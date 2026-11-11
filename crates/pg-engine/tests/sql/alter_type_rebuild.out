@@ -1,0 +1,418 @@
+> create table r (a int primary key)
+-- CREATE TABLE
+
+> create table t (id int, a int not null, b text, c int, constraint ck1 check (a > 0), constraint ck2 check (c > 0), unique (b), constraint t_pk primary key (a, id), constraint fk1 foreign key (a) references r, constraint ck0 check (a < 1000))
+-- CREATE TABLE
+
+> create index ix2 on t (b, a)
+-- CREATE INDEX
+
+> create index ix1 on t ((a + 1))
+-- CREATE INDEX
+
+> create index ix0 on t (c) where a > 5
+-- CREATE INDEX
+
+> create table t2 (x int, y int, foreign key (x, y) references t (a, id))
+-- CREATE TABLE
+
+> comment on index ix1 is 'ix1 comment'
+-- COMMENT
+
+> comment on constraint ck1 on t is 'ck1 comment'
+-- COMMENT
+
+> create table mk ()
+-- CREATE TABLE
+
+> alter table t alter column a type bigint
+-- ALTER TABLE
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else regexp_replace(n, '_\d+$', '') end, o::int8 - 'mk'::regclass::oid::int8 from (
+> select relname::text n, oid o from pg_class union all select 'con ' || conname::text, oid from pg_constraint union all select 'def ' || adrelid::regclass::text, oid from pg_attrdef union all select 'type ' || typname::text, oid from pg_type
+> union all select 'trig ' || tgname, oid from pg_trigger) s where o >= 'mk'::regclass order by 2
+regexp_replace:text | ?column?:int8
+mk | 0
+type _mk | 1
+type mk | 2
+t_pk | 3
+con t_pk | 4
+ix2 | 5
+ix1 | 6
+ix0 | 7
+con t_a_not_null | 8
+con ck1 | 9
+con ck0 | 10
+con fk1 | 11
+trig RI_ConstraintTrigger_a | 12
+trig RI_ConstraintTrigger_a | 13
+trig RI_ConstraintTrigger_c | 14
+trig RI_ConstraintTrigger_c | 15
+con t2_x_y_fkey | 16
+trig RI_ConstraintTrigger_a | 17
+trig RI_ConstraintTrigger_a | 18
+trig RI_ConstraintTrigger_c | 19
+trig RI_ConstraintTrigger_c | 20
+toast | 24
+toast | 25
+mk2 | 31
+type _mk2 | 32
+type mk2 | 33
+-- SELECT 26
+
+> select obj_description('ix1'::regclass, 'pg_class'), obj_description((select oid from pg_constraint where conname = 'ck1'), 'pg_constraint')
+obj_description:text | obj_description:text
+ix1 comment | ck1 comment
+-- SELECT 1
+
+> select conname, conindid::regclass, contype from pg_constraint where conrelid in ('t'::regclass, 't2'::regclass) order by 1
+conname:name | conindid:regclass | contype:char
+ck0 | - | c
+ck1 | - | c
+ck2 | - | c
+fk1 | r_pkey | f
+t2_x_y_fkey | t_pk | f
+t_a_not_null | - | n
+t_b_key | t_b_key | u
+t_id_not_null | - | n
+t_pk | t_pk | p
+-- SELECT 9
+
+> select indexrelid::regclass, indisprimary, indisunique from pg_index where indrelid = 't'::regclass order by 1
+indexrelid:regclass | indisprimary:bool | indisunique:bool
+t_b_key | f | t
+t_pk | t | t
+ix2 | f | f
+ix1 | f | f
+ix0 | f | f
+-- SELECT 5
+
+> select count(*) from pg_trigger where tgconstraint in (select oid from pg_constraint where conrelid in ('t'::regclass, 't2'::regclass))
+count:int8
+8
+-- SELECT 1
+
+> select classid::regclass, refclassid::regclass, deptype, count(*) from pg_depend where refobjid = 't'::regclass and refobjsubid = 2 group by 1, 2, 3 order by 1, 2, 3
+classid:regclass | refclassid:regclass | deptype:char | count:int8
+pg_class | pg_class | a | 3
+pg_constraint | pg_class | a | 5
+pg_constraint | pg_class | n | 3
+-- SELECT 3
+
+> insert into r values (1)
+-- INSERT 0 1
+
+> insert into t values (1, 1, 'x', 1)
+-- INSERT 0 1
+
+> insert into t values (1, 1, 'y', 1)
+ERROR 23505: duplicate key value violates unique constraint "t_pk"
+DETAIL: Key (a, id)=(1, 1) already exists.
+OBJECTS: schema=public table=t constraint=t_pk
+
+> insert into t values (1, 2, 'z', 1)
+ERROR 23503: insert or update on table "t" violates foreign key constraint "fk1"
+DETAIL: Key (a)=(2) is not present in table "r".
+OBJECTS: schema=public table=t constraint=fk1
+
+> drop table t2, t, r, mk, mk2
+-- DROP TABLE
+
+> create table t (id int not null, a int not null, b int, constraint ckab check (a > b), constraint cka check (a > 0), constraint ckid check (id > 0), unique (id), unique (a))
+-- CREATE TABLE
+
+> create index ixa on t (a)
+-- CREATE INDEX
+
+> create index ixid on t (id)
+-- CREATE INDEX
+
+> create index ixab on t (a, id)
+-- CREATE INDEX
+
+> create statistics st on a, b from t
+-- CREATE STATISTICS
+
+> create table c (z int) inherits (t)
+-- CREATE TABLE
+
+> create index ixc on c (a)
+-- CREATE INDEX
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> alter table t alter column a type bigint, alter column id type bigint, add constraint ckz check (b > 1)
+-- ALTER TABLE
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'mk1'::regclass::oid::int8 from (
+> select relname::text n, oid o from pg_class union all select 'con ' || conname::text || ' ' || conrelid::regclass, oid from pg_constraint union all select 'def ' || adrelid::regclass::text, oid from pg_attrdef union all select 'type ' || typname::text, oid from pg_type
+> union all select 'stat ' || stxname, oid from pg_statistic_ext) s where o >= 'mk1'::regclass order by 2
+n:text | ?column?:int8
+mk1 | 0
+type _mk1 | 1
+type mk1 | 2
+t_a_key | 3
+con t_a_key t | 4
+t_id_key | 5
+con t_id_key t | 6
+ixa | 7
+ixab | 8
+ixid | 9
+ixc | 10
+con t_id_not_null t | 11
+con t_id_not_null c | 12
+con t_a_not_null t | 13
+con t_a_not_null c | 14
+con ckab t | 15
+con ckab c | 16
+con cka t | 17
+con cka c | 18
+con ckid t | 19
+con ckid c | 20
+con ckz t | 21
+con ckz c | 22
+stat st | 23
+mk2 | 36
+type _mk2 | 37
+type mk2 | 38
+-- SELECT 27
+
+> drop table c, t, mk1, mk2
+-- DROP TABLE
+
+> create table t (id int, a int, b int, constraint ex exclude using btree (a with =), constraint fk foreign key (b) references t (id) not enforced, primary key (id), unique (b) deferrable)
+-- CREATE TABLE
+
+> create index ix on t (a) where b > 0
+-- CREATE INDEX
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> alter table t alter column a type bigint, alter column id type bigint, add column z int default 3, alter column b type bigint
+-- ALTER TABLE
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else regexp_replace(n, '_\d+$', '') end, o::int8 - 'mk1'::regclass::oid::int8 from (
+> select relname::text n, oid o from pg_class union all select 'con ' || conname::text || ' ' || conrelid::regclass, oid from pg_constraint union all select 'def ' || adrelid::regclass::text, oid from pg_attrdef union all select 'type ' || typname::text, oid from pg_type
+> union all select 'trig ' || tgname, oid from pg_trigger) s where o >= 'mk1'::regclass order by 2
+regexp_replace:text | ?column?:int8
+mk1 | 0
+type _mk1 | 1
+type mk1 | 2
+def t | 3
+ex | 4
+con ex t | 5
+t_pkey | 6
+con t_pkey t | 7
+t_b_key | 8
+con t_b_key t | 9
+trig Unique_ConstraintTrigger | 10
+ix | 11
+con t_id_not_null t | 12
+con fk t | 13
+mk2 | 21
+type _mk2 | 22
+type mk2 | 23
+-- SELECT 17
+
+> select conname, conindid::regclass, contype, condeferrable from pg_constraint where conrelid = 't'::regclass order by 1
+conname:name | conindid:regclass | contype:char | condeferrable:bool
+ex | ex | x | f
+fk | t_pkey | f | f
+t_b_key | t_b_key | u | t
+t_id_not_null | - | n | f
+t_pkey | t_pkey | p | f
+-- SELECT 5
+
+> drop table t, mk1, mk2
+-- DROP TABLE
+
+> create table p (a int, b int, constraint pc check (a > b))
+-- CREATE TABLE
+
+> create table c1 () inherits (p)
+-- CREATE TABLE
+
+> create table c2 () inherits (p)
+-- CREATE TABLE
+
+> create table c3 () inherits (c1)
+-- CREATE TABLE
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> alter table p alter column a type bigint
+-- ALTER TABLE
+
+> select conrelid::regclass, conname, conislocal, coninhcount, oid::int8 - 'mk1'::regclass::oid::int8 from pg_constraint where conname = 'pc' order by 5
+conrelid:regclass | conname:name | conislocal:bool | coninhcount:int2 | ?column?:int8
+p | pc | t | 0 | 3
+c1 | pc | f | 1 | 4
+c3 | pc | f | 1 | 5
+c2 | pc | f | 1 | 6
+-- SELECT 4
+
+> drop table p cascade
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table c1
+DETAIL: drop cascades to table c3
+DETAIL: drop cascades to table c2
+-- DROP TABLE
+
+> drop table mk1
+-- DROP TABLE
+
+> create type ct as (a int, b text)
+-- CREATE TYPE
+
+> create table tt of ct (primary key (a), check (a > 0))
+-- CREATE TABLE
+
+> create index on tt (b, a)
+-- CREATE INDEX
+
+> create table mk1 ()
+-- CREATE TABLE
+
+> alter type ct alter attribute a type bigint cascade
+-- ALTER TYPE
+
+> create table mk2 ()
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'mk1'::regclass::oid::int8 from (
+> select relname::text n, oid o from pg_class union all select 'con ' || conname::text || ' ' || conrelid::regclass, oid from pg_constraint) s where o >= 'mk1'::regclass order by 2
+n:text | ?column?:int8
+mk1 | 0
+tt_pkey | 3
+con tt_pkey tt | 4
+tt_b_a_idx | 5
+con tt_a_not_null tt | 6
+con tt_a_check tt | 7
+toast | 11
+toast | 12
+mk2 | 15
+-- SELECT 9
+
+> drop table tt, mk1, mk2
+-- DROP TABLE
+
+> drop type ct
+-- DROP TYPE
+
+> create table mk ()
+-- CREATE TABLE
+
+> create table u (a int primary key deferrable initially deferred, b int unique deferrable, c int, exclude using btree (c with =) deferrable)
+-- CREATE TABLE
+
+> select tgname ~ ('_' || oid || '$'), regexp_replace(tgname, '_\d+$', ''), tgrelid::regclass, tgparentid, tgfoid::regproc, tgtype, tgenabled, tgisinternal, tgconstrrelid, tgconstrindid::regclass, (select conname from pg_constraint where oid = tgconstraint), tgdeferrable, tginitdeferred, tgnargs, tgattr, tgargs, tgqual, oid::int8 - 'mk'::regclass::int8 from pg_trigger where tgrelid = 'u'::regclass order by oid
+?column?:bool | regexp_replace:text | tgrelid:regclass | tgparentid:oid | tgfoid:regproc | tgtype:int2 | tgenabled:char | tgisinternal:bool | tgconstrrelid:oid | tgconstrindid:regclass | conname:name | tgdeferrable:bool | tginitdeferred:bool | tgnargs:int2 | tgattr:22 | tgargs:bytea | tgqual:194 | ?column?:int8
+t | PK_ConstraintTrigger | u | 0 | unique_key_recheck | 21 | O | t | 0 | u_pkey | u_pkey | t | t | 0 |  | \x | NULL | 9
+t | Unique_ConstraintTrigger | u | 0 | unique_key_recheck | 21 | O | t | 0 | u_b_key | u_b_key | t | f | 0 |  | \x | NULL | 12
+t | Unique_ConstraintTrigger | u | 0 | unique_key_recheck | 21 | O | t | 0 | u_c_excl | u_c_excl | t | f | 0 |  | \x | NULL | 15
+-- SELECT 3
+
+> select oid::int8 - 'mk'::regclass::int8, contype from pg_constraint where conrelid = 'u'::regclass order by 1
+?column?:int8 | contype:char
+6 | n
+8 | p
+11 | u
+14 | x
+-- SELECT 4
+
+> select classid::regclass, objsubid, refclassid::regclass, refobjsubid, deptype from pg_depend where classid = 'pg_trigger'::regclass and objid in (select oid from pg_trigger where tgrelid = 'u'::regclass)
+classid:regclass | objsubid:int4 | refclassid:regclass | refobjsubid:int4 | deptype:char
+pg_trigger | 0 | pg_constraint | 0 | i
+pg_trigger | 0 | pg_constraint | 0 | i
+pg_trigger | 0 | pg_constraint | 0 | i
+-- SELECT 3
+
+> select relhastriggers from pg_class where oid = 'u'::regclass
+relhastriggers:bool
+t
+-- SELECT 1
+
+> select regexp_replace(pg_get_triggerdef(oid), '_\d+"', '"') from pg_trigger where tgrelid = 'u'::regclass order by oid
+regexp_replace:text
+CREATE CONSTRAINT TRIGGER "PK_ConstraintTrigger" AFTER INSERT OR UPDATE ON public.u DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION unique_key_recheck()
+CREATE CONSTRAINT TRIGGER "Unique_ConstraintTrigger" AFTER INSERT OR UPDATE ON public.u DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION unique_key_recheck()
+CREATE CONSTRAINT TRIGGER "Unique_ConstraintTrigger" AFTER INSERT OR UPDATE ON public.u DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION unique_key_recheck()
+-- SELECT 3
+
+> select regexp_replace(pg_describe_object(classid, objid, objsubid), '_\d+ ', ' ') from pg_depend where classid = 'pg_trigger'::regclass and objid in (select oid from pg_trigger where tgrelid = 'u'::regclass) order by objid
+regexp_replace:text
+trigger PK_ConstraintTrigger on table u
+trigger Unique_ConstraintTrigger on table u
+trigger Unique_ConstraintTrigger on table u
+-- SELECT 3
+
+> create table u2 (like u including all)
+-- CREATE TABLE
+
+> select regexp_replace(tgname, '_\d+$', ''), (select conname from pg_constraint where oid = tgconstraint) from pg_trigger where tgrelid = 'u2'::regclass order by oid
+regexp_replace:text | conname:name
+PK_ConstraintTrigger | u2_pkey
+Unique_ConstraintTrigger | u2_b_key
+Unique_ConstraintTrigger | u2_c_excl
+-- SELECT 3
+
+> alter table u disable trigger all
+-- ALTER TABLE
+
+> select tgenabled from pg_trigger where tgrelid = 'u'::regclass
+tgenabled:char
+D
+D
+D
+-- SELECT 3
+
+> alter table u enable trigger all
+-- ALTER TABLE
+
+> alter table u drop constraint u_b_key
+-- ALTER TABLE
+
+> select count(*) from pg_trigger where tgrelid = 'u'::regclass
+count:int8
+2
+-- SELECT 1
+
+> begin
+-- BEGIN
+
+> insert into u values (1, 1, 1), (1, 2, 2)
+-- INSERT 0 2
+
+> update u set a = 2 where b = 2
+-- UPDATE 1
+
+> commit
+-- COMMIT
+
+> create table pp (a int, primary key (a) deferrable) partition by range (a)
+-- CREATE TABLE
+
+> create table pp1 partition of pp for values from (1) to (5)
+-- CREATE TABLE
+
+> select tgrelid::regclass, regexp_replace(tgname, '_\d+$', ''), tgparentid <> 0 from pg_trigger where tgrelid in ('pp'::regclass, 'pp1'::regclass) order by oid
+tgrelid:regclass | regexp_replace:text | ?column?:bool
+pp | PK_ConstraintTrigger | f
+pp1 | PK_ConstraintTrigger | f
+-- SELECT 2
+
+> drop table u, u2, mk, pp
+-- DROP TABLE
+

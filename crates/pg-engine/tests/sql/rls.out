@@ -1,0 +1,742 @@
+> DROP ROLE IF EXISTS rl_alice, rl_bob, rl_admin, rl_bypass
+NOTICE 00000: role "rl_alice" does not exist, skipping
+NOTICE 00000: role "rl_bob" does not exist, skipping
+NOTICE 00000: role "rl_admin" does not exist, skipping
+NOTICE 00000: role "rl_bypass" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE rl_alice
+-- CREATE ROLE
+
+> CREATE ROLE rl_bob
+-- CREATE ROLE
+
+> CREATE ROLE rl_admin
+-- CREATE ROLE
+
+> CREATE ROLE rl_bypass BYPASSRLS
+-- CREATE ROLE
+
+> CREATE TABLE rl_docs (id int PRIMARY KEY, owner name, level int, body text)
+-- CREATE TABLE
+
+> INSERT INTO rl_docs VALUES (1, 'rl_alice', 1, 'a1'), (2, 'rl_alice', 3, 'a2'), (3, 'rl_bob', 1, 'b1'), (4, 'rl_bob', 5, 'b2'), (5, 'rl_admin', 9, 'x')
+-- INSERT 0 5
+
+> GRANT ALL ON rl_docs TO rl_alice, rl_bob, rl_admin, rl_bypass
+-- GRANT
+
+> CREATE POLICY p_own ON rl_docs USING (owner = current_user)
+-- CREATE POLICY
+
+> CREATE POLICY p_own ON rl_docs USING (true)
+ERROR 42710: policy "p_own" for table "rl_docs" already exists
+
+> CREATE POLICY p_bad1 ON rl_docs FOR SELECT USING (true) WITH CHECK (true)
+ERROR 42601: WITH CHECK cannot be applied to SELECT or DELETE
+
+> CREATE POLICY p_bad2 ON rl_docs FOR INSERT USING (true)
+ERROR 42601: only WITH CHECK expression allowed for INSERT
+
+> CREATE POLICY p_bad3 ON rl_docs FOR DELETE WITH CHECK (true)
+ERROR 42601: WITH CHECK cannot be applied to SELECT or DELETE
+
+> CREATE POLICY p_bad4 ON rl_docs USING (1)
+ERROR 42804: argument of POLICY must be type boolean, not type integer
+
+> CREATE POLICY p_bad5 ON rl_docs USING (count(*) > 0)
+ERROR 42803: aggregate functions are not allowed in policy expressions
+
+> CREATE POLICY p_bad6 ON rl_docs USING (nope > 0)
+ERROR 42703: column "nope" does not exist
+
+> CREATE POLICY p_bad7 ON rl_nope USING (true)
+ERROR 42P01: relation "rl_nope" does not exist
+
+> CREATE POLICY p_bad8 ON rl_docs TO rl_nobody USING (true)
+ERROR 42704: role "rl_nobody" does not exist
+
+> CREATE POLICY p_pub ON rl_docs FOR SELECT TO public, rl_bob USING (level < 2)
+WARNING 22023: ignoring specified roles other than PUBLIC
+HINT: All roles are members of the PUBLIC role.
+-- CREATE POLICY
+
+> CREATE POLICY p_ins ON rl_docs FOR INSERT TO rl_alice, rl_bob WITH CHECK (owner = current_user AND level < 5)
+-- CREATE POLICY
+
+> CREATE POLICY p_upd ON rl_docs FOR UPDATE USING (owner = current_user) WITH CHECK (level < 9)
+-- CREATE POLICY
+
+> CREATE POLICY p_cap ON rl_docs AS RESTRICTIVE FOR ALL TO rl_bob USING (level <> 5) WITH CHECK (body <> 'forbidden')
+-- CREATE POLICY
+
+> CREATE POLICY p_admin ON rl_docs TO rl_admin USING (true)
+-- CREATE POLICY
+
+> SELECT polname, polcmd, polpermissive, pg_get_expr(polqual, polrelid) AS qual, pg_get_expr(polwithcheck, polrelid) AS with_check
+> FROM pg_policy WHERE polrelid = 'rl_docs'::regclass ORDER BY 1
+polname:name | polcmd:char | polpermissive:bool | qual:text | with_check:text
+p_admin | * | t | true | NULL
+p_cap | * | f | (level <> 5) | (body <> 'forbidden'::text)
+p_ins | a | t | NULL | ((owner = CURRENT_USER) AND (level < 5))
+p_own | * | t | (owner = CURRENT_USER) | NULL
+p_pub | r | t | (level < 2) | NULL
+p_upd | w | t | (owner = CURRENT_USER) | (level < 9)
+-- SELECT 6
+
+> SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check FROM pg_policies ORDER BY policyname
+schemaname:name | tablename:name | policyname:name | permissive:text | roles:name[] | cmd:text | qual:text | with_check:text
+public | rl_docs | p_admin | PERMISSIVE | {rl_admin} | ALL | true | NULL
+public | rl_docs | p_cap | RESTRICTIVE | {rl_bob} | ALL | (level <> 5) | (body <> 'forbidden'::text)
+public | rl_docs | p_ins | PERMISSIVE | {rl_alice,rl_bob} | INSERT | NULL | ((owner = CURRENT_USER) AND (level < 5))
+public | rl_docs | p_own | PERMISSIVE | {public} | ALL | (owner = CURRENT_USER) | NULL
+public | rl_docs | p_pub | PERMISSIVE | {public} | SELECT | (level < 2) | NULL
+public | rl_docs | p_upd | PERMISSIVE | {public} | UPDATE | (owner = CURRENT_USER) | (level < 9)
+-- SELECT 6
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+5
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> ALTER TABLE rl_docs ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'rl_docs'
+relrowsecurity:bool | relforcerowsecurity:bool
+t | f
+-- SELECT 1
+
+> SELECT tablename, rowsecurity FROM pg_tables WHERE tablename = 'rl_docs'
+tablename:name | rowsecurity:bool
+rl_docs | t
+-- SELECT 1
+
+> SELECT row_security_active('rl_docs')
+row_security_active:bool
+f
+-- SELECT 1
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT row_security_active('rl_docs'), row_security_active('rl_docs'::regclass::oid)
+row_security_active:bool | row_security_active:bool
+t | t
+-- SELECT 1
+
+> SELECT id, owner, level FROM rl_docs ORDER BY id
+id:int4 | owner:name | level:int4
+1 | rl_alice | 1
+2 | rl_alice | 3
+3 | rl_bob | 1
+-- SELECT 3
+
+> SELECT count(*) FROM rl_docs WHERE level > 2
+count:int8
+1
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE rl_bob
+-- SET
+
+> SELECT id, owner, level FROM rl_docs ORDER BY id
+id:int4 | owner:name | level:int4
+1 | rl_alice | 1
+3 | rl_bob | 1
+-- SELECT 2
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE rl_admin
+-- SET
+
+> SELECT id FROM rl_docs ORDER BY id
+id:int4
+1
+2
+3
+4
+5
+-- SELECT 5
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE rl_bypass
+-- SET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+5
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+5
+-- SELECT 1
+
+> SET ROLE rl_alice
+-- SET
+
+> INSERT INTO rl_docs VALUES (10, 'rl_alice', 1, 'ok')
+-- INSERT 0 1
+
+> INSERT INTO rl_docs VALUES (11, 'rl_bob', 1, 'not mine')
+ERROR 42501: new row violates row-level security policy for table "rl_docs"
+
+> INSERT INTO rl_docs VALUES (12, 'rl_alice', 7, 'too high')
+-- INSERT 0 1
+
+> INSERT INTO rl_docs VALUES (13, 'rl_alice', 4, 'hidden') RETURNING id
+id:int4
+13
+-- INSERT 0 1
+
+> INSERT INTO rl_docs VALUES (14, 'rl_alice', 1, 'visible') RETURNING id
+id:int4
+14
+-- INSERT 0 1
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE rl_bob
+-- SET
+
+> INSERT INTO rl_docs VALUES (20, 'rl_bob', 1, 'forbidden')
+ERROR 42501: new row violates row-level security policy "p_cap" for table "rl_docs"
+
+> INSERT INTO rl_docs VALUES (21, 'rl_bob', 1, 'fine')
+-- INSERT 0 1
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE rl_admin
+-- SET
+
+> INSERT INTO rl_docs VALUES (30, 'rl_admin', 1, 'admin')
+-- INSERT 0 1
+
+> RESET ROLE
+-- RESET
+
+> SELECT id, owner, level, body FROM rl_docs WHERE id >= 10 ORDER BY id
+id:int4 | owner:name | level:int4 | body:text
+10 | rl_alice | 1 | ok
+12 | rl_alice | 7 | too high
+13 | rl_alice | 4 | hidden
+14 | rl_alice | 1 | visible
+21 | rl_bob | 1 | fine
+30 | rl_admin | 1 | admin
+-- SELECT 6
+
+> SET ROLE rl_alice
+-- SET
+
+> UPDATE rl_docs SET body = body || '!' RETURNING id, body
+id:int4 | body:text
+1 | a1!
+10 | ok!
+12 | too high!
+13 | hidden!
+14 | visible!
+2 | a2!
+-- UPDATE 6
+
+> UPDATE rl_docs SET level = 9 WHERE id = 1
+-- UPDATE 1
+
+> UPDATE rl_docs SET level = 2 WHERE id = 3
+-- UPDATE 0
+
+> UPDATE rl_docs SET level = 2 WHERE id = 2
+-- UPDATE 1
+
+> DELETE FROM rl_docs WHERE id = 3
+-- DELETE 0
+
+> DELETE FROM rl_docs WHERE id = 1 RETURNING id
+id:int4
+1
+-- DELETE 1
+
+> RESET ROLE
+-- RESET
+
+> SELECT id, owner, level, body FROM rl_docs ORDER BY id
+id:int4 | owner:name | level:int4 | body:text
+2 | rl_alice | 2 | a2!
+3 | rl_bob | 1 | b1
+4 | rl_bob | 5 | b2
+5 | rl_admin | 9 | x
+10 | rl_alice | 1 | ok!
+12 | rl_alice | 7 | too high!
+13 | rl_alice | 4 | hidden!
+14 | rl_alice | 1 | visible!
+21 | rl_bob | 1 | fine
+30 | rl_admin | 1 | admin
+-- SELECT 10
+
+> SET ROLE rl_alice
+-- SET
+
+> INSERT INTO rl_docs VALUES (10, 'rl_alice', 1, 'upsert') ON CONFLICT (id) DO UPDATE SET body = 'upserted'
+-- INSERT 0 1
+
+> INSERT INTO rl_docs VALUES (4, 'rl_alice', 1, 'steal') ON CONFLICT (id) DO UPDATE SET body = 'stolen'
+ERROR 42501: new row violates row-level security policy (USING expression) for table "rl_docs"
+
+> INSERT INTO rl_docs VALUES (10, 'rl_alice', 1, 'upsert') ON CONFLICT (id) DO UPDATE SET level = 9
+-- INSERT 0 1
+
+> INSERT INTO rl_docs VALUES (4, 'rl_alice', 1, 'nothing') ON CONFLICT (id) DO NOTHING
+-- INSERT 0 0
+
+> RESET ROLE
+-- RESET
+
+> SELECT id, body FROM rl_docs WHERE id IN (4, 10) ORDER BY id
+id:int4 | body:text
+4 | b2
+10 | upserted
+-- SELECT 2
+
+> SET ROLE rl_bob
+-- SET
+
+> SELECT id FROM rl_docs ORDER BY id
+id:int4
+3
+14
+21
+30
+-- SELECT 4
+
+> SELECT id FROM rl_docs ORDER BY id FOR UPDATE
+id:int4
+3
+21
+-- SELECT 2
+
+> RESET ROLE
+-- RESET
+
+> ALTER TABLE rl_docs OWNER TO rl_admin
+-- ALTER TABLE
+
+> SET ROLE rl_admin
+-- SET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+10
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> ALTER TABLE rl_docs FORCE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> SET ROLE rl_admin
+-- SET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+10
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> ALTER TABLE rl_docs NO FORCE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> ALTER TABLE rl_docs OWNER TO postgres
+-- ALTER TABLE
+
+> SET ROLE rl_alice
+-- SET
+
+> SET row_security = off
+-- SET
+
+> SELECT count(*) FROM rl_docs
+ERROR 42501: query would be affected by row-level security policy for table "rl_docs"
+
+> SET row_security = on
+-- SET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+8
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> SET row_security = off
+-- SET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+10
+-- SELECT 1
+
+> RESET row_security
+-- RESET
+
+> PREPARE rl_q AS SELECT count(*) FROM rl_docs
+-- PREPARE
+
+> SET ROLE rl_alice
+-- SET
+
+> EXECUTE rl_q
+count:int8
+8
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE rl_bob
+-- SET
+
+> EXECUTE rl_q
+count:int8
+4
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> EXECUTE rl_q
+count:int8
+10
+-- SELECT 1
+
+> DEALLOCATE rl_q
+-- DEALLOCATE
+
+> CREATE VIEW rl_v AS SELECT id, owner FROM rl_docs
+-- CREATE VIEW
+
+> CREATE VIEW rl_vi WITH (security_invoker) AS SELECT id, owner FROM rl_docs
+-- CREATE VIEW
+
+> ALTER VIEW rl_v OWNER TO rl_bob
+-- ALTER VIEW
+
+> GRANT SELECT ON rl_v, rl_vi TO rl_alice
+-- GRANT
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT id FROM rl_v ORDER BY id
+id:int4
+2
+3
+10
+12
+13
+14
+21
+30
+-- SELECT 8
+
+> SELECT id FROM rl_vi ORDER BY id
+id:int4
+2
+3
+10
+12
+13
+14
+21
+30
+-- SELECT 8
+
+> RESET ROLE
+-- RESET
+
+> CREATE TABLE rl_acl (who name, doc int)
+-- CREATE TABLE
+
+> INSERT INTO rl_acl VALUES ('rl_alice', 4), ('rl_alice', 5)
+-- INSERT 0 2
+
+> GRANT SELECT ON rl_acl TO rl_alice
+-- GRANT
+
+> CREATE POLICY p_shared ON rl_docs FOR SELECT USING (id IN (SELECT doc FROM rl_acl WHERE who = current_user))
+-- CREATE POLICY
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT id FROM rl_docs ORDER BY id
+id:int4
+2
+3
+4
+5
+10
+12
+13
+14
+21
+30
+-- SELECT 10
+
+> RESET ROLE
+-- RESET
+
+> ALTER TABLE rl_acl ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY p_loop ON rl_acl USING (doc IN (SELECT id FROM rl_docs))
+-- CREATE POLICY
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT id FROM rl_docs ORDER BY id
+ERROR 42P17: infinite recursion detected in policy for relation "rl_docs"
+
+> RESET ROLE
+-- RESET
+
+> DROP POLICY p_loop ON rl_acl
+-- DROP POLICY
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT id FROM rl_docs ORDER BY id
+id:int4
+2
+3
+10
+12
+13
+14
+21
+30
+-- SELECT 8
+
+> RESET ROLE
+-- RESET
+
+> DROP POLICY p_shared ON rl_docs
+-- DROP POLICY
+
+> ALTER POLICY p_own ON rl_docs RENAME TO p_mine
+-- ALTER POLICY
+
+> ALTER POLICY p_mine ON rl_docs TO rl_alice USING (owner = current_user AND level < 3)
+-- ALTER POLICY
+
+> ALTER POLICY p_pub ON rl_docs WITH CHECK (true)
+ERROR 42601: only USING expression allowed for SELECT, DELETE
+
+> ALTER POLICY nope ON rl_docs USING (true)
+ERROR 42704: policy "nope" for table "rl_docs" does not exist
+
+> ALTER POLICY p_mine ON rl_docs RENAME TO p_upd
+ERROR 42710: policy "p_upd" for table "rl_docs" already exists
+
+> SELECT policyname, roles, qual FROM pg_policies WHERE policyname = 'p_mine'
+policyname:name | roles:name[] | qual:text
+p_mine | {rl_alice} | ((owner = CURRENT_USER) AND (level < 3))
+-- SELECT 1
+
+> DROP POLICY nope ON rl_docs
+ERROR 42704: policy "nope" for table "rl_docs" does not exist
+
+> DROP POLICY IF EXISTS nope ON rl_docs
+NOTICE 00000: policy "nope" for relation "rl_docs" does not exist, skipping
+-- DROP POLICY
+
+> ALTER TABLE rl_docs DROP COLUMN level
+ERROR 2BP01: cannot drop column level of table rl_docs because other objects depend on it
+DETAIL: policy p_mine on table rl_docs depends on column level of table rl_docs
+DETAIL: policy p_pub on table rl_docs depends on column level of table rl_docs
+DETAIL: policy p_ins on table rl_docs depends on column level of table rl_docs
+DETAIL: policy p_upd on table rl_docs depends on column level of table rl_docs
+DETAIL: policy p_cap on table rl_docs depends on column level of table rl_docs
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE rl_docs RENAME COLUMN owner TO who
+-- ALTER TABLE
+
+> SELECT policyname, qual, with_check FROM pg_policies WHERE tablename = 'rl_docs' ORDER BY 1
+policyname:name | qual:text | with_check:text
+p_admin | true | NULL
+p_cap | (level <> 5) | (body <> 'forbidden'::text)
+p_ins | NULL | ((who = CURRENT_USER) AND (level < 5))
+p_mine | ((who = CURRENT_USER) AND (level < 3)) | NULL
+p_pub | (level < 2) | NULL
+p_upd | (who = CURRENT_USER) | (level < 9)
+-- SELECT 6
+
+> DROP ROLE rl_bob
+ERROR 2BP01: role "rl_bob" cannot be dropped because some objects depend on it
+DETAIL: privileges for table rl_docs
+DETAIL: target of policy p_ins on table rl_docs
+DETAIL: target of policy p_cap on table rl_docs
+DETAIL: owner of view rl_v
+
+> SET ROLE rl_alice
+-- SET
+
+> DROP POLICY p_upd ON rl_docs
+ERROR 42501: must be owner of relation rl_docs
+
+> CREATE POLICY p_x ON rl_docs USING (true)
+ERROR 42501: must be owner of table rl_docs
+
+> RESET ROLE
+-- RESET
+
+> DROP OWNED BY rl_bob
+-- DROP OWNED
+
+> SELECT policyname, roles FROM pg_policies WHERE tablename = 'rl_docs' ORDER BY 1
+policyname:name | roles:name[]
+p_admin | {rl_admin}
+p_ins | {rl_alice}
+p_mine | {rl_alice}
+p_pub | {public}
+p_upd | {public}
+-- SELECT 5
+
+> ALTER TABLE rl_docs DISABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT count(*) FROM rl_docs
+count:int8
+10
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> DROP TABLE rl_docs CASCADE
+NOTICE 00000: drop cascades to view rl_vi
+-- DROP TABLE
+
+> CREATE TABLE rl_t (id int PRIMARY KEY, v int, tag text)
+-- CREATE TABLE
+
+> INSERT INTO rl_t VALUES (1, 1, 'a'), (2, 2, 'b'), (3, 30, 'c')
+-- INSERT 0 3
+
+> GRANT ALL ON rl_t TO rl_alice
+-- GRANT
+
+> ALTER TABLE rl_t ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY s ON rl_t FOR SELECT USING (v < 10)
+-- CREATE POLICY
+
+> CREATE POLICY i ON rl_t FOR INSERT WITH CHECK (v > 0)
+-- CREATE POLICY
+
+> CREATE POLICY u ON rl_t FOR UPDATE USING (v < 20) WITH CHECK (v < 5)
+-- CREATE POLICY
+
+> CREATE POLICY d ON rl_t FOR DELETE USING (tag <> 'a')
+-- CREATE POLICY
+
+> SET ROLE rl_alice
+-- SET
+
+> SELECT * FROM rl_t ORDER BY id
+id:int4 | v:int4 | tag:text
+1 | 1 | a
+2 | 2 | b
+-- SELECT 2
+
+> INSERT INTO rl_t VALUES (4, 0, 'zero')
+ERROR 42501: new row violates row-level security policy for table "rl_t"
+
+> INSERT INTO rl_t VALUES (5, 50, 'big')
+-- INSERT 0 1
+
+> INSERT INTO rl_t VALUES (6, 50, 'big') RETURNING id
+ERROR 42501: new row violates row-level security policy for table "rl_t"
+
+> INSERT INTO rl_t VALUES (7, 7, 'seven') RETURNING id
+id:int4
+7
+-- INSERT 0 1
+
+> UPDATE rl_t SET v = v + 1
+ERROR 42501: new row violates row-level security policy for table "rl_t"
+
+> UPDATE rl_t SET v = 3 WHERE id = 2
+-- UPDATE 1
+
+> UPDATE rl_t SET tag = 'x' RETURNING id, tag
+ERROR 42501: new row violates row-level security policy for table "rl_t"
+
+> UPDATE rl_t SET v = 100 WHERE id = 7
+ERROR 42501: new row violates row-level security policy for table "rl_t"
+
+> DELETE FROM rl_t
+-- DELETE 4
+
+> INSERT INTO rl_t VALUES (2, 1, 'dup') ON CONFLICT (id) DO UPDATE SET v = 4
+-- INSERT 0 1
+
+> INSERT INTO rl_t VALUES (2, 1, 'dup') ON CONFLICT (id) DO UPDATE SET v = 8
+ERROR 42501: new row violates row-level security policy for table "rl_t"
+
+> INSERT INTO rl_t VALUES (5, 1, 'dup') ON CONFLICT (id) DO UPDATE SET v = 1
+-- INSERT 0 1
+
+> RESET ROLE
+-- RESET
+
+> SELECT * FROM rl_t ORDER BY id
+id:int4 | v:int4 | tag:text
+1 | 1 | a
+2 | 1 | dup
+5 | 1 | dup
+-- SELECT 3
+
+> DROP TABLE rl_t
+-- DROP TABLE
+
+> SELECT count(*) FROM pg_policy
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE rl_acl
+-- DROP TABLE
+
+> DROP ROLE rl_alice, rl_bob, rl_admin, rl_bypass
+-- DROP ROLE
+

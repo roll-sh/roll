@@ -1,0 +1,237 @@
+> create table p (x text collate "de-x-icu") partition by range (x)
+-- CREATE TABLE
+
+> create table p1 partition of p for values from ('a') to ('B')
+-- CREATE TABLE
+
+> create table p2 partition of p for values from ('B') to ('c')
+-- CREATE TABLE
+
+> create table pbad partition of p for values from ('b') to ('A')
+ERROR 42P17: empty range bound specified for partition "pbad" (at 51)
+DETAIL: Specified lower bound ('b') is greater than or equal to upper bound ('A').
+
+> create table pov partition of p for values from ('A') to ('b')
+ERROR 42P17: partition "pov" would overlap partition "p1" (at 50)
+
+> create table pd partition of p default
+-- CREATE TABLE
+
+> insert into p values ('a'), ('A'), ('ab'), ('B'), ('b'), ('bz'), ('C'), ('c'), ('Ä'), ('z')
+-- INSERT 0 10
+
+> select tableoid::regclass, x from p order by x collate "C"
+tableoid:regclass | x:text
+p1 | A
+p2 | B
+pd | C
+p1 | a
+p1 | ab
+p1 | b
+p2 | bz
+pd | c
+pd | z
+p1 | Ä
+-- SELECT 10
+
+> select x from p where x < 'B' order by x
+x:text
+a
+A
+Ä
+ab
+b
+-- SELECT 5
+
+> explain (costs off) select x from p where x < 'B'
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p1 p_1
+        Filter: (x < 'B'::text)
+  ->  Seq Scan on pd p_2
+        Filter: (x < 'B'::text)
+-- EXPLAIN
+
+> explain (costs off) select x from p where x = 'bz'
+QUERY PLAN:text
+Seq Scan on p2 p
+  Filter: (x = 'bz'::text)
+-- EXPLAIN
+
+> explain (costs off) select x from p where x collate "C" < 'B'
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p1 p_1
+        Filter: ((x)::text < 'B'::text)
+  ->  Seq Scan on p2 p_2
+        Filter: ((x)::text < 'B'::text)
+  ->  Seq Scan on pd p_3
+        Filter: ((x)::text < 'B'::text)
+-- EXPLAIN
+
+> create table q (x text) partition by range (x collate "sv-x-icu")
+-- CREATE TABLE
+
+> create table q1 partition of q for values from ('a') to ('z')
+-- CREATE TABLE
+
+> create table q2 partition of q for values from ('z') to (maxvalue)
+-- CREATE TABLE
+
+> insert into q values ('ä'), ('z'), ('zz'), ('y')
+-- INSERT 0 4
+
+> select tableoid::regclass, x from q order by x collate "C"
+tableoid:regclass | x:text
+q1 | y
+q2 | z
+q2 | zz
+q2 | ä
+-- SELECT 4
+
+> explain (costs off) select * from q where x > 'zz'
+QUERY PLAN:text
+Append
+  ->  Seq Scan on q1 q_1
+        Filter: (x > 'zz'::text)
+  ->  Seq Scan on q2 q_2
+        Filter: (x > 'zz'::text)
+-- EXPLAIN
+
+> create table l (x text collate "de-x-icu") partition by list (x)
+-- CREATE TABLE
+
+> create table l1 partition of l for values in ('a', 'B')
+-- CREATE TABLE
+
+> create table l2 partition of l for values in ('b', 'A')
+-- CREATE TABLE
+
+> insert into l values ('a'), ('A'), ('b'), ('B')
+-- INSERT 0 4
+
+> select tableoid::regclass, x from l order by x collate "C"
+tableoid:regclass | x:text
+l2 | A
+l1 | B
+l1 | a
+l2 | b
+-- SELECT 4
+
+> select pg_get_partkeydef('q'::regclass), pg_get_partkeydef('p'::regclass)
+pg_get_partkeydef:text | pg_get_partkeydef:text
+RANGE (x COLLATE "sv-x-icu") | RANGE (x)
+-- SELECT 1
+
+> create collation ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> create table n (x text collate ci) partition by range (x)
+-- CREATE TABLE
+
+> create table n1 partition of n for values from ('a') to ('m')
+-- CREATE TABLE
+
+> insert into n values ('A'), ('L'), ('M')
+ERROR 23514: no partition of relation "n" found for row
+DETAIL: Partition key of the failing row contains (x) = (M).
+OBJECTS: schema=public table=n
+
+> create table h (x text collate ci) partition by hash (x)
+-- CREATE TABLE
+
+> create table h1 partition of h for values with (modulus 2, remainder 0)
+-- CREATE TABLE
+
+> create table h2 partition of h for values with (modulus 2, remainder 1)
+-- CREATE TABLE
+
+> insert into h values ('abc'), ('ABC'), ('x'), ('X')
+-- INSERT 0 4
+
+> select tableoid::regclass, x from h order by x collate "C"
+tableoid:regclass | x:text
+h1 | ABC
+h2 | X
+h1 | abc
+h2 | x
+-- SELECT 4
+
+> create table nl (x text collate ci) partition by list (x)
+-- CREATE TABLE
+
+> create table nl1 partition of nl for values in ('a', 'B')
+-- CREATE TABLE
+
+> create table nl2 partition of nl for values in ('A')
+ERROR 42P17: partition "nl2" would overlap partition "nl1" (at 49)
+
+> create table nl3 partition of nl for values in ('c', 'C')
+-- CREATE TABLE
+
+> insert into nl values ('a'), ('A'), ('b'), ('c')
+-- INSERT 0 4
+
+> select tableoid::regclass, x from nl order by x collate "C"
+tableoid:regclass | x:text
+nl1 | A
+nl1 | a
+nl1 | b
+nl3 | c
+-- SELECT 4
+
+> select pg_get_expr(relpartbound, oid) from pg_class where relname like 'nl_' order by 1
+pg_get_expr:text
+FOR VALUES IN ('a', 'B')
+FOR VALUES IN ('c', 'C')
+-- SELECT 2
+
+> explain (costs off) select * from nl where x = 'C'
+QUERY PLAN:text
+Seq Scan on nl3 nl
+  Filter: (x = 'C'::text)
+-- EXPLAIN
+
+> create table m (a text collate "sv-x-icu", b text collate "C") partition by range (a, b)
+-- CREATE TABLE
+
+> create table m1 partition of m for values from ('a', 'B') to ('z', 'a')
+-- CREATE TABLE
+
+> create table m2 partition of m for values from ('z', 'a') to ('ö', 'a')
+-- CREATE TABLE
+
+> insert into m values ('y', 'x'), ('z', 'A'), ('z', 'b'), ('ä', 'a')
+-- INSERT 0 4
+
+> select tableoid::regclass, a, b from m order by 2, 3
+tableoid:regclass | a:text | b:text
+m1 | y | x
+m1 | z | A
+m2 | z | b
+m2 | ä | a
+-- SELECT 4
+
+> explain (costs off) select * from m where a = 'z' and b < 'a'
+QUERY PLAN:text
+Seq Scan on m1 m
+  Filter: ((b < 'a'::text) AND (a = 'z'::text))
+-- EXPLAIN
+
+> explain (costs off) select * from m where a > 'z'
+QUERY PLAN:text
+Seq Scan on m2 m
+  Filter: (a > 'z'::text)
+-- EXPLAIN
+
+> update m set a = 'ä' where a = 'y'
+-- UPDATE 1
+
+> select tableoid::regclass, a, b from m order by 2, 3
+tableoid:regclass | a:text | b:text
+m1 | z | A
+m2 | z | b
+m2 | ä | a
+m2 | ä | x
+-- SELECT 4
+

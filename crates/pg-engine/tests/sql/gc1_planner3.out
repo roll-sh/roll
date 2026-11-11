@@ -1,0 +1,309 @@
+> CREATE TABLE gc3_p (a int, b int, c text) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gc3_p1 PARTITION OF gc3_p FOR VALUES IN (0, 1, 2)
+-- CREATE TABLE
+
+> CREATE TABLE gc3_p2 PARTITION OF gc3_p FOR VALUES IN (3, 4, 5)
+-- CREATE TABLE
+
+> CREATE TABLE gc3_p3 PARTITION OF gc3_p FOR VALUES IN (6, 7, 8, 9)
+-- CREATE TABLE
+
+> INSERT INTO gc3_p SELECT i % 10, i % 7, to_char(i % 4, 'FM0000') FROM generate_series(1, 3000) i
+-- INSERT 0 3000
+
+> ANALYZE gc3_p
+-- ANALYZE
+
+> SET enable_partitionwise_aggregate = on
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT a, sum(b), count(*) FROM gc3_p GROUP BY a HAVING avg(b) < 3.2 ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: gc3_p.a
+  ->  Append
+        ->  HashAggregate
+              Group Key: gc3_p.a
+              Filter: (avg(gc3_p.b) < 3.2)
+              ->  Seq Scan on gc3_p1 gc3_p
+        ->  HashAggregate
+              Group Key: gc3_p_1.a
+              Filter: (avg(gc3_p_1.b) < 3.2)
+              ->  Seq Scan on gc3_p2 gc3_p_1
+        ->  HashAggregate
+              Group Key: gc3_p_2.a
+              Filter: (avg(gc3_p_2.b) < 3.2)
+              ->  Seq Scan on gc3_p3 gc3_p_2
+-- EXPLAIN
+
+> SELECT a, sum(b), count(*) FROM gc3_p GROUP BY a HAVING avg(b) < 3.2 ORDER BY 1
+a:int4 | sum:int8 | count:int8
+0 | 903 | 300
+1 | 898 | 300
+2 | 897 | 300
+3 | 903 | 300
+4 | 902 | 300
+5 | 901 | 300
+6 | 900 | 300
+7 | 899 | 300
+8 | 898 | 300
+9 | 897 | 300
+-- SELECT 10
+
+> EXPLAIN (COSTS OFF) SELECT b, sum(a), count(*) FROM gc3_p GROUP BY b ORDER BY 1
+QUERY PLAN:text
+Finalize GroupAggregate
+  Group Key: gc3_p.b
+  ->  Sort
+        Sort Key: gc3_p.b
+        ->  Append
+              ->  Partial HashAggregate
+                    Group Key: gc3_p.b
+                    ->  Seq Scan on gc3_p1 gc3_p
+              ->  Partial HashAggregate
+                    Group Key: gc3_p_1.b
+                    ->  Seq Scan on gc3_p2 gc3_p_1
+              ->  Partial HashAggregate
+                    Group Key: gc3_p_2.b
+                    ->  Seq Scan on gc3_p3 gc3_p_2
+-- EXPLAIN
+
+> SELECT b, sum(a), count(*) FROM gc3_p GROUP BY b ORDER BY 1
+b:int4 | sum:int8 | count:int8
+0 | 1932 | 428
+1 | 1931 | 429
+2 | 1930 | 429
+3 | 1929 | 429
+4 | 1928 | 429
+5 | 1926 | 428
+6 | 1924 | 428
+-- SELECT 7
+
+> RESET enable_partitionwise_aggregate
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT a, b, row_number() OVER (ORDER BY a, b) rn FROM gc3_p1) s WHERE rn <= 3
+QUERY PLAN:text
+WindowAgg
+  Window: w1 AS (ORDER BY gc3_p1.a, gc3_p1.b ROWS UNBOUNDED PRECEDING)
+  Run Condition: (row_number() OVER w1 <= 3)
+  ->  Sort
+        Sort Key: gc3_p1.a, gc3_p1.b
+        ->  Seq Scan on gc3_p1
+-- EXPLAIN
+
+> SELECT * FROM (SELECT a, b, row_number() OVER (ORDER BY a, b) rn FROM gc3_p1) s WHERE rn <= 3
+a:int4 | b:int4 | rn:int8
+0 | 0 | 1
+0 | 0 | 2
+0 | 0 | 3
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT a, b, count(*) OVER (PARTITION BY a ORDER BY b) c FROM gc3_p1) s WHERE c <= 2
+QUERY PLAN:text
+WindowAgg
+  Window: w1 AS (PARTITION BY gc3_p1.a ORDER BY gc3_p1.b)
+  Run Condition: (count(*) OVER w1 <= 2)
+  ->  Sort
+        Sort Key: gc3_p1.a, gc3_p1.b
+        ->  Seq Scan on gc3_p1
+-- EXPLAIN
+
+> SELECT * FROM (SELECT a, b, count(*) OVER (PARTITION BY a ORDER BY b) c FROM gc3_p1) s WHERE c <= 2
+a:int4 | b:int4 | c:int8
+-- SELECT 0
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a, sum(b) OVER (ORDER BY a ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), rank() OVER (ORDER BY a) FROM gc3_p2 LIMIT 3
+QUERY PLAN:text
+Limit
+  Output: a, (sum(b) OVER w1), (rank() OVER w2)
+  ->  WindowAgg
+        Output: a, (sum(b) OVER w1), rank() OVER w2
+        Window: w2 AS (ORDER BY gc3_p2.a ROWS UNBOUNDED PRECEDING)
+        ->  WindowAgg
+              Output: a, b, sum(b) OVER w1
+              Window: w1 AS (ORDER BY gc3_p2.a ROWS BETWEEN '1'::bigint PRECEDING AND CURRENT ROW)
+              ->  Sort
+                    Output: a, b
+                    Sort Key: gc3_p2.a
+                    ->  Seq Scan on public.gc3_p2
+                          Output: a, b
+-- EXPLAIN
+
+> SET debug_parallel_query = on
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gc3_p1 WHERE b > 2
+QUERY PLAN:text
+Gather
+  Workers Planned: 1
+  Single Copy: true
+  ->  Aggregate
+        ->  Seq Scan on gc3_p1
+              Filter: (b > 2)
+-- EXPLAIN
+
+> RESET debug_parallel_query
+-- RESET
+
+> CREATE TABLE gc3_t (id int, val text)
+-- CREATE TABLE
+
+> CREATE FUNCTION gc3_t_ins() RETURNS trigger LANGUAGE plpgsql AS $$
+> DECLARE t text := ''; l text;
+> BEGIN
+>   FOR l IN EXECUTE 'EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM nt' LOOP
+>     t := t || l || E'\n';
+>   END LOOP;
+>   RAISE INFO '%', t;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gc3_t_ins AFTER INSERT ON gc3_t REFERENCING NEW TABLE AS nt
+>   FOR EACH STATEMENT EXECUTE FUNCTION gc3_t_ins()
+-- CREATE TRIGGER
+
+> INSERT INTO gc3_t VALUES (1, 'one'), (2, 'two')
+INFO 00000: Named Tuplestore Scan
+  Output: id, val
+
+CONTEXT: PL/pgSQL function gc3_t_ins() line 7 at RAISE
+-- INSERT 0 2
+
+> CREATE FUNCTION gc3_arr(int) RETURNS int[] LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN array[$1, $1 + 1]; END $$
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x FROM gc3_arr(4) x
+QUERY PLAN:text
+Function Scan on public.gc3_arr x
+  Output: x
+  Function Call: gc3_arr(4)
+-- EXPLAIN
+
+> SELECT x FROM gc3_arr(4) x
+x:int4[]
+{4,5}
+-- SELECT 1
+
+> CREATE TABLE gc3_mt (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE gc3_ms (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO gc3_mt SELECT i, i * 10 FROM generate_series(1, 100, 2) i
+-- INSERT 0 50
+
+> INSERT INTO gc3_ms SELECT i, i * 10 FROM generate_series(1, 100) i
+-- INSERT 0 100
+
+> CREATE FUNCTION gc3_explain(q text) RETURNS SETOF text LANGUAGE plpgsql AS $$
+> DECLARE ln text;
+> BEGIN
+>   FOR ln IN EXECUTE 'EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF, BUFFERS OFF) ' || q LOOP
+>     ln := regexp_replace(ln, 'Memory: \S*', 'Memory: xxx', 'g');
+>     RETURN NEXT ln;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT gc3_explain('MERGE INTO gc3_mt t USING gc3_ms s ON t.a = s.a WHEN MATCHED AND t.a < 10 THEN UPDATE SET b = t.b + 1')
+gc3_explain:text
+              ->  Seq Scan on gc3_ms s (actual rows=100.00 loops=1)
+              ->  Seq Scan on gc3_mt t (actual rows=50.00 loops=1)
+              Sort Key: s.a
+              Sort Key: t.a
+              Sort Method: quicksort  Memory: xxx
+              Sort Method: quicksort  Memory: xxx
+        ->  Sort (actual rows=100.00 loops=1)
+        ->  Sort (actual rows=50.00 loops=1)
+        Merge Cond: (t.a = s.a)
+  ->  Merge Join (actual rows=50.00 loops=1)
+  Tuples: updated=5 skipped=45
+Merge on gc3_mt t (actual rows=0.00 loops=1)
+-- SELECT 12
+
+> SELECT gc3_explain('MERGE INTO gc3_mt t USING gc3_ms s ON t.a = s.a AND t.a < -1000 WHEN MATCHED THEN DELETE')
+gc3_explain:text
+                    Filter: (a < '-1000'::integer)
+                    Rows Removed by Filter: 50
+              ->  Seq Scan on gc3_ms s (never executed)
+              ->  Seq Scan on gc3_mt t (actual rows=0.00 loops=1)
+              Sort Key: s.a
+              Sort Key: t.a
+              Sort Method: quicksort  Memory: xxx
+        ->  Sort (actual rows=0.00 loops=1)
+        ->  Sort (never executed)
+        Merge Cond: (t.a = s.a)
+  ->  Merge Join (actual rows=0.00 loops=1)
+Merge on gc3_mt t (actual rows=0.00 loops=1)
+-- SELECT 12
+
+> SELECT gc3_explain('MERGE INTO gc3_mt t USING gc3_ms s ON t.a = s.a WHEN NOT MATCHED BY SOURCE AND t.a < 10 THEN DELETE WHEN NOT MATCHED BY TARGET AND s.a < 20 THEN INSERT VALUES (a, b)')
+gc3_explain:text
+              ->  Seq Scan on gc3_ms s (actual rows=100.00 loops=1)
+              ->  Seq Scan on gc3_mt t (actual rows=50.00 loops=1)
+              Sort Key: s.a
+              Sort Key: t.a
+              Sort Method: quicksort  Memory: xxx
+              Sort Method: quicksort  Memory: xxx
+        ->  Sort (actual rows=100.00 loops=1)
+        ->  Sort (actual rows=50.00 loops=1)
+        Merge Cond: (t.a = s.a)
+  ->  Merge Full Join (actual rows=100.00 loops=1)
+  Tuples: inserted=9 skipped=91
+Merge on gc3_mt t (actual rows=0.00 loops=1)
+-- SELECT 12
+
+> SELECT count(*), sum(b) FROM gc3_mt
+count:int8 | sum:int8
+59 | 25905
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (VALUES (1, 10)) v(x, y) LEFT JOIN gc3_mt t ON t.a = v.x AND t.b = v.y
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Result
+  ->  Seq Scan on gc3_mt t
+        Filter: ((a = 1) AND (b = 10))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) MERGE INTO gc3_mt t USING (VALUES (3, 5)) v(x, y) ON t.a = v.x WHEN NOT MATCHED THEN INSERT VALUES (x, y)
+QUERY PLAN:text
+Merge on gc3_mt t
+  ->  Nested Loop Left Join
+        ->  Result
+        ->  Seq Scan on gc3_mt t
+              Filter: (a = 3)
+-- EXPLAIN
+
+> CREATE TABLE gc3_i (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE gc3_i1 () INHERITS (gc3_i)
+-- CREATE TABLE
+
+> INSERT INTO gc3_i SELECT i % 50, i % 100 FROM generate_series(0, 1999) i
+-- INSERT 0 2000
+
+> INSERT INTO gc3_i1 SELECT i % 100, i % 100 FROM generate_series(0, 999) i
+-- INSERT 0 1000
+
+> CREATE STATISTICS gc3_i_s ON a, b FROM gc3_i
+-- CREATE STATISTICS
+
+> ANALYZE gc3_i, gc3_i1
+-- ANALYZE
+
+> EXPLAIN SELECT a, b FROM gc3_i GROUP BY 1, 2
+QUERY PLAN:text
+HashAggregate  (cost=74.00..75.50 rows=150 width=8)
+  Group Key: gc3_i.a, gc3_i.b
+  ->  Append  (cost=0.00..59.00 rows=3000 width=8)
+        ->  Seq Scan on gc3_i gc3_i_1  (cost=0.00..29.00 rows=2000 width=8)
+        ->  Seq Scan on gc3_i1 gc3_i_2  (cost=0.00..15.00 rows=1000 width=8)
+-- EXPLAIN
+

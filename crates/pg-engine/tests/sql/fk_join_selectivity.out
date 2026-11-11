@@ -1,0 +1,126 @@
+> create table fkj_1 (id int primary key, k int, v text)
+-- CREATE TABLE
+
+> create table fkj_2 (id int, f1 int references fkj_1, w text)
+-- CREATE TABLE
+
+> create table fkj_3 (a int, b int, primary key (a, b))
+-- CREATE TABLE
+
+> insert into fkj_1 select g, g % 50, 'v' || g from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> insert into fkj_2 select g, (g % 2000) + 1, 'w' from generate_series(1, 9000) g
+-- INSERT 0 9000
+
+> insert into fkj_3 select g % 100, g / 100 from generate_series(0, 2999) g
+-- INSERT 0 3000
+
+> alter table fkj_2 add column fa int, add column fb int
+-- ALTER TABLE
+
+> update fkj_2 set fa = id % 100, fb = (id % 3000) / 100
+-- UPDATE 9000
+
+> alter table fkj_2 add foreign key (fa, fb) references fkj_3
+-- ALTER TABLE
+
+> analyze fkj_1
+-- ANALYZE
+
+> analyze fkj_2
+-- ANALYZE
+
+> analyze fkj_3
+-- ANALYZE
+
+> explain select * from fkj_2 join fkj_1 on fkj_1.id = fkj_2.f1
+QUERY PLAN:text
+Hash Join  (cost=56.00..275.67 rows=9000 width=31)
+  Hash Cond: (fkj_2.f1 = fkj_1.id)
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=13)
+        ->  Seq Scan on fkj_1  (cost=0.00..31.00 rows=2000 width=13)
+-- EXPLAIN
+
+> explain select * from fkj_2 join fkj_1 on fkj_1.id = fkj_2.f1 where fkj_1.k = 3
+QUERY PLAN:text
+Hash Join  (cost=36.50..256.17 rows=180 width=31)
+  Hash Cond: (fkj_2.f1 = fkj_1.id)
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=36.00..36.00 rows=40 width=13)
+        ->  Seq Scan on fkj_1  (cost=0.00..36.00 rows=40 width=13)
+              Filter: (k = 3)
+-- EXPLAIN
+
+> explain select * from fkj_2 left join fkj_1 on fkj_1.id = fkj_2.f1
+QUERY PLAN:text
+Hash Left Join  (cost=56.00..275.67 rows=9000 width=31)
+  Hash Cond: (fkj_2.f1 = fkj_1.id)
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=13)
+        ->  Seq Scan on fkj_1  (cost=0.00..31.00 rows=2000 width=13)
+-- EXPLAIN
+
+> explain select * from fkj_2 where exists (select 1 from fkj_1 where fkj_1.id = fkj_2.f1)
+QUERY PLAN:text
+Hash Join  (cost=56.00..275.67 rows=9000 width=18)
+  Hash Cond: (fkj_2.f1 = fkj_1.id)
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=4)
+        ->  Seq Scan on fkj_1  (cost=0.00..31.00 rows=2000 width=4)
+-- EXPLAIN
+
+> explain select * from fkj_2 where not exists (select 1 from fkj_1 where fkj_1.id = fkj_2.f1)
+QUERY PLAN:text
+Hash Anti Join  (cost=56.00..285.75 rows=1 width=18)
+  Hash Cond: (fkj_2.f1 = fkj_1.id)
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=31.00..31.00 rows=2000 width=4)
+        ->  Seq Scan on fkj_1  (cost=0.00..31.00 rows=2000 width=4)
+-- EXPLAIN
+
+> explain select * from fkj_2 join fkj_3 on a = fa and b = fb
+QUERY PLAN:text
+Hash Join  (cost=89.00..332.29 rows=9000 width=26)
+  Hash Cond: ((fkj_2.fa = fkj_3.a) AND (fkj_2.fb = fkj_3.b))
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=44.00..44.00 rows=3000 width=8)
+        ->  Seq Scan on fkj_3  (cost=0.00..44.00 rows=3000 width=8)
+-- EXPLAIN
+
+> explain select * from fkj_2 join fkj_3 on a = fa
+QUERY PLAN:text
+Hash Join  (cost=81.50..3337.50 rows=270000 width=26)
+  Hash Cond: (fkj_2.fa = fkj_3.a)
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=44.00..44.00 rows=3000 width=8)
+        ->  Seq Scan on fkj_3  (cost=0.00..44.00 rows=3000 width=8)
+-- EXPLAIN
+
+> explain select * from fkj_1 join fkj_2 on fkj_1.id = fkj_2.f1 join fkj_3 on a = fa and b = fb
+QUERY PLAN:text
+Hash Join  (cost=145.00..411.96 rows=9000 width=39)
+  Hash Cond: ((fkj_2.fa = fkj_3.a) AND (fkj_2.fb = fkj_3.b))
+  ->  Hash Join  (cost=56.00..275.67 rows=9000 width=31)
+        Hash Cond: (fkj_2.f1 = fkj_1.id)
+        ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+        ->  Hash  (cost=31.00..31.00 rows=2000 width=13)
+              ->  Seq Scan on fkj_1  (cost=0.00..31.00 rows=2000 width=13)
+  ->  Hash  (cost=44.00..44.00 rows=3000 width=8)
+        ->  Seq Scan on fkj_3  (cost=0.00..44.00 rows=3000 width=8)
+-- EXPLAIN
+
+> alter table fkj_2 alter constraint fkj_2_f1_fkey not enforced
+-- ALTER TABLE
+
+> explain select * from fkj_2 join fkj_1 on fkj_1.id = fkj_2.f1 where fkj_1.k = 3
+QUERY PLAN:text
+Hash Join  (cost=36.50..256.17 rows=180 width=31)
+  Hash Cond: (fkj_2.f1 = fkj_1.id)
+  ->  Seq Scan on fkj_2  (cost=0.00..196.00 rows=9000 width=18)
+  ->  Hash  (cost=36.00..36.00 rows=40 width=13)
+        ->  Seq Scan on fkj_1  (cost=0.00..36.00 rows=40 width=13)
+              Filter: (k = 3)
+-- EXPLAIN
+

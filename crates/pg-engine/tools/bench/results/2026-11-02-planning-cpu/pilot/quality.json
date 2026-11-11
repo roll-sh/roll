@@ -1,0 +1,17 @@
+{
+  "samples": 79,
+  "physical_frame_depths": {
+    "1": 37,
+    "2": 27,
+    "3": 11,
+    "7": 1,
+    "13": 1,
+    "16": 1,
+    "36": 1
+  },
+  "bound_custom_samples": 0,
+  "root_cost_samples": 0,
+  "attribution_gate_passed": false,
+  "reason": "No planning boundary appears; most callchains stop at 1-3 physical frames. Do not infer inclusive CPU shares from these stacks.",
+  "next_check": "Verbose saved-data decoding suggests an ELF executable mapping offset discrepancy; cause and replay correction unverified."
+}

@@ -1,0 +1,60 @@
+> SELECT name, setting, source FROM pg_settings
+>   WHERE name IN ('archive_command', 'data_directory_mode', 'log_file_mode', 'unix_socket_permissions',
+>                  'transaction_isolation', 'transaction_read_only', 'transaction_deferrable', 'allow_alter_system')
+>   ORDER BY name
+name:text | setting:text | source:text
+allow_alter_system | on | default
+archive_command | (disabled) | default
+data_directory_mode | 0700 | default
+log_file_mode | 0600 | default
+transaction_deferrable | off | override
+transaction_isolation | read committed | override
+transaction_read_only | off | override
+unix_socket_permissions | 0777 | default
+-- SELECT 8
+
+> SHOW archive_command
+archive_command:text
+(disabled)
+-- SHOW
+
+> SHOW log_file_mode
+log_file_mode:text
+0600
+-- SHOW
+
+> SELECT name, context, vartype, boot_val, short_desc, extra_desc FROM pg_settings WHERE name = 'allow_alter_system'
+name:text | context:text | vartype:text | boot_val:text | short_desc:text | extra_desc:text
+allow_alter_system | sighup | bool | on | Allows running the ALTER SYSTEM command. | Can be set to off for environments where global configuration changes should be made using a different method.
+-- SELECT 1
+
+> SELECT count(*) FROM pg_settings WHERE name LIKE 'plpgsql.%'
+count:int8
+0
+-- SELECT 1
+
+> DO $$ BEGIN END $$
+-- DO
+
+> SELECT name, setting FROM pg_settings WHERE name LIKE 'plpgsql.%' ORDER BY name
+name:text | setting:text
+plpgsql.check_asserts | on
+plpgsql.extra_errors | none
+plpgsql.extra_warnings | none
+plpgsql.print_strict_params | off
+plpgsql.variable_conflict | error
+-- SELECT 5
+
+> SELECT * FROM pg_ls_logdir()
+ERROR 58P01: could not open directory "log": No such file or directory
+
+> SELECT count(*) FROM pg_ls_tmpdir()
+count:int8
+0
+-- SELECT 1
+
+> SELECT pg_current_logfile()
+pg_current_logfile:text
+NULL
+-- SELECT 1
+

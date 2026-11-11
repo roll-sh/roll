@@ -1,0 +1,177 @@
+> CREATE TABLE a29_wt (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO a29_wt VALUES (1, 'x'), (2, 'y'), (NULL, NULL), (3, NULL)
+-- INSERT 0 4
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT a, b FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  Seq Scan on public.a29_wt
+        Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> SELECT s FROM (SELECT a, b FROM a29_wt OFFSET 0) s
+s:record
+(,)
+(1,x)
+(2,y)
+(3,)
+-- SELECT 4
+
+> EXPLAIN (verbose, costs off) SELECT s, s.a FROM (SELECT a, b FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*, s.a
+  ->  Seq Scan on public.a29_wt
+        Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s.* FROM (SELECT a, b FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Seq Scan on public.a29_wt
+  Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s IS NULL, s IS NOT NULL FROM (SELECT a, b FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: (s.* IS NULL), (s.* IS NOT NULL)
+  ->  Seq Scan on public.a29_wt
+        Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> SELECT s IS NULL, s IS NOT NULL FROM (SELECT a, b FROM a29_wt OFFSET 0) s
+?column?:bool | ?column?:bool
+f | f
+f | t
+f | t
+t | f
+-- SELECT 4
+
+> SELECT a, b FROM (SELECT a, b FROM a29_wt OFFSET 0) s WHERE s IS NULL
+a:int4 | b:text
+NULL | NULL
+-- SELECT 1
+
+> SELECT a, b FROM (SELECT a, b FROM a29_wt OFFSET 0) s WHERE s IS NOT NULL
+a:int4 | b:text
+1 | x
+2 | y
+-- SELECT 2
+
+> EXPLAIN (verbose, costs off) SELECT row_to_json(s) FROM (SELECT a, b || '!' AS c FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: row_to_json(s.*)
+  ->  Seq Scan on public.a29_wt
+        Output: a29_wt.a, (a29_wt.b || '!'::text)
+-- EXPLAIN
+
+> SELECT row_to_json(s) FROM (SELECT a, b || '!' AS c FROM a29_wt OFFSET 0) s
+row_to_json:json
+{"a":1,"c":"x!"}
+{"a":2,"c":"y!"}
+{"a":3,"c":null}
+{"a":null,"c":null}
+-- SELECT 4
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT a, b FROM a29_wt) s
+QUERY PLAN:text
+Seq Scan on public.a29_wt
+  Output: ROW(a29_wt.a, a29_wt.b)
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s IS NULL FROM (SELECT a, b FROM a29_wt) s
+QUERY PLAN:text
+Seq Scan on public.a29_wt
+  Output: ((a29_wt.a IS NULL) AND (a29_wt.b IS NULL))
+-- EXPLAIN
+
+> SELECT s IS NULL FROM (SELECT a, b FROM a29_wt) s
+?column?:bool
+f
+f
+f
+t
+-- SELECT 4
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT a, b FROM a29_wt LIMIT 1) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  Limit
+        Output: a29_wt.a, a29_wt.b
+        ->  Seq Scan on public.a29_wt
+              Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT a, b FROM a29_wt ORDER BY a OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  Sort
+        Output: a29_wt.a, a29_wt.b
+        Sort Key: a29_wt.a
+        ->  Seq Scan on public.a29_wt
+              Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT DISTINCT a FROM a29_wt) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  HashAggregate
+        Output: a29_wt.a
+        Group Key: a29_wt.a
+        ->  Seq Scan on public.a29_wt
+              Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT a, count(*) FROM a29_wt GROUP BY a) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  HashAggregate
+        Output: a29_wt.a, count(*)
+        Group Key: a29_wt.a
+        ->  Seq Scan on public.a29_wt
+              Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> SELECT s FROM (SELECT a, count(*) FROM a29_wt GROUP BY a) s ORDER BY 1
+s:record
+(1,1)
+(2,1)
+(3,1)
+(,1)
+-- SELECT 4
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT b, a FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  Seq Scan on public.a29_wt
+        Output: a29_wt.b, a29_wt.a
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT * FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  Seq Scan on public.a29_wt
+        Output: a29_wt.a, a29_wt.b
+-- EXPLAIN
+
+> EXPLAIN (verbose, costs off) SELECT s FROM (SELECT a FROM a29_wt OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.*
+  ->  Seq Scan on public.a29_wt
+        Output: a29_wt.a
+-- EXPLAIN
+
+> DROP TABLE a29_wt
+-- DROP TABLE
+

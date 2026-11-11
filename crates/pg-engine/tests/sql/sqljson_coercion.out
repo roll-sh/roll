@@ -1,0 +1,341 @@
+> CREATE DOMAIN sjc_int_nn AS int NOT NULL
+-- CREATE DOMAIN
+
+> CREATE DOMAIN sjc_txt AS text CHECK (VALUE <> 'foo')
+-- CREATE DOMAIN
+
+> CREATE DOMAIN sjc_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TYPE sjc_rec AS (a int, t text)
+-- CREATE TYPE
+
+> SELECT JSON_VALUE(jsonb 'true', '$'), JSON_VALUE(jsonb 'true', '$' RETURNING bool), JSON_VALUE(jsonb '1.5', '$' RETURNING numeric)
+json_value:text | json_value:bool | json_value:numeric
+t | t | 1.5
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING char(2))
+json_value:bpchar
+NULL
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING char(2) ERROR ON ERROR)
+ERROR 22001: value too long for type character(2)
+
+> SELECT JSON_VALUE(jsonb '"aaa"', '$' RETURNING json), JSON_VALUE(jsonb '"aaa"', '$' RETURNING jsonb)
+json_value:json | json_value:jsonb
+"aaa" | "aaa"
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb 'null', '$' RETURNING sjc_int_nn)
+ERROR 42804: could not coerce ON ERROR expression (NULL) to the RETURNING type
+DETAIL: domain sjc_int_nn does not allow null values
+
+> SELECT JSON_VALUE(jsonb 'null', '$' RETURNING sjc_int_nn ERROR ON ERROR)
+ERROR 23502: domain sjc_int_nn does not allow null values
+OBJECTS: schema=public datatype=sjc_int_nn
+
+> SELECT JSON_VALUE(jsonb '1', '$.a' RETURNING sjc_int_nn DEFAULT NULL ON EMPTY ERROR ON ERROR)
+ERROR 23502: domain sjc_int_nn does not allow null values
+OBJECTS: schema=public datatype=sjc_int_nn
+
+> SELECT JSON_VALUE(jsonb '{"d1": "H"}', '$.a2' RETURNING sjc_txt DEFAULT 'foo'::sjc_txt ON EMPTY)
+ERROR 42804: could not coerce ON EMPTY expression (DEFAULT) to the RETURNING type
+DETAIL: value for domain sjc_txt violates check constraint "sjc_txt_check"
+
+> SELECT JSON_VALUE(jsonb '"foo"', '$' RETURNING sjc_txt)
+json_value:text
+NULL
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb '"foo"', '$' RETURNING sjc_txt ERROR ON ERROR)
+ERROR 23514: value for domain sjc_txt violates check constraint "sjc_txt_check"
+OBJECTS: schema=public datatype=sjc_txt constraint=sjc_txt_check
+
+> SELECT JSON_VALUE(jsonb '[1,2]', '$[*]' DEFAULT '0' ON ERROR), JSON_VALUE(jsonb '[" "]', '$[*]' RETURNING int DEFAULT 2 + 3 ON ERROR)
+json_value:text | json_value:int4
+0 | 5
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb '[1,2]', '$[*]' ERROR ON ERROR)
+ERROR 22034: JSON path expression in JSON_VALUE must return single scalar item
+
+> SELECT JSON_VALUE(jsonb '1', 'lax $.a' ERROR ON EMPTY ERROR ON ERROR)
+ERROR 22035: no SQL/JSON item found for specified path
+
+> SELECT JSON_VALUE(jsonb '1', '$' EMPTY ON ERROR)
+ERROR 42601: invalid ON ERROR behavior (at 34)
+DETAIL: Only ERROR, NULL, or DEFAULT expression is allowed in ON ERROR for JSON_VALUE().
+
+> SELECT JSON_VALUE(jsonb '["1"]', '$[*]' RETURNING int FORMAT JSON)
+ERROR 42601: cannot specify FORMAT JSON in RETURNING clause of JSON_VALUE() (at 55)
+
+> SELECT JSON_VALUE(jsonb '["1"]', '$[*]' RETURNING record)
+ERROR 0A000: returning pseudo-types is not supported in SQL/JSON functions
+
+> SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING bit(3) DEFAULT 1 ON EMPTY)
+ERROR 42846: cannot cast behavior expression of type integer to bit (at 62)
+HINT: You will need to explicitly cast the expression to type bit.
+
+> SELECT JSON_VALUE(jsonb 'null', '$ts' PASSING timestamptz '2018-02-21 12:34:56 +10' AS ts)
+json_value:text
+2018-02-21 02:34:56+00
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb 'null', '$ts' PASSING date '2018-02-21' AS ts RETURNING date)
+json_value:date
+2018-02-21
+-- SELECT 1
+
+> SELECT JSON_VALUE(jsonb 'null', '$ts' PASSING timetz '12:34:56 +10' AS ts RETURNING timetz)
+json_value:timetz
+12:34:56+10
+-- SELECT 1
+
+> SELECT JSON_QUERY(jsonb 'null', '$ts' PASSING timestamptz '2018-02-21 12:34:56 +10' AS ts)
+json_query:jsonb
+"2018-02-21T02:34:56+00:00"
+-- SELECT 1
+
+> SELECT JSON_EXISTS(jsonb '{"a": "2018-02-21"}', '$.a.datetime() ? (@ == $d)' PASSING date '2018-02-21' AS d)
+json_exists:bool
+t
+-- SELECT 1
+
+> SELECT JSON_QUERY(jsonb '"aaa"', '$' RETURNING text), JSON_QUERY(jsonb '"aaa"', '$' RETURNING text OMIT QUOTES)
+json_query:text | json_query:text
+"aaa" | aaa
+-- SELECT 1
+
+> SELECT JSON_QUERY(jsonb '"aaa"', '$' RETURNING char(3) ERROR ON ERROR)
+ERROR 22001: value too long for type character(3)
+
+> SELECT JSON_QUERY(jsonb '[1,2]', '$' RETURNING int[]), JSON_QUERY(jsonb '{"a": 1}', '$' RETURNING int[])
+json_query:int4[] | json_query:int4[]
+{1,2} | NULL
+-- SELECT 1
+
+> SELECT JSON_QUERY(jsonb '{"a": 1}', '$' RETURNING int[] ERROR ON ERROR)
+ERROR 22P02: expected JSON array
+
+> SELECT JSON_QUERY(jsonb '"[1,2]"', '$' RETURNING int4range ERROR ON ERROR)
+ERROR 22P02: malformed range literal: ""[1,2]""
+DETAIL: Missing left parenthesis or bracket.
+
+> SELECT JSON_QUERY(jsonb '"[1,2]"', '$' RETURNING int4range OMIT QUOTES ERROR ON ERROR)
+json_query:3904
+[1,3)
+-- SELECT 1
+
+> SELECT JSON_QUERY(jsonb '{"a": 1, "t": "x"}', '$' RETURNING sjc_rec), JSON_QUERY(jsonb '1', '$' RETURNING sjc_rec ERROR ON ERROR)
+ERROR 22023: cannot call populate_composite on a scalar
+
+> SELECT JSON_QUERY(jsonb '[1,2]', '$' RETURNING bytea), JSON_QUERY(jsonb '[1,2]', '$[*]' RETURNING bytea EMPTY OBJECT ON ERROR)
+json_query:bytea | json_query:bytea
+\x5b312c20325d | \x7b7d
+-- SELECT 1
+
+> SELECT JSON_QUERY(jsonb '[1,2]', '$[*]' ERROR ON ERROR)
+ERROR 22034: JSON path expression in JSON_QUERY must return single item when no wrapper is requested
+HINT: Use the WITH WRAPPER clause to wrap SQL/JSON items into an array.
+
+> SELECT JSON_QUERY(jsonb '[1,2]', '$[*]' RETURNING int[] EMPTY OBJECT ON ERROR)
+ERROR 42804: could not coerce ON ERROR expression (EMPTY OBJECT) to the RETURNING type
+DETAIL: expected JSON array
+
+> SELECT JSON_QUERY(jsonb '["1"]', '$[*]' WITH CONDITIONAL WRAPPER KEEP QUOTES), JSON_QUERY(jsonb '["1"]', '$[*]' WITH WRAPPER OMIT QUOTES)
+ERROR 42601: SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used (at 80)
+
+> SELECT JSON_QUERY(jsonb '1', '$' TRUE ON ERROR)
+ERROR 42601: invalid ON ERROR behavior (at 34)
+DETAIL: Only ERROR, NULL, EMPTY ARRAY, EMPTY OBJECT, or DEFAULT expression is allowed in ON ERROR for JSON_QUERY().
+
+> SELECT JSON_QUERY(jsonb 'null', '$xyz' PASSING 1 AS xy)
+ERROR 42704: could not find jsonpath variable "xyz"
+
+> SELECT JSON_EXISTS(jsonb '1', '$' DEFAULT 1 ON ERROR)
+ERROR 42601: invalid ON ERROR behavior (at 35)
+DETAIL: Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON ERROR for JSON_EXISTS().
+
+> SELECT JSON_EXISTS(jsonb '{"a": 123}', '$' || '.' || 'a'), JSON_VALUE(jsonb '{"a": 123}', '$' || '.' || 'a')
+json_exists:bool | json_value:text
+t | 123
+-- SELECT 1
+
+> SELECT JSON_QUERY(jsonb '{"a": 123}', 'error' || ' ' || 'error')
+ERROR 42601: syntax error at or near " " of jsonpath input
+
+> SELECT JSON_VALUE(jsonb '1', '$' RETURNING int DEFAULT (SELECT 1) ON ERROR)
+ERROR 42804: can only specify a constant, non-aggregate function, or operator expression for DEFAULT (at 56)
+
+> CREATE TABLE sjc_t (js jsonb, b int)
+-- CREATE TABLE
+
+> SELECT JSON_QUERY(js, '$' RETURNING int DEFAULT b + 1 ON ERROR) FROM sjc_t
+ERROR 42804: DEFAULT expression must not contain column references (at 49)
+
+> SELECT JSON_QUERY(js, '$' RETURNING int DEFAULT sum(1) OVER () ON ERROR) FROM sjc_t
+ERROR 42804: can only specify a constant, non-aggregate function, or operator expression for DEFAULT (at 49)
+
+> CREATE INDEX ON sjc_t (JSON_QUERY(js, '$.datetime()'))
+-- CREATE INDEX
+
+> CREATE INDEX ON sjc_t (JSON_QUERY(js, '$.date()'))
+ERROR 42P17: functions in index expression must be marked IMMUTABLE
+
+> CREATE INDEX ON sjc_t (JSON_QUERY(js, '$.a ? (@.datetime("HH:MI TZH") < $.datetime("HH:MI TZH"))'))
+-- CREATE INDEX
+
+> CREATE INDEX ON sjc_t (JSON_QUERY(js, '$.a ? (@.datetime() < $.datetime())'))
+ERROR 42P17: functions in index expression must be marked IMMUTABLE
+
+> CREATE INDEX ON sjc_t (JSON_QUERY(js, '$.datetime() < $x' PASSING '12:34'::timetz AS x))
+ERROR 42P17: functions in index expression must be marked IMMUTABLE
+
+> CREATE INDEX ON sjc_t (JSON_VALUE(js, '$' DEFAULT random()::int ON ERROR))
+ERROR 42P17: functions in index expression must be marked IMMUTABLE
+
+> SELECT * FROM JSON_TABLE(jsonb '[true, false, "aaaaa", 1]', '$[*]' COLUMNS (t text PATH '$', c char(4) PATH '$', i int PATH '$', b bool EXISTS PATH '$', e smallint EXISTS PATH 'strict $.x' FALSE ON ERROR))
+ERROR 42804: could not coerce ON ERROR expression (FALSE) to the RETURNING type
+DETAIL: invalid input syntax for type smallint: "false"
+
+> SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH '$.a' ERROR ON EMPTY))
+ERROR 22035: no SQL/JSON item found for specified path of column "a"
+
+> SELECT * FROM JSON_TABLE(jsonb '[1,2]', '$' COLUMNS (b int PATH '$[*]' ERROR ON ERROR))
+ERROR 22034: JSON path expression for column "b" must return single scalar item
+
+> SELECT * FROM JSON_TABLE(jsonb '[1,2]', '$' COLUMNS (b jsonb PATH '$[*]' ERROR ON ERROR))
+ERROR 22034: JSON path expression for column "b" must return single item when no wrapper is requested
+HINT: Use the WITH WRAPPER clause to wrap SQL/JSON items into an array.
+
+> SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a sjc_pos EXISTS PATH '$.a' FALSE ON ERROR))
+ERROR 42804: could not coerce ON ERROR expression (FALSE) to the RETURNING type
+DETAIL: value for domain sjc_pos violates check constraint "sjc_pos_check"
+
+> SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int) NULL ON ERROR)
+ERROR 42601: invalid ON ERROR behavior (at 57)
+DETAIL: Only EMPTY [ ARRAY ] or ERROR is allowed in the top-level ON ERROR clause.
+
+> SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int TRUE ON EMPTY))
+ERROR 42601: invalid ON EMPTY behavior for column "a" (at 56)
+DETAIL: Only ERROR, NULL, or DEFAULT expression is allowed in ON EMPTY for scalar columns.
+
+> SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int EXISTS EMPTY OBJECT ON ERROR))
+ERROR 42601: invalid ON ERROR behavior for column "a" (at 63)
+DETAIL: Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON ERROR for EXISTS columns.
+
+> SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (id FOR ORDINALITY, id2 FOR ORDINALITY))
+ERROR 42601: only one FOR ORDINALITY column is allowed (at 69)
+
+> SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (v1 int)) AS jt(v1, v2)
+ERROR 42P10: JSON_TABLE function has 1 columns available but 2 columns specified
+
+> SELECT * FROM JSON_TABLE(jsonb '{"a": [1, 2], "c": 3}', '$' COLUMNS (NESTED PATH '$.a[*]' COLUMNS (x int PATH '$'), c int PATH '$.c'))
+c:int4 | x:int4
+3 | 1
+3 | 2
+-- SELECT 2
+
+> SELECT JSON('{ "a" : 1 } ' FORMAT JSON ENCODING UTF8)
+ERROR 42804: JSON ENCODING clause is only allowed for bytea input type (at 28)
+
+> SELECT JSON('{ "a" : 1 } '::bytea FORMAT JSON ENCODING UTF8), JSON('   1   '::jsonb)
+json:json | json:json
+{ "a" : 1 }  | 1
+-- SELECT 1
+
+> SELECT JSON('   1   '::json WITH UNIQUE KEYS)
+ERROR 42804: cannot use non-string types with WITH UNIQUE KEYS clause (at 8)
+
+> SELECT JSON_SERIALIZE('{ "a" : 1 } ' RETURNING jsonb)
+ERROR 42804: cannot use type jsonb in RETURNING clause of JSON_SERIALIZE()
+HINT: Try returning a string type or bytea.
+
+> SELECT JSON_SERIALIZE('{ "a" : 1 } ' RETURNING varchar(2))
+ERROR 22001: value too long for type character varying(2)
+
+> SELECT JSON_OBJECT(RETURNING text FORMAT JSON ENCODING UTF8)
+ERROR 0A000: cannot set JSON encoding for non-bytea output types (at 35)
+
+> SELECT JSON_OBJECT(RETURNING bytea FORMAT JSON ENCODING UTF16)
+ERROR 0A000: unsupported JSON encoding (at 36)
+HINT: Only UTF8 JSON encoding is supported.
+
+> SELECT JSON_OBJECT('foo': NULL::int FORMAT JSON)
+ERROR 42804: cannot use non-string types with explicit FORMAT JSON clause (at 37)
+
+> SELECT JSON_OBJECT('foo': NULL::json FORMAT JSON ENCODING UTF8)
+ERROR 42804: JSON ENCODING clause is only allowed for bytea input type (at 38)
+
+> SELECT JSON_OBJECT('foo': NULL::jsonb FORMAT JSON), JSON_OBJECT('a': '123', 'b': JSON_OBJECT('a': 111 RETURNING jsonb))
+json_object:jsonb | json_object:jsonb
+{"foo": null} | {"a": "123", "b": {"a": 111}}
+-- SELECT 1
+
+> SELECT JSON_OBJECT('a': '{"b" : 1}'::bytea FORMAT JSON)
+json_object:json
+{"a" : {"b" : 1}}
+-- SELECT 1
+
+> SELECT JSON_OBJECT(1: 1, '1': NULL ABSENT ON NULL WITH UNIQUE)
+ERROR 22030: duplicate JSON object key value: "1"
+
+> SELECT JSON_ARRAY(SELECT FROM (VALUES (1)) foo(i))
+ERROR 42601: subquery must return only one column (at 8)
+
+> SELECT JSON_ARRAY(SELECT * FROM (VALUES (1, 2)) foo(i, j))
+ERROR 42601: subquery must return only one column (at 8)
+
+> SELECT JSON_ARRAY(SELECT i FROM (VALUES ('{1,2}'::int[]), ('{3,4}')) foo(i))
+json_array:json
+[[1,2], 
+ [3,4]]
+-- SELECT 1
+
+> SELECT JSON_ARRAYAGG(JSON_ARRAY(i, i + 1 RETURNING text) FORMAT JSON) FROM generate_series(1, 3) i
+json_arrayagg:json
+[[1, 2], [2, 3], [3, 4]]
+-- SELECT 1
+
+> SELECT JSON_ARRAYAGG(NULL), JSON_ARRAYAGG(NULL RETURNING jsonb) FROM generate_series(1, 3)
+json_arrayagg:json | json_arrayagg:jsonb
+[] | []
+-- SELECT 1
+
+> SELECT JSON_OBJECTAGG(NULL: 1)
+ERROR 22004: null value not allowed for object key
+
+> SELECT JSON_OBJECTAGG(NULL: 1 RETURNING jsonb)
+ERROR 22023: field name must not be null
+
+> SELECT JSON_OBJECTAGG(k: v ABSENT ON NULL WITH UNIQUE KEYS) FROM (VALUES (1, 1), (1, NULL), (2, 2)) foo(k, v)
+ERROR 22030: duplicate JSON object key value: "1"
+
+> SELECT JSON_OBJECTAGG(k: v ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb) FROM (VALUES (1, 1), (0, NULL), (2, 2)) foo(k, v)
+json_objectagg:jsonb
+{"1": 1, "2": 2}
+-- SELECT 1
+
+> SELECT json_agg(x) FROM (VALUES (ROW(1, 'a')), (ROW(2, 'b'))) v(x)
+json_agg:json
+[{"f1":1,"f2":"a"}, 
+ {"f1":2,"f2":"b"}]
+-- SELECT 1
+
+> DROP TABLE sjc_t
+-- DROP TABLE
+
+> DROP TYPE sjc_rec
+-- DROP TYPE
+
+> DROP DOMAIN sjc_pos
+-- DROP DOMAIN
+
+> DROP DOMAIN sjc_txt
+-- DROP DOMAIN
+
+> DROP DOMAIN sjc_int_nn
+-- DROP DOMAIN
+

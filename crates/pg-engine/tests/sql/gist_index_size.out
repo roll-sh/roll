@@ -1,0 +1,189 @@
+> create table gst1 (id int, p point)
+-- CREATE TABLE
+
+> insert into gst1 select g, point(g % 100, g / 100) from generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> create index gst1_p on gst1 using gist (p)
+-- CREATE INDEX
+
+> select pg_relation_size('gst1_p') / 8192 as pages
+pages:int8
+84
+-- SELECT 1
+
+> create index gst1_part on gst1 using gist (p) where id % 2 = 0
+-- CREATE INDEX
+
+> select pg_relation_size('gst1_part') / 8192 as pages
+pages:int8
+41
+-- SELECT 1
+
+> create table gst2 (p point)
+-- CREATE TABLE
+
+> insert into gst2 select point((g * 7919) % 1000, (g::int8 * 104729) % 997) from generate_series(1, 30000) g
+-- INSERT 0 30000
+
+> create index gst2_p on gst2 using gist (p)
+-- CREATE INDEX
+
+> select pg_relation_size('gst2_p') / 8192 as pages
+pages:int8
+229
+-- SELECT 1
+
+> create table gst3 (p point)
+-- CREATE TABLE
+
+> insert into gst3 select case when g % 5 = 0 then null else point(g * 0.37, -g * 1.5) end from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index gst3_p on gst3 using gist (p)
+-- CREATE INDEX
+
+> select pg_relation_size('gst3_p') / 8192 as pages
+pages:int8
+146
+-- SELECT 1
+
+> create table gst4 (r int4range)
+-- CREATE TABLE
+
+> insert into gst4 select int4range(g, g + 10) from generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> create index gst4_r on gst4 using gist (r)
+-- CREATE INDEX
+
+> select pg_relation_size('gst4_r') / 8192 as pages
+pages:int8
+37
+-- SELECT 1
+
+> create table gst5 (r int8range)
+-- CREATE TABLE
+
+> insert into gst5 select case when g % 50 = 0 then 'empty'::int8range when g % 37 = 0 then int8range(g, null) when g % 41 = 0 then null else int8range((g * 7919) % 5000, (g * 7919) % 5000 + g % 300) end from generate_series(1, 40000) g
+-- INSERT 0 40000
+
+> create index gst5_r on gst5 using gist (r)
+-- CREATE INDEX
+
+> select pg_relation_size('gst5_r') / 8192 as pages
+pages:int8
+220
+-- SELECT 1
+
+> create table gst6 (r daterange)
+-- CREATE TABLE
+
+> insert into gst6 select daterange('2020-01-01'::date + g % 400, '2020-01-01'::date + g % 400 + g % 7 + 1, '[]') from generate_series(1, 25000) g
+-- INSERT 0 25000
+
+> create index gst6_r on gst6 using gist (r)
+-- CREATE INDEX
+
+> select pg_relation_size('gst6_r') / 8192 as pages
+pages:int8
+152
+-- SELECT 1
+
+> create table gst7 (r int4range)
+-- CREATE TABLE
+
+> insert into gst7 select int4range(null, g) from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> insert into gst7 select int4range(g, null) from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> create index gst7_r on gst7 using gist (r)
+-- CREATE INDEX
+
+> select pg_relation_size('gst7_r') / 8192 as pages
+pages:int8
+24
+-- SELECT 1
+
+> create table gst8 (r int4range)
+-- CREATE TABLE
+
+> create index gst8_r on gst8 using gist (r)
+-- CREATE INDEX
+
+> insert into gst8 select int4range(g, g + 10) from generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> select pg_relation_size('gst8_r') / 8192 as pages
+pages:int8
+69
+-- SELECT 1
+
+> create table gst9 (p point)
+-- CREATE TABLE
+
+> create index gst9_p on gst9 using gist (p)
+-- CREATE INDEX
+
+> insert into gst9 select point(g % 100, g / 100) from generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> select pg_relation_size('gst9_p') / 8192 as pages
+pages:int8
+99
+-- SELECT 1
+
+> create table gst10 (id int, during tsrange, exclude using gist (during with &&))
+-- CREATE TABLE
+
+> insert into gst10 select g, tsrange('2024-01-01'::timestamp + make_interval(hours => g), '2024-01-01'::timestamp + make_interval(hours => g + 1)) from generate_series(1, 2500) g
+-- INSERT 0 2500
+
+> select pg_relation_size('gst10_during_excl') / 8192 as pages
+pages:int8
+23
+-- SELECT 1
+
+> create table gst11 (r daterange, exclude using gist (r with &&))
+-- CREATE TABLE
+
+> insert into gst11 select daterange('2000-01-01'::date + g * 3, '2000-01-01'::date + g * 3 + 2) from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> select pg_relation_size('gst11_r_excl') / 8192 as pages
+pages:int8
+14
+-- SELECT 1
+
+> truncate gst1
+-- TRUNCATE TABLE
+
+> select pg_relation_size('gst1_p') / 8192 as pages
+pages:int8
+1
+-- SELECT 1
+
+> insert into gst1 select g, point(g, -g) from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> select pg_relation_size('gst1_p') / 8192 as pages
+pages:int8
+33
+-- SELECT 1
+
+> create table gst12 (p point)
+-- CREATE TABLE
+
+> create index gst12_p on gst12 using gist (p)
+-- CREATE INDEX
+
+> select pg_relation_size('gst12_p') as bytes
+bytes:int8
+8192
+-- SELECT 1
+
+> drop table gst1, gst2, gst3, gst4, gst5, gst6, gst7, gst8, gst9, gst10, gst11, gst12
+-- DROP TABLE
+

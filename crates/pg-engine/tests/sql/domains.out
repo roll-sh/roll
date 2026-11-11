@@ -1,0 +1,392 @@
+> CREATE DOMAIN dm_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE DOMAIN dm_nn AS int NOT NULL
+-- CREATE DOMAIN
+
+> SELECT (-1)::dm_pos
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> SELECT CASE WHEN false THEN (-1)::dm_pos END
+case:int4
+NULL
+-- SELECT 1
+
+> SELECT x::dm_pos FROM (VALUES (1), (-1)) s(x)
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> SELECT NULL::dm_nn
+ERROR 23502: domain dm_nn does not allow null values
+OBJECTS: schema=public datatype=dm_nn
+
+> SELECT NULL::dm_pos
+dm_pos:int4
+NULL
+-- SELECT 1
+
+> SELECT pg_typeof(1::dm_pos), pg_typeof(1::dm_pos + 1)
+pg_typeof:regtype | pg_typeof:regtype
+dm_pos | integer
+-- SELECT 1
+
+> CREATE TABLE dm_src (x int)
+-- CREATE TABLE
+
+> CREATE VIEW dm_v AS SELECT (-1)::dm_pos AS a, 5::dm_pos AS b, '7'::dm_pos AS c, (x + 1)::dm_pos AS d, NULL::dm_nn AS e FROM dm_src
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('dm_v')
+pg_get_viewdef:text
+ SELECT ('-1'::integer)::dm_pos AS a,
+    (5)::dm_pos AS b,
+    (7)::dm_pos AS c,
+    ((x + 1))::dm_pos AS d,
+    (NULL::integer)::dm_nn AS e
+   FROM dm_src;
+-- SELECT 1
+
+> DROP VIEW dm_v
+-- DROP VIEW
+
+> DROP TABLE dm_src
+-- DROP TABLE
+
+> SELECT ARRAY[1, -2]::dm_pos[]
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> SELECT '{1,-2}'::dm_pos[]
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check" (at 8)
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> SELECT ARRAY[1, 2]::dm_pos[]
+array:user
+{1,2}
+-- SELECT 1
+
+> CREATE TABLE dm_arr (a dm_pos[])
+-- CREATE TABLE
+
+> INSERT INTO dm_arr VALUES (ARRAY[1, -2])
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> INSERT INTO dm_arr VALUES ('{1,2}')
+-- INSERT 0 1
+
+> SELECT a FROM dm_arr
+a:user
+{1,2}
+-- SELECT 1
+
+> SELECT format_type('_dm_pos'::regtype, NULL), '_dm_pos'::regtype, 'dm_pos[]'::regtype
+format_type:text | regtype:regtype | regtype:regtype
+dm_pos[] | dm_pos[] | dm_pos[]
+-- SELECT 1
+
+> SELECT attname, atttypid::regtype FROM pg_attribute WHERE attrelid = 'dm_arr'::regclass AND attnum > 0
+attname:name | atttypid:regtype
+a | dm_pos[]
+-- SELECT 1
+
+> DROP TABLE dm_arr
+-- DROP TABLE
+
+> CREATE DOMAIN dm_p AS int NOT NULL CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE DOMAIN dm_c AS dm_p CHECK (VALUE < 100) CHECK (VALUE <> 50) DEFAULT 7
+-- CREATE DOMAIN
+
+> SELECT typname, typbasetype::regtype, typnotnull, typdefault, typarray::regtype, typtype FROM pg_type WHERE typname IN ('dm_p', 'dm_c', '_dm_p', '_dm_c') ORDER BY 1
+typname:name | typbasetype:regtype | typnotnull:bool | typdefault:text | typarray:regtype | typtype:char
+_dm_c | - | f | NULL | - | b
+_dm_p | - | f | NULL | - | b
+dm_c | dm_p | f | 7 | dm_c[] | d
+dm_p | integer | t | NULL | dm_p[] | d
+-- SELECT 4
+
+> SELECT conname, contypid::regtype FROM pg_constraint WHERE contypid IN ('dm_p'::regtype, 'dm_c'::regtype) ORDER BY 1
+conname:name | contypid:regtype
+dm_c_check | dm_c
+dm_c_check1 | dm_c
+dm_p_check | dm_p
+dm_p_not_null | dm_p
+-- SELECT 4
+
+> CREATE DOMAIN dm_o AS int CONSTRAINT b_z CHECK (VALUE <> 2) CONSTRAINT a_z CHECK (VALUE <> 2)
+-- CREATE DOMAIN
+
+> SELECT 2::dm_o
+ERROR 23514: value for domain dm_o violates check constraint "a_z"
+OBJECTS: schema=public datatype=dm_o constraint=a_z
+
+> SELECT NULL::dm_c
+ERROR 23502: domain dm_c does not allow null values
+OBJECTS: schema=public datatype=dm_c
+
+> SELECT 150::dm_c
+ERROR 23514: value for domain dm_c violates check constraint "dm_c_check"
+OBJECTS: schema=public datatype=dm_c constraint=dm_c_check
+
+> SELECT (-1)::dm_c
+ERROR 23514: value for domain dm_c violates check constraint "dm_p_check"
+OBJECTS: schema=public datatype=dm_c constraint=dm_p_check
+
+> SELECT 50::dm_c
+ERROR 23514: value for domain dm_c violates check constraint "dm_c_check1"
+OBJECTS: schema=public datatype=dm_c constraint=dm_c_check1
+
+> ALTER DOMAIN dm_p ADD CONSTRAINT dm_p_lt CHECK (VALUE < 90)
+-- ALTER DOMAIN
+
+> SELECT 95::dm_c
+ERROR 23514: value for domain dm_c violates check constraint "dm_p_lt"
+OBJECTS: schema=public datatype=dm_c constraint=dm_p_lt
+
+> CREATE TABLE dm_t (a dm_c, b dm_p[])
+-- CREATE TABLE
+
+> INSERT INTO dm_t (b) VALUES (NULL)
+-- INSERT 0 1
+
+> SELECT * FROM dm_t
+a:int4 | b:user
+7 | NULL
+-- SELECT 1
+
+> INSERT INTO dm_t VALUES (95, NULL)
+ERROR 23514: value for domain dm_c violates check constraint "dm_p_lt"
+OBJECTS: schema=public datatype=dm_c constraint=dm_p_lt
+
+> INSERT INTO dm_t VALUES (5, '{1,NULL}')
+ERROR 23502: domain dm_p does not allow null values (at 29)
+OBJECTS: schema=public datatype=dm_p
+
+> INSERT INTO dm_t VALUES (5, '{1,2}')
+-- INSERT 0 1
+
+> ALTER DOMAIN dm_p ADD CONSTRAINT dm_p_lt2 CHECK (VALUE < 2)
+ERROR 0A000: cannot alter type "dm_p" because column "dm_t.b" uses it
+
+> ALTER DOMAIN dm_p SET NOT NULL
+-- ALTER DOMAIN
+
+> DROP DOMAIN dm_p
+ERROR 2BP01: cannot drop type dm_p because other objects depend on it
+DETAIL: column b of table dm_t depends on type dm_p[]
+DETAIL: type dm_c depends on type dm_p
+DETAIL: column a of table dm_t depends on type dm_c
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE dm_t DROP COLUMN b
+-- ALTER TABLE
+
+> ALTER DOMAIN dm_p ADD CONSTRAINT dm_p_lt2 CHECK (VALUE < 6)
+ERROR 23514: column "a" of table "dm_t" contains values that violate the new constraint
+OBJECTS: schema=public table=dm_t column=a
+
+> ALTER DOMAIN dm_p ADD CONSTRAINT dm_p_lt3 CHECK (VALUE < 7)
+ERROR 23514: column "a" of table "dm_t" contains values that violate the new constraint
+OBJECTS: schema=public table=dm_t column=a
+
+> SELECT 6::dm_c
+dm_c:int4
+6
+-- SELECT 1
+
+> DROP TABLE dm_t
+-- DROP TABLE
+
+> DROP DOMAIN dm_c
+-- DROP DOMAIN
+
+> DROP DOMAIN dm_p
+-- DROP DOMAIN
+
+> DROP DOMAIN dm_o
+-- DROP DOMAIN
+
+> CREATE DOMAIN dm_p AS int
+-- CREATE DOMAIN
+
+> CREATE TABLE dm_t1 (a dm_p)
+-- CREATE TABLE
+
+> CREATE DOMAIN dm_c AS dm_p
+-- CREATE DOMAIN
+
+> CREATE TABLE dm_t2 (a dm_c, b dm_p[], c dm_p, d dm_c[])
+-- CREATE TABLE
+
+> CREATE DOMAIN dm_g AS dm_c
+-- CREATE DOMAIN
+
+> DROP DOMAIN dm_p
+ERROR 2BP01: cannot drop type dm_p because other objects depend on it
+DETAIL: column b of table dm_t2 depends on type dm_p[]
+DETAIL: column a of table dm_t1 depends on type dm_p
+DETAIL: type dm_c depends on type dm_p
+DETAIL: column d of table dm_t2 depends on type dm_c[]
+DETAIL: column a of table dm_t2 depends on type dm_c
+DETAIL: type dm_g depends on type dm_c
+DETAIL: column c of table dm_t2 depends on type dm_p
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> BEGIN
+-- BEGIN
+
+> DROP DOMAIN dm_p CASCADE
+NOTICE 00000: drop cascades to 7 other objects
+DETAIL: drop cascades to column b of table dm_t2
+DETAIL: drop cascades to column a of table dm_t1
+DETAIL: drop cascades to type dm_c
+DETAIL: drop cascades to column d of table dm_t2
+DETAIL: drop cascades to column a of table dm_t2
+DETAIL: drop cascades to type dm_g
+DETAIL: drop cascades to column c of table dm_t2
+-- DROP DOMAIN
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TABLE dm_t1, dm_t2
+-- DROP TABLE
+
+> DROP DOMAIN dm_p CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to type dm_c
+DETAIL: drop cascades to type dm_g
+-- DROP DOMAIN
+
+> CREATE FUNCTION dm_h(x dm_pos) RETURNS int LANGUAGE sql AS 'SELECT x'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION dm_h(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 100'
+-- CREATE FUNCTION
+
+> SELECT dm_h(-1)
+dm_h:int4
+99
+-- SELECT 1
+
+> SELECT dm_h(1::dm_pos)
+dm_h:int4
+1
+-- SELECT 1
+
+> SELECT dm_h(5)
+dm_h:int4
+105
+-- SELECT 1
+
+> CREATE FUNCTION dm_h(x dm_pos) RETURNS int LANGUAGE sql AS 'SELECT x'
+ERROR 42723: function "dm_h" already exists with same argument types
+
+> DROP FUNCTION dm_h(int)
+-- DROP FUNCTION
+
+> SELECT dm_h(-1)
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> SELECT dm_h(2)
+dm_h:int4
+2
+-- SELECT 1
+
+> SELECT pg_get_function_arguments('dm_h'::regproc), 'dm_h'::regproc::regprocedure
+pg_get_function_arguments:text | regprocedure:2202
+x dm_pos | dm_h(dm_pos)
+-- SELECT 1
+
+> CREATE FUNCTION dm_f(i int) RETURNS dm_pos LANGUAGE sql AS 'SELECT i'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION dm_g(i int) RETURNS dm_pos LANGUAGE plpgsql AS 'BEGIN RETURN i; END'
+-- CREATE FUNCTION
+
+> SELECT dm_f(3), dm_g(3)
+dm_f:int4 | dm_g:int4
+3 | 3
+-- SELECT 1
+
+> SELECT dm_f(-3)
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> SELECT dm_g(-3)
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+CONTEXT: PL/pgSQL function dm_g(integer) while casting return value to function's return type
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> SELECT pg_get_function_result('dm_f'::regproc)
+pg_get_function_result:text
+dm_pos
+-- SELECT 1
+
+> SELECT proname, prorettype::regtype, proargtypes::regtype[] FROM pg_proc WHERE proname IN ('dm_h', 'dm_f') ORDER BY 1
+proname:name | prorettype:regtype | proargtypes:2211
+dm_f | dm_pos | [0:0]={integer}
+dm_h | integer | [0:0]={dm_pos}
+-- SELECT 2
+
+> DROP DOMAIN dm_pos
+ERROR 2BP01: cannot drop type dm_pos because other objects depend on it
+DETAIL: function dm_h(dm_pos) depends on type dm_pos
+DETAIL: function dm_f(integer) depends on type dm_pos
+DETAIL: function dm_g(integer) depends on type dm_pos
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DO $$ DECLARE v dm_pos; BEGIN v := -1; END $$
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at assignment
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> DO $$ DECLARE v dm_pos := 1; BEGIN v := v - 5; END $$
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at assignment
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> DO $$ DECLARE v dm_pos := 1; BEGIN SELECT -3 INTO v; END $$
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at SQL statement
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> DO $$ DECLARE v dm_pos[] := '{1}'; BEGIN v[2] := -1; END $$
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at assignment
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> DO $$ DECLARE v dm_pos := 1; w v%TYPE; BEGIN w := 0; END $$
+ERROR 23514: value for domain dm_pos violates check constraint "dm_pos_check"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at assignment
+OBJECTS: schema=public datatype=dm_pos constraint=dm_pos_check
+
+> DO $$ DECLARE v dm_nn; BEGIN END $$
+ERROR 23502: domain dm_nn does not allow null values
+CONTEXT: PL/pgSQL function inline_code_block line 1 during statement block local variable initialization
+OBJECTS: schema=public datatype=dm_nn
+
+> DO $$ DECLARE v dm_nn := 1; BEGIN v := NULL; END $$
+ERROR 23502: domain dm_nn does not allow null values
+CONTEXT: PL/pgSQL function inline_code_block line 1 at assignment
+OBJECTS: schema=public datatype=dm_nn
+
+> DO $$ DECLARE v dm_pos := 1; BEGIN v := v + 1; RAISE NOTICE '%', v; END $$
+NOTICE 00000: 2
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DROP DOMAIN dm_pos CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to function dm_h(dm_pos)
+DETAIL: drop cascades to function dm_f(integer)
+DETAIL: drop cascades to function dm_g(integer)
+-- DROP DOMAIN
+
+> DROP DOMAIN dm_nn
+-- DROP DOMAIN
+

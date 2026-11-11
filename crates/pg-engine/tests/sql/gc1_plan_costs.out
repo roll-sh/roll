@@ -1,0 +1,191 @@
+> CREATE TABLE gc1_a (unique1 int, unique2 int, thousand int, tenthous int)
+-- CREATE TABLE
+
+> INSERT INTO gc1_a SELECT g, (g * 7) % 10000, g % 1000, g FROM generate_series(0, 9999) g
+-- INSERT 0 10000
+
+> CREATE INDEX gc1_a_tt ON gc1_a (thousand, tenthous)
+-- CREATE INDEX
+
+> CREATE INDEX gc1_a_u1 ON gc1_a (unique1)
+-- CREATE INDEX
+
+> CREATE TABLE gc1_b (unique1 int, thousand int, tenthous int)
+-- CREATE TABLE
+
+> INSERT INTO gc1_b SELECT g, g % 1000, g FROM generate_series(0, 9999) g
+-- INSERT 0 10000
+
+> ANALYZE gc1_a
+-- ANALYZE
+
+> ANALYZE gc1_b
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.unique1 FROM gc1_a t1 INNER JOIN gc1_b t2 ON t1.tenthous = t2.tenthous AND t2.thousand = 0
+> UNION ALL (VALUES (1)) LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  Append
+        ->  Nested Loop
+              ->  Seq Scan on gc1_b t2
+                    Filter: (thousand = 0)
+              ->  Index Scan using gc1_a_tt on gc1_a t1
+                    Index Cond: (tenthous = t2.tenthous)
+        ->  Result
+-- EXPLAIN
+
+> SELECT t1.unique1 FROM gc1_a t1 INNER JOIN gc1_b t2 ON t1.tenthous = t2.tenthous AND t2.thousand = 0
+> UNION ALL (VALUES (1)) LIMIT 1
+unique1:int4
+0
+-- SELECT 1
+
+> CREATE FUNCTION gc1_expensive(int) RETURNS int LANGUAGE plpgsql IMMUTABLE STRICT COST 10000
+> AS $$BEGIN RETURN $1; END$$
+-- CREATE FUNCTION
+
+> CREATE TABLE gc1_t3 AS SELECT generate_series(-1000, 1000) AS x
+-- SELECT 2001
+
+> CREATE INDEX gc1_t3i ON gc1_t3 (gc1_expensive(x))
+-- CREATE INDEX
+
+> CREATE TABLE gc1_small (f1 int)
+-- CREATE TABLE
+
+> INSERT INTO gc1_small VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> ANALYZE gc1_t3
+-- ANALYZE
+
+> ANALYZE gc1_small
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT * FROM gc1_t3 a UNION ALL SELECT * FROM gc1_t3 b) ss
+>   JOIN gc1_small ON f1 = gc1_expensive(x)
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on gc1_small
+  ->  Append
+        ->  Index Scan using gc1_t3i on gc1_t3 a
+              Index Cond: (gc1_expensive(x) = gc1_small.f1)
+        ->  Index Scan using gc1_t3i on gc1_t3 b
+              Index Cond: (gc1_expensive(x) = gc1_small.f1)
+-- EXPLAIN
+
+> SELECT * FROM (SELECT * FROM gc1_t3 a UNION ALL SELECT * FROM gc1_t3 b) ss
+>   JOIN gc1_small ON f1 = gc1_expensive(x)
+x:int4 | f1:int4
+0 | 0
+0 | 0
+-- SELECT 2
+
+> EXPLAIN SELECT * FROM gc1_t3 a JOIN gc1_small ON f1 = gc1_expensive(x)
+QUERY PLAN:text
+Nested Loop  (cost=0.28..38.57 rows=5 width=8)
+  ->  Seq Scan on gc1_small  (cost=0.00..1.05 rows=5 width=4)
+  ->  Index Scan using gc1_t3i on gc1_t3 a  (cost=0.28..7.49 rows=1 width=4)
+        Index Cond: (gc1_expensive(x) = gc1_small.f1)
+-- EXPLAIN
+
+> CREATE TABLE gc1_pp (a int, b text, c text) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gc1_pp1 PARTITION OF gc1_pp FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE INDEX ON gc1_pp (left(c, 3))
+-- CREATE INDEX
+
+> INSERT INTO gc1_pp SELECT 1, 'a', left(md5(i::text), 5) FROM generate_series(0, 100) i
+-- INSERT 0 101
+
+> ANALYZE gc1_pp
+-- ANALYZE
+
+> CREATE ROLE gc1_reader
+-- CREATE ROLE
+
+> GRANT SELECT (a, c) ON gc1_pp TO gc1_reader
+-- GRANT
+
+> SET SESSION AUTHORIZATION gc1_reader
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT p2.a, p1.c FROM gc1_pp p1 INNER JOIN gc1_pp p2 ON p1.a = p2.a AND left(p1.c, 3) ~ 'a1$'
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (p2.a = p1.a)
+  ->  Seq Scan on gc1_pp1 p2
+  ->  Hash
+        ->  Seq Scan on gc1_pp1 p1
+              Filter: ("left"(c, 3) ~ 'a1$'::text)
+-- EXPLAIN
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> REVOKE ALL ON gc1_pp FROM gc1_reader
+-- REVOKE
+
+> DROP ROLE gc1_reader
+-- DROP ROLE
+
+> EXPLAIN (COSTS OFF) SELECT min(unique1) FROM gc1_a GROUP BY ()
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan using gc1_a_u1 on gc1_a
+                Index Cond: (unique1 IS NOT NULL)
+-- EXPLAIN
+
+> SELECT min(unique1) FROM gc1_a GROUP BY ()
+min:int4
+0
+-- SELECT 1
+
+> CREATE TEMP TABLE gc1_gs (a int PRIMARY KEY, b int)
+-- CREATE TABLE
+
+> INSERT INTO gc1_gs VALUES (1, 1), (2, 2)
+-- INSERT 0 2
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL enable_hashagg = false
+-- SET
+
+> SET LOCAL enable_seqscan = false
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT a, b, count(*) FROM gc1_gs GROUP BY GROUPING SETS (a, b, ()) ORDER BY a, b
+QUERY PLAN:text
+Sort
+  Sort Key: a, b
+  ->  GroupAggregate
+        Group Key: a
+        Group Key: ()
+        Sort Key: b
+          Group Key: b
+        ->  Index Scan using gc1_gs_pkey on gc1_gs
+-- EXPLAIN
+
+> SELECT a, b, count(*) FROM gc1_gs GROUP BY GROUPING SETS (a, b, ()) ORDER BY a, b
+a:int4 | b:int4 | count:int8
+1 | NULL | 1
+2 | NULL | 1
+NULL | 1 | 1
+NULL | 2 | 1
+NULL | NULL | 2
+-- SELECT 5
+
+> COMMIT
+-- COMMIT
+

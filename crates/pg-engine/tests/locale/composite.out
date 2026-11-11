@@ -1,0 +1,200 @@
+> CREATE DATABASE locale_comp LOCALE_PROVIDER icu ICU_LOCALE 'en' LOCALE 'C' TEMPLATE template0
+-- CREATE DATABASE
+
+> \c locale_comp
+
+> CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TYPE ct AS (a text, b int)
+-- CREATE TYPE
+
+> CREATE TYPE cc AS (a text COLLATE "C", b int)
+-- CREATE TYPE
+
+> CREATE TYPE cn AS (a text COLLATE ci, b int)
+-- CREATE TYPE
+
+> CREATE TYPE cnest AS (x ct, y int)
+-- CREATE TYPE
+
+> CREATE TYPE ctr AS RANGE (subtype = ct)
+-- CREATE TYPE
+
+> CREATE DOMAIN dct AS ct
+-- CREATE DOMAIN
+
+> SELECT ROW('a',1)::ct < ROW('B',1)::ct AS ct_icu, ROW('a',1)::cc < ROW('B',1)::cc AS cc_c
+ct_icu:bool | cc_c:bool
+t | f
+-- SELECT 1
+
+> SELECT r1 < r2 AS anon FROM (SELECT ROW('a'::text,1) r1, ROW('B'::text,1) r2) s
+anon:bool
+t
+-- SELECT 1
+
+> SELECT r1 < r2 AS anon_c FROM (SELECT ROW('a'::text COLLATE "C",1) r1, ROW('B'::text COLLATE "C",1) r2) s
+anon_c:bool
+f
+-- SELECT 1
+
+> SELECT ROW('a',1)::cn = ROW('A',1)::cn AS cn_eq
+cn_eq:bool
+t
+-- SELECT 1
+
+> SELECT ARRAY[ROW('a',1)::ct] < ARRAY[ROW('B',1)::ct] AS arr
+arr:bool
+t
+-- SELECT 1
+
+> SELECT ROW(ROW('a',1)::ct, 1)::cnest < ROW(ROW('B',1)::ct, 1)::cnest AS nest
+nest:bool
+t
+-- SELECT 1
+
+> SELECT ctr(ROW('a',1)::ct, ROW('B',1)::ct) AS rng
+rng:user
+["(a,1)","(B,1)")
+-- SELECT 1
+
+> SELECT ctr(ROW('a',1)::ct, ROW('c',1)::ct) @> ROW('B',1)::ct AS rng_contains
+rng_contains:bool
+t
+-- SELECT 1
+
+> SELECT ROW('a',1)::dct < ROW('B',1)::dct AS dom
+dom:bool
+t
+-- SELECT 1
+
+> CREATE TABLE tn (c cn)
+-- CREATE TABLE
+
+> INSERT INTO tn VALUES (ROW('a',1)),(ROW('A',1)),(ROW('b',1)),(ROW('B',2))
+-- INSERT 0 4
+
+> SELECT count(DISTINCT c) FROM tn
+count:int8
+3
+-- SELECT 1
+
+> SELECT c, count(*) FROM tn GROUP BY c ORDER BY c
+c:user | count:int8
+(a,1) | 2
+(b,1) | 1
+(B,2) | 1
+-- SELECT 3
+
+> SELECT DISTINCT c FROM tn ORDER BY c
+c:user
+(a,1)
+(b,1)
+(B,2)
+-- SELECT 3
+
+> CREATE UNIQUE INDEX tn_u ON tn (c)
+ERROR 23505: could not create unique index "tn_u"
+DETAIL: Key (c)=((a,1)) is duplicated.
+OBJECTS: schema=public table=tn constraint=tn_u
+
+> CREATE TABLE tc (id int, c ct, k cc)
+-- CREATE TABLE
+
+> INSERT INTO tc VALUES (1,ROW('a',1),ROW('a',1)),(2,ROW('B',1),ROW('B',1)),(3,ROW('b',1),ROW('b',1)),(4,ROW('A',2),ROW('A',2)),(5,ROW('Z',0),ROW('Z',0))
+-- INSERT 0 5
+
+> SELECT string_agg(id::text, ',' ORDER BY c), string_agg(id::text, ',' ORDER BY k) FROM tc
+string_agg:text | string_agg:text
+1,4,3,2,5 | 4,2,5,1,3
+-- SELECT 1
+
+> SELECT min(c), max(c), min(k), max(k), greatest(ROW('a',1)::ct, ROW('B',1)::ct) FROM tc
+min:record | max:record | min:record | max:record | greatest:user
+(a,1) | (Z,0) | (A,2) | (b,1) | (B,1)
+-- SELECT 1
+
+> SELECT (c).a < 'b' AS icu, (k).a < 'b' AS c, id FROM tc ORDER BY id
+icu:bool | c:bool | id:int4
+t | t | 1
+f | t | 2
+f | f | 3
+t | t | 4
+f | t | 5
+-- SELECT 5
+
+> CREATE INDEX tc_c ON tc (c)
+-- CREATE INDEX
+
+> CREATE INDEX tc_k ON tc (k)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT id FROM tc WHERE c >= ROW('Z',0)::ct
+id:int4
+5
+-- SELECT 1
+
+> SELECT id FROM tc WHERE c < ROW('b',0)::ct ORDER BY c
+id:int4
+1
+4
+-- SELECT 2
+
+> SELECT id FROM tc ORDER BY c DESC LIMIT 2
+id:int4
+5
+2
+-- SELECT 2
+
+> SELECT id FROM tc WHERE k < ROW('b',0)::cc ORDER BY k
+id:int4
+4
+2
+5
+1
+-- SELECT 4
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT id, rank() OVER (ORDER BY c) FROM tc ORDER BY 2, 1
+id:int4 | rank:int8
+1 | 1
+4 | 2
+3 | 3
+2 | 4
+5 | 5
+-- SELECT 5
+
+> SELECT ARRAY(SELECT c FROM tc ORDER BY c)::text
+array:text
+{"(a,1)","(A,2)","(b,1)","(B,1)","(Z,0)"}
+-- SELECT 1
+
+> SELECT id FROM tc ORDER BY ROW((c).a, id)
+id:int4
+1
+4
+3
+2
+5
+-- SELECT 5
+
+> SELECT id FROM tc t ORDER BY t
+id:int4
+1
+2
+3
+4
+5
+-- SELECT 5
+
+> SELECT array_agg(id ORDER BY ARRAY[c]) FROM tc
+array_agg:int4[]
+{1,4,3,2,5}
+-- SELECT 1
+

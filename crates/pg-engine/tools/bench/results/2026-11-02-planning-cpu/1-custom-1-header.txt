@@ -1,0 +1,78 @@
+# ========
+# captured on    : Mon Nov  2 02:28:26 2026
+# header version : 1
+# data offset    : 2560
+# data size      : 52919544
+# feat offset    : 52922104
+# hostname : 813b04eed73f
+# os release : 6.12.94+deb13-amd64
+# perf version : 6.15.0
+# arch : x86_64
+# nrcpus online : 36
+# nrcpus avail : 36
+# cpudesc : Intel(R) Xeon(R) W-2295 CPU @ 3.00GHz
+# cpuid : GenuineIntel,6,85,7
+# total memory : 131590264 kB
+# cmdline : /usr/bin/perf record -e cpu-clock -F 49 -T --sample-cpu --call-graph dwarf,65528 -p 841933 -o /home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/capture-20261102T022538Z/1-custom-1.data -- sleep 20 
+# event : name = cpu-clock, , id = { 890928, 890929, 890930, 890931, 890932, 890933, 890934, 890935, 890936, 890937, 890938, 890939, 890940, 890941, 890942, 890943, 890944, 890945, 890946, 890947, 890948, 890949, 890950, 890951, 890952, 890953, 890954, 890955, 890956, 890957, 890958, 890959, 890960, 890961, 890962, 890963, 890964, 890965, 890966, 890967, 890968, 890969, 890970, 890971, 890972, 890973, 890974, 890975, 890976, 890977, 890978, 890979, 890980, 890981, 890982, 890983, 890984, 890985, 890986, 890987, 890988, 890989, 890990, 890991, 890992, 890993, 890994, 890995, 890996, 890997, 890998, 890999, 891000, 891001, 891002, 891003, 891004, 891005, 891006, 891007, 891008, 891009, 891010, 891011, 891012, 891013, 891014, 891015, 891016, 891017, 891018, 891019, 891020, 891021, 891022, 891023, 891024, 891025, 891026, 891027, 891028, 891029, 891030, 891031, 891032, 891033, 891034, 891035, 891036, 891037, 891038, 891039, 891040, 891041, 891042, 891043, 891044, 891045, 891046, 891047, 891048, 891049, 891050, 891051, 891052, 891053, 891054, 891055, 891056, 891057, 891058, 891059, 891060, 891061, 891062, 891063, 891064, 891065, 891066, 891067, 891068, 891069, 891070, 891071, 891072, 891073, 891074, 891075, 891076, 891077, 891078, 891079, 891080, 891081, 891082, 891083, 891084, 891085, 891086, 891087, 891088, 891089, 891090, 891091, 891092, 891093, 891094, 891095, 891096, 891097, 891098, 891099, 891100, 891101, 891102, 891103, 891104, 891105, 891106, 891107, 891108, 891109, 891110, 891111, 891112, 891113, 891114, 891115, 891116, 891117, 891118, 891119, 891120, 891121, 891122, 891123, 891124, 891125, 891126, 891127, 891128, 891129, 891130, 891131, 891132, 891133, 891134, 891135, 891136, 891137, 891138, 891139, 891140, 891141, 891142, 891143, 891144, 891145, 891146, 891147, 891148, 891149, 891150, 891151, 891152, 891153, 891154, 891155, 891156, 891157, 891158, 891159, 891160, 891161, 891162, 891163, 891164, 891165, 891166, 891167, 891168, 891169, 891170, 891171, 891172, 891173, 891174, 891175, 891176, 891177, 891178, 891179, 891180, 891181, 891182, 891183, 891184, 891185, 891186, 891187, 891188, 891189, 891190, 891191, 891192, 891193, 891194, 891195, 891196, 891197, 891198, 891199, 891200, 891201, 891202, 891203, 891204, 891205, 891206, 891207, 891208, 891209, 891210, 891211, 891212, 891213, 891214, 891215 }, type = 1 (PERF_TYPE_SOFTWARE), size = 136, config = 0 (PERF_COUNT_SW_CPU_CLOCK), { sample_period, sample_freq } = 49, sample_type = IP|TID|TIME|ADDR|CALLCHAIN|CPU|PERIOD|REGS_USER|STACK_USER|DATA_SRC, read_format = ID|LOST, disabled = 1, inherit = 1, mmap = 1, comm = 1, freq = 1, task = 1, mmap_data = 1, sample_id_all = 1, exclude_callchain_user = 1, mmap2 = 1, comm_exec = 1, ksymbol = 1, bpf_event = 1, sample_regs_user = 0xff0fff, sample_stack_user = 65528
+# CPU_TOPOLOGY info available, use -I to display
+# NUMA_TOPOLOGY info available, use -I to display
+# pmu mappings: cpu = 4, breakpoint = 5, cstate_core = 64, cstate_pkg = 65, hwmon_asus = 4294901762, hwmon_coretemp = 4294901763, hwmon_nvme = 4294901760, hwmon_nvme = 4294901761, intel_bts = 10, intel_pt = 11, kprobe = 8, msr = 12, power = 66, software = 1, tool = 4294967294, tracepoint = 2, uncore_cha_0 = 27, uncore_cha_1 = 28, uncore_cha_2 = 29, uncore_cha_3 = 30, uncore_cha_4 = 31, uncore_cha_5 = 32, uncore_cha_6 = 33, uncore_cha_7 = 34, uncore_cha_8 = 35, uncore_cha_9 = 36, uncore_cha_10 = 37, uncore_cha_11 = 38, uncore_cha_12 = 39, uncore_cha_13 = 40, uncore_cha_14 = 41, uncore_cha_15 = 42, uncore_cha_16 = 43, uncore_cha_17 = 44, uncore_iio_free_running_1 = 52, uncore_iio_free_running_3 = 54, uncore_iio_free_running_5 = 56, uncore_iio_0 = 45, uncore_iio_2 = 47, uncore_iio_4 = 49, uncore_iio_free_running_0 = 51, uncore_iio_free_running_2 = 53, uncore_iio_free_running_4 = 55, uncore_iio_1 = 46, uncore_iio_3 = 48, uncore_iio_5 = 50, uncore_imc_0 = 15, uncore_imc_1 = 16, uncore_imc_2 = 17, uncore_imc_3 = 18, uncore_imc_4 = 19, uncore_imc_5 = 20, uncore_irp_0 = 57, uncore_irp_1 = 58, uncore_irp_2 = 59, uncore_irp_3 = 60, uncore_irp_4 = 61, uncore_irp_5 = 62, uncore_m2m_0 = 13, uncore_m2m_1 = 14, uncore_m2pcie_0 = 23, uncore_m2pcie_1 = 24, uncore_m2pcie_2 = 25, uncore_m3upi_0 = 21, uncore_m3upi_1 = 22, uncore_pcu = 63, uncore_ubox = 26, uprobe = 9
+# CACHE info available, use -I to display
+# time of first sample : 468218.137432
+# time of last sample : 468238.100624
+# sample duration :  19963.192 ms
+# MEM_TOPOLOGY info available, use -I to display
+# bpf_prog_info 21: bpf_prog_e8932b6bae2b9745_restrict_filesystems addr 0xffffffffc003a814 size 309
+# bpf_prog_info 22: bpf_prog_a42d275341448247_sd_devices addr 0xffffffffc003abd8 size 322
+# bpf_prog_info 23: bpf_prog_6deef7357e7b4530_sd_fw_egress addr 0xffffffffc003a674 size 67
+# bpf_prog_info 24: bpf_prog_6deef7357e7b4530_sd_fw_ingress addr 0xffffffffc003ad48 size 67
+# bpf_prog_info 25: bpf_prog_ee0e253c78993a24_sd_devices addr 0xffffffffc003d668 size 271
+# bpf_prog_info 26: bpf_prog_6deef7357e7b4530_sd_fw_egress addr 0xffffffffc003d7ac size 67
+# bpf_prog_info 27: bpf_prog_6deef7357e7b4530_sd_fw_ingress addr 0xffffffffc003d830 size 67
+# bpf_prog_info 28: bpf_prog_6ceaf4d6095cca93_sd_devices addr 0xffffffffc0045d5c size 460
+# bpf_prog_info 29: bpf_prog_6deef7357e7b4530_sd_fw_egress addr 0xffffffffc0045f60 size 67
+# bpf_prog_info 30: bpf_prog_6deef7357e7b4530_sd_fw_ingress addr 0xffffffffc0045fe0 size 67
+# bpf_prog_info 34: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc00498e0 size 307
+# bpf_prog_info 36: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0049aac size 369
+# bpf_prog_info 38: bpf_prog_6deef7357e7b4530_sd_fw_egress addr 0xffffffffc0051a14 size 67
+# bpf_prog_info 39: bpf_prog_6deef7357e7b4530_sd_fw_ingress addr 0xffffffffc0051aa8 size 67
+# bpf_prog_info 3829: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc0049594 size 307
+# bpf_prog_info 3831: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0049730 size 369
+# bpf_prog_info 3844: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004e1a4 size 307
+# bpf_prog_info 3846: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004f264 size 369
+# bpf_prog_info 3901: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004e9f0 size 307
+# bpf_prog_info 3903: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004eb58 size 369
+# bpf_prog_info 3931: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc00510f8 size 307
+# bpf_prog_info 3933: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc005124c size 369
+# bpf_prog_info 3946: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004dfd4 size 307
+# bpf_prog_info 3948: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004e6bc size 369
+# bpf_prog_info 4020: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004e4d0 size 369
+# bpf_prog_info 4024: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004eecc size 307
+# bpf_prog_info 4026: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004f050 size 369
+# bpf_prog_info 4027: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004f42c size 307
+# bpf_prog_info 4031: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004f760 size 307
+# bpf_prog_info 4033: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004f8cc size 369
+# bpf_prog_info 4034: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004fa94 size 307
+# bpf_prog_info 4036: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004fc0c size 369
+# bpf_prog_info 4037: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004fdd4 size 307
+# bpf_prog_info 4039: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004ff54 size 369
+# bpf_prog_info 4040: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc005011c size 307
+# bpf_prog_info 4042: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0050f2c size 369
+# bpf_prog_info 4043: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc0050a68 size 307
+# bpf_prog_info 4045: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0051420 size 369
+# bpf_prog_info 4058: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc005298c size 307
+# bpf_prog_info 4060: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0052b24 size 369
+# bpf_prog_info 4064: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc004e860 size 307
+# bpf_prog_info 4066: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc004ed28 size 369
+# bpf_prog_info 19501: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc005a288 size 307
+# bpf_prog_info 19503: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc005a418 size 369
+# bpf_prog_info 21731: bpf_prog_81dfab3bd7eb416a_sd_devices addr 0xffffffffc005d2e8 size 307
+# bpf_prog_info 21733: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc005d474 size 369
+# bpf_prog_info 24290: bpf_prog_3918c82a5f4c0360 addr 0xffffffffc004daac size 53
+# btf info of id 78
+# cpu pmu capabilities: branches=32, max_precise=3, pmu_name=skylake
+# intel_pt pmu capabilities: topa_multiple_entries=1, psb_cyc=1, single_range_output=1, mtc_periods=249, ip_filtering=1, output_subsys=0, cr3_filtering=1, psb_periods=3f, event_trace=0, cycle_thresholds=3fff, power_event_trace=0, mtc=1, payloads_lip=0, ptwrite=0, num_address_ranges=2, max_subleaf=1, topa_output=1, tnt_disable=0
+# missing features: TRACING_DATA BRANCH_STACK GROUP_DESC AUXTRACE STAT CLOCKID DIR_FORMAT COMPRESSED CLOCK_DATA HYBRID_TOPOLOGY 
+# ========
+#

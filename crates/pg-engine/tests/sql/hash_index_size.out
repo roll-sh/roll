@@ -1,0 +1,114 @@
+> create table h1 (id int, t text)
+-- CREATE TABLE
+
+> insert into h1 select g, md5(g::text) from generate_series(1, 5000) g
+-- INSERT 0 5000
+
+> create index h1_id on h1 using hash (id)
+-- CREATE INDEX
+
+> create index h1_t on h1 using hash (t)
+-- CREATE INDEX
+
+> select pg_relation_size('h1_id'), pg_relation_size('h1_t')
+pg_relation_size:int8 | pg_relation_size:int8
+278528 | 278528
+-- SELECT 1
+
+> create table h2 (id int, t text)
+-- CREATE TABLE
+
+> create index h2_id on h2 using hash (id)
+-- CREATE INDEX
+
+> select pg_relation_size('h2_id')
+pg_relation_size:int8
+49152
+-- SELECT 1
+
+> insert into h2 select g, md5(g::text) from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> select pg_relation_size('h2_id')
+pg_relation_size:int8
+1220608
+-- SELECT 1
+
+> create table h3 (k int)
+-- CREATE TABLE
+
+> insert into h3 select g % 3 from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> create index h3_k on h3 using hash (k)
+-- CREATE INDEX
+
+> select pg_relation_size('h3_k')
+pg_relation_size:int8
+196608
+-- SELECT 1
+
+> insert into h3 select g % 3 from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> select pg_relation_size('h3_k')
+pg_relation_size:int8
+385024
+-- SELECT 1
+
+> create table h4 (id bigint, d date, f float8, u uuid)
+-- CREATE TABLE
+
+> insert into h4 select g, date '2020-01-01' + g, g * 1.5, md5(g::text)::uuid from generate_series(1, 30000) g
+-- INSERT 0 30000
+
+> create index on h4 using hash (id)
+-- CREATE INDEX
+
+> create index on h4 using hash (d)
+-- CREATE INDEX
+
+> create index on h4 using hash (f)
+-- CREATE INDEX
+
+> create index on h4 using hash (u)
+-- CREATE INDEX
+
+> select relname, pg_relation_size(oid) from pg_class where relname like 'h4_%' order by relname
+relname:name | pg_relation_size:int8
+h4_d_idx | 1064960
+h4_f_idx | 1064960
+h4_id_idx | 1064960
+h4_u_idx | 1064960
+-- SELECT 4
+
+> create index h1_ff on h1 using hash (id) with (fillfactor = 10)
+-- CREATE INDEX
+
+> select pg_relation_size('h1_ff')
+pg_relation_size:int8
+1064960
+-- SELECT 1
+
+> create table h5 (t varchar(20), c char(4), b bool)
+-- CREATE TABLE
+
+> insert into h5 select 'v' || (g % 500), 'c' || (g % 40), g % 2 = 0 from generate_series(1, 12000) g
+-- INSERT 0 12000
+
+> create index on h5 using hash (t)
+-- CREATE INDEX
+
+> create index on h5 using hash (c)
+-- CREATE INDEX
+
+> create index on h5 using hash (b)
+-- CREATE INDEX
+
+> select relname, pg_relation_size(oid) from pg_class where relname like 'h5_%' order by relname
+relname:name | pg_relation_size:int8
+h5_b_idx | 770048
+h5_c_idx | 614400
+h5_t_idx | 630784
+-- SELECT 3
+

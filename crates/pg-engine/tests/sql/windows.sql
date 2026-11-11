@@ -1,0 +1,15 @@
+CREATE TABLE w (dept text, emp text, sal int);
+INSERT INTO w VALUES ('a', 'x', 10), ('a', 'y', 20), ('a', 'z', 20), ('b', 'p', 5), ('b', 'q', 15);
+SELECT emp, row_number() OVER (ORDER BY sal, emp), rank() OVER (ORDER BY sal), dense_rank() OVER (ORDER BY sal) FROM w ORDER BY sal, emp;
+SELECT dept, emp, sum(sal) OVER (PARTITION BY dept), sum(sal) OVER (PARTITION BY dept ORDER BY emp) FROM w ORDER BY dept, emp;
+SELECT emp, lag(sal) OVER (ORDER BY emp), lead(sal, 2, -1) OVER (ORDER BY emp), first_value(emp) OVER (ORDER BY emp), last_value(emp) OVER (ORDER BY emp ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM w ORDER BY emp;
+SELECT emp, avg(sal) OVER (ORDER BY emp ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)::numeric(10,2) FROM w ORDER BY emp;
+SELECT emp, sum(sal) OVER (ORDER BY sal RANGE BETWEEN 5 PRECEDING AND CURRENT ROW) FROM w ORDER BY emp;
+SELECT emp, ntile(2) OVER (ORDER BY emp), percent_rank() OVER (ORDER BY sal), cume_dist() OVER (ORDER BY sal) FROM w ORDER BY emp;
+SELECT emp, nth_value(emp, 2) OVER (PARTITION BY dept ORDER BY emp) FROM w ORDER BY emp;
+SELECT dept, emp, count(*) OVER win FROM w WINDOW win AS (PARTITION BY dept) ORDER BY emp;
+SELECT emp, sum(sal) OVER (ORDER BY emp GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM w ORDER BY emp;
+SELECT dept, sum(sal), rank() OVER (ORDER BY sum(sal) DESC) FROM w GROUP BY dept ORDER BY dept;
+SELECT emp FROM w WHERE row_number() OVER () = 1;
+SELECT * FROM (SELECT emp, row_number() OVER (PARTITION BY dept ORDER BY sal DESC, emp) rn FROM w) t WHERE rn = 1 ORDER BY emp;
+SELECT emp, sum(sal) FILTER (WHERE sal > 10) OVER (ORDER BY emp) FROM w ORDER BY emp;

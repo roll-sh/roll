@@ -1,0 +1,2 @@
+DROP DATABASE IF EXISTS a81_sqlmodel;
+CREATE DATABASE a81_sqlmodel;

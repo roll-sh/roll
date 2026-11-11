@@ -1,0 +1,132 @@
+> create table ajc_a (x int, v int)
+-- CREATE TABLE
+
+> create table ajc_b (y int, w int)
+-- CREATE TABLE
+
+> insert into ajc_a select g % 10, g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> insert into ajc_b select g % 7, g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> analyze ajc_a, ajc_b
+-- ANALYZE
+
+> explain (costs off)
+> select * from ajc_a where ajc_a.x = 1 and not exists (select 1 from ajc_b where ajc_b.y = ajc_a.x)
+QUERY PLAN:text
+Nested Loop Anti Join
+  ->  Seq Scan on ajc_a
+        Filter: (x = 1)
+  ->  Materialize
+        ->  Seq Scan on ajc_b
+              Filter: (y = 1)
+-- EXPLAIN
+
+> select count(*) from ajc_a where ajc_a.x = 1 and not exists (select 1 from ajc_b where ajc_b.y = ajc_a.x)
+count:int8
+0
+-- SELECT 1
+
+> select * from ajc_a where ajc_a.x = 8 and not exists (select 1 from ajc_b where ajc_b.y = ajc_a.x) order by v
+x:int4 | v:int4
+8 | 8
+8 | 18
+8 | 28
+8 | 38
+8 | 48
+8 | 58
+8 | 68
+8 | 78
+8 | 88
+8 | 98
+-- SELECT 10
+
+> explain (costs off)
+> select * from ajc_a where ajc_a.x = 1 and not exists (select 1 from ajc_b where ajc_b.y = ajc_a.x and ajc_b.w > ajc_a.v)
+QUERY PLAN:text
+Nested Loop Anti Join
+  Join Filter: (ajc_b.w > ajc_a.v)
+  ->  Seq Scan on ajc_a
+        Filter: (x = 1)
+  ->  Materialize
+        ->  Seq Scan on ajc_b
+              Filter: (y = 1)
+-- EXPLAIN
+
+> select * from ajc_a where ajc_a.x = 1 and not exists (select 1 from ajc_b where ajc_b.y = ajc_a.x and ajc_b.w > ajc_a.v) order by v
+x:int4 | v:int4
+-- SELECT 0
+
+> explain (costs off)
+> select * from ajc_a left join ajc_b on ajc_b.y = ajc_a.x where ajc_b.y is null
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (ajc_a.x = ajc_b.y)
+  ->  Seq Scan on ajc_a
+  ->  Hash
+        ->  Seq Scan on ajc_b
+-- EXPLAIN
+
+> explain (costs off)
+> select * from ajc_a left join ajc_b on ajc_b.y = ajc_a.x where ajc_a.x = 1 and ajc_b.y is null
+QUERY PLAN:text
+Nested Loop Anti Join
+  ->  Seq Scan on ajc_a
+        Filter: (x = 1)
+  ->  Materialize
+        ->  Seq Scan on ajc_b
+              Filter: (y = 1)
+-- EXPLAIN
+
+> select * from ajc_a left join ajc_b on ajc_b.y = ajc_a.x where ajc_a.x = 8 and ajc_b.y is null order by v
+x:int4 | v:int4 | y:int4 | w:int4
+8 | 8 | NULL | NULL
+8 | 18 | NULL | NULL
+8 | 28 | NULL | NULL
+8 | 38 | NULL | NULL
+8 | 48 | NULL | NULL
+8 | 58 | NULL | NULL
+8 | 68 | NULL | NULL
+8 | 78 | NULL | NULL
+8 | 88 | NULL | NULL
+8 | 98 | NULL | NULL
+-- SELECT 10
+
+> select count(*) from ajc_a left join ajc_b on ajc_b.y = ajc_a.x where ajc_a.x = 1 and ajc_b.y is null
+count:int8
+0
+-- SELECT 1
+
+> explain (costs off, verbose)
+> select * from ajc_a where exists (select 1 from ajc_b where ajc_b.y = ajc_a.x and ajc_b.w = ajc_a.v) or ajc_a.v < 0
+QUERY PLAN:text
+Seq Scan on public.ajc_a
+  Output: ajc_a.x, ajc_a.v
+  Filter: ((ANY ((ajc_a.x = (hashed SubPlan 2).col1) AND (ajc_a.v = (hashed SubPlan 2).col2))) OR (ajc_a.v < 0))
+  SubPlan 2
+    ->  Seq Scan on public.ajc_b
+          Output: ajc_b.y, ajc_b.w
+-- EXPLAIN
+
+> explain (costs off)
+> select * from ajc_a where not exists (select 1 from ajc_b where ajc_b.y = ajc_a.x and ajc_b.w + 1 = ajc_a.v + 1) or ajc_a.v < 0
+QUERY PLAN:text
+Seq Scan on ajc_a
+  Filter: ((NOT (ANY ((x = (hashed SubPlan 2).col1) AND ((v + 1) = (hashed SubPlan 2).col2)))) OR (v < 0))
+  SubPlan 2
+    ->  Seq Scan on ajc_b
+-- EXPLAIN
+
+> select count(*) from ajc_a where exists (select 1 from ajc_b where ajc_b.y = ajc_a.x and ajc_b.w = ajc_a.v) or ajc_a.v < 0
+count:int8
+13
+-- SELECT 1
+
+> drop table ajc_a
+-- DROP TABLE
+
+> drop table ajc_b
+-- DROP TABLE
+

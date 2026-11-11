@@ -1,0 +1,120 @@
+> CREATE TABLE a135_e (id int, k int)
+-- CREATE TABLE
+
+> CREATE TABLE a135_s (k int, z int)
+-- CREATE TABLE
+
+> INSERT INTO a135_s SELECT i, i % 5 FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> CREATE VIEW a135_v AS SELECT k, 10 / z AS q FROM a135_s
+-- CREATE VIEW
+
+> ANALYZE a135_e
+-- ANALYZE
+
+> ANALYZE a135_s
+-- ANALYZE
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> EXPLAIN (COSTS OFF) DELETE FROM a135_e USING a135_v WHERE a135_e.k = a135_v.k AND a135_v.q > 0
+QUERY PLAN:text
+Delete on a135_e
+  ->  Hash Join
+        Hash Cond: (a135_s.k = a135_e.k)
+        ->  Seq Scan on a135_s
+              Filter: ((10 / z) > 0)
+        ->  Hash
+              ->  Seq Scan on a135_e
+-- EXPLAIN
+
+> DELETE FROM a135_e USING a135_v WHERE a135_e.k = a135_v.k AND a135_v.q > 0
+-- DELETE 0
+
+> EXPLAIN (COSTS OFF) SELECT e.id, v.q FROM a135_e e JOIN a135_v v ON v.k = e.k
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a135_s.k = e.k)
+  ->  Seq Scan on a135_s
+  ->  Hash
+        ->  Seq Scan on a135_e e
+-- EXPLAIN
+
+> SELECT e.id, v.q FROM a135_e e JOIN a135_v v ON v.k = e.k
+id:int4 | q:int4
+-- SELECT 0
+
+> SELECT e.id, v.q FROM a135_e e LEFT JOIN a135_v v ON v.k = e.k
+id:int4 | q:int4
+-- SELECT 0
+
+> SELECT count(*) FROM a135_e e WHERE NOT EXISTS (SELECT 1 FROM a135_v v WHERE v.k = e.k)
+count:int8
+0
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT s.k FROM a135_s s JOIN a135_e e ON e.k = s.k WHERE 10 / s.z > 1
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (s.k = e.k)
+  ->  Seq Scan on a135_s s
+        Filter: ((10 / z) > 1)
+  ->  Hash
+        ->  Seq Scan on a135_e e
+-- EXPLAIN
+
+> SELECT s.k FROM a135_s s JOIN a135_e e ON e.k = s.k WHERE 10 / s.z > 1
+k:int4
+-- SELECT 0
+
+> SELECT count(*) FROM a135_s s WHERE EXISTS (SELECT 1 FROM a135_e e WHERE e.k = s.k) AND 10 / s.z > 1
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM a135_s s LEFT JOIN a135_e e ON e.k = s.k WHERE 10 / s.z > 1
+ERROR 22012: division by zero
+
+> SELECT count(*) FROM a135_s s LEFT JOIN a135_e e ON e.k = s.k WHERE 10 / (s.z + 1) > 1
+count:int8
+2000
+-- SELECT 1
+
+> INSERT INTO a135_e VALUES (1, 5), (2, 7)
+-- INSERT 0 2
+
+> SELECT e.id, v.q FROM a135_e e JOIN a135_v v ON v.k = e.k
+ERROR 22012: division by zero
+
+> DELETE FROM a135_e
+-- DELETE 2
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT e.id, v.q FROM a135_e e JOIN a135_v v ON v.k = e.k
+QUERY PLAN:text
+Hash Join (actual rows=0.00 loops=1)
+  Hash Cond: (e.k = a135_s.k)
+  ->  Seq Scan on a135_e e (actual rows=0.00 loops=1)
+  ->  Hash (never executed)
+        ->  Seq Scan on a135_s (never executed)
+-- EXPLAIN
+
+> RESET enable_mergejoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> DROP VIEW a135_v
+-- DROP VIEW
+
+> DROP TABLE a135_e
+-- DROP TABLE
+
+> DROP TABLE a135_s
+-- DROP TABLE
+

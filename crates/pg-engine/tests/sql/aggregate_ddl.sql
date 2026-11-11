@@ -1,0 +1,32 @@
+-- CREATE AGGREGATE as DefineAggregate / AggregateCreate check and record it: moving
+-- aggregates, combine and serialization functions, ordered-set aggregates, sort operators.
+create aggregate agd_avg (sfunc = int4_avg_accum, basetype = int4, stype = _int8, finalfunc = int8_avg, initcond1 = '{0,0}');
+select aggfnoid::regprocedure, aggkind, aggtransfn, aggfinalfn, aggtranstype::regtype, agginitval from pg_aggregate where aggfnoid = 'agd_avg'::regproc;
+comment on aggregate agd_nope (*) is 'x';
+create function agd_least(int8, int8) returns int8 language sql as 'select least($1, $2)';
+create aggregate agd_least_agg(int4) (stype = int8, sfunc = agd_least);
+create aggregate agd_sum (float8) (stype = float8, sfunc = float8pl, mstype = float8, msfunc = float8pl, minvfunc = float8mi);
+select aggmtransfn, aggminvtransfn, aggmtranstype::regtype from pg_aggregate where aggfnoid = 'agd_sum'::regproc;
+create aggregate agd_bad1 (float8) (stype = float8, sfunc = float8pl, msfunc = float8pl);
+create aggregate agd_bad2 (float8) (stype = float8, sfunc = float8pl, mstype = float8, msfunc = float8pl);
+create aggregate agd_avg2 (numeric) (stype = internal, sfunc = numeric_avg_accum, serialfunc = numeric_avg_serialize);
+create aggregate agd_avg2 (numeric) (stype = internal, sfunc = numeric_avg_accum, serialfunc = numeric_avg_serialize, deserialfunc = numeric_avg_deserialize, combinefunc = int4larger);
+create aggregate agd_avg2 (numeric) (stype = internal, sfunc = numeric_avg_accum, finalfunc = numeric_avg, serialfunc = numeric_avg_serialize, deserialfunc = numeric_avg_deserialize, combinefunc = numeric_avg_combine, finalfunc_modify = shareable, parallel = safe);
+select aggfnoid, aggtransfn, aggcombinefn, aggtranstype::regtype, aggserialfn, aggdeserialfn, aggfinalmodify from pg_aggregate where aggfnoid = 'agd_avg2'::regproc;
+create or replace aggregate agd_avg2 (numeric) (stype = numeric, sfunc = numeric_add, finalfunc = numeric_out);
+create or replace aggregate agd_avg2 (order by numeric) (stype = numeric, sfunc = numeric_add);
+create aggregate agd_bad3 (int) (stype = int, sfunc = int4pl, parallel = pear);
+create aggregate agd_pct(float8 order by anyelement) (stype = internal, sfunc = ordered_set_transition, finalfunc = percentile_disc_final, finalfunc_extra = true, finalfunc_modify = read_write);
+create aggregate agd_rank(variadic "any" order by variadic "any") (stype = internal, sfunc = ordered_set_transition_multi, finalfunc = rank_final, finalfunc_extra = true, hypothetical);
+select p.proname, a.aggkind, a.aggnumdirectargs, pg_get_function_arguments(p.oid), pg_get_function_result(p.oid) from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid where p.proname like 'agd_%' order by 1;
+create aggregate agd_max (int4) (stype = int4, sfunc = int4larger, sortop = >);
+select aggsortop::regoperator from pg_aggregate where aggfnoid = 'agd_max'::regproc;
+create aggregate agd_bad4 (int4, int4) (stype = int4, sfunc = int4larger, sortop = >);
+create aggregate agd_bad5 ("Stype" = int4, "Sfunc" = int4pl);
+drop aggregate agd_avg(int4);
+drop aggregate agd_sum(float8);
+drop aggregate agd_avg2(numeric);
+drop aggregate agd_pct(float8 order by anyelement);
+drop aggregate agd_rank(variadic "any" order by variadic "any");
+drop aggregate agd_max(int4);
+drop function agd_least(int8, int8);

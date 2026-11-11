@@ -1,0 +1,70 @@
+> CREATE COLLATION a104_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> SELECT ARRAY['z'] @> ARRAY['Z' COLLATE a104_ci], ARRAY['z'] <@ ARRAY['Z' COLLATE a104_ci], ARRAY['z'] && ARRAY['Z' COLLATE a104_ci]
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+-- SELECT 1
+
+> SELECT '{"x y",z}' @> array_append('{}', 'Z' COLLATE a104_ci)
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT ARRAY['z'] @> ARRAY['Z' COLLATE "C"], ARRAY['z'] @> ARRAY['Z' COLLATE "en-x-icu"]
+?column?:bool | ?column?:bool
+f | f
+-- SELECT 1
+
+> SELECT array_position(ARRAY['z', 'Z'], 'Z' COLLATE a104_ci), array_position(ARRAY['z', 'Z'], 'Z' COLLATE a104_ci, 2), array_positions(ARRAY['z', NULL, 'Z'], 'z' COLLATE a104_ci)
+array_position:int4 | array_position:int4 | array_positions:int4[]
+1 | 2 | {1,3}
+-- SELECT 1
+
+> SELECT array_remove(ARRAY['z', 'a', 'Z'], 'Z' COLLATE a104_ci), array_replace(ARRAY['z', 'a'], 'Z' COLLATE a104_ci, 'q')
+array_remove:text[] | array_replace:text[]
+{a} | {q,a}
+-- SELECT 1
+
+> SELECT array_position(ARRAY['z', 'Z'], 'Z'), array_remove(ARRAY['z', 'Z'], 'Z' COLLATE "C")
+array_position:int4 | array_remove:text[]
+2 | {z}
+-- SELECT 1
+
+> CREATE TABLE a104_t (id int, c text COLLATE a104_ci, cs text[] COLLATE a104_ci)
+-- CREATE TABLE
+
+> INSERT INTO a104_t VALUES (1, 'Z', '{z,a}'), (2, 'b', '{B}'), (3, NULL, '{x}')
+-- INSERT 0 3
+
+> SELECT id FROM a104_t WHERE cs @> ARRAY['A'] ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM a104_t WHERE '{"x y",z}' @> array_append('{}', c) ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT x.u, t.id FROM unnest('{2,NULL}'::int[]) x(u) RIGHT JOIN a104_t t ON '{"x y",z}' @> array_append('{}', t.c) ORDER BY 2, 1
+u:int4 | id:int4
+2 | 1
+NULL | 1
+NULL | 2
+NULL | 3
+-- SELECT 4
+
+> SELECT id, array_position(cs, 'Z'), array_remove(cs, 'A') FROM a104_t ORDER BY id
+id:int4 | array_position:int4 | array_remove:text[]
+1 | 1 | {z}
+2 | NULL | {B}
+3 | NULL | {x}
+-- SELECT 3
+
+> DROP TABLE a104_t
+-- DROP TABLE
+
+> DROP COLLATION a104_ci
+-- DROP COLLATION
+

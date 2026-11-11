@@ -1,0 +1,159 @@
+> CREATE TABLE a8_sl (f1 int)
+-- CREATE TABLE
+
+> INSERT INTO a8_sl VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> ANALYZE a8_sl
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_sl o WHERE (f1, f1) IN
+>   (SELECT f1, generate_series(1, 50) / 10 g FROM a8_sl i GROUP BY f1)
+QUERY PLAN:text
+Nested Loop Semi Join
+  Output: o.f1
+  Join Filter: (o.f1 = "ANY_subquery".f1)
+  ->  Seq Scan on public.a8_sl o
+        Output: o.f1
+  ->  Materialize
+        Output: "ANY_subquery".f1, "ANY_subquery".g
+        ->  Subquery Scan on "ANY_subquery"
+              Output: "ANY_subquery".f1, "ANY_subquery".g
+              Filter: ("ANY_subquery".f1 = "ANY_subquery".g)
+              ->  Result
+                    Output: i.f1, ((generate_series(1, 50)) / 10)
+                    ->  ProjectSet
+                          Output: generate_series(1, 50), i.f1
+                          ->  HashAggregate
+                                Output: i.f1
+                                Group Key: i.f1
+                                ->  Seq Scan on public.a8_sl i
+                                      Output: i.f1
+-- EXPLAIN
+
+> SELECT * FROM a8_sl o WHERE (f1, f1) IN
+>   (SELECT f1, generate_series(1, 50) / 10 g FROM a8_sl i GROUP BY f1)
+f1:int4
+0
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT f1, generate_series(1, 3) / 10 g FROM a8_sl
+QUERY PLAN:text
+Result
+  Output: f1, ((generate_series(1, 3)) / 10)
+  ->  ProjectSet
+        Output: generate_series(1, 3), f1
+        ->  Seq Scan on public.a8_sl
+              Output: f1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT f1 + generate_series(1, 2), f1 FROM a8_sl
+QUERY PLAN:text
+Result
+  Output: (f1 + (generate_series(1, 2))), f1
+  ->  ProjectSet
+        Output: generate_series(1, 2), f1
+        ->  Seq Scan on public.a8_sl
+              Output: f1
+-- EXPLAIN
+
+> SELECT f1, generate_series(1, 3) / 10 g FROM a8_sl ORDER BY 1, 2
+f1:int4 | g:int4
+-2147483647 | 0
+-2147483647 | 0
+-2147483647 | 0
+-123456 | 0
+-123456 | 0
+-123456 | 0
+0 | 0
+0 | 0
+0 | 0
+123456 | 0
+123456 | 0
+123456 | 0
+2147483647 | 0
+2147483647 | 0
+2147483647 | 0
+-- SELECT 15
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_sl i4,
+>   LATERAL (
+>     SELECT i4.f1 > 1 AS b, 1 AS id FROM (SELECT random() ORDER BY 1) AS t1
+>     UNION ALL
+>     SELECT true AS b, 2 AS id
+>   ) AS t2
+> WHERE b AND f1 >= 0
+QUERY PLAN:text
+Nested Loop
+  Output: i4.f1, ((i4.f1 > 1)), (1)
+  ->  Seq Scan on public.a8_sl i4
+        Output: i4.f1
+        Filter: (i4.f1 >= 0)
+  ->  Append
+        ->  Subquery Scan on t1
+              Output: (i4.f1 > 1), 1
+              Filter: (i4.f1 > 1)
+              ->  Sort
+                    Output: (random())
+                    Sort Key: (random())
+                    ->  Result
+                          Output: random()
+        ->  Result
+              Output: true, 2
+-- EXPLAIN
+
+> SELECT * FROM a8_sl i4,
+>   LATERAL (
+>     SELECT i4.f1 > 1 AS b, 1 AS id FROM (SELECT random() ORDER BY 1) AS t1
+>     UNION ALL
+>     SELECT true AS b, 2 AS id
+>   ) AS t2
+> WHERE b AND f1 >= 0 ORDER BY 1, 3
+f1:int4 | b:bool | id:int4
+0 | t | 2
+123456 | t | 1
+123456 | t | 2
+2147483647 | t | 1
+2147483647 | t | 2
+-- SELECT 5
+
+> CREATE TABLE a8_sv (unique1 int, unique2 int, ten int)
+-- CREATE TABLE
+
+> INSERT INTO a8_sv SELECT i, 9 - i, i % 3 FROM generate_series(0, 9) i
+-- INSERT 0 10
+
+> CREATE INDEX a8_sv_u2 ON a8_sv (unique2)
+-- CREATE INDEX
+
+> ANALYZE a8_sv
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT ten FROM a8_sv t
+> WHERE unique1 IN (VALUES (0), ((2 IN (SELECT unique2 FROM a8_sv c WHERE c.unique2 = t.unique1))::integer))
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a8_sv t
+  ->  Values Scan on "*VALUES*"
+        Filter: (t.unique1 = column1)
+        SubPlan 1
+          ->  Seq Scan on a8_sv c
+                Filter: (unique2 = t.unique1)
+-- EXPLAIN
+
+> SELECT ten FROM a8_sv t
+> WHERE unique1 IN (VALUES (0), ((2 IN (SELECT unique2 FROM a8_sv c WHERE c.unique2 = t.unique1))::integer))
+> ORDER BY 1
+ten:int4
+0
+-- SELECT 1
+
+> DROP TABLE a8_sv
+-- DROP TABLE
+
+> DROP TABLE a8_sl
+-- DROP TABLE
+

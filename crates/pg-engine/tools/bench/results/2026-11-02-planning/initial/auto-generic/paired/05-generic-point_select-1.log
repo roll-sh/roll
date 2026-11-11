@@ -1,0 +1,1 @@
+RESULT	generic	oltp	point_select	clients=1	tps=6849	ops=68491	elapsed_s=10.000599776	mean_ms=0.145	p50_ms=0.134	p95_ms=0.201	p99_ms=0.341	errors=0	peak_mem_mb=114.1	validation_version=oltp-values-v1	checked_ops=68491

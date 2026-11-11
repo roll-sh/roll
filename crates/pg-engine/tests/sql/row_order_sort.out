@@ -1,0 +1,1561 @@
+> create table ro_k (k int, v text)
+-- CREATE TABLE
+
+> insert into ro_k values (1, 'b1'), (2, 'b2'), (1, 'b1x'), (3, 'b3'), (1, 'b1y'), (7, 'b7'), (8, 'b8')
+-- INSERT 0 7
+
+> select * from ro_k order by k
+k:int4 | v:text
+1 | b1y
+1 | b1x
+1 | b1
+2 | b2
+3 | b3
+7 | b7
+8 | b8
+-- SELECT 7
+
+> select * from ro_k order by k limit 3
+k:int4 | v:text
+1 | b1
+1 | b1x
+1 | b1y
+-- SELECT 3
+
+> create table ro_t (id int, g int, s text)
+-- CREATE TABLE
+
+> insert into ro_t select i, i % 7, 'str' || (i % 13) from generate_series(1, 300) i
+-- INSERT 0 300
+
+> analyze ro_t
+-- ANALYZE
+
+> select id, g from ro_t order by g limit 15
+id:int4 | g:int4
+77 | 0
+98 | 0
+63 | 0
+70 | 0
+84 | 0
+91 | 0
+35 | 0
+56 | 0
+21 | 0
+28 | 0
+49 | 0
+42 | 0
+14 | 0
+7 | 0
+105 | 0
+-- SELECT 15
+
+> select id, g from ro_t order by g
+id:int4 | g:int4
+14 | 0
+245 | 0
+98 | 0
+147 | 0
+175 | 0
+49 | 0
+168 | 0
+217 | 0
+231 | 0
+28 | 0
+112 | 0
+273 | 0
+56 | 0
+224 | 0
+210 | 0
+287 | 0
+203 | 0
+140 | 0
+196 | 0
+63 | 0
+259 | 0
+189 | 0
+154 | 0
+21 | 0
+126 | 0
+266 | 0
+70 | 0
+35 | 0
+252 | 0
+182 | 0
+119 | 0
+7 | 0
+133 | 0
+77 | 0
+105 | 0
+280 | 0
+238 | 0
+294 | 0
+161 | 0
+42 | 0
+84 | 0
+91 | 0
+29 | 1
+85 | 1
+127 | 1
+92 | 1
+239 | 1
+15 | 1
+204 | 1
+253 | 1
+99 | 1
+120 | 1
+197 | 1
+106 | 1
+288 | 1
+113 | 1
+246 | 1
+155 | 1
+169 | 1
+211 | 1
+36 | 1
+225 | 1
+281 | 1
+43 | 1
+183 | 1
+148 | 1
+8 | 1
+50 | 1
+218 | 1
+274 | 1
+57 | 1
+22 | 1
+141 | 1
+162 | 1
+64 | 1
+232 | 1
+267 | 1
+71 | 1
+190 | 1
+134 | 1
+295 | 1
+1 | 1
+78 | 1
+176 | 1
+260 | 1
+107 | 2
+177 | 2
+212 | 2
+184 | 2
+191 | 2
+205 | 2
+198 | 2
+30 | 2
+296 | 2
+282 | 2
+37 | 2
+44 | 2
+275 | 2
+51 | 2
+9 | 2
+58 | 2
+268 | 2
+65 | 2
+72 | 2
+79 | 2
+261 | 2
+86 | 2
+93 | 2
+254 | 2
+100 | 2
+16 | 2
+247 | 2
+114 | 2
+2 | 2
+121 | 2
+240 | 2
+128 | 2
+289 | 2
+135 | 2
+233 | 2
+142 | 2
+149 | 2
+23 | 2
+226 | 2
+156 | 2
+163 | 2
+219 | 2
+170 | 2
+129 | 3
+192 | 3
+80 | 3
+234 | 3
+262 | 3
+73 | 3
+206 | 3
+136 | 3
+3 | 3
+213 | 3
+66 | 3
+269 | 3
+10 | 3
+164 | 3
+143 | 3
+59 | 3
+52 | 3
+227 | 3
+276 | 3
+45 | 3
+297 | 3
+150 | 3
+171 | 3
+185 | 3
+38 | 3
+283 | 3
+31 | 3
+17 | 3
+178 | 3
+115 | 3
+157 | 3
+108 | 3
+241 | 3
+248 | 3
+101 | 3
+24 | 3
+122 | 3
+290 | 3
+199 | 3
+94 | 3
+255 | 3
+87 | 3
+220 | 3
+263 | 4
+4 | 4
+11 | 4
+18 | 4
+25 | 4
+32 | 4
+39 | 4
+46 | 4
+53 | 4
+60 | 4
+67 | 4
+74 | 4
+81 | 4
+88 | 4
+95 | 4
+102 | 4
+109 | 4
+116 | 4
+123 | 4
+130 | 4
+137 | 4
+144 | 4
+151 | 4
+158 | 4
+165 | 4
+172 | 4
+179 | 4
+186 | 4
+193 | 4
+200 | 4
+207 | 4
+214 | 4
+221 | 4
+228 | 4
+235 | 4
+242 | 4
+249 | 4
+256 | 4
+270 | 4
+277 | 4
+284 | 4
+291 | 4
+298 | 4
+236 | 5
+89 | 5
+173 | 5
+82 | 5
+131 | 5
+75 | 5
+264 | 5
+152 | 5
+124 | 5
+68 | 5
+19 | 5
+61 | 5
+299 | 5
+271 | 5
+243 | 5
+229 | 5
+54 | 5
+117 | 5
+47 | 5
+5 | 5
+278 | 5
+222 | 5
+110 | 5
+40 | 5
+145 | 5
+33 | 5
+166 | 5
+285 | 5
+250 | 5
+138 | 5
+103 | 5
+201 | 5
+159 | 5
+194 | 5
+96 | 5
+26 | 5
+208 | 5
+292 | 5
+187 | 5
+12 | 5
+180 | 5
+257 | 5
+215 | 5
+20 | 6
+216 | 6
+167 | 6
+160 | 6
+223 | 6
+153 | 6
+146 | 6
+230 | 6
+139 | 6
+132 | 6
+237 | 6
+125 | 6
+118 | 6
+293 | 6
+244 | 6
+111 | 6
+104 | 6
+13 | 6
+251 | 6
+97 | 6
+90 | 6
+258 | 6
+83 | 6
+76 | 6
+265 | 6
+69 | 6
+62 | 6
+6 | 6
+272 | 6
+55 | 6
+48 | 6
+279 | 6
+41 | 6
+34 | 6
+300 | 6
+286 | 6
+27 | 6
+202 | 6
+195 | 6
+188 | 6
+209 | 6
+181 | 6
+174 | 6
+-- SELECT 300
+
+> select id, s from ro_t order by s, g limit 40
+id:int4 | s:text
+273 | str0
+182 | str0
+91 | str0
+260 | str0
+169 | str0
+78 | str0
+156 | str0
+247 | str0
+65 | str0
+143 | str0
+234 | str0
+52 | str0
+221 | str0
+130 | str0
+39 | str0
+26 | str0
+117 | str0
+299 | str0
+208 | str0
+195 | str0
+13 | str0
+286 | str0
+104 | str0
+14 | str1
+105 | str1
+196 | str1
+287 | str1
+183 | str1
+92 | str1
+274 | str1
+1 | str1
+170 | str1
+79 | str1
+261 | str1
+157 | str1
+66 | str1
+248 | str1
+144 | str1
+53 | str1
+235 | str1
+-- SELECT 40
+
+> select id, s from ro_t order by s desc limit 10 offset 5
+id:int4 | s:text
+165 | str9
+61 | str9
+9 | str9
+35 | str9
+48 | str9
+87 | str9
+22 | str9
+152 | str9
+74 | str9
+191 | str9
+-- SELECT 10
+
+> select string_agg(id::text, ',') from ro_t where id < 50 group by g
+string_agg:text
+1,8,15,22,29,36,43
+5,12,19,26,33,40,47
+4,11,18,25,32,39,46
+2,9,16,23,30,37,44
+7,14,21,28,35,42,49
+6,13,20,27,34,41,48
+3,10,17,24,31,38,45
+-- SELECT 7
+
+> create table ro_x (a int, t text)
+-- CREATE TABLE
+
+> create table ro_y (b int, u text)
+-- CREATE TABLE
+
+> create table ro_z (c int, w text)
+-- CREATE TABLE
+
+> insert into ro_x select g % 30, 'x' || g from generate_series(1, 300) g
+-- INSERT 0 300
+
+> insert into ro_y select g % 50, 'y' || g from generate_series(1, 250) g
+-- INSERT 0 250
+
+> insert into ro_z select g, 'z' || g from generate_series(1, 40) g
+-- INSERT 0 40
+
+> analyze ro_x
+-- ANALYZE
+
+> analyze ro_y
+-- ANALYZE
+
+> analyze ro_z
+-- ANALYZE
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> explain (costs off) select * from ro_z full join ro_y on c = b
+QUERY PLAN:text
+Merge Full Join
+  Merge Cond: (ro_z.c = ro_y.b)
+  ->  Sort
+        Sort Key: ro_z.c
+        ->  Seq Scan on ro_z
+  ->  Sort
+        Sort Key: ro_y.b
+        ->  Seq Scan on ro_y
+-- EXPLAIN
+
+> select coalesce(w, '-') || coalesce(u, '-') from ro_z full join ro_y on c = b
+?column?:text
+-y150
+-y50
+-y200
+-y100
+-y250
+z1y101
+z1y151
+z1y1
+z1y51
+z1y201
+z2y152
+z2y202
+z2y2
+z2y102
+z2y52
+z3y53
+z3y103
+z3y153
+z3y3
+z3y203
+z4y204
+z4y154
+z4y54
+z4y104
+z4y4
+z5y105
+z5y205
+z5y5
+z5y155
+z5y55
+z6y106
+z6y156
+z6y206
+z6y6
+z6y56
+z7y57
+z7y157
+z7y207
+z7y107
+z7y7
+z8y208
+z8y58
+z8y158
+z8y108
+z8y8
+z9y59
+z9y9
+z9y209
+z9y159
+z9y109
+z10y60
+z10y160
+z10y10
+z10y110
+z10y210
+z11y61
+z11y211
+z11y161
+z11y111
+z11y11
+z12y112
+z12y212
+z12y12
+z12y62
+z12y162
+z13y113
+z13y163
+z13y63
+z13y213
+z13y13
+z14y64
+z14y114
+z14y214
+z14y164
+z14y14
+z15y165
+z15y215
+z15y115
+z15y65
+z15y15
+z16y166
+z16y116
+z16y66
+z16y16
+z16y216
+z17y67
+z17y17
+z17y117
+z17y167
+z17y217
+z18y118
+z18y18
+z18y68
+z18y218
+z18y168
+z19y219
+z19y19
+z19y69
+z19y119
+z19y169
+z20y120
+z20y170
+z20y220
+z20y70
+z20y20
+z21y121
+z21y71
+z21y171
+z21y221
+z21y21
+z22y222
+z22y122
+z22y22
+z22y72
+z22y172
+z23y173
+z23y23
+z23y123
+z23y73
+z23y223
+z24y174
+z24y24
+z24y224
+z24y74
+z24y124
+z25y125
+z25y75
+z25y225
+z25y25
+z25y175
+z26y76
+z26y226
+z26y126
+z26y26
+z26y176
+z27y77
+z27y177
+z27y27
+z27y227
+z27y127
+z28y228
+z28y28
+z28y178
+z28y78
+z28y128
+z29y229
+z29y129
+z29y79
+z29y29
+z29y179
+z30y230
+z30y30
+z30y80
+z30y130
+z30y180
+z31y81
+z31y181
+z31y131
+z31y31
+z31y231
+z32y232
+z32y82
+z32y132
+z32y182
+z32y32
+z33y133
+z33y33
+z33y233
+z33y83
+z33y183
+z34y134
+z34y84
+z34y34
+z34y184
+z34y234
+z35y35
+z35y235
+z35y185
+z35y85
+z35y135
+z36y36
+z36y136
+z36y236
+z36y186
+z36y86
+z37y137
+z37y87
+z37y187
+z37y237
+z37y37
+z38y238
+z38y38
+z38y188
+z38y138
+z38y88
+z39y139
+z39y239
+z39y189
+z39y39
+z39y89
+z40y90
+z40y190
+z40y240
+z40y140
+z40y40
+-y91
+-y241
+-y141
+-y191
+-y41
+-y192
+-y42
+-y242
+-y142
+-y92
+-y43
+-y93
+-y193
+-y143
+-y243
+-y44
+-y144
+-y194
+-y94
+-y244
+-y245
+-y145
+-y45
+-y195
+-y95
+-y246
+-y46
+-y96
+-y196
+-y146
+-y97
+-y47
+-y147
+-y197
+-y247
+-y98
+-y198
+-y148
+-y48
+-y248
+-y149
+-y99
+-y199
+-y249
+-y49
+-- SELECT 250
+
+> select coalesce(w, '-') || coalesce(u, '-') from ro_z right join ro_y on c = b
+?column?:text
+-y150
+-y50
+-y200
+-y100
+-y250
+z1y101
+z1y151
+z1y1
+z1y51
+z1y201
+z2y152
+z2y202
+z2y2
+z2y102
+z2y52
+z3y53
+z3y103
+z3y153
+z3y3
+z3y203
+z4y204
+z4y154
+z4y54
+z4y104
+z4y4
+z5y105
+z5y205
+z5y5
+z5y155
+z5y55
+z6y106
+z6y156
+z6y206
+z6y6
+z6y56
+z7y57
+z7y157
+z7y207
+z7y107
+z7y7
+z8y208
+z8y58
+z8y158
+z8y108
+z8y8
+z9y59
+z9y9
+z9y209
+z9y159
+z9y109
+z10y60
+z10y160
+z10y10
+z10y110
+z10y210
+z11y61
+z11y211
+z11y161
+z11y111
+z11y11
+z12y112
+z12y212
+z12y12
+z12y62
+z12y162
+z13y113
+z13y163
+z13y63
+z13y213
+z13y13
+z14y64
+z14y114
+z14y214
+z14y164
+z14y14
+z15y165
+z15y215
+z15y115
+z15y65
+z15y15
+z16y166
+z16y116
+z16y66
+z16y16
+z16y216
+z17y67
+z17y17
+z17y117
+z17y167
+z17y217
+z18y118
+z18y18
+z18y68
+z18y218
+z18y168
+z19y219
+z19y19
+z19y69
+z19y119
+z19y169
+z20y120
+z20y170
+z20y220
+z20y70
+z20y20
+z21y121
+z21y71
+z21y171
+z21y221
+z21y21
+z22y222
+z22y122
+z22y22
+z22y72
+z22y172
+z23y173
+z23y23
+z23y123
+z23y73
+z23y223
+z24y174
+z24y24
+z24y224
+z24y74
+z24y124
+z25y125
+z25y75
+z25y225
+z25y25
+z25y175
+z26y76
+z26y226
+z26y126
+z26y26
+z26y176
+z27y77
+z27y177
+z27y27
+z27y227
+z27y127
+z28y228
+z28y28
+z28y178
+z28y78
+z28y128
+z29y229
+z29y129
+z29y79
+z29y29
+z29y179
+z30y230
+z30y30
+z30y80
+z30y130
+z30y180
+z31y81
+z31y181
+z31y131
+z31y31
+z31y231
+z32y232
+z32y82
+z32y132
+z32y182
+z32y32
+z33y133
+z33y33
+z33y233
+z33y83
+z33y183
+z34y134
+z34y84
+z34y34
+z34y184
+z34y234
+z35y35
+z35y235
+z35y185
+z35y85
+z35y135
+z36y36
+z36y136
+z36y236
+z36y186
+z36y86
+z37y137
+z37y87
+z37y187
+z37y237
+z37y37
+z38y238
+z38y38
+z38y188
+z38y138
+z38y88
+z39y139
+z39y239
+z39y189
+z39y39
+z39y89
+z40y90
+z40y190
+z40y240
+z40y140
+z40y40
+-y91
+-y241
+-y141
+-y191
+-y41
+-y192
+-y42
+-y242
+-y142
+-y92
+-y43
+-y93
+-y193
+-y143
+-y243
+-y44
+-y144
+-y194
+-y94
+-y244
+-y245
+-y145
+-y45
+-y195
+-y95
+-y246
+-y46
+-y96
+-y196
+-y146
+-y97
+-y47
+-y147
+-y197
+-y247
+-y98
+-y198
+-y148
+-y48
+-y248
+-y149
+-y99
+-y199
+-y249
+-y49
+-- SELECT 250
+
+> select coalesce(w, '-') || coalesce(u, '-') from ro_z left join ro_y on c = b
+?column?:text
+z1y101
+z1y151
+z1y1
+z1y51
+z1y201
+z2y152
+z2y202
+z2y2
+z2y102
+z2y52
+z3y53
+z3y103
+z3y153
+z3y3
+z3y203
+z4y204
+z4y154
+z4y54
+z4y104
+z4y4
+z5y105
+z5y205
+z5y5
+z5y155
+z5y55
+z6y106
+z6y156
+z6y206
+z6y6
+z6y56
+z7y57
+z7y157
+z7y207
+z7y107
+z7y7
+z8y208
+z8y58
+z8y158
+z8y108
+z8y8
+z9y59
+z9y9
+z9y209
+z9y159
+z9y109
+z10y60
+z10y160
+z10y10
+z10y110
+z10y210
+z11y61
+z11y211
+z11y161
+z11y111
+z11y11
+z12y112
+z12y212
+z12y12
+z12y62
+z12y162
+z13y113
+z13y163
+z13y63
+z13y213
+z13y13
+z14y64
+z14y114
+z14y214
+z14y164
+z14y14
+z15y165
+z15y215
+z15y115
+z15y65
+z15y15
+z16y166
+z16y116
+z16y66
+z16y16
+z16y216
+z17y67
+z17y17
+z17y117
+z17y167
+z17y217
+z18y118
+z18y18
+z18y68
+z18y218
+z18y168
+z19y219
+z19y19
+z19y69
+z19y119
+z19y169
+z20y120
+z20y170
+z20y220
+z20y70
+z20y20
+z21y121
+z21y71
+z21y171
+z21y221
+z21y21
+z22y222
+z22y122
+z22y22
+z22y72
+z22y172
+z23y173
+z23y23
+z23y123
+z23y73
+z23y223
+z24y174
+z24y24
+z24y224
+z24y74
+z24y124
+z25y125
+z25y75
+z25y225
+z25y25
+z25y175
+z26y76
+z26y226
+z26y126
+z26y26
+z26y176
+z27y77
+z27y177
+z27y27
+z27y227
+z27y127
+z28y228
+z28y28
+z28y178
+z28y78
+z28y128
+z29y229
+z29y129
+z29y79
+z29y29
+z29y179
+z30y230
+z30y30
+z30y80
+z30y130
+z30y180
+z31y81
+z31y181
+z31y131
+z31y31
+z31y231
+z32y232
+z32y82
+z32y132
+z32y182
+z32y32
+z33y133
+z33y33
+z33y233
+z33y83
+z33y183
+z34y134
+z34y84
+z34y34
+z34y184
+z34y234
+z35y35
+z35y235
+z35y185
+z35y85
+z35y135
+z36y36
+z36y136
+z36y236
+z36y186
+z36y86
+z37y137
+z37y87
+z37y187
+z37y237
+z37y37
+z38y238
+z38y38
+z38y188
+z38y138
+z38y88
+z39y139
+z39y239
+z39y189
+z39y39
+z39y89
+z40y90
+z40y190
+z40y240
+z40y140
+z40y40
+-- SELECT 200
+
+> select md5(string_agg(t || u, ',')) from (select * from ro_x join ro_y on a = b where a < 20) s
+md5:text
+0a8a7ce3bcb8cf19d4799c9ee7f9de3a
+-- SELECT 1
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_nestloop
+-- RESET
+
+> select a, t, row_number() over (partition by a order by a) from ro_x where a < 4
+a:int4 | t:text | row_number:int8
+0 | x150 | 1
+0 | x90 | 2
+0 | x30 | 3
+0 | x120 | 4
+0 | x300 | 5
+0 | x240 | 6
+0 | x210 | 7
+0 | x60 | 8
+0 | x270 | 9
+0 | x180 | 10
+1 | x151 | 1
+1 | x31 | 2
+1 | x61 | 3
+1 | x91 | 4
+1 | x121 | 5
+1 | x1 | 6
+1 | x181 | 7
+1 | x211 | 8
+1 | x241 | 9
+1 | x271 | 10
+2 | x2 | 1
+2 | x32 | 2
+2 | x182 | 3
+2 | x242 | 4
+2 | x152 | 5
+2 | x92 | 6
+2 | x62 | 7
+2 | x122 | 8
+2 | x272 | 9
+2 | x212 | 10
+3 | x63 | 1
+3 | x153 | 2
+3 | x183 | 3
+3 | x33 | 4
+3 | x213 | 5
+3 | x273 | 6
+3 | x93 | 7
+3 | x243 | 8
+3 | x123 | 9
+3 | x3 | 10
+-- SELECT 40
+
+> select a, t, row_number() over (order by a) from ro_x where a < 4
+a:int4 | t:text | row_number:int8
+0 | x150 | 1
+0 | x90 | 2
+0 | x30 | 3
+0 | x120 | 4
+0 | x300 | 5
+0 | x240 | 6
+0 | x210 | 7
+0 | x60 | 8
+0 | x270 | 9
+0 | x180 | 10
+1 | x151 | 11
+1 | x31 | 12
+1 | x61 | 13
+1 | x91 | 14
+1 | x121 | 15
+1 | x1 | 16
+1 | x181 | 17
+1 | x211 | 18
+1 | x241 | 19
+1 | x271 | 20
+2 | x2 | 21
+2 | x32 | 22
+2 | x182 | 23
+2 | x242 | 24
+2 | x152 | 25
+2 | x92 | 26
+2 | x62 | 27
+2 | x122 | 28
+2 | x272 | 29
+2 | x212 | 30
+3 | x63 | 31
+3 | x153 | 32
+3 | x183 | 33
+3 | x33 | 34
+3 | x213 | 35
+3 | x273 | 36
+3 | x93 | 37
+3 | x243 | 38
+3 | x123 | 39
+3 | x3 | 40
+-- SELECT 40
+
+> select a, t, rank() over (partition by a % 2 order by a), row_number() over (order by t) from ro_x where a < 4
+a:int4 | t:text | rank:int8 | row_number:int8
+0 | x270 | 1 | 23
+0 | x300 | 1 | 29
+0 | x30 | 1 | 28
+0 | x120 | 1 | 2
+0 | x210 | 1 | 15
+0 | x90 | 1 | 37
+0 | x180 | 1 | 10
+0 | x60 | 1 | 33
+0 | x240 | 1 | 19
+0 | x150 | 1 | 6
+2 | x122 | 11 | 4
+2 | x32 | 11 | 31
+2 | x272 | 11 | 25
+2 | x152 | 11 | 8
+2 | x242 | 11 | 21
+2 | x182 | 11 | 12
+2 | x62 | 11 | 35
+2 | x2 | 11 | 14
+2 | x92 | 11 | 39
+2 | x212 | 11 | 17
+1 | x1 | 1 | 1
+1 | x121 | 1 | 3
+1 | x151 | 1 | 7
+1 | x181 | 1 | 11
+1 | x211 | 1 | 16
+1 | x241 | 1 | 20
+1 | x271 | 1 | 24
+1 | x31 | 1 | 30
+1 | x61 | 1 | 34
+1 | x91 | 1 | 38
+3 | x243 | 11 | 22
+3 | x33 | 11 | 32
+3 | x213 | 11 | 18
+3 | x123 | 11 | 5
+3 | x183 | 11 | 13
+3 | x63 | 11 | 36
+3 | x153 | 11 | 9
+3 | x3 | 11 | 27
+3 | x273 | 11 | 26
+3 | x93 | 11 | 40
+-- SELECT 40
+
+> select a, t, sum(a) over () from ro_x where a < 3
+a:int4 | t:text | sum:int8
+1 | x1 | 30
+2 | x2 | 30
+0 | x30 | 30
+1 | x31 | 30
+2 | x32 | 30
+0 | x60 | 30
+1 | x61 | 30
+2 | x62 | 30
+0 | x90 | 30
+1 | x91 | 30
+2 | x92 | 30
+0 | x120 | 30
+1 | x121 | 30
+2 | x122 | 30
+0 | x150 | 30
+1 | x151 | 30
+2 | x152 | 30
+0 | x180 | 30
+1 | x181 | 30
+2 | x182 | 30
+0 | x210 | 30
+1 | x211 | 30
+2 | x212 | 30
+0 | x240 | 30
+1 | x241 | 30
+2 | x242 | 30
+0 | x270 | 30
+1 | x271 | 30
+2 | x272 | 30
+0 | x300 | 30
+-- SELECT 30
+
+> select a, t, lag(t) over (order by a), first_value(t) over (partition by a % 2 order by a desc) from ro_x where a < 4
+a:int4 | t:text | lag:text | first_value:text
+0 | x60 | NULL | x32
+0 | x120 | x60 | x32
+0 | x240 | x120 | x32
+0 | x270 | x240 | x32
+0 | x300 | x270 | x32
+0 | x90 | x300 | x32
+0 | x30 | x90 | x32
+0 | x150 | x30 | x32
+0 | x180 | x150 | x32
+0 | x210 | x180 | x32
+1 | x271 | x210 | x63
+1 | x241 | x271 | x63
+1 | x211 | x241 | x63
+1 | x181 | x211 | x63
+1 | x1 | x181 | x63
+1 | x121 | x1 | x63
+1 | x91 | x121 | x63
+1 | x61 | x91 | x63
+1 | x31 | x61 | x63
+1 | x151 | x31 | x63
+2 | x32 | x151 | x32
+2 | x182 | x32 | x32
+2 | x212 | x182 | x32
+2 | x92 | x212 | x32
+2 | x122 | x92 | x32
+2 | x2 | x122 | x32
+2 | x62 | x2 | x32
+2 | x272 | x62 | x32
+2 | x152 | x272 | x32
+2 | x242 | x152 | x32
+3 | x183 | x242 | x63
+3 | x123 | x183 | x63
+3 | x93 | x123 | x63
+3 | x213 | x93 | x63
+3 | x243 | x213 | x63
+3 | x33 | x243 | x63
+3 | x3 | x33 | x63
+3 | x153 | x3 | x63
+3 | x273 | x153 | x63
+3 | x63 | x273 | x63
+-- SELECT 40
+
+> select distinct on (a) a, t from ro_x order by a
+a:int4 | t:text
+0 | x30
+1 | x271
+2 | x32
+3 | x93
+4 | x64
+5 | x215
+6 | x276
+7 | x97
+8 | x38
+9 | x69
+10 | x10
+11 | x11
+12 | x42
+13 | x193
+14 | x74
+15 | x255
+16 | x196
+17 | x227
+18 | x168
+19 | x79
+20 | x170
+21 | x231
+22 | x22
+23 | x83
+24 | x264
+25 | x25
+26 | x146
+27 | x177
+28 | x178
+29 | x239
+-- SELECT 30
+
+> select a, array_agg(t) from ro_x where a < 3 group by a
+a:int4 | array_agg:text[]
+0 | {x30,x60,x90,x120,x150,x180,x210,x240,x270,x300}
+1 | {x1,x31,x61,x91,x121,x151,x181,x211,x241,x271}
+2 | {x2,x32,x62,x92,x122,x152,x182,x212,x242,x272}
+-- SELECT 3
+
+> select array_agg(t order by a) from ro_x where a < 4
+array_agg:text[]
+{x150,x90,x30,x120,x300,x240,x210,x60,x270,x180,x151,x31,x61,x91,x121,x1,x181,x211,x241,x271,x2,x32,x182,x242,x152,x92,x62,x122,x272,x212,x63,x153,x183,x33,x213,x273,x93,x243,x123,x3}
+-- SELECT 1
+
+> select a % 2, array_agg(t order by a) from ro_x where a < 6 group by a % 2
+?column?:int4 | array_agg:text[]
+0 | {x240,x60,x30,x270,x210,x120,x150,x90,x180,x300,x92,x272,x122,x32,x242,x212,x62,x2,x182,x152,x214,x4,x34,x64,x94,x124,x154,x184,x244,x274}
+1 | {x151,x91,x181,x211,x61,x1,x241,x31,x271,x121,x3,x63,x213,x123,x33,x243,x93,x153,x273,x183,x275,x245,x5,x125,x65,x95,x215,x35,x185,x155}
+-- SELECT 2
+
+> select a % 2, string_agg(distinct t, ',') from ro_x where a < 6 group by a % 2
+?column?:int4 | string_agg:text
+0 | x120,x122,x124,x150,x152,x154,x180,x182,x184,x2,x210,x212,x214,x240,x242,x244,x270,x272,x274,x30,x300,x32,x34,x4,x60,x62,x64,x90,x92,x94
+1 | x1,x121,x123,x125,x151,x153,x155,x181,x183,x185,x211,x213,x215,x241,x243,x245,x271,x273,x275,x3,x31,x33,x35,x5,x61,x63,x65,x91,x93,x95
+-- SELECT 2
+
+> select percentile_disc(0.5) within group (order by a), mode() within group (order by a % 3) from ro_x
+percentile_disc:int4 | mode:int4
+14 | 0
+-- SELECT 1
+
+> create table ro_i (a int, b int, c text)
+-- CREATE TABLE
+
+> insert into ro_i select g % 100, g % 7, 'c' || g from generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> create index on ro_i (a)
+-- CREATE INDEX
+
+> analyze ro_i
+-- ANALYZE
+
+> explain (costs off) select * from ro_i order by a, b limit 50
+QUERY PLAN:text
+Limit
+  ->  Incremental Sort
+        Sort Key: a, b
+        Presorted Key: a
+        ->  Index Scan using ro_i_a_idx on ro_i
+-- EXPLAIN
+
+> select * from ro_i order by a, b limit 50
+a:int4 | b:int4 | c:text
+0 | 0 | c8400
+0 | 0 | c3500
+0 | 0 | c7000
+0 | 0 | c9800
+0 | 0 | c700
+0 | 0 | c5600
+0 | 0 | c1400
+0 | 0 | c2100
+0 | 0 | c6300
+0 | 0 | c4200
+0 | 0 | c4900
+0 | 0 | c7700
+0 | 0 | c2800
+0 | 0 | c9100
+0 | 1 | c1100
+0 | 1 | c8100
+0 | 1 | c7400
+0 | 1 | c6700
+0 | 1 | c3200
+0 | 1 | c2500
+0 | 1 | c3900
+0 | 1 | c5300
+0 | 1 | c6000
+0 | 1 | c400
+0 | 1 | c1800
+0 | 1 | c4600
+0 | 1 | c9500
+0 | 1 | c8800
+0 | 2 | c6400
+0 | 2 | c2900
+0 | 2 | c5700
+0 | 2 | c800
+0 | 2 | c100
+0 | 2 | c3600
+0 | 2 | c1500
+0 | 2 | c7100
+0 | 2 | c9900
+0 | 2 | c7800
+0 | 2 | c8500
+0 | 2 | c9200
+0 | 2 | c5000
+0 | 2 | c2200
+0 | 2 | c4300
+0 | 3 | c500
+0 | 3 | c1200
+0 | 3 | c1900
+0 | 3 | c2600
+0 | 3 | c4000
+0 | 3 | c4700
+0 | 3 | c5400
+-- SELECT 50
+
+> explain (costs off) select * from ro_i where a < 3 order by a, b
+QUERY PLAN:text
+Sort
+  Sort Key: a, b
+  ->  Bitmap Heap Scan on ro_i
+        Recheck Cond: (a < 3)
+        ->  Bitmap Index Scan on ro_i_a_idx
+              Index Cond: (a < 3)
+-- EXPLAIN
+
+> select md5(string_agg(c, ',')) from (select * from ro_i where a < 3 order by a, b) s
+md5:text
+cf8ec9e1c187279c8c5bb454b99b465e
+-- SELECT 1
+
+> select md5(string_agg(c || r, ',')) from (select a, b, c, row_number() over (order by a, b) r from ro_i where a < 3) s
+md5:text
+b658bdd1dc5e67acbc8aa0484b1e6985
+-- SELECT 1
+

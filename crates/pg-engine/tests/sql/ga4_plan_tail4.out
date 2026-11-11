@@ -1,0 +1,180 @@
+> CREATE TABLE ga4_tk (unique1 int, unique2 int, thousand int, tenthous int, filler text)
+-- CREATE TABLE
+
+> INSERT INTO ga4_tk SELECT i, (i * 7919) % 10000, i % 1000, i, repeat('x', 100) FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX ga4_tk_u1 ON ga4_tk (unique1)
+-- CREATE INDEX
+
+> CREATE INDEX ga4_tk_thous_tenthous ON ga4_tk (thousand, tenthous)
+-- CREATE INDEX
+
+> VACUUM ANALYZE ga4_tk
+-- VACUUM
+
+> EXPLAIN (COSTS OFF)
+> SELECT COUNT(*) OVER (ORDER BY t1.unique1)
+> FROM ga4_tk t1 INNER JOIN ga4_tk t2 ON t1.unique1 = t2.tenthous
+> LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  WindowAgg
+        Window: w1 AS (ORDER BY t1.unique1)
+        ->  Nested Loop
+              ->  Index Only Scan using ga4_tk_u1 on ga4_tk t1
+              ->  Index Only Scan using ga4_tk_thous_tenthous on ga4_tk t2
+                    Index Cond: (tenthous = t1.unique1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT COUNT(*) OVER (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+> FROM ga4_tk t1 INNER JOIN ga4_tk t2 ON t1.unique1 = t2.tenthous
+> LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  WindowAgg
+        Window: w1 AS (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+        ->  Merge Join
+              Merge Cond: (t1.unique1 = t2.tenthous)
+              ->  Index Only Scan using ga4_tk_u1 on ga4_tk t1
+              ->  Sort
+                    Sort Key: t2.tenthous
+                    ->  Index Only Scan using ga4_tk_thous_tenthous on ga4_tk t2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT COUNT(*) OVER (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING AND 10000 FOLLOWING)
+> FROM ga4_tk t1 INNER JOIN ga4_tk t2 ON t1.unique1 = t2.tenthous
+> LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  WindowAgg
+        Window: w1 AS (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING AND '10000'::bigint FOLLOWING)
+        ->  Merge Join
+              Merge Cond: (t1.unique1 = t2.tenthous)
+              ->  Index Only Scan using ga4_tk_u1 on ga4_tk t1
+              ->  Sort
+                    Sort Key: t2.tenthous
+                    ->  Index Only Scan using ga4_tk_thous_tenthous on ga4_tk t2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT sum(t2.unique2) OVER (PARTITION BY t1.thousand)
+> FROM ga4_tk t1 INNER JOIN ga4_tk t2 ON t1.unique1 = t2.unique2
+QUERY PLAN:text
+WindowAgg
+  Window: w1 AS (PARTITION BY t1.thousand)
+  ->  Sort
+        Sort Key: t1.thousand
+        ->  Hash Join
+              Hash Cond: (t1.unique1 = t2.unique2)
+              ->  Seq Scan on ga4_tk t1
+              ->  Hash
+                    ->  Seq Scan on ga4_tk t2
+-- EXPLAIN
+
+> CREATE TABLE ga4_u1 (a int)
+-- CREATE TABLE
+
+> CREATE TABLE ga4_u2 (a int)
+-- CREATE TABLE
+
+> CREATE TABLE ga4_u3 (a int)
+-- CREATE TABLE
+
+> INSERT INTO ga4_u1 SELECT i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> INSERT INTO ga4_u2 SELECT i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> INSERT INTO ga4_u3 SELECT i % 50 FROM generate_series(1, 100) i
+-- INSERT 0 100
+
+> CREATE INDEX ON ga4_u1 (a)
+-- CREATE INDEX
+
+> CREATE INDEX ON ga4_u2 (a)
+-- CREATE INDEX
+
+> ANALYZE ga4_u1
+-- ANALYZE
+
+> ANALYZE ga4_u2
+-- ANALYZE
+
+> ANALYZE ga4_u3
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM ga4_u3 t1 JOIN (SELECT * FROM ga4_u1 UNION ALL SELECT * FROM ga4_u2) t2 ON t1.a = t2.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (ga4_u1.a = t1.a)
+  ->  Append
+        ->  Seq Scan on ga4_u1
+        ->  Seq Scan on ga4_u2
+  ->  Hash
+        ->  Seq Scan on ga4_u3 t1
+-- EXPLAIN
+
+> SELECT count(*) FROM ga4_u3 t1 JOIN (SELECT * FROM ga4_u1 UNION ALL SELECT * FROM ga4_u2) t2 ON t1.a = t2.a
+count:int8
+196
+-- SELECT 1
+
+> CREATE TABLE ga4_g32 (
+>   a int PRIMARY KEY,
+>   b int GENERATED ALWAYS AS (a * 2),
+>   c int GENERATED ALWAYS AS (10 + 10),
+>   d int GENERATED ALWAYS AS (coalesce(a, 100)),
+>   e int
+> )
+-- CREATE TABLE
+
+> INSERT INTO ga4_g32 VALUES (1), (2)
+-- INSERT 0 2
+
+> ANALYZE ga4_g32
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a FROM ga4_g32 t1 LEFT JOIN ga4_g32 t2 ON t1.a = t2.a WHERE coalesce(t2.b, 1) = 2
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (t1.a = t2.a)
+  Filter: (COALESCE((t2.a * 2), 1) = 2)
+  ->  Seq Scan on ga4_g32 t1
+  ->  Hash
+        ->  Seq Scan on ga4_g32 t2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a FROM ga4_g32 t1 LEFT JOIN ga4_g32 t2 ON t1.a = t2.a WHERE coalesce(t2.b, 1) = 2 OR t1.a IS NULL
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (t1.a = t2.a)
+  Filter: ((COALESCE((t2.a * 2), 1) = 2) OR (t1.a IS NULL))
+  ->  Seq Scan on ga4_g32 t1
+  ->  Hash
+        ->  Seq Scan on ga4_g32 t2
+-- EXPLAIN
+
+> SELECT t1.a FROM ga4_g32 t1 LEFT JOIN ga4_g32 t2 ON t1.a = t2.a WHERE coalesce(t2.b, 1) = 2
+a:int4
+1
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT t2.* FROM ga4_g32 t1 LEFT JOIN ga4_g32 t2 ON false
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: a, (a * 2), (20), (COALESCE(a, 100)), e
+  Join Filter: false
+  ->  Seq Scan on public.ga4_g32 t1
+        Output: t1.a, t1.b, t1.c, t1.d, t1.e
+  ->  Result
+        Output: a, e, 20, COALESCE(a, 100)
+        One-Time Filter: false
+-- EXPLAIN
+

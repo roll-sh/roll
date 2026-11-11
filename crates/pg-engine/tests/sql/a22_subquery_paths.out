@@ -1,0 +1,485 @@
+> begin
+-- BEGIN
+
+> create temp table sp_b (id int primary key, c_id int)
+-- CREATE TABLE
+
+> create temp table sp_d (a int, b int)
+-- CREATE TABLE
+
+> insert into sp_b values (0, 0), (1, null)
+-- INSERT 0 2
+
+> insert into sp_d values (1, 3), (2, 2), (3, 1)
+-- INSERT 0 3
+
+> explain (costs off)
+> select sp_d.* from sp_d left join (select * from sp_b group by sp_b.id, sp_b.c_id) s
+>   on sp_d.a = s.id
+QUERY PLAN:text
+Merge Right Join
+  Merge Cond: (sp_b.id = sp_d.a)
+  ->  Group
+        Group Key: sp_b.id
+        ->  Index Scan using sp_b_pkey on sp_b
+  ->  Sort
+        Sort Key: sp_d.a
+        ->  Seq Scan on sp_d
+-- EXPLAIN
+
+> select sp_d.*, s.* from sp_d left join (select * from sp_b group by sp_b.id, sp_b.c_id) s
+>   on sp_d.a = s.id
+a:int4 | b:int4 | id:int4 | c_id:int4
+1 | 3 | 1 | NULL
+2 | 2 | NULL | NULL
+3 | 1 | NULL | NULL
+-- SELECT 3
+
+> explain (costs off)
+> select sp_d.* from sp_d left join (select distinct * from sp_b) s
+>   on sp_d.a = s.id
+QUERY PLAN:text
+Merge Right Join
+  Merge Cond: (sp_b.id = sp_d.a)
+  ->  Unique
+        ->  Sort
+              Sort Key: sp_b.id, sp_b.c_id
+              ->  Seq Scan on sp_b
+  ->  Sort
+        Sort Key: sp_d.a
+        ->  Seq Scan on sp_d
+-- EXPLAIN
+
+> select sp_d.*, s.* from sp_d left join (select distinct * from sp_b) s
+>   on sp_d.a = s.id
+a:int4 | b:int4 | id:int4 | c_id:int4
+1 | 3 | 1 | NULL
+2 | 2 | NULL | NULL
+3 | 1 | NULL | NULL
+-- SELECT 3
+
+> explain (costs off)
+> select s.id, sp_d.b from (select * from sp_b group by sp_b.id, sp_b.c_id) s
+>   join sp_d on sp_d.a = s.id order by s.id
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (sp_b.id = sp_d.a)
+  ->  Group
+        Group Key: sp_b.id
+        ->  Index Scan using sp_b_pkey on sp_b
+  ->  Sort
+        Sort Key: sp_d.a
+        ->  Seq Scan on sp_d
+-- EXPLAIN
+
+> select s.id, sp_d.b from (select * from sp_b group by sp_b.id, sp_b.c_id) s
+>   join sp_d on sp_d.a = s.id order by s.id
+id:int4 | b:int4
+1 | 3
+-- SELECT 1
+
+> rollback
+-- ROLLBACK
+
+> create table sp_t (g int, h int, v int)
+-- CREATE TABLE
+
+> insert into sp_t select i % 50, i % 7, i from generate_series(1, 5000) i
+-- INSERT 0 5000
+
+> create index on sp_t (g)
+-- CREATE INDEX
+
+> create table sp_u (g int, w int)
+-- CREATE TABLE
+
+> insert into sp_u select i % 60, i from generate_series(1, 3000) i
+-- INSERT 0 3000
+
+> analyze sp_t, sp_u
+-- ANALYZE
+
+> explain (costs off)
+> select * from (select distinct g, h from sp_t) s join sp_u u on u.g = s.g
+>   where u.w < 40 order by s.g, s.h, u.w
+QUERY PLAN:text
+Sort
+  Sort Key: sp_t.g, sp_t.h, u.w
+  ->  Hash Join
+        Hash Cond: (u.g = sp_t.g)
+        ->  Seq Scan on sp_u u
+              Filter: (w < 40)
+        ->  Hash
+              ->  HashAggregate
+                    Group Key: sp_t.g, sp_t.h
+                    ->  Seq Scan on sp_t
+-- EXPLAIN
+
+> select * from (select distinct g, h from sp_t) s join sp_u u on u.g = s.g
+>   where u.w < 40 order by s.g, s.h, u.w
+g:int4 | h:int4 | g:int4 | w:int4
+1 | 0 | 1 | 1
+1 | 1 | 1 | 1
+1 | 2 | 1 | 1
+1 | 3 | 1 | 1
+1 | 4 | 1 | 1
+1 | 5 | 1 | 1
+1 | 6 | 1 | 1
+2 | 0 | 2 | 2
+2 | 1 | 2 | 2
+2 | 2 | 2 | 2
+2 | 3 | 2 | 2
+2 | 4 | 2 | 2
+2 | 5 | 2 | 2
+2 | 6 | 2 | 2
+3 | 0 | 3 | 3
+3 | 1 | 3 | 3
+3 | 2 | 3 | 3
+3 | 3 | 3 | 3
+3 | 4 | 3 | 3
+3 | 5 | 3 | 3
+3 | 6 | 3 | 3
+4 | 0 | 4 | 4
+4 | 1 | 4 | 4
+4 | 2 | 4 | 4
+4 | 3 | 4 | 4
+4 | 4 | 4 | 4
+4 | 5 | 4 | 4
+4 | 6 | 4 | 4
+5 | 0 | 5 | 5
+5 | 1 | 5 | 5
+5 | 2 | 5 | 5
+5 | 3 | 5 | 5
+5 | 4 | 5 | 5
+5 | 5 | 5 | 5
+5 | 6 | 5 | 5
+6 | 0 | 6 | 6
+6 | 1 | 6 | 6
+6 | 2 | 6 | 6
+6 | 3 | 6 | 6
+6 | 4 | 6 | 6
+6 | 5 | 6 | 6
+6 | 6 | 6 | 6
+7 | 0 | 7 | 7
+7 | 1 | 7 | 7
+7 | 2 | 7 | 7
+7 | 3 | 7 | 7
+7 | 4 | 7 | 7
+7 | 5 | 7 | 7
+7 | 6 | 7 | 7
+8 | 0 | 8 | 8
+8 | 1 | 8 | 8
+8 | 2 | 8 | 8
+8 | 3 | 8 | 8
+8 | 4 | 8 | 8
+8 | 5 | 8 | 8
+8 | 6 | 8 | 8
+9 | 0 | 9 | 9
+9 | 1 | 9 | 9
+9 | 2 | 9 | 9
+9 | 3 | 9 | 9
+9 | 4 | 9 | 9
+9 | 5 | 9 | 9
+9 | 6 | 9 | 9
+10 | 0 | 10 | 10
+10 | 1 | 10 | 10
+10 | 2 | 10 | 10
+10 | 3 | 10 | 10
+10 | 4 | 10 | 10
+10 | 5 | 10 | 10
+10 | 6 | 10 | 10
+11 | 0 | 11 | 11
+11 | 1 | 11 | 11
+11 | 2 | 11 | 11
+11 | 3 | 11 | 11
+11 | 4 | 11 | 11
+11 | 5 | 11 | 11
+11 | 6 | 11 | 11
+12 | 0 | 12 | 12
+12 | 1 | 12 | 12
+12 | 2 | 12 | 12
+12 | 3 | 12 | 12
+12 | 4 | 12 | 12
+12 | 5 | 12 | 12
+12 | 6 | 12 | 12
+13 | 0 | 13 | 13
+13 | 1 | 13 | 13
+13 | 2 | 13 | 13
+13 | 3 | 13 | 13
+13 | 4 | 13 | 13
+13 | 5 | 13 | 13
+13 | 6 | 13 | 13
+14 | 0 | 14 | 14
+14 | 1 | 14 | 14
+14 | 2 | 14 | 14
+14 | 3 | 14 | 14
+14 | 4 | 14 | 14
+14 | 5 | 14 | 14
+14 | 6 | 14 | 14
+15 | 0 | 15 | 15
+15 | 1 | 15 | 15
+15 | 2 | 15 | 15
+15 | 3 | 15 | 15
+15 | 4 | 15 | 15
+15 | 5 | 15 | 15
+15 | 6 | 15 | 15
+16 | 0 | 16 | 16
+16 | 1 | 16 | 16
+16 | 2 | 16 | 16
+16 | 3 | 16 | 16
+16 | 4 | 16 | 16
+16 | 5 | 16 | 16
+16 | 6 | 16 | 16
+17 | 0 | 17 | 17
+17 | 1 | 17 | 17
+17 | 2 | 17 | 17
+17 | 3 | 17 | 17
+17 | 4 | 17 | 17
+17 | 5 | 17 | 17
+17 | 6 | 17 | 17
+18 | 0 | 18 | 18
+18 | 1 | 18 | 18
+18 | 2 | 18 | 18
+18 | 3 | 18 | 18
+18 | 4 | 18 | 18
+18 | 5 | 18 | 18
+18 | 6 | 18 | 18
+19 | 0 | 19 | 19
+19 | 1 | 19 | 19
+19 | 2 | 19 | 19
+19 | 3 | 19 | 19
+19 | 4 | 19 | 19
+19 | 5 | 19 | 19
+19 | 6 | 19 | 19
+20 | 0 | 20 | 20
+20 | 1 | 20 | 20
+20 | 2 | 20 | 20
+20 | 3 | 20 | 20
+20 | 4 | 20 | 20
+20 | 5 | 20 | 20
+20 | 6 | 20 | 20
+21 | 0 | 21 | 21
+21 | 1 | 21 | 21
+21 | 2 | 21 | 21
+21 | 3 | 21 | 21
+21 | 4 | 21 | 21
+21 | 5 | 21 | 21
+21 | 6 | 21 | 21
+22 | 0 | 22 | 22
+22 | 1 | 22 | 22
+22 | 2 | 22 | 22
+22 | 3 | 22 | 22
+22 | 4 | 22 | 22
+22 | 5 | 22 | 22
+22 | 6 | 22 | 22
+23 | 0 | 23 | 23
+23 | 1 | 23 | 23
+23 | 2 | 23 | 23
+23 | 3 | 23 | 23
+23 | 4 | 23 | 23
+23 | 5 | 23 | 23
+23 | 6 | 23 | 23
+24 | 0 | 24 | 24
+24 | 1 | 24 | 24
+24 | 2 | 24 | 24
+24 | 3 | 24 | 24
+24 | 4 | 24 | 24
+24 | 5 | 24 | 24
+24 | 6 | 24 | 24
+25 | 0 | 25 | 25
+25 | 1 | 25 | 25
+25 | 2 | 25 | 25
+25 | 3 | 25 | 25
+25 | 4 | 25 | 25
+25 | 5 | 25 | 25
+25 | 6 | 25 | 25
+26 | 0 | 26 | 26
+26 | 1 | 26 | 26
+26 | 2 | 26 | 26
+26 | 3 | 26 | 26
+26 | 4 | 26 | 26
+26 | 5 | 26 | 26
+26 | 6 | 26 | 26
+27 | 0 | 27 | 27
+27 | 1 | 27 | 27
+27 | 2 | 27 | 27
+27 | 3 | 27 | 27
+27 | 4 | 27 | 27
+27 | 5 | 27 | 27
+27 | 6 | 27 | 27
+28 | 0 | 28 | 28
+28 | 1 | 28 | 28
+28 | 2 | 28 | 28
+28 | 3 | 28 | 28
+28 | 4 | 28 | 28
+28 | 5 | 28 | 28
+28 | 6 | 28 | 28
+29 | 0 | 29 | 29
+29 | 1 | 29 | 29
+29 | 2 | 29 | 29
+29 | 3 | 29 | 29
+29 | 4 | 29 | 29
+29 | 5 | 29 | 29
+29 | 6 | 29 | 29
+30 | 0 | 30 | 30
+30 | 1 | 30 | 30
+30 | 2 | 30 | 30
+30 | 3 | 30 | 30
+30 | 4 | 30 | 30
+30 | 5 | 30 | 30
+30 | 6 | 30 | 30
+31 | 0 | 31 | 31
+31 | 1 | 31 | 31
+31 | 2 | 31 | 31
+31 | 3 | 31 | 31
+31 | 4 | 31 | 31
+31 | 5 | 31 | 31
+31 | 6 | 31 | 31
+32 | 0 | 32 | 32
+32 | 1 | 32 | 32
+32 | 2 | 32 | 32
+32 | 3 | 32 | 32
+32 | 4 | 32 | 32
+32 | 5 | 32 | 32
+32 | 6 | 32 | 32
+33 | 0 | 33 | 33
+33 | 1 | 33 | 33
+33 | 2 | 33 | 33
+33 | 3 | 33 | 33
+33 | 4 | 33 | 33
+33 | 5 | 33 | 33
+33 | 6 | 33 | 33
+34 | 0 | 34 | 34
+34 | 1 | 34 | 34
+34 | 2 | 34 | 34
+34 | 3 | 34 | 34
+34 | 4 | 34 | 34
+34 | 5 | 34 | 34
+34 | 6 | 34 | 34
+35 | 0 | 35 | 35
+35 | 1 | 35 | 35
+35 | 2 | 35 | 35
+35 | 3 | 35 | 35
+35 | 4 | 35 | 35
+35 | 5 | 35 | 35
+35 | 6 | 35 | 35
+36 | 0 | 36 | 36
+36 | 1 | 36 | 36
+36 | 2 | 36 | 36
+36 | 3 | 36 | 36
+36 | 4 | 36 | 36
+36 | 5 | 36 | 36
+36 | 6 | 36 | 36
+37 | 0 | 37 | 37
+37 | 1 | 37 | 37
+37 | 2 | 37 | 37
+37 | 3 | 37 | 37
+37 | 4 | 37 | 37
+37 | 5 | 37 | 37
+37 | 6 | 37 | 37
+38 | 0 | 38 | 38
+38 | 1 | 38 | 38
+38 | 2 | 38 | 38
+38 | 3 | 38 | 38
+38 | 4 | 38 | 38
+38 | 5 | 38 | 38
+38 | 6 | 38 | 38
+39 | 0 | 39 | 39
+39 | 1 | 39 | 39
+39 | 2 | 39 | 39
+39 | 3 | 39 | 39
+39 | 4 | 39 | 39
+39 | 5 | 39 | 39
+39 | 6 | 39 | 39
+-- SELECT 273
+
+> set enable_hashjoin = off
+-- SET
+
+> explain (costs off)
+> select s.g, s.n, u.w from (select g, count(*) n from sp_t group by g) s
+>   left join sp_u u on u.g = s.g and u.w < 70
+QUERY PLAN:text
+Merge Right Join
+  Merge Cond: (u.g = sp_t.g)
+  ->  Sort
+        Sort Key: u.g
+        ->  Seq Scan on sp_u u
+              Filter: (w < 70)
+  ->  Sort
+        Sort Key: sp_t.g
+        ->  HashAggregate
+              Group Key: sp_t.g
+              ->  Seq Scan on sp_t
+-- EXPLAIN
+
+> select s.g, s.n, u.w from (select g, count(*) n from sp_t group by g) s
+>   left join sp_u u on u.g = s.g and u.w < 70
+g:int4 | n:int8 | w:int4
+0 | 100 | 60
+1 | 100 | 1
+1 | 100 | 61
+10 | 100 | 10
+11 | 100 | 11
+12 | 100 | 12
+13 | 100 | 13
+14 | 100 | 14
+15 | 100 | 15
+16 | 100 | 16
+17 | 100 | 17
+18 | 100 | 18
+19 | 100 | 19
+2 | 100 | 2
+2 | 100 | 62
+20 | 100 | 20
+21 | 100 | 21
+22 | 100 | 22
+23 | 100 | 23
+24 | 100 | 24
+25 | 100 | 25
+26 | 100 | 26
+27 | 100 | 27
+28 | 100 | 28
+29 | 100 | 29
+3 | 100 | 3
+3 | 100 | 63
+30 | 100 | 30
+31 | 100 | 31
+32 | 100 | 32
+33 | 100 | 33
+34 | 100 | 34
+35 | 100 | 35
+36 | 100 | 36
+37 | 100 | 37
+38 | 100 | 38
+39 | 100 | 39
+4 | 100 | 4
+4 | 100 | 64
+40 | 100 | 40
+41 | 100 | 41
+42 | 100 | 42
+43 | 100 | 43
+44 | 100 | 44
+45 | 100 | 45
+46 | 100 | 46
+47 | 100 | 47
+48 | 100 | 48
+49 | 100 | 49
+5 | 100 | 5
+5 | 100 | 65
+6 | 100 | 6
+6 | 100 | 66
+7 | 100 | 67
+7 | 100 | 7
+8 | 100 | 68
+8 | 100 | 8
+9 | 100 | 69
+9 | 100 | 9
+-- SELECT 59
+
+> reset enable_hashjoin
+-- RESET
+
+> drop table sp_t, sp_u
+-- DROP TABLE
+

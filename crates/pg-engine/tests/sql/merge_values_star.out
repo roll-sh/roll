@@ -1,0 +1,71 @@
+> CREATE TABLE mvs_t (id int PRIMARY KEY, a int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE mvs_s (id int, a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO mvs_s VALUES (1, 10, 'x'), (2, 20, 'y')
+-- INSERT 0 2
+
+> INSERT INTO mvs_t VALUES (1, 0, 'old')
+-- INSERT 0 1
+
+> MERGE INTO mvs_t t USING mvs_s s ON t.id = s.id
+>   WHEN MATCHED THEN UPDATE SET a = s.a
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.*)
+-- MERGE 2
+
+> SELECT * FROM mvs_t ORDER BY id
+id:int4 | a:int4 | b:text
+1 | 10 | old
+2 | 20 | y
+-- SELECT 2
+
+> MERGE INTO mvs_t t USING (SELECT id + 10 AS id, a FROM mvs_s) s ON t.id = s.id
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.*, 'z')
+-- MERGE 2
+
+> SELECT * FROM mvs_t ORDER BY id
+id:int4 | a:int4 | b:text
+1 | 10 | old
+2 | 20 | y
+11 | 10 | z
+12 | 20 | z
+-- SELECT 4
+
+> MERGE INTO mvs_t t USING mvs_s s ON t.id = s.id + 100
+>   WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.*)
+ERROR 42601: INSERT has more expressions than target columns (at 102)
+
+> MERGE INTO mvs_t t USING mvs_s s ON t.id = s.id + 100
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.*, 1)
+ERROR 42601: INSERT has more expressions than target columns (at 99)
+
+> MERGE INTO mvs_t t USING (SELECT id + 200 AS id, a FROM mvs_s) s ON t.id = s.id
+>   WHEN NOT MATCHED THEN INSERT (id, a, b) VALUES (s.*)
+ERROR 42601: INSERT has more target columns than expressions (at 120)
+
+> DROP TABLE mvs_t, mvs_s
+-- DROP TABLE
+
+> CREATE TABLE mvs_cat (id int, x int) WITH (user_catalog_table = true)
+-- CREATE TABLE
+
+> ALTER TABLE mvs_cat ALTER COLUMN x TYPE text
+ERROR 0A000: cannot rewrite table "mvs_cat" used as a catalog table
+
+> ALTER TABLE mvs_cat ADD COLUMN y int DEFAULT random()
+ERROR 0A000: cannot rewrite table "mvs_cat" used as a catalog table
+
+> ALTER TABLE mvs_cat ADD COLUMN z int DEFAULT 1
+-- ALTER TABLE
+
+> ALTER TABLE mvs_cat SET (user_catalog_table = false)
+-- ALTER TABLE
+
+> ALTER TABLE mvs_cat ALTER COLUMN x TYPE text
+-- ALTER TABLE
+
+> DROP TABLE mvs_cat
+-- DROP TABLE
+

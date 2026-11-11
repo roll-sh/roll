@@ -1,0 +1,301 @@
+> CREATE TABLE grg_x (a serial, b int, c text NOT NULL DEFAULT 'stuff', d text, e text)
+-- CREATE TABLE
+
+> CREATE FUNCTION grg_x_before() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN NEW.e := 'before trigger fired'; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION grg_x_after() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN UPDATE grg_x SET e = 'after trigger fired' WHERE c = 'stuff'; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER grg_x_after AFTER INSERT ON grg_x FOR EACH ROW EXECUTE PROCEDURE grg_x_after()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER grg_x_before BEFORE INSERT ON grg_x FOR EACH ROW EXECUTE PROCEDURE grg_x_before()
+-- CREATE TRIGGER
+
+> COPY grg_x (a, b, c, d, e) FROM STDIN
+>> 9999	\N	\\N	\NN	\N
+>> 10000	21	31	41	51
+-- COPY 2
+
+> COPY grg_x (b, d) FROM STDIN
+>> 1	test_1
+-- COPY 1
+
+> COPY grg_x (b, d) FROM STDIN
+>> 2	test_2
+>> 3	test_3
+>> 4	test_4
+>> 5	test_5
+-- COPY 4
+
+> COPY grg_x (a, b, c, d, e) FROM STDIN
+>> 10001	22	32	42	52
+>> 10002	23	33	43	53
+>> 10003	24	34	44	54
+>> 10004	25	35	45	55
+>> 10005	26	36	46	56
+-- COPY 5
+
+> COPY grg_x (b, c, d, e) FROM STDIN DELIMITER ',' NULL 'x'
+>> x,45,80,90
+>> x,\x,\\x,\\\x
+>> x,\,,\\\,,\\
+-- COPY 3
+
+> COPY grg_x FROM STDIN WITH DELIMITER AS ';' NULL AS ''
+>> 3000;;c;;
+-- COPY 1
+
+> COPY grg_x FROM STDIN WITH DELIMITER AS ':' NULL AS E'\\X' ENCODING 'sql_ascii'
+>> 4000:\X:C:\X:\X
+>> 4001:1:empty::
+>> 4002:2:null:\X:\X
+>> 4003:3:Backslash:\\:\\
+>> 4004:4:BackslashX:\\X:\\X
+>> 4005:5:N:\N:\N
+>> 4006:6:BackslashN:\\N:\\N
+>> 4007:7:XX:\XX:\XX
+>> 4008:8:Delimiter:\::\:
+-- COPY 9
+
+> COPY grg_x FROM STDIN WHERE a = 50004
+>> 50003	24	34	44	54
+>> 50004	25	35	45	55
+>> 50005	26	36	46	56
+-- COPY 1
+
+> COPY grg_x FROM STDIN WHERE a > 60003
+>> 60001	22	32	42	52
+>> 60002	23	33	43	53
+>> 60003	24	34	44	54
+>> 60004	25	35	45	55
+>> 60005	26	36	46	56
+-- COPY 2
+
+> SELECT ctid, * FROM grg_x
+ctid:27 | a:int4 | b:int4 | c:text | d:text | e:text
+(0,1) | 9999 | NULL | \N | NN | before trigger fired
+(0,2) | 10000 | 21 | 31 | 41 | before trigger fired
+(0,29) | 10001 | 22 | 32 | 42 | before trigger fired
+(0,30) | 10002 | 23 | 33 | 43 | before trigger fired
+(0,31) | 10003 | 24 | 34 | 44 | before trigger fired
+(0,32) | 10004 | 25 | 35 | 45 | before trigger fired
+(0,33) | 10005 | 26 | 36 | 46 | before trigger fired
+(0,59) | 6 | NULL | 45 | 80 | before trigger fired
+(0,60) | 7 | NULL | x | \x | before trigger fired
+(0,61) | 8 | NULL | , | \, | before trigger fired
+(0,77) | 3000 | NULL | c | NULL | before trigger fired
+(0,83) | 4000 | NULL | C | NULL | before trigger fired
+(0,84) | 4001 | 1 | empty |  | before trigger fired
+(0,85) | 4002 | 2 | null | NULL | before trigger fired
+(0,86) | 4003 | 3 | Backslash | \ | before trigger fired
+(0,87) | 4004 | 4 | BackslashX | \X | before trigger fired
+(0,88) | 4005 | 5 | N | N | before trigger fired
+(0,89) | 4006 | 6 | BackslashN | \N | before trigger fired
+(0,90) | 4007 | 7 | XX | XX | before trigger fired
+(0,91) | 4008 | 8 | Delimiter | : | before trigger fired
+(1,28) | 50004 | 25 | 35 | 45 | before trigger fired
+(1,34) | 60004 | 25 | 35 | 45 | before trigger fired
+(1,35) | 60005 | 26 | 36 | 46 | before trigger fired
+(1,41) | 1 | 1 | stuff | test_1 | after trigger fired
+(1,42) | 2 | 2 | stuff | test_2 | after trigger fired
+(1,43) | 3 | 3 | stuff | test_3 | after trigger fired
+(1,44) | 4 | 4 | stuff | test_4 | after trigger fired
+(1,45) | 5 | 5 | stuff | test_5 | after trigger fired
+-- SELECT 28
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL enable_seqscan = false
+-- SET
+
+> SET LOCAL enable_indexonlyscan = false
+-- SET
+
+> SET LOCAL enable_bitmapscan = false
+-- SET
+
+> CREATE TABLE grg_clean (key int, data text)
+-- CREATE TABLE
+
+> CREATE INDEX grg_clean_key ON grg_clean (key)
+-- CREATE INDEX
+
+> INSERT INTO grg_clean (key, data) VALUES (-1, 'just to allocate metapage')
+-- INSERT 0 1
+
+> SELECT pg_relation_size('grg_clean_key')
+pg_relation_size:int8
+16384
+-- SELECT 1
+
+> DO $$
+> BEGIN
+>     FOR i IN 1..100 LOOP
+>         BEGIN
+>             IF EXISTS (SELECT * FROM grg_clean WHERE key > 0 AND key < 100) THEN
+>                 RAISE data_corrupted USING MESSAGE = 'these rows should not exist';
+>             END IF;
+>             INSERT INTO grg_clean SELECT g.i, 'rolling back in a sec' FROM generate_series(1, 100) g(i);
+>             RAISE reading_sql_data_not_permitted USING MESSAGE = 'round and round again';
+>         EXCEPTION WHEN reading_sql_data_not_permitted THEN END;
+>     END LOOP;
+> END $$
+-- DO
+
+> SELECT pg_relation_size('grg_clean_key')
+pg_relation_size:int8
+16384
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE SEQUENCE grg_ta_id1 START WITH 33
+-- CREATE SEQUENCE
+
+> CREATE TABLE grg_ta (id serial, id1 integer DEFAULT nextval('grg_ta_id1'))
+-- CREATE TABLE
+
+> ALTER SEQUENCE grg_ta_id1 OWNED BY grg_ta.id1
+-- ALTER SEQUENCE
+
+> INSERT INTO grg_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> INSERT INTO grg_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> BEGIN
+-- BEGIN
+
+> TRUNCATE grg_ta RESTART IDENTITY
+-- TRUNCATE TABLE
+
+> INSERT INTO grg_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> SELECT ctid, * FROM grg_ta
+ctid:27 | id:int4 | id1:int4
+(0,1) | 1 | 33
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> INSERT INTO grg_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> INSERT INTO grg_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> SELECT ctid, * FROM grg_ta
+ctid:27 | id:int4 | id1:int4
+(0,1) | 1 | 33
+(0,2) | 2 | 34
+(0,3) | 3 | 35
+(0,4) | 4 | 36
+-- SELECT 4
+
+> BEGIN
+-- BEGIN
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> TRUNCATE grg_ta RESTART IDENTITY
+-- TRUNCATE TABLE
+
+> INSERT INTO grg_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> ROLLBACK TO s1
+-- ROLLBACK
+
+> INSERT INTO grg_ta DEFAULT VALUES
+-- INSERT 0 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT ctid, * FROM grg_ta
+ctid:27 | id:int4 | id1:int4
+(0,1) | 1 | 33
+(0,2) | 2 | 34
+(0,3) | 3 | 35
+(0,4) | 4 | 36
+(0,5) | 5 | 37
+-- SELECT 5
+
+> CREATE TABLE grg_cl (id int, k int)
+-- CREATE TABLE
+
+> INSERT INTO grg_cl SELECT g, g % 7 FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> INSERT INTO grg_cl SELECT g, NULL FROM generate_series(301, 305) g
+-- INSERT 0 5
+
+> CREATE INDEX grg_cl_k ON grg_cl (k)
+-- CREATE INDEX
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL enable_indexscan = false
+-- SET
+
+> CLUSTER grg_cl USING grg_cl_k
+-- CLUSTER
+
+> SELECT ctid, * FROM grg_cl ORDER BY ctid LIMIT 12
+ctid:27 | id:int4 | k:int4
+(0,1) | 21 | 0
+(0,2) | 14 | 0
+(0,3) | 112 | 0
+(0,4) | 84 | 0
+(0,5) | 126 | 0
+(0,6) | 252 | 0
+(0,7) | 49 | 0
+(0,8) | 154 | 0
+(0,9) | 217 | 0
+(0,10) | 287 | 0
+(0,11) | 77 | 0
+(0,12) | 147 | 0
+-- SELECT 12
+
+> SELECT ctid, * FROM grg_cl ORDER BY ctid DESC LIMIT 8
+ctid:27 | id:int4 | k:int4
+(1,79) | 303 | NULL
+(1,78) | 302 | NULL
+(1,77) | 305 | NULL
+(1,76) | 304 | NULL
+(1,75) | 301 | NULL
+(1,74) | 48 | 6
+(1,73) | 251 | 6
+(1,72) | 146 | 6
+-- SELECT 8
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT ctid, * FROM grg_cl ORDER BY ctid LIMIT 3
+ctid:27 | id:int4 | k:int4
+(0,1) | 1 | 1
+(0,2) | 2 | 2
+(0,3) | 3 | 3
+-- SELECT 3
+
+> DROP TABLE grg_x, grg_ta, grg_cl
+-- DROP TABLE
+
+> DROP FUNCTION grg_x_before()
+-- DROP FUNCTION
+
+> DROP FUNCTION grg_x_after()
+-- DROP FUNCTION
+

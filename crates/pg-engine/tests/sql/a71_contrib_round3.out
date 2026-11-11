@@ -1,0 +1,383 @@
+> DROP ROLE IF EXISTS regress_a71_pw
+NOTICE 00000: role "regress_a71_pw" does not exist, skipping
+-- DROP ROLE
+
+> CREATE EXTENSION tsm_system_rows
+-- CREATE EXTENSION
+
+> CREATE EXTENSION tsm_system_time
+-- CREATE EXTENSION
+
+> CREATE TABLE ts (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO ts SELECT i, repeat('x', 200) FROM generate_series(1, 50) i
+-- INSERT 0 50
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows (7)
+count:int8
+7
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows (0)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows (500)
+count:int8
+50
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows (-1)
+ERROR 2202H: sample size must not be negative
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows (NULL)
+ERROR 2202H: TABLESAMPLE parameter cannot be null
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows (1, 2)
+ERROR 2202H: tablesample method system_rows requires 1 argument, not 2 (at 37)
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows ('abc')
+ERROR 22P02: invalid input syntax for type bigint: "abc" (at 50)
+
+> SELECT count(*) FROM ts TABLESAMPLE system_rows (3) REPEATABLE (1)
+ERROR 0A000: tablesample method system_rows does not support REPEATABLE (at 37)
+
+> SELECT count(*) FROM ts TABLESAMPLE system_time (0)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE system_time (100000)
+count:int8
+50
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE system_time (-5)
+ERROR 2202H: sample collection time must not be negative
+
+> SELECT count(*) FROM ts TABLESAMPLE nosuch (5)
+ERROR 42704: tablesample method nosuch does not exist (at 37)
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ts TABLESAMPLE system_rows (3)
+QUERY PLAN:text
+Sample Scan on ts
+  Sampling: system_rows ('3'::bigint)
+-- EXPLAIN
+
+> CREATE VIEW tsv AS SELECT * FROM ts TABLESAMPLE system_rows (2)
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('tsv')
+pg_get_viewdef:text
+ SELECT id,
+    v
+   FROM ts TABLESAMPLE system_rows (2);
+-- SELECT 1
+
+> DROP EXTENSION tsm_system_rows
+ERROR 2BP01: cannot drop extension tsm_system_rows because other objects depend on it
+DETAIL: view tsv depends on function system_rows(internal)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP VIEW tsv
+-- DROP VIEW
+
+> CREATE EXTENSION pg_prewarm
+-- CREATE EXTENSION
+
+> SELECT pg_prewarm('ts')
+pg_prewarm:int8
+2
+-- SELECT 1
+
+> SELECT pg_prewarm('ts', 'read', 'main', 0, 0)
+pg_prewarm:int8
+1
+-- SELECT 1
+
+> SELECT pg_prewarm('ts', 'bogus')
+ERROR 22023: invalid prewarm type
+HINT: Valid prewarm types are "prefetch", "read", and "buffer".
+
+> SELECT pg_prewarm('ts', 'buffer', 'nofork')
+ERROR 22023: invalid fork name
+HINT: Valid fork names are "main", "fsm", "vm", and "init".
+
+> SELECT pg_prewarm('ts', 'buffer', 'main', -1)
+ERROR 22023: starting block number must be between 0 and 1
+
+> SELECT pg_prewarm('ts', 'buffer', 'main', 0, 1000)
+ERROR 22023: ending block number must be between 0 and 1
+
+> SELECT pg_prewarm(NULL)
+ERROR 22023: relation cannot be null
+
+> SELECT pg_prewarm('ts', NULL)
+ERROR 22023: prewarm type cannot be null
+
+> SELECT pg_prewarm('ts', 'buffer', NULL)
+ERROR 22023: relation fork cannot be null
+
+> SELECT pg_prewarm('ts', 'buffer', 'vm')
+ERROR 22023: fork "vm" does not exist for this relation
+
+> SELECT pg_prewarm('ts_pkey') > 0
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE VIEW pv AS SELECT 1
+-- CREATE VIEW
+
+> SELECT pg_prewarm('pv')
+ERROR 42809: relation "pv" does not have storage
+DETAIL: This operation is not supported for views.
+
+> DROP VIEW pv
+-- DROP VIEW
+
+> SELECT autoprewarm_dump_now() >= 0
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE EXTENSION pg_freespacemap
+-- CREATE EXTENSION
+
+> SELECT count(*) > 0 FROM pg_freespace('ts')
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_freespace('ts', -1)
+ERROR 22023: invalid block number
+
+> SELECT pg_freespace('ts', 0) >= 0
+?column?:bool
+t
+-- SELECT 1
+
+> VACUUM ts
+-- VACUUM
+
+> SELECT count(*) FILTER (WHERE avail > 0) > 0 FROM pg_freespace('ts')
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE EXTENSION pg_visibility
+-- CREATE EXTENSION
+
+> SELECT count(*) > 0 FROM pg_visibility_map('ts')
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT all_visible FROM pg_visibility_map_summary('ts') s, LATERAL (SELECT s.all_visible > 0 AS all_visible) x
+ERROR 42702: column reference "all_visible" is ambiguous (at 8)
+
+> SELECT * FROM pg_check_frozen('ts')
+t_ctid:27
+-- SELECT 0
+
+> SELECT * FROM pg_check_visible('ts')
+t_ctid:27
+-- SELECT 0
+
+> SELECT pg_visibility('ts', -1)
+ERROR 22023: invalid block number
+
+> SELECT pg_visibility_map('ts_pkey')
+ERROR 42809: relation "ts_pkey" is of wrong relation kind
+DETAIL: This operation is not supported for indexes.
+
+> SELECT pg_truncate_visibility_map('ts')
+pg_truncate_visibility_map:void
+
+-- SELECT 1
+
+> SELECT bool_or(all_visible) FROM pg_visibility_map('ts')
+bool_or:bool
+f
+-- SELECT 1
+
+> CREATE EXTENSION pgstattuple
+-- CREATE EXTENSION
+
+> CREATE TABLE st (a int PRIMARY KEY)
+-- CREATE TABLE
+
+> SELECT table_len, tuple_count, dead_tuple_count, free_space FROM pgstattuple('st')
+table_len:int8 | tuple_count:int8 | dead_tuple_count:int8 | free_space:int8
+0 | 0 | 0 | 0
+-- SELECT 1
+
+> SELECT version, tree_level, index_size, root_block_no, leaf_pages FROM pgstatindex('st_pkey')
+version:int4 | tree_level:int4 | index_size:int8 | root_block_no:int8 | leaf_pages:int8
+4 | 0 | 8192 | 0 | 0
+-- SELECT 1
+
+> SELECT pg_relpages('st'), pg_relpages('st_pkey')
+pg_relpages:int8 | pg_relpages:int8
+0 | 1
+-- SELECT 1
+
+> SELECT pgstatindex('st')
+ERROR 42809: relation "st" is not a btree index
+
+> SELECT pgstatginindex('st_pkey')
+ERROR 42809: relation "st_pkey" is not a GIN index
+
+> SELECT pgstathashindex('st_pkey')
+ERROR 42809: relation "st_pkey" is not a hash index
+
+> SELECT pgstattuple('nosuch')
+ERROR 42P01: relation "nosuch" does not exist
+
+> SELECT tuple_count FROM pgstattuple('ts')
+tuple_count:int8
+50
+-- SELECT 1
+
+> SELECT table_len > 0, approx_tuple_count FROM pgstattuple_approx('ts')
+?column?:bool | approx_tuple_count:int8
+t | 50
+-- SELECT 1
+
+> CREATE EXTENSION pgrowlocks
+-- CREATE EXTENSION
+
+> SELECT * FROM pgrowlocks('ts')
+locked_row:27 | locker:28 | multi:bool | xids:1011 | modes:text[] | pids:int4[]
+-- SELECT 0
+
+> BEGIN
+-- BEGIN
+
+> SELECT id FROM ts WHERE id = 3 FOR SHARE
+id:int4
+3
+-- SELECT 1
+
+> SELECT multi, modes FROM pgrowlocks('ts')
+multi:bool | modes:text[]
+f | {"For Share"}
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT * FROM pgrowlocks('ts_pkey')
+ERROR 42809: "ts_pkey" is not a table
+
+> CREATE EXTENSION dict_int
+-- CREATE EXTENSION
+
+> SELECT ts_lexize('intdict', '511673')
+ts_lexize:text[]
+{511673}
+-- SELECT 1
+
+> SELECT ts_lexize('intdict', '129')
+ts_lexize:text[]
+{129}
+-- SELECT 1
+
+> SELECT ts_lexize('intdict', '40865854')
+ts_lexize:text[]
+{408658}
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY intdict (MAXLEN = 4, REJECTLONG = true)
+-- ALTER TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('intdict', '12345')
+ts_lexize:text[]
+{}
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY intdict (MAXLEN = 0)
+ERROR 22023: maxlen value has to be >= 1
+
+> ALTER TEXT SEARCH DICTIONARY intdict (BOGUS = 1)
+ERROR 22023: unrecognized intdict parameter: "bogus"
+
+> CREATE EXTENSION dict_xsyn
+-- CREATE EXTENSION
+
+> ALTER TEXT SEARCH DICTIONARY xsyn (RULES = 'xsyn_sample', KEEPORIG = false)
+-- ALTER TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('xsyn', 'supernova')
+ts_lexize:text[]
+{sn,sne,1987a}
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY xsyn (RULES = 'nosuch_file')
+ERROR F0000: could not open synonym file "/usr/local/share/postgresql/tsearch_data/nosuch_file.rules": No such file or directory
+
+> SET md5_password_warnings = off
+-- SET
+
+> LOAD 'passwordcheck'
+-- LOAD
+
+> CREATE ROLE regress_a71_pw PASSWORD 'short1'
+ERROR 22023: password is too short
+DETAIL: password must be at least "passwordcheck.min_password_length" (8) bytes long
+
+> CREATE ROLE regress_a71_pw PASSWORD 'onlyletterspassword'
+ERROR 22023: password must contain both letters and nonletters
+
+> CREATE ROLE regress_a71_pw PASSWORD 'xx_regress_a71_pw_1'
+ERROR 22023: password must not contain user name
+
+> CREATE ROLE regress_a71_pw PASSWORD 'good_pass_1'
+-- CREATE ROLE
+
+> ALTER ROLE regress_a71_pw PASSWORD 'md5a0b5c4ac7b4a1d6ff0a41dc77e98c5a3'
+-- ALTER ROLE
+
+> SHOW passwordcheck.min_password_length
+passwordcheck.min_password_length:text
+8B
+-- SHOW
+
+> DROP ROLE regress_a71_pw
+-- DROP ROLE
+
+> CREATE EXTENSION sslinfo
+-- CREATE EXTENSION
+
+> SELECT ssl_is_used(), ssl_version(), ssl_cipher()
+ssl_is_used:bool | ssl_version:text | ssl_cipher:text
+f | NULL | NULL
+-- SELECT 1
+
+> CREATE EXTENSION intagg
+-- CREATE EXTENSION
+
+> SELECT int_array_enum('{5,3,9}'::int4[])
+int_array_enum:int4
+3
+5
+9
+-- SELECT 3
+
+> CREATE EXTENSION tcn
+-- CREATE EXTENSION
+
+> SELECT triggered_change_notification()
+ERROR 39P01: triggered_change_notification: must be called as trigger
+
+> DROP TABLE ts, st
+-- DROP TABLE
+
+> DROP EXTENSION tsm_system_time, pg_prewarm, pg_freespacemap, pg_visibility, pgstattuple, pgrowlocks
+-- DROP EXTENSION
+
+> DROP EXTENSION dict_int, dict_xsyn, sslinfo, intagg, tcn
+-- DROP EXTENSION
+

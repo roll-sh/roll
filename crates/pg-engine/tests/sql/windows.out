@@ -1,0 +1,111 @@
+> CREATE TABLE w (dept text, emp text, sal int)
+-- CREATE TABLE
+
+> INSERT INTO w VALUES ('a', 'x', 10), ('a', 'y', 20), ('a', 'z', 20), ('b', 'p', 5), ('b', 'q', 15)
+-- INSERT 0 5
+
+> SELECT emp, row_number() OVER (ORDER BY sal, emp), rank() OVER (ORDER BY sal), dense_rank() OVER (ORDER BY sal) FROM w ORDER BY sal, emp
+emp:text | row_number:int8 | rank:int8 | dense_rank:int8
+p | 1 | 1 | 1
+x | 2 | 2 | 2
+q | 3 | 3 | 3
+y | 4 | 4 | 4
+z | 5 | 4 | 4
+-- SELECT 5
+
+> SELECT dept, emp, sum(sal) OVER (PARTITION BY dept), sum(sal) OVER (PARTITION BY dept ORDER BY emp) FROM w ORDER BY dept, emp
+dept:text | emp:text | sum:int8 | sum:int8
+a | x | 50 | 10
+a | y | 50 | 30
+a | z | 50 | 50
+b | p | 20 | 5
+b | q | 20 | 20
+-- SELECT 5
+
+> SELECT emp, lag(sal) OVER (ORDER BY emp), lead(sal, 2, -1) OVER (ORDER BY emp), first_value(emp) OVER (ORDER BY emp), last_value(emp) OVER (ORDER BY emp ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM w ORDER BY emp
+emp:text | lag:int4 | lead:int4 | first_value:text | last_value:text
+p | NULL | 10 | p | z
+q | 5 | 20 | p | z
+x | 15 | 20 | p | z
+y | 10 | -1 | p | z
+z | 20 | -1 | p | z
+-- SELECT 5
+
+> SELECT emp, avg(sal) OVER (ORDER BY emp ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)::numeric(10,2) FROM w ORDER BY emp
+emp:text | avg:numeric
+p | 10.00
+q | 10.00
+x | 15.00
+y | 16.67
+z | 20.00
+-- SELECT 5
+
+> SELECT emp, sum(sal) OVER (ORDER BY sal RANGE BETWEEN 5 PRECEDING AND CURRENT ROW) FROM w ORDER BY emp
+emp:text | sum:int8
+p | 5
+q | 25
+x | 15
+y | 55
+z | 55
+-- SELECT 5
+
+> SELECT emp, ntile(2) OVER (ORDER BY emp), percent_rank() OVER (ORDER BY sal), cume_dist() OVER (ORDER BY sal) FROM w ORDER BY emp
+emp:text | ntile:int4 | percent_rank:float8 | cume_dist:float8
+p | 1 | 0 | 0.2
+q | 1 | 0.5 | 0.6
+x | 1 | 0.25 | 0.4
+y | 2 | 0.75 | 1
+z | 2 | 0.75 | 1
+-- SELECT 5
+
+> SELECT emp, nth_value(emp, 2) OVER (PARTITION BY dept ORDER BY emp) FROM w ORDER BY emp
+emp:text | nth_value:text
+p | NULL
+q | q
+x | NULL
+y | y
+z | y
+-- SELECT 5
+
+> SELECT dept, emp, count(*) OVER win FROM w WINDOW win AS (PARTITION BY dept) ORDER BY emp
+dept:text | emp:text | count:int8
+b | p | 2
+b | q | 2
+a | x | 3
+a | y | 3
+a | z | 3
+-- SELECT 5
+
+> SELECT emp, sum(sal) OVER (ORDER BY emp GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM w ORDER BY emp
+emp:text | sum:int8
+p | NULL
+q | 5
+x | 15
+y | 10
+z | 20
+-- SELECT 5
+
+> SELECT dept, sum(sal), rank() OVER (ORDER BY sum(sal) DESC) FROM w GROUP BY dept ORDER BY dept
+dept:text | sum:int8 | rank:int8
+a | 50 | 1
+b | 20 | 2
+-- SELECT 2
+
+> SELECT emp FROM w WHERE row_number() OVER () = 1
+ERROR 42P20: window functions are not allowed in WHERE (at 25)
+
+> SELECT * FROM (SELECT emp, row_number() OVER (PARTITION BY dept ORDER BY sal DESC, emp) rn FROM w) t WHERE rn = 1 ORDER BY emp
+emp:text | rn:int8
+q | 1
+y | 1
+-- SELECT 2
+
+> SELECT emp, sum(sal) FILTER (WHERE sal > 10) OVER (ORDER BY emp) FROM w ORDER BY emp
+emp:text | sum:int8
+p | NULL
+q | 15
+x | 15
+y | 35
+z | 55
+-- SELECT 5
+

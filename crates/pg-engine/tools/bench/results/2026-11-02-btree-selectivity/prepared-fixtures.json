@@ -1,0 +1,12 @@
+{
+  "at_utc": "2026-11-02T00:54:20.788724+00:00",
+  "source_data": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-histogram",
+  "source_cleanly_stopped": true,
+  "baseline_binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+  "baseline_source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "baseline_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "client": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "source_repo": "90b5525fd689d5e81c1385b181aa88cf70e09e07",
+  "source_git_status": ""
+}

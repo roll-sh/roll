@@ -1,0 +1,410 @@
+> SET plan_cache_mode = force_generic_plan
+-- SET
+
+> CREATE TABLE a5_abc (a int, b text, c bool) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE a5_abc_1 (b text, a int, c bool)
+-- CREATE TABLE
+
+> CREATE TABLE a5_abc_2 (a int, c bool, b text)
+-- CREATE TABLE
+
+> ALTER TABLE a5_abc ATTACH PARTITION a5_abc_1 FOR VALUES IN (1)
+-- ALTER TABLE
+
+> ALTER TABLE a5_abc ATTACH PARTITION a5_abc_2 FOR VALUES IN (2)
+-- ALTER TABLE
+
+> INSERT INTO a5_abc VALUES (1, 'b', true), (2, 'c', true)
+-- INSERT 0 2
+
+> CREATE VIEW a5_abc_view AS SELECT * FROM a5_abc WHERE b <> 'a' WITH CHECK OPTION
+-- CREATE VIEW
+
+> CREATE FUNCTION a5_stable_one() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql STABLE
+-- CREATE FUNCTION
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT a5_stable_one() AS pid) AS q JOIN a5_abc_1 pt1 ON (q.pid = pt1.a)
+QUERY PLAN:text
+Seq Scan on a5_abc_1 pt1
+  Filter: (a5_stable_one() = a)
+-- EXPLAIN
+
+> SELECT * FROM (SELECT a5_stable_one() AS pid) AS q JOIN a5_abc_1 pt1 ON (q.pid = pt1.a)
+pid:int4 | b:text | a:int4 | c:bool
+1 | b | 1 | t
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a5_abc pt JOIN ((SELECT a5_stable_one() AS pid) AS q JOIN a5_abc_1 pt1 ON (q.pid = pt1.a)) ON pt.a = pt1.a
+QUERY PLAN:text
+Nested Loop
+  ->  Append
+        Subplans Removed: 1
+        ->  Seq Scan on a5_abc_1 pt_1
+              Filter: (a = a5_stable_one())
+  ->  Materialize
+        ->  Seq Scan on a5_abc_1 pt1
+              Filter: (a = a5_stable_one())
+-- EXPLAIN
+
+> SELECT * FROM a5_abc pt JOIN ((SELECT a5_stable_one() AS pid) AS q JOIN a5_abc_1 pt1 ON (q.pid = pt1.a)) ON pt.a = pt1.a
+a:int4 | b:text | c:bool | pid:int4 | b:text | a:int4 | c:bool
+1 | b | t | 1 | b | 1 | t
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> MERGE INTO a5_abc_view pt
+> USING (SELECT a5_stable_one() AS pid) AS q JOIN a5_abc_1 pt1 ON (q.pid = pt1.a) ON pt.a = pt1.a
+> WHEN MATCHED THEN DELETE RETURNING pt.a
+QUERY PLAN:text
+Merge on a5_abc
+  Merge on a5_abc_1
+  ->  Nested Loop
+        ->  Append
+              Subplans Removed: 1
+              ->  Seq Scan on a5_abc_1
+                    Filter: ((b <> 'a'::text) AND (a = a5_stable_one()))
+        ->  Materialize
+              ->  Seq Scan on a5_abc_1 pt1
+                    Filter: (a = a5_stable_one())
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> MERGE INTO a5_abc_view pt
+> USING (SELECT a5_stable_one() AS pid) AS q JOIN a5_abc_1 pt1 ON (q.pid = pt1.a) ON pt.a = pt1.a
+> WHEN MATCHED THEN DELETE RETURNING pt.a
+a:int4
+1
+-- MERGE 1
+
+> TABLE a5_abc_view
+a:int4 | b:text | c:bool
+2 | c | t
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> EXPLAIN (COSTS OFF)
+> MERGE INTO a5_abc_view pt
+> USING (SELECT a5_stable_one() + 2 AS pid) AS q JOIN a5_abc_1 pt1 ON (q.pid = pt1.a) ON pt.a = pt1.a
+> WHEN MATCHED THEN DELETE RETURNING pt.a
+QUERY PLAN:text
+Merge on a5_abc
+  ->  Nested Loop
+        ->  Append
+              Subplans Removed: 2
+        ->  Materialize
+              ->  Seq Scan on a5_abc_1 pt1
+                    Filter: (a = (a5_stable_one() + 2))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> MERGE INTO a5_abc_view pt
+> USING (SELECT a5_stable_one() + 1 AS pid) AS q JOIN a5_abc_2 pt2 ON (q.pid = pt2.a) ON pt.a = a5_stable_one() + 2
+> WHEN NOT MATCHED THEN INSERT VALUES (1, 'd', false) RETURNING pt.a
+QUERY PLAN:text
+Merge on a5_abc
+  ->  Nested Loop Left Join
+        ->  Seq Scan on a5_abc_2 pt2
+              Filter: ((a5_stable_one() + 1) = a)
+        ->  Materialize
+              ->  Append
+                    Subplans Removed: 2
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> MERGE INTO a5_abc_view pt
+> USING (SELECT a5_stable_one() + 1 AS pid) AS q JOIN a5_abc_2 pt2 ON (q.pid = pt2.a) ON pt.a = a5_stable_one() + 2
+> WHEN NOT MATCHED THEN INSERT VALUES (1, 'd', false) RETURNING pt.a
+a:int4
+1
+-- MERGE 1
+
+> TABLE a5_abc_view
+a:int4 | b:text | c:bool
+1 | b | t
+1 | d | f
+2 | c | t
+-- SELECT 3
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE a5_t1 (name text, n int)
+-- CREATE TABLE
+
+> CREATE TABLE a5_t2 (name text, n int)
+-- CREATE TABLE
+
+> CREATE TABLE a5_t3 (name text, n int)
+-- CREATE TABLE
+
+> INSERT INTO a5_t1 VALUES ('bb', 11)
+-- INSERT 0 1
+
+> INSERT INTO a5_t2 VALUES ('bb', 12), ('cc', 22), ('ee', 42)
+-- INSERT 0 3
+
+> INSERT INTO a5_t3 VALUES ('bb', 13), ('cc', 23), ('dd', 33)
+-- INSERT 0 3
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a5_t1 FULL JOIN a5_t2 USING (name) FULL JOIN a5_t3 USING (name)
+QUERY PLAN:text
+Merge Full Join
+  Merge Cond: (a5_t3.name = (COALESCE(a5_t1.name, a5_t2.name)))
+  ->  Sort
+        Sort Key: a5_t3.name
+        ->  Seq Scan on a5_t3
+  ->  Sort
+        Sort Key: (COALESCE(a5_t1.name, a5_t2.name))
+        ->  Merge Full Join
+              Merge Cond: (a5_t1.name = a5_t2.name)
+              ->  Sort
+                    Sort Key: a5_t1.name
+                    ->  Seq Scan on a5_t1
+              ->  Sort
+                    Sort Key: a5_t2.name
+                    ->  Seq Scan on a5_t2
+-- EXPLAIN
+
+> SELECT * FROM a5_t1 FULL JOIN a5_t2 USING (name) FULL JOIN a5_t3 USING (name)
+name:text | n:int4 | n:int4 | n:int4
+bb | 11 | 12 | 13
+cc | NULL | 22 | 23
+dd | NULL | NULL | 33
+ee | NULL | 42 | NULL
+-- SELECT 4
+
+> CREATE TABLE a5_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a5_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> ANALYZE a5_i8
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT a.q2, b.q1 FROM a5_i8 a LEFT JOIN a5_i8 b ON a.q2 = coalesce(b.q1, 1) WHERE coalesce(b.q1, 1) > 0
+QUERY PLAN:text
+Hash Left Join
+  Output: a.q2, b.q1
+  Hash Cond: (a.q2 = COALESCE(b.q1, '1'::bigint))
+  Filter: (COALESCE(b.q1, '1'::bigint) > 0)
+  ->  Seq Scan on public.a5_i8 a
+        Output: a.q1, a.q2
+  ->  Hash
+        Output: b.q1
+        ->  Seq Scan on public.a5_i8 b
+              Output: b.q1
+-- EXPLAIN
+
+> SELECT a.q2, b.q1 FROM a5_i8 a LEFT JOIN a5_i8 b ON a.q2 = coalesce(b.q1, 1) WHERE coalesce(b.q1, 1) > 0
+q2:int8 | q1:int8
+-4567890123456789 | NULL
+123 | 123
+123 | 123
+456 | NULL
+4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789
+-- SELECT 10
+
+> CREATE TABLE a5_j1 (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE a5_j2 (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO a5_j1 VALUES (1), (2), (3)
+-- INSERT 0 3
+
+> INSERT INTO a5_j2 VALUES (1), (2), (3)
+-- INSERT 0 3
+
+> ANALYZE a5_j1
+-- ANALYZE
+
+> ANALYZE a5_j2
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a5_j1 RIGHT JOIN a5_j2 ON a5_j1.id = a5_j2.id
+QUERY PLAN:text
+Hash Left Join
+  Output: a5_j1.id, a5_j2.id
+  Inner Unique: true
+  Hash Cond: (a5_j2.id = a5_j1.id)
+  ->  Seq Scan on public.a5_j2
+        Output: a5_j2.id
+  ->  Hash
+        Output: a5_j1.id
+        ->  Seq Scan on public.a5_j1
+              Output: a5_j1.id
+-- EXPLAIN
+
+> CREATE TABLE a5_k1 (id1 int, id2 int, PRIMARY KEY (id1, id2))
+-- CREATE TABLE
+
+> CREATE TABLE a5_k2 (id1 int, id2 int, PRIMARY KEY (id1, id2))
+-- CREATE TABLE
+
+> INSERT INTO a5_k1 VALUES (1, 1), (1, 2)
+-- INSERT 0 2
+
+> INSERT INTO a5_k2 VALUES (1, 1)
+-- INSERT 0 1
+
+> ANALYZE a5_k1
+-- ANALYZE
+
+> ANALYZE a5_k2
+-- ANALYZE
+
+> CREATE UNIQUE INDEX a5_k1_id2_idx ON a5_k1 (id2) WHERE id2 IS NOT NULL
+-- CREATE INDEX
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a5_k1 INNER JOIN a5_k2 ON a5_k1.id2 = a5_k2.id2
+QUERY PLAN:text
+Nested Loop
+  Output: a5_k1.id1, a5_k1.id2, a5_k2.id1, a5_k2.id2
+  Join Filter: (a5_k2.id2 = a5_k1.id2)
+  ->  Seq Scan on public.a5_k2
+        Output: a5_k2.id1, a5_k2.id2
+  ->  Seq Scan on public.a5_k1
+        Output: a5_k1.id1, a5_k1.id2
+-- EXPLAIN
+
+> DROP INDEX a5_k1_id2_idx
+-- DROP INDEX
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a5_k1 INNER JOIN a5_k2 ON a5_k1.id2 = a5_k2.id2
+QUERY PLAN:text
+Nested Loop
+  Output: a5_k1.id1, a5_k1.id2, a5_k2.id1, a5_k2.id2
+  Join Filter: (a5_k1.id2 = a5_k2.id2)
+  ->  Seq Scan on public.a5_k2
+        Output: a5_k2.id1, a5_k2.id2
+  ->  Seq Scan on public.a5_k1
+        Output: a5_k1.id1, a5_k1.id2
+-- EXPLAIN
+
+> SET enable_partitionwise_join = on
+-- SET
+
+> CREATE TABLE a5_pht (a int, b int, c text) PARTITION BY HASH (c)
+-- CREATE TABLE
+
+> CREATE TABLE a5_pht_p1 PARTITION OF a5_pht FOR VALUES WITH (MODULUS 3, REMAINDER 0)
+-- CREATE TABLE
+
+> CREATE TABLE a5_pht_p2 PARTITION OF a5_pht FOR VALUES WITH (MODULUS 3, REMAINDER 1)
+-- CREATE TABLE
+
+> CREATE TABLE a5_pht_p3 PARTITION OF a5_pht FOR VALUES WITH (MODULUS 3, REMAINDER 2)
+-- CREATE TABLE
+
+> INSERT INTO a5_pht SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> ANALYZE a5_pht
+-- ANALYZE
+
+> CREATE INDEX a5_pht_c_idx ON a5_pht (c)
+-- CREATE INDEX
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a5_pht p1 JOIN a5_pht p2 USING (c) LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  Append
+        ->  Nested Loop
+              Join Filter: (p1_1.c = p2_1.c)
+              ->  Seq Scan on a5_pht_p1 p1_1
+              ->  Materialize
+                    ->  Seq Scan on a5_pht_p1 p2_1
+        ->  Nested Loop
+              Join Filter: (p1_2.c = p2_2.c)
+              ->  Seq Scan on a5_pht_p2 p1_2
+              ->  Materialize
+                    ->  Seq Scan on a5_pht_p2 p2_2
+        ->  Nested Loop
+              Join Filter: (p1_3.c = p2_3.c)
+              ->  Seq Scan on a5_pht_p3 p1_3
+              ->  Materialize
+                    ->  Seq Scan on a5_pht_p3 p2_3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a5_pht p1 JOIN a5_pht p2 USING (c) LIMIT 100
+QUERY PLAN:text
+Limit
+  ->  Append
+        ->  Nested Loop
+              ->  Seq Scan on a5_pht_p1 p1_1
+              ->  Memoize
+                    Cache Key: p1_1.c
+                    Cache Mode: logical
+                    ->  Index Scan using a5_pht_p1_c_idx on a5_pht_p1 p2_1
+                          Index Cond: (c = p1_1.c)
+        ->  Nested Loop
+              ->  Seq Scan on a5_pht_p2 p1_2
+              ->  Memoize
+                    Cache Key: p1_2.c
+                    Cache Mode: logical
+                    ->  Index Scan using a5_pht_p2_c_idx on a5_pht_p2 p2_2
+                          Index Cond: (c = p1_2.c)
+        ->  Nested Loop
+              ->  Seq Scan on a5_pht_p3 p1_3
+              ->  Memoize
+                    Cache Key: p1_3.c
+                    Cache Mode: logical
+                    ->  Index Scan using a5_pht_p3_c_idx on a5_pht_p3 p2_3
+                          Index Cond: (c = p1_3.c)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a5_pht p1 JOIN a5_pht p2 USING (c) LIMIT 1000
+QUERY PLAN:text
+Limit
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (p1_1.c = p2_1.c)
+              ->  Seq Scan on a5_pht_p1 p1_1
+              ->  Hash
+                    ->  Seq Scan on a5_pht_p1 p2_1
+        ->  Hash Join
+              Hash Cond: (p1_2.c = p2_2.c)
+              ->  Seq Scan on a5_pht_p2 p1_2
+              ->  Hash
+                    ->  Seq Scan on a5_pht_p2 p2_2
+        ->  Hash Join
+              Hash Cond: (p1_3.c = p2_3.c)
+              ->  Seq Scan on a5_pht_p3 p1_3
+              ->  Hash
+                    ->  Seq Scan on a5_pht_p3 p2_3
+-- EXPLAIN
+
+> SELECT count(*) FROM (SELECT * FROM a5_pht p1 JOIN a5_pht p2 USING (c) LIMIT 100) s
+count:int8
+100
+-- SELECT 1
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> DROP TABLE a5_abc, a5_t1, a5_t2, a5_t3, a5_i8, a5_j1, a5_j2, a5_k1, a5_k2, a5_pht CASCADE
+NOTICE 00000: drop cascades to view a5_abc_view
+-- DROP TABLE
+
+> DROP FUNCTION a5_stable_one()
+-- DROP FUNCTION
+

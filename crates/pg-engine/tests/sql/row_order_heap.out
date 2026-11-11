@@ -1,0 +1,229 @@
+> create table ro_a (id int, v text)
+-- CREATE TABLE
+
+> insert into ro_a select g, 'v' || g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> update ro_a set v = 'u' where id in (2, 5)
+-- UPDATE 2
+
+> select * from ro_a
+id:int4 | v:text
+1 | v1
+3 | v3
+4 | v4
+6 | v6
+7 | v7
+8 | v8
+9 | v9
+10 | v10
+2 | u
+5 | u
+-- SELECT 10
+
+> delete from ro_a where id in (3, 4)
+-- DELETE 2
+
+> vacuum ro_a
+-- VACUUM
+
+> insert into ro_a values (100, 'n1'), (101, 'n2')
+-- INSERT 0 2
+
+> select * from ro_a
+id:int4 | v:text
+1 | v1
+100 | n1
+101 | n2
+6 | v6
+7 | v7
+8 | v8
+9 | v9
+10 | v10
+2 | u
+5 | u
+-- SELECT 10
+
+> create table ro_p (id int primary key, v text)
+-- CREATE TABLE
+
+> insert into ro_p values (5, 'a'), (1, 'b'), (3, 'c'), (2, 'd')
+-- INSERT 0 4
+
+> select * from ro_p
+id:int4 | v:text
+5 | a
+1 | b
+3 | c
+2 | d
+-- SELECT 4
+
+> update ro_p set v = 'x' where id = 1
+-- UPDATE 1
+
+> select * from ro_p
+id:int4 | v:text
+5 | a
+3 | c
+2 | d
+1 | x
+-- SELECT 4
+
+> begin
+-- BEGIN
+
+> update ro_p set v = 'y' where id = 3
+-- UPDATE 1
+
+> rollback
+-- ROLLBACK
+
+> select * from ro_p
+id:int4 | v:text
+5 | a
+3 | c
+2 | d
+1 | x
+-- SELECT 4
+
+> create table ro_t2 (id int primary key, v int, w text) with (fillfactor = 70)
+-- CREATE TABLE
+
+> insert into ro_t2 select g, 0, 'abc' from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> update ro_t2 set v = v + 1
+-- UPDATE 2000
+
+> update ro_t2 set v = v + 1
+-- UPDATE 2000
+
+> update ro_t2 set w = w || 'defgh' where id % 2 = 0
+-- UPDATE 1000
+
+> select md5(string_agg(id::text, ',')) from ro_t2
+md5:text
+b07e4dea2bf3f96f22abb6660c284717
+-- SELECT 1
+
+> create index ro_t2_v on ro_t2 (v)
+-- CREATE INDEX
+
+> update ro_t2 set v = v + 1 where id <= 1000
+-- UPDATE 1000
+
+> select pg_relation_size('ro_t2'), md5(string_agg(id::text, ',')) from ro_t2
+pg_relation_size:int8 | md5:text
+253952 | 1f6f1f8348f172b7d86b81a7298412bf
+-- SELECT 1
+
+> update ro_t2 set v = v + 1 where id <= 1000
+-- UPDATE 1000
+
+> select pg_relation_size('ro_t2'), md5(string_agg(id::text, ',')) from ro_t2
+pg_relation_size:int8 | md5:text
+253952 | ba2da08afbf424aea2f44f7f602fe5d4
+-- SELECT 1
+
+> delete from ro_t2 where id % 3 = 0
+-- DELETE 666
+
+> vacuum ro_t2
+-- VACUUM
+
+> insert into ro_t2 select g, 5, 'new' from generate_series(3000, 3100) g
+-- INSERT 0 101
+
+> select pg_relation_size('ro_t2'), md5(string_agg(id::text, ',')) from ro_t2
+pg_relation_size:int8 | md5:text
+253952 | 561150d9c0c46ae800be8fc7741824d0
+-- SELECT 1
+
+> explain (costs off) select * from ro_t2 where v = 5
+QUERY PLAN:text
+Bitmap Heap Scan on ro_t2
+  Recheck Cond: (v = 5)
+  ->  Bitmap Index Scan on ro_t2_v
+        Index Cond: (v = 5)
+-- EXPLAIN
+
+> select md5(string_agg(id::text, ',')) from ro_t2 where v = 5
+md5:text
+8d8d86e03e9bbf3ac0910203d9c20f1a
+-- SELECT 1
+
+> set enable_bitmapscan = off
+-- SET
+
+> explain (costs off) select * from ro_t2 where v = 4
+QUERY PLAN:text
+Index Scan using ro_t2_v on ro_t2
+  Index Cond: (v = 4)
+-- EXPLAIN
+
+> select md5(string_agg(id::text, ',')) from ro_t2 where v = 4
+md5:text
+d0289626d91ae92c0e952ce33348acc9
+-- SELECT 1
+
+> select id from ro_t2 where v = 4 order by v desc limit 5
+id:int4
+1
+5
+7
+11
+13
+-- SELECT 5
+
+> reset enable_bitmapscan
+-- RESET
+
+> create table ro_c (a int, b text)
+-- CREATE TABLE
+
+> insert into ro_c values (1, 'x'), (2, 'y'), (3, 'z')
+-- INSERT 0 3
+
+> begin
+-- BEGIN
+
+> update ro_c set b = 'w' where a = 2
+-- UPDATE 1
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c cursor for select a, b from ro_c
+-- DECLARE CURSOR
+
+> fetch 1 from c
+a:int4 | b:text
+1 | x
+-- FETCH 1
+
+> update ro_c set b = b || '!' where current of c
+-- UPDATE 1
+
+> fetch 1 from c
+a:int4 | b:text
+2 | y
+-- FETCH 1
+
+> fetch 1 from c
+a:int4 | b:text
+3 | z
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> select * from ro_c
+a:int4 | b:text
+2 | y
+3 | z
+1 | x!
+-- SELECT 3
+

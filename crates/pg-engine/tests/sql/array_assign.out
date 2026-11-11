@@ -1,0 +1,213 @@
+> CREATE TABLE t (id int PRIMARY KEY, a int[], b text[], c int[][], n numeric(5,2)[])
+-- CREATE TABLE
+
+> INSERT INTO t VALUES (1, NULL, '{}', '{{1,2},{3,4}}', '{1}')
+-- INSERT 0 1
+
+> UPDATE t SET a[3] = 1, b[-1] = 'x'
+-- UPDATE 1
+
+> SELECT a, b FROM t
+a:int4[] | b:text[]
+[3:3]={1} | [-1:-1]={x}
+-- SELECT 1
+
+> UPDATE t SET a[5] = 2, a[0] = 9
+-- UPDATE 1
+
+> SELECT a, array_dims(a) FROM t
+a:int4[] | array_dims:text
+[0:5]={9,NULL,NULL,1,NULL,2} | [0:5]
+-- SELECT 1
+
+> UPDATE t SET c[2][2] = 40
+-- UPDATE 1
+
+> SELECT c FROM t
+c:int4[]
+{{1,2},{3,40}}
+-- SELECT 1
+
+> UPDATE t SET c[3][1] = 1
+ERROR 2202E: array subscript out of range
+
+> UPDATE t SET c[1] = 1
+ERROR 2202E: wrong number of array subscripts
+
+> UPDATE t SET a[NULL] = 1
+ERROR 22004: array subscript in assignment must not be null
+
+> UPDATE t SET a[1:2] = '{7,8}'
+-- UPDATE 1
+
+> SELECT a FROM t
+a:int4[]
+[0:5]={9,7,8,1,NULL,2}
+-- SELECT 1
+
+> UPDATE t SET a[6:8] = '{1}'
+ERROR 2202E: source array too small
+
+> UPDATE t SET a[7:8] = '{5,6,99}'
+-- UPDATE 1
+
+> SELECT a FROM t
+a:int4[]
+[0:8]={9,7,8,1,NULL,2,NULL,5,6}
+-- SELECT 1
+
+> UPDATE t SET a[:1] = '{0,0}'
+-- UPDATE 1
+
+> UPDATE t SET a[8:] = ARRAY[-8, -9]
+-- UPDATE 1
+
+> SELECT a FROM t
+a:int4[]
+[0:8]={0,0,8,1,NULL,2,NULL,5,-8}
+-- SELECT 1
+
+> UPDATE t SET c[1:1][1:2] = '{{-1,-2}}'
+-- UPDATE 1
+
+> SELECT c FROM t
+c:int4[]
+{{-1,-2},{3,40}}
+-- SELECT 1
+
+> UPDATE t SET c[1:2] = '{{1}}'
+ERROR 2202E: source array too small
+
+> UPDATE t SET c[2:2] = NULL
+-- UPDATE 1
+
+> SELECT c FROM t
+c:int4[]
+{{-1,-2},{3,40}}
+-- SELECT 1
+
+> UPDATE t SET a = NULL
+-- UPDATE 1
+
+> UPDATE t SET a[2:3] = '{1,2}'
+-- UPDATE 1
+
+> SELECT a FROM t
+a:int4[]
+[2:3]={1,2}
+-- SELECT 1
+
+> UPDATE t SET a = NULL
+-- UPDATE 1
+
+> UPDATE t SET a[:3] = '{1,2}'
+ERROR 2202E: array slice subscript must provide both boundaries
+DETAIL: When assigning to a slice of an empty array value, slice boundaries must be fully specified.
+
+> UPDATE t SET a[1][2] = 5
+-- UPDATE 1
+
+> SELECT a FROM t
+a:int4[]
+[1:1][2:2]={{5}}
+-- SELECT 1
+
+> UPDATE t SET a[10] = 1, a[1] = 3
+ERROR 2202E: wrong number of array subscripts
+
+> UPDATE t SET a[1] = 'x'
+ERROR 22P02: invalid input syntax for type integer: "x" (at 21)
+
+> UPDATE t SET b[1.7] = 'q'
+-- UPDATE 1
+
+> SELECT b FROM t
+b:text[]
+[-1:2]={x,NULL,NULL,q}
+-- SELECT 1
+
+> UPDATE t SET n[2] = 1000
+ERROR 22003: numeric field overflow
+DETAIL: A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+
+> UPDATE t SET n[2] = 3.14159 RETURNING n
+n:numeric[]
+{1.00,3.14}
+-- UPDATE 1
+
+> UPDATE t SET a = '{1}', a[1] = 2
+ERROR 42601: multiple assignments to same column "a"
+
+> UPDATE t SET a[1] = 2, a = '{1}'
+ERROR 42601: multiple assignments to same column "a"
+
+> UPDATE t SET a = '{1,2,3}'
+-- UPDATE 1
+
+> UPDATE t SET a[2] = a[1] + a[3], a[3] = a[2] * 10 RETURNING a
+a:int4[]
+{1,4,20}
+-- UPDATE 1
+
+> UPDATE t SET id[1] = 1
+ERROR 42804: cannot subscript type integer because it does not support subscripting (at 14)
+
+> INSERT INTO t (id, a[2], a[1], b[1:2]) VALUES (2, 20, 10, '{p,q,r}')
+-- INSERT 0 1
+
+> INSERT INTO t (id, c[1][1]) SELECT 3, 7
+-- INSERT 0 1
+
+> SELECT id, a, b, c FROM t WHERE id > 1 ORDER BY id
+id:int4 | a:int4[] | b:text[] | c:int4[]
+2 | {10,20} | {p,q} | NULL
+3 | NULL | NULL | {{7}}
+-- SELECT 2
+
+> INSERT INTO t (id, a, a[1]) VALUES (4, '{1}', 2)
+ERROR 42701: column "a" specified more than once (at 23)
+
+> CREATE TYPE pt AS (x int, y int)
+-- CREATE TYPE
+
+> CREATE TABLE shapes (id int, p pt, ps pt[])
+-- CREATE TABLE
+
+> INSERT INTO shapes VALUES (1, ROW(1, 2), ARRAY[ROW(1, 1)::pt])
+-- INSERT 0 1
+
+> UPDATE shapes SET p.x = 10, p.y = p.x + 1
+ERROR 42P01: missing FROM-clause entry for table "p" (at 35)
+
+> UPDATE shapes SET ps[2] = ROW(5, 6)
+-- UPDATE 1
+
+> SELECT p, ps FROM shapes
+p:user | ps:user
+(1,2) | {"(1,1)","(5,6)"}
+-- SELECT 1
+
+> UPDATE shapes SET p.z = 1
+ERROR 42703: cannot assign to field "z" of column "p" because there is no such column in data type pt (at 19)
+
+> UPDATE shapes SET id.x = 1
+ERROR 42804: cannot assign to field "x" of column "id" because its type integer is not a composite type (at 19)
+
+> INSERT INTO shapes (id, p.y) VALUES (2, 9)
+-- INSERT 0 1
+
+> SELECT id, p, (p).y FROM shapes ORDER BY id
+id:int4 | p:user | y:int4
+1 | (1,2) | 2
+2 | (,9) | 9
+-- SELECT 2
+
+> DROP TABLE shapes
+-- DROP TABLE
+
+> DROP TYPE pt
+-- DROP TYPE
+
+> DROP TABLE t
+-- DROP TABLE
+

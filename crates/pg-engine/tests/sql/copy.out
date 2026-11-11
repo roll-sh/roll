@@ -1,0 +1,341 @@
+> CREATE TABLE cp (id int PRIMARY KEY, name text, score numeric(5,2), tags text[], born date, note text DEFAULT 'none')
+-- CREATE TABLE
+
+> COPY cp (id, name, score, tags, born) FROM STDIN
+>> 1	alice	9.5	{a,b}	2001-02-03
+>> 2	bob	\N	{}	\N
+>> 3	tab\there	1.25	{"x y"}	1999-12-31
+>> 4	back\\slash	0	{NULL}	2020-01-01
+-- COPY 4
+
+> SELECT * FROM cp ORDER BY id
+id:int4 | name:text | score:numeric | tags:text[] | born:date | note:text
+1 | alice | 9.50 | {a,b} | 2001-02-03 | none
+2 | bob | NULL | {} | NULL | none
+3 | tab	here | 1.25 | {"x y"} | 1999-12-31 | none
+4 | back\slash | 0.00 | {NULL} | 2020-01-01 | none
+-- SELECT 4
+
+> COPY cp TO STDOUT
+copy:text
+1	alice	9.50	{a,b}	2001-02-03	none
+2	bob	\N	{}	\N	none
+3	tab\there	1.25	{"x y"}	1999-12-31	none
+4	back\\slash	0.00	{NULL}	2020-01-01	none
+-- COPY 4
+
+> COPY cp (id, name) TO STDOUT
+copy:text
+1	alice
+2	bob
+3	tab\there
+4	back\\slash
+-- COPY 4
+
+> COPY (SELECT id, name FROM cp WHERE id > 2 ORDER BY id) TO STDOUT
+copy:text
+3	tab\there
+4	back\\slash
+-- COPY 2
+
+> COPY cp TO STDOUT WITH (DELIMITER '|', NULL 'NULL')
+copy:text
+1|alice|9.50|{a,b}|2001-02-03|none
+2|bob|NULL|{}|NULL|none
+3|tab\there|1.25|{"x y"}|1999-12-31|none
+4|back\\slash|0.00|{NULL}|2020-01-01|none
+-- COPY 4
+
+> COPY cp TO STDOUT WITH (FORMAT csv, HEADER)
+copy:text
+1,alice,9.50,"{a,b}",2001-02-03,none
+2,bob,,{},,none
+3,tab	here,1.25,"{""x y""}",1999-12-31,none
+4,back\slash,0.00,{NULL},2020-01-01,none
+id,name,score,tags,born,note
+-- COPY 4
+
+> COPY cp (id, name) TO STDOUT WITH (FORMAT csv, FORCE_QUOTE *)
+copy:text
+"1","alice"
+"2","bob"
+"3","tab	here"
+"4","back\slash"
+-- COPY 4
+
+> COPY cp (id, name, note) TO STDOUT WITH (FORMAT csv, FORCE_QUOTE (name), QUOTE '''', DELIMITER ';')
+copy:text
+1;'alice';none
+2;'bob';none
+3;'tab	here';none
+4;'back\slash';none
+-- COPY 4
+
+> TRUNCATE cp
+-- TRUNCATE TABLE
+
+> COPY cp (id, name, score) FROM STDIN WITH (FORMAT csv, HEADER)
+>> id,name,score
+>> 10,"quoted, comma",1.5
+>> 11,"say ""hi""",
+>> 12,,2
+-- COPY 3
+
+> SELECT id, name, score, name IS NULL AS null_name FROM cp ORDER BY id
+id:int4 | name:text | score:numeric | null_name:bool
+10 | quoted, comma | 1.50 | f
+11 | say "hi" | NULL | f
+12 | NULL | 2.00 | t
+-- SELECT 3
+
+> COPY cp (id, name) FROM STDIN WITH (FORMAT csv, FORCE_NOT_NULL (name))
+>> 13,
+-- COPY 1
+
+> COPY cp (id, name) FROM STDIN WITH (FORMAT csv, FORCE_NULL (name))
+>> 14,""
+-- COPY 1
+
+> COPY cp (id, name) FROM STDIN WITH (FORMAT csv, NULL 'nil')
+>> 15,nil
+>> 16,"nil"
+-- COPY 2
+
+> SELECT id, name IS NULL AS null_name, name FROM cp WHERE id >= 13 ORDER BY id
+id:int4 | null_name:bool | name:text
+13 | f | 
+14 | t | NULL
+15 | t | NULL
+16 | f | nil
+-- SELECT 4
+
+> COPY cp (id, name) FROM STDIN WITH (FORMAT csv, HEADER MATCH)
+>> id,name
+>> 17,matched
+-- COPY 1
+
+> COPY cp (id, name) FROM STDIN WITH (FORMAT csv, HEADER MATCH)
+>> id,wrong
+>> 18,x
+ERROR 22P04: column name mismatch in header line field 2: got "wrong", expected "name"
+CONTEXT: COPY cp, line 1: "id,wrong"
+
+> COPY cp (id, name, note) FROM STDIN WITH (DEFAULT '\D')
+>> 20	d	\D
+>> 21	e	explicit
+-- COPY 2
+
+> SELECT id, note FROM cp WHERE id >= 20 ORDER BY id
+id:int4 | note:text
+20 | none
+21 | explicit
+-- SELECT 2
+
+> COPY cp (id, name) FROM STDIN
+>> 30	a	extra
+ERROR 22P04: extra data after last expected column
+CONTEXT: COPY cp, line 1: "30	a	extra"
+
+> COPY cp (id, name) FROM STDIN
+>> 31
+ERROR 22P04: missing data for column "name"
+CONTEXT: COPY cp, line 1: "31"
+
+> COPY cp (id, score) FROM STDIN
+>> 32	notanumber
+ERROR 22P02: invalid input syntax for type numeric: "notanumber"
+CONTEXT: COPY cp, line 1, column score: "notanumber"
+
+> COPY cp (id, name) FROM STDIN
+>> 1	duplicate
+-- COPY 1
+
+> COPY cp (nope) FROM STDIN
+ERROR 42703: column "nope" of relation "cp" does not exist
+
+> COPY cp_missing FROM STDIN
+ERROR 42P01: relation "cp_missing" does not exist
+
+> COPY cp FROM STDIN WITH (FORMAT xml)
+ERROR 22023: COPY format "xml" not recognized (at 26)
+
+> COPY cp FROM STDIN WITH (DELIMITER 'ab')
+ERROR 0A000: COPY delimiter must be a single one-byte character
+
+> COPY cp TO STDOUT WITH (FORMAT csv, FORCE_QUOTE (id), FORCE_QUOTE (name))
+ERROR 42601: conflicting or redundant options (at 55)
+
+> COPY cp TO STDOUT WITH (FORCE_QUOTE (id))
+ERROR 0A000: COPY FORCE_QUOTE requires CSV mode
+
+> COPY cp FROM STDIN WITH (HEADER)
+-- COPY 0
+
+> SELECT count(*) FROM cp
+count:int8
+11
+-- SELECT 1
+
+> COPY cp (id, score) FROM STDIN WITH (ON_ERROR ignore)
+>> 40	1
+>> 41	bad
+>> 42	3
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT id, score FROM cp WHERE id >= 40 ORDER BY id
+id:int4 | score:numeric
+40 | 1.00
+42 | 3.00
+-- SELECT 2
+
+> CREATE VIEW cpv AS SELECT id FROM cp
+-- CREATE VIEW
+
+> COPY cpv TO STDOUT
+ERROR 42809: cannot copy from view "cpv"
+HINT: Try the COPY (SELECT ...) TO variant.
+
+> COPY cpv FROM STDIN
+ERROR 42809: cannot copy to view "cpv"
+HINT: To enable copying to a view, provide an INSTEAD OF INSERT trigger.
+
+> CREATE TABLE cpg (a int, b int GENERATED ALWAYS AS (a * 2) STORED)
+-- CREATE TABLE
+
+> COPY cpg (a) FROM STDIN
+>> 1
+>> 2
+-- COPY 2
+
+> COPY cpg (a, b) FROM STDIN
+>> 3	4
+ERROR 42P10: column "b" is a generated column
+DETAIL: Generated columns cannot be used in COPY.
+
+> COPY cpg TO STDOUT
+copy:text
+1
+2
+-- COPY 2
+
+> CREATE TABLE cpt (a int, b text)
+-- CREATE TABLE
+
+> CREATE FUNCTION cpt_trig() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   NEW.b := upper(NEW.b);
+>   RAISE NOTICE 'row %', NEW.a;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER cpt_t BEFORE INSERT ON cpt FOR EACH ROW EXECUTE FUNCTION cpt_trig()
+-- CREATE TRIGGER
+
+> COPY cpt FROM STDIN
+>> 1	x
+>> 2	y
+NOTICE 00000: row 1
+CONTEXT: PL/pgSQL function cpt_trig() line 4 at RAISE
+CONTEXT: COPY cpt, line 1: "1	x"
+NOTICE 00000: row 2
+CONTEXT: PL/pgSQL function cpt_trig() line 4 at RAISE
+CONTEXT: COPY cpt, line 2: "2	y"
+-- COPY 2
+
+> SELECT * FROM cpt ORDER BY a
+a:int4 | b:text
+1 | X
+2 | Y
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> COPY cpt FROM STDIN
+>> 3	z
+NOTICE 00000: row 3
+CONTEXT: PL/pgSQL function cpt_trig() line 4 at RAISE
+CONTEXT: COPY cpt, line 1: "3	z"
+-- COPY 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*) FROM cpt
+count:int8
+2
+-- SELECT 1
+
+> DROP TABLE cp, cpg, cpt CASCADE
+NOTICE 00000: drop cascades to view cpv
+-- DROP TABLE
+
+> DROP FUNCTION cpt_trig()
+-- DROP FUNCTION
+
+> CREATE TABLE cpe (a int PRIMARY KEY, b text CHECK (b <> 'bad'))
+-- CREATE TABLE
+
+> COPY cpe FROM STDIN
+>> 1	x
+>> 1	y
+ERROR 23505: duplicate key value violates unique constraint "cpe_pkey"
+DETAIL: Key (a)=(1) already exists.
+CONTEXT: COPY cpe, line 2
+OBJECTS: schema=public table=cpe constraint=cpe_pkey
+
+> COPY cpe FROM STDIN
+>> 1	x
+>> 2	bad
+ERROR 23514: new row for relation "cpe" violates check constraint "cpe_b_check"
+DETAIL: Failing row contains (2, bad).
+CONTEXT: COPY cpe, line 2: "2	bad"
+OBJECTS: schema=public table=cpe constraint=cpe_b_check
+
+> COPY cpe (b) FROM STDIN
+>> z
+ERROR 23502: null value in column "a" of relation "cpe" violates not-null constraint
+DETAIL: Failing row contains (null, z).
+CONTEXT: COPY cpe, line 1: "z"
+OBJECTS: schema=public table=cpe column=a
+
+> CREATE FUNCTION cpe_trig() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER cpe_t BEFORE INSERT ON cpe FOR EACH ROW EXECUTE FUNCTION cpe_trig()
+-- CREATE TRIGGER
+
+> COPY cpe FROM STDIN
+>> 1	x
+>> 1	y
+ERROR 23505: duplicate key value violates unique constraint "cpe_pkey"
+DETAIL: Key (a)=(1) already exists.
+CONTEXT: COPY cpe, line 2: "1	y"
+OBJECTS: schema=public table=cpe constraint=cpe_pkey
+
+> CREATE FUNCTION cpe_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'after %', NEW.a; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER cpe_a AFTER INSERT ON cpe FOR EACH ROW EXECUTE FUNCTION cpe_after()
+-- CREATE TRIGGER
+
+> COPY cpe FROM STDIN
+>> 5	x
+>> 6	y
+NOTICE 00000: after 5
+CONTEXT: PL/pgSQL function cpe_after() line 1 at RAISE
+NOTICE 00000: after 6
+CONTEXT: PL/pgSQL function cpe_after() line 1 at RAISE
+-- COPY 2
+
+> DROP TABLE cpe
+-- DROP TABLE
+
+> DROP FUNCTION cpe_trig()
+-- DROP FUNCTION
+
+> DROP FUNCTION cpe_after()
+-- DROP FUNCTION
+

@@ -1,0 +1,309 @@
+> create table a25_i4 (f1 int)
+-- CREATE TABLE
+
+> create table a25_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> create table a25_tx (f1 text)
+-- CREATE TABLE
+
+> create table a25_tk (unique1 int, unique2 int, ten int, stringu2 name, string4 name)
+-- CREATE TABLE
+
+> create table a25_u (f1 text unique)
+-- CREATE TABLE
+
+> insert into a25_i4 values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> insert into a25_i8 values (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> insert into a25_tx values ('doh!'), ('hi de ho neighbor')
+-- INSERT 0 2
+
+> insert into a25_tk select g, (g * 7919) % 10000, g % 10, 'x' || (g % 26), 's' || (g % 4)
+>   from generate_series(0, 9999) g
+-- INSERT 0 10000
+
+> create unique index a25_tk_unique2 on a25_tk (unique2)
+-- CREATE INDEX
+
+> analyze a25_i4
+-- ANALYZE
+
+> analyze a25_i8
+-- ANALYZE
+
+> analyze a25_tx
+-- ANALYZE
+
+> analyze a25_tk
+-- ANALYZE
+
+> analyze a25_u
+-- ANALYZE
+
+> explain (costs off)
+> select s.f1 from a25_i4 s join (select unique2 as j from a25_tk i2) ss on ss.j = s.f1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a25_i4 s
+  ->  Index Only Scan using a25_tk_unique2 on a25_tk i2
+        Index Cond: (unique2 = s.f1)
+-- EXPLAIN
+
+> explain (costs off)
+> select s.f1, ss.j from a25_i4 s left join (select unique2 as j from a25_tk i2) ss on ss.j = s.f1
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on a25_i4 s
+  ->  Index Only Scan using a25_tk_unique2 on a25_tk i2
+        Index Cond: (unique2 = s.f1)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select foo1.join_key as foo1_id, foo3.join_key as foo3_id, bug_field from
+>   (values (0), (1)) foo1(join_key)
+> left join
+>   (select join_key, bug_field from
+>     (select ss1.join_key, ss1.bug_field from
+>       (select f1 as join_key, 666 as bug_field from a25_i4 i1) ss1
+>     ) foo2
+>    left join
+>     (select unique2 as join_key from a25_tk i2) ss2
+>    using (join_key)
+>   ) foo3
+> using (join_key)
+QUERY PLAN:text
+Hash Right Join
+  Output: "*VALUES*".column1, i1.f1, (666)
+  Hash Cond: (i1.f1 = "*VALUES*".column1)
+  ->  Seq Scan on public.a25_i4 i1
+        Output: i1.f1, 666
+  ->  Hash
+        Output: "*VALUES*".column1
+        ->  Values Scan on "*VALUES*"
+              Output: "*VALUES*".column1
+-- EXPLAIN
+
+> select foo1.join_key as foo1_id, foo3.join_key as foo3_id, bug_field from
+>   (values (0), (1)) foo1(join_key)
+> left join
+>   (select join_key, bug_field from
+>     (select ss1.join_key, ss1.bug_field from
+>       (select f1 as join_key, 666 as bug_field from a25_i4 i1) ss1
+>     ) foo2
+>    left join
+>     (select unique2 as join_key from a25_tk i2) ss2
+>    using (join_key)
+>   ) foo3
+> using (join_key)
+foo1_id:int4 | foo3_id:int4 | bug_field:int4
+0 | 0 | 666
+1 | NULL | NULL
+-- SELECT 2
+
+> explain (verbose, costs off)
+> select * from
+>   a25_tx t1
+>   left join a25_i8 i8
+>   on i8.q2 = 123,
+>   lateral (select i8.q1, t2.f1 from a25_tx t2 limit 1) as ss1,
+>   lateral (select ss1.* from a25_tx t3 limit 1) as ss2
+> where t1.f1 = ss2.f1
+QUERY PLAN:text
+Nested Loop
+  Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1, ((i8.q1)), (t2.f1)
+  Join Filter: (t1.f1 = (t2.f1))
+  ->  Nested Loop
+        Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1
+        ->  Nested Loop Left Join
+              Output: t1.f1, i8.q1, i8.q2
+              ->  Seq Scan on public.a25_tx t1
+                    Output: t1.f1
+              ->  Materialize
+                    Output: i8.q1, i8.q2
+                    ->  Seq Scan on public.a25_i8 i8
+                          Output: i8.q1, i8.q2
+                          Filter: (i8.q2 = 123)
+        ->  Memoize
+              Output: (i8.q1), t2.f1
+              Cache Key: i8.q1
+              Cache Mode: binary
+              ->  Limit
+                    Output: (i8.q1), t2.f1
+                    ->  Seq Scan on public.a25_tx t2
+                          Output: i8.q1, t2.f1
+  ->  Memoize
+        Output: ((i8.q1)), (t2.f1)
+        Cache Key: (i8.q1), t2.f1
+        Cache Mode: binary
+        ->  Limit
+              Output: ((i8.q1)), (t2.f1)
+              ->  Seq Scan on public.a25_tx t3
+                    Output: (i8.q1), t2.f1
+-- EXPLAIN
+
+> select * from
+>   a25_tx t1
+>   left join a25_i8 i8
+>   on i8.q2 = 123,
+>   lateral (select i8.q1, t2.f1 from a25_tx t2 limit 1) as ss1,
+>   lateral (select ss1.* from a25_tx t3 limit 1) as ss2
+> where t1.f1 = ss2.f1
+f1:text | q1:int8 | q2:int8 | q1:int8 | f1:text | q1:int8 | f1:text
+doh! | 4567890123456789 | 123 | 4567890123456789 | doh! | 4567890123456789 | doh!
+-- SELECT 1
+
+> explain (costs off)
+> select t0.* from a25_tx t0
+>   left join (select case t1.ten when 0 then 'doh!'::text else null::text end as case1,
+>                     t1.stringu2
+>                from a25_tk t1) ss
+>   on t0.f1 = ss.case1
+> where ss.stringu2 !~* ss.case1
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (CASE t1.ten WHEN 0 THEN 'doh!'::text ELSE NULL::text END = t0.f1)
+  ->  Seq Scan on a25_tk t1
+        Filter: (stringu2 !~* CASE ten WHEN 0 THEN 'doh!'::text ELSE NULL::text END)
+  ->  Hash
+        ->  Seq Scan on a25_tx t0
+-- EXPLAIN
+
+> explain (costs off)
+> select t0.* from a25_tx t0
+>   left join (select case t1.ten when 0 then 'doh!'::text else null::text end as case1,
+>                     t1.stringu2
+>                from a25_tk t1
+>                join a25_i4 i4 on i4.f1 = t1.unique2
+>                left join a25_u u1 on u1.f1 = t1.string4) ss
+>   on t0.f1 = ss.case1
+> where ss.stringu2 !~* ss.case1
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (t0.f1 = CASE t1.ten WHEN 0 THEN 'doh!'::text ELSE NULL::text END)
+  ->  Nested Loop
+        ->  Seq Scan on a25_i4 i4
+        ->  Index Scan using a25_tk_unique2 on a25_tk t1
+              Index Cond: (unique2 = i4.f1)
+              Filter: (stringu2 !~* CASE ten WHEN 0 THEN 'doh!'::text ELSE NULL::text END)
+  ->  Materialize
+        ->  Seq Scan on a25_tx t0
+-- EXPLAIN
+
+> select t0.* from a25_tx t0
+>   left join (select case t1.ten when 0 then 'doh!'::text else null::text end as case1,
+>                     t1.stringu2
+>                from a25_tk t1
+>                join a25_i4 i4 on i4.f1 = t1.unique2
+>                left join a25_u u1 on u1.f1 = t1.string4) ss
+>   on t0.f1 = ss.case1
+> where ss.stringu2 !~* ss.case1
+f1:text
+doh!
+-- SELECT 1
+
+> explain (verbose, costs off)
+> select t1.* from
+>   a25_tx t1
+>   left join (select *, '***'::text as d1 from a25_i8 i8b1) b1
+>     left join a25_i8 i8
+>       left join (select *, null::int as d2 from a25_i8 i8b2, a25_i4 i4b2) b2
+>       on (i8.q1 = b2.q1)
+>     on (b2.d2 = b1.q2)
+>   on (t1.f1 = b1.d1)
+>   left join a25_i4 i4
+>   on (i8.q2 = i4.f1)
+QUERY PLAN:text
+Hash Left Join
+  Output: t1.f1
+  Hash Cond: (i8.q2 = i4.f1)
+  ->  Nested Loop Left Join
+        Output: t1.f1, i8.q2
+        Join Filter: (t1.f1 = '***'::text)
+        ->  Seq Scan on public.a25_tx t1
+              Output: t1.f1
+        ->  Materialize
+              Output: i8.q2
+              ->  Hash Right Join
+                    Output: i8.q2
+                    Hash Cond: ((NULL::integer) = i8b1.q2)
+                    ->  Hash Right Join
+                          Output: i8.q2, (NULL::integer)
+                          Hash Cond: (i8b2.q1 = i8.q1)
+                          ->  Nested Loop
+                                Output: i8b2.q1, NULL::integer
+                                ->  Seq Scan on public.a25_i8 i8b2
+                                      Output: i8b2.q1, i8b2.q2
+                                ->  Materialize
+                                      ->  Seq Scan on public.a25_i4 i4b2
+                          ->  Hash
+                                Output: i8.q1, i8.q2
+                                ->  Seq Scan on public.a25_i8 i8
+                                      Output: i8.q1, i8.q2
+                    ->  Hash
+                          Output: i8b1.q2
+                          ->  Seq Scan on public.a25_i8 i8b1
+                                Output: i8b1.q2
+  ->  Hash
+        Output: i4.f1
+        ->  Seq Scan on public.a25_i4 i4
+              Output: i4.f1
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select ss2.* from
+>   a25_i4 i41
+>   left join a25_i8 i8
+>     join (select i42.f1 as c1, i43.f1 as c2, 42 as c3
+>           from a25_i4 i42, a25_i4 i43) ss1
+>     on i8.q1 = ss1.c2
+>   on i41.f1 = ss1.c1,
+>   lateral (select i41.*, i8.*, ss1.* from a25_tx limit 1) ss2
+> where ss1.c2 = 0
+QUERY PLAN:text
+Nested Loop
+  Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((42))
+  ->  Hash Join
+        Output: i41.f1, i42.f1, i8.q1, i8.q2, i43.f1, 42
+        Hash Cond: (i41.f1 = i42.f1)
+        ->  Nested Loop
+              Output: i8.q1, i8.q2, i43.f1, i41.f1
+              ->  Nested Loop
+                    Output: i8.q1, i8.q2, i43.f1
+                    ->  Seq Scan on public.a25_i8 i8
+                          Output: i8.q1, i8.q2
+                          Filter: (i8.q1 = 0)
+                    ->  Seq Scan on public.a25_i4 i43
+                          Output: i43.f1
+                          Filter: (i43.f1 = 0)
+              ->  Seq Scan on public.a25_i4 i41
+                    Output: i41.f1
+        ->  Hash
+              Output: i42.f1
+              ->  Seq Scan on public.a25_i4 i42
+                    Output: i42.f1
+  ->  Limit
+        Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((42))
+        ->  Seq Scan on public.a25_tx
+              Output: i41.f1, i8.q1, i8.q2, i42.f1, i43.f1, (42)
+-- EXPLAIN
+
+> select ss2.* from
+>   a25_i4 i41
+>   left join a25_i8 i8
+>     join (select i42.f1 as c1, i43.f1 as c2, 42 as c3
+>           from a25_i4 i42, a25_i4 i43) ss1
+>     on i8.q1 = ss1.c2
+>   on i41.f1 = ss1.c1,
+>   lateral (select i41.*, i8.*, ss1.* from a25_tx limit 1) ss2
+> where ss1.c2 = 0
+f1:int4 | q1:int8 | q2:int8 | c1:int4 | c2:int4 | c3:int4
+-- SELECT 0
+
+> drop table a25_i4, a25_i8, a25_tx, a25_tk, a25_u
+-- DROP TABLE
+

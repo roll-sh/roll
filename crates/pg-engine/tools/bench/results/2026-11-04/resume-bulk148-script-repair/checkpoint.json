@@ -1,0 +1,7 @@
+{
+  "head": "2bc84a5a554287de1afbce96a23aa596ce381fd0",
+  "tree": "13d1ba3f7252e54df34c399cdf106784d3a22ca6",
+  "status": "",
+  "time_utc": "2026-11-04T11:33:04.662156+00:00",
+  "note": "Sibling repair bundle. Original sealed resume-bulk148 files remain unchanged and closed. Local fake-Docker wrapper checks preserve actual exit codes; no services or benchmarks started, no frozen timing/acceptance changed."
+}

@@ -1,0 +1,731 @@
+> drop table if exists fkt_c, fkt_p, fkt_s cascade
+NOTICE 00000: table "fkt_c" does not exist, skipping
+NOTICE 00000: table "fkt_p" does not exist, skipping
+NOTICE 00000: table "fkt_s" does not exist, skipping
+-- DROP TABLE
+
+> create table fkt_p (id int primary key)
+-- CREATE TABLE
+
+> create table fkt_c (id int primary key, pid int references fkt_p on delete cascade)
+-- CREATE TABLE
+
+> insert into fkt_p values (1),(2)
+-- INSERT 0 2
+
+> insert into fkt_c values (10,1),(11,1),(20,2)
+-- INSERT 0 3
+
+> create function fkt_tf() returns trigger language plpgsql as $$
+> begin
+>   raise notice '% % % % cnt=%', tg_name, tg_when, tg_op, coalesce(old::text, new::text), (select count(*) from fkt_c);
+>   return coalesce(new, old);
+> end $$
+-- CREATE FUNCTION
+
+> create trigger aaa after delete on fkt_p for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger zzz after delete on fkt_p for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger "AAA" after delete on fkt_p for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger bef before delete on fkt_p for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger cbef before delete on fkt_c for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger caft after delete on fkt_c for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> delete from fkt_p
+NOTICE 00000: bef BEFORE DELETE (1) cnt=3
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: bef BEFORE DELETE (2) cnt=3
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: AAA AFTER DELETE (1) cnt=3
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: cbef BEFORE DELETE (10,1) cnt=3
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."fkt_c" WHERE $1 OPERATOR(pg_catalog.=) "pid""
+NOTICE 00000: cbef BEFORE DELETE (11,1) cnt=2
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."fkt_c" WHERE $1 OPERATOR(pg_catalog.=) "pid""
+NOTICE 00000: aaa AFTER DELETE (1) cnt=1
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: zzz AFTER DELETE (1) cnt=1
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: AAA AFTER DELETE (2) cnt=1
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: cbef BEFORE DELETE (20,2) cnt=1
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."fkt_c" WHERE $1 OPERATOR(pg_catalog.=) "pid""
+NOTICE 00000: aaa AFTER DELETE (2) cnt=0
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: zzz AFTER DELETE (2) cnt=0
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: caft AFTER DELETE (10,1) cnt=0
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: caft AFTER DELETE (11,1) cnt=0
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: caft AFTER DELETE (20,2) cnt=0
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+-- DELETE 2
+
+> create table fkt_s (id int primary key, pid int references fkt_s)
+-- CREATE TABLE
+
+> insert into fkt_s values (2,1),(1,null)
+-- INSERT 0 2
+
+> select * from fkt_s
+id:int4 | pid:int4
+1 | NULL
+2 | 1
+-- SELECT 2
+
+> update fkt_s set id = id + 10, pid = pid + 10
+-- UPDATE 2
+
+> select * from fkt_s
+id:int4 | pid:int4
+11 | NULL
+12 | 11
+-- SELECT 2
+
+> insert into fkt_c values (30, 99), (30, 1)
+ERROR 23505: duplicate key value violates unique constraint "fkt_c_pkey"
+DETAIL: Key (id)=(30) already exists.
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pkey
+
+> insert into fkt_c values (31, 99), (32, 1)
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(99) is not present in table "fkt_p".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> select tgname ~ '^RI_ConstraintTrigger_[ac]_\d+$', tgrelid::regclass, tgfoid::regproc, tgtype, tgenabled, tgisinternal, tgconstrrelid::regclass, tgconstrindid::regclass, tgconstraint = (select oid from pg_constraint where conname='fkt_c_pid_fkey'), tgdeferrable, tginitdeferred, tgnargs, tgattr, tgargs, tgqual, tgoldtable, tgparentid from pg_trigger where tgconstraint in (select oid from pg_constraint where conname='fkt_c_pid_fkey') order by oid
+?column?:bool | tgrelid:regclass | tgfoid:regproc | tgtype:int2 | tgenabled:char | tgisinternal:bool | tgconstrrelid:regclass | tgconstrindid:regclass | ?column?:bool | tgdeferrable:bool | tginitdeferred:bool | tgnargs:int2 | tgattr:22 | tgargs:bytea | tgqual:194 | tgoldtable:name | tgparentid:oid
+t | fkt_p | "RI_FKey_cascade_del" | 9 | O | t | fkt_c | fkt_p_pkey | t | f | f | 0 |  | \x | NULL | NULL | 0
+t | fkt_p | "RI_FKey_noaction_upd" | 17 | O | t | fkt_c | fkt_p_pkey | t | f | f | 0 |  | \x | NULL | NULL | 0
+t | fkt_c | "RI_FKey_check_ins" | 5 | O | t | fkt_p | fkt_p_pkey | t | f | f | 0 |  | \x | NULL | NULL | 0
+t | fkt_c | "RI_FKey_check_upd" | 17 | O | t | fkt_p | fkt_p_pkey | t | f | f | 0 |  | \x | NULL | NULL | 0
+-- SELECT 4
+
+> select t.oid::int8 - c.oid::int8, substr(tgname, 1, 22), (regexp_match(tgname,'\d+$'))[1]::oid = t.oid from pg_trigger t join pg_constraint c on c.oid = t.tgconstraint where c.conname = 'fkt_c_pid_fkey' order by t.oid
+?column?:int8 | substr:text | ?column?:bool
+1 | RI_ConstraintTrigger_a | t
+2 | RI_ConstraintTrigger_a | t
+3 | RI_ConstraintTrigger_c | t
+4 | RI_ConstraintTrigger_c | t
+-- SELECT 4
+
+> drop table if exists fkt_c, fkt_p, fkt_g, fkt_d, fkt_s cascade
+NOTICE 00000: table "fkt_g" does not exist, skipping
+NOTICE 00000: table "fkt_d" does not exist, skipping
+-- DROP TABLE
+
+> drop function if exists fkt_tf, fkt_st cascade
+NOTICE 00000: function fkt_st() does not exist, skipping
+-- DROP FUNCTION
+
+> create function fkt_tf() returns trigger language plpgsql as $$
+> begin
+>   raise notice '% % % % on %', tg_name, tg_when, tg_op, coalesce(old::text, new::text), tg_table_name;
+>   return coalesce(new, old);
+> end $$
+-- CREATE FUNCTION
+
+> create function fkt_st() returns trigger language plpgsql as $$
+> begin
+>   raise notice 'stmt % % % on %', tg_name, tg_when, tg_op, tg_table_name;
+>   return null;
+> end $$
+-- CREATE FUNCTION
+
+> create table fkt_p (id int primary key)
+-- CREATE TABLE
+
+> create table fkt_c (id int primary key, pid int references fkt_p on delete cascade on update cascade)
+-- CREATE TABLE
+
+> create table fkt_g (id int primary key, cid int references fkt_c on delete cascade on update set null)
+-- CREATE TABLE
+
+> insert into fkt_p values (1),(2)
+-- INSERT 0 2
+
+> insert into fkt_c values (10,1),(11,1),(20,2)
+-- INSERT 0 3
+
+> insert into fkt_g values (100,10),(110,11),(200,20)
+-- INSERT 0 3
+
+> create trigger ca after delete or update on fkt_c for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger ga after delete or update on fkt_g for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger pa after delete or update on fkt_p for each row execute function fkt_tf()
+-- CREATE TRIGGER
+
+> create trigger s1 before delete or update on fkt_c for each statement execute function fkt_st()
+-- CREATE TRIGGER
+
+> create trigger s2 after delete or update on fkt_c for each statement execute function fkt_st()
+-- CREATE TRIGGER
+
+> create trigger s3 after delete or update on fkt_p for each statement execute function fkt_st()
+-- CREATE TRIGGER
+
+> create trigger s4 after delete or update on fkt_g for each statement execute function fkt_st()
+-- CREATE TRIGGER
+
+> update fkt_p set id = id * 5
+NOTICE 00000: stmt s1 BEFORE UPDATE on fkt_c
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+CONTEXT: SQL statement "UPDATE ONLY "public"."fkt_c" SET "pid" = $1 WHERE $2 OPERATOR(pg_catalog.=) "pid""
+NOTICE 00000: pa AFTER UPDATE (1) on fkt_p
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: pa AFTER UPDATE (2) on fkt_p
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: stmt s3 AFTER UPDATE on fkt_p
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+NOTICE 00000: ca AFTER UPDATE (10,1) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ca AFTER UPDATE (11,1) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ca AFTER UPDATE (20,2) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: stmt s2 AFTER UPDATE on fkt_c
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+-- UPDATE 2
+
+> select * from fkt_c order by id
+id:int4 | pid:int4
+10 | 5
+11 | 5
+20 | 10
+-- SELECT 3
+
+> select * from fkt_g order by id
+id:int4 | cid:int4
+100 | 10
+110 | 11
+200 | 20
+-- SELECT 3
+
+> delete from fkt_p
+NOTICE 00000: stmt s1 BEFORE DELETE on fkt_c
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."fkt_c" WHERE $1 OPERATOR(pg_catalog.=) "pid""
+NOTICE 00000: pa AFTER DELETE (5) on fkt_p
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: pa AFTER DELETE (10) on fkt_p
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: stmt s3 AFTER DELETE on fkt_p
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+NOTICE 00000: ca AFTER DELETE (10,5) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ca AFTER DELETE (11,5) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ca AFTER DELETE (20,10) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: stmt s2 AFTER DELETE on fkt_c
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+NOTICE 00000: ga AFTER DELETE (100,10) on fkt_g
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ga AFTER DELETE (110,11) on fkt_g
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ga AFTER DELETE (200,20) on fkt_g
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: stmt s4 AFTER DELETE on fkt_g
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+-- DELETE 2
+
+> select count(*) from fkt_c
+count:int8
+0
+-- SELECT 1
+
+> select count(*) from fkt_g
+count:int8
+0
+-- SELECT 1
+
+> drop trigger s2 on fkt_c
+-- DROP TRIGGER
+
+> create function fkt_tt() returns trigger language plpgsql as $$
+> begin
+>   raise notice 'tt % rows=%', tg_name, (select count(*) from oldt);
+>   return null;
+> end $$
+-- CREATE FUNCTION
+
+> create trigger s5 after delete on fkt_c referencing old table as oldt for each statement execute function fkt_tt()
+-- CREATE TRIGGER
+
+> insert into fkt_p values (1),(2)
+-- INSERT 0 2
+
+> insert into fkt_c values (10,1),(11,1),(20,2)
+-- INSERT 0 3
+
+> delete from fkt_p
+NOTICE 00000: stmt s1 BEFORE DELETE on fkt_c
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+CONTEXT: SQL statement "DELETE FROM ONLY "public"."fkt_c" WHERE $1 OPERATOR(pg_catalog.=) "pid""
+NOTICE 00000: pa AFTER DELETE (1) on fkt_p
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: pa AFTER DELETE (2) on fkt_p
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: stmt s3 AFTER DELETE on fkt_p
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+NOTICE 00000: ca AFTER DELETE (10,1) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ca AFTER DELETE (11,1) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: ca AFTER DELETE (20,2) on fkt_c
+CONTEXT: PL/pgSQL function fkt_tf() line 3 at RAISE
+NOTICE 00000: tt s5 rows=3
+CONTEXT: PL/pgSQL function fkt_tt() line 3 at RAISE
+NOTICE 00000: stmt s4 AFTER DELETE on fkt_g
+CONTEXT: PL/pgSQL function fkt_st() line 3 at RAISE
+-- DELETE 2
+
+> drop table fkt_g, fkt_c, fkt_p cascade
+-- DROP TABLE
+
+> create table fkt_p (id int primary key)
+-- CREATE TABLE
+
+> create table fkt_c (pid int references fkt_p)
+-- CREATE TABLE
+
+> create table fkt_d (pid int references fkt_p on update restrict)
+-- CREATE TABLE
+
+> insert into fkt_p values (1),(2)
+-- INSERT 0 2
+
+> insert into fkt_c values (1),(2)
+-- INSERT 0 2
+
+> update fkt_p set id = 3 - id
+ERROR 23505: duplicate key value violates unique constraint "fkt_p_pkey"
+DETAIL: Key (id)=(2) already exists.
+OBJECTS: schema=public table=fkt_p constraint=fkt_p_pkey
+
+> insert into fkt_d values (1)
+-- INSERT 0 1
+
+> update fkt_p set id = 3 - id
+ERROR 23505: duplicate key value violates unique constraint "fkt_p_pkey"
+DETAIL: Key (id)=(2) already exists.
+OBJECTS: schema=public table=fkt_p constraint=fkt_p_pkey
+
+> insert into fkt_c values (5)
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(5) is not present in table "fkt_p".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> insert into fkt_c values (5), (null), (1/0)
+ERROR 22012: division by zero
+
+> insert into fkt_c select x from generate_series(1,3) x
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(3) is not present in table "fkt_p".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> create table fkt_s (id int primary key, pid int references fkt_s deferrable initially deferred)
+-- CREATE TABLE
+
+> begin
+-- BEGIN
+
+> insert into fkt_s values (1, 2)
+-- INSERT 0 1
+
+> insert into fkt_s values (3, 4)
+-- INSERT 0 1
+
+> update fkt_s set pid = 1 where id = 3
+-- UPDATE 1
+
+> select 'mid'
+?column?:text
+mid
+-- SELECT 1
+
+> commit
+ERROR 23503: insert or update on table "fkt_s" violates foreign key constraint "fkt_s_pid_fkey"
+DETAIL: Key (pid)=(2) is not present in table "fkt_s".
+OBJECTS: schema=public table=fkt_s constraint=fkt_s_pid_fkey
+
+> begin
+-- BEGIN
+
+> insert into fkt_s values (1, 2)
+-- INSERT 0 1
+
+> update fkt_s set pid = 5 where id = 1
+-- UPDATE 1
+
+> set constraints all immediate
+ERROR 23503: insert or update on table "fkt_s" violates foreign key constraint "fkt_s_pid_fkey"
+DETAIL: Key (pid)=(5) is not present in table "fkt_s".
+OBJECTS: schema=public table=fkt_s constraint=fkt_s_pid_fkey
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> insert into fkt_s values (1, 1), (2, 1)
+-- INSERT 0 2
+
+> set constraints fkt_s_pid_fkey immediate
+-- SET CONSTRAINTS
+
+> delete from fkt_s where id = 1
+ERROR 23503: update or delete on table "fkt_s" violates foreign key constraint "fkt_s_pid_fkey" on table "fkt_s"
+DETAIL: Key (id)=(1) is still referenced from table "fkt_s".
+OBJECTS: schema=public table=fkt_s constraint=fkt_s_pid_fkey
+
+> commit
+-- ROLLBACK
+
+> select * from fkt_s
+id:int4 | pid:int4
+-- SELECT 0
+
+> drop table if exists fkt_c, fkt_p, fkt_pp, fkt_cp, fkt_m cascade
+NOTICE 00000: table "fkt_pp" does not exist, skipping
+NOTICE 00000: table "fkt_cp" does not exist, skipping
+NOTICE 00000: table "fkt_m" does not exist, skipping
+NOTICE 00000: drop cascades to constraint fkt_d_pid_fkey on table fkt_d
+-- DROP TABLE
+
+> drop function if exists fkt_tf, fkt_f cascade
+NOTICE 00000: function fkt_f() does not exist, skipping
+-- DROP FUNCTION
+
+> create table fkt_p (id int primary key, v int)
+-- CREATE TABLE
+
+> create table fkt_c (id int, pid int references fkt_p)
+-- CREATE TABLE
+
+> insert into fkt_p values (1, 0), (2, 0)
+-- INSERT 0 2
+
+> copy fkt_c from stdin
+>> 1	1
+>> 2	9
+>> 3	2
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(9) is not present in table "fkt_p".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> create function fkt_f(x int) returns void language plpgsql as $$
+> begin
+>   insert into fkt_c values (x, x);
+> end $$
+-- CREATE FUNCTION
+
+> select fkt_f(1)
+fkt_f:void
+
+-- SELECT 1
+
+> select fkt_f(7)
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(7) is not present in table "fkt_p".
+CONTEXT: SQL statement "insert into fkt_c values (x, x)"
+CONTEXT: PL/pgSQL function fkt_f(integer) line 3 at SQL statement
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> create unique index on fkt_c (id)
+-- CREATE INDEX
+
+> insert into fkt_c values (1, 2) on conflict (id) do update set pid = 8
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(8) is not present in table "fkt_p".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> insert into fkt_c values (1, 2) on conflict (id) do update set pid = excluded.pid
+-- INSERT 0 1
+
+> with x as (delete from fkt_p where id = 2 returning id) insert into fkt_c select id + 10, id from x
+ERROR 23503: update or delete on table "fkt_p" violates foreign key constraint "fkt_c_pid_fkey" on table "fkt_c"
+DETAIL: Key (id)=(2) is still referenced from table "fkt_c".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> with x as (insert into fkt_p values (3, 0) returning id) insert into fkt_c select 30, id from x
+-- INSERT 0 1
+
+> merge into fkt_c c using (values (40, 4)) s(id, pid) on c.id = s.id when not matched then insert values (s.id, s.pid)
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(4) is not present in table "fkt_p".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> merge into fkt_c c using (values (30, 1)) s(id, pid) on c.id = s.id when matched then update set pid = 77
+ERROR 23503: insert or update on table "fkt_c" violates foreign key constraint "fkt_c_pid_fkey"
+DETAIL: Key (pid)=(77) is not present in table "fkt_p".
+OBJECTS: schema=public table=fkt_c constraint=fkt_c_pid_fkey
+
+> set session_replication_role = replica
+-- SET
+
+> insert into fkt_c values (50, 555)
+-- INSERT 0 1
+
+> reset session_replication_role
+-- RESET
+
+> select * from fkt_c order by id
+id:int4 | pid:int4
+1 | 2
+30 | 3
+50 | 555
+-- SELECT 3
+
+> delete from fkt_c where id = 50
+-- DELETE 1
+
+> alter table fkt_c disable trigger all
+-- ALTER TABLE
+
+> insert into fkt_c values (51, 556)
+-- INSERT 0 1
+
+> select tgname ~ '^RI_', tgenabled from pg_trigger where tgrelid = 'fkt_c'::regclass order by 1, 2
+?column?:bool | tgenabled:char
+t | D
+t | D
+-- SELECT 2
+
+> alter table fkt_c enable trigger all
+-- ALTER TABLE
+
+> delete from fkt_c where id = 51
+-- DELETE 1
+
+> alter table fkt_c disable trigger user
+-- ALTER TABLE
+
+> select tgname ~ '^RI_', tgenabled from pg_trigger where tgrelid = 'fkt_c'::regclass order by 1, 2
+?column?:bool | tgenabled:char
+t | O
+t | O
+-- SELECT 2
+
+> alter table fkt_c enable trigger all
+-- ALTER TABLE
+
+> truncate fkt_p
+ERROR 0A000: cannot truncate a table referenced in a foreign key constraint
+DETAIL: Table "fkt_c" references "fkt_p".
+HINT: Truncate table "fkt_c" at the same time, or use TRUNCATE ... CASCADE.
+
+> create table fkt_pp (id int primary key) partition by range (id)
+-- CREATE TABLE
+
+> create table fkt_pp1 partition of fkt_pp for values from (0) to (100)
+-- CREATE TABLE
+
+> create table fkt_pp2 partition of fkt_pp for values from (100) to (200)
+-- CREATE TABLE
+
+> create table fkt_cp (pid int references fkt_pp on update cascade on delete cascade)
+-- CREATE TABLE
+
+> insert into fkt_pp values (1), (2)
+-- INSERT 0 2
+
+> insert into fkt_cp values (1), (2)
+-- INSERT 0 2
+
+> update fkt_pp set id = 150 where id = 1
+-- UPDATE 1
+
+> select * from fkt_cp order by 1
+pid:int4
+2
+150
+-- SELECT 2
+
+> delete from fkt_pp where id = 150
+-- DELETE 1
+
+> select * from fkt_cp order by 1
+pid:int4
+2
+-- SELECT 1
+
+> create table fkt_m (pid int references fkt_pp)
+-- CREATE TABLE
+
+> insert into fkt_m values (2)
+-- INSERT 0 1
+
+> update fkt_pp set id = 160 where id = 2
+ERROR 23503: update or delete on table "fkt_pp" violates foreign key constraint "fkt_m_pid_fkey" on table "fkt_m"
+DETAIL: Key (id)=(2) is still referenced from table "fkt_m".
+OBJECTS: schema=public table=fkt_m constraint=fkt_m_pid_fkey
+
+> update fkt_pp set id = 3 where id = 2
+ERROR 23503: update or delete on table "fkt_pp1" violates foreign key constraint "fkt_m_pid_fkey_1" on table "fkt_m"
+DETAIL: Key (id)=(2) is still referenced from table "fkt_m".
+OBJECTS: schema=public table=fkt_m constraint=fkt_m_pid_fkey_1
+
+> select tgrelid::regclass, tgfoid::regproc, tgparentid <> 0, tgconstrrelid::regclass, tgconstrindid::regclass, tgdeferrable from pg_trigger where tgisinternal and tgconstraint in (select oid from pg_constraint where conrelid = 'fkt_cp'::regclass) order by tgrelid::regclass::text, tgfoid::regproc::text
+tgrelid:regclass | tgfoid:regproc | ?column?:bool | tgconstrrelid:regclass | tgconstrindid:regclass | tgdeferrable:bool
+fkt_cp | "RI_FKey_check_ins" | f | fkt_pp | fkt_pp_pkey | f
+fkt_cp | "RI_FKey_check_upd" | f | fkt_pp | fkt_pp_pkey | f
+fkt_pp | "RI_FKey_cascade_del" | f | fkt_cp | fkt_pp_pkey | f
+fkt_pp | "RI_FKey_cascade_upd" | f | fkt_cp | fkt_pp_pkey | f
+fkt_pp1 | "RI_FKey_cascade_del" | t | fkt_cp | fkt_pp1_pkey | f
+fkt_pp1 | "RI_FKey_cascade_upd" | t | fkt_cp | fkt_pp1_pkey | f
+fkt_pp2 | "RI_FKey_cascade_del" | t | fkt_cp | fkt_pp2_pkey | f
+fkt_pp2 | "RI_FKey_cascade_upd" | t | fkt_cp | fkt_pp2_pkey | f
+-- SELECT 8
+
+> drop table if exists fkt_c, fkt_p cascade
+-- DROP TABLE
+
+> create table fkt_p (id int primary key)
+-- CREATE TABLE
+
+> create table fkt_c (id int, pid int references fkt_p on delete set null deferrable initially deferred)
+-- CREATE TABLE
+
+> select regexp_replace(pg_get_triggerdef(oid), '\d+', 'N', 'g') from pg_trigger where tgrelid in ('fkt_p'::regclass, 'fkt_c'::regclass) order by tgrelid::regclass::text, tgfoid
+regexp_replace:text
+CREATE CONSTRAINT TRIGGER "RI_ConstraintTrigger_c_N" AFTER INSERT ON public.fkt_c FROM fkt_p DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "RI_FKey_check_ins"()
+CREATE CONSTRAINT TRIGGER "RI_ConstraintTrigger_c_N" AFTER UPDATE ON public.fkt_c FROM fkt_p DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "RI_FKey_check_upd"()
+CREATE CONSTRAINT TRIGGER "RI_ConstraintTrigger_a_N" AFTER DELETE ON public.fkt_p FROM fkt_c NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION "RI_FKey_setnull_del"()
+CREATE CONSTRAINT TRIGGER "RI_ConstraintTrigger_a_N" AFTER UPDATE ON public.fkt_p FROM fkt_c DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "RI_FKey_noaction_upd"()
+-- SELECT 4
+
+> select regexp_replace(pg_describe_object('pg_trigger'::regclass, oid, 0), '\d+', 'N', 'g') from pg_trigger where tgrelid in ('fkt_p'::regclass, 'fkt_c'::regclass) order by 1
+regexp_replace:text
+trigger RI_ConstraintTrigger_a_N on table fkt_p
+trigger RI_ConstraintTrigger_a_N on table fkt_p
+trigger RI_ConstraintTrigger_c_N on table fkt_c
+trigger RI_ConstraintTrigger_c_N on table fkt_c
+-- SELECT 4
+
+> select (pg_identify_object('pg_trigger'::regclass, oid, 0)).type, regexp_replace((pg_identify_object('pg_trigger'::regclass, oid, 0)).identity, '\d+', 'N', 'g') from pg_trigger where tgrelid in ('fkt_p'::regclass, 'fkt_c'::regclass) order by 2
+type:text | regexp_replace:text
+trigger | "RI_ConstraintTrigger_a_N" on public.fkt_p
+trigger | "RI_ConstraintTrigger_a_N" on public.fkt_p
+trigger | "RI_ConstraintTrigger_c_N" on public.fkt_c
+trigger | "RI_ConstraintTrigger_c_N" on public.fkt_c
+-- SELECT 4
+
+> select classid::regclass, refclassid::regclass, deptype, count(*) from pg_depend where classid = 'pg_trigger'::regclass and objid in (select oid from pg_trigger where tgrelid in ('fkt_p'::regclass, 'fkt_c'::regclass)) group by 1,2,3 order by 1,2,3
+classid:regclass | refclassid:regclass | deptype:char | count:int8
+pg_trigger | pg_constraint | i | 4
+-- SELECT 1
+
+> select relname, relhastriggers from pg_class where relname like 'fkt_%' and relkind = 'r' order by 1
+relname:name | relhastriggers:bool
+fkt_c | t
+fkt_cp | t
+fkt_d | t
+fkt_m | t
+fkt_p | t
+fkt_pp1 | t
+fkt_pp2 | t
+fkt_s | t
+-- SELECT 8
+
+> select tablename, hastriggers from pg_tables where tablename like 'fkt_%' order by 1
+tablename:name | hastriggers:bool
+fkt_c | t
+fkt_cp | t
+fkt_d | t
+fkt_m | t
+fkt_p | t
+fkt_pp | t
+fkt_pp1 | t
+fkt_pp2 | t
+fkt_s | t
+-- SELECT 9
+
+> alter table fkt_c disable trigger all
+-- ALTER TABLE
+
+> alter table fkt_c enable trigger all
+-- ALTER TABLE
+
+> alter table fkt_c alter constraint fkt_c_pid_fkey not deferrable
+-- ALTER TABLE
+
+> select tgfoid::regproc, tgdeferrable, tginitdeferred from pg_trigger where tgrelid in ('fkt_p'::regclass, 'fkt_c'::regclass) order by tgrelid::regclass::text, tgfoid
+tgfoid:regproc | tgdeferrable:bool | tginitdeferred:bool
+"RI_FKey_check_ins" | f | f
+"RI_FKey_check_upd" | f | f
+"RI_FKey_setnull_del" | f | f
+"RI_FKey_noaction_upd" | f | f
+-- SELECT 4
+
+> alter table fkt_c drop constraint fkt_c_pid_fkey
+-- ALTER TABLE
+
+> select count(*) from pg_trigger where tgrelid in ('fkt_p'::regclass, 'fkt_c'::regclass)
+count:int8
+0
+-- SELECT 1
+
+> create table fkt_u (a int)
+-- CREATE TABLE
+
+> create function fkt_noop() returns trigger language plpgsql as $$ begin return null; end $$
+-- CREATE FUNCTION
+
+> create trigger u1 after insert on fkt_u for each statement execute function fkt_noop()
+-- CREATE TRIGGER
+
+> drop trigger u1 on fkt_u
+-- DROP TRIGGER
+
+> select relname, relhastriggers from pg_class where relname in ('fkt_u', 'fkt_d', 'fkt_c', 'fkt_p') order by 1
+relname:name | relhastriggers:bool
+fkt_c | t
+fkt_d | t
+fkt_p | t
+fkt_u | t
+-- SELECT 4
+
+> vacuum fkt_u, fkt_d, fkt_c, fkt_p
+-- VACUUM
+
+> select relname, relhastriggers from pg_class where relname in ('fkt_u', 'fkt_d', 'fkt_c', 'fkt_p') order by 1
+relname:name | relhastriggers:bool
+fkt_c | f
+fkt_d | f
+fkt_p | f
+fkt_u | f
+-- SELECT 4
+
+> drop table fkt_u
+-- DROP TABLE
+
+> drop function fkt_noop
+-- DROP FUNCTION
+
+> drop table if exists fkt_c, fkt_p, fkt_g, fkt_d, fkt_s, fkt_pp, fkt_cp, fkt_m cascade
+NOTICE 00000: table "fkt_g" does not exist, skipping
+-- DROP TABLE
+
+> drop function if exists fkt_tf, fkt_st, fkt_tt, fkt_f cascade
+NOTICE 00000: function fkt_tf() does not exist, skipping
+-- DROP FUNCTION
+

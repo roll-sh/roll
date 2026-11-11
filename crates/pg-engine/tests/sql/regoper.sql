@@ -1,0 +1,24 @@
+-- regoper, regoperator and regcollation.
+SELECT '&&'::regoper;
+SELECT '||/'::regoper, '|/'::regoper;
+SELECT '+(integer,integer)'::regoperator, '-(NONE,integer)'::regoperator, '&&(anyrange,anyrange)'::regoperator::regoper;
+SELECT '&&(anyrange,anyrange)'::regoperator::regoper::regoperator, '+(int4,int4)'::regoperator::oid = '+(integer,integer)'::regoperator::oid;
+SELECT 'nope'::regoper;
+SELECT '+(integer,text)'::regoperator;
+SELECT '+'::regoperator;
+SELECT '-(int4)'::regoperator;
+SELECT '+(int4,int4,int4)'::regoperator;
+SELECT 'nope.+(int4,int4)'::regoperator;
+SELECT 'pg_catalog.+(int4,int4)'::regoperator, ' ||/ '::regoper, '+ ( int4 , int4 )'::regoperator;
+SELECT to_regoper('&&'), to_regoper('||/'), to_regoperator('+(integer,integer)'), to_regoperator('+(int4,text)'), to_regoperator('nope');
+SELECT '"C"'::regcollation, 'default'::regcollation, '"POSIX"'::regcollation, '"C"'::regcollation::oid, 'pg_catalog."C"'::regcollation, 'ucs_basic'::regcollation, 'unicode'::regcollation;
+SELECT 'C'::regcollation;
+SELECT 'nope.ucs_basic'::regcollation;
+SELECT to_regcollation('nope'), to_regcollation('"C"'), to_regcollation('C');
+SELECT 0::regoper, 0::regoperator, 0::regcollation, '-'::regcollation, 99999::regcollation;
+SELECT pg_typeof('"C"'::regcollation), pg_typeof('||/'::regoper), pg_typeof('+(int4,int4)'::regoperator);
+SELECT '{||/}'::regoper[], pg_typeof('{||/}'::regoper[]);
+SELECT 'regoper'::regtype::oid, 'regoperator[]'::regtype::oid, 'regcollation'::regtype::oid, 'regcollation[]'::regtype::oid;
+SELECT typname, typlen, typcategory, typarray::regtype FROM pg_type WHERE typname IN ('regoper', 'regoperator', 'regcollation') ORDER BY 1;
+SELECT '"C"'::regcollation::text, '"C"'::regcollation::oid::int4, 950::regcollation::text;
+SELECT oprname, oprleft::regtype, oprright::regtype FROM pg_operator WHERE oid = '+(integer,integer)'::regoperator;

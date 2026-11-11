@@ -1,0 +1,231 @@
+> SHOW TimeZone
+TimeZone:text
+UTC
+-- SHOW
+
+> SHOW DateStyle
+DateStyle:text
+ISO, MDY
+-- SHOW
+
+> SHOW nosuch
+ERROR 42704: unrecognized configuration parameter "nosuch"
+
+> SET nosuch = 1
+ERROR 42704: unrecognized configuration parameter "nosuch"
+
+> SET work_mem = '64MB'
+-- SET
+
+> SHOW work_mem
+work_mem:text
+64MB
+-- SHOW
+
+> RESET work_mem
+-- RESET
+
+> SHOW work_mem
+work_mem:text
+4MB
+-- SHOW
+
+> SET application_name = 'golden'
+-- SET
+
+> SELECT current_setting('application_name')
+current_setting:text
+golden
+-- SELECT 1
+
+> SELECT set_config('application_name', 'x', false), current_setting('application_name')
+set_config:text | current_setting:text
+x | x
+-- SELECT 1
+
+> SET extra_float_digits = 0
+-- SET
+
+> SELECT 0.1::float8, 1/3::float4
+float8:float8 | ?column?:float8
+0.1 | 0.333333333333333
+-- SELECT 1
+
+> RESET extra_float_digits
+-- RESET
+
+> SELECT 0.1::float8
+float8:float8
+0.1
+-- SELECT 1
+
+> PREPARE p1 (int) AS SELECT $1 + 1
+-- PREPARE
+
+> EXECUTE p1(41)
+?column?:int4
+42
+-- SELECT 1
+
+> EXECUTE p1('x')
+ERROR 22P02: invalid input syntax for type integer: "x" (at 12)
+
+> PREPARE p1 AS SELECT 1
+ERROR 42P05: prepared statement "p1" already exists
+
+> DEALLOCATE p1
+-- DEALLOCATE
+
+> EXECUTE p1(1)
+ERROR 26000: prepared statement "p1" does not exist
+
+> DEALLOCATE nosuch
+ERROR 26000: prepared statement "nosuch" does not exist
+
+> DEALLOCATE ALL
+-- DEALLOCATE ALL
+
+> PREPARE p2 AS SELECT $1::text || 'x'
+-- PREPARE
+
+> EXECUTE p2('a')
+?column?:text
+ax
+-- SELECT 1
+
+> SELECT name, statement FROM pg_prepared_statements
+name:text | statement:text
+p2 | PREPARE p2 AS SELECT $1::text || 'x'
+-- SELECT 1
+
+> CREATE TABLE cur (x int)
+-- CREATE TABLE
+
+> INSERT INTO cur SELECT generate_series(1, 10)
+-- INSERT 0 10
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT x FROM cur ORDER BY x
+-- DECLARE CURSOR
+
+> FETCH 2 FROM c
+x:int4
+1
+2
+-- FETCH 2
+
+> FETCH NEXT FROM c
+x:int4
+3
+-- FETCH 1
+
+> MOVE 3 IN c
+-- MOVE 3
+
+> FETCH ALL FROM c
+x:int4
+10
+7
+8
+9
+-- FETCH 4
+
+> FETCH 1 FROM c
+x:int4
+-- FETCH 0
+
+> CLOSE c
+-- CLOSE CURSOR
+
+> FETCH 1 FROM c
+ERROR 34000: cursor "c" does not exist
+
+> COMMIT
+-- ROLLBACK
+
+> DECLARE outside CURSOR FOR SELECT 1
+ERROR 25P01: DECLARE CURSOR can only be used in transaction blocks
+
+> BEGIN
+-- BEGIN
+
+> DECLARE s SCROLL CURSOR FOR SELECT x FROM cur ORDER BY x
+-- DECLARE CURSOR
+
+> FETCH LAST FROM s
+x:int4
+10
+-- FETCH 1
+
+> FETCH ABSOLUTE 2 FROM s
+x:int4
+2
+-- FETCH 1
+
+> FETCH PRIOR FROM s
+x:int4
+1
+-- FETCH 1
+
+> FETCH RELATIVE 3 FROM s
+x:int4
+4
+-- FETCH 1
+
+> FETCH BACKWARD 2 FROM s
+x:int4
+2
+3
+-- FETCH 2
+
+> COMMIT
+-- COMMIT
+
+> DECLARE h CURSOR WITH HOLD FOR SELECT x FROM cur ORDER BY x
+-- DECLARE CURSOR
+
+> FETCH 2 FROM h
+x:int4
+1
+2
+-- FETCH 2
+
+> CLOSE h
+-- CLOSE CURSOR
+
+> EXPLAIN (COSTS OFF) SELECT 1
+QUERY PLAN:text
+Result
+-- EXPLAIN
+
+> DISCARD ALL
+-- DISCARD ALL
+
+> VACUUM
+-- VACUUM
+
+> ANALYZE
+-- ANALYZE
+
+> CHECKPOINT
+-- CHECKPOINT
+
+> LISTEN chan
+-- LISTEN
+
+> NOTIFY chan, 'payload'
+-- NOTIFY
+
+> UNLISTEN *
+-- UNLISTEN
+
+> SELECT pg_sleep(0)
+pg_sleep:void
+
+-- SELECT 1
+
+> DO $$ BEGIN END $$
+-- DO
+

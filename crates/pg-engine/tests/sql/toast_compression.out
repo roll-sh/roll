@@ -1,0 +1,125 @@
+> create table tz (id int, t text, b bytea, j jsonb, a int[], x xml, n numeric)
+-- CREATE TABLE
+
+> insert into tz select g, repeat('abc', 3000), convert_to(repeat('xyz', 3000), 'UTF8'), to_jsonb(repeat('q', 5000)), array_fill(g, array[3000]), xmlparse(content repeat('<a>1</a>', 1000)), 1 from generate_series(1, 20) g
+-- INSERT 0 20
+
+> select pg_relation_size('tz'), pg_table_size('tz'), pg_total_relation_size('tz')
+pg_relation_size:int8 | pg_table_size:int8 | pg_total_relation_size:int8
+16384 | 49152 | 49152
+-- SELECT 1
+
+> select pg_column_size(t), pg_column_size(b), pg_column_size(j), pg_column_size(a), pg_column_size(x), pg_column_size(id), pg_column_size(n), pg_column_compression(t), pg_column_compression(a), pg_column_compression(id) from tz where id = 1
+pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_compression:text | pg_column_compression:text | pg_column_compression:text
+115 | 115 | 78 | 161 | 111 | 4 | 5 | pglz | pglz | NULL
+-- SELECT 1
+
+> create table tj (j jsonb, a text[], f float8[], i int8[])
+-- CREATE TABLE
+
+> insert into tj select jsonb_build_object('k', g, 'arr', (select jsonb_agg(x) from generate_series(1, 400) x), 'n', 1.5, 'b', true, 'z', null, 's', repeat('w', 100)), array_fill('hello'::text, array[600]), array_fill(1.5::float8, array[600]), array_fill(g::int8, array[20, 30]) from generate_series(1, 20) g
+-- INSERT 0 20
+
+> select pg_table_size('tj')
+pg_table_size:int8
+73728
+-- SELECT 1
+
+> insert into tj select (select jsonb_object_agg('key' || x, x * 1.25) from generate_series(1, 300) x), array[null, 'a', repeat('b', 3000)], array[1, null, 3]::float8[], null from generate_series(1, 5) g
+-- INSERT 0 5
+
+> select pg_table_size('tj')
+pg_table_size:int8
+122880
+-- SELECT 1
+
+> select pg_column_size(j), pg_column_size(a), pg_column_compression(j), pg_column_compression(a) from tj order by pg_column_size(j), pg_column_size(a) limit 3
+pg_column_size:int4 | pg_column_size:int4 | pg_column_compression:text | pg_column_compression:text
+1444 | 118 | pglz | pglz
+1445 | 118 | pglz | pglz
+1446 | 118 | pglz | pglz
+-- SELECT 3
+
+> create table tm (id int, t text, u text)
+-- CREATE TABLE
+
+> insert into tm values (1, repeat(md5('a'), 300), 'short'), (2, (select string_agg(md5(x::text), '') from generate_series(1, 300) x), 'x')
+-- INSERT 0 2
+
+> select id, pg_column_size(t), pg_column_size(u), pg_column_compression(t), pg_column_compression(u) from tm order by id
+id:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_compression:text | pg_column_compression:text
+1 | 156 | 6 | pglz | NULL
+2 | 9600 | 2 | NULL | NULL
+-- SELECT 2
+
+> show default_toast_compression
+default_toast_compression:text
+pglz
+-- SHOW
+
+> set default_toast_compression = lz4
+-- SET
+
+> create table tl (id int, t text)
+-- CREATE TABLE
+
+> insert into tl select g, repeat('abc', 3000) from generate_series(1, 20) g
+-- INSERT 0 20
+
+> select pg_table_size('tl')
+pg_table_size:int8
+16384
+-- SELECT 1
+
+> create table tl2 (id int, t text compression pglz, u text compression lz4, v text)
+-- CREATE TABLE
+
+> insert into tl2 select g, repeat(md5(g::text), 100), repeat(md5(g::text), 100), repeat(md5(g::text), 100) from generate_series(1, 20) g
+-- INSERT 0 20
+
+> select pg_table_size('tl2')
+pg_table_size:int8
+16384
+-- SELECT 1
+
+> select pg_column_size(t), pg_column_size(u), pg_column_size(v), pg_column_compression(t), pg_column_compression(u), pg_column_compression(v) from tl2 where id < 4 order by id
+pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_compression:text | pg_column_compression:text | pg_column_compression:text
+82 | 63 | 63 | pglz | lz4 | lz4
+82 | 63 | 63 | pglz | lz4 | lz4
+82 | 63 | 63 | pglz | lz4 | lz4
+-- SELECT 3
+
+> select attname, attcompression from pg_attribute where attrelid = 'tl2'::regclass and attnum > 0 order by attnum
+attname:name | attcompression:char
+id | 
+t | p
+u | l
+v | 
+-- SELECT 4
+
+> create table tl3 (id int, t text)
+-- CREATE TABLE
+
+> insert into tl3 select g, (select string_agg(md5((g * 1000 + x)::text), '') from generate_series(1, 200) x) from generate_series(1, 30) g
+-- INSERT 0 30
+
+> insert into tl3 select g, (select string_agg(x::text || 'abc' || (x % 7)::text, ',') from generate_series(1, 2000) x) from generate_series(1, 30) g
+-- INSERT 0 30
+
+> select pg_table_size('tl3')
+pg_table_size:int8
+663552
+-- SELECT 1
+
+> set default_toast_compression = zstd
+ERROR 22023: invalid value for parameter "default_toast_compression": "zstd"
+HINT: Available values: pglz, lz4.
+
+> reset default_toast_compression
+-- RESET
+
+> select pg_column_compression('abc'::text), pg_column_size('abc'::text), pg_column_size(1), pg_column_size(1::int8), pg_column_size('abc'), pg_column_size(repeat('x', 200)), pg_column_size(array[1,2,3]), pg_column_size('{"a":1}'::jsonb), pg_column_size(1.5::numeric), pg_column_size(true), pg_column_size('\x0102'::bytea), pg_column_size(row(1,2)), pg_column_size(null::text)
+pg_column_compression:text | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4
+NULL | 7 | 4 | 8 | 4 | 204 | 36 | 28 | 10 | 1 | 6 | 32 | NULL
+-- SELECT 1
+

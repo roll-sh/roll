@@ -1,0 +1,45 @@
+{
+  "pid": 841933,
+  "port": 53332,
+  "mode": "custom",
+  "data": "/home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/capture-20261102T022538Z/custom-data",
+  "command": [
+    "taskset",
+    "-c",
+    "28-31",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+    "--data",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/capture-20261102T022538Z/custom-data",
+    "--listen",
+    "127.0.0.1:53332",
+    "--password",
+    "pw",
+    "--cache-mb",
+    "2048",
+    "-c",
+    "maintenance_work_mem=256MB",
+    "-c",
+    "max_connections=100",
+    "-c",
+    "plan_cache_mode=force_custom_plan"
+  ],
+  "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+  "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/capture-20261102T022538Z/custom-data --listen 127.0.0.1:53332 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 -c plan_cache_mode=force_custom_plan ",
+  "starttime_ticks": "46806893",
+  "affinity": [
+    28,
+    29,
+    30,
+    31
+  ],
+  "thread_affinities": [
+    [
+      28,
+      29,
+      30,
+      31
+    ]
+  ],
+  "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-915af586.scope\n"
+}

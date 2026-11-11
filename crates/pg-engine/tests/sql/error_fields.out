@@ -1,0 +1,123 @@
+> CREATE TABLE ef_p (id int PRIMARY KEY, n int NOT NULL, c int CONSTRAINT ef_c_pos CHECK (c > 0))
+-- CREATE TABLE
+
+> CREATE TABLE ef_c (id int REFERENCES ef_p)
+-- CREATE TABLE
+
+> CREATE DOMAIN ef_d AS int NOT NULL CONSTRAINT ef_d_pos CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> INSERT INTO ef_p VALUES (1, 1, 1)
+-- INSERT 0 1
+
+> INSERT INTO ef_p VALUES (1, 1, 1)
+ERROR 23505: duplicate key value violates unique constraint "ef_p_pkey"
+DETAIL: Key (id)=(1) already exists.
+OBJECTS: schema=public table=ef_p constraint=ef_p_pkey
+
+> INSERT INTO ef_p VALUES (2, NULL, 1)
+ERROR 23502: null value in column "n" of relation "ef_p" violates not-null constraint
+DETAIL: Failing row contains (2, null, 1).
+OBJECTS: schema=public table=ef_p column=n
+
+> INSERT INTO ef_p VALUES (3, 1, 0)
+ERROR 23514: new row for relation "ef_p" violates check constraint "ef_c_pos"
+DETAIL: Failing row contains (3, 1, 0).
+OBJECTS: schema=public table=ef_p constraint=ef_c_pos
+
+> INSERT INTO ef_c VALUES (7)
+ERROR 23503: insert or update on table "ef_c" violates foreign key constraint "ef_c_id_fkey"
+DETAIL: Key (id)=(7) is not present in table "ef_p".
+OBJECTS: schema=public table=ef_c constraint=ef_c_id_fkey
+
+> SELECT NULL::ef_d
+ERROR 23502: domain ef_d does not allow null values
+OBJECTS: schema=public datatype=ef_d
+
+> SELECT 0::ef_d
+ERROR 23514: value for domain ef_d violates check constraint "ef_d_pos"
+OBJECTS: schema=public datatype=ef_d constraint=ef_d_pos
+
+> CREATE FUNCTION ef_try(sql text) RETURNS text LANGUAGE plpgsql AS $$
+> DECLARE s text; t text; c text; d text; n text; st text;
+> BEGIN
+>   EXECUTE sql;
+>   RETURN 'ok';
+> EXCEPTION WHEN others THEN
+>   GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, s = SCHEMA_NAME, t = TABLE_NAME, c = COLUMN_NAME, d = PG_DATATYPE_NAME, n = CONSTRAINT_NAME;
+>   RETURN concat_ws('|', st, s, t, c, d, n);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT ef_try('INSERT INTO ef_p VALUES (1, 1, 1)')
+ef_try:text
+23505|public|ef_p|||ef_p_pkey
+-- SELECT 1
+
+> SELECT ef_try('INSERT INTO ef_p VALUES (2, NULL, 1)')
+ef_try:text
+23502|public|ef_p|n||
+-- SELECT 1
+
+> SELECT ef_try('INSERT INTO ef_c VALUES (9)')
+ef_try:text
+23503|public|ef_c|||ef_c_id_fkey
+-- SELECT 1
+
+> SELECT ef_try('SELECT 0::ef_d')
+ef_try:text
+23514|public|||ef_d|ef_d_pos
+-- SELECT 1
+
+> SELECT ef_try('SELECT 1/0')
+ef_try:text
+22012|||||
+-- SELECT 1
+
+> DO $$ BEGIN RAISE EXCEPTION 'custom' USING COLUMN = 'col', CONSTRAINT = 'con', DATATYPE = 'typ', TABLE = 'tab', SCHEMA = 'sch'; END $$
+ERROR P0001: custom
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+OBJECTS: schema=sch table=tab column=col datatype=typ constraint=con
+
+> DO $$ BEGIN RAISE NOTICE 'note' USING TABLE = 'tab'; END $$
+NOTICE 00000: note
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+OBJECTS: table=tab
+-- DO
+
+> DO $$ BEGIN RAISE EXCEPTION 'twice' USING DETAIL = 'a', DETAIL = 'b'; END $$
+ERROR 42601: RAISE option already specified: DETAIL
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN RAISE EXCEPTION 'msg' USING MESSAGE = 'other'; END $$
+ERROR 42601: RAISE option already specified: MESSAGE
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN RAISE division_by_zero USING ERRCODE = '22000'; END $$
+ERROR 42601: RAISE option already specified: ERRCODE
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN RAISE division_by_zero USING MESSAGE = 'custom message'; END $$
+ERROR 22012: custom message
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ DECLARE t text; BEGIN
+>   BEGIN RAISE EXCEPTION 'x' USING TABLE = 'tt', COLUMN = 'cc';
+>   EXCEPTION WHEN others THEN GET STACKED DIAGNOSTICS t = TABLE_NAME; RAISE NOTICE 'table %', t; RAISE;
+>   END;
+> END $$
+NOTICE 00000: table tt
+CONTEXT: PL/pgSQL function inline_code_block line 3 at RAISE
+ERROR P0001: x
+CONTEXT: PL/pgSQL function inline_code_block line 2 at RAISE
+OBJECTS: table=tt column=cc
+
+> DROP FUNCTION ef_try(text)
+-- DROP FUNCTION
+
+> DROP TABLE ef_c, ef_p
+-- DROP TABLE
+
+> DROP DOMAIN ef_d
+-- DROP DOMAIN
+

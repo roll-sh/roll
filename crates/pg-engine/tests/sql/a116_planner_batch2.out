@@ -1,0 +1,104 @@
+> CREATE TABLE a116_jobs (id bigserial PRIMARY KEY, state text NOT NULL DEFAULT 'available', queue text NOT NULL DEFAULT 'default',
+>   worker text NOT NULL, args jsonb NOT NULL DEFAULT '{}', attempt int NOT NULL DEFAULT 0, priority int NOT NULL DEFAULT 0,
+>   scheduled_at timestamp NOT NULL DEFAULT '2026-01-01', attempted_at timestamp)
+-- CREATE TABLE
+
+> CREATE INDEX a116_jobs_fetch ON a116_jobs (state, queue, priority, scheduled_at, id)
+-- CREATE INDEX
+
+> INSERT INTO a116_jobs (worker, priority, scheduled_at) SELECT 'W', g % 4, timestamp '2026-01-01' - g * interval '1 s' FROM generate_series(1, 5000) g
+-- INSERT 0 5000
+
+> VACUUM ANALYZE a116_jobs
+-- VACUUM
+
+> EXPLAIN (COSTS OFF) UPDATE a116_jobs SET state = 'executing', attempted_at = '2026-01-02', attempt = attempt + 1
+> WHERE id IN (SELECT id FROM a116_jobs WHERE state = 'available' AND queue = 'default'
+>              ORDER BY priority, scheduled_at, id LIMIT 10 FOR UPDATE SKIP LOCKED) RETURNING id
+QUERY PLAN:text
+Update on a116_jobs
+  ->  Nested Loop
+        ->  HashAggregate
+              Group Key: "ANY_subquery".id
+              ->  Subquery Scan on "ANY_subquery"
+                    ->  Limit
+                          ->  LockRows
+                                ->  Index Scan using a116_jobs_fetch on a116_jobs a116_jobs_1
+                                      Index Cond: ((state = 'available'::text) AND (queue = 'default'::text))
+        ->  Index Scan using a116_jobs_pkey on a116_jobs
+              Index Cond: (id = "ANY_subquery".id)
+-- EXPLAIN
+
+> UPDATE a116_jobs SET state = 'executing', attempted_at = '2026-01-02', attempt = attempt + 1
+> WHERE id IN (SELECT id FROM a116_jobs WHERE state = 'available' AND queue = 'default'
+>              ORDER BY priority, scheduled_at, id LIMIT 10 FOR UPDATE SKIP LOCKED) RETURNING id
+id:int8
+4968
+4976
+4988
+4964
+4972
+4984
+4996
+4992
+4980
+5000
+-- UPDATE 10
+
+> CREATE TABLE a116_m1 (k int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> CREATE TABLE a116_m2 (k int, w int)
+-- CREATE TABLE
+
+> INSERT INTO a116_m1 SELECT g, g FROM generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> INSERT INTO a116_m2 SELECT g + 5000, g FROM generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> CREATE INDEX ON a116_m2 (k)
+-- CREATE INDEX
+
+> ANALYZE a116_m1, a116_m2
+-- ANALYZE
+
+> INSERT INTO a116_m2 SELECT g, g FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> EXPLAIN SELECT * FROM a116_m1 JOIN a116_m2 USING (k) ORDER BY k LIMIT 5
+QUERY PLAN:text
+Limit  (cost=168.07..168.38 rows=5 width=12)
+  ->  Merge Join  (cost=168.07..1376.08 rows=20000 width=12)
+        Merge Cond: (a116_m1.k = a116_m2.k)
+        ->  Index Scan using a116_m1_pkey on a116_m1  (cost=0.29..620.29 rows=20000 width=8)
+        ->  Index Scan using a116_m2_k_idx on a116_m2  (cost=0.29..624.29 rows=20000 width=8)
+-- EXPLAIN
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> EXPLAIN WITH t AS (SELECT queue, sum(attempt) AS v FROM a116_jobs WHERE scheduled_at > '2026-02-01' GROUP BY queue)
+> SELECT queue, v FROM t LIMIT 10
+QUERY PLAN:text
+Limit  (cost=81.82..81.84 rows=1 width=16)
+  ->  GroupAggregate  (cost=81.82..81.84 rows=1 width=16)
+        Group Key: a116_jobs.queue
+        ->  Sort  (cost=81.82..81.83 rows=1 width=12)
+              Sort Key: a116_jobs.queue
+              ->  Index Scan using a116_jobs_fetch on a116_jobs  (cost=0.28..81.81 rows=1 width=12)
+                    Index Cond: (scheduled_at > '2026-02-01 00:00:00'::timestamp without time zone)
+-- EXPLAIN
+
+> DROP TABLE a116_jobs, a116_m1, a116_m2
+-- DROP TABLE
+

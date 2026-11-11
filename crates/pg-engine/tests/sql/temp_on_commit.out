@@ -1,0 +1,168 @@
+> CREATE TEMP TABLE temptest(col int) ON COMMIT DELETE ROWS
+-- CREATE TABLE
+
+> CREATE INDEX ON temptest(bit_length(''))
+-- CREATE INDEX
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO temptest VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO temptest VALUES (2)
+-- INSERT 0 1
+
+> SELECT * FROM temptest
+col:int4
+1
+2
+-- SELECT 2
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM temptest
+col:int4
+-- SELECT 0
+
+> DROP TABLE temptest
+-- DROP TABLE
+
+> BEGIN
+-- BEGIN
+
+> CREATE TEMP TABLE temptest(col) ON COMMIT DELETE ROWS AS SELECT 1
+-- SELECT 1
+
+> SELECT * FROM temptest
+col:int4
+1
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM temptest
+col:int4
+-- SELECT 0
+
+> DROP TABLE temptest
+-- DROP TABLE
+
+> BEGIN
+-- BEGIN
+
+> CREATE TEMP TABLE temptest(col int) ON COMMIT DROP
+-- CREATE TABLE
+
+> INSERT INTO temptest VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO temptest VALUES (2)
+-- INSERT 0 1
+
+> SELECT * FROM temptest
+col:int4
+1
+2
+-- SELECT 2
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM temptest
+ERROR 42P01: relation "temptest" does not exist (at 15)
+
+> BEGIN
+-- BEGIN
+
+> CREATE TEMP TABLE temptest(col) ON COMMIT DROP AS SELECT 1
+-- SELECT 1
+
+> SELECT * FROM temptest
+col:int4
+1
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM temptest
+ERROR 42P01: relation "temptest" does not exist (at 15)
+
+> BEGIN
+-- BEGIN
+
+> do $$
+> begin
+>   execute format($cmd$
+>     CREATE TEMP TABLE temptest (col text CHECK (col < %L)) ON COMMIT DROP
+>   $cmd$,
+>     (SELECT string_agg(g.i::text || ':' || random()::text, '|')
+>      FROM generate_series(1, 100) g(i)));
+> end$$
+-- DO
+
+> SELECT * FROM temptest
+col:text
+-- SELECT 0
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM temptest
+ERROR 42P01: relation "temptest" does not exist (at 15)
+
+> CREATE TABLE temptest(col int) ON COMMIT DELETE ROWS
+ERROR 42P16: ON COMMIT can only be used on temporary tables
+
+> CREATE TABLE temptest(col) ON COMMIT DELETE ROWS AS SELECT 1
+ERROR 42P16: ON COMMIT can only be used on temporary tables
+
+> BEGIN
+-- BEGIN
+
+> CREATE TEMP TABLE temptest1(col int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TEMP TABLE temptest2(col int REFERENCES temptest1)
+>   ON COMMIT DELETE ROWS
+-- CREATE TABLE
+
+> INSERT INTO temptest1 VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO temptest2 VALUES (1)
+-- INSERT 0 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM temptest1
+col:int4
+1
+-- SELECT 1
+
+> SELECT * FROM temptest2
+col:int4
+-- SELECT 0
+
+> DROP TABLE temptest2
+-- DROP TABLE
+
+> DROP TABLE temptest1
+-- DROP TABLE
+
+> WITH RECURSIVE t(n) AS (VALUES ('01'::varbit) UNION SELECT n || '10'::varbit FROM t WHERE n < '100'::varbit) SELECT n FROM t
+ERROR 0A000: could not implement recursive UNION
+DETAIL: All column datatypes must be hashable.
+
+> WITH RECURSIVE t(n) AS (VALUES ('01'::varbit) UNION ALL SELECT n || '10'::varbit FROM t WHERE length(n) < 7) SELECT n FROM t
+n:varbit
+01
+0110
+011010
+01101010
+-- SELECT 4
+

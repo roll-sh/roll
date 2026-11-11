@@ -1,0 +1,374 @@
+> CREATE TABLE mm_a (id int, x text)
+-- CREATE TABLE
+
+> CREATE TABLE mm_b (id int, y text, z int)
+-- CREATE TABLE
+
+> INSERT INTO mm_a VALUES (1, 'a1')
+-- INSERT 0 1
+
+> INSERT INTO mm_b VALUES (1, 'b1', 10), (2, 'b2', 20)
+-- INSERT 0 2
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id
+>   WHEN MATCHED THEN UPDATE SET x = mm_b.y WHEN NOT MATCHED THEN INSERT VALUES (mm_b.id, mm_b.y) RETURNING *
+id:int4 | y:text | z:int4 | id:int4 | x:text
+1 | b1 | 10 | 1 | b1
+2 | b2 | 20 | 2 | b2
+-- MERGE 2
+
+> WITH m AS (MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED THEN DELETE RETURNING merge_action() act, mm_a.*)
+> SELECT * FROM m ORDER BY id
+act:text | id:int4 | x:text
+DELETE | 1 | b1
+DELETE | 2 | b2
+-- SELECT 2
+
+> SELECT count(*) FROM mm_a
+count:int8
+0
+-- SELECT 1
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED THEN UPDATE SET x = mm_b.y RETURNING merge_action() + 1
+ERROR 42883: operator does not exist: text + integer (at 114)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT pg_typeof(merge_action())
+ERROR 42601: MERGE_ACTION() can only be used in the RETURNING list of a MERGE command (at 18)
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED THEN DELETE RETURNING (SELECT merge_action())
+merge_action:text
+-- MERGE 0
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED AND merge_action() = 'x' THEN DELETE
+ERROR 42601: MERGE_ACTION() can only be used in the RETURNING list of a MERGE command (at 66)
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN NOT MATCHED THEN INSERT VALUES (z)
+-- MERGE 2
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN NOT MATCHED THEN INSERT VALUES (x)
+ERROR 42703: column "x" does not exist (at 86)
+DETAIL: There is a column named "x" in table "mm_a", but it cannot be referenced from this part of the query.
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN NOT MATCHED BY SOURCE THEN UPDATE SET x = y
+ERROR 42703: column "y" does not exist (at 96)
+DETAIL: There is a column named "y" in table "mm_b", but it cannot be referenced from this part of the query.
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = nope WHEN MATCHED THEN DELETE
+ERROR 42703: column "nope" does not exist (at 41)
+
+> MERGE INTO mm_a USING (SELECT 1) s ON true WHEN MATCHED THEN UPDATE SET mm_a.x = 'q'
+ERROR 42703: column "mm_a" of relation "mm_a" does not exist (at 73)
+HINT: SET target columns cannot be qualified with the relation name.
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED THEN UPDATE SET x = DEFAULT RETURNING ctid IS NOT NULL
+ERROR 42702: column reference "ctid" is ambiguous (at 100)
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED THEN UPDATE SET x = 'zz' RETURNING mm_a.ctid IS NOT NULL, mm_a.tableoid::regclass, mm_b.*
+?column?:bool | tableoid:regclass | id:int4 | y:text | z:int4
+-- MERGE 0
+
+> MERGE INTO mm_a AS q USING mm_b ON q.id = mm_b.id WHEN MATCHED THEN DELETE RETURNING mm_a.id
+ERROR 42P01: invalid reference to FROM-clause entry for table "mm_a" (at 86)
+HINT: Perhaps you meant to reference the table alias "q".
+
+> MERGE INTO mm_a USING mm_b ON 1 WHEN MATCHED THEN DELETE
+ERROR 21000: MERGE command cannot affect row a second time
+HINT: Ensure that not more than one source row matches any one target row.
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED AND 1 THEN DELETE
+ERROR 42804: argument of WHEN must be type boolean, not type integer (at 66)
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN MATCHED AND count(*) > 0 THEN DELETE
+ERROR 42803: aggregate functions are not allowed in MERGE WHEN conditions (at 66)
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN NOT MATCHED THEN INSERT VALUES (sum(mm_b.z))
+ERROR 42803: aggregate functions are not allowed in VALUES (at 86)
+
+> MERGE INTO mm_a USING mm_b ON mm_a.id = mm_b.id WHEN NOT MATCHED THEN INSERT VALUES (generate_series(1, 2))
+ERROR 0A000: set-valued function called in context that cannot accept a set (at 86)
+
+> SELECT a.id FROM mm_a q
+ERROR 42P01: missing FROM-clause entry for table "a" (at 8)
+
+> CREATE SEQUENCE mm_seq
+-- CREATE SEQUENCE
+
+> MERGE INTO mm_seq USING mm_b ON false WHEN NOT MATCHED THEN DO NOTHING
+ERROR 0A000: cannot execute MERGE on relation "mm_seq"
+DETAIL: This operation is not supported for sequences.
+
+> DROP SEQUENCE mm_seq
+-- DROP SEQUENCE
+
+> MERGE INTO mm_a t USING (mm_b JOIN (VALUES (1, 'j')) v(k, w) ON mm_b.id = v.k) ON t.id = mm_b.id
+>   WHEN NOT MATCHED THEN INSERT VALUES (mm_b.id, v.w || mm_b.y)
+-- MERGE 1
+
+> SELECT * FROM mm_a ORDER BY id
+id:int4 | x:text
+1 | jb1
+10 | NULL
+20 | NULL
+-- SELECT 3
+
+> MERGE INTO mm_a t USING (SELECT * FROM mm_b WHERE false) s ON t.id = s.id
+>   WHEN NOT MATCHED BY SOURCE THEN UPDATE SET x = 'orphan'
+-- MERGE 3
+
+> SELECT * FROM mm_a ORDER BY id
+id:int4 | x:text
+1 | orphan
+10 | orphan
+20 | orphan
+-- SELECT 3
+
+> CREATE TABLE mm_base (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> CREATE VIEW mm_tv AS SELECT id, upper(v) AS v FROM mm_base
+-- CREATE VIEW
+
+> MERGE INTO mm_tv USING mm_b ON mm_tv.id = mm_b.id WHEN NOT MATCHED THEN INSERT VALUES (mm_b.id, mm_b.y)
+ERROR 0A000: cannot merge into column "v" of view "mm_tv"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> CREATE FUNCTION mm_tv_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF TG_OP = 'INSERT' THEN INSERT INTO mm_base VALUES (NEW.id, lower(NEW.v)); RETURN NEW;
+>   ELSIF TG_OP = 'UPDATE' THEN UPDATE mm_base SET v = lower(NEW.v) WHERE id = OLD.id; RETURN NEW;
+>   ELSE DELETE FROM mm_base WHERE id = OLD.id; RETURN OLD;
+>   END IF;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER mm_tv_i INSTEAD OF INSERT ON mm_tv FOR EACH ROW EXECUTE FUNCTION mm_tv_trg()
+-- CREATE TRIGGER
+
+> MERGE INTO mm_tv USING mm_b ON mm_tv.id = mm_b.id WHEN NOT MATCHED THEN INSERT VALUES (mm_b.id, mm_b.y)
+-- MERGE 2
+
+> SELECT * FROM mm_tv ORDER BY id
+id:int4 | v:text
+1 | B1
+2 | B2
+-- SELECT 2
+
+> MERGE INTO mm_tv USING mm_b ON mm_tv.id = mm_b.id WHEN MATCHED THEN UPDATE SET v = 'NEW'
+ERROR 0A000: cannot merge into column "v" of view "mm_tv"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> CREATE TRIGGER mm_tv_u INSTEAD OF UPDATE ON mm_tv FOR EACH ROW EXECUTE FUNCTION mm_tv_trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER mm_tv_d INSTEAD OF DELETE ON mm_tv FOR EACH ROW EXECUTE FUNCTION mm_tv_trg()
+-- CREATE TRIGGER
+
+> MERGE INTO mm_tv t USING (VALUES (1, 'X'), (2, NULL), (3, 'Z')) s(id, v) ON t.id = s.id
+>   WHEN MATCHED AND s.v IS NULL THEN DELETE
+>   WHEN MATCHED THEN UPDATE SET v = s.v
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v)
+>   RETURNING merge_action(), t.*
+merge_action:text | id:int4 | v:text
+DELETE | 2 | B2
+INSERT | 3 | Z
+UPDATE | 1 | X
+-- MERGE 3
+
+> SELECT * FROM mm_base ORDER BY id
+id:int4 | v:text
+1 | x
+3 | z
+-- SELECT 2
+
+> CREATE ROLE mm_user
+-- CREATE ROLE
+
+> CREATE TABLE mm_r (id int PRIMARY KEY, owner text, v int)
+-- CREATE TABLE
+
+> GRANT ALL ON mm_r TO mm_user
+-- GRANT
+
+> INSERT INTO mm_r VALUES (1, 'mm_user', 1), (2, 'other', 2), (3, 'mm_user', 3)
+-- INSERT 0 3
+
+> ALTER TABLE mm_r ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY sel ON mm_r FOR SELECT USING (true)
+-- CREATE POLICY
+
+> CREATE POLICY upd ON mm_r FOR UPDATE USING (owner = current_user) WITH CHECK (v < 100)
+-- CREATE POLICY
+
+> CREATE POLICY del ON mm_r FOR DELETE USING (owner = current_user)
+-- CREATE POLICY
+
+> CREATE POLICY ins ON mm_r FOR INSERT WITH CHECK (owner = current_user)
+-- CREATE POLICY
+
+> SET ROLE mm_user
+-- SET
+
+> MERGE INTO mm_r USING (VALUES (1)) s(id) ON mm_r.id = s.id WHEN MATCHED THEN UPDATE SET v = 10
+-- MERGE 1
+
+> MERGE INTO mm_r USING (VALUES (2)) s(id) ON mm_r.id = s.id WHEN MATCHED THEN UPDATE SET v = 10
+ERROR 42501: target row violates row-level security policy (USING expression) for table "mm_r"
+
+> MERGE INTO mm_r USING (VALUES (1)) s(id) ON mm_r.id = s.id WHEN MATCHED THEN UPDATE SET v = 1000
+ERROR 42501: new row violates row-level security policy for table "mm_r"
+
+> MERGE INTO mm_r USING (VALUES (2)) s(id) ON mm_r.id = s.id WHEN MATCHED THEN DELETE
+ERROR 42501: target row violates row-level security policy (USING expression) for table "mm_r"
+
+> MERGE INTO mm_r USING (VALUES (9)) s(id) ON mm_r.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (9, 'other', 1)
+ERROR 42501: new row violates row-level security policy for table "mm_r"
+
+> MERGE INTO mm_r USING (VALUES (9)) s(id) ON mm_r.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (9, 'mm_user', 1)
+-- MERGE 1
+
+> MERGE INTO mm_r USING (VALUES (3)) s(id) ON mm_r.id = s.id WHEN MATCHED THEN DELETE
+-- MERGE 1
+
+> RESET ROLE
+-- RESET
+
+> DROP POLICY sel ON mm_r
+-- DROP POLICY
+
+> CREATE POLICY sel2 ON mm_r FOR SELECT USING (id <> 1)
+-- CREATE POLICY
+
+> SET ROLE mm_user
+-- SET
+
+> MERGE INTO mm_r USING (VALUES (1)) s(id) ON mm_r.id = s.id WHEN MATCHED THEN UPDATE SET v = 5 WHEN NOT MATCHED THEN DO NOTHING
+-- MERGE 0
+
+> RESET ROLE
+-- RESET
+
+> SELECT * FROM mm_r ORDER BY id
+id:int4 | owner:text | v:int4
+1 | mm_user | 10
+2 | other | 2
+9 | mm_user | 1
+-- SELECT 3
+
+> CREATE TABLE mm_p (id int, a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO mm_p VALUES (1, 1, 1)
+-- INSERT 0 1
+
+> GRANT SELECT ON mm_b TO mm_user
+-- GRANT
+
+> GRANT SELECT (id), UPDATE (a) ON mm_p TO mm_user
+-- GRANT
+
+> SET ROLE mm_user
+-- SET
+
+> MERGE INTO mm_p USING mm_b ON mm_p.id = mm_b.id WHEN MATCHED THEN UPDATE SET a = 5
+-- MERGE 1
+
+> MERGE INTO mm_p USING mm_b ON mm_p.id = mm_b.id WHEN MATCHED THEN UPDATE SET b = 5
+ERROR 42501: permission denied for table mm_p
+
+> MERGE INTO mm_p USING mm_b ON mm_p.id = mm_b.id WHEN MATCHED THEN DELETE
+ERROR 42501: permission denied for table mm_p
+
+> MERGE INTO mm_p USING mm_b ON mm_p.id = mm_b.id WHEN NOT MATCHED THEN INSERT VALUES (1, 2, 3)
+ERROR 42501: permission denied for table mm_p
+
+> MERGE INTO mm_p USING mm_b ON mm_p.id = mm_b.id WHEN MATCHED AND mm_p.b = 1 THEN UPDATE SET a = 6
+ERROR 42501: permission denied for table mm_p
+
+> MERGE INTO mm_p USING mm_b ON mm_p.id = mm_b.id WHEN MATCHED THEN DO NOTHING
+-- MERGE 0
+
+> RESET ROLE
+-- RESET
+
+> SELECT * FROM mm_p
+id:int4 | a:int4 | b:int4
+1 | 5 | 1
+-- SELECT 1
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> MERGE INTO mm_p USING mm_b ON mm_p.id = mm_b.id WHEN MATCHED THEN DO NOTHING
+-- MERGE 0
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE mm_parent (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE mm_child (id int PRIMARY KEY, pid int REFERENCES mm_parent ON DELETE CASCADE)
+-- CREATE TABLE
+
+> INSERT INTO mm_parent VALUES (1), (2)
+-- INSERT 0 2
+
+> INSERT INTO mm_child VALUES (10, 1), (20, 2)
+-- INSERT 0 2
+
+> MERGE INTO mm_child c USING (VALUES (30, 3)) s(id, pid) ON c.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.pid)
+ERROR 23503: insert or update on table "mm_child" violates foreign key constraint "mm_child_pid_fkey"
+DETAIL: Key (pid)=(3) is not present in table "mm_parent".
+OBJECTS: schema=public table=mm_child constraint=mm_child_pid_fkey
+
+> MERGE INTO mm_parent p USING (VALUES (1)) s(id) ON p.id = s.id WHEN MATCHED THEN DELETE
+-- MERGE 1
+
+> SELECT * FROM mm_child ORDER BY id
+id:int4 | pid:int4
+20 | 2
+-- SELECT 1
+
+> CREATE FUNCTION mm_fn(i int) RETURNS SETOF text LANGUAGE sql AS $$
+>   MERGE INTO mm_parent p USING (VALUES (i)) s(id) ON p.id = s.id
+>     WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id)
+>     RETURNING merge_action()
+> $$
+-- CREATE FUNCTION
+
+> SELECT mm_fn(2), mm_fn(5)
+mm_fn:text | mm_fn:text
+DELETE | INSERT
+-- SELECT 1
+
+> SELECT * FROM mm_parent ORDER BY id
+id:int4
+5
+-- SELECT 1
+
+> COPY (MERGE INTO mm_parent p USING (VALUES (7)) s(id) ON p.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id) RETURNING p.id) TO STDOUT
+copy:text
+7
+-- COPY 1
+
+> COPY (MERGE INTO mm_parent p USING (VALUES (7)) s(id) ON p.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id)) TO STDOUT
+ERROR 0A000: COPY query must have a RETURNING clause
+
+> DROP FUNCTION mm_fn(int)
+-- DROP FUNCTION
+
+> DROP VIEW mm_tv
+-- DROP VIEW
+
+> DROP FUNCTION mm_tv_trg()
+-- DROP FUNCTION
+
+> DROP TABLE mm_a, mm_b, mm_base, mm_r, mm_p, mm_child, mm_parent
+-- DROP TABLE
+
+> DROP ROLE mm_user
+-- DROP ROLE
+

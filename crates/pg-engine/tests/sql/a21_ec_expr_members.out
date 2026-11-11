@@ -1,0 +1,133 @@
+> SET enable_partitionwise_join = true
+-- SET
+
+> CREATE TABLE ecx1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE ecx1_p1 PARTITION OF ecx1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE ecx1_p2 PARTITION OF ecx1 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO ecx1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> CREATE TABLE ecx2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE ecx2_p1 PARTITION OF ecx2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE ecx2_p2 PARTITION OF ecx2 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO ecx2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> CREATE TABLE ecx3 (a int, b int, c int) PARTITION BY RANGE (((a + b) / 2))
+-- CREATE TABLE
+
+> CREATE TABLE ecx3_p1 PARTITION OF ecx3 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE ecx3_p2 PARTITION OF ecx3 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO ecx3 SELECT i, i, i % 25 FROM generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> CREATE INDEX ecx3_p1_ab2 ON ecx3_p1 (((a + b) / 2))
+-- CREATE INDEX
+
+> CREATE INDEX ecx3_p2_ab2 ON ecx3_p2 (((a + b) / 2))
+-- CREATE INDEX
+
+> ANALYZE ecx1, ecx2, ecx3
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b, t3.a + t3.b FROM ecx1 t1, ecx2 t2, ecx3 t3
+> WHERE t1.a = t2.b AND t1.a = (t3.a + t3.b) / 2 AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Nested Loop
+              Join Filter: (((t3_1.a + t3_1.b) / 2) = t1_1.a)
+              ->  Hash Join
+                    Hash Cond: (t2_1.b = t1_1.a)
+                    ->  Seq Scan on ecx2_p1 t2_1
+                    ->  Hash
+                          ->  Seq Scan on ecx1_p1 t1_1
+                                Filter: (b = 0)
+              ->  Index Scan using ecx3_p1_ab2 on ecx3_p1 t3_1
+                    Index Cond: (((a + b) / 2) = t2_1.b)
+        ->  Nested Loop
+              Join Filter: (((t3_2.a + t3_2.b) / 2) = t1_2.a)
+              ->  Hash Join
+                    Hash Cond: (t2_2.b = t1_2.a)
+                    ->  Seq Scan on ecx2_p2 t2_2
+                    ->  Hash
+                          ->  Seq Scan on ecx1_p2 t1_2
+                                Filter: (b = 0)
+              ->  Index Scan using ecx3_p2_ab2 on ecx3_p2 t3_2
+                    Index Cond: (((a + b) / 2) = t2_2.b)
+-- EXPLAIN
+
+> SELECT t1.a, t2.b, t3.a + t3.b FROM ecx1 t1, ecx2 t2, ecx3 t3
+> WHERE t1.a = t2.b AND t1.a = (t3.a + t3.b) / 2 AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | ?column?:int4
+0 | 0 | 0
+150 | 150 | 300
+300 | 300 | 600
+450 | 450 | 900
+-- SELECT 4
+
+> SELECT count(*), sum(t1.a), sum(t2.b) FROM ecx1 t1, ecx2 t2, ecx3 t3
+> WHERE t1.a = (t3.a + t3.b) / 2 AND t2.b = (t3.a + t3.b) / 2
+count:int8 | sum:int8 | sum:int8
+100 | 29700 | 29700
+-- SELECT 1
+
+> SELECT count(*) FROM ecx1 t1, ecx3 t3 WHERE t1.a = (t3.a + t3.b) / 2 AND t1.a = t3.a
+count:int8
+300
+-- SELECT 1
+
+> SELECT count(*) FROM ecx1 t1, ecx3 t3 WHERE t1.a = (t3.a + t3.b) / 2 AND t1.a = t3.a * 2
+count:int8
+1
+-- SELECT 1
+
+> SET enable_partitionwise_join = false
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b FROM ecx1_p1 t1, ecx2_p1 t2, ecx3_p1 t3
+> WHERE t1.a = t2.b AND t1.a = (t3.a + t3.b) / 2 AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Nested Loop
+        Join Filter: (((t3.a + t3.b) / 2) = t1.a)
+        ->  Hash Join
+              Hash Cond: (t2.b = t1.a)
+              ->  Seq Scan on ecx2_p1 t2
+              ->  Hash
+                    ->  Seq Scan on ecx1_p1 t1
+                          Filter: (b = 0)
+        ->  Index Scan using ecx3_p1_ab2 on ecx3_p1 t3
+              Index Cond: (((a + b) / 2) = t2.b)
+-- EXPLAIN
+
+> SELECT t1.a, t2.b FROM ecx1_p1 t1, ecx2_p1 t2, ecx3_p1 t3
+> WHERE t1.a = t2.b AND t1.a = (t3.a + t3.b) / 2 AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4
+0 | 0
+150 | 150
+-- SELECT 2
+
+> RESET enable_partitionwise_join
+-- RESET
+

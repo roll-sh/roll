@@ -1,0 +1,140 @@
+> create table a64_t as select g as k, g % 7 as j, g % 100 as h from generate_series(1, 20000) g
+-- SELECT 20000
+
+> create table a64_u as select g as k, g % 5 as j from generate_series(1, 5000) g
+-- SELECT 5000
+
+> analyze a64_t, a64_u
+-- ANALYZE
+
+> set work_mem = '64kB'
+-- SET
+
+> set enable_sort = off
+-- SET
+
+> explain select k, sum(j) from a64_t group by k
+QUERY PLAN:text
+HashAggregate  (cost=2478.00..2990.50 rows=20000 width=12)
+  Group Key: k
+  Planned Partitions: 4
+  ->  Seq Scan on a64_t  (cost=0.00..328.00 rows=20000 width=8)
+-- EXPLAIN
+
+> explain (format json) select k, sum(j) from a64_t group by k
+QUERY PLAN:json
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Hashed",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 2478.00,
+      "Total Cost": 2990.50,
+      "Plan Rows": 20000,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Group Key": ["k"],
+      "Planned Partitions": 4,
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "a64_t",
+          "Alias": "a64_t",
+          "Startup Cost": 0.00,
+          "Total Cost": 328.00,
+          "Plan Rows": 20000,
+          "Plan Width": 8,
+          "Disabled": false
+        }
+      ]
+    }
+  }
+]
+-- EXPLAIN
+
+> explain select h, count(*) from a64_t group by h
+QUERY PLAN:text
+HashAggregate  (cost=428.00..429.00 rows=100 width=12)
+  Group Key: h
+  ->  Seq Scan on a64_t  (cost=0.00..328.00 rows=20000 width=4)
+-- EXPLAIN
+
+> select count(*) from (select k, sum(j) from a64_t group by k) s
+count:int8
+20000
+-- SELECT 1
+
+> reset work_mem
+-- RESET
+
+> explain (costs off) select c, count(*) from (select h, count(*) as c from a64_t group by h) s group by c
+QUERY PLAN:text
+HashAggregate
+  Group Key: count(*)
+  ->  HashAggregate
+        Group Key: a64_t.h
+        ->  Seq Scan on a64_t
+-- EXPLAIN
+
+> select c, count(*) from (select h, count(*) as c from a64_t group by h) s group by c order by c
+c:int8 | count:int8
+200 | 100
+-- SELECT 1
+
+> reset enable_sort
+-- RESET
+
+> set parallel_setup_cost = 0
+-- SET
+
+> set parallel_tuple_cost = 0
+-- SET
+
+> set min_parallel_table_scan_size = 0
+-- SET
+
+> explain (costs off)
+> select count(*) from a64_t a join a64_u b on a.k = b.k
+>   and a.j < (select max(c.j) from a64_t c where c.h = b.j)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (a.k = b.k)
+        Join Filter: (a.j < (SubPlan 1))
+        ->  Gather
+              Workers Planned: 2
+              ->  Parallel Seq Scan on a64_t a
+        ->  Hash
+              ->  Gather
+                    Workers Planned: 2
+                    ->  Parallel Seq Scan on a64_u b
+        SubPlan 1
+          ->  Aggregate
+                ->  Seq Scan on a64_t c
+                      Filter: (h = b.j)
+-- EXPLAIN
+
+> select count(*) from a64_t a join a64_u b on a.k = b.k
+>   and a.j < (select max(c.j) from a64_t c where c.h = b.j)
+count:int8
+4286
+-- SELECT 1
+
+> reset parallel_setup_cost
+-- RESET
+
+> reset parallel_tuple_cost
+-- RESET
+
+> reset min_parallel_table_scan_size
+-- RESET
+
+> drop table a64_t, a64_u
+-- DROP TABLE
+

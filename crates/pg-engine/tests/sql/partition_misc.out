@@ -1,0 +1,293 @@
+> CREATE TABLE m (k int, v text) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE m1 PARTITION OF m FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE m2 PARTITION OF m FOR VALUES IN (2)
+-- CREATE TABLE
+
+> CREATE FUNCTION tt() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE r record; BEGIN
+>   IF TG_OP IN ('INSERT', 'UPDATE') THEN FOR r IN SELECT * FROM n ORDER BY k, v LOOP RAISE NOTICE '% new %', TG_TABLE_NAME, r; END LOOP; END IF;
+>   IF TG_OP IN ('DELETE', 'UPDATE') THEN FOR r IN SELECT * FROM o ORDER BY k, v LOOP RAISE NOTICE '% old %', TG_TABLE_NAME, r; END LOOP; END IF;
+>   RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER ti AFTER INSERT ON m REFERENCING NEW TABLE AS n FOR EACH STATEMENT EXECUTE FUNCTION tt()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tu AFTER UPDATE ON m REFERENCING NEW TABLE AS n OLD TABLE AS o FOR EACH STATEMENT EXECUTE FUNCTION tt()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER td AFTER DELETE ON m REFERENCING OLD TABLE AS o FOR EACH STATEMENT EXECUTE FUNCTION tt()
+-- CREATE TRIGGER
+
+> INSERT INTO m VALUES (1, 'a'), (2, 'b')
+NOTICE 00000: m new (1,a)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+NOTICE 00000: m new (2,b)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+-- INSERT 0 2
+
+> UPDATE m SET v = v || 'x'
+NOTICE 00000: m new (1,ax)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+NOTICE 00000: m new (2,bx)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+NOTICE 00000: m old (1,a)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+NOTICE 00000: m old (2,b)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+-- UPDATE 2
+
+> UPDATE m SET k = 3 - k WHERE k = 1
+NOTICE 00000: m new (2,ax)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+NOTICE 00000: m old (1,ax)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+-- UPDATE 1
+
+> DELETE FROM m
+NOTICE 00000: m old (2,ax)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+NOTICE 00000: m old (2,bx)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+-- DELETE 2
+
+> CREATE TRIGGER ti1 AFTER INSERT ON m1 REFERENCING NEW TABLE AS n FOR EACH STATEMENT EXECUTE FUNCTION tt()
+-- CREATE TRIGGER
+
+> INSERT INTO m VALUES (1, 'c')
+NOTICE 00000: m new (1,c)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+-- INSERT 0 1
+
+> INSERT INTO m1 VALUES (1, 'd')
+NOTICE 00000: m1 new (1,d)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+-- INSERT 0 1
+
+> DROP TABLE m
+-- DROP TABLE
+
+> CREATE TABLE ih (k int, v text)
+-- CREATE TABLE
+
+> CREATE TABLE ic (extra int) INHERITS (ih)
+-- CREATE TABLE
+
+> CREATE TRIGGER td AFTER DELETE ON ih REFERENCING OLD TABLE AS o FOR EACH STATEMENT EXECUTE FUNCTION tt()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tu AFTER UPDATE ON ih REFERENCING NEW TABLE AS n OLD TABLE AS o FOR EACH STATEMENT EXECUTE FUNCTION tt()
+-- CREATE TRIGGER
+
+> INSERT INTO ih VALUES (1, 'p')
+-- INSERT 0 1
+
+> INSERT INTO ic VALUES (2, 'c', 9)
+-- INSERT 0 1
+
+> UPDATE ih SET v = v || 'y'
+NOTICE 00000: ih new (1,py)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+NOTICE 00000: ih new (2,cy)
+CONTEXT: PL/pgSQL function tt() line 2 at RAISE
+NOTICE 00000: ih old (1,p)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+NOTICE 00000: ih old (2,c)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+-- UPDATE 2
+
+> DELETE FROM ih
+NOTICE 00000: ih old (1,py)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+NOTICE 00000: ih old (2,cy)
+CONTEXT: PL/pgSQL function tt() line 3 at RAISE
+-- DELETE 2
+
+> DROP TABLE ih, ic
+-- DROP TABLE
+
+> DROP FUNCTION tt()
+-- DROP FUNCTION
+
+> CREATE TABLE g (id int GENERATED ALWAYS AS IDENTITY, k int, d int DEFAULT 7, s int GENERATED ALWAYS AS (k * 10) STORED) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE g1 PARTITION OF g FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE g2 PARTITION OF g (d DEFAULT 8) FOR VALUES IN (2)
+-- CREATE TABLE
+
+> INSERT INTO g (k) VALUES (1), (2)
+-- INSERT 0 2
+
+> INSERT INTO g2 (k) VALUES (2)
+-- INSERT 0 1
+
+> SELECT tableoid::regclass, * FROM g ORDER BY id
+tableoid:regclass | id:int4 | k:int4 | d:int4 | s:int4
+g1 | 1 | 1 | 7 | 10
+g2 | 2 | 2 | 7 | 20
+g2 | 3 | 2 | 8 | 20
+-- SELECT 3
+
+> SELECT attname, attidentity, attgenerated, pg_get_expr(adbin, adrelid) FROM pg_attribute LEFT JOIN pg_attrdef ON adrelid = attrelid AND adnum = attnum WHERE attrelid = 'g2'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attidentity:char | attgenerated:char | pg_get_expr:text
+id | a |  | NULL
+k |  |  | NULL
+d |  |  | 8
+s |  | s | (k * 10)
+-- SELECT 4
+
+> CREATE TABLE g3 PARTITION OF g (s GENERATED ALWAYS AS (k * 100) STORED) FOR VALUES IN (3)
+-- CREATE TABLE
+
+> INSERT INTO g (k) VALUES (3)
+-- INSERT 0 1
+
+> SELECT tableoid::regclass, * FROM g WHERE k = 3
+tableoid:regclass | id:int4 | k:int4 | d:int4 | s:int4
+g3 | 4 | 3 | 7 | 300
+-- SELECT 1
+
+> DROP TABLE g
+-- DROP TABLE
+
+> CREATE TABLE g (id int GENERATED ALWAYS AS IDENTITY, k int, s int GENERATED ALWAYS AS (k * 10) STORED) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE ga PARTITION OF g (k GENERATED ALWAYS AS (1) STORED) FOR VALUES IN (1)
+ERROR 42611: child column "k" specifies generation expression
+HINT: A child table column cannot be generated unless its parent column is.
+
+> CREATE TABLE gb PARTITION OF g (id GENERATED BY DEFAULT AS IDENTITY) FOR VALUES IN (1)
+ERROR 0A000: identity columns are not supported on partitions
+
+> CREATE TABLE gc PARTITION OF g (s DEFAULT 5) FOR VALUES IN (1)
+ERROR 42611: column "s" inherits from generated column but specifies default
+
+> CREATE TABLE gd PARTITION OF g (k WITH OPTIONS NOT NULL, s WITH OPTIONS GENERATED ALWAYS AS (k + 1) STORED) FOR VALUES IN (4)
+-- CREATE TABLE
+
+> CREATE TABLE gx PARTITION OF g (nope DEFAULT 1) FOR VALUES IN (5)
+ERROR 42703: column "nope" does not exist
+
+> CREATE TABLE ge (id int NOT NULL, k int, s int)
+-- CREATE TABLE
+
+> ALTER TABLE g ATTACH PARTITION ge FOR VALUES IN (6)
+ERROR 42804: column "s" in child table must be a generated column
+
+> CREATE TABLE gf (id int NOT NULL, k int, s int GENERATED ALWAYS AS (k * 2) STORED)
+-- CREATE TABLE
+
+> ALTER TABLE g ATTACH PARTITION gf FOR VALUES IN (7)
+-- ALTER TABLE
+
+> INSERT INTO g (k) VALUES (4), (7)
+-- INSERT 0 2
+
+> SELECT tableoid::regclass, * FROM g ORDER BY id
+tableoid:regclass | id:int4 | k:int4 | s:int4
+gd | 1 | 4 | 5
+gf | 2 | 7 | 14
+-- SELECT 2
+
+> SELECT attrelid::regclass, attname, attidentity, attgenerated FROM pg_attribute WHERE attrelid IN ('gd'::regclass, 'gf'::regclass) AND attnum > 0 ORDER BY 1, attnum
+attrelid:regclass | attname:name | attidentity:char | attgenerated:char
+gd | id | a | 
+gd | k |  | 
+gd | s |  | s
+gf | id | a | 
+gf | k |  | 
+gf | s |  | s
+-- SELECT 6
+
+> ALTER TABLE g ALTER COLUMN id RESTART WITH 100
+-- ALTER TABLE
+
+> INSERT INTO gd (k) VALUES (4)
+-- INSERT 0 1
+
+> SELECT id FROM gd ORDER BY id
+id:int4
+1
+100
+-- SELECT 2
+
+> ALTER TABLE gd ALTER COLUMN id DROP IDENTITY
+ERROR 42P16: cannot drop identity from a column of a partition
+
+> ALTER TABLE g DETACH PARTITION gd
+-- ALTER TABLE
+
+> SELECT attidentity FROM pg_attribute WHERE attrelid = 'gd'::regclass AND attname = 'id'
+attidentity:char
+
+-- SELECT 1
+
+> INSERT INTO gd (k) VALUES (4)
+ERROR 23502: null value in column "id" of relation "gd" violates not-null constraint
+DETAIL: Failing row contains (null, 4, 5).
+OBJECTS: schema=public table=gd column=id
+
+> DROP TABLE g, gd
+-- DROP TABLE
+
+> CREATE TABLE ih (k int GENERATED ALWAYS AS IDENTITY)
+-- CREATE TABLE
+
+> CREATE TABLE ic () INHERITS (ih)
+-- CREATE TABLE
+
+> SELECT attidentity, attnotnull FROM pg_attribute WHERE attrelid = 'ic'::regclass AND attname = 'k'
+attidentity:char | attnotnull:bool
+ | t
+-- SELECT 1
+
+> DROP TABLE ih CASCADE
+NOTICE 00000: drop cascades to table ic
+-- DROP TABLE
+
+> CREATE TABLE g (id int GENERATED ALWAYS AS IDENTITY, k int, j int NOT NULL) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE g1 PARTITION OF g FOR VALUES IN (1)
+-- CREATE TABLE
+
+> ALTER TABLE g1 ALTER COLUMN id SET GENERATED BY DEFAULT
+ERROR 42P16: cannot change identity column of a partition
+
+> ALTER TABLE g1 ALTER COLUMN j ADD GENERATED ALWAYS AS IDENTITY
+ERROR 42P16: cannot add identity to a column of a partition
+
+> ALTER TABLE g ALTER COLUMN id SET GENERATED BY DEFAULT
+-- ALTER TABLE
+
+> SELECT attidentity FROM pg_attribute WHERE attrelid='g1'::regclass AND attname='id'
+attidentity:char
+d
+-- SELECT 1
+
+> ALTER TABLE g ALTER COLUMN j ADD GENERATED ALWAYS AS IDENTITY
+-- ALTER TABLE
+
+> SELECT attidentity FROM pg_attribute WHERE attrelid='g1'::regclass AND attname='j'
+attidentity:char
+a
+-- SELECT 1
+
+> ALTER TABLE g ALTER COLUMN id DROP IDENTITY
+-- ALTER TABLE
+
+> SELECT attidentity FROM pg_attribute WHERE attrelid='g1'::regclass AND attname='id'
+attidentity:char
+
+-- SELECT 1
+
+> DROP TABLE g
+-- DROP TABLE
+

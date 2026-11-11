@@ -1,0 +1,75 @@
+> CREATE TABLE a (x int, y int[])
+-- CREATE TABLE
+
+> CREATE TABLE b (x int, z int)
+-- CREATE TABLE
+
+> INSERT INTO a VALUES (1, '{}'), (2, '{1}')
+-- INSERT 0 2
+
+> INSERT INTO b VALUES (2, 5)
+-- INSERT 0 1
+
+> SELECT * FROM a LEFT JOIN b ON a.x = b.x WHERE b.z < ALL ('{}') ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4
+1 | {} | NULL | NULL
+2 | {1} | 2 | 5
+-- SELECT 2
+
+> SELECT * FROM a LEFT JOIN b ON a.x = b.x WHERE b.z = ALL (ARRAY[]::int[]) ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4
+1 | {} | NULL | NULL
+2 | {1} | 2 | 5
+-- SELECT 2
+
+> SELECT * FROM a LEFT JOIN b ON a.x = b.x WHERE b.z < ALL (a.y) ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4
+1 | {} | NULL | NULL
+-- SELECT 1
+
+> SELECT * FROM a LEFT JOIN b ON a.x = b.x WHERE b.z < ALL ('{7}') ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4
+2 | {1} | 2 | 5
+-- SELECT 1
+
+> SELECT * FROM a LEFT JOIN b ON a.x = b.x WHERE b.z = ANY ('{}') ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4
+-- SELECT 0
+
+> SELECT * FROM a LEFT JOIN b ON a.x = b.x WHERE NOT (b.z = ANY ('{}')) ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4
+1 | {} | NULL | NULL
+2 | {1} | 2 | 5
+-- SELECT 2
+
+> SELECT * FROM a LEFT JOIN (SELECT x, z, 1 AS k FROM b) s ON a.x = s.x WHERE s.z <> ALL ('{}') ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4 | k:int4
+1 | {} | NULL | NULL | NULL
+2 | {1} | 2 | 5 | 1
+-- SELECT 2
+
+> SELECT * FROM a LEFT JOIN b ON a.x = b.x LEFT JOIN b b2 ON b2.z < ALL ('{}') AND b.z IS NULL ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4 | x:int4 | z:int4
+1 | {} | NULL | NULL | 2 | 5
+2 | {1} | 2 | 5 | NULL | NULL
+-- SELECT 2
+
+> SELECT * FROM a FULL JOIN b ON a.x = b.x WHERE b.z < ALL ('{}') ORDER BY 1
+x:int4 | y:int4[] | x:int4 | z:int4
+1 | {} | NULL | NULL
+2 | {1} | 2 | 5
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a LEFT JOIN b ON a.x = b.x WHERE b.z < ALL ('{}')
+QUERY PLAN:text
+Merge Left Join
+  Merge Cond: (a.x = b.x)
+  Filter: (b.z < ALL ('{}'::integer[]))
+  ->  Sort
+        Sort Key: a.x
+        ->  Seq Scan on a
+  ->  Sort
+        Sort Key: b.x
+        ->  Seq Scan on b
+-- EXPLAIN
+

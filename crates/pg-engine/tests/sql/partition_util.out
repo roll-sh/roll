@@ -1,0 +1,136 @@
+> CREATE TABLE p (a int, b text) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE p1 PARTITION OF p FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE p2 PARTITION OF p FOR VALUES IN (2) PARTITION BY LIST (b)
+-- CREATE TABLE
+
+> CREATE TABLE p2x PARTITION OF p2 FOR VALUES IN ('x')
+-- CREATE TABLE
+
+> INSERT INTO p VALUES (1, 'a'), (2, 'x')
+-- INSERT 0 2
+
+> COPY p TO STDOUT
+ERROR 42809: cannot copy from partitioned table "p"
+HINT: Try the COPY (SELECT ...) TO variant.
+
+> COPY (SELECT * FROM p ORDER BY a) TO STDOUT
+copy:text
+1	a
+2	x
+-- COPY 2
+
+> COPY p FROM STDIN
+>> 1	z
+>> 2	x
+-- COPY 2
+
+> SELECT tableoid::regclass, * FROM p ORDER BY a, b
+tableoid:regclass | a:int4 | b:text
+p1 | 1 | a
+p1 | 1 | z
+p2x | 2 | x
+p2x | 2 | x
+-- SELECT 4
+
+> TRUNCATE ONLY p
+ERROR 42809: cannot truncate only a partitioned table
+HINT: Do not specify the ONLY keyword, or use TRUNCATE ONLY on the partitions directly.
+
+> TRUNCATE p2
+-- TRUNCATE TABLE
+
+> SELECT tableoid::regclass, * FROM p ORDER BY a, b
+tableoid:regclass | a:int4 | b:text
+p1 | 1 | a
+p1 | 1 | z
+-- SELECT 2
+
+> TRUNCATE p
+-- TRUNCATE TABLE
+
+> SELECT count(*) FROM p
+count:int8
+0
+-- SELECT 1
+
+> CREATE INDEX CONCURRENTLY pi ON p (b)
+ERROR 0A000: cannot create index on partitioned table "p" concurrently
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE p DETACH PARTITION p1 CONCURRENTLY
+ERROR 25001: ALTER TABLE ... DETACH CONCURRENTLY cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> ALTER TABLE p DETACH PARTITION p1 CONCURRENTLY
+-- ALTER TABLE
+
+> SELECT relispartition FROM pg_class WHERE relname = 'p1'
+relispartition:bool
+f
+-- SELECT 1
+
+> ALTER TABLE p DETACH PARTITION p2 FINALIZE
+ERROR 55000: cannot complete detaching partition "p2"
+DETAIL: There's no pending concurrent detach.
+
+> CREATE TABLE pd PARTITION OF p DEFAULT
+-- CREATE TABLE
+
+> ALTER TABLE p ATTACH PARTITION p1 FOR VALUES IN (1)
+-- ALTER TABLE
+
+> ALTER TABLE p DETACH PARTITION p1 CONCURRENTLY
+ERROR 55000: cannot detach partitions concurrently when a default partition exists
+
+> VACUUM p
+-- VACUUM
+
+> ANALYZE p
+-- ANALYZE
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE p IN ACCESS EXCLUSIVE MODE
+-- LOCK TABLE
+
+> COMMIT
+-- COMMIT
+
+> SELECT relname, relkind, reltuples FROM pg_class WHERE relname IN ('p', 'p1', 'p2') ORDER BY 1
+relname:name | relkind:char | reltuples:float4
+p | p | 0
+p1 | r | 0
+p2 | p | 0
+-- SELECT 3
+
+> CLUSTER p
+ERROR 42704: there is no previously clustered index for table "p"
+
+> ALTER TABLE p SET UNLOGGED
+ERROR 42809: ALTER action SET UNLOGGED cannot be performed on relation "p"
+DETAIL: This operation is not supported for partitioned tables.
+
+> ALTER TABLE p SET (fillfactor = 50)
+ERROR 42809: cannot specify storage parameters for a partitioned table
+HINT: Specify storage parameters for its leaf partitions instead.
+
+> ALTER TABLE p2 SET (fillfactor = 50)
+ERROR 42809: cannot specify storage parameters for a partitioned table
+HINT: Specify storage parameters for its leaf partitions instead.
+
+> CREATE TABLE q (a int) PARTITION BY RANGE (a) WITH (fillfactor = 70)
+ERROR 42809: cannot specify storage parameters for a partitioned table
+HINT: Specify storage parameters for its leaf partitions instead.
+
+> DROP TABLE p, p1
+-- DROP TABLE
+

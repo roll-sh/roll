@@ -1,0 +1,457 @@
+> CREATE FUNCTION opf_add(int, int) RETURNS int IMMUTABLE LANGUAGE sql AS 'SELECT $1 + $2 * 10'
+-- CREATE FUNCTION
+
+> CREATE OPERATOR #+# (LEFTARG = int, RIGHTARG = int, FUNCTION = opf_add, COMMUTATOR = #+#)
+-- CREATE OPERATOR
+
+> SELECT 1 #+# 2, 3 #+# NULL
+?column?:int4 | ?column?:int4
+21 | NULL
+-- SELECT 1
+
+> SELECT oprname, oprkind, oprleft::regtype, oprright::regtype, oprresult::regtype, oprcode, oprcom::regoperator, oprnegate, oprcanmerge, oprcanhash, oprrest, oprjoin FROM pg_operator WHERE oprname = '#+#'
+oprname:name | oprkind:char | oprleft:regtype | oprright:regtype | oprresult:regtype | oprcode:regproc | oprcom:2204 | oprnegate:oid | oprcanmerge:bool | oprcanhash:bool | oprrest:regproc | oprjoin:regproc
+#+# | b | integer | integer | integer | opf_add | #+#(integer,integer) | 0 | f | f | - | -
+-- SELECT 1
+
+> CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int, PROCEDURE = int4eq, COMMUTATOR = ===, NEGATOR = !==, RESTRICT = eqsel, JOIN = eqjoinsel, HASHES, MERGES)
+-- CREATE OPERATOR
+
+> SELECT oprname, oprleft::regtype, oprright::regtype, oprresult::regtype, oprcode, oprcom::regoperator, oprnegate::regoperator, oprcanmerge, oprcanhash, oprrest, oprjoin FROM pg_operator WHERE oprname IN ('===', '!==') ORDER BY 1
+oprname:name | oprleft:regtype | oprright:regtype | oprresult:regtype | oprcode:regproc | oprcom:2204 | oprnegate:2204 | oprcanmerge:bool | oprcanhash:bool | oprrest:regproc | oprjoin:regproc
+!== | integer | integer | - | - | 0 | ===(integer,integer) | f | f | - | -
+=== | integer | integer | boolean | int4eq | ===(integer,integer) | !==(integer,integer) | t | t | eqsel | eqjoinsel
+-- SELECT 2
+
+> SELECT 1 === 1, 1 === 2, 2 !== 3
+ERROR 42883: operator is only a shell: integer !== integer (at 28)
+
+> CREATE OPERATOR !== (LEFTARG = int, RIGHTARG = int, FUNCTION = int4ne, NEGATOR = ===)
+-- CREATE OPERATOR
+
+> SELECT 2 !== 3, oprcode FROM pg_operator WHERE oprname = '!=='
+?column?:bool | oprcode:regproc
+t | int4ne
+-- SELECT 1
+
+> CREATE OPERATOR ~-~ (RIGHTARG = int, FUNCTION = int4um)
+-- CREATE OPERATOR
+
+> SELECT ~-~ 5, oprkind, oprleft FROM pg_operator WHERE oprname = '~-~'
+?column?:int4 | oprkind:char | oprleft:oid
+-5 | l | 0
+-- SELECT 1
+
+> CREATE OPERATOR ~-~ (LEFTARG = int, FUNCTION = int4um)
+ERROR 42P13: operator right argument type must be specified
+DETAIL: Postfix operators are not supported.
+
+> CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq)
+ERROR 42723: operator === already exists
+
+> CREATE OPERATOR ==+ (LEFTARG = int, RIGHTARG = int)
+ERROR 42601: syntax error at or near "+" (at 19)
+
+> CREATE OPERATOR ==+ (LEFTARG = int, RIGHTARG = int, FUNCTION = nosuch)
+ERROR 42601: syntax error at or near "+" (at 19)
+
+> CREATE OPERATOR ==+ (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, FOO = 1)
+ERROR 42601: syntax error at or near "+" (at 19)
+
+> CREATE OPERATOR ==+ (LEFTARG = int, RIGHTARG = text, FUNCTION = int4eq)
+ERROR 42601: syntax error at or near "+" (at 19)
+
+> CREATE OPERATOR => (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq)
+ERROR 42601: syntax error at or near "=>" (at 17)
+
+> CREATE OPERATOR ==+ (FUNCTION = int4eq)
+ERROR 42601: syntax error at or near "+" (at 19)
+
+> SELECT 1 OPERATOR(public.===) 1
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 1 OPERATOR(pg_catalog.===) 1
+ERROR 42883: operator does not exist: integer pg_catalog.=== integer (at 10)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT '===(int,int)'::regoperator, '===(int4,int4)'::regoperator::oid > 0
+regoperator:2204 | ?column?:bool
+===(integer,integer) | t
+-- SELECT 1
+
+> COMMENT ON OPERATOR === (int, int) IS 'eq op'
+-- COMMENT
+
+> SELECT obj_description('===(int,int)'::regoperator, 'pg_operator')
+obj_description:text
+eq op
+-- SELECT 1
+
+> ALTER OPERATOR === (int, int) SET (RESTRICT = NONE)
+-- ALTER OPERATOR
+
+> SELECT oprrest FROM pg_operator WHERE oprname = '==='
+oprrest:regproc
+-
+-- SELECT 1
+
+> CREATE ROLE opr_r
+-- CREATE ROLE
+
+> ALTER OPERATOR === (int, int) OWNER TO opr_r
+-- ALTER OPERATOR
+
+> SELECT oprowner::regrole FROM pg_operator WHERE oprname = '==='
+oprowner:4096
+opr_r
+-- SELECT 1
+
+> CREATE SCHEMA ops
+-- CREATE SCHEMA
+
+> ALTER OPERATOR #+# (int, int) SET SCHEMA ops
+-- ALTER OPERATOR
+
+> SELECT 1 #+# 2
+ERROR 42883: operator does not exist: integer #+# integer (at 10)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT 1 OPERATOR(ops.#+#) 2
+?column?:int4
+21
+-- SELECT 1
+
+> CREATE TABLE opt (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO opt VALUES (1, 1), (1, 2)
+-- INSERT 0 2
+
+> SELECT * FROM opt WHERE a === b
+a:int4 | b:int4
+1 | 1
+-- SELECT 1
+
+> CREATE VIEW opv AS SELECT a === b AS e, a OPERATOR(ops.#+#) b AS s FROM opt
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('opv')
+pg_get_viewdef:text
+ SELECT (a === b) AS e,
+    (a OPERATOR(ops.#+#) b) AS s
+   FROM opt;
+-- SELECT 1
+
+> SELECT * FROM opv ORDER BY 2
+e:bool | s:int4
+t | 11
+f | 21
+-- SELECT 2
+
+> DROP OPERATOR === (int, int)
+ERROR 2BP01: cannot drop operator ===(integer,integer) because other objects depend on it
+DETAIL: view opv depends on operator ===(integer,integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP OPERATOR IF EXISTS ==== (int, int)
+NOTICE 00000: operator ==== does not exist, skipping
+-- DROP OPERATOR
+
+> DROP OPERATOR ==== (int, int)
+ERROR 42883: operator does not exist: integer ==== integer
+
+> DROP OPERATOR ops.#+# (int, int)
+ERROR 2BP01: cannot drop operator ops.#+#(integer,integer) because other objects depend on it
+DETAIL: view opv depends on operator ops.#+#(integer,integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP OPERATOR ops.#+# (int, int) CASCADE
+NOTICE 00000: drop cascades to view opv
+-- DROP OPERATOR
+
+> DROP OPERATOR !== (int, int), ~-~ (NONE, int)
+-- DROP OPERATOR
+
+> DROP OPERATOR === (int, int) CASCADE
+-- DROP OPERATOR
+
+> DROP TABLE opt
+-- DROP TABLE
+
+> DROP FUNCTION opf_add
+-- DROP FUNCTION
+
+> DROP SCHEMA ops
+-- DROP SCHEMA
+
+> DROP ROLE opr_r
+-- DROP ROLE
+
+> CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, COMMUTATOR = ===)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, COMMUTATOR = ===)
+ERROR 42P13: commutator operator === is already the commutator of operator ===
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, NEGATOR = =#=)
+ERROR 42P13: operator cannot be its own negator
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4pl, NEGATOR = <#>)
+ERROR 42P13: only boolean operators can have negators
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4pl, HASHES)
+ERROR 42P13: only boolean operators can hash
+
+> CREATE OPERATOR =#= (RIGHTARG = int, FUNCTION = int4um, COMMUTATOR = ===)
+ERROR 42P13: only binary operators can have commutators
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, RESTRICT = nosuchsel)
+ERROR 42883: function nosuchsel(internal, oid, internal, integer) does not exist
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, JOIN = eqsel)
+ERROR 42883: function eqsel(internal, oid, internal, smallint, internal) does not exist
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = nosuch)
+ERROR 42883: function nosuch(integer, integer) does not exist
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, FOO = 1, BAR)
+WARNING 42601: operator attribute "foo" not recognized
+WARNING 42601: operator attribute "bar" not recognized
+-- CREATE OPERATOR
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int)
+ERROR 42P13: operator function must be specified
+
+> CREATE OPERATOR =#= (FUNCTION = int4eq)
+ERROR 42P13: operator argument types must be specified
+
+> CREATE OPERATOR =#= (LEFTARG = int, FUNCTION = int4eq)
+ERROR 42P13: operator right argument type must be specified
+DETAIL: Postfix operators are not supported.
+
+> CREATE OPERATOR =#= (LEFTARG = setof int, RIGHTARG = int, FUNCTION = int4eq)
+ERROR 42P13: SETOF type not allowed for operator argument
+
+> CREATE OPERATOR =#= (LEFTARG = nosuchtype, RIGHTARG = int, FUNCTION = int4eq)
+ERROR 42704: type "nosuchtype" does not exist
+
+> CREATE OPERATOR =#= (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, HASHES = false, MERGES = true)
+ERROR 42723: operator =#= already exists
+
+> SELECT oprname, oprcanhash, oprcanmerge, oprcom::regoperator, oprnegate::regoperator FROM pg_operator WHERE oprname IN ('=#=', '===') ORDER BY 1
+oprname:name | oprcanhash:bool | oprcanmerge:bool | oprcom:2204 | oprnegate:2204
+=#= | f | f | 0 | 0
+=== | f | f | ===(integer,integer) | 0
+-- SELECT 2
+
+> CREATE OPERATOR <<< (LEFTARG = int, RIGHTARG = int, FUNCTION = int4lt, COMMUTATOR = >>>, NEGATOR = >>=)
+-- CREATE OPERATOR
+
+> SELECT oprname, oprcode, oprcom::regoperator, oprnegate::regoperator, oprowner::regrole, oprresult::regtype FROM pg_operator WHERE oprname IN ('<<<', '>>>', '>>=') AND oid >= 16384 ORDER BY 1
+oprname:name | oprcode:regproc | oprcom:2204 | oprnegate:2204 | oprowner:4096 | oprresult:regtype
+<<< | int4lt | >>>(integer,integer) | >>=(integer,integer) | postgres | boolean
+>>= | - | 0 | <<<(integer,integer) | postgres | -
+>>> | - | <<<(integer,integer) | 0 | postgres | -
+-- SELECT 3
+
+> CREATE OPERATOR >>> (LEFTARG = int, RIGHTARG = int, FUNCTION = int4gt, COMMUTATOR = <<<)
+-- CREATE OPERATOR
+
+> SELECT oprname, oprcode, oprcom::regoperator FROM pg_operator WHERE oprname IN ('<<<', '>>>') ORDER BY 1
+oprname:name | oprcode:regproc | oprcom:2204
+<<< | int4lt | >>>(integer,integer)
+>>> | int4gt | <<<(integer,integer)
+-- SELECT 2
+
+> CREATE OPERATOR >>> (LEFTARG = int, RIGHTARG = int, FUNCTION = int4gt)
+ERROR 42723: operator >>> already exists
+
+> SELECT 1 <<< 2, 2 >>> 1
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT 1 >>= 2
+ERROR 42883: operator is only a shell: integer >>= integer (at 10)
+
+> CREATE OPERATOR <@@ (LEFTARG = text, RIGHTARG = int, FUNCTION = left, COMMUTATOR = @@>)
+-- CREATE OPERATOR
+
+> SELECT oprname, oprleft::regtype, oprright::regtype, oprcom::regoperator FROM pg_operator WHERE oprname IN ('<@@', '@@>') ORDER BY 1
+oprname:name | oprleft:regtype | oprright:regtype | oprcom:2204
+<@@ | text | integer | @@>(integer,text)
+@@> | integer | text | <@@(text,integer)
+-- SELECT 2
+
+> SELECT 'abcdef' <@@ 3
+?column?:text
+abc
+-- SELECT 1
+
+> DROP OPERATOR <<< (int, int)
+-- DROP OPERATOR
+
+> SELECT oprname, oprcom::regoperator, oprnegate::regoperator FROM pg_operator WHERE oprname IN ('>>>', '>>=') AND oid >= 16384 ORDER BY 1
+oprname:name | oprcom:2204 | oprnegate:2204
+>>= | 0 | 0
+>>> | 0 | 0
+-- SELECT 2
+
+> DROP OPERATOR >>> (int, int), >>= (int, int), === (int, int), =#= (int, int), <@@ (text, int), @@> (int, text)
+-- DROP OPERATOR
+
+> DROP OPERATOR === (int)
+ERROR 42601: missing argument (at 23)
+HINT: Use NONE to denote the missing argument of a unary operator.
+
+> DROP OPERATOR === (NONE, int)
+ERROR 42883: operator does not exist: === integer
+
+> DROP OPERATOR IF EXISTS === (int, nosuchtype)
+NOTICE 00000: type "nosuchtype" does not exist, skipping
+-- DROP OPERATOR
+
+> DROP OPERATOR === (int, nosuchtype)
+ERROR 42704: type "nosuchtype" does not exist
+
+> DROP OPERATOR nosuchschema.=== (int, int)
+ERROR 42883: operator does not exist: integer nosuchschema.=== integer
+
+> DROP OPERATOR IF EXISTS nosuchschema.=== (int, int)
+NOTICE 00000: schema "nosuchschema" does not exist, skipping
+-- DROP OPERATOR
+
+> CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq)
+-- CREATE OPERATOR
+
+> CREATE TABLE opt2 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO opt2 VALUES (1, 1), (2, 3)
+-- INSERT 0 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM opt2 WHERE a === b
+QUERY PLAN:text
+Seq Scan on opt2
+  Filter: (a === b)
+-- EXPLAIN
+
+> SELECT * FROM opt2 WHERE a === b OR b === 3 ORDER BY a
+a:int4 | b:int4
+1 | 1
+2 | 3
+-- SELECT 2
+
+> SELECT 1 === 1.0
+ERROR 42883: operator does not exist: integer === numeric (at 10)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT 'a' === 'b'
+ERROR 22P02: invalid input syntax for type integer: "a" (at 8)
+
+> SELECT '1' === 1
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE OPERATOR === (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = int8eq)
+-- CREATE OPERATOR
+
+> SELECT 1 === 1::bigint, 1::int2 === 1::int2
+ERROR 42725: operator is not unique: smallint === smallint (at 33)
+HINT: Could not choose a best candidate operator. You might need to add explicit type casts.
+
+> CREATE OPERATOR - (LEFTARG = text, RIGHTARG = text, FUNCTION = textcat)
+-- CREATE OPERATOR
+
+> SELECT 'a' - 'b'::text, 5 - 3
+?column?:text | ?column?:int4
+ab | 2
+-- SELECT 1
+
+> DROP OPERATOR - (text, text)
+-- DROP OPERATOR
+
+> CREATE FUNCTION opf_rev(text) RETURNS text IMMUTABLE STRICT LANGUAGE sql AS 'SELECT reverse($1)'
+-- CREATE FUNCTION
+
+> CREATE OPERATOR ~~~ (RIGHTARG = text, FUNCTION = opf_rev)
+-- CREATE OPERATOR
+
+> SELECT ~~~ 'abc', ~~~ NULL::text
+?column?:text | ?column?:text
+cba | NULL
+-- SELECT 1
+
+> SELECT oprname, oprkind, oprleft, oprright::regtype, oprresult::regtype, oprcode FROM pg_operator WHERE oprname = '~~~'
+oprname:name | oprkind:char | oprleft:oid | oprright:regtype | oprresult:regtype | oprcode:regproc
+~~~ | l | 0 | text | text | opf_rev
+-- SELECT 1
+
+> SELECT '~~~'::regoper, '~~~(NONE,text)'::regoperator
+regoper:2203 | regoperator:2204
+~~~ | ~~~(NONE,text)
+-- SELECT 1
+
+> DROP FUNCTION opf_rev
+ERROR 2BP01: cannot drop function opf_rev(text) because other objects depend on it
+DETAIL: operator ~~~(NONE,text) depends on function opf_rev(text)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP OPERATOR ~~~ (NONE, text)
+-- DROP OPERATOR
+
+> DROP FUNCTION opf_rev
+-- DROP FUNCTION
+
+> CREATE SCHEMA opsx
+-- CREATE SCHEMA
+
+> CREATE OPERATOR opsx.<~> (LEFTARG = int, RIGHTARG = int, FUNCTION = int4ne)
+-- CREATE OPERATOR
+
+> SELECT 1 <~> 2
+ERROR 42883: operator does not exist: integer <~> integer (at 10)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT 1 OPERATOR(opsx.<~>) 2
+?column?:bool
+t
+-- SELECT 1
+
+> SET search_path = opsx, public
+-- SET
+
+> SELECT 1 <~> 2, '<~>(int,int)'::regoperator
+?column?:bool | regoperator:2204
+t | <~>(integer,integer)
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT '<~>(int,int)'::regoperator
+ERROR 42883: operator does not exist: <~>(int,int) (at 8)
+
+> SELECT 'opsx.<~>(int,int)'::regoperator
+regoperator:2204
+opsx.<~>(integer,integer)
+-- SELECT 1
+
+> DROP SCHEMA opsx
+ERROR 2BP01: cannot drop schema opsx because other objects depend on it
+DETAIL: operator opsx.<~>(integer,integer) depends on schema opsx
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP SCHEMA opsx CASCADE
+NOTICE 00000: drop cascades to operator opsx.<~>(integer,integer)
+-- DROP SCHEMA
+
+> DROP OPERATOR === (int, int), === (bigint, bigint)
+-- DROP OPERATOR
+
+> DROP TABLE opt2
+-- DROP TABLE
+

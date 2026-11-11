@@ -1,0 +1,108 @@
+> CREATE TABLE gc1_m1 (hundred int, thousand int)
+-- CREATE TABLE
+
+> CREATE TABLE gc1_m2 (hundred int, thousand int, tenthous int)
+-- CREATE TABLE
+
+> INSERT INTO gc1_m1 SELECT g % 100, g % 1000 FROM generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> INSERT INTO gc1_m2 SELECT g % 100, g % 1000, g FROM generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> CREATE INDEX gc1_m1_h ON gc1_m1 (hundred)
+-- CREATE INDEX
+
+> CREATE INDEX gc1_m2_h ON gc1_m2 (hundred)
+-- CREATE INDEX
+
+> ANALYZE gc1_m1
+-- ANALYZE
+
+> ANALYZE gc1_m2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM gc1_m1 JOIN gc1_m2 ON gc1_m1.hundred = 42 AND gc1_m2.hundred = gc1_m1.hundred
+QUERY PLAN:text
+Aggregate
+  ->  Nested Loop
+        ->  Bitmap Heap Scan on gc1_m1
+              Recheck Cond: (hundred = 42)
+              ->  Bitmap Index Scan on gc1_m1_h
+                    Index Cond: (hundred = 42)
+        ->  Materialize
+              ->  Bitmap Heap Scan on gc1_m2
+                    Recheck Cond: (hundred = 42)
+                    ->  Bitmap Index Scan on gc1_m2_h
+                          Index Cond: (hundred = 42)
+-- EXPLAIN
+
+> SELECT count(*) FROM gc1_m1 JOIN gc1_m2 ON gc1_m1.hundred = 42 AND gc1_m2.hundred = gc1_m1.hundred
+count:int8
+10000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM gc1_m1 JOIN gc1_m2 ON
+>   gc1_m1.hundred = 42 AND (gc1_m2.thousand = 42 OR gc1_m2.thousand = 41 OR gc1_m2.tenthous = 2) AND
+>   gc1_m2.hundred = gc1_m1.hundred
+QUERY PLAN:text
+Aggregate
+  ->  Nested Loop
+        ->  Bitmap Heap Scan on gc1_m2
+              Recheck Cond: (hundred = 42)
+              Filter: ((thousand = 42) OR (thousand = 41) OR (tenthous = 2))
+              ->  Bitmap Index Scan on gc1_m2_h
+                    Index Cond: (hundred = 42)
+        ->  Bitmap Heap Scan on gc1_m1
+              Recheck Cond: (hundred = 42)
+              ->  Bitmap Index Scan on gc1_m1_h
+                    Index Cond: (hundred = 42)
+-- EXPLAIN
+
+> CREATE TABLE gc1_ff (n char(1000)) WITH (fillfactor = 10, autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO gc1_ff SELECT 'x' FROM generate_series(1, 1000)
+-- INSERT 0 1000
+
+> EXPLAIN SELECT * FROM gc1_ff
+QUERY PLAN:text
+Seq Scan on gc1_ff  (cost=0.00..1010.00 rows=1000 width=4004)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT x, x FROM (SELECT (SELECT random() WHERE y = y) AS x FROM (VALUES (1), (2)) v(y)) ss
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.x, ss.x
+  ->  Values Scan on "*VALUES*"
+        Output: (SubPlan 1)
+        SubPlan 1
+          ->  Result
+                Output: random()
+                One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+-- EXPLAIN
+
+> CREATE TABLE gc1_pt (tid int PRIMARY KEY) PARTITION BY LIST (tid)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gc1_pt
+QUERY PLAN:text
+Result
+  Output: tid
+  One-Time Filter: false
+-- EXPLAIN
+
+> SELECT * FROM gc1_pt
+tid:int4
+-- SELECT 0
+
+> SELECT * FROM (gc1_m1 i CROSS JOIN gc1_pt j) ss(a, b, c, d)
+ERROR 42P10: join expression "ss" has 3 columns available but 4 columns specified
+
+> SELECT * FROM (gc1_m1 i CROSS JOIN gc1_pt j) ss(a, b, c)
+a:int4 | b:int4 | c:int4
+-- SELECT 0
+

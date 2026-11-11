@@ -1,0 +1,144 @@
+> create table spn_a (a int, b int)
+-- CREATE TABLE
+
+> create table spn_b (a int, b int)
+-- CREATE TABLE
+
+> insert into spn_a select g, g % 5 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> insert into spn_b select g, g % 3 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> create index on spn_b (a)
+-- CREATE INDEX
+
+> analyze spn_a, spn_b
+-- ANALYZE
+
+> explain (costs off)
+> select (select max(b) from spn_b where spn_b.a = ss.a) from
+>   (select a, (select min(b) from spn_b where spn_b.a = spn_a.b) m from spn_a offset 0) ss
+> where ss.m > (select min(a) from spn_b x where x.b = ss.a)
+QUERY PLAN:text
+Subquery Scan on ss
+  Filter: (ss.m > (SubPlan 3))
+  ->  Seq Scan on spn_a
+        SubPlan 4
+          ->  Aggregate
+                ->  Seq Scan on spn_b spn_b_1
+                      Filter: (a = spn_a.b)
+  SubPlan 1
+    ->  Aggregate
+          ->  Seq Scan on spn_b
+                Filter: (a = ss.a)
+  SubPlan 3
+    ->  Result
+          InitPlan 2
+            ->  Limit
+                  ->  Index Scan using spn_b_a_idx on spn_b x
+                        Index Cond: (a IS NOT NULL)
+                        Filter: (b = ss.a)
+-- EXPLAIN
+
+> select (select max(b) from spn_b where spn_b.a = ss.a) from
+>   (select a, (select min(b) from spn_b where spn_b.a = spn_a.b) m from spn_a offset 0) ss
+> where ss.m > (select min(a) from spn_b x where x.b = ss.a)
+max:int4
+-- SELECT 0
+
+> explain (costs off)
+> select x.c, (select max(b) from spn_b) from (select a, (select count(*) from spn_b where b = spn_a.b) c from spn_a offset 0) x
+QUERY PLAN:text
+Subquery Scan on x
+  InitPlan 1
+    ->  Aggregate
+          ->  Seq Scan on spn_b
+  ->  Seq Scan on spn_a
+        SubPlan 2
+          ->  Aggregate
+                ->  Seq Scan on spn_b spn_b_1
+                      Filter: (b = spn_a.b)
+-- EXPLAIN
+
+> create index on spn_a (a)
+-- CREATE INDEX
+
+> explain (costs off)
+> select max(a), (select count(*) from spn_b where b = 1) from spn_a
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Aggregate
+          ->  Seq Scan on spn_b
+                Filter: (b = 1)
+  InitPlan 2
+    ->  Limit
+          ->  Index Only Scan Backward using spn_a_a_idx on spn_a
+                Index Cond: (a IS NOT NULL)
+-- EXPLAIN
+
+> explain (costs off)
+> select (select count(*) from spn_b where b = 1), max(a) from spn_a
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Aggregate
+          ->  Seq Scan on spn_b
+                Filter: (b = 1)
+  InitPlan 2
+    ->  Limit
+          ->  Index Only Scan Backward using spn_a_a_idx on spn_a
+                Index Cond: (a IS NOT NULL)
+-- EXPLAIN
+
+> explain (costs off)
+> select max(a) from spn_a having max(a) > (select count(*) from spn_b where b = 1)
+QUERY PLAN:text
+Result
+  One-Time Filter: ((InitPlan 2).col1 > (InitPlan 1).col1)
+  InitPlan 1
+    ->  Aggregate
+          ->  Seq Scan on spn_b
+                Filter: (b = 1)
+  InitPlan 2
+    ->  Limit
+          ->  Index Only Scan Backward using spn_a_a_idx on spn_a
+                Index Cond: (a IS NOT NULL)
+-- EXPLAIN
+
+> select max(a) from spn_a having max(a) > (select count(*) from spn_b where b = 1)
+max:int4
+30
+-- SELECT 1
+
+> select max(a) from spn_a having max(a) > (select count(*) + 100 from spn_b where b = 1)
+max:int4
+-- SELECT 0
+
+> explain (costs off)
+> select max(a) from spn_a where b > (select count(*) from spn_b where b = 1)
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Aggregate
+          ->  Seq Scan on spn_b
+                Filter: (b = 1)
+  InitPlan 2
+    ->  Limit
+          ->  Index Scan Backward using spn_a_a_idx on spn_a
+                Index Cond: (a IS NOT NULL)
+                Filter: (b > (InitPlan 1).col1)
+-- EXPLAIN
+
+> select max(a) from spn_a where b > (select count(*) from spn_b where b = 1)
+max:int4
+NULL
+-- SELECT 1
+
+> drop table spn_a
+-- DROP TABLE
+
+> drop table spn_b
+-- DROP TABLE
+

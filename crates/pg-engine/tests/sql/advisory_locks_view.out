@@ -1,0 +1,249 @@
+> BEGIN
+-- BEGIN
+
+> SELECT
+> 	pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2),
+> 	pg_advisory_xact_lock(1, 1), pg_advisory_xact_lock_shared(2, 2)
+pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void | pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void
+ |  |  | 
+-- SELECT 1
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> SELECT pg_advisory_unlock_all()
+pg_advisory_unlock_all:void
+
+-- SELECT 1
+
+> SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+count:int8
+4
+-- SELECT 1
+
+> SELECT
+> 	pg_advisory_unlock(1), pg_advisory_unlock_shared(2),
+> 	pg_advisory_unlock(1, 1), pg_advisory_unlock_shared(2, 2)
+WARNING 01000: you don't own a lock of type ExclusiveLock
+WARNING 01000: you don't own a lock of type ShareLock
+WARNING 01000: you don't own a lock of type ExclusiveLock
+WARNING 01000: you don't own a lock of type ShareLock
+pg_advisory_unlock:bool | pg_advisory_unlock_shared:bool | pg_advisory_unlock:bool | pg_advisory_unlock_shared:bool
+f | f | f | f
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT
+> 	pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2),
+> 	pg_advisory_xact_lock(1, 1), pg_advisory_xact_lock_shared(2, 2)
+pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void | pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void
+ |  |  | 
+-- SELECT 1
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> SELECT
+> 	pg_advisory_lock(1), pg_advisory_lock_shared(2),
+> 	pg_advisory_lock(1, 1), pg_advisory_lock_shared(2, 2)
+pg_advisory_lock:void | pg_advisory_lock_shared:void | pg_advisory_lock:void | pg_advisory_lock_shared:void
+ |  |  | 
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> SELECT
+> 	pg_advisory_unlock(1), pg_advisory_unlock(1),
+> 	pg_advisory_unlock_shared(2), pg_advisory_unlock_shared(2),
+> 	pg_advisory_unlock(1, 1), pg_advisory_unlock(1, 1),
+> 	pg_advisory_unlock_shared(2, 2), pg_advisory_unlock_shared(2, 2)
+WARNING 01000: you don't own a lock of type ExclusiveLock
+WARNING 01000: you don't own a lock of type ShareLock
+WARNING 01000: you don't own a lock of type ExclusiveLock
+WARNING 01000: you don't own a lock of type ShareLock
+pg_advisory_unlock:bool | pg_advisory_unlock:bool | pg_advisory_unlock_shared:bool | pg_advisory_unlock_shared:bool | pg_advisory_unlock:bool | pg_advisory_unlock:bool | pg_advisory_unlock_shared:bool | pg_advisory_unlock_shared:bool
+t | f | t | f | t | f | t | f
+-- SELECT 1
+
+> SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT
+> 	pg_advisory_lock(1), pg_advisory_lock_shared(2),
+> 	pg_advisory_lock(1, 1), pg_advisory_lock_shared(2, 2)
+pg_advisory_lock:void | pg_advisory_lock_shared:void | pg_advisory_lock:void | pg_advisory_lock_shared:void
+ |  |  | 
+-- SELECT 1
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> SELECT
+> 	pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2),
+> 	pg_advisory_xact_lock(1, 1), pg_advisory_xact_lock_shared(2, 2)
+pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void | pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void
+ |  |  | 
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> SELECT pg_advisory_unlock_all()
+pg_advisory_unlock_all:void
+
+-- SELECT 1
+
+> SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT
+> 	pg_advisory_xact_lock(1), pg_advisory_xact_lock(1),
+> 	pg_advisory_xact_lock_shared(2), pg_advisory_xact_lock_shared(2),
+> 	pg_advisory_xact_lock(1, 1), pg_advisory_xact_lock(1, 1),
+> 	pg_advisory_xact_lock_shared(2, 2), pg_advisory_xact_lock_shared(2, 2)
+pg_advisory_xact_lock:void | pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void | pg_advisory_xact_lock_shared:void | pg_advisory_xact_lock:void | pg_advisory_xact_lock:void | pg_advisory_xact_lock_shared:void | pg_advisory_xact_lock_shared:void
+ |  |  |  |  |  |  | 
+-- SELECT 1
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> COMMIT
+-- COMMIT
+
+> SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+count:int8
+0
+-- SELECT 1
+
+> SELECT
+> 	pg_advisory_lock(1), pg_advisory_lock(1),
+> 	pg_advisory_lock_shared(2), pg_advisory_lock_shared(2),
+> 	pg_advisory_lock(1, 1), pg_advisory_lock(1, 1),
+> 	pg_advisory_lock_shared(2, 2), pg_advisory_lock_shared(2, 2)
+pg_advisory_lock:void | pg_advisory_lock:void | pg_advisory_lock_shared:void | pg_advisory_lock_shared:void | pg_advisory_lock:void | pg_advisory_lock:void | pg_advisory_lock_shared:void | pg_advisory_lock_shared:void
+ |  |  |  |  |  |  | 
+-- SELECT 1
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> SELECT
+> 	pg_advisory_unlock(1), pg_advisory_unlock(1),
+> 	pg_advisory_unlock_shared(2), pg_advisory_unlock_shared(2),
+> 	pg_advisory_unlock(1, 1), pg_advisory_unlock(1, 1),
+> 	pg_advisory_unlock_shared(2, 2), pg_advisory_unlock_shared(2, 2)
+pg_advisory_unlock:bool | pg_advisory_unlock:bool | pg_advisory_unlock_shared:bool | pg_advisory_unlock_shared:bool | pg_advisory_unlock:bool | pg_advisory_unlock:bool | pg_advisory_unlock_shared:bool | pg_advisory_unlock_shared:bool
+t | t | t | t | t | t | t | t
+-- SELECT 1
+
+> SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+count:int8
+0
+-- SELECT 1
+
+> SELECT
+> 	pg_advisory_lock(1), pg_advisory_lock(1),
+> 	pg_advisory_lock_shared(2), pg_advisory_lock_shared(2),
+> 	pg_advisory_lock(1, 1), pg_advisory_lock(1, 1),
+> 	pg_advisory_lock_shared(2, 2), pg_advisory_lock_shared(2, 2)
+pg_advisory_lock:void | pg_advisory_lock:void | pg_advisory_lock_shared:void | pg_advisory_lock_shared:void | pg_advisory_lock:void | pg_advisory_lock:void | pg_advisory_lock_shared:void | pg_advisory_lock_shared:void
+ |  |  |  |  |  |  | 
+-- SELECT 1
+
+> SELECT locktype, classid, objid, objsubid, mode, granted
+> 	FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+> 	ORDER BY classid, objid, objsubid
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 1 | 1 | ExclusiveLock | t
+advisory | 0 | 2 | 1 | ShareLock | t
+advisory | 1 | 1 | 2 | ExclusiveLock | t
+advisory | 2 | 2 | 2 | ShareLock | t
+-- SELECT 4
+
+> SELECT pg_advisory_unlock_all()
+pg_advisory_unlock_all:void
+
+-- SELECT 1
+
+> SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+count:int8
+0
+-- SELECT 1
+

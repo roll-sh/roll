@@ -1,0 +1,216 @@
+> CREATE TABLE a116_t (g int, n numeric, i int, f float8, t text)
+-- CREATE TABLE
+
+> INSERT INTO a116_t SELECT i % 100, i * 1.5, i, i / 3.0, 'x' || (i % 37) FROM generate_series(1, 20000) i
+-- INSERT 0 20000
+
+> ANALYZE a116_t
+-- ANALYZE
+
+> EXPLAIN SELECT g, sum(n) FROM a116_t GROUP BY g
+QUERY PLAN:text
+HashAggregate  (cost=455.00..456.25 rows=100 width=36)
+  Group Key: g
+  ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=11)
+-- EXPLAIN
+
+> EXPLAIN SELECT sum(n), avg(i), count(*) FROM a116_t
+QUERY PLAN:text
+Aggregate  (cost=505.00..505.01 rows=1 width=72)
+  ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=11)
+-- EXPLAIN
+
+> EXPLAIN SELECT g, avg(n), stddev(f) FROM a116_t GROUP BY g ORDER BY g
+QUERY PLAN:text
+Sort  (cost=509.82..510.07 rows=100 width=44)
+  Sort Key: g
+  ->  HashAggregate  (cost=505.00..506.50 rows=100 width=44)
+        Group Key: g
+        ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=19)
+-- EXPLAIN
+
+> EXPLAIN SELECT g, string_agg(t, ','), array_agg(i) FROM a116_t GROUP BY g
+QUERY PLAN:text
+HashAggregate  (cost=505.00..506.50 rows=100 width=68)
+  Group Key: g
+  ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=11)
+-- EXPLAIN
+
+> EXPLAIN SELECT g, sum(i), sum(i::int8), max(n) FROM a116_t GROUP BY g
+QUERY PLAN:text
+HashAggregate  (cost=605.00..606.25 rows=100 width=76)
+  Group Key: g
+  ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=15)
+-- EXPLAIN
+
+> EXPLAIN SELECT g, sum(n), avg(n) FROM a116_t GROUP BY g
+QUERY PLAN:text
+HashAggregate  (cost=455.00..456.50 rows=100 width=68)
+  Group Key: g
+  ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=11)
+-- EXPLAIN
+
+> EXPLAIN SELECT g, count(i) FILTER (WHERE i > 10) FROM a116_t GROUP BY g
+QUERY PLAN:text
+HashAggregate  (cost=505.00..506.00 rows=100 width=12)
+  Group Key: g
+  ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a116_t LIMIT (SELECT 5)
+QUERY PLAN:text
+Limit  (cost=0.01..35.51 rows=2000 width=26)
+  InitPlan 1
+    ->  Result  (cost=0.00..0.01 rows=1 width=4)
+  ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=26)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a116_t ORDER BY i OFFSET (SELECT 3) LIMIT (SELECT 5)
+QUERY PLAN:text
+Limit  (cost=1788.79..1793.79 rows=2000 width=26)
+  InitPlan 1
+    ->  Result  (cost=0.00..0.01 rows=1 width=4)
+  InitPlan 2
+    ->  Result  (cost=0.00..0.01 rows=1 width=4)
+  ->  Sort  (cost=1783.77..1833.77 rows=20000 width=26)
+        Sort Key: a116_t.i
+        ->  Seq Scan on a116_t  (cost=0.00..355.00 rows=20000 width=26)
+-- EXPLAIN
+
+> SELECT i FROM a116_t ORDER BY i OFFSET (SELECT 3) LIMIT (SELECT 2)
+i:int4
+4
+5
+-- SELECT 2
+
+> EXPLAIN SELECT s.i, s.n FROM (SELECT i, n FROM a116_t WHERE g = 3 ORDER BY n DESC LIMIT 10 OFFSET 0) s ORDER BY s.n DESC
+QUERY PLAN:text
+Limit  (cost=409.32..409.35 rows=10 width=11)
+  ->  Sort  (cost=409.32..409.82 rows=200 width=11)
+        Sort Key: a116_t.n DESC
+        ->  Seq Scan on a116_t  (cost=0.00..405.00 rows=200 width=11)
+              Filter: (g = 3)
+-- EXPLAIN
+
+> CREATE TABLE a116_o (k int PRIMARY KEY, c int, d date)
+-- CREATE TABLE
+
+> CREATE TABLE a116_l (k int, ln int, q numeric, PRIMARY KEY (k, ln))
+-- CREATE TABLE
+
+> INSERT INTO a116_o SELECT i, i % 997, date '1995-01-01' + i % 2000 FROM generate_series(1, 6000) i
+-- INSERT 0 6000
+
+> INSERT INTO a116_l SELECT i / 4 + 1, i % 4, (i * 7) % 50 FROM generate_series(0, 23999) i
+-- INSERT 0 24000
+
+> VACUUM ANALYZE a116_o, a116_l
+-- VACUUM
+
+> EXPLAIN SELECT k FROM a116_l GROUP BY k HAVING sum(q) > 150
+QUERY PLAN:text
+HashAggregate  (cost=490.00..580.00 rows=2000 width=4)
+  Group Key: k
+  Filter: (sum(q) > '150'::numeric)
+  ->  Seq Scan on a116_l  (cost=0.00..370.00 rows=24000 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT o.k FROM a116_o o WHERE o.k IN (SELECT k FROM a116_l GROUP BY k HAVING sum(q) > 150)
+QUERY PLAN:text
+Hash Join  (cost=605.00..713.76 rows=2000 width=4)
+  Hash Cond: (o.k = a116_l.k)
+  ->  Seq Scan on a116_o o  (cost=0.00..93.00 rows=6000 width=4)
+  ->  Hash  (cost=580.00..580.00 rows=2000 width=4)
+        ->  HashAggregate  (cost=490.00..580.00 rows=2000 width=4)
+              Group Key: a116_l.k
+              Filter: (sum(a116_l.q) > '150'::numeric)
+              ->  Seq Scan on a116_l  (cost=0.00..370.00 rows=24000 width=8)
+-- EXPLAIN
+
+> SELECT count(*) FROM a116_o o WHERE o.k IN (SELECT k FROM a116_l GROUP BY k HAVING sum(q) > 150)
+count:int8
+240
+-- SELECT 1
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SET min_parallel_index_scan_size = 0
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM (SELECT k FROM a116_l WHERE q > 3 OFFSET 0) sub
+QUERY PLAN:text
+Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Parallel Seq Scan on a116_l
+              Filter: (q > '3'::numeric)
+-- EXPLAIN
+
+> SELECT count(*) FROM (SELECT k FROM a116_l WHERE q > 3 OFFSET 0) sub
+count:int8
+22080
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT o.* FROM a116_o o LEFT JOIN a116_l l ON l.ln = o.c WHERE l.k IS NULL AND o.c < 50
+QUERY PLAN:text
+Gather
+  Workers Planned: 2
+  ->  Parallel Hash Right Join
+        Hash Cond: (l.ln = o.c)
+        Filter: (l.k IS NULL)
+        ->  Parallel Seq Scan on a116_l l
+        ->  Parallel Hash
+              ->  Parallel Seq Scan on a116_o o
+                    Filter: (c < 50)
+-- EXPLAIN
+
+> SELECT count(*) FROM a116_o o LEFT JOIN a116_l l ON l.ln = o.c WHERE l.k IS NULL AND o.c < 50
+count:int8
+291
+-- SELECT 1
+
+> RESET parallel_setup_cost
+-- RESET
+
+> RESET parallel_tuple_cost
+-- RESET
+
+> RESET min_parallel_table_scan_size
+-- RESET
+
+> RESET min_parallel_index_scan_size
+-- RESET
+
+> EXPLAIN SELECT o.k, (SELECT max(l.q) FROM a116_l l WHERE l.k = o.k) FROM a116_o o WHERE o.c = 7 ORDER BY o.k LIMIT 5
+QUERY PLAN:text
+Limit  (cost=108.10..176.30 rows=5 width=36)
+  ->  Result  (cost=108.10..203.58 rows=7 width=36)
+        ->  Sort  (cost=108.10..108.12 rows=7 width=4)
+              Sort Key: o.k
+              ->  Seq Scan on a116_o o  (cost=0.00..108.00 rows=7 width=4)
+                    Filter: (c = 7)
+        SubPlan 1
+          ->  Aggregate  (cost=13.62..13.63 rows=1 width=32)
+                ->  Index Scan using a116_l_pkey on a116_l l  (cost=0.29..13.61 rows=4 width=4)
+                      Index Cond: (k = o.k)
+-- EXPLAIN
+
+> SELECT o.k, (SELECT max(l.q) FROM a116_l l WHERE l.k = o.k) FROM a116_o o WHERE o.c = 7 ORDER BY o.k LIMIT 5
+k:int4 | max:numeric
+7 | 39
+1004 | 48
+2001 | 21
+2998 | 37
+3995 | 46
+-- SELECT 5
+
+> DROP TABLE a116_t, a116_o, a116_l
+-- DROP TABLE
+

@@ -1,0 +1,20 @@
+-- View definitions as pg_get_viewdef / pg_views print them.
+CREATE TABLE vu (id int PRIMARY KEY, email text NOT NULL, age int, team text);
+CREATE TABLE vp (id int PRIMARY KEY, user_id int REFERENCES vu (id), title varchar(50), score numeric);
+CREATE VIEW v_join AS SELECT p.id, u.email FROM vp p JOIN vu u ON u.id = p.user_id;
+CREATE VIEW v_star AS SELECT * FROM vu;
+CREATE VIEW v_where AS SELECT id, email AS mail, age + 1 AS next_age FROM vu WHERE age > 18 AND team IS NOT NULL ORDER BY email DESC LIMIT 10;
+CREATE VIEW v_agg AS SELECT team, count(*) AS n, avg(age), max(email) FILTER (WHERE age > 1) AS top FROM vu GROUP BY team HAVING count(*) > 1 ORDER BY 2 DESC;
+CREATE VIEW v_left AS SELECT u.email, p.title, coalesce(p.score, 0) AS score FROM vu u LEFT JOIN vp p ON p.user_id = u.id WHERE p.title LIKE 'a%';
+CREATE VIEW v_case AS SELECT id, CASE WHEN age < 18 THEN 'minor' WHEN age < 65 THEN 'adult' ELSE 'senior' END AS bracket FROM vu;
+CREATE VIEW v_const AS SELECT 1 AS one, 'x'::text AS x, now() AS t;
+CREATE VIEW v_distinct AS SELECT DISTINCT team FROM vu;
+CREATE VIEW v_cross AS SELECT a.id AS a_id, b.id AS b_id FROM vu a, vp b WHERE a.id = b.user_id;
+CREATE VIEW v_view AS SELECT email FROM v_star WHERE id IN (1, 2, 3);
+CREATE VIEW v_offset AS SELECT id FROM vu ORDER BY id OFFSET 5;
+SELECT c.relname, pg_get_viewdef(c.oid, true) FROM pg_class c WHERE c.relkind = 'v' AND c.relname LIKE 'v\_%' ORDER BY 1;
+SELECT viewname, definition FROM pg_views WHERE viewname LIKE 'v\_%' ORDER BY 1;
+SELECT pg_get_viewdef('v_join'), pg_get_viewdef('v_join'::regclass, 40);
+SELECT table_name, view_definition FROM information_schema.views WHERE table_name = 'v_join';
+DROP VIEW v_view, v_star, v_join, v_where, v_agg, v_left, v_case, v_const, v_distinct, v_cross, v_offset;
+DROP TABLE vp, vu;

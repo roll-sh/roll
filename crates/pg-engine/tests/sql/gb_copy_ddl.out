@@ -1,0 +1,260 @@
+> CREATE TABLE gb_cx (a int, b int, c text DEFAULT 'x', d text)
+-- CREATE TABLE
+
+> COPY gb_cx FROM stdin WHERE a = max(b)
+ERROR 42803: aggregate functions are not allowed in COPY FROM WHERE conditions (at 33)
+
+> COPY gb_cx FROM stdin WHERE a IN (SELECT 1)
+ERROR 0A000: cannot use subquery in COPY FROM WHERE condition (at 31)
+
+> COPY gb_cx FROM stdin WHERE a IN (generate_series(1, 5))
+ERROR 0A000: set-returning functions are not allowed in COPY FROM WHERE conditions (at 35)
+
+> COPY gb_cx FROM stdin WHERE a = row_number() OVER (b)
+ERROR 42P20: window functions are not allowed in COPY FROM WHERE conditions (at 33)
+
+> COPY gb_cx (a) FROM stdin WITH (default '\D')
+>> \D
+ERROR 22P04: unexpected default marker in COPY data
+DETAIL: Column "a" has no default value.
+CONTEXT: COPY gb_cx, line 1: "\D"
+
+> COPY gb_cx FROM stdin
+>> 
+ERROR 22P02: invalid input syntax for type integer: ""
+CONTEXT: COPY gb_cx, line 1, column a: ""
+
+> COPY gb_cx FROM stdin FREEZE
+>> 1	2	3	4
+ERROR 55000: cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction
+
+> BEGIN
+-- BEGIN
+
+> TRUNCATE gb_cx
+-- TRUNCATE TABLE
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> COPY gb_cx FROM stdin FREEZE
+>> 1	2	3	4
+ERROR 55000: cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE gb_eoc (a text)
+-- CREATE TABLE
+
+> INSERT INTO gb_eoc VALUES ('\.'), ('\.b'), ('a\.')
+-- INSERT 0 3
+
+> COPY gb_eoc TO stdout CSV
+copy:text
+"\."
+\.b
+a\.
+-- COPY 3
+
+> CREATE TABLE gb_eoc2 (a text, b int)
+-- CREATE TABLE
+
+> INSERT INTO gb_eoc2 VALUES ('\.', 1)
+-- INSERT 0 1
+
+> COPY gb_eoc2 TO stdout CSV
+copy:text
+\.,1
+-- COPY 1
+
+> CREATE DOMAIN gb_dnn varchar(15) NOT NULL
+-- CREATE DOMAIN
+
+> CREATE TABLE gb_dt (n int, l gb_dnn)
+-- CREATE TABLE
+
+> COPY gb_dt FROM stdin WITH (on_error ignore, log_verbosity verbose)
+>> 1	a
+>> 2	\N
+>> 3	c
+NOTICE 00000: skipping row due to data type incompatibility at line 2 for column "l": null input
+CONTEXT: COPY gb_dt
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT * FROM gb_dt
+n:int4 | l:varchar
+1 | a
+3 | c
+-- SELECT 2
+
+> CREATE TABLE gb_vt (id serial, name text)
+-- CREATE TABLE
+
+> CREATE VIEW gb_vv AS SELECT ''::text AS str
+-- CREATE VIEW
+
+> COPY gb_vv FROM stdin
+ERROR 42809: cannot copy to view "gb_vv"
+HINT: To enable copying to a view, provide an INSTEAD OF INSERT trigger.
+
+> CREATE FUNCTION gb_vv_ins() RETURNS trigger LANGUAGE plpgsql AS
+>   $$ BEGIN INSERT INTO gb_vt (name) VALUES (NEW.str); RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gb_vv_t INSTEAD OF INSERT ON gb_vv FOR EACH ROW EXECUTE FUNCTION gb_vv_ins()
+-- CREATE TRIGGER
+
+> COPY gb_vv FROM stdin
+>> one
+>> two
+-- COPY 2
+
+> SELECT * FROM gb_vt
+id:int4 | name:text
+1 | one
+2 | two
+-- SELECT 2
+
+> CREATE FUNCTION gb_bark(text) RETURNS bool LANGUAGE plpgsql IMMUTABLE AS
+>   $$ BEGIN RAISE NOTICE '% <- woof!', $1; RETURN true; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gb_tn() RETURNS trigger LANGUAGE plpgsql AS
+>   $$ BEGIN RAISE NOTICE 'trigger % on % for %', TG_NAME, TG_TABLE_NAME, NEW.a; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TABLE gb_tw (a int, b text)
+-- CREATE TABLE
+
+> CREATE TRIGGER gb_tw_t AFTER INSERT ON gb_tw FOR EACH ROW WHEN (gb_bark(new.b) AND new.a % 2 = 1)
+>   EXECUTE FUNCTION gb_tn()
+-- CREATE TRIGGER
+
+> INSERT INTO gb_tw VALUES (1, 'aardvark'), (2, 'aanimals'), (3, 'ant')
+NOTICE 00000: aardvark <- woof!
+CONTEXT: PL/pgSQL function gb_bark(text) line 1 at RAISE
+NOTICE 00000: aanimals <- woof!
+CONTEXT: PL/pgSQL function gb_bark(text) line 1 at RAISE
+NOTICE 00000: ant <- woof!
+CONTEXT: PL/pgSQL function gb_bark(text) line 1 at RAISE
+NOTICE 00000: trigger gb_tw_t on gb_tw for 1
+CONTEXT: PL/pgSQL function gb_tn() line 1 at RAISE
+NOTICE 00000: trigger gb_tw_t on gb_tw for 3
+CONTEXT: PL/pgSQL function gb_tn() line 1 at RAISE
+-- INSERT 0 3
+
+> CREATE FUNCTION gb_rw() RETURNS event_trigger LANGUAGE plpgsql AS
+>   $$ BEGIN RAISE NOTICE 'rewriting % for reason %', pg_event_trigger_table_rewrite_oid()::regclass,
+>        pg_event_trigger_table_rewrite_reason(); END $$
+-- CREATE FUNCTION
+
+> CREATE EVENT TRIGGER gb_rw_et ON table_rewrite EXECUTE FUNCTION gb_rw()
+-- CREATE EVENT TRIGGER
+
+> CREATE TABLE gb_fd (a int, b varchar(10))
+-- CREATE TABLE
+
+> INSERT INTO gb_fd VALUES (1, 'x')
+-- INSERT 0 1
+
+> ALTER TABLE gb_fd ADD COLUMN c int DEFAULT 5
+-- ALTER TABLE
+
+> ALTER TABLE gb_fd ADD COLUMN v int GENERATED ALWAYS AS (a + 1) VIRTUAL
+-- ALTER TABLE
+
+> ALTER TABLE gb_fd ALTER COLUMN v TYPE float8
+-- ALTER TABLE
+
+> ALTER TABLE gb_fd ALTER COLUMN b TYPE varchar(20) USING b::varchar(20)
+-- ALTER TABLE
+
+> SELECT attname, atthasmissing FROM pg_attribute WHERE attrelid = 'gb_fd'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atthasmissing:bool
+a | f
+b | f
+c | t
+v | f
+-- SELECT 4
+
+> ALTER TABLE gb_fd ADD COLUMN t timestamptz DEFAULT clock_timestamp()
+NOTICE 00000: rewriting gb_fd for reason 2
+CONTEXT: PL/pgSQL function gb_rw() line 1 at RAISE
+-- ALTER TABLE
+
+> SELECT attname, atthasmissing FROM pg_attribute WHERE attrelid = 'gb_fd'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atthasmissing:bool
+a | f
+b | f
+c | f
+v | f
+t | f
+-- SELECT 5
+
+> SELECT a, b, c, v FROM gb_fd
+a:int4 | b:varchar | c:int4 | v:float8
+1 | x | 5 | 2
+-- SELECT 1
+
+> DROP EVENT TRIGGER gb_rw_et
+-- DROP EVENT TRIGGER
+
+> DROP FUNCTION gb_rw()
+-- DROP FUNCTION
+
+> SET search_path = pg_temp, public
+-- SET
+
+> CREATE DOMAIN pg_temp.gb_nonempty AS text CHECK (value <> '')
+-- CREATE DOMAIN
+
+> SELECT gb_nonempty('')
+ERROR 42883: function gb_nonempty(unknown) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT pg_temp.gb_nonempty('x')
+gb_nonempty:text
+x
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> DROP TABLE gb_fd
+-- DROP TABLE
+
+> DROP TABLE gb_tw
+-- DROP TABLE
+
+> DROP FUNCTION gb_tn()
+-- DROP FUNCTION
+
+> DROP FUNCTION gb_bark(text)
+-- DROP FUNCTION
+
+> DROP VIEW gb_vv
+-- DROP VIEW
+
+> DROP FUNCTION gb_vv_ins()
+-- DROP FUNCTION
+
+> DROP TABLE gb_vt
+-- DROP TABLE
+
+> DROP TABLE gb_dt
+-- DROP TABLE
+
+> DROP DOMAIN gb_dnn
+-- DROP DOMAIN
+
+> DROP TABLE gb_eoc2
+-- DROP TABLE
+
+> DROP TABLE gb_eoc
+-- DROP TABLE
+
+> DROP TABLE gb_cx
+-- DROP TABLE
+

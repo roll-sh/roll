@@ -1,0 +1,7 @@
+PREPARE
+SET
+Index Scan using accounts_pkey on accounts  (cost=0.42..43.42 rows=1000 width=12)
+  Index Cond: ((id >= $1) AND (id <= ($1 + 99)))
+SET
+Index Scan using accounts_pkey on accounts  (cost=0.42..10.40 rows=99 width=12)
+  Index Cond: ((id >= 50000) AND (id <= 50099))

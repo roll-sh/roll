@@ -1,0 +1,219 @@
+> CREATE TABLE it_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (a int)
+NOTICE 42622: identifier "it_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" will be truncated to "it_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+-- CREATE TABLE
+
+> CREATE TABLE "it_YYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" (a int)
+NOTICE 42622: identifier "it_YYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" will be truncated to "it_YYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+-- CREATE TABLE
+
+> SELECT relname, length(relname) FROM pg_class WHERE relname LIKE 'it\_%' ORDER BY 1
+relname:name | length:int4
+it_YYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | 63
+it_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | 63
+-- SELECT 2
+
+> CREATE TABLE it_éééééééééééééééééééééééééééééééééééééééééééééééé (a int)
+NOTICE 42622: identifier "it_éééééééééééééééééééééééééééééééééééééééééééééééé" will be truncated to "it_éééééééééééééééééééééééééééééé"
+-- CREATE TABLE
+
+> SELECT relname, octet_length(relname) FROM pg_class WHERE relname LIKE 'it\_é%' ORDER BY 1
+relname:name | octet_length:int4
+it_éééééééééééééééééééééééééééééé | 63
+-- SELECT 1
+
+> SELECT typname, octet_length(typname) FROM pg_type WHERE typname LIKE '%it\_é%' ORDER BY 1
+typname:name | octet_length:int4
+_it_ééééééééééééééééééééééééééééé | 62
+it_éééééééééééééééééééééééééééééé | 63
+-- SELECT 2
+
+> SELECT 1 AS xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+NOTICE 42622: identifier "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" will be truncated to "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:int4
+1
+-- SELECT 1
+
+> SELECT 1 AS "Lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll""x"
+NOTICE 42622: identifier "Lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll"x" will be truncated to "Lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll"
+Lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll:int4
+1
+-- SELECT 1
+
+> SELECT 1 AS U&"\0041mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+NOTICE 42622: identifier "Ammmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm" will be truncated to "Ammmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+Ammmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm:int4
+1
+-- SELECT 1
+
+> SELECT 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' AS s, $q$yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy$q$ AS d
+s:text | d:text
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+-- SELECT 1
+
+> CREATE TABLE it_t2 (abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij_col1 int, abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij_col2 int)
+NOTICE 42622: identifier "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij_col1" will be truncated to "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij_co"
+NOTICE 42622: identifier "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij_col2" will be truncated to "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij_co"
+ERROR 42701: column "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij_co" specified more than once
+
+> SELECT 1 AS ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+NOTICE 42622: identifier "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" will be truncated to "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+NOTICE 42622: identifier "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg" will be truncated to "ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+ERROR 42601: syntax error at or near "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg" (at 90)
+
+> SELECT 'iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'::regclass
+ERROR 42P01: relation "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii" does not exist (at 8)
+
+> SELECT 'a'::name, repeat('b', 70)::name
+name:name | repeat:name
+a | bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+-- SELECT 1
+
+> SET client_min_messages = warning
+-- SET
+
+> SELECT 1 AS kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk:int4
+1
+-- SELECT 1
+
+> RESET client_min_messages
+-- RESET
+
+> CREATE TABLE it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa int PRIMARY KEY, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb serial UNIQUE, CHECK (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > 0))
+-- CREATE TABLE
+
+> CREATE INDEX ON it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+-- CREATE INDEX
+
+> CREATE INDEX ON it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+-- CREATE INDEX
+
+> CREATE INDEX ON it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+-- CREATE INDEX
+
+> ALTER TABLE it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt ADD CHECK (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > 1), ADD CHECK (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > 2)
+-- ALTER TABLE
+
+> CREATE TABLE it_ref (x int REFERENCES it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt, yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy int REFERENCES it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt)
+-- CREATE TABLE
+
+> CREATE STATISTICS ON aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb FROM it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+-- CREATE STATISTICS
+
+> CREATE STATISTICS ON aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb FROM it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+-- CREATE STATISTICS
+
+> SELECT stxname FROM pg_statistic_ext WHERE stxrelid = 'it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt'::regclass ORDER BY 1
+stxname:name
+it_ttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaaa_stat1
+it_tttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaaa_stat
+-- SELECT 2
+
+> SELECT conname FROM pg_constraint WHERE conrelid IN ('it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt'::regclass, 'it_ref'::regclass) ORDER BY 1
+conname:name
+it_ref_x_fkey
+it_ref_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy_fkey
+it_tttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaa_not_null
+it_tttttttttttttttttttttttt_bbbbbbbbbbbbbbbbbbbbbbbbbb_not_null
+it_ttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaa_check1
+it_ttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaa_check2
+it_ttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaaa_check
+it_tttttttttttttttttttttttttt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbb_key
+it_ttttttttttttttttttttttttttttttttttttttttttttttttttttttt_pkey
+-- SELECT 9
+
+> SELECT relname FROM pg_class WHERE relname LIKE 'it\_ttt%' ORDER BY 1
+relname:name
+it_tttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaaa_idx1
+it_tttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaaa_idx2
+it_tttttttttttttttttttttttttt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaa_idx
+it_tttttttttttttttttttttttttt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbb_key
+it_tttttttttttttttttttttttttt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbb_seq
+it_ttttttttttttttttttttttttttttttttttttttttttttttttttttttt_pkey
+it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+-- SELECT 7
+
+> SELECT typname FROM pg_type WHERE typname LIKE '%it\_ttt%' ORDER BY 1
+typname:name
+_it_ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+it_tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+-- SELECT 2
+
+> CREATE TABLE it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupd_seq (a int)
+NOTICE 42622: identifier "it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupd_seq" will be truncated to "it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupd_s"
+-- CREATE TABLE
+
+> CREATE TABLE it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdup (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb serial)
+NOTICE 42622: identifier "it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdup" will be truncated to "it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdup"
+-- CREATE TABLE
+
+> SELECT relname FROM pg_class WHERE relname LIKE 'it\_dup%' ORDER BY 1
+relname:name
+it_dupdupdupdupdupdupdupdupdu_bbbbbbbbbbbbbbbbbbbbbbbbbbbbb_seq
+it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupd_s
+it_dupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdupdup
+-- SELECT 3
+
+> CREATE TABLE it_q (q1 int, q2 int)
+-- CREATE TABLE
+
+> CREATE VIEW it_v AS
+>   SELECT * FROM it_q xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy
+>   UNION ALL
+>   SELECT * FROM it_q xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxz
+NOTICE 42622: identifier "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy" will be truncated to "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+NOTICE 42622: identifier "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxz" will be truncated to "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('it_v', true)
+pg_get_viewdef:text
+ SELECT xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.q1,
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.q2
+   FROM it_q xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+UNION ALL
+ SELECT xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.q1,
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.q2
+   FROM it_q xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx;
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM it_v
+QUERY PLAN:text
+Append
+  ->  Seq Scan on it_q xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  ->  Seq Scan on it_q xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_1
+-- EXPLAIN
+
+> CREATE FUNCTION it_f() RETURNS int LANGUAGE sql AS 'SELECT 1 AS aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+NOTICE 42622: identifier "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" will be truncated to "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+CONTEXT: SQL function "it_f"
+-- CREATE FUNCTION
+
+> SELECT it_f()
+NOTICE 42622: identifier "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" will be truncated to "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+CONTEXT: SQL function "it_f" during inlining
+it_f:int4
+1
+-- SELECT 1
+
+> SET client_min_messages = warning
+-- SET
+
+> CREATE FUNCTION it_g() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb int := 7;
+> BEGIN RETURN bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb + 1; END $$
+-- CREATE FUNCTION
+
+> SELECT it_g()
+it_g:int4
+8
+-- SELECT 1
+
+> RESET client_min_messages
+-- RESET
+
+> DO $$ BEGIN EXECUTE 'SELECT 1 AS eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'; END $$
+NOTICE 42622: identifier "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" will be truncated to "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+CONTEXT: SQL statement "SELECT 1 AS eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+-- DO
+

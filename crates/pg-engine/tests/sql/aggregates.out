@@ -1,0 +1,194 @@
+> CREATE TABLE s (g text, n int, f float8, d numeric, t text)
+-- CREATE TABLE
+
+> INSERT INTO s VALUES ('a', 1, 1.5, 1.10, 'x'), ('a', 2, 2.5, 2.20, 'y'), ('b', 3, NULL, 3.30, 'z'), ('b', NULL, 4.0, NULL, NULL), ('c', 5, 5.5, 5.50, 'w')
+-- INSERT 0 5
+
+> SELECT count(*), count(n), sum(n), avg(n), min(n), max(n) FROM s
+count:int8 | count:int8 | sum:int8 | avg:numeric | min:int4 | max:int4
+5 | 4 | 11 | 2.7500000000000000 | 1 | 5
+-- SELECT 1
+
+> SELECT g, count(*), sum(n), avg(f), max(t) FROM s GROUP BY g ORDER BY g
+g:text | count:int8 | sum:int8 | avg:float8 | max:text
+a | 2 | 3 | 2 | y
+b | 2 | 3 | 4 | z
+c | 1 | 5 | 5.5 | w
+-- SELECT 3
+
+> SELECT g, sum(d), avg(d) FROM s GROUP BY g HAVING sum(d) > 2 ORDER BY g
+g:text | sum:numeric | avg:numeric
+a | 3.30 | 1.6500000000000000
+b | 3.30 | 3.3000000000000000
+c | 5.50 | 5.5000000000000000
+-- SELECT 3
+
+> SELECT string_agg(t, ',' ORDER BY t), array_agg(n ORDER BY n NULLS FIRST) FROM s
+string_agg:text | array_agg:int4[]
+w,x,y,z | {NULL,1,2,3,5}
+-- SELECT 1
+
+> SELECT count(DISTINCT g), sum(DISTINCT n) FROM s
+count:int8 | sum:int8
+3 | 11
+-- SELECT 1
+
+> SELECT bool_and(n > 0), bool_or(n > 4), every(n < 10) FROM s
+bool_and:bool | bool_or:bool | every:bool
+t | t | t
+-- SELECT 1
+
+> SELECT stddev(n)::numeric(10,6), variance(n)::numeric(10,6), stddev_pop(f), var_pop(f) FROM s
+stddev:numeric | variance:numeric | stddev_pop:float8 | var_pop:float8
+1.707825 | 2.916667 | 1.5155444566227676 | 2.296875
+-- SELECT 1
+
+> SELECT g, count(*) FILTER (WHERE n > 1) FROM s GROUP BY g ORDER BY g
+g:text | count:int8
+a | 1
+b | 1
+c | 1
+-- SELECT 3
+
+> SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY n), percentile_disc(0.5) WITHIN GROUP (ORDER BY n), mode() WITHIN GROUP (ORDER BY g) FROM s
+percentile_cont:float8 | percentile_disc:int4 | mode:text
+2.5 | 2 | a
+-- SELECT 1
+
+> SELECT g, n FROM s GROUP BY g
+ERROR 42803: column "s.n" must appear in the GROUP BY clause or be used in an aggregate function (at 11)
+
+> SELECT sum(n) FROM s WHERE false
+sum:int8
+NULL
+-- SELECT 1
+
+> SELECT count(*) FROM s WHERE false
+count:int8
+0
+-- SELECT 1
+
+> SELECT g, sum(n) FROM s GROUP BY ROLLUP (g) ORDER BY g NULLS LAST
+g:text | sum:int8
+a | 3
+b | 3
+c | 5
+NULL | 11
+-- SELECT 4
+
+> SELECT g, t, count(*) FROM s GROUP BY CUBE (g, t) HAVING count(*) > 1 ORDER BY 1, 2
+g:text | t:text | count:int8
+a | NULL | 2
+b | NULL | 2
+NULL | NULL | 5
+-- SELECT 3
+
+> SELECT g, grouping(g), count(*) FROM s GROUP BY GROUPING SETS ((g), ()) ORDER BY 1 NULLS LAST
+g:text | grouping:int4 | count:int8
+a | 0 | 2
+b | 0 | 2
+c | 0 | 1
+NULL | 1 | 5
+-- SELECT 4
+
+> SELECT json_agg(n ORDER BY n), jsonb_object_agg(g, n) FILTER (WHERE n IS NOT NULL AND g <> 'a') FROM s
+json_agg:json | jsonb_object_agg:jsonb
+[1, 2, 3, 5, null] | {"b": 3, "c": 5}
+-- SELECT 1
+
+> SELECT sum(n) OVER () FROM s
+sum:int8
+11
+11
+11
+11
+11
+-- SELECT 5
+
+> SELECT max(sum(n)) FROM s
+ERROR 42803: aggregate function calls cannot be nested (at 12)
+
+> SELECT g FROM s WHERE sum(n) > 1
+ERROR 42803: aggregate functions are not allowed in WHERE (at 23)
+
+> SELECT 1 FROM s HAVING count(*) > 2
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT bit_and(n), bit_or(n), xmax IS NULL FROM s GROUP BY xmax
+bit_and:int4 | bit_or:int4 | ?column?:bool
+0 | 7 | f
+-- SELECT 1
+
+> SELECT count(*) FROM (SELECT DISTINCT g FROM s) x
+count:int8
+3
+-- SELECT 1
+
+> SELECT DISTINCT ON (g) g, n FROM s ORDER BY g, n DESC NULLS LAST
+g:text | n:int4
+a | 2
+b | 3
+c | 5
+-- SELECT 3
+
+> SELECT avg(x) FROM (VALUES (1::int8), (2), (4)) v(x)
+avg:numeric
+2.3333333333333333
+-- SELECT 1
+
+> SELECT sum(x), avg(x) FROM (VALUES (1.5::float4), (2.25)) v(x)
+sum:float4 | avg:float8
+3.75 | 1.875
+-- SELECT 1
+
+> SELECT min(x), max(x) FROM (VALUES ('2024-01-01'::date), ('2023-05-05')) v(x)
+min:date | max:date
+2023-05-05 | 2024-01-01
+-- SELECT 1
+
+> SELECT corr(n, f)::numeric(10,6), regr_slope(f, n)::numeric(10,6) FROM s
+corr:numeric | regr_slope:numeric
+1.000000 | 1.000000
+-- SELECT 1
+
+> CREATE TABLE zs (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO zs VALUES (1, 2), (1, 3), (2, 1)
+-- INSERT 0 3
+
+> SELECT *, a + b FROM zs ORDER BY 3, 2
+a:int4 | b:int4 | ?column?:int4
+2 | 1 | 3
+1 | 2 | 3
+1 | 3 | 4
+-- SELECT 3
+
+> SELECT DISTINCT ON (1) * FROM zs ORDER BY 1, 2 DESC
+a:int4 | b:int4
+1 | 3
+2 | 1
+-- SELECT 2
+
+> SELECT zs.*, 9 FROM zs GROUP BY 1, 2, 3 ORDER BY 2
+a:int4 | b:int4 | ?column?:int4
+2 | 1 | 9
+1 | 2 | 9
+1 | 3 | 9
+-- SELECT 3
+
+> SELECT (ROW(a, b)::zs).*, count(*) FROM zs GROUP BY 1, 2 ORDER BY 1, 2
+a:int4 | b:int4 | count:int8
+1 | 2 | 1
+1 | 3 | 1
+2 | 1 | 1
+-- SELECT 3
+
+> SELECT * FROM zs GROUP BY 3
+ERROR 42P10: GROUP BY position 3 is not in select list (at 27)
+
+> DROP TABLE zs
+-- DROP TABLE
+

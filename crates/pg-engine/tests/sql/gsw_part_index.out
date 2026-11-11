@@ -1,0 +1,274 @@
+> CREATE TABLE gsw_ip (a int, b int, c text) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE INDEX gsw_ip_idx ON gsw_ip (a)
+-- CREATE INDEX
+
+> SELECT indexdef FROM pg_indexes WHERE indexname = 'gsw_ip_idx'
+indexdef:text
+CREATE INDEX gsw_ip_idx ON ONLY public.gsw_ip USING btree (a)
+-- SELECT 1
+
+> SELECT pg_get_indexdef('gsw_ip_idx'::regclass)
+pg_get_indexdef:text
+CREATE INDEX gsw_ip_idx ON ONLY public.gsw_ip USING btree (a)
+-- SELECT 1
+
+> CREATE TABLE gsw_ip1 PARTITION OF gsw_ip FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> SELECT relname, relkind, relhassubclass FROM pg_class WHERE relname LIKE 'gsw_ip%idx' ORDER BY 1
+relname:name | relkind:char | relhassubclass:bool
+gsw_ip1_a_idx | i | f
+gsw_ip_idx | I | t
+-- SELECT 2
+
+> DROP INDEX CONCURRENTLY gsw_ip_idx
+ERROR 0A000: cannot drop partitioned index "gsw_ip_idx" concurrently
+
+> DROP INDEX gsw_ip_idx
+-- DROP INDEX
+
+> CREATE INDEX gsw_ip_c ON ONLY gsw_ip (c)
+-- CREATE INDEX
+
+> CREATE INDEX gsw_ip1_c ON gsw_ip1 (c)
+-- CREATE INDEX
+
+> ALTER TABLE gsw_ip_c ATTACH PARTITION gsw_ip1_c FOR VALUES FROM (10) TO (20)
+ERROR 42P17: "gsw_ip_c" is not a partitioned table
+
+> ALTER TABLE gsw_ip_c DETACH PARTITION gsw_ip1_c
+ERROR 42809: ALTER action DETACH PARTITION cannot be performed on relation "gsw_ip_c"
+DETAIL: This operation is not supported for partitioned indexes.
+
+> ALTER INDEX gsw_ip_c ATTACH PARTITION gsw_ip1
+ERROR 42P17: "gsw_ip1" is not an index
+
+> ALTER INDEX gsw_ip_c ATTACH PARTITION gsw_ip1_c
+-- ALTER INDEX
+
+> DROP TABLE gsw_ip
+-- DROP TABLE
+
+> CREATE TABLE gsw_vp (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_vp1 PARTITION OF gsw_vp FOR VALUES FROM (1) TO (1000) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_vp11 PARTITION OF gsw_vp1 FOR VALUES FROM (1) TO (100)
+-- CREATE TABLE
+
+> CREATE INDEX ON ONLY gsw_vp1 (a)
+-- CREATE INDEX
+
+> CREATE INDEX ON ONLY gsw_vp (a)
+-- CREATE INDEX
+
+> SELECT relname, indisvalid FROM pg_class JOIN pg_index ON indexrelid = oid WHERE relname LIKE 'gsw_vp%' ORDER BY relname
+relname:name | indisvalid:bool
+gsw_vp1_a_idx | f
+gsw_vp_a_idx | f
+-- SELECT 2
+
+> ALTER INDEX gsw_vp_a_idx ATTACH PARTITION gsw_vp1_a_idx
+-- ALTER INDEX
+
+> SELECT relname, indisvalid FROM pg_class JOIN pg_index ON indexrelid = oid WHERE relname LIKE 'gsw_vp%' ORDER BY relname
+relname:name | indisvalid:bool
+gsw_vp1_a_idx | f
+gsw_vp_a_idx | f
+-- SELECT 2
+
+> CREATE INDEX ON gsw_vp11 (a)
+-- CREATE INDEX
+
+> ALTER INDEX gsw_vp1_a_idx ATTACH PARTITION gsw_vp11_a_idx
+-- ALTER INDEX
+
+> SELECT relname, indisvalid FROM pg_class JOIN pg_index ON indexrelid = oid WHERE relname LIKE 'gsw_vp%' ORDER BY relname
+relname:name | indisvalid:bool
+gsw_vp11_a_idx | t
+gsw_vp1_a_idx | t
+gsw_vp_a_idx | t
+-- SELECT 3
+
+> SELECT relname, relhassubclass FROM pg_class WHERE relname LIKE 'gsw_vp%idx' ORDER BY 1
+relname:name | relhassubclass:bool
+gsw_vp11_a_idx | f
+gsw_vp1_a_idx | t
+gsw_vp_a_idx | t
+-- SELECT 3
+
+> DROP TABLE gsw_vp
+-- DROP TABLE
+
+> CREATE TABLE gsw_pk (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_pk1 PARTITION OF gsw_pk FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> ALTER TABLE ONLY gsw_pk ADD PRIMARY KEY (a)
+ERROR XX000: column "a" of table "gsw_pk1" is not marked NOT NULL
+
+> CREATE INDEX gsw_pk1_a_idx ON gsw_pk1 (a)
+-- CREATE INDEX
+
+> ALTER INDEX gsw_pk_pkey ATTACH PARTITION gsw_pk1_a_idx
+ERROR 42P01: relation "gsw_pk_pkey" does not exist
+
+> DROP TABLE gsw_pk
+-- DROP TABLE
+
+> CREATE TABLE gsw_ex (a int4range, b int4range, EXCLUDE USING GIST (a WITH =)) PARTITION BY RANGE (a, b)
+ERROR 0A000: unique constraint on partitioned table must include all partitioning columns
+DETAIL: EXCLUDE constraint on table "gsw_ex" lacks column "b" which is part of the partition key.
+
+> CREATE TABLE gsw_ex (a int4range, EXCLUDE USING GIST (a WITH -|-)) PARTITION BY RANGE (a)
+ERROR 0A000: cannot match partition key to index on column "a" using non-equal operator "-|-"
+
+> CREATE TABLE gsw_ex (a int4range, b int4range, EXCLUDE USING GIST (a WITH =, b WITH &&)) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> DROP TABLE gsw_ex
+-- DROP TABLE
+
+> CREATE TABLE gsw_ex (a int4range, b int4range, c int4range) PARTITION BY RANGE (a, b)
+-- CREATE TABLE
+
+> ALTER TABLE gsw_ex ADD EXCLUDE USING GIST (a WITH =)
+ERROR 0A000: unique constraint on partitioned table must include all partitioning columns
+DETAIL: EXCLUDE constraint on table "gsw_ex" lacks column "b" which is part of the partition key.
+
+> ALTER TABLE gsw_ex ADD EXCLUDE USING GIST (a WITH -|-)
+ERROR 0A000: cannot match partition key to index on column "a" using non-equal operator "-|-"
+
+> ALTER TABLE gsw_ex ADD EXCLUDE USING GIST (b WITH =, c WITH &&)
+ERROR 0A000: unique constraint on partitioned table must include all partitioning columns
+DETAIL: EXCLUDE constraint on table "gsw_ex" lacks column "a" which is part of the partition key.
+
+> ALTER TABLE gsw_ex ADD EXCLUDE USING GIST (a WITH =, b WITH =, c WITH &&)
+-- ALTER TABLE
+
+> CREATE TABLE gsw_ex1 PARTITION OF gsw_ex FOR VALUES FROM ('[1,2)', '[1,2)') TO ('[3,4)', '[3,4)') PARTITION BY RANGE (c)
+ERROR 0A000: cannot match partition key to index on column "c" using non-equal operator "&&"
+
+> DROP TABLE gsw_ex
+-- DROP TABLE
+
+> CREATE TABLE gsw_ux (a int, b int, UNIQUE (a, b)) PARTITION BY RANGE (a, b)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_ux1 (a int, b int, UNIQUE (a)) PARTITION BY RANGE (b)
+ERROR 0A000: unique constraint on partitioned table must include all partitioning columns
+DETAIL: UNIQUE constraint on table "gsw_ux1" lacks column "b" which is part of the partition key.
+
+> CREATE TABLE gsw_ux2 PARTITION OF gsw_ux FOR VALUES FROM (0, 0) TO (10, 10) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> DROP TABLE gsw_ux, gsw_ux1
+ERROR 42P01: table "gsw_ux1" does not exist
+
+> CREATE TABLE gsw_xp (a int4range, b int4range) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_xp_1 (a int4range, b int4range)
+-- CREATE TABLE
+
+> ALTER TABLE ONLY gsw_xp ATTACH PARTITION gsw_xp_1 FOR VALUES IN ('[0,1)'::int4range)
+-- ALTER TABLE
+
+> ALTER TABLE ONLY gsw_xp ADD CONSTRAINT gsw_xp_excl EXCLUDE USING gist (a WITH =, b WITH &&)
+-- ALTER TABLE
+
+> ALTER TABLE gsw_xp_1 ADD CONSTRAINT gsw_xp_1_excl EXCLUDE USING gist (a WITH &&, b WITH &&)
+-- ALTER TABLE
+
+> ALTER INDEX gsw_xp_excl ATTACH PARTITION gsw_xp_1_excl
+ERROR 42P17: cannot attach index "gsw_xp_1_excl" as a partition of index "gsw_xp_excl"
+DETAIL: The index definitions do not match.
+
+> ALTER TABLE gsw_xp_1 DROP CONSTRAINT gsw_xp_1_excl
+-- ALTER TABLE
+
+> ALTER TABLE gsw_xp_1 ADD CONSTRAINT gsw_xp_1_excl EXCLUDE USING gist (a WITH =, b WITH &&)
+-- ALTER TABLE
+
+> ALTER INDEX gsw_xp_excl ATTACH PARTITION gsw_xp_1_excl
+-- ALTER INDEX
+
+> DROP TABLE gsw_xp
+-- DROP TABLE
+
+> CREATE TABLE gsw_rv (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_rv1 PARTITION OF gsw_rv FOR VALUES FROM (1) TO (1000) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_rv11 PARTITION OF gsw_rv1 FOR VALUES FROM (1) TO (100)
+-- CREATE TABLE
+
+> CREATE INDEX ON ONLY gsw_rv ((a / b))
+-- CREATE INDEX
+
+> CREATE INDEX ON ONLY gsw_rv1 ((a / b))
+-- CREATE INDEX
+
+> INSERT INTO gsw_rv11 VALUES (1, 0)
+-- INSERT 0 1
+
+> CREATE INDEX CONCURRENTLY ON gsw_rv11 ((a / b))
+ERROR 22012: division by zero
+
+> ALTER INDEX gsw_rv1_expr_idx ATTACH PARTITION gsw_rv11_expr_idx
+-- ALTER INDEX
+
+> ALTER INDEX gsw_rv_expr_idx ATTACH PARTITION gsw_rv1_expr_idx
+-- ALTER INDEX
+
+> SELECT relname, indisvalid FROM pg_class JOIN pg_index ON indexrelid = oid WHERE relname LIKE 'gsw_rv%' ORDER BY relname
+relname:name | indisvalid:bool
+gsw_rv11_expr_idx | f
+gsw_rv1_expr_idx | f
+gsw_rv_expr_idx | f
+-- SELECT 3
+
+> DELETE FROM gsw_rv11 WHERE b = 0
+-- DELETE 1
+
+> REINDEX INDEX CONCURRENTLY gsw_rv11_expr_idx
+-- REINDEX
+
+> ALTER INDEX gsw_rv1_expr_idx ATTACH PARTITION gsw_rv11_expr_idx
+-- ALTER INDEX
+
+> SELECT relname, indisvalid FROM pg_class JOIN pg_index ON indexrelid = oid WHERE relname LIKE 'gsw_rv%' ORDER BY relname
+relname:name | indisvalid:bool
+gsw_rv11_expr_idx | t
+gsw_rv1_expr_idx | t
+gsw_rv_expr_idx | t
+-- SELECT 3
+
+> DROP TABLE gsw_rv
+-- DROP TABLE
+
+> CREATE TEMP TABLE gsw_tmp (a int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE INDEX ON gsw_tmp (a)
+-- CREATE INDEX
+
+> DROP INDEX CONCURRENTLY gsw_tmp_a_idx
+-- DROP INDEX
+
+> SELECT count(*) FROM pg_class WHERE relname = 'gsw_tmp_a_idx'
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE gsw_tmp
+-- DROP TABLE
+

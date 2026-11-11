@@ -1,0 +1,55 @@
+> CREATE TABLE a104_at (id int PRIMARY KEY, a int, b text, g1 int GENERATED ALWAYS AS (a * 2) STORED, g2 text GENERATED ALWAYS AS (upper(b)) VIRTUAL)
+-- CREATE TABLE
+
+> INSERT INTO a104_at (id, a, b) VALUES (1, 2, 'x')
+-- INSERT 0 1
+
+> ALTER TABLE a104_at ALTER COLUMN b TYPE bigint
+ERROR 42804: column "b" cannot be cast automatically to type bigint
+HINT: You might need to specify "USING b::bigint".
+
+> ALTER TABLE a104_at ALTER COLUMN b TYPE varchar(3)
+ERROR 0A000: cannot alter type of a column used by a generated column
+DETAIL: Column "b" is used by generated column "g2".
+
+> ALTER TABLE a104_at ALTER COLUMN a TYPE point
+ERROR 42804: column "a" cannot be cast automatically to type point
+HINT: You might need to specify "USING a::point".
+
+> ALTER TABLE a104_at ALTER COLUMN a TYPE bigint
+ERROR 0A000: cannot alter type of a column used by a generated column
+DETAIL: Column "a" is used by generated column "g1".
+
+> ALTER TABLE a104_at ALTER COLUMN g1 TYPE int USING length(g1::text)
+ERROR 42611: cannot specify USING when altering type of generated column (at 34)
+DETAIL: Column "g1" is a generated column.
+
+> ALTER TABLE a104_at ALTER COLUMN g1 TYPE bigint
+-- ALTER TABLE
+
+> CREATE VIEW a104_atv AS SELECT id, b FROM a104_at
+-- CREATE VIEW
+
+> ALTER TABLE a104_at ALTER COLUMN id TYPE date
+ERROR 42804: column "id" cannot be cast automatically to type date
+HINT: You might need to specify "USING id::date".
+
+> ALTER TABLE a104_at ALTER COLUMN id TYPE bigint
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule _RETURN on view a104_atv depends on column "id"
+
+> SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'a104_at'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | format_type:text
+id | integer
+a | integer
+b | text
+g1 | bigint
+g2 | text
+-- SELECT 5
+
+> DROP VIEW a104_atv
+-- DROP VIEW
+
+> DROP TABLE a104_at
+-- DROP TABLE
+

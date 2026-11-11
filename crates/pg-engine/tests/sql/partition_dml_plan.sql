@@ -1,0 +1,91 @@
+CREATE TABLE pr (a int, b text, c int GENERATED ALWAYS AS (a * 10) STORED) PARTITION BY RANGE (a);
+CREATE TABLE pr1 PARTITION OF pr FOR VALUES FROM (0) TO (10);
+CREATE TABLE pr2 (b text, c int GENERATED ALWAYS AS (a * 100) STORED, a int);
+ALTER TABLE pr ATTACH PARTITION pr2 FOR VALUES FROM (10) TO (20);
+CREATE TABLE pr3 PARTITION OF pr FOR VALUES FROM (20) TO (40) PARTITION BY LIST (b);
+CREATE TABLE pr3x PARTITION OF pr3 FOR VALUES IN ('x');
+CREATE TABLE pr3d PARTITION OF pr3 DEFAULT;
+INSERT INTO pr (a, b) VALUES (1, 'x'), (5, 'y'), (11, 'x'), (15, 'z'), (21, 'x'), (25, 'q');
+CREATE FUNCTION ptrg() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_LEVEL = 'ROW' THEN
+    RAISE NOTICE '% % % on %: % -> %', TG_WHEN, TG_OP, TG_LEVEL, TG_TABLE_NAME, OLD, NEW;
+  ELSE
+    RAISE NOTICE '% % % on %', TG_WHEN, TG_OP, TG_LEVEL, TG_TABLE_NAME;
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END $$;
+CREATE FUNCTION ptrans() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE r record;
+BEGIN
+  IF TG_OP IN ('UPDATE', 'DELETE') THEN
+    FOR r IN SELECT * FROM oldt ORDER BY a LOOP RAISE NOTICE '% old: %', TG_OP, r; END LOOP;
+  END IF;
+  IF TG_OP IN ('UPDATE', 'INSERT') THEN
+    FOR r IN SELECT * FROM newt ORDER BY a LOOP RAISE NOTICE '% new: %', TG_OP, r; END LOOP;
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER bs BEFORE UPDATE OR DELETE OR INSERT ON pr FOR EACH STATEMENT EXECUTE FUNCTION ptrg();
+CREATE TRIGGER zs AFTER UPDATE OR DELETE OR INSERT ON pr FOR EACH STATEMENT EXECUTE FUNCTION ptrg();
+CREATE TRIGGER br BEFORE UPDATE OR DELETE OR INSERT ON pr FOR EACH ROW EXECUTE FUNCTION ptrg();
+CREATE TRIGGER zr AFTER UPDATE OR DELETE OR INSERT ON pr FOR EACH ROW EXECUTE FUNCTION ptrg();
+CREATE TRIGGER tu AFTER UPDATE ON pr REFERENCING OLD TABLE AS oldt NEW TABLE AS newt FOR EACH STATEMENT EXECUTE FUNCTION ptrans();
+-- Rows leaving their partition move: DELETE there, INSERT where they go (seeing the
+-- generated values as computed for where they came from), AFTER events in row order.
+UPDATE pr SET a = a + 4 WHERE a < 25 RETURNING tableoid::regclass, *;
+SELECT tableoid::regclass, * FROM pr ORDER BY a;
+UPDATE pr SET b = 'x' WHERE a = 19 RETURNING tableoid::regclass, *;
+UPDATE pr SET a = 40 WHERE a = 5;
+UPDATE pr3 SET a = 5 WHERE a = 25;
+DELETE FROM pr WHERE a > 20 RETURNING tableoid::regclass, *;
+SELECT tableoid::regclass, * FROM pr ORDER BY a;
+DROP TRIGGER tu ON pr;
+-- MERGE across the members: each WHEN clause on each member's rows, events in row order;
+-- its transition tables take a moved row as deleted and inserted.
+CREATE TRIGGER ti AFTER INSERT ON pr REFERENCING NEW TABLE AS newt FOR EACH STATEMENT EXECUTE FUNCTION ptrans();
+CREATE TRIGGER td AFTER DELETE ON pr REFERENCING OLD TABLE AS oldt FOR EACH STATEMENT EXECUTE FUNCTION ptrans();
+CREATE TRIGGER tu AFTER UPDATE ON pr REFERENCING OLD TABLE AS oldt NEW TABLE AS newt FOR EACH STATEMENT EXECUTE FUNCTION ptrans();
+MERGE INTO pr t USING (VALUES (9, 3), (13, 14), (15, NULL), (2, 2)) v(x, y) ON t.a = v.x
+  WHEN MATCHED AND v.y IS NULL THEN DELETE
+  WHEN MATCHED THEN UPDATE SET a = v.y, b = b || '>'
+  WHEN NOT MATCHED THEN INSERT (a, b) VALUES (v.x, 'new')
+  RETURNING merge_action(), tableoid::regclass, t.*;
+SELECT tableoid::regclass, * FROM pr ORDER BY a;
+DROP TRIGGER ti ON pr;
+DROP TRIGGER td ON pr;
+DROP TRIGGER tu ON pr;
+DROP TRIGGER bs ON pr;
+DROP TRIGGER zs ON pr;
+DROP TRIGGER br ON pr;
+DROP TRIGGER zr ON pr;
+-- An inheritance tree with a member of its own.
+CREATE TABLE ih (a int, b text);
+CREATE TABLE ihc (c int) INHERITS (ih);
+INSERT INTO ih VALUES (1, 'p1'), (2, 'p2');
+INSERT INTO ihc VALUES (3, 'c3', 30), (4, 'c4', 40);
+CREATE TRIGGER zr AFTER UPDATE OR DELETE OR INSERT ON ih FOR EACH ROW EXECUTE FUNCTION ptrg();
+CREATE TRIGGER zr AFTER UPDATE OR DELETE ON ihc FOR EACH ROW EXECUTE FUNCTION ptrg();
+MERGE INTO ih t USING (VALUES (1), (3), (4), (2), (9)) v(x) ON t.a = v.x
+  WHEN MATCHED AND t.a = 4 THEN DELETE
+  WHEN MATCHED THEN UPDATE SET b = b || '!'
+  WHEN NOT MATCHED THEN INSERT VALUES (v.x, 'new')
+  RETURNING merge_action(), tableoid::regclass, t.*;
+-- The plans: the result relations the plan reads, the members' Append.
+EXPLAIN (COSTS OFF) UPDATE pr SET b = 'u' WHERE a = 12;
+EXPLAIN (COSTS OFF) DELETE FROM pr WHERE a < 15;
+EXPLAIN (VERBOSE, COSTS OFF) UPDATE pr SET b = 'u' RETURNING *;
+EXPLAIN (VERBOSE, COSTS OFF) UPDATE pr SET b = 'u' WHERE a = 12 RETURNING *;
+EXPLAIN (VERBOSE, COSTS OFF) DELETE FROM pr WHERE a < 15 RETURNING a;
+EXPLAIN (COSTS OFF) UPDATE pr SET a = 1 WHERE b = 'none' AND a > 100;
+PREPARE pq(int) AS UPDATE pr SET b = 'v' WHERE a = $1 RETURNING *;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pq(13);
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pq(3);
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE pq(300);
+EXECUTE pq(13);
+PREPARE dq(int) AS DELETE FROM pr WHERE a = $1;
+EXPLAIN (COSTS OFF) EXECUTE dq(13);
+RESET plan_cache_mode;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) UPDATE pr SET b = b || '.' WHERE a > 0;
+SELECT tableoid::regclass, * FROM pr ORDER BY a;

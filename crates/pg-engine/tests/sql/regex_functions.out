@@ -1,0 +1,259 @@
+> select regexp_replace('abcabc', 'b', 'X'), regexp_replace('abcabc', 'b', 'X', 'g'), regexp_replace('abcabc', 'B', 'X', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+aXcabc | aXcaXc | aXcaXc
+-- SELECT 1
+
+> select regexp_replace('abcabcabc', 'b', 'X', 2), regexp_replace('abcabcabc', 'b', 'X', 1, 2), regexp_replace('abcabcabc', 'b', 'X', 1, 0), regexp_replace('abcabcabc', 'B', 'X', 3, 0, 'i')
+regexp_replace:text | regexp_replace:text | regexp_replace:text | regexp_replace:text
+aXcabcabc | abcaXcabc | aXcaXcaXc | abcaXcaXc
+-- SELECT 1
+
+> select regexp_replace('abc', 'b', 'X', '1')
+ERROR 22023: invalid regular expression option: "1"
+HINT: If you meant to use regexp_replace() with a start parameter, cast the fourth argument to integer explicitly.
+
+> select regexp_replace('abc', 'b', 'X', 0)
+ERROR 22023: invalid value for parameter "start": 0
+
+> select regexp_replace('abc', 'b', 'X', 1, -1)
+ERROR 22023: invalid value for parameter "n": -1
+
+> select regexp_replace('abc', '', 'X', 'g'), regexp_replace('abc', 'x*', '-', 'g'), regexp_replace('', 'x*', '-', 'g')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+XaXbXcX | -a-b-c- | -
+-- SELECT 1
+
+> select regexp_replace('abc', '(b)', '[\1\&\\\x$1]'), regexp_replace('abc', '(a)(b)?', '<\2\3>', 'g'), regexp_replace('a.b', '.', '\'), regexp_replace('abc','b','x\')
+regexp_replace:text | regexp_replace:text | regexp_replace:text | regexp_replace:text
+a[bb\\x$1]c | <b>c | \.b | ax\c
+-- SELECT 1
+
+> select regexp_replace('abc', 'b', 'X', 10), regexp_replace('abc', 'c', 'X', 3), regexp_replace('abc', '$', 'X', 4)
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+abc | abX | abcX
+-- SELECT 1
+
+> select regexp_match('foobarbequebaz', '(bar)(beque)'), regexp_match('abc', 'x'), regexp_match('abc', 'b'), regexp_match('abc', '(x)?b')
+regexp_match:text[] | regexp_match:text[] | regexp_match:text[] | regexp_match:text[]
+{bar,beque} | NULL | {b} | {NULL}
+-- SELECT 1
+
+> select regexp_match('abc', 'b', 'g')
+ERROR 22023: regexp_match() does not support the "global" option
+HINT: Use the regexp_matches function instead.
+
+> select regexp_matches('foobarbequebazilbarfbonk', '(b[^b]+)(b[^b]+)', 'g')
+regexp_matches:text[]
+{bar,beque}
+{bazil,barf}
+-- SELECT 2
+
+> select regexp_matches('abc', '', 'g')
+regexp_matches:text[]
+{""}
+{""}
+{""}
+{""}
+-- SELECT 4
+
+> select regexp_matches('abc', 'x*', 'g')
+regexp_matches:text[]
+{""}
+{""}
+{""}
+{""}
+-- SELECT 4
+
+> select regexp_matches('aaa', 'a*?', 'g')
+regexp_matches:text[]
+{""}
+{""}
+{""}
+{""}
+-- SELECT 4
+
+> select regexp_split_to_array('hello world', '\s+'), regexp_split_to_array('abc', ''), regexp_split_to_array('abc', 'x*'), regexp_split_to_array('', 'x'), regexp_split_to_array('abc','b*')
+regexp_split_to_array:text[] | regexp_split_to_array:text[] | regexp_split_to_array:text[] | regexp_split_to_array:text[] | regexp_split_to_array:text[]
+{hello,world} | {a,b,c} | {a,b,c} | {""} | {a,c}
+-- SELECT 1
+
+> select regexp_split_to_array('a,b,,c', ','), regexp_split_to_array(',a,', ','), regexp_split_to_array('aXbxc', 'x', 'i')
+regexp_split_to_array:text[] | regexp_split_to_array:text[] | regexp_split_to_array:text[]
+{a,b,"",c} | {"",a,""} | {a,b,c}
+-- SELECT 1
+
+> select regexp_split_to_array('abc', 'b', 'g')
+ERROR 22023: regexp_split_to_array() does not support the "global" option
+
+> select regexp_split_to_table('the quick brown fox', '\s*')
+regexp_split_to_table:text
+b
+c
+e
+f
+h
+i
+k
+n
+o
+o
+q
+r
+t
+u
+w
+x
+-- SELECT 16
+
+> select regexp_count('ABCABCAXYaxy', 'A.'), regexp_count('ABCABCAXYaxy', 'A.', 1, 'i'), regexp_count('ABCABCAXYaxy', 'A.', 4), regexp_count('abc', ''), regexp_count('abc', 'x*', 2), regexp_count('abc', 'b', 10)
+regexp_count:int4 | regexp_count:int4 | regexp_count:int4 | regexp_count:int4 | regexp_count:int4 | regexp_count:int4
+3 | 4 | 2 | 4 | 3 | 0
+-- SELECT 1
+
+> select regexp_count('abc', 'b', 0)
+ERROR 22023: invalid value for parameter "start": 0
+
+> select regexp_count('abc', 'b', 1, 'g')
+ERROR 22023: regexp_count() does not support the "global" option
+
+> select regexp_instr('abcdefghi', 'd.f'), regexp_instr('abcdefghi', 'd.f', 1, 1, 1), regexp_instr('ABCDEF','c(.)(..)', 1, 1, 0, 'i', 2), regexp_instr('ABCDEF','c(.)(..)', 1, 1, 0, 'i', 3), regexp_instr('abcabc','b',1,2), regexp_instr('abcabc','b',1,3), regexp_instr('abc','b',1,1,0,'',1), regexp_instr('abc','b',1,1,0,'',2), regexp_instr('abc','(x)?b',1,1,0,'',1)
+regexp_instr:int4 | regexp_instr:int4 | regexp_instr:int4 | regexp_instr:int4 | regexp_instr:int4 | regexp_instr:int4 | regexp_instr:int4 | regexp_instr:int4 | regexp_instr:int4
+4 | 7 | 5 | 0 | 5 | 0 | 2 | 0 | 0
+-- SELECT 1
+
+> select regexp_instr('abc', 'b', 1, 0)
+ERROR 22023: invalid value for parameter "n": 0
+
+> select regexp_instr('abc', 'b', 1, 1, 2)
+ERROR 22023: invalid value for parameter "endoption": 2
+
+> select regexp_instr('abc', 'b', 1, 1, 0, '', -1)
+ERROR 22023: invalid value for parameter "subexpr": -1
+
+> select regexp_substr('ABCDEF', 'c(.)(..)', 1, 1, 'i', 2), regexp_substr('abcabc','b.',1,2), regexp_substr('abc','x'), regexp_substr('abc','(x)?b',1,1,'',1), regexp_substr('abc','b',1,1,'',1), regexp_substr('abc','b',1,1,'',2)
+regexp_substr:text | regexp_substr:text | regexp_substr:text | regexp_substr:text | regexp_substr:text | regexp_substr:text
+EF | bc | NULL | NULL | b | NULL
+-- SELECT 1
+
+> select regexp_like('Hello', 'hello'), regexp_like('Hello', 'hello', 'i'), regexp_like('a
+> b', 'a.b'), regexp_like('a
+> b', 'a.b', 'n'), regexp_like('a
+> b', '^b', 'n'), regexp_like('a
+> b', '^b', 'p'), regexp_like('a
+> b', '^b', 'w'), regexp_like('a
+> b', 'a$', 'w'), regexp_like('a
+> b', 'a[^x]b', 'p')
+regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool
+f | t | t | f | t | f | t | t | f
+-- SELECT 1
+
+> select regexp_like('abc', 'a b c', 'x'), regexp_like('abc', 'a b # comment
+>  c', 'x'), regexp_like('a.c', 'a.c', 'q'), regexp_like('abc', 'a.c', 'q'), regexp_like('abc', '***=a.c'), regexp_like('a.c', '***=a.c'), regexp_like('ABC', '(?i)abc'), regexp_like('ABC', '***:(?i)abc')
+regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool | regexp_like:bool
+t | t | t | f | f | t | t | t
+-- SELECT 1
+
+> select regexp_like('abc', 'a', 'z')
+ERROR 22023: invalid regular expression option: "z"
+
+> select regexp_like('abc', '(?z)abc')
+ERROR 2201B: invalid regular expression: invalid embedded option
+
+> select 'abc' ~ '\y', 'abc def' ~ '\mdef', 'abc def' ~ 'abc\M', 'abcdef' ~ '\Ydef', 'abc' ~ '[[:<:]]abc[[:>:]]', 'a1' ~ '\d', 'a' ~ '\D', ' ' ~ '\s', 'x' ~ '\S', '_' ~ '\w', '-' ~ '\W'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t | t | t | t | t | t | t
+-- SELECT 1
+
+> select 'a' ~ '\x61', 'a' ~ 'a', 'a' ~ '\U00000061', 'a' ~ '\141', E'\t' ~ '\t', E'\x07' ~ '\a', E'\x1b' ~ '\e', '\' ~ '\B', E'\x01' ~ '\cA', 'a{b' ~ 'a{b', 'aa' ~ '^a{2}$', 'a]' ~ '[]a]+', 'a-' ~ '[a-]{2}'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t | t | t | t | t | t | t | t | t
+-- SELECT 1
+
+> select 'a' ~ '\q'
+ERROR 2201B: invalid regular expression: invalid escape \ sequence
+
+> select 'a' ~ '[a'
+ERROR 2201B: invalid regular expression: brackets [] not balanced
+
+> select 'a' ~ 'a)'
+ERROR 2201B: invalid regular expression: parentheses () not balanced
+
+> select 'a' ~ '(a'
+ERROR 2201B: invalid regular expression: parentheses () not balanced
+
+> select 'a' ~ '[b-a]'
+ERROR 2201B: invalid regular expression: invalid character range
+
+> select 'a' ~ '[[:foo:]]'
+ERROR 2201B: invalid regular expression: invalid character class
+
+> select 'a' ~ 'a{2'
+ERROR 2201B: invalid regular expression: braces {} not balanced
+
+> select 'abc' ~ '*'
+ERROR 2201B: invalid regular expression: quantifier operand invalid
+
+> select 'AbC' ~* 'abc', 'AbC' ~* '[a-c]+$', 'x' ~* '[^a-z]', 'X' ~* '[^a-z]', 'Ab' !~* 'ab', 'Ab' !~ 'ab'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | f | f | f | t
+-- SELECT 1
+
+> select 'a.b' similar to 'a.b', 'axb' similar to 'a.b', 'abc' similar to 'a%', 'abc' similar to 'a_c', 'abc' similar to '(a|x)bc', 'a$' similar to 'a$', 'a^' similar to 'a^', 'ab' similar to 'a[bc]', 'a]' similar to 'a[]]', 'a\b' similar to 'a\\b', 'a%' similar to 'a#%' escape '#', 'ab' similar to 'ab' escape ''
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | t | t | t | t | t | t | t
+-- SELECT 1
+
+> select 'x' similar to 'x' escape 'ab'
+ERROR 22025: invalid escape string
+HINT: Escape string must be empty or one character.
+
+> select similar_to_escape('a%b_c.d\e(f)[g]^$'), similar_to_escape('a#"b#"c', '#'), similar_to_escape('[]a]%[^]b]'), similar_to_escape('a\"b\"c')
+similar_to_escape:text | similar_to_escape:text | similar_to_escape:text | similar_to_escape:text
+^(?:a.*b.c\.d\e(?:f)[g]\^\$)$ | ^(?:a){1,1}?(b){1,1}(?:c)$ | ^(?:[]a].*[^]b])$ | ^(?:a){1,1}?(b){1,1}(?:c)$
+-- SELECT 1
+
+> select substring('foobar' similar '#"o_b#"%' escape '#'), substring('foobar' similar 'f#"o_b#"%' escape '#'), substring('abcdef' similar 'a#"%#"#"%' escape '#')
+ERROR 2200C: SQL regular expression may not contain more than two escape-double-quote separators
+CONTEXT: SQL function "substring" statement 1
+
+> select substring('foobar' similar 'f#"o#"b#"%' escape '#')
+ERROR 2200C: SQL regular expression may not contain more than two escape-double-quote separators
+CONTEXT: SQL function "substring" statement 1
+
+> select substring('foobar' from 'o(.)b'), substring('foobar' from 'o.b'), substring('foobar' from 'x'), substring('foobar' from '(x)?b')
+substring:text | substring:text | substring:text | substring:text
+o | oob | NULL | NULL
+-- SELECT 1
+
+> select regexp_replace('foo bar', '\s', '_', 'g'), regexp_replace('aaa', 'a', 'b', 'g'), regexp_replace('Ab', '[a-z]', 'x', 'gi'), regexp_replace('ab'||chr(10)||'cd', '^', '>', 'gn')
+regexp_replace:text | regexp_replace:text | regexp_replace:text | regexp_replace:text
+foo_bar | bbb | xx | >ab
+>cd
+-- SELECT 1
+
+> select regexp_matches('ab'||chr(10)||'cd', '^.', 'gn'), regexp_matches('ab', '(a)|(b)', 'g')
+regexp_matches:text[] | regexp_matches:text[]
+{a} | {a,NULL}
+{c} | {NULL,b}
+-- SELECT 2
+
+> select substring(x similar 'a#"%#"#"%' escape '#') from (values ('abc')) v(x)
+ERROR 2200C: SQL regular expression may not contain more than two escape-double-quote separators
+CONTEXT: SQL function "substring" statement 1
+
+> select substring('abc' similar x escape '#') from (values ('a#"%#"#"%')) v(x)
+ERROR 2200C: SQL regular expression may not contain more than two escape-double-quote separators
+CONTEXT: SQL function "substring" statement 1
+
+> select substring('abc' similar '(' escape '#')
+ERROR 2201B: invalid regular expression: parentheses () not balanced
+CONTEXT: SQL function "substring" statement 1
+
+> select substring('abc' similar 'a' escape 'xx')
+ERROR 22025: invalid escape string
+HINT: Escape string must be empty or one character.
+CONTEXT: SQL function "substring" statement 1
+
+> select 'abc' similar to 'a#"%#"#"%' escape '#'
+ERROR 2200C: SQL regular expression may not contain more than two escape-double-quote separators
+

@@ -1,0 +1,73 @@
+> CREATE TYPE gsw_rainbow AS ENUM ('red', 'orange', 'yellow', 'green', 'blue', 'purple')
+-- CREATE TYPE
+
+> CREATE TABLE gsw_enumtest (col gsw_rainbow)
+-- CREATE TABLE
+
+> INSERT INTO gsw_enumtest VALUES ('red'), ('orange'), ('yellow'), ('green'), ('blue'), ('purple')
+-- INSERT 0 6
+
+> CREATE UNIQUE INDEX gsw_enumtest_btree ON gsw_enumtest USING btree (col)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> SELECT min(col) FROM gsw_enumtest
+min:user
+red
+-- SELECT 1
+
+> SELECT max(col) FROM gsw_enumtest
+max:user
+purple
+-- SELECT 1
+
+> SELECT min(col), max(col) FROM gsw_enumtest
+min:user | max:user
+red | purple
+-- SELECT 1
+
+> SELECT max(col) FROM gsw_enumtest WHERE col < 'green'
+max:user
+yellow
+-- SELECT 1
+
+> CREATE TABLE gsw_icu (t text COLLATE "en-x-icu")
+-- CREATE TABLE
+
+> INSERT INTO gsw_icu VALUES ('a'), ('B'), ('c'), ('D')
+-- INSERT 0 4
+
+> CREATE INDEX ON gsw_icu (t)
+-- CREATE INDEX
+
+> SELECT min(t), max(t) FROM gsw_icu
+min:text | max:text
+a | D
+-- SELECT 1
+
+> SELECT min(t) FROM gsw_icu
+min:text
+a
+-- SELECT 1
+
+> SELECT max(t) FROM gsw_icu
+max:text
+D
+-- SELECT 1
+
+> SELECT min(t COLLATE "C") FROM gsw_icu
+min:text
+B
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+

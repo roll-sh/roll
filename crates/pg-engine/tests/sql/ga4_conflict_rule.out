@@ -1,0 +1,38 @@
+> CREATE TABLE ga4_hats (hat_name char(10) primary key, hat_color char(10))
+-- CREATE TABLE
+
+> CREATE TABLE ga4_hat_data (hat_name char(10), hat_color char(10))
+-- CREATE TABLE
+
+> create unique index ga4_hat_data_unique_idx on ga4_hat_data (hat_name COLLATE "C" bpchar_pattern_ops)
+-- CREATE INDEX
+
+> CREATE RULE ga4_hat_upsert AS ON INSERT TO ga4_hats
+>     DO INSTEAD
+>     INSERT INTO ga4_hat_data VALUES (NEW.hat_name, NEW.hat_color)
+>         ON CONFLICT (hat_name)
+>         DO UPDATE
+>            SET hat_name = ga4_hat_data.hat_name, hat_color = excluded.hat_color
+>            WHERE excluded.hat_color <>  'forbidden' AND ga4_hat_data.* != excluded.*
+>         RETURNING *
+-- CREATE RULE
+
+> explain (costs off) INSERT INTO ga4_hats VALUES ('h8', 'forbidden') RETURNING *
+QUERY PLAN:text
+Insert on ga4_hat_data
+  Conflict Resolution: UPDATE
+  Conflict Arbiter Indexes: ga4_hat_data_unique_idx
+  Conflict Filter: ((excluded.hat_color <> 'forbidden'::bpchar) AND (ga4_hat_data.* <> excluded.*))
+  ->  Result
+-- EXPLAIN
+
+> explain (costs off) INSERT INTO ga4_hat_data VALUES ('h8', 'forbidden') ON CONFLICT (hat_name) DO UPDATE
+>   SET hat_color = excluded.hat_color WHERE excluded.hat_color <> 'forbidden' AND ga4_hat_data.* != excluded.*
+QUERY PLAN:text
+Insert on ga4_hat_data
+  Conflict Resolution: UPDATE
+  Conflict Arbiter Indexes: ga4_hat_data_unique_idx
+  Conflict Filter: ((excluded.hat_color <> 'forbidden'::bpchar) AND (ga4_hat_data.* <> excluded.*))
+  ->  Result
+-- EXPLAIN
+

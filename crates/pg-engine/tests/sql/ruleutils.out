@@ -1,0 +1,180 @@
+> CREATE TYPE mood AS ENUM ('a', 'b')
+-- CREATE TYPE
+
+> CREATE TABLE ru (
+>   id serial PRIMARY KEY,
+>   i2 int2 DEFAULT 0,
+>   i8 int8 DEFAULT -5,
+>   n numeric DEFAULT 1.5 CHECK (n > 0),
+>   t text DEFAULT 'x',
+>   vc varchar(10) DEFAULT 'y',
+>   c char(3) DEFAULT 'z',
+>   j jsonb DEFAULT '{}',
+>   ar int[] DEFAULT '{1,2}',
+>   ta text[] DEFAULT ARRAY['a', 'b'],
+>   e mood DEFAULT 'a',
+>   neg int DEFAULT -1,
+>   ex int DEFAULT (1 + 2) * 3,
+>   lo text DEFAULT lower('ABC'),
+>   iv interval DEFAULT '1 day',
+>   who name DEFAULT CURRENT_USER,
+>   ts timestamptz DEFAULT CURRENT_TIMESTAMP,
+>   d date DEFAULT CURRENT_DATE,
+>   ts2 timestamp DEFAULT now(),
+>   b bool DEFAULT true,
+>   f float8 DEFAULT 2.5,
+>   CHECK (t LIKE '%x%' AND t IS NOT NULL),
+>   CHECK (i8 BETWEEN 1 AND 10),
+>   CHECK (COALESCE(t, '') <> 'q'),
+>   CHECK (CASE WHEN b THEN i2 > 0 END),
+>   CHECK (NOT b OR i8 = 5),
+>   CHECK (j ? 'k' OR j = '{}'),
+>   CHECK (f::int > 0),
+>   CHECK (vc <> ''),
+>   CHECK (i2 IN (1, 2) AND t IS NOT NULL),
+>   CHECK (i2 NOT IN (3)),
+>   CHECK (-i2 < 5 AND (i2 + 1) * 2 > 0 AND i2 - (1 - 2) > 0),
+>   CHECK (CASE i2 WHEN 1 THEN true ELSE false END),
+>   CHECK (ar[1] > 0 AND (i2 IS NOT DISTINCT FROM 1)),
+>   CHECK (greatest(i2, 2) > nullif(i2, 3)),
+>   CHECK (t || 'x' <> 'y' AND length(t) > 1 AND (i2::text)::int > 0),
+>   CHECK (b IS NOT TRUE OR i2 * 2 + 1 > i2 - 1 - 1)
+> )
+-- CREATE TABLE
+
+> SELECT a.attname, pg_get_expr(d.adbin, d.adrelid) AS plain, pg_get_expr(d.adbin, d.adrelid, true) AS pretty
+> FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+> WHERE d.adrelid = 'ru'::regclass ORDER BY d.adnum
+attname:name | plain:text | pretty:text
+id | nextval('ru_id_seq'::regclass) | nextval('ru_id_seq'::regclass)
+i2 | 0 | 0
+i8 | '-5'::integer | '-5'::integer
+n | 1.5 | 1.5
+t | 'x'::text | 'x'::text
+vc | 'y'::character varying | 'y'::character varying
+c | 'z'::bpchar | 'z'::bpchar
+j | '{}'::jsonb | '{}'::jsonb
+ar | '{1,2}'::integer[] | '{1,2}'::integer[]
+ta | ARRAY['a'::text, 'b'::text] | ARRAY['a'::text, 'b'::text]
+e | 'a'::mood | 'a'::mood
+neg | '-1'::integer | '-1'::integer
+ex | ((1 + 2) * 3) | (1 + 2) * 3
+lo | lower('ABC'::text) | lower('ABC'::text)
+iv | '1 day'::interval | '1 day'::interval
+who | CURRENT_USER | CURRENT_USER
+ts | CURRENT_TIMESTAMP | CURRENT_TIMESTAMP
+d | CURRENT_DATE | CURRENT_DATE
+ts2 | now() | now()
+b | true | true
+f | 2.5 | 2.5
+-- SELECT 21
+
+> SELECT column_name, column_default FROM information_schema.columns WHERE table_name = 'ru' ORDER BY ordinal_position
+column_name:name | column_default:varchar
+id | nextval('ru_id_seq'::regclass)
+i2 | 0
+i8 | '-5'::integer
+n | 1.5
+t | 'x'::text
+vc | 'y'::character varying
+c | 'z'::bpchar
+j | '{}'::jsonb
+ar | '{1,2}'::integer[]
+ta | ARRAY['a'::text, 'b'::text]
+e | 'a'::mood
+neg | '-1'::integer
+ex | ((1 + 2) * 3)
+lo | lower('ABC'::text)
+iv | '1 day'::interval
+who | CURRENT_USER
+ts | CURRENT_TIMESTAMP
+d | CURRENT_DATE
+ts2 | now()
+b | true
+f | 2.5
+-- SELECT 21
+
+> SELECT pg_get_constraintdef(oid, true) AS pretty, pg_get_constraintdef(oid) AS plain
+> FROM pg_constraint WHERE conrelid = 'ru'::regclass AND contype = 'c' ORDER BY pg_get_constraintdef(oid, true)
+pretty:text | plain:text
+CHECK (
+CASE
+    WHEN b THEN i2 > 0
+    ELSE NULL::boolean
+END) | CHECK (
+CASE
+    WHEN b THEN (i2 > 0)
+    ELSE NULL::boolean
+END)
+CHECK (
+CASE i2
+    WHEN 1 THEN true
+    ELSE false
+END) | CHECK (
+CASE i2
+    WHEN 1 THEN true
+    ELSE false
+END)
+CHECK ((- i2) < 5 AND ((i2 + 1) * 2) > 0 AND (i2 - (1 - 2)) > 0) | CHECK ((((- i2) < 5) AND (((i2 + 1) * 2) > 0) AND ((i2 - (1 - 2)) > 0)))
+CHECK ((i2 = ANY (ARRAY[1, 2])) AND t IS NOT NULL) | CHECK (((i2 = ANY (ARRAY[1, 2])) AND (t IS NOT NULL)))
+CHECK ((t || 'x'::text) <> 'y'::text AND length(t) > 1 AND i2::text::integer > 0) | CHECK ((((t || 'x'::text) <> 'y'::text) AND (length(t) > 1) AND (((i2)::text)::integer > 0)))
+CHECK (COALESCE(t, ''::text) <> 'q'::text) | CHECK ((COALESCE(t, ''::text) <> 'q'::text))
+CHECK (GREATEST(i2::integer, 2) > NULLIF(i2, 3)) | CHECK ((GREATEST((i2)::integer, 2) > NULLIF(i2, 3)))
+CHECK (NOT b OR i8 = 5) | CHECK (((NOT b) OR (i8 = 5)))
+CHECK (ar[1] > 0 AND NOT i2 IS DISTINCT FROM 1) | CHECK (((ar[1] > 0) AND (NOT (i2 IS DISTINCT FROM 1))))
+CHECK (b IS NOT TRUE OR (i2 * 2 + 1) > (i2 - 1 - 1)) | CHECK (((b IS NOT TRUE) OR (((i2 * 2) + 1) > ((i2 - 1) - 1))))
+CHECK (f::integer > 0) | CHECK (((f)::integer > 0))
+CHECK (i2 <> 3) | CHECK ((i2 <> 3))
+CHECK (i8 >= 1 AND i8 <= 10) | CHECK (((i8 >= 1) AND (i8 <= 10)))
+CHECK (j ? 'k'::text OR j = '{}'::jsonb) | CHECK (((j ? 'k'::text) OR (j = '{}'::jsonb)))
+CHECK (n > 0::numeric) | CHECK ((n > (0)::numeric))
+CHECK (t ~~ '%x%'::text AND t IS NOT NULL) | CHECK (((t ~~ '%x%'::text) AND (t IS NOT NULL)))
+CHECK (vc::text <> ''::text) | CHECK (((vc)::text <> ''::text))
+-- SELECT 17
+
+> CREATE INDEX ru_partial ON ru (i8) WHERE b AND n > 1
+-- CREATE INDEX
+
+> CREATE INDEX ru_expr ON ru ((i8 + 1), t DESC NULLS LAST)
+-- CREATE INDEX
+
+> CREATE INDEX ru_func ON ru (lower(t), coalesce(vc, 'q'))
+-- CREATE INDEX
+
+> SELECT pg_get_indexdef(i.indexrelid, 0, true), pg_get_indexdef(i.indexrelid)
+> FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'ru'::regclass ORDER BY c.relname
+pg_get_indexdef:text | pg_get_indexdef:text
+CREATE INDEX ru_expr ON ru USING btree ((i8 + 1), t DESC NULLS LAST) | CREATE INDEX ru_expr ON public.ru USING btree (((i8 + 1)), t DESC NULLS LAST)
+CREATE INDEX ru_func ON ru USING btree (lower(t), COALESCE(vc, 'q'::character varying)) | CREATE INDEX ru_func ON public.ru USING btree (lower(t), COALESCE(vc, 'q'::character varying))
+CREATE INDEX ru_partial ON ru USING btree (i8) WHERE b AND n > 1::numeric | CREATE INDEX ru_partial ON public.ru USING btree (i8) WHERE (b AND (n > (1)::numeric))
+CREATE UNIQUE INDEX ru_pkey ON ru USING btree (id) | CREATE UNIQUE INDEX ru_pkey ON public.ru USING btree (id)
+-- SELECT 4
+
+> SELECT pg_get_indexdef('ru_expr'::regclass, 1, true), pg_get_indexdef('ru_expr'::regclass, 2, true), pg_get_indexdef('ru_func'::regclass, 1, false)
+pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text
+(i8 + 1) | t | lower(t)
+-- SELECT 1
+
+> SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'ru' ORDER BY indexname
+indexname:name | indexdef:text
+ru_expr | CREATE INDEX ru_expr ON public.ru USING btree (((i8 + 1)), t DESC NULLS LAST)
+ru_func | CREATE INDEX ru_func ON public.ru USING btree (lower(t), COALESCE(vc, 'q'::character varying))
+ru_partial | CREATE INDEX ru_partial ON public.ru USING btree (i8) WHERE (b AND (n > (1)::numeric))
+ru_pkey | CREATE UNIQUE INDEX ru_pkey ON public.ru USING btree (id)
+-- SELECT 4
+
+> SELECT pg_get_expr(i.indexprs, i.indrelid), pg_get_expr(i.indpred, i.indrelid, true)
+> FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'ru'::regclass ORDER BY c.relname
+pg_get_expr:text | pg_get_expr:text
+(i8 + 1) | NULL
+lower(t), COALESCE(vc, 'q'::character varying) | NULL
+NULL | b AND n > 1::numeric
+NULL | NULL
+-- SELECT 4
+
+> DROP TABLE ru
+-- DROP TABLE
+
+> DROP TYPE mood
+-- DROP TYPE
+

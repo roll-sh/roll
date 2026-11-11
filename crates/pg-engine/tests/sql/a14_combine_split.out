@@ -1,0 +1,107 @@
+> CREATE TABLE a14_cs AS SELECT i % 100 AS hundred, i % 4 AS four FROM generate_series(1, 10000) i
+-- SELECT 10000
+
+> ANALYZE a14_cs
+-- ANALYZE
+
+> CREATE FUNCTION a14_balkifnull(int8, int8) RETURNS int8 PARALLEL SAFE STRICT LANGUAGE plpgsql AS $$
+> BEGIN
+>     IF $1 IS NULL THEN
+>        RAISE 'erroneously called with NULL argument';
+>     END IF;
+>     RETURN NULL;
+> END$$
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE a14_balk(int4) (
+>     SFUNC = int4_sum(int8, int4),
+>     STYPE = int8,
+>     COMBINEFUNC = a14_balkifnull(int8, int8),
+>     PARALLEL = SAFE,
+>     INITCOND = '0'
+> )
+-- CREATE AGGREGATE
+
+> CREATE AGGREGATE a14_sum(int4) (SFUNC = int4_sum(int8, int4), STYPE = int8, COMBINEFUNC = int8pl, PARALLEL = SAFE)
+-- CREATE AGGREGATE
+
+> ALTER TABLE a14_cs SET (parallel_workers = 4)
+-- ALTER TABLE
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET max_parallel_workers_per_gather = 4
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT a14_balk(hundred) FROM a14_cs
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 4
+        ->  Partial Aggregate
+              ->  Parallel Seq Scan on a14_cs
+-- EXPLAIN
+
+> SELECT a14_balk(hundred) FROM a14_cs
+a14_balk:int8
+NULL
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT a14_balk(hundred), four FROM a14_cs GROUP BY four ORDER BY 2
+QUERY PLAN:text
+Finalize GroupAggregate
+  Group Key: four
+  ->  Gather Merge
+        Workers Planned: 4
+        ->  Sort
+              Sort Key: four
+              ->  Partial HashAggregate
+                    Group Key: four
+                    ->  Parallel Seq Scan on a14_cs
+-- EXPLAIN
+
+> SELECT a14_balk(hundred), four FROM a14_cs GROUP BY four ORDER BY 2
+a14_balk:int8 | four:int4
+NULL | 0
+NULL | 1
+NULL | 2
+NULL | 3
+-- SELECT 4
+
+> SELECT a14_sum(hundred) FROM a14_cs
+a14_sum:int8
+495000
+-- SELECT 1
+
+> SELECT a14_sum(hundred) FROM a14_cs WHERE four > 5
+a14_sum:int8
+NULL
+-- SELECT 1
+
+> SET max_parallel_workers_per_gather = 0
+-- SET
+
+> SELECT a14_balk(hundred) FROM a14_cs
+a14_balk:int8
+495000
+-- SELECT 1
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> RESET parallel_setup_cost
+-- RESET
+
+> DROP AGGREGATE a14_sum(int4)
+-- DROP AGGREGATE
+
+> DROP AGGREGATE a14_balk(int4)
+-- DROP AGGREGATE
+
+> DROP FUNCTION a14_balkifnull(int8, int8)
+-- DROP FUNCTION
+
+> DROP TABLE a14_cs
+-- DROP TABLE
+

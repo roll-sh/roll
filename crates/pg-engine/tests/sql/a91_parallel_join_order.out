@@ -1,0 +1,132 @@
+> CREATE TABLE a91_region (r_regionkey int PRIMARY KEY, r_name text)
+-- CREATE TABLE
+
+> CREATE TABLE a91_nation (n_nationkey int PRIMARY KEY, n_name text, n_regionkey int)
+-- CREATE TABLE
+
+> CREATE TABLE a91_customer (c_custkey int PRIMARY KEY, c_nationkey int, c_pad text)
+-- CREATE TABLE
+
+> CREATE TABLE a91_orders (o_orderkey int PRIMARY KEY, o_custkey int, o_orderdate date, o_pad text)
+-- CREATE TABLE
+
+> CREATE INDEX a91_orders_cust ON a91_orders (o_custkey)
+-- CREATE INDEX
+
+> CREATE INDEX a91_orders_date ON a91_orders (o_orderdate)
+-- CREATE INDEX
+
+> CREATE INDEX a91_customer_nation ON a91_customer (c_nationkey)
+-- CREATE INDEX
+
+> INSERT INTO a91_region SELECT i, 'r' || i FROM generate_series(0, 4) i
+-- INSERT 0 5
+
+> INSERT INTO a91_nation SELECT i, 'n' || i, i % 5 FROM generate_series(0, 24) i
+-- INSERT 0 25
+
+> INSERT INTO a91_customer SELECT i, i % 25, repeat('x', 100) FROM generate_series(1, 15000) i
+-- INSERT 0 15000
+
+> INSERT INTO a91_orders SELECT i, 1 + (i * 7919) % 15000, date '1992-01-01' + (i % 2400), repeat('y', 60) FROM generate_series(1, 150000) i
+-- INSERT 0 150000
+
+> VACUUM ANALYZE a91_region, a91_nation, a91_customer, a91_orders
+-- VACUUM
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SET min_parallel_index_scan_size = 0
+-- SET
+
+> SET parallel_setup_cost = 10
+-- SET
+
+> SET parallel_tuple_cost = 0.001
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT n_name, count(*) FROM a91_customer, a91_orders, a91_nation, a91_region
+> WHERE c_custkey = o_custkey AND c_nationkey = n_nationkey AND n_regionkey = r_regionkey
+>   AND r_name = 'r2' AND o_orderdate >= date '1994-01-01' AND o_orderdate < date '1995-01-01'
+> GROUP BY n_name ORDER BY 2 DESC
+QUERY PLAN:text
+Sort
+  Sort Key: (count(*)) DESC
+  ->  Finalize GroupAggregate
+        Group Key: a91_nation.n_name
+        ->  Gather Merge
+              Workers Planned: 1
+              ->  Sort
+                    Sort Key: a91_nation.n_name
+                    ->  Partial HashAggregate
+                          Group Key: a91_nation.n_name
+                          ->  Nested Loop
+                                ->  Nested Loop
+                                      ->  Parallel Hash Join
+                                            Hash Cond: (a91_nation.n_regionkey = a91_region.r_regionkey)
+                                            ->  Parallel Seq Scan on a91_nation
+                                            ->  Parallel Hash
+                                                  ->  Parallel Seq Scan on a91_region
+                                                        Filter: (r_name = 'r2'::text)
+                                      ->  Bitmap Heap Scan on a91_customer
+                                            Recheck Cond: (c_nationkey = a91_nation.n_nationkey)
+                                            ->  Bitmap Index Scan on a91_customer_nation
+                                                  Index Cond: (c_nationkey = a91_nation.n_nationkey)
+                                ->  Index Scan using a91_orders_cust on a91_orders
+                                      Index Cond: (o_custkey = a91_customer.c_custkey)
+                                      Filter: ((o_orderdate >= '1994-01-01'::date) AND (o_orderdate < '1995-01-01'::date))
+-- EXPLAIN
+
+> SELECT n_name, count(*) FROM a91_customer, a91_orders, a91_nation, a91_region
+> WHERE c_custkey = o_custkey AND c_nationkey = n_nationkey AND n_regionkey = r_regionkey
+>   AND r_name = 'r2' AND o_orderdate >= date '1994-01-01' AND o_orderdate < date '1995-01-01'
+> GROUP BY n_name ORDER BY 2 DESC, 1
+n_name:text | count:int8
+n12 | 945
+n17 | 945
+n22 | 945
+n2 | 882
+n7 | 882
+-- SELECT 5
+
+> SET max_parallel_workers_per_gather = 0
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT n_name, count(*) FROM a91_customer, a91_orders, a91_nation, a91_region
+> WHERE c_custkey = o_custkey AND c_nationkey = n_nationkey AND n_regionkey = r_regionkey
+>   AND r_name = 'r2' AND o_orderdate >= date '1994-01-01' AND o_orderdate < date '1995-01-01'
+> GROUP BY n_name ORDER BY 2 DESC
+QUERY PLAN:text
+Sort
+  Sort Key: (count(*)) DESC
+  ->  HashAggregate
+        Group Key: a91_nation.n_name
+        ->  Hash Join
+              Hash Cond: (a91_orders.o_custkey = a91_customer.c_custkey)
+              ->  Bitmap Heap Scan on a91_orders
+                    Recheck Cond: ((o_orderdate >= '1994-01-01'::date) AND (o_orderdate < '1995-01-01'::date))
+                    ->  Bitmap Index Scan on a91_orders_date
+                          Index Cond: ((o_orderdate >= '1994-01-01'::date) AND (o_orderdate < '1995-01-01'::date))
+              ->  Hash
+                    ->  Nested Loop
+                          ->  Hash Join
+                                Hash Cond: (a91_nation.n_regionkey = a91_region.r_regionkey)
+                                ->  Seq Scan on a91_nation
+                                ->  Hash
+                                      ->  Seq Scan on a91_region
+                                            Filter: (r_name = 'r2'::text)
+                          ->  Bitmap Heap Scan on a91_customer
+                                Recheck Cond: (c_nationkey = a91_nation.n_nationkey)
+                                ->  Bitmap Index Scan on a91_customer_nation
+                                      Index Cond: (c_nationkey = a91_nation.n_nationkey)
+-- EXPLAIN
+
+> RESET ALL
+-- RESET
+
+> DROP TABLE a91_region, a91_nation, a91_customer, a91_orders
+-- DROP TABLE
+

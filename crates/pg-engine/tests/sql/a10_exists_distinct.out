@@ -1,0 +1,79 @@
+> CREATE COLLATION a10_ecs (provider = icu, locale = '')
+NOTICE 00000: using standard form "und" for ICU locale ""
+-- CREATE COLLATION
+
+> CREATE COLLATION a10_eci (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE TABLE a10_t3 (x text COLLATE a10_ecs)
+-- CREATE TABLE
+
+> INSERT INTO a10_t3 VALUES ('abc'), ('ABC'), ('def'), ('ghi')
+-- INSERT 0 4
+
+> CREATE UNIQUE INDEX ON a10_t3 (x)
+-- CREATE INDEX
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a10_t3 t1
+>   WHERE EXISTS (SELECT 1 FROM (SELECT DISTINCT x FROM a10_t3) t2
+>                 WHERE t1.x = t2.x COLLATE a10_eci)
+> ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: t1.x COLLATE a10_ecs
+  ->  Hash Semi Join
+        Hash Cond: ((t1.x)::text = (a10_t3.x)::text)
+        ->  Seq Scan on a10_t3 t1
+        ->  Hash
+              ->  HashAggregate
+                    Group Key: a10_t3.x
+                    ->  Seq Scan on a10_t3
+-- EXPLAIN
+
+> SELECT * FROM a10_t3 t1
+>   WHERE EXISTS (SELECT 1 FROM (SELECT DISTINCT x FROM a10_t3) t2
+>                 WHERE t1.x = t2.x COLLATE a10_eci)
+> ORDER BY 1
+x:text
+abc
+ABC
+def
+ghi
+-- SELECT 4
+
+> SELECT * FROM a10_t3 t1 WHERE EXISTS (SELECT 1 FROM (SELECT DISTINCT x FROM a10_t3) t2 WHERE t1.x = t2.x) ORDER BY 1
+x:text
+abc
+ABC
+def
+ghi
+-- SELECT 4
+
+> SELECT * FROM a10_t3 t1
+>   WHERE NOT EXISTS (SELECT 1 FROM (SELECT DISTINCT x FROM a10_t3) t2
+>                 WHERE t1.x = t2.x COLLATE a10_eci AND t2.x <> 'def')
+> ORDER BY 1
+x:text
+def
+-- SELECT 1
+
+> SELECT * FROM a10_t3 t1
+>   WHERE EXISTS (SELECT 1 FROM (SELECT DISTINCT x FROM a10_t3 WHERE x > 'b') t2 WHERE t1.x < t2.x)
+> ORDER BY 1
+x:text
+abc
+ABC
+def
+-- SELECT 3
+
+> DROP TABLE a10_t3
+-- DROP TABLE
+
+> DROP COLLATION a10_ecs
+-- DROP COLLATION
+
+> DROP COLLATION a10_eci
+-- DROP COLLATION
+

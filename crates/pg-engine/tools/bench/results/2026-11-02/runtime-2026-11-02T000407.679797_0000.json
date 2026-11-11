@@ -1,0 +1,97 @@
+{
+  "observed_at_utc": "2026-11-02T00:04:07.679797+00:00",
+  "git_head": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "git_status": "",
+  "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "nproc": 36,
+  "load": "3.61 3.73 3.67 4/2759 2785397",
+  "build_environment": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only",
+    "TMPDIR": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/tmp"
+  },
+  "postgres": {
+    "name": "/t3-d4020b98-perf-pg",
+    "image_id": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+    "repo_digests": [
+      "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+    ],
+    "started_at": "2026-11-01T23:15:30.826641771Z",
+    "cpuset": "28-31",
+    "nano_cpus": 0,
+    "cpu_quota": 0,
+    "cpu_period": 0,
+    "memory_limit": 8589934592,
+    "network_mode": "host",
+    "executable_sha256": "51b088c1df230893fc90182ce286d5e7caa5020ce9c01158dab462e1ec4b619a",
+    "cgroup": {
+      "cpu.max": "max 100000",
+      "cpuset.cpus.effective": "28-31",
+      "memory.max": "8589934592"
+    },
+    "leader_affinity": [
+      28,
+      29,
+      30,
+      31
+    ]
+  },
+  "engines": {
+    "baseline": {
+      "pid": 2424538,
+      "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+      "sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349",
+      "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-baseline --listen 127.0.0.1:53110 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ]
+    }
+  },
+  "clients": {
+    "checked-client": {
+      "manifest": {
+        "source": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0",
+        "sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+        "binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-client/bench"
+      },
+      "observed_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b"
+    },
+    "final-client": {
+      "manifest": {
+        "source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+        "sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+        "build_log": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client-build-tests.log"
+      },
+      "observed_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28"
+    }
+  },
+  "ancillary_observed_scripts": {
+    "probe-plan-choice.py": {
+      "sha256": "99160fe0183c7cceaaeb26bc84a23b9bc09269ce3aca5395b8c3333441858769",
+      "mtime_utc": "2026-11-01T23:38:51.359947+00:00"
+    },
+    "check-live-negative.py": {
+      "sha256": "0a8ea7fa591f89ce56800e528281aeb89b72b0e3f5f550f38dbc815f283ec9ea",
+      "mtime_utc": "2026-11-01T23:36:44.973357+00:00"
+    },
+    "check-final-live-negative.py": {
+      "sha256": "2156fe0901fe93ad6a3c0d85529e97b075cefd50ad72549a2fb89cdcbc25e501",
+      "mtime_utc": "2026-11-01T23:54:50.813435+00:00"
+    }
+  }
+}

@@ -1,0 +1,361 @@
+> create domain di_posint as int check (value > 0)
+-- CREATE DOMAIN
+
+> create table di_t (c di_posint, d di_posint[])
+-- CREATE TABLE
+
+> insert into di_t values (1, '{1,2}')
+-- INSERT 0 1
+
+> select pg_typeof(c), pg_typeof(d), pg_typeof(d[1]), pg_typeof(d[1:1]), pg_typeof(array[c]), pg_typeof(array[1::di_posint]) from di_t
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+di_posint | di_posint[] | di_posint | di_posint[] | di_posint[] | di_posint[]
+-- SELECT 1
+
+> select pg_typeof(x) from (select c from di_t) s(x)
+pg_typeof:regtype
+di_posint
+-- SELECT 1
+
+> select pg_typeof(c) from (select c from di_t union all select c from di_t) s
+pg_typeof:regtype
+di_posint
+di_posint
+-- SELECT 2
+
+> select pg_typeof(c) from (select c from di_t union all select 1) s
+pg_typeof:regtype
+integer
+integer
+-- SELECT 2
+
+> create view di_v as select c, c + 1 as e from di_t
+-- CREATE VIEW
+
+> select pg_typeof(c), pg_typeof(e) from di_v
+pg_typeof:regtype | pg_typeof:regtype
+di_posint | integer
+-- SELECT 1
+
+> select pg_typeof(c) from di_t group by c
+pg_typeof:regtype
+di_posint
+-- SELECT 1
+
+> select pg_typeof(max(c)) from di_t
+pg_typeof:regtype
+integer
+-- SELECT 1
+
+> with w as (select c from di_t) select pg_typeof(c) from w
+pg_typeof:regtype
+di_posint
+-- SELECT 1
+
+> select pg_typeof(r.c) from di_t r
+pg_typeof:regtype
+di_posint
+-- SELECT 1
+
+> select pg_typeof(f), pg_typeof(g) from (values (1::di_posint, 1::di_posint), (2::di_posint, 2)) v(f, g)
+pg_typeof:regtype | pg_typeof:regtype
+di_posint | integer
+di_posint | integer
+-- SELECT 2
+
+> select f from (values (1::di_posint), (2::di_posint)) v(f) order by 1
+f:int4
+1
+2
+-- SELECT 2
+
+> select pg_typeof(c::di_posint), pg_typeof(c::int), pg_typeof(c::int8) from di_t
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+di_posint | integer | bigint
+-- SELECT 1
+
+> select pg_typeof(coalesce(c, c)), pg_typeof(coalesce(c, 1)), pg_typeof(greatest(c, c)), pg_typeof(nullif(c, 5)) from di_t
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+di_posint | integer | di_posint | integer
+-- SELECT 1
+
+> select pg_typeof(case when c > 0 then c else c end), pg_typeof(case when c > 0 then c end) from di_t
+pg_typeof:regtype | pg_typeof:regtype
+di_posint | integer
+-- SELECT 1
+
+> select a.c, pg_typeof(b.c) from di_t a join di_t b using (c)
+c:int4 | pg_typeof:regtype
+1 | di_posint
+-- SELECT 1
+
+> create function di_make(int) returns di_posint as 'select $1' language sql
+-- CREATE FUNCTION
+
+> select di_make(3), pg_typeof(di_make(3)), pg_typeof(di_make(3) + 1)
+di_make:int4 | pg_typeof:regtype | pg_typeof:regtype
+3 | di_posint | integer
+-- SELECT 1
+
+> select pg_typeof(coalesce(di_make(3), 1::di_posint))
+pg_typeof:regtype
+di_posint
+-- SELECT 1
+
+> select di_make(-1)
+ERROR 23514: value for domain di_posint violates check constraint "di_posint_check"
+OBJECTS: schema=public datatype=di_posint constraint=di_posint_check
+
+> select pg_typeof(m) from di_make(4) m
+pg_typeof:regtype
+di_posint
+-- SELECT 1
+
+> create function di_f(di_posint) returns text as 'select ''dom''' language sql
+-- CREATE FUNCTION
+
+> create function di_f(int) returns text as 'select ''int''' language sql
+-- CREATE FUNCTION
+
+> select di_f(c), di_f(c::int), di_f(1), di_f(1::di_posint) from di_t
+di_f:text | di_f:text | di_f:text | di_f:text
+dom | int | int | dom
+-- SELECT 1
+
+> select di_f(x) from (select c from di_t) s(x)
+di_f:text
+dom
+-- SELECT 1
+
+> create table di_ctas as select c, d, c + 0 as p from (select * from di_t) s
+-- SELECT 1
+
+> select attname, atttypid::regtype from pg_attribute where attrelid = 'di_ctas'::regclass and attnum > 0 order by attnum
+attname:name | atttypid:regtype
+c | di_posint
+d | di_posint[]
+p | integer
+-- SELECT 3
+
+> create domain di_dpa as di_posint[]
+-- CREATE DOMAIN
+
+> create domain di_dpa2 as di_dpa check (cardinality(value) < 3)
+-- CREATE DOMAIN
+
+> select array[-1]::di_dpa
+ERROR 23514: value for domain di_posint violates check constraint "di_posint_check"
+OBJECTS: schema=public datatype=di_posint constraint=di_posint_check
+
+> select array[1,2,3]::di_dpa2
+ERROR 23514: value for domain di_dpa2 violates check constraint "di_dpa2_check"
+OBJECTS: schema=public datatype=di_dpa2 constraint=di_dpa2_check
+
+> select pg_typeof(array[1]::di_dpa2), pg_typeof((array[1]::di_dpa2)[1])
+pg_typeof:regtype | pg_typeof:regtype
+di_dpa2 | di_posint
+-- SELECT 1
+
+> select typname, typbasetype::regtype, typelem::regtype, typarray::regtype from pg_type where typname in ('di_dpa', 'di_dpa2', '_di_dpa2') order by 1
+typname:name | typbasetype:regtype | typelem:regtype | typarray:regtype
+_di_dpa2 | - | di_dpa2 | -
+di_dpa | di_posint[] | - | di_dpa[]
+di_dpa2 | di_dpa | - | di_dpa2[]
+-- SELECT 3
+
+> create table di_a (f1 di_dpa[], f2 di_dpa, f3 di_posint[])
+-- CREATE TABLE
+
+> insert into di_a values (array[array[42]])
+ERROR 42804: column "f1" is of type di_dpa[] but expression is of type integer[] (at 26)
+HINT: You will need to rewrite or cast the expression.
+
+> insert into di_a values (array[array[42]::di_posint[]])
+ERROR 42804: column "f1" is of type di_dpa[] but expression is of type di_posint[] (at 26)
+HINT: You will need to rewrite or cast the expression.
+
+> insert into di_a values (array[array[1]::di_dpa], array[2], array[3])
+-- INSERT 0 1
+
+> select pg_typeof(f1), pg_typeof(f1[1]), pg_typeof(f1[1][1]), pg_typeof((f1[1])[1]), pg_typeof(f2), pg_typeof(f2[1]), pg_typeof(f3), pg_typeof(f3[1]) from di_a
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+di_dpa[] | di_dpa | di_dpa | di_posint | di_dpa | di_posint | di_posint[] | di_posint
+-- SELECT 1
+
+> select f1, f2, f3, f1[1], f2[1], f3[1], (f1[1])[1] from di_a
+f1:user | f2:user | f3:user | f1:user | f2:int4 | f3:int4 | f1:int4
+{"{1}"} | {2} | {3} | {1} | 2 | 3 | 1
+-- SELECT 1
+
+> select pg_typeof(f2[1:1]), pg_typeof(f3[1:1]), pg_typeof(f1[1:1]) from di_a
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+di_posint[] | di_posint[] | di_dpa[]
+-- SELECT 1
+
+> update di_a set f1[2] = array[99]
+-- UPDATE 1
+
+> update di_a set f1[3] = array[-1]
+ERROR 23514: value for domain di_posint violates check constraint "di_posint_check"
+OBJECTS: schema=public datatype=di_posint constraint=di_posint_check
+
+> update di_a set f1[2][1] = array[97]
+ERROR 2202E: wrong number of array subscripts
+
+> select f1, array_dims(f1), array_length(f1, 1), cardinality(f1), array_ndims(f1) from di_a
+f1:user | array_dims:text | array_length:int4 | cardinality:int4 | array_ndims:int4
+{"{1}","{99}"} | [1:2] | 2 | 2 | 1
+-- SELECT 1
+
+> select x, pg_typeof(x) from di_a, unnest(f1) x
+x:user | pg_typeof:regtype
+{1} | di_dpa
+{99} | di_dpa
+-- SELECT 2
+
+> select array_agg(f2) from di_a
+array_agg:user
+{{2}}
+-- SELECT 1
+
+> select f1 || array[5]::di_dpa from di_a
+?column?:user
+{"{1}","{99}","{5}"}
+-- SELECT 1
+
+> select array_append(f1, array[6]::di_dpa) from di_a
+array_append:user
+{"{1}","{99}","{6}"}
+-- SELECT 1
+
+> select f1::text, '{"{1}","{2,3}"}'::di_dpa[] from di_a
+f1:text | di_dpa:user
+{"{1}","{99}"} | {"{1}","{2,3}"}
+-- SELECT 1
+
+> select f1 = f1, f1 < '{"{50}"}'::di_dpa[] from di_a
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select row_to_json(di_a) from di_a
+row_to_json:json
+{"f1":[[1],[99]],"f2":[2],"f3":[3]}
+-- SELECT 1
+
+> select to_json(f1) from di_a
+to_json:json
+[[1],[99]]
+-- SELECT 1
+
+> select array[array[42]::di_dpa, array[1,2]::di_dpa]
+array:user
+{"{42}","{1,2}"}
+-- SELECT 1
+
+> select (array[array[42]::di_dpa, array[1,2]::di_dpa])[2]
+array:user
+{1,2}
+-- SELECT 1
+
+> select array_dims(array[array[42]::di_dpa, array[1,2]::di_dpa])
+array_dims:text
+[1:2]
+-- SELECT 1
+
+> select pg_typeof(array[array[42]::di_dpa])
+pg_typeof:regtype
+di_dpa[]
+-- SELECT 1
+
+> select '{"{1,2}","{3}"}'::di_dpa[], pg_typeof('{"{1,2}","{3}"}'::di_dpa[])
+di_dpa:user | pg_typeof:regtype
+{"{1,2}","{3}"} | di_dpa[]
+-- SELECT 1
+
+> create function di_g(di_dpa) returns text as 'select ''dom''' language sql
+-- CREATE FUNCTION
+
+> create function di_g(int[]) returns text as 'select ''arr''' language sql
+-- CREATE FUNCTION
+
+> select di_g(array[1]::di_dpa), di_g(array[1])
+di_g:text | di_g:text
+dom | arr
+-- SELECT 1
+
+> select di_g(x) from unnest(array[array[42]::di_dpa]) x
+di_g:text
+dom
+-- SELECT 1
+
+> drop table di_a, di_ctas
+-- DROP TABLE
+
+> drop domain di_posint cascade
+NOTICE 00000: drop cascades to 8 other objects
+DETAIL: drop cascades to column d of table di_t
+DETAIL: drop cascades to type di_dpa
+DETAIL: drop cascades to type di_dpa2
+DETAIL: drop cascades to function di_g(di_dpa)
+DETAIL: drop cascades to column c of table di_t
+DETAIL: drop cascades to view di_v
+DETAIL: drop cascades to function di_make(integer)
+DETAIL: drop cascades to function di_f(di_posint)
+-- DROP DOMAIN
+
+> create type di_comp as (r float8, i float8)
+-- CREATE TYPE
+
+> create domain di_dcomp as di_comp check ((value).r <= (value).i)
+-- CREATE DOMAIN
+
+> create function di_mkd(r float8, i float8) returns di_dcomp as 'select row(r, i)' language sql
+-- CREATE FUNCTION
+
+> create function di_mk(r float8, i float8) returns di_comp as 'select row(r, i)' language sql
+-- CREATE FUNCTION
+
+> select di_mkd(1,2)
+di_mkd:user
+(1,2)
+-- SELECT 1
+
+> select di_mkd(2,1)
+ERROR 23514: value for domain di_dcomp violates check constraint "di_dcomp_check"
+OBJECTS: schema=public datatype=di_dcomp constraint=di_dcomp_check
+
+> select * from di_mkd(1,2) m
+r:float8 | i:float8
+1 | 2
+-- SELECT 1
+
+> select * from di_mkd(2,1) m
+ERROR 23514: value for domain di_dcomp violates check constraint "di_dcomp_check"
+OBJECTS: schema=public datatype=di_dcomp constraint=di_dcomp_check
+
+> select m is not null, (m).r from di_mkd(1,2) m
+?column?:bool | r:float8
+t | 1
+-- SELECT 1
+
+> select * from di_mk(1,2) m
+r:float8 | i:float8
+1 | 2
+-- SELECT 1
+
+> select r from di_mk(3,4)
+r:float8
+3
+-- SELECT 1
+
+> create domain di_c as int not null check (value > 0) check (value < 10 and value <> 5)
+-- CREATE DOMAIN
+
+> select constraint_name, check_clause from information_schema.check_constraints where constraint_name like 'di_c%' order by 1
+constraint_name:name | check_clause:varchar
+di_c_check | (VALUE > 0)
+di_c_check1 | ((VALUE < 10) AND (VALUE <> 5))
+di_c_not_null | VALUE IS NOT NULL
+-- SELECT 3
+

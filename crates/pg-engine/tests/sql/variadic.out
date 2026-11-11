@@ -1,0 +1,299 @@
+> CREATE FUNCTION vsum(VARIADIC xs int[]) RETURNS int LANGUAGE sql AS 'SELECT sum(x)::int FROM unnest(xs) x'
+-- CREATE FUNCTION
+
+> SELECT vsum(1, 2, 3), vsum(VARIADIC ARRAY[4, 5]), vsum(10)
+vsum:int4 | vsum:int4 | vsum:int4
+6 | 9 | 10
+-- SELECT 1
+
+> SELECT vsum()
+ERROR 42883: function vsum() does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT vsum(VARIADIC 1)
+ERROR 42883: function vsum(integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT vsum(VARIADIC NULL::int[]) IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT vsum(xs => ARRAY[1, 2])
+ERROR 42883: function vsum(xs => integer[]) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT vsum(VARIADIC xs => ARRAY[3, 4])
+vsum:int4
+7
+-- SELECT 1
+
+> CREATE FUNCTION vfmt(fmt text, VARIADIC args text[]) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN fmt || ':' || array_to_string(args, ','); END $$
+-- CREATE FUNCTION
+
+> SELECT vfmt('x', 'a', 'b'), vfmt('y', VARIADIC '{c,d}'), vfmt('z', 'only')
+vfmt:text | vfmt:text | vfmt:text
+x:a,b | y:c,d | z:only
+-- SELECT 1
+
+> SELECT vfmt('x')
+ERROR 42883: function vfmt(unknown) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT concat_ws('-', VARIADIC ARRAY['a', 'b'])
+concat_ws:text
+a-b
+-- SELECT 1
+
+> SELECT format('%s+%s', VARIADIC ARRAY['1', '2'])
+format:text
+1+2
+-- SELECT 1
+
+> SELECT proname, provariadic::regtype, pg_get_function_arguments(oid), pg_get_function_identity_arguments(oid), proargmodes FROM pg_proc WHERE proname IN ('vsum', 'vfmt') ORDER BY 1
+proname:name | provariadic:regtype | pg_get_function_arguments:text | pg_get_function_identity_arguments:text | proargmodes:1002
+vfmt | text | fmt text, VARIADIC args text[] | fmt text, VARIADIC args text[] | {i,v}
+vsum | integer | VARIADIC xs integer[] | VARIADIC xs integer[] | {v}
+-- SELECT 2
+
+> CREATE FUNCTION vany(VARIADIC "any") RETURNS int LANGUAGE sql AS 'SELECT 1'
+ERROR 42P13: SQL functions cannot have arguments of type "any"
+
+> CREATE FUNCTION vbad(VARIADIC xs int) RETURNS int LANGUAGE sql AS 'SELECT 1'
+ERROR 42P13: VARIADIC parameter must be an array (at 22)
+
+> CREATE FUNCTION vbad2(VARIADIC xs int[], y int) RETURNS int LANGUAGE sql AS 'SELECT 1'
+ERROR 42P13: VARIADIC parameter must be the last input parameter (at 42)
+
+> CREATE FUNCTION vdef(a int, VARIADIC rest int[] DEFAULT '{}') RETURNS int LANGUAGE sql AS 'SELECT a + coalesce(array_length(rest, 1), 0)'
+-- CREATE FUNCTION
+
+> SELECT vdef(1), vdef(1, 5, 6)
+vdef:int4 | vdef:int4
+1 | 3
+-- SELECT 1
+
+> CREATE FUNCTION vpoly(VARIADIC anyarray) RETURNS anyelement LANGUAGE sql AS 'SELECT $1[array_upper($1, 1)]'
+-- CREATE FUNCTION
+
+> SELECT vpoly(1, 2, 3), vpoly('a'::text, 'b')
+vpoly:int4 | vpoly:text
+3 | b
+-- SELECT 1
+
+> CREATE PROCEDURE vproc(VARIADIC xs int[]) LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'got %', xs; END $$
+-- CREATE PROCEDURE
+
+> CALL vproc(1, 2)
+NOTICE 00000: got {1,2}
+CONTEXT: PL/pgSQL function vproc(integer[]) line 1 at RAISE
+-- CALL
+
+> DROP FUNCTION vsum(int[])
+-- DROP FUNCTION
+
+> DROP FUNCTION vfmt(text, text[])
+-- DROP FUNCTION
+
+> DROP FUNCTION vdef, vpoly
+-- DROP FUNCTION
+
+> DROP PROCEDURE vproc(VARIADIC int[])
+-- DROP PROCEDURE
+
+> SELECT count(*) FROM pg_proc WHERE proname LIKE 'v%' AND pronamespace = 'public'::regnamespace
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE mc (a int, b int[], c text)
+-- CREATE TABLE
+
+> INSERT INTO mc VALUES (1, '{1,2}', 'x')
+-- INSERT 0 1
+
+> INSERT INTO mc VALUES (1, '{1,2}', 'x') RETURNING generate_series(1, 2)
+ERROR 0A000: set-returning functions are not allowed in RETURNING (at 51)
+
+> UPDATE mc SET (a, b) = ROW(2, '{3}') RETURNING *
+a:int4 | b:int4[] | c:text
+2 | {3} | x
+-- UPDATE 1
+
+> UPDATE mc SET (a, b) = (SELECT 3, '{4}'::int[]) RETURNING *
+a:int4 | b:int4[] | c:text
+3 | {4} | x
+-- UPDATE 1
+
+> UPDATE mc SET (a) = ROW(5) RETURNING *
+a:int4 | b:int4[] | c:text
+5 | {4} | x
+-- UPDATE 1
+
+> UPDATE mc SET (a, b) = ROW(6) RETURNING *
+ERROR 42601: number of columns does not match number of values (at 24)
+
+> UPDATE mc SET (a, c) = (a + 1, DEFAULT) RETURNING *
+a:int4 | b:int4[] | c:text
+6 | {4} | NULL
+-- UPDATE 1
+
+> UPDATE mc SET (a, b[1]) = (10, 20) RETURNING *
+a:int4 | b:int4[] | c:text
+10 | {20} | NULL
+-- UPDATE 1
+
+> SELECT (mc.b)[1], mc.b[1:1] FROM mc
+b:int4 | b:int4[]
+20 | {20}
+-- SELECT 1
+
+> SELECT (ARRAY[ROW(1, 2)])[1].f1
+ERROR 42703: could not identify column "f1" in record data type (at 9)
+
+> SELECT current_role, current_catalog, current_schema, user, session_user, current_user
+current_role:name | current_catalog:name | current_schema:name | user:name | session_user:name | current_user:name
+postgres | golden_variadic | public | postgres | postgres | postgres
+-- SELECT 1
+
+> SELECT 1 OPERATOR(pg_catalog.+) 2, 2 OPERATOR(+) 3
+?column?:int4 | ?column?:int4
+3 | 5
+-- SELECT 1
+
+> SELECT 2 ^ 3, |/ 16, ||/ 27, @ -5, ~ 5
+?column?:float8 | ?column?:float8 | ?column?:float8 | ?column?:int4 | ?column?:int4
+8 | 4 | 3 | 5 | -6
+-- SELECT 1
+
+> DROP TABLE mc
+-- DROP TABLE
+
+> SELECT concat(VARIADIC NULL::text[]) IS NULL, concat_ws(',', VARIADIC NULL::text[]) IS NULL, format('x', VARIADIC NULL::text[])
+?column?:bool | ?column?:bool | format:text
+t | t | x
+-- SELECT 1
+
+> SELECT concat(VARIADIC '{}'::text[]), json_build_array(VARIADIC '{}'::int[]), num_nulls(VARIADIC ARRAY[1, NULL]), format('%s %s', VARIADIC ARRAY[1, 2]), concat(VARIADIC ARRAY[1, 2])
+concat:text | json_build_array:json | num_nulls:int4 | format:text | concat:text
+ | [] | 1 | 1 2 | 12
+-- SELECT 1
+
+> SELECT format('%s', VARIADIC ARRAY[[1, 2], [3, 4]]), length(VARIADIC 'abc')
+format:text | length:int4
+1 | 3
+-- SELECT 1
+
+> SELECT concat(VARIADIC 1)
+ERROR 42804: VARIADIC argument must be an array (at 24)
+
+> SELECT concat()
+ERROR 42883: function concat() does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT json_build_object(VARIADIC ARRAY['a', '1'])
+json_build_object:json
+{"a" : "1"}
+-- SELECT 1
+
+> CREATE VIEW vv AS SELECT concat('a', 'b') AS c1, concat(VARIADIC ARRAY['x', 'y']) AS c2
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('vv')
+pg_get_viewdef:text
+ SELECT concat('a', 'b') AS c1,
+    concat(VARIADIC ARRAY['x'::text, 'y'::text]) AS c2;
+-- SELECT 1
+
+> DROP VIEW vv
+-- DROP VIEW
+
+> CREATE FUNCTION pid(x anyelement) RETURNS anyelement LANGUAGE sql AS 'SELECT x'
+-- CREATE FUNCTION
+
+> SELECT pid(1), pid('a'::text), pid(2.5)
+pid:int4 | pid:text | pid:numeric
+1 | a | 2.5
+-- SELECT 1
+
+> CREATE FUNCTION pfirst(xs anyarray) RETURNS anyelement LANGUAGE sql AS 'SELECT xs[1]'
+-- CREATE FUNCTION
+
+> SELECT pfirst(ARRAY[3, 4]), pfirst(ARRAY['p', 'q'])
+pfirst:int4 | pfirst:text
+3 | p
+-- SELECT 1
+
+> CREATE FUNCTION zz1(a int, INOUT b int, OUT c int, VARIADIC d int[]) AS 'SELECT 1, 2' LANGUAGE sql
+-- CREATE FUNCTION
+
+> CREATE PROCEDURE zz2(a int, INOUT b int, OUT c int) LANGUAGE sql AS 'SELECT 1, 2'
+-- CREATE PROCEDURE
+
+> CREATE FUNCTION zz3(a int) RETURNS TABLE(x int, y int) LANGUAGE sql AS 'SELECT 1, 2'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION zz4(a int, b int DEFAULT 3, OUT c int) LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> SELECT proname, pg_get_function_arguments(oid), pg_get_function_identity_arguments(oid), proargmodes, proargnames, proallargtypes, pronargs, pronargdefaults, proargtypes FROM pg_proc WHERE proname LIKE 'zz%' ORDER BY 1
+proname:name | pg_get_function_arguments:text | pg_get_function_identity_arguments:text | proargmodes:1002 | proargnames:text[] | proallargtypes:oid[] | pronargs:int2 | pronargdefaults:int2 | proargtypes:30
+zz1 | a integer, INOUT b integer, OUT c integer, VARIADIC d integer[] | a integer, INOUT b integer, OUT c integer, VARIADIC d integer[] | {i,b,o,v} | {a,b,c,d} | {23,23,23,1007} | 3 | 0 | 23 23 1007
+zz2 | IN a integer, INOUT b integer, OUT c integer | IN a integer, INOUT b integer, OUT c integer | {i,b,o} | {a,b,c} | {23,23,23} | 2 | 0 | 23 23
+zz3 | a integer | a integer | {i,t,t} | {a,x,y} | {23,23,23} | 1 | 0 | 23
+zz4 | a integer, b integer DEFAULT 3, OUT c integer | a integer, b integer, OUT c integer | {i,i,o} | {a,b,c} | {23,23,23} | 2 | 1 | 23 23
+-- SELECT 4
+
+> CREATE FUNCTION zz5(VARIADIC "any") RETURNS int LANGUAGE plpgsql AS 'BEGIN RETURN 1; END'
+ERROR 0A000: PL/pgSQL functions cannot accept type "any"
+
+> CREATE PROCEDURE zz6(VARIADIC a int[], OUT b int) LANGUAGE sql AS 'SELECT 1'
+ERROR 42P13: VARIADIC parameter must be the last parameter (at 40)
+
+> CREATE FUNCTION zz7(VARIADIC a int[], VARIADIC b int[]) RETURNS int LANGUAGE sql AS 'SELECT 1'
+ERROR 42P13: VARIADIC parameter must be the last input parameter (at 39)
+
+> CREATE FUNCTION zz8(a int[]) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> SELECT zz8(VARIADIC ARRAY[1])
+zz8:int4
+1
+-- SELECT 1
+
+> DROP FUNCTION zz1, zz3, zz4, zz8, pid, pfirst
+-- DROP FUNCTION
+
+> DROP PROCEDURE zz2
+-- DROP PROCEDURE
+
+> CREATE TABLE zt (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO zt VALUES (1, 'x')
+-- INSERT 0 1
+
+> SELECT (array_agg(zt))[1].a FROM zt
+a:int4
+1
+-- SELECT 1
+
+> SELECT (ARRAY[zt])[1].b FROM zt
+b:text
+x
+-- SELECT 1
+
+> SELECT (array_agg(s))[1].n FROM (SELECT 1 AS n) s
+ERROR 42703: could not identify column "n" in record data type (at 9)
+
+> SELECT (row(1, 2)).f1, (x).f2 FROM (SELECT row(1, 2) x) s
+f1:int4 | f2:int4
+1 | 2
+-- SELECT 1
+
+> UPDATE zt SET (a, b) = (SELECT 1)
+ERROR 42601: number of columns does not match number of values (at 24)
+
+> DROP TABLE zt
+-- DROP TABLE
+

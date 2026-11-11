@@ -1,0 +1,865 @@
+> DO $$ BEGIN END $$
+-- DO
+
+> DO $$ BEGIN RAISE NOTICE 'hello % and %', 1, 'x'; END $$
+NOTICE 00000: hello 1 and x
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DO $$ BEGIN RAISE NOTICE 'percent %% and null %', NULL; END $$
+NOTICE 00000: percent % and null <NULL>
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DO $$ BEGIN RAISE INFO 'info'; RAISE WARNING 'warn %', 2; RAISE LOG 'not shown'; RAISE DEBUG 'not shown'; END $$
+INFO 00000: info
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+WARNING 01000: warn 2
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DO $$
+> DECLARE x int := 2; s text; c CONSTANT int := 10; n numeric NOT NULL DEFAULT 1.5;
+> BEGIN
+>   FOR i IN 1..3 LOOP x := x * i; END LOOP;
+>   IF x > 10 THEN s := 'big'; ELSIF x > 5 THEN s := 'mid'; ELSE s := 'small'; END IF;
+>   RAISE NOTICE 'x=% s=% c=% n=%', x, s, c, n;
+> END $$
+NOTICE 00000: x=12 s=big c=10 n=1.5
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+-- DO
+
+> DO language plpgsql $$ BEGIN RAISE NOTICE 'lang first'; END $$
+NOTICE 00000: lang first
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DO $$
+> DECLARE i int := 0; total int := 0;
+> BEGIN
+>   LOOP i := i + 1; EXIT WHEN i > 5; CONTINUE WHEN i = 3; total := total + i; END LOOP;
+>   RAISE NOTICE 'loop total %', total;
+>   WHILE i > 0 LOOP i := i - 2; END LOOP;
+>   RAISE NOTICE 'while %', i;
+>   FOR j IN REVERSE 10..1 BY 3 LOOP RAISE NOTICE 'rev %', j; END LOOP;
+>   FOR j IN 1..0 LOOP RAISE NOTICE 'never'; END LOOP;
+>   <<outer>> FOR a IN 1..3 LOOP
+>     FOR b IN 1..3 LOOP
+>       CONTINUE outer WHEN b = 2;
+>       EXIT outer WHEN a = 3;
+>       RAISE NOTICE 'a=% b=%', a, b;
+>     END LOOP;
+>   END LOOP outer;
+>   FOREACH i IN ARRAY ARRAY[5,6,7] LOOP total := total + i; END LOOP;
+>   RAISE NOTICE 'foreach %', total;
+> END $$
+NOTICE 00000: loop total 12
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+NOTICE 00000: while 0
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+NOTICE 00000: rev 10
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: rev 7
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: rev 4
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: rev 1
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: a=1 b=1
+CONTEXT: PL/pgSQL function inline_code_block line 14 at RAISE
+NOTICE 00000: a=2 b=1
+CONTEXT: PL/pgSQL function inline_code_block line 14 at RAISE
+NOTICE 00000: foreach 30
+CONTEXT: PL/pgSQL function inline_code_block line 18 at RAISE
+-- DO
+
+> DO $$
+> <<top>>
+> DECLARE v int := 1;
+> BEGIN
+>   DECLARE v int := 2;
+>   BEGIN
+>     RAISE NOTICE 'inner % outer %', v, top.v;
+>     top.v := 5;
+>   END;
+>   RAISE NOTICE 'after %', v;
+> END top $$
+NOTICE 00000: inner 2 outer 1
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+NOTICE 00000: after 5
+CONTEXT: PL/pgSQL function inline_code_block line 10 at RAISE
+-- DO
+
+> DO $$
+> DECLARE r text;
+> BEGIN
+>   FOR i IN 1..4 LOOP
+>     CASE i WHEN 1, 2 THEN r := 'low'; WHEN 3 THEN r := 'three'; ELSE r := 'other'; END CASE;
+>     RAISE NOTICE '% %', i, r;
+>   END LOOP;
+>   CASE WHEN r = 'other' THEN RAISE NOTICE 'searched'; END CASE;
+> END $$
+NOTICE 00000: 1 low
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: 2 low
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: 3 three
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: 4 other
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: searched
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+-- DO
+
+> DO $$ BEGIN CASE 5 WHEN 1 THEN NULL; END CASE; END $$
+ERROR 20000: case not found
+HINT: CASE statement is missing ELSE part.
+CONTEXT: PL/pgSQL function inline_code_block line 1 at CASE
+
+> CREATE TABLE t (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> DO $$
+> DECLARE n int; r record; total int := 0; rc bigint;
+> BEGIN
+>   FOR i IN 1..5 LOOP INSERT INTO t VALUES (i, 'v' || i); END LOOP;
+>   GET DIAGNOSTICS rc = ROW_COUNT;
+>   RAISE NOTICE 'row_count %', rc;
+>   SELECT count(*) INTO n FROM t;
+>   RAISE NOTICE 'count % found %', n, FOUND;
+>   SELECT * INTO r FROM t WHERE id = 3;
+>   RAISE NOTICE 'r.id=% r.v=%', r.id, r.v;
+>   SELECT * INTO r FROM t WHERE id = 99;
+>   RAISE NOTICE 'missing found=% r.v=%', FOUND, r.v;
+>   FOR r IN SELECT * FROM t ORDER BY id DESC LOOP total := total + r.id; END LOOP;
+>   RAISE NOTICE 'sum %', total;
+>   UPDATE t SET v = upper(v) WHERE id <= 2;
+>   GET DIAGNOSTICS rc = ROW_COUNT;
+>   RAISE NOTICE 'updated % found %', rc, FOUND;
+>   DELETE FROM t WHERE id = 42;
+>   RAISE NOTICE 'delete found %', FOUND;
+>   PERFORM * FROM t WHERE id = 1;
+>   RAISE NOTICE 'perform found %', FOUND;
+>   INSERT INTO t VALUES (6, 'six') RETURNING v INTO r;
+>   RAISE NOTICE 'returning %', r.v;
+> END $$
+NOTICE 00000: row_count 1
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: count 5 found t
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: r.id=3 r.v=v3
+CONTEXT: PL/pgSQL function inline_code_block line 10 at RAISE
+NOTICE 00000: missing found=f r.v=<NULL>
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+NOTICE 00000: sum 15
+CONTEXT: PL/pgSQL function inline_code_block line 14 at RAISE
+NOTICE 00000: updated 2 found t
+CONTEXT: PL/pgSQL function inline_code_block line 17 at RAISE
+NOTICE 00000: delete found f
+CONTEXT: PL/pgSQL function inline_code_block line 19 at RAISE
+NOTICE 00000: perform found t
+CONTEXT: PL/pgSQL function inline_code_block line 21 at RAISE
+NOTICE 00000: returning six
+CONTEXT: PL/pgSQL function inline_code_block line 23 at RAISE
+-- DO
+
+> SELECT * FROM t ORDER BY id
+id:int4 | v:text
+1 | V1
+2 | V2
+3 | v3
+4 | v4
+5 | v5
+6 | six
+-- SELECT 6
+
+> DO $$ DECLARE n int; BEGIN SELECT id INTO STRICT n FROM t WHERE id > 100; END $$
+ERROR P0002: query returned no rows
+CONTEXT: PL/pgSQL function inline_code_block line 1 at SQL statement
+
+> DO $$ DECLARE n int; BEGIN SELECT id INTO STRICT n FROM t; END $$
+ERROR P0003: query returned more than one row
+HINT: Make sure the query returns a single row, or use LIMIT 1.
+CONTEXT: PL/pgSQL function inline_code_block line 1 at SQL statement
+
+> DO $$ BEGIN SELECT 1; END $$
+ERROR 42601: query has no destination for result data
+HINT: If you want to discard the results of a SELECT, use PERFORM instead.
+CONTEXT: PL/pgSQL function inline_code_block line 1 at SQL statement
+
+> DO $$ DECLARE a int; b text; BEGIN SELECT id, v INTO a, b FROM t WHERE id = 2; RAISE NOTICE '% %', a, b; END $$
+NOTICE 00000: 2 V2
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DO $$
+> DECLARE n int; tbl text := 't';
+> BEGIN
+>   EXECUTE 'SELECT count(*) FROM ' || quote_ident(tbl) INTO n;
+>   RAISE NOTICE 'dyn count %', n;
+>   EXECUTE 'SELECT v FROM t WHERE id = $1' INTO tbl USING 3;
+>   RAISE NOTICE 'dyn using %', tbl;
+>   EXECUTE format('CREATE TABLE %I (x int)', 'dyn_' || n);
+>   EXECUTE 'INSERT INTO dyn_6 VALUES ($1), ($2)' USING 1, 2;
+>   FOR n IN EXECUTE 'SELECT x FROM dyn_6 ORDER BY x' LOOP RAISE NOTICE 'dyn row %', n; END LOOP;
+> END $$
+NOTICE 00000: dyn count 6
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+NOTICE 00000: dyn using v3
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+NOTICE 00000: dyn row 1
+CONTEXT: PL/pgSQL function inline_code_block line 10 at RAISE
+NOTICE 00000: dyn row 2
+CONTEXT: PL/pgSQL function inline_code_block line 10 at RAISE
+-- DO
+
+> SELECT * FROM dyn_6 ORDER BY x
+x:int4
+1
+2
+-- SELECT 2
+
+> DO $$
+> BEGIN
+>   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 't' AND column_name = 'extra') THEN
+>     ALTER TABLE t ADD COLUMN extra int DEFAULT 0;
+>   END IF;
+>   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'mood') THEN
+>     CREATE TYPE mood AS ENUM ('sad', 'happy');
+>   END IF;
+> END $$
+-- DO
+
+> DO $$
+> BEGIN
+>   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'mood') THEN
+>     CREATE TYPE mood AS ENUM ('sad', 'happy');
+>   END IF;
+> END $$
+-- DO
+
+> SELECT id, extra FROM t WHERE id = 1
+id:int4 | extra:int4
+1 | 0
+-- SELECT 1
+
+> DO $$
+> BEGIN
+>   INSERT INTO t VALUES (1, 'dup');
+> EXCEPTION WHEN unique_violation THEN
+>   RAISE NOTICE 'caught % %', SQLSTATE, SQLERRM;
+> END $$
+NOTICE 00000: caught 23505 duplicate key value violates unique constraint "t_pkey"
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> DO $$
+> DECLARE x int;
+> BEGIN
+>   BEGIN
+>     INSERT INTO t VALUES (100, 'rolled back');
+>     x := 1 / 0;
+>   EXCEPTION WHEN division_by_zero OR numeric_value_out_of_range THEN
+>     RAISE NOTICE 'div: %', SQLERRM;
+>   END;
+>   RAISE NOTICE 'exists after rollback: %', EXISTS (SELECT 1 FROM t WHERE id = 100);
+> END $$
+NOTICE 00000: div: division by zero
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: exists after rollback: f
+CONTEXT: PL/pgSQL function inline_code_block line 10 at RAISE
+-- DO
+
+> DO $$
+> BEGIN
+>   RAISE EXCEPTION 'custom % thing', 7 USING ERRCODE = 'P0042', DETAIL = 'some detail', HINT = 'a hint';
+> EXCEPTION WHEN SQLSTATE 'P0042' THEN
+>   RAISE NOTICE 'caught custom: %', SQLERRM;
+> END $$
+NOTICE 00000: caught custom: custom 7 thing
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> DO $$
+> DECLARE msg text; st text; det text;
+> BEGIN
+>   PERFORM 1 / 0;
+> EXCEPTION WHEN OTHERS THEN
+>   GET STACKED DIAGNOSTICS msg = MESSAGE_TEXT, st = RETURNED_SQLSTATE, det = PG_EXCEPTION_DETAIL;
+>   RAISE NOTICE 'diag % % [%]', st, msg, det;
+> END $$
+NOTICE 00000: diag 22012 division by zero []
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+-- DO
+
+> DO $$ BEGIN BEGIN PERFORM 1 / 0; EXCEPTION WHEN data_exception THEN RAISE NOTICE 'class match'; END; END $$
+NOTICE 00000: class match
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> DO $$ BEGIN BEGIN PERFORM 1 / 0; EXCEPTION WHEN unique_violation THEN RAISE NOTICE 'wrong'; END; END $$
+ERROR 22012: division by zero
+CONTEXT: SQL statement "SELECT 1 / 0"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at PERFORM
+
+> DO $$ BEGIN BEGIN RAISE EXCEPTION 'inner'; EXCEPTION WHEN OTHERS THEN RAISE; END; END $$
+ERROR P0001: inner
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN RAISE EXCEPTION 'plain'; END $$
+ERROR P0001: plain
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN RAISE division_by_zero; END $$
+ERROR 22012: division_by_zero
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN RAISE SQLSTATE '22012'; END $$
+ERROR 22012: 22012
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN RAISE EXCEPTION USING MESSAGE = 'only using', ERRCODE = 'check_violation'; END $$
+ERROR 23514: only using
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+
+> DO $$ BEGIN ASSERT 1 = 1; ASSERT 1 = 2, 'one is not two'; END $$
+ERROR P0004: one is not two
+CONTEXT: PL/pgSQL function inline_code_block line 1 at ASSERT
+
+> DO $$ BEGIN ASSERT false; END $$
+ERROR P0004: assertion failed
+CONTEXT: PL/pgSQL function inline_code_block line 1 at ASSERT
+
+> CREATE FUNCTION add1(a int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN a + 1; END $$
+-- CREATE FUNCTION
+
+> SELECT add1(41), add1(NULL)
+add1:int4 | add1:int4
+42 | NULL
+-- SELECT 1
+
+> CREATE FUNCTION add_strict(a int) RETURNS int LANGUAGE plpgsql STRICT AS $$ BEGIN RAISE NOTICE 'called'; RETURN a + 1; END $$
+-- CREATE FUNCTION
+
+> SELECT add_strict(NULL), add_strict(1)
+NOTICE 00000: called
+CONTEXT: PL/pgSQL function add_strict(integer) line 1 at RAISE
+add_strict:int4 | add_strict:int4
+NULL | 2
+-- SELECT 1
+
+> CREATE FUNCTION cnt() RETURNS bigint LANGUAGE plpgsql AS $$ DECLARE n bigint; BEGIN SELECT count(*) INTO n FROM t; RETURN n; END $$
+-- CREATE FUNCTION
+
+> SELECT cnt()
+cnt:int8
+6
+-- SELECT 1
+
+> CREATE FUNCTION evens(n int) RETURNS SETOF int LANGUAGE plpgsql AS $$ BEGIN FOR i IN 1..n LOOP IF i % 2 = 0 THEN RETURN NEXT i; END IF; END LOOP; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM evens(7)
+evens:int4
+2
+4
+6
+-- SELECT 3
+
+> CREATE FUNCTION tab(lim int) RETURNS TABLE(id int, v text) LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT t.id, t.v FROM t WHERE t.id < lim ORDER BY t.id; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM tab(4)
+id:int4 | v:text
+1 | V1
+2 | V2
+3 | v3
+-- SELECT 3
+
+> CREATE FUNCTION outs(a int, OUT b int, OUT c text) LANGUAGE plpgsql AS $$ BEGIN b := a * 2; c := 'x' || a; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM outs(5)
+b:int4 | c:text
+10 | x5
+-- SELECT 1
+
+> SELECT (outs(6)).c
+c:text
+x6
+-- SELECT 1
+
+> CREATE FUNCTION fact(n int) RETURNS numeric LANGUAGE plpgsql AS $$ BEGIN IF n <= 1 THEN RETURN 1; END IF; RETURN n * fact(n - 1); END $$
+-- CREATE FUNCTION
+
+> SELECT fact(20)
+fact:numeric
+2432902008176640000
+-- SELECT 1
+
+> CREATE FUNCTION noret() RETURNS int LANGUAGE plpgsql AS $$ BEGIN END $$
+-- CREATE FUNCTION
+
+> SELECT noret()
+ERROR 2F005: control reached end of function without RETURN
+CONTEXT: PL/pgSQL function noret()
+
+> CREATE FUNCTION getrow(i int) RETURNS t LANGUAGE plpgsql AS $$ DECLARE r t; BEGIN SELECT * INTO r FROM t WHERE id = i; RETURN r; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM getrow(2)
+id:int4 | v:text | extra:int4
+2 | V2 | 0
+-- SELECT 1
+
+> SELECT (getrow(3)).v
+v:text
+v3
+-- SELECT 1
+
+> CREATE FUNCTION defs(a int, b int DEFAULT 10) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN a + b; END $$
+-- CREATE FUNCTION
+
+> SELECT defs(1), defs(1, 2)
+defs:int4 | defs:int4
+11 | 3
+-- SELECT 1
+
+> CREATE FUNCTION dollar(int, text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN $2 || $1; END $$
+-- CREATE FUNCTION
+
+> SELECT dollar(1, 'a')
+dollar:text
+a1
+-- SELECT 1
+
+> CREATE FUNCTION alias_fn(int) RETURNS int LANGUAGE plpgsql AS $$ DECLARE x ALIAS FOR $1; BEGIN RETURN x * 3; END $$
+-- CREATE FUNCTION
+
+> SELECT alias_fn(4)
+alias_fn:int4
+12
+-- SELECT 1
+
+> CREATE FUNCTION vfn() RETURNS void LANGUAGE plpgsql AS $$ BEGIN INSERT INTO t VALUES (50, 'from void'); END $$
+-- CREATE FUNCTION
+
+> SELECT vfn()
+vfn:void
+
+-- SELECT 1
+
+> SELECT v FROM t WHERE id = 50
+v:text
+from void
+-- SELECT 1
+
+> CREATE FUNCTION typed(x t.v%TYPE) RETURNS text LANGUAGE plpgsql AS $$ DECLARE y t.id%TYPE := 7; r t%ROWTYPE; BEGIN r.id := y; r.v := x; RETURN r.v || r.id; END $$
+NOTICE 00000: type reference t.v%TYPE converted to text
+-- CREATE FUNCTION
+
+> SELECT typed('q')
+typed:text
+q7
+-- SELECT 1
+
+> CREATE FUNCTION arr() RETURNS int[] LANGUAGE plpgsql AS $$ DECLARE a int[] := '{}'; BEGIN a[1] := 10; a[3] := 30; RETURN a; END $$
+-- CREATE FUNCTION
+
+> SELECT arr()
+arr:int4[]
+{10,NULL,30}
+-- SELECT 1
+
+> CREATE FUNCTION volatile_count() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO t VALUES ((SELECT max(id) + 1 FROM t), 'v'); RETURN 1; END $$
+-- CREATE FUNCTION
+
+> SELECT volatile_count() FROM generate_series(1, 3)
+volatile_count:int4
+1
+1
+1
+-- SELECT 3
+
+> SELECT count(*) FROM t WHERE v = 'v'
+count:int8
+3
+-- SELECT 1
+
+> CREATE FUNCTION bad() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETRN 1; END $$
+ERROR 42601: syntax error at or near "RETRN" (at 64)
+
+> CREATE FUNCTION bad2() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1 +; END $$
+ERROR 42601: syntax error at end of input (at 75)
+
+> CREATE FUNCTION bad3() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE '% %', 1; END $$
+ERROR 42601: too few parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "bad3" near line 1
+
+> CREATE FUNCTION bad4() RETURNS int LANGUAGE plpgsql AS $$ BEGIN IF true THEN RETURN 1; END; END $$
+ERROR 42601: syntax error at or near ";" (at 91)
+
+> CREATE FUNCTION bad5() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE x int;
+> BEGIN
+>   x := 1;
+>   RAISE NOTICE '%', 1, 2;
+>   RETURN x;
+> END $$
+ERROR 42601: too many parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "bad5" near line 5
+
+> DO $$
+> BEGIN
+>   PERFORM 1;
+> 
+>   RAISE NOTICE '% %',
+>     1;
+> END $$
+ERROR 42601: too few parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "inline_code_block" near line 5
+
+> SET check_function_bodies = off
+-- SET
+
+> CREATE FUNCTION bad6() RETURNS int LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE '% %', 1;
+>   RETURN 1;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT bad6()
+ERROR 42601: too few parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "bad6" near line 3
+
+> CREATE FUNCTION bad7() RETURNS int LANGUAGE sql AS 'SELEC 1'
+-- CREATE FUNCTION
+
+> SELECT bad7()
+ERROR 42601: syntax error at or near "SELEC"
+QUERY: SELEC 1 (at 1)
+CONTEXT: SQL function "bad7" during inlining
+
+> CREATE FUNCTION bad8() RETURNS int LANGUAGE sql AS 'SELECT ''x''::text'
+-- CREATE FUNCTION
+
+> SELECT bad8()
+ERROR 42P13: return type mismatch in function declared to return integer
+DETAIL: Actual return type is text.
+CONTEXT: SQL function "bad8" during inlining
+
+> RESET check_function_bodies
+-- RESET
+
+> DROP FUNCTION bad6(), bad7(), bad8()
+-- DROP FUNCTION
+
+> CREATE FUNCTION retvoid() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$
+ERROR 42804: RETURN cannot have a parameter in function returning void (at 76)
+
+> CREATE FUNCTION div0() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1 / 0; END $$
+-- CREATE FUNCTION
+
+> SELECT div0()
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL expression "1 / 0"
+CONTEXT: PL/pgSQL function div0() line 1 at RETURN
+
+> DROP FUNCTION add1(int)
+-- DROP FUNCTION
+
+> SELECT add1(1)
+ERROR 42883: function add1(integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE TABLE items (id serial PRIMARY KEY, name text, price numeric, updated_at timestamptz, version int DEFAULT 0)
+-- CREATE TABLE
+
+> CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   NEW.updated_at := '2024-01-01 00:00:00+00';
+>   NEW.version := COALESCE(OLD.version, 0) + 1;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER items_touch BEFORE INSERT OR UPDATE ON items FOR EACH ROW EXECUTE FUNCTION touch()
+-- CREATE TRIGGER
+
+> INSERT INTO items (name, price) VALUES ('a', 1), ('b', 2) RETURNING id, version, updated_at
+id:int4 | version:int4 | updated_at:timestamptz
+1 | 1 | 2024-01-01 00:00:00+00
+2 | 1 | 2024-01-01 00:00:00+00
+-- INSERT 0 2
+
+> UPDATE items SET price = price * 2 WHERE id = 1 RETURNING id, price, version
+id:int4 | price:numeric | version:int4
+1 | 2 | 2
+-- UPDATE 1
+
+> CREATE TABLE audit (n serial, op text, tbl text, old_name text, new_name text, lvl text, nargs int, args text[])
+-- CREATE TABLE
+
+> CREATE FUNCTION log_it() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   INSERT INTO audit (op, tbl, old_name, new_name, lvl, nargs, args)
+>     VALUES (TG_OP, TG_TABLE_NAME, CASE WHEN TG_OP <> 'INSERT' THEN OLD.name END, CASE WHEN TG_OP <> 'DELETE' THEN NEW.name END, TG_LEVEL, TG_NARGS, TG_ARGV);
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER items_audit AFTER INSERT OR UPDATE OR DELETE ON items FOR EACH ROW EXECUTE FUNCTION log_it('x', 'y')
+-- CREATE TRIGGER
+
+> CREATE TRIGGER items_audit_stmt AFTER INSERT ON items FOR EACH STATEMENT EXECUTE PROCEDURE log_it()
+-- CREATE TRIGGER
+
+> INSERT INTO items (name, price) VALUES ('c', 3)
+-- INSERT 0 1
+
+> UPDATE items SET name = 'bb' WHERE id = 2
+-- UPDATE 1
+
+> DELETE FROM items WHERE id = 1
+-- DELETE 1
+
+> SELECT op, tbl, old_name, new_name, lvl, nargs, args FROM audit ORDER BY n
+op:text | tbl:text | old_name:text | new_name:text | lvl:text | nargs:int4 | args:text[]
+INSERT | items | NULL | c | ROW | 2 | [0:1]={x,y}
+INSERT | items | NULL | NULL | STATEMENT | 0 | NULL
+UPDATE | items | b | bb | ROW | 2 | [0:1]={x,y}
+DELETE | items | a | NULL | ROW | 2 | [0:1]={x,y}
+-- SELECT 4
+
+> CREATE FUNCTION no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.name = 'bb' THEN RETURN NULL; END IF; RETURN OLD; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER items_guard BEFORE DELETE ON items FOR EACH ROW EXECUTE FUNCTION no_delete()
+-- CREATE TRIGGER
+
+> DELETE FROM items
+-- DELETE 1
+
+> SELECT id, name, version FROM items ORDER BY id
+id:int4 | name:text | version:int4
+2 | bb | 2
+-- SELECT 1
+
+> CREATE FUNCTION skip_neg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.price < 0 THEN RETURN NULL; END IF; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER items_skip BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION skip_neg()
+-- CREATE TRIGGER
+
+> INSERT INTO items (name, price) VALUES ('neg', -1), ('pos', 1)
+-- INSERT 0 1
+
+> SELECT name FROM items ORDER BY id
+name:text
+bb
+pos
+-- SELECT 2
+
+> CREATE FUNCTION note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE '% % % %', TG_NAME, TG_WHEN, TG_LEVEL, TG_OP; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER s1 BEFORE UPDATE ON items FOR EACH STATEMENT EXECUTE FUNCTION note()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER s2 AFTER UPDATE ON items FOR EACH STATEMENT EXECUTE FUNCTION note()
+-- CREATE TRIGGER
+
+> UPDATE items SET price = 0 WHERE false
+NOTICE 00000: s1 BEFORE STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+NOTICE 00000: s2 AFTER STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+-- UPDATE 0
+
+> CREATE TRIGGER w BEFORE UPDATE OF price ON items FOR EACH ROW WHEN (OLD.price IS DISTINCT FROM NEW.price) EXECUTE FUNCTION touch()
+-- CREATE TRIGGER
+
+> UPDATE items SET price = 5 WHERE name = 'pos'
+NOTICE 00000: s1 BEFORE STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+NOTICE 00000: s2 AFTER STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+-- UPDATE 1
+
+> UPDATE items SET name = 'pos2' WHERE name = 'pos'
+NOTICE 00000: s1 BEFORE STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+NOTICE 00000: s2 AFTER STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+-- UPDATE 1
+
+> SELECT tgname, tgtype, tgenabled, tgnargs FROM pg_trigger WHERE tgrelid = 'items'::regclass ORDER BY tgname
+tgname:name | tgtype:int2 | tgenabled:char | tgnargs:int2
+items_audit | 29 | O | 2
+items_audit_stmt | 4 | O | 0
+items_guard | 11 | O | 0
+items_skip | 7 | O | 0
+items_touch | 23 | O | 0
+s1 | 18 | O | 0
+s2 | 16 | O | 0
+w | 19 | O | 0
+-- SELECT 8
+
+> ALTER TABLE items DISABLE TRIGGER s1
+-- ALTER TABLE
+
+> UPDATE items SET price = 6 WHERE false
+NOTICE 00000: s2 AFTER STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+-- UPDATE 0
+
+> ALTER TABLE items DISABLE TRIGGER ALL
+-- ALTER TABLE
+
+> UPDATE items SET price = 6 WHERE false
+-- UPDATE 0
+
+> ALTER TABLE items ENABLE TRIGGER ALL
+-- ALTER TABLE
+
+> ALTER TRIGGER s2 ON items RENAME TO s3
+-- ALTER TRIGGER
+
+> UPDATE items SET price = 7 WHERE false
+NOTICE 00000: s1 BEFORE STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+NOTICE 00000: s3 AFTER STATEMENT UPDATE
+CONTEXT: PL/pgSQL function note() line 1 at RAISE
+-- UPDATE 0
+
+> DROP FUNCTION note()
+ERROR 2BP01: cannot drop function note() because other objects depend on it
+DETAIL: trigger s1 on table items depends on function note()
+DETAIL: trigger s3 on table items depends on function note()
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TRIGGER w ON items
+-- DROP TRIGGER
+
+> DROP TRIGGER IF EXISTS w ON items
+NOTICE 00000: trigger "w" for relation "items" does not exist, skipping
+-- DROP TRIGGER
+
+> DROP TRIGGER w ON items
+ERROR 42704: trigger "w" for table "items" does not exist
+
+> CREATE TRIGGER items_touch BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION touch()
+ERROR 42710: trigger "items_touch" for relation "items" already exists
+
+> CREATE TRIGGER bad BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION cnt()
+ERROR 42P17: function cnt must return type trigger
+
+> CREATE TRIGGER bad BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION nope()
+ERROR 42883: function nope() does not exist
+
+> CREATE TRIGGER bad BEFORE INSERT ON items FOR EACH ROW WHEN (OLD.id = 1) EXECUTE FUNCTION touch()
+ERROR 42P17: INSERT trigger's WHEN condition cannot reference OLD values (at 62)
+
+> CREATE TRIGGER bad BEFORE TRUNCATE ON items FOR EACH ROW EXECUTE FUNCTION touch()
+ERROR 0A000: TRUNCATE FOR EACH ROW triggers are not supported
+
+> DROP TABLE items CASCADE
+-- DROP TABLE
+
+> SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'items%'
+count:int8
+0
+-- SELECT 1
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN EXIT; END $$
+ERROR 42601: EXIT cannot be used outside a loop, unless it has a label (at 64)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN CONTINUE; END $$
+ERROR 42601: CONTINUE cannot be used outside a loop (at 64)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN EXIT foo; END $$
+ERROR 42601: there is no label "foo" attached to any block or loop enclosing this statement (at 69)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ <<b>> BEGIN LOOP CONTINUE b; END LOOP; END $$
+ERROR 42601: block label "b" cannot be used in CONTINUE (at 84)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ <<b>> BEGIN EXIT b; END $$
+-- CREATE FUNCTION
+
+> DROP FUNCTION chk()
+-- DROP FUNCTION
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN LOOP BEGIN EXIT; END; END LOOP; RETURN 1; END $$
+-- CREATE FUNCTION
+
+> SELECT chk()
+chk:int4
+1
+-- SELECT 1
+
+> DROP FUNCTION chk()
+-- DROP FUNCTION
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$
+ERROR 42601: missing expression at or near ";" (at 70)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN NEXT 1; END $$
+ERROR 42804: cannot use RETURN NEXT in a non-SETOF function (at 64)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 1; END $$
+ERROR 42804: cannot use RETURN QUERY in a non-SETOF function (at 64)
+
+> CREATE FUNCTION chk(OUT a int) LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$
+ERROR 42804: RETURN cannot have a parameter in function with OUT parameters (at 68)
+
+> CREATE FUNCTION chk() RETURNS SETOF int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$
+ERROR 42804: RETURN cannot have a parameter in function returning set (at 77)
+HINT: Use RETURN NEXT or RETURN QUERY.
+
+> CREATE FUNCTION chk() RETURNS SETOF int LANGUAGE plpgsql AS $$ BEGIN RETURN NEXT; END $$
+ERROR 42601: missing expression at or near ";" (at 81)
+
+> CREATE FUNCTION chk(OUT a int) RETURNS SETOF int LANGUAGE plpgsql AS $$ BEGIN RETURN NEXT 1; END $$
+ERROR 42804: RETURN NEXT cannot have a parameter in function with OUT parameters (at 91)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1 $$
+ERROR 42601: syntax error at end of input (at 73)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN PERFORM 1 +; END $$
+ERROR 42601: syntax error at end of input (at 75)
+
+> CREATE FUNCTION chk() RETURNS int LANGUAGE plpgsql AS $$ BEGIN IF 1 + THEN RETURN 1; END IF; END $$
+ERROR 42601: syntax error at end of input (at 70)
+
+> DO $$ BEGIN RETRN 1; END $$
+ERROR 42601: syntax error at or near "RETRN" (at 13)
+
+> DO $$ BEGIN RETURN 1; END $$
+ERROR 42804: RETURN cannot have a parameter in function returning void (at 20)
+
+> DO $$ BEGIN IF true THEN NULL; END; END $$
+ERROR 42601: syntax error at or near ";" (at 35)
+
+> DO $$ BEGIN PERFORM 1 +; END $$
+ERROR 42601: syntax error at end of input (at 24)
+
+> CREATE FUNCTION chk(a t.nope%TYPE) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$
+ERROR 42703: column "nope" of relation "t" does not exist (at 23)
+
+> CREATE FUNCTION chk(a nope.v%TYPE) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$
+ERROR 42P01: relation "nope" does not exist
+
+> CREATE FUNCTION chk(a t.v%TYPE) RETURNS t.id%TYPE LANGUAGE plpgsql AS $$ BEGIN RETURN length(a); END $$
+NOTICE 00000: type reference t.v%TYPE converted to text
+NOTICE 00000: type reference t.id%TYPE converted to integer
+-- CREATE FUNCTION
+
+> SELECT chk('abcd')
+chk:int4
+4
+-- SELECT 1
+
+> DROP FUNCTION chk(text)
+-- DROP FUNCTION
+

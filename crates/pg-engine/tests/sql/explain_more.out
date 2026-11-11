@@ -1,0 +1,189 @@
+> CREATE TABLE xa (id int PRIMARY KEY, b text, c int)
+-- CREATE TABLE
+
+> INSERT INTO xa SELECT g, 'x' || g, g % 4 FROM generate_series(1, 12) g
+-- INSERT 0 12
+
+> CREATE VIEW xv AS SELECT id, c FROM xa WHERE c > 0
+-- CREATE VIEW
+
+> EXPLAIN (COSTS OFF) SELECT * FROM xv
+QUERY PLAN:text
+Seq Scan on xa
+  Filter: (c > 0)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM xv ORDER BY c
+QUERY PLAN:text
+Sort
+  Sort Key: xa.c
+  ->  Seq Scan on xa
+        Filter: (c > 0)
+-- EXPLAIN
+
+> PREPARE xp(int) AS SELECT * FROM xa WHERE id = $1
+-- PREPARE
+
+> EXPLAIN (COSTS OFF) EXECUTE xp(3)
+QUERY PLAN:text
+Index Scan using xa_pkey on xa
+  Index Cond: (id = 3)
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE xp(3)
+QUERY PLAN:text
+Index Scan using xa_pkey on xa (actual rows=1.00 loops=1)
+  Index Cond: (id = 3)
+  Index Searches: 1
+-- EXPLAIN
+
+> DEALLOCATE xp
+-- DEALLOCATE
+
+> EXPLAIN (COSTS OFF) CREATE TABLE xc AS SELECT * FROM xa WHERE c = 1
+QUERY PLAN:text
+Seq Scan on xa
+  Filter: (c = 1)
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) CREATE TABLE xc AS SELECT * FROM xa WHERE c = 1
+QUERY PLAN:text
+Seq Scan on xa (actual rows=3.00 loops=1)
+  Filter: (c = 1)
+  Rows Removed by Filter: 9
+-- EXPLAIN
+
+> SELECT count(*) FROM xc
+count:int8
+3
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) INSERT INTO xa VALUES (100, 'z', 1) RETURNING id
+QUERY PLAN:text
+Insert on xa (actual rows=1.00 loops=1)
+  ->  Result (actual rows=1.00 loops=1)
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) UPDATE xa SET c = 9 WHERE id = 100
+QUERY PLAN:text
+Update on xa (actual rows=0.00 loops=1)
+  ->  Index Scan using xa_pkey on xa (actual rows=1.00 loops=1)
+        Index Cond: (id = 100)
+        Index Searches: 1
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) DELETE FROM xa WHERE c = 9
+QUERY PLAN:text
+Delete on xa (actual rows=0.00 loops=1)
+  ->  Seq Scan on xa (actual rows=1.00 loops=1)
+        Filter: (c = 9)
+        Rows Removed by Filter: 12
+-- EXPLAIN
+
+> ROLLBACK
+-- ROLLBACK
+
+> EXPLAIN (COSTS OFF) SELECT count(*) + 1 FROM xa
+QUERY PLAN:text
+Aggregate
+  ->  Seq Scan on xa
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT c + 1, b FROM xa ORDER BY 1
+QUERY PLAN:text
+Sort
+  Output: ((c + 1)), b
+  Sort Key: ((xa.c + 1))
+  ->  Seq Scan on public.xa
+        Output: (c + 1), b
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT c + 1 FROM xa GROUP BY c + 1 ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: ((c + 1))
+  ->  HashAggregate
+        Group Key: (c + 1)
+        ->  Seq Scan on xa
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM xa x1, xa x2 WHERE x1.c < x2.c AND x1.id = 1
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (x1.c < x2.c)
+  ->  Index Scan using xa_pkey on xa x1
+        Index Cond: (id = 1)
+  ->  Seq Scan on xa x2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT 1 WHERE false
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT ARRAY(SELECT id FROM xa)
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Seq Scan on xa
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM xa WHERE c > ALL (SELECT c FROM xa WHERE b = 'q')
+QUERY PLAN:text
+Seq Scan on xa
+  Filter: (ALL (c > (SubPlan 1).col1))
+  SubPlan 1
+    ->  Materialize
+          ->  Seq Scan on xa xa_1
+                Filter: (b = 'q'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT max(id) FILTER (WHERE c = 1), string_agg(b, ',' ORDER BY b) FROM xa
+QUERY PLAN:text
+Aggregate
+  ->  Sort
+        Sort Key: b
+        ->  Seq Scan on xa
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM xa
+QUERY PLAN:text
+Aggregate
+  ->  Sort
+        Sort Key: c
+        ->  Seq Scan on xa
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT c, string_agg(b, ',' ORDER BY b) FROM xa GROUP BY c
+QUERY PLAN:text
+GroupAggregate
+  Group Key: c
+  ->  Sort
+        Sort Key: c, b
+        ->  Seq Scan on xa
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT array_agg(b ORDER BY b DESC), array_agg(c ORDER BY c) FROM xa
+QUERY PLAN:text
+Aggregate
+  ->  Sort
+        Sort Key: b DESC
+        ->  Seq Scan on xa
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM xa WHERE c = $1
+ERROR 42P02: there is no parameter $1 (at 48)
+
+> DROP VIEW xv
+-- DROP VIEW
+
+> DROP TABLE xc
+-- DROP TABLE
+
+> DROP TABLE xa
+-- DROP TABLE
+

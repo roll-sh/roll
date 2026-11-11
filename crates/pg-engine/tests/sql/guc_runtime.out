@@ -1,0 +1,506 @@
+> SET intervalstyle to 'asd'
+ERROR 22023: invalid value for parameter "IntervalStyle": "asd"
+HINT: Available values: postgres, postgres_verbose, sql_standard, iso_8601.
+
+> SET vacuum_cost_delay TO 40
+-- SET
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+40ms
+-- SHOW
+
+> BEGIN
+-- BEGIN
+
+> SET vacuum_cost_delay TO 70
+-- SET
+
+> SET datestyle = 'MDY'
+-- SET
+
+> SAVEPOINT first_sp
+-- SAVEPOINT
+
+> SET vacuum_cost_delay TO 80.1
+-- SET
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+80100us
+-- SHOW
+
+> SET datestyle = 'German, DMY'
+-- SET
+
+> SHOW datestyle
+DateStyle:text
+German, DMY
+-- SHOW
+
+> ROLLBACK TO first_sp
+-- ROLLBACK
+
+> SHOW datestyle
+DateStyle:text
+ISO, MDY
+-- SHOW
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+70ms
+-- SHOW
+
+> SAVEPOINT second_sp
+-- SAVEPOINT
+
+> SET vacuum_cost_delay TO '900us'
+-- SET
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+900us
+-- SHOW
+
+> SAVEPOINT third_sp
+-- SAVEPOINT
+
+> SET vacuum_cost_delay TO 100
+-- SET
+
+> ROLLBACK TO third_sp
+-- ROLLBACK
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+900us
+-- SHOW
+
+> ROLLBACK TO second_sp
+-- ROLLBACK
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+70ms
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+40ms
+-- SHOW
+
+> SHOW datestyle
+DateStyle:text
+ISO, MDY
+-- SHOW
+
+> BEGIN
+-- BEGIN
+
+> SAVEPOINT sp
+-- SAVEPOINT
+
+> SET LOCAL vacuum_cost_delay TO 30
+-- SET
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+30ms
+-- SHOW
+
+> RELEASE SAVEPOINT sp
+-- RELEASE
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+30ms
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+40ms
+-- SHOW
+
+> BEGIN
+-- BEGIN
+
+> SET vacuum_cost_delay TO 40
+-- SET
+
+> SET LOCAL vacuum_cost_delay TO 50
+-- SET
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+50ms
+-- SHOW
+
+> COMMIT
+-- COMMIT
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+40ms
+-- SHOW
+
+> SET seq_page_cost TO 'NaN'
+ERROR 22023: invalid value for parameter "seq_page_cost": "NaN"
+
+> SET vacuum_cost_delay TO '10s'
+ERROR 22023: 10000 ms is outside the valid range for parameter "vacuum_cost_delay" (0 ms .. 100 ms)
+
+> SET no_such_variable TO 42
+ERROR 42704: unrecognized configuration parameter "no_such_variable"
+
+> SHOW custom.my_guc
+ERROR 42704: unrecognized configuration parameter "custom.my_guc"
+
+> SET custom.my_guc = 42
+-- SET
+
+> SHOW custom.my_guc
+custom.my_guc:text
+42
+-- SHOW
+
+> RESET custom.my_guc
+-- RESET
+
+> SHOW custom.my_guc
+custom.my_guc:text
+
+-- SHOW
+
+> SET custom."bad-guc" = 42
+ERROR 42602: invalid configuration parameter name "custom.bad-guc"
+DETAIL: Custom parameter names must be two or more simple identifiers separated by dots.
+
+> SET special."weird name" = 'foo'
+ERROR 42602: invalid configuration parameter name "special.weird name"
+DETAIL: Custom parameter names must be two or more simple identifiers separated by dots.
+
+> SET plpgsql.extra_foo_warnings = true
+-- SET
+
+> LOAD 'plpgsql'
+WARNING 42602: invalid configuration parameter name "plpgsql.extra_foo_warnings", removing it
+DETAIL: "plpgsql" is now a reserved prefix.
+-- LOAD
+
+> SET plpgsql.extra_foo_warnings = true
+ERROR 42602: invalid configuration parameter name "plpgsql.extra_foo_warnings"
+DETAIL: "plpgsql" is a reserved prefix.
+
+> SHOW plpgsql.extra_foo_warnings
+ERROR 42704: unrecognized configuration parameter "plpgsql.extra_foo_warnings"
+
+> set default_with_oids to f
+-- SET
+
+> set default_with_oids to t
+ERROR 0A000: tables declared WITH OIDS are not supported
+
+> SELECT pg_settings_get_flags(NULL)
+pg_settings_get_flags:text[]
+NULL
+-- SELECT 1
+
+> SELECT pg_settings_get_flags('does_not_exist')
+pg_settings_get_flags:text[]
+NULL
+-- SELECT 1
+
+> SELECT pg_settings_get_flags('seed'), pg_settings_get_flags('work_mem')
+pg_settings_get_flags:text[] | pg_settings_get_flags:text[]
+{NO_RESET,NO_RESET_ALL,NO_SHOW_ALL,NOT_IN_SAMPLE} | {EXPLAIN}
+-- SELECT 1
+
+> SHOW seed
+seed:text
+unavailable
+-- SHOW
+
+> RESET seed
+ERROR 0A000: parameter "seed" cannot be reset
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL max_parallel_workers_per_gather = 4
+-- SET
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL enable_parallel_hash = off
+-- SET
+
+> SET LOCAL enable_partitionwise_join = on
+-- SET
+
+> SET LOCAL enable_presorted_aggregate = off
+-- SET
+
+> SHOW min_parallel_table_scan_size
+min_parallel_table_scan_size:text
+0
+-- SHOW
+
+> SAVEPOINT settings
+-- SAVEPOINT
+
+> SET LOCAL work_mem = '128kB'
+-- SET
+
+> SHOW work_mem
+work_mem:text
+128kB
+-- SHOW
+
+> ROLLBACK TO settings
+-- ROLLBACK
+
+> SHOW work_mem
+work_mem:text
+4MB
+-- SHOW
+
+> COMMIT
+-- COMMIT
+
+> SHOW parallel_setup_cost
+parallel_setup_cost:text
+1000
+-- SHOW
+
+> SET work_mem = '64MB'
+-- SET
+
+> SHOW work_mem
+work_mem:text
+64MB
+-- SHOW
+
+> SET work_mem = '1.5MB'
+-- SET
+
+> SHOW work_mem
+work_mem:text
+1536kB
+-- SHOW
+
+> SET work_mem = 0
+ERROR 22023: 0 kB is outside the valid range for parameter "work_mem" (64 kB .. 2147483647 kB)
+
+> SET work_mem = '10 parsecs'
+ERROR 22023: invalid value for parameter "work_mem": "10 parsecs"
+HINT: Valid units for this parameter are "B", "kB", "MB", "GB", and "TB".
+
+> SET work_mem = 0x100
+-- SET
+
+> SHOW work_mem
+work_mem:text
+256kB
+-- SHOW
+
+> SET work_mem = 3000000000
+ERROR 22023: invalid value for parameter "work_mem": "3000000000"
+HINT: Value exceeds integer range.
+
+> RESET work_mem
+-- RESET
+
+> SET statement_timeout = '1.5s'
+-- SET
+
+> SHOW statement_timeout
+statement_timeout:text
+1500ms
+-- SHOW
+
+> SET statement_timeout = '90min'
+-- SET
+
+> SHOW statement_timeout
+statement_timeout:text
+90min
+-- SHOW
+
+> RESET statement_timeout
+-- RESET
+
+> SET shared_buffers = '1GB'
+ERROR 55P02: parameter "shared_buffers" cannot be changed without restarting the server
+
+> SET wal_level = minimal
+ERROR 55P02: parameter "wal_level" cannot be changed without restarting the server
+
+> SET log_connections = on
+ERROR 55P02: parameter "log_connections" cannot be set after connection start
+
+> SET max_stack_depth = '100kB'
+-- SET
+
+> SET random_page_cost = 1.1
+-- SET
+
+> SHOW random_page_cost
+random_page_cost:text
+1.1
+-- SHOW
+
+> SET cpu_tuple_cost = 0.000001234567
+-- SET
+
+> SHOW cpu_tuple_cost
+cpu_tuple_cost:text
+1.23457e-06
+-- SHOW
+
+> SET random_page_cost = 1234567.5
+-- SET
+
+> SHOW random_page_cost
+random_page_cost:text
+1.23457e+06
+-- SHOW
+
+> RESET random_page_cost
+-- RESET
+
+> RESET cpu_tuple_cost
+-- RESET
+
+> SET work_mem = 1, 2
+ERROR 22023: SET work_mem takes only one argument
+
+> SET client_min_messages = 'debug'
+-- SET
+
+> SHOW client_min_messages
+client_min_messages:text
+debug2
+-- SHOW
+
+> SET client_min_messages = notice
+-- SET
+
+> SET enable_seqscan = yes
+-- SET
+
+> SHOW enable_seqscan
+enable_seqscan:text
+on
+-- SHOW
+
+> SET enable_seqscan = 'o'
+ERROR 22023: parameter "enable_seqscan" requires a Boolean value
+
+> RESET enable_seqscan
+-- RESET
+
+> SET constraint_exclusion = true
+-- SET
+
+> SHOW constraint_exclusion
+constraint_exclusion:text
+on
+-- SHOW
+
+> RESET constraint_exclusion
+-- RESET
+
+> SELECT name, setting, unit, context, vartype, min_val, max_val, enumvals, boot_val, reset_val FROM pg_settings WHERE name IN ('work_mem','vacuum_cost_delay','enable_seqscan','constraint_exclusion','shared_buffers','max_parallel_workers_per_gather','seq_page_cost')
+name:text | setting:text | unit:text | context:text | vartype:text | min_val:text | max_val:text | enumvals:text[] | boot_val:text | reset_val:text
+constraint_exclusion | partition | NULL | user | enum | NULL | NULL | {partition,on,off} | partition | partition
+enable_seqscan | on | NULL | user | bool | NULL | NULL | NULL | on | on
+max_parallel_workers_per_gather | 2 | NULL | user | integer | 0 | 1024 | NULL | 2 | 2
+seq_page_cost | 1 | NULL | user | real | 0 | 1.79769e+308 | NULL | 1 | 1
+shared_buffers | 16384 | 8kB | postmaster | integer | 16 | 1073741823 | NULL | 16384 | 16384
+vacuum_cost_delay | 40 | ms | user | real | 0 | 100 | NULL | 0 | 0
+work_mem | 4096 | kB | user | integer | 64 | 2147483647 | NULL | 4096 | 4096
+-- SELECT 7
+
+> SELECT count(*) > 350 FROM pg_settings
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT name FROM pg_settings WHERE name IN ('seed','role','is_superuser','default_with_oids')
+name:text
+-- SELECT 0
+
+> RESET transaction_isolation
+ERROR 0A000: parameter "transaction_isolation" cannot be reset
+
+> SET client_min_messages = warning
+-- SET
+
+> DROP TABLE IF EXISTS gx_guc_nothere
+-- DROP TABLE
+
+> DO $$ BEGIN RAISE NOTICE 'hidden'; RAISE WARNING 'shown'; END $$
+WARNING 01000: shown
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> RESET client_min_messages
+-- RESET
+
+> CREATE FUNCTION gx_guc_f(int) RETURNS text AS $$
+> begin
+>   set local work_mem = '2MB';
+>   return current_setting('work_mem');
+> end $$ LANGUAGE plpgsql SET work_mem = '1MB'
+-- CREATE FUNCTION
+
+> SELECT gx_guc_f(0), current_setting('work_mem')
+gx_guc_f:text | current_setting:text
+2MB | 4MB
+-- SELECT 1
+
+> CREATE OR REPLACE FUNCTION gx_guc_f(int) RETURNS text AS $$
+> begin
+>   set work_mem = '2MB';
+>   perform 1/$1;
+>   return current_setting('work_mem');
+> end $$ LANGUAGE plpgsql SET work_mem = '1MB'
+-- CREATE FUNCTION
+
+> SET work_mem = '3MB'
+-- SET
+
+> SELECT gx_guc_f(0)
+ERROR 22012: division by zero
+CONTEXT: SQL statement "SELECT 1/$1"
+CONTEXT: PL/pgSQL function gx_guc_f(integer) line 4 at PERFORM
+
+> SELECT current_setting('work_mem')
+current_setting:text
+3MB
+-- SELECT 1
+
+> SELECT gx_guc_f(1), current_setting('work_mem')
+gx_guc_f:text | current_setting:text
+2MB | 2MB
+-- SELECT 1
+
+> RESET work_mem
+-- RESET
+
+> DROP FUNCTION gx_guc_f(int)
+-- DROP FUNCTION
+

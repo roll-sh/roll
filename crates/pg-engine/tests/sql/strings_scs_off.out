@@ -1,0 +1,944 @@
+> set standard_conforming_strings = off
+-- SET
+
+> select 'a\nb', 'a\\b', 'it\'s', 'x\tq', 'a''b', 'no esc'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 16)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \' in a string literal (at 24)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+WARNING 22P06: nonstandard use of escape in a string literal (at 33)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+?column?:text | ?column?:text | ?column?:text | ?column?:text | ?column?:text | ?column?:text
+a
+b | a\b | it's | x	q | a'b | no esc
+-- SELECT 1
+
+> select 'a\\b' as x, 'c\d' as y
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 21)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+x:text | y:text
+a\b | cd
+-- SELECT 1
+
+> select E'a\\b', 'a\\b' like 'a\\\\b', 'a\b' like 'a\\b'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 17)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 29)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 39)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 50)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:text | ?column?:bool | ?column?:bool
+a\b | t | f
+-- SELECT 1
+
+> select quote_literal('a\b'), quote_literal(E'a\\b')
+WARNING 22P06: nonstandard use of escape in a string literal (at 22)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+quote_literal:text | quote_literal:text
+'a' | E'a\\b'
+-- SELECT 1
+
+> set escape_string_warning = off
+-- SET
+
+> select 'a\\b'
+?column?:text
+a\b
+-- SELECT 1
+
+> set escape_string_warning = on
+-- SET
+
+> set backslash_quote = off
+-- SET
+
+> select 'it\'s'
+ERROR 22P06: unsafe use of \' in a string literal (at 8)
+HINT: Use '' to write quotes in strings. \' is insecure in client-only encodings.
+
+> select E'it\'s'
+ERROR 22P06: unsafe use of \' in a string literal (at 8)
+HINT: Use '' to write quotes in strings. \' is insecure in client-only encodings.
+
+> set backslash_quote = on
+-- SET
+
+> select 'it\'s'
+WARNING 22P06: nonstandard use of \' in a string literal (at 8)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+?column?:text
+it's
+-- SELECT 1
+
+> set backslash_quote = safe_encoding
+-- SET
+
+> create view gxw_v as select 'a\\b'::text as c, 'x''y' as d, E'\t' as e
+WARNING 22P06: nonstandard use of \\ in a string literal (at 29)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+-- CREATE VIEW
+
+> select pg_get_viewdef('gxw_v'::regclass)
+pg_get_viewdef:text
+ SELECT 'a\\b'::text AS c,
+    'x''y'::text AS d,
+    '	'::text AS e;
+-- SELECT 1
+
+> set standard_conforming_strings = on
+-- SET
+
+> select pg_get_viewdef('gxw_v'::regclass)
+pg_get_viewdef:text
+ SELECT 'a\b'::text AS c,
+    'x''y'::text AS d,
+    '	'::text AS e;
+-- SELECT 1
+
+> select * from gxw_v
+c:text | d:text | e:text
+a\b | x'y | 	
+-- SELECT 1
+
+> drop view gxw_v
+-- DROP VIEW
+
+> show standard_conforming_strings
+standard_conforming_strings:text
+on
+-- SHOW
+
+> set standard_conforming_strings = off
+-- SET
+
+> select '\u0041', 'ab\u0041\n', 'a\U00000042', '\x41\x42', E'\u0041'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 18)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 32)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 47)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+?column?:text | ?column?:text | ?column?:text | ?column?:text | ?column?:text
+A | abA
+ | aB | AB | A
+-- SELECT 1
+
+> select 'a'
+>   'b\n'   'c'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+ERROR 42601: syntax error at or near "'c'" (at 22)
+
+> select 'a'
+> 'b\n'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+?column?:text
+ab
+
+-- SELECT 1
+
+> select 'n', b'101', x'1f', 'a' 
+> 'q\\'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 28)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:text | ?column?:bit | ?column?:bit | ?column?:text
+n | 101 | 00011111 | aq\
+-- SELECT 1
+
+> create function gxw_f1() returns text language plpgsql as $$
+> begin
+>   return 'a\\b' || 'c\nd';
+> end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 77)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 87)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 77)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 87)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+-- CREATE FUNCTION
+
+> select gxw_f1()
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'a\\b' || 'c\nd' (at 1)
+CONTEXT: PL/pgSQL function gxw_f1() line 3 at RETURN
+WARNING 22P06: nonstandard use of escape in a string literal
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+QUERY: 'a\\b' || 'c\nd' (at 11)
+CONTEXT: PL/pgSQL function gxw_f1() line 3 at RETURN
+gxw_f1:text
+a\bc
+d
+-- SELECT 1
+
+> create function gxw_f2() returns text language sql as $$ select 'x\\y' $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 65)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+-- CREATE FUNCTION
+
+> select gxw_f2()
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY:  select 'x\\y'  (at 9)
+CONTEXT: SQL function "gxw_f2" during inlining
+gxw_f2:text
+x\y
+-- SELECT 1
+
+> create function gxw_f3() returns text language sql begin atomic select 'p\\q'; end
+WARNING 22P06: nonstandard use of \\ in a string literal (at 72)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+-- CREATE FUNCTION
+
+> select gxw_f3()
+gxw_f3:text
+p\q
+-- SELECT 1
+
+> select pg_get_functiondef('gxw_f3'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.gxw_f3()
+ RETURNS text
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT 'p\\q'::text;
+END
+
+-- SELECT 1
+
+> set standard_conforming_strings = on
+-- SET
+
+> select gxw_f1(), gxw_f2(), gxw_f3()
+gxw_f1:text | gxw_f2:text | gxw_f3:text
+a\bc
+d | x\\y | p\q
+-- SELECT 1
+
+> select pg_get_functiondef('gxw_f3'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.gxw_f3()
+ RETURNS text
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT 'p\q'::text;
+END
+
+-- SELECT 1
+
+> set standard_conforming_strings = off
+-- SET
+
+> select gxw_f1(), gxw_f2(), gxw_f3()
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY:  select 'x\\y'  (at 9)
+CONTEXT: SQL function "gxw_f2" during inlining
+gxw_f1:text | gxw_f2:text | gxw_f3:text
+a\bc
+d | x\y | p\q
+-- SELECT 1
+
+> do $$ begin raise notice '%', 'r\\s'; end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 31)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 31)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'r\\s' (at 1)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+NOTICE 00000: r\s
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> do $$ begin execute 'select ''e\\x'''; end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 21)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 21)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'select ''e\\x''' (at 1)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+WARNING 22P06: nonstandard use of escape in a string literal
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+QUERY: select 'e\x' (at 8)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+-- DO
+
+> prepare gxw_p as select 'pp\\x' as c
+WARNING 22P06: nonstandard use of \\ in a string literal (at 25)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+-- PREPARE
+
+> execute gxw_p
+c:text
+pp\x
+-- SELECT 1
+
+> select statement from pg_prepared_statements
+statement:text
+prepare gxw_p as select 'pp\\x' as c
+-- SELECT 1
+
+> select 'a\\b' = 'a\\b' as eq, length('a\\b')
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 17)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 38)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+eq:bool | length:int4
+t | 3
+-- SELECT 1
+
+> select 'a\\b'::bytea, '\\x41'::bytea
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 23)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+ERROR 22P02: invalid input syntax for type bytea (at 8)
+
+> select ARRAY['a\\b', 'c\"d']
+WARNING 22P06: nonstandard use of \\ in a string literal (at 14)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 22)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+array:text[]
+{"a\\b","c\"d"}
+-- SELECT 1
+
+> select '{"a\\\\b"}'::text[]
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+text:text[]
+{"a\\b"}
+-- SELECT 1
+
+> select 1  , 'c\\d'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 13)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:int4 | ?column?:text
+1 | c\d
+-- SELECT 1
+
+> drop function gxw_f1(), gxw_f2(), gxw_f3()
+-- DROP FUNCTION
+
+> reset standard_conforming_strings
+-- RESET
+
+> set standard_conforming_strings = off
+-- SET
+
+> select 'a\\b' as x, 'c\d' as y
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 21)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+x:text | y:text
+a\b | cd
+-- SELECT 1
+
+> select 'q\\'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:text
+q\
+-- SELECT 1
+
+> select 'a\\b' +
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+ERROR 42601: syntax error at end of input (at 16)
+
+> select 'a\\b', 'c\\d' frm
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 16)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:text | frm:text
+a\b | c\d
+-- SELECT 1
+
+> select 'x\'y', E'z\'w'
+WARNING 22P06: nonstandard use of \' in a string literal (at 8)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+?column?:text | ?column?:text
+x'y | z'w
+-- SELECT 1
+
+> set backslash_quote = off
+-- SET
+
+> select 'p\\q', 'it\'s'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+ERROR 22P06: unsafe use of \' in a string literal (at 16)
+HINT: Use '' to write quotes in strings. \' is insecure in client-only encodings.
+
+> select E'it\'s'
+ERROR 22P06: unsafe use of \' in a string literal (at 8)
+HINT: Use '' to write quotes in strings. \' is insecure in client-only encodings.
+
+> select 'ok''s'
+?column?:text
+ok's
+-- SELECT 1
+
+> set backslash_quote = on
+-- SET
+
+> select 'it\'s'
+WARNING 22P06: nonstandard use of \' in a string literal (at 8)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+?column?:text
+it's
+-- SELECT 1
+
+> set backslash_quote = safe_encoding
+-- SET
+
+> select 'it\'s'
+WARNING 22P06: nonstandard use of \' in a string literal (at 8)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+?column?:text
+it's
+-- SELECT 1
+
+> select U&'d\0061t'
+ERROR 0A000: unsafe use of string constant with Unicode escapes (at 8)
+DETAIL: String constants with Unicode escapes cannot be used when "standard_conforming_strings" is off.
+
+> select U&"d\0061t" from (select 1) x
+ERROR 42703: column "dat" does not exist (at 8)
+
+> select '\xff'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0xff
+
+> select '\000'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0x00
+
+> select '\u00e9t\xC3\xA9', length('\u00e9t\xC3\xA9')
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 34)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+?column?:text | length:int4
+été | 3
+-- SELECT 1
+
+> select '\uD83D\uDE00', '\U0001F600'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 24)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+?column?:text | ?column?:text
+😀 | 😀
+-- SELECT 1
+
+> select '\uD83D'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+ERROR 42601: invalid Unicode surrogate pair at or near "'" (at 15)
+
+> select '\u12'
+ERROR 22025: invalid Unicode escape (at 9)
+HINT: Unicode escapes must be \uXXXX or \UXXXXXXXX.
+
+> set escape_string_warning = off
+-- SET
+
+> select 'a\\b', 'c\nd'
+?column?:text | ?column?:text
+a\b | c
+d
+-- SELECT 1
+
+> set escape_string_warning = on
+-- SET
+
+> select 'a\\b' like 'a\\\\b', 'a\\b' like 'a\\b' escape ''
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 20)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 30)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 42)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select quote_literal('x\\y'), quote_ident('a\\b'), format('%L', 'p\\q')
+WARNING 22P06: nonstandard use of \\ in a string literal (at 22)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 43)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 65)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+quote_literal:text | quote_ident:text | format:text
+E'x\\y' | "a\b" | E'p\\q'
+-- SELECT 1
+
+> create table gxw_t (a text default 'd\\e', b text check (b <> 'x\\y'))
+WARNING 22P06: nonstandard use of \\ in a string literal (at 36)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 63)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+-- CREATE TABLE
+
+> insert into gxw_t (b) values ('b\\c') returning *
+WARNING 22P06: nonstandard use of \\ in a string literal (at 31)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+a:text | b:text
+d\e | b\c
+-- INSERT 0 1
+
+> select pg_get_expr(adbin, adrelid) from pg_attrdef where adrelid = 'gxw_t'::regclass
+pg_get_expr:text
+'d\\e'::text
+-- SELECT 1
+
+> select pg_get_constraintdef(oid) from pg_constraint where conrelid = 'gxw_t'::regclass
+pg_get_constraintdef:text
+CHECK ((b <> 'x\\y'::text))
+-- SELECT 1
+
+> set standard_conforming_strings = on
+-- SET
+
+> select pg_get_expr(adbin, adrelid) from pg_attrdef where adrelid = 'gxw_t'::regclass
+pg_get_expr:text
+'d\e'::text
+-- SELECT 1
+
+> insert into gxw_t (b) values ('b\c') returning *
+a:text | b:text
+d\e | b\c
+-- INSERT 0 1
+
+> set standard_conforming_strings = off
+-- SET
+
+> copy gxw_t from stdin
+>> x\\y	p\tq
+-- COPY 1
+
+> select * from gxw_t
+a:text | b:text
+d\e | b\c
+d\e | b\c
+x\y | p	q
+-- SELECT 3
+
+> copy gxw_t to stdout
+copy:text
+d\\e	b\\c
+d\\e	b\\c
+x\\y	p\tq
+-- COPY 3
+
+> create function gxw_s1() returns text language sql as 'select ''a\\b'''
+WARNING 22P06: nonstandard use of \\ in a string literal (at 55)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 63)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+-- CREATE FUNCTION
+
+> select gxw_s1(), prosrc from pg_proc where proname = 'gxw_s1'
+WARNING 22P06: nonstandard use of escape in a string literal
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+QUERY: select 'a\b' (at 8)
+CONTEXT: SQL function "gxw_s1" during inlining
+gxw_s1:text | prosrc:text
+a | select 'a\b'
+-- SELECT 1
+
+> create function gxw_s2() returns text language plpgsql as 'begin return ''r\\s''; end'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 59)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 73)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 73)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+-- CREATE FUNCTION
+
+> select gxw_s2()
+WARNING 22P06: nonstandard use of escape in a string literal
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+QUERY: 'r\s' (at 1)
+CONTEXT: PL/pgSQL function gxw_s2() line 1 at RETURN
+gxw_s2:text
+rs
+-- SELECT 1
+
+> create view gxw_v2 as select 'v\\w' as c, E'\\' as d where 'k\\' <> ''
+WARNING 22P06: nonstandard use of \\ in a string literal (at 30)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 60)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+-- CREATE VIEW
+
+> select pg_get_viewdef('gxw_v2')
+pg_get_viewdef:text
+ SELECT 'v\\w'::text AS c,
+    '\\'::text AS d
+  WHERE ('k\\'::text <> ''::text);
+-- SELECT 1
+
+> select * from gxw_v2
+c:text | d:text
+v\w | \
+-- SELECT 1
+
+> create view gxw_v3 as select a from gxw_t where a like 'q\\_%' and b <> 'p''\\'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 56)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 73)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+-- CREATE VIEW
+
+> explain (costs off) select * from gxw_t where a = 'x\\y' and b ~ '\\d'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 51)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 66)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY PLAN:text
+Seq Scan on gxw_t
+  Filter: ((b ~ '\\d'::text) AND (a = 'x\\y'::text))
+-- EXPLAIN
+
+> explain (costs off, verbose) select a || '\\' from gxw_t
+WARNING 22P06: nonstandard use of \\ in a string literal (at 42)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY PLAN:text
+Seq Scan on public.gxw_t
+  Output: (a || '\\'::text)
+-- EXPLAIN
+
+> select definition from pg_views where viewname = 'gxw_v3'
+definition:text
+ SELECT a
+   FROM gxw_t
+  WHERE ((a ~~ 'q\\_%'::text) AND (b <> 'p''\\'::text));
+-- SELECT 1
+
+> drop view gxw_v3
+-- DROP VIEW
+
+> set standard_conforming_strings = on
+-- SET
+
+> select pg_get_viewdef('gxw_v2')
+pg_get_viewdef:text
+ SELECT 'v\w'::text AS c,
+    '\'::text AS d
+  WHERE ('k\'::text <> ''::text);
+-- SELECT 1
+
+> select * from gxw_v2
+c:text | d:text
+v\w | \
+-- SELECT 1
+
+> set standard_conforming_strings = off
+-- SET
+
+> do $$ begin raise notice 'msg \\ %', 'arg\\'; end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 26)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 38)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 38)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'arg\\' (at 1)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+NOTICE 00000: msg \ arg\
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> do $$ declare v text := 'i\\j'; begin raise notice '%', v; end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 25)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 25)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'i\\j' (at 1)
+CONTEXT: PL/pgSQL function inline_code_block line 1 during statement block local variable initialization
+NOTICE 00000: i\j
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> select 'end\\'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 8)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:text
+end\
+-- SELECT 1
+
+> drop view gxw_v2
+-- DROP VIEW
+
+> drop function gxw_s1(), gxw_s2()
+-- DROP FUNCTION
+
+> drop table gxw_t
+-- DROP TABLE
+
+> show standard_conforming_strings
+standard_conforming_strings:text
+off
+-- SHOW
+
+> reset standard_conforming_strings
+-- RESET
+
+> select 'a\\b'
+?column?:text
+a\\b
+-- SELECT 1
+
+> set standard_conforming_strings = off
+-- SET
+
+> create function gxw_p1(x text) returns text language plpgsql as $$
+> declare
+>   v text := 'd\\e';
+> begin
+>   raise notice 'fmt\\ %', x;
+>   if x = 'c\\d' then
+>     return v || 'x\ny';
+>   end if;
+>   perform 'p\\q';
+>   return 'it\'s';
+> end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 88)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 88)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 117)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 140)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 140)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 168)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 168)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 196)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 196)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \' in a string literal (at 213)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+WARNING 22P06: nonstandard use of \' in a string literal (at 213)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+-- CREATE FUNCTION
+
+> select gxw_p1('c\\d')
+WARNING 22P06: nonstandard use of \\ in a string literal (at 15)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 22)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+CONTEXT: compilation of PL/pgSQL function "gxw_p1" near line 3
+WARNING 22P06: nonstandard use of \\ in a string literal (at 51)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+CONTEXT: compilation of PL/pgSQL function "gxw_p1" near line 5
+WARNING 22P06: nonstandard use of \\ in a string literal (at 74)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+CONTEXT: compilation of PL/pgSQL function "gxw_p1" near line 5
+WARNING 22P06: nonstandard use of escape in a string literal (at 102)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+CONTEXT: compilation of PL/pgSQL function "gxw_p1" near line 7
+WARNING 22P06: nonstandard use of \\ in a string literal (at 130)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+CONTEXT: compilation of PL/pgSQL function "gxw_p1" near line 6
+WARNING 22P06: nonstandard use of \' in a string literal (at 147)
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+CONTEXT: compilation of PL/pgSQL function "gxw_p1" near line 9
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: 'd\\e' (at 1)
+CONTEXT: PL/pgSQL function gxw_p1(text) line 3 during statement block local variable initialization
+NOTICE 00000: fmt\ c\d
+CONTEXT: PL/pgSQL function gxw_p1(text) line 5 at RAISE
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: x = 'c\\d' (at 5)
+CONTEXT: PL/pgSQL function gxw_p1(text) line 6 at IF
+WARNING 22P06: nonstandard use of escape in a string literal
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+QUERY: v || 'x\ny' (at 6)
+CONTEXT: PL/pgSQL function gxw_p1(text) line 7 at RETURN
+gxw_p1:text
+d\ex
+y
+-- SELECT 1
+
+> select gxw_p1('z')
+NOTICE 00000: fmt\ z
+CONTEXT: PL/pgSQL function gxw_p1(text) line 5 at RAISE
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: SELECT 'p\\q' (at 8)
+CONTEXT: PL/pgSQL function gxw_p1(text) line 9 at PERFORM
+WARNING 22P06: nonstandard use of \' in a string literal
+HINT: Use '' to write quotes in strings, or use the escape string syntax (E'...').
+QUERY: 'it\'s' (at 1)
+CONTEXT: PL/pgSQL function gxw_p1(text) line 10 at RETURN
+gxw_p1:text
+it's
+-- SELECT 1
+
+> select gxw_p1('z')
+NOTICE 00000: fmt\ z
+CONTEXT: PL/pgSQL function gxw_p1(text) line 5 at RAISE
+gxw_p1:text
+it's
+-- SELECT 1
+
+> create function gxw_p2() returns text language plpgsql as 'begin return ''a\\b''; end'
+WARNING 22P06: nonstandard use of \\ in a string literal (at 59)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 73)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of escape in a string literal (at 73)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+-- CREATE FUNCTION
+
+> select gxw_p2()
+WARNING 22P06: nonstandard use of escape in a string literal
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+QUERY: 'a\b' (at 1)
+CONTEXT: PL/pgSQL function gxw_p2() line 1 at RETURN
+gxw_p2:text
+a
+-- SELECT 1
+
+> create function gxw_p3() returns int language plpgsql as $$ begin return 'x\\y' + ; end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 74)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 74)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+ERROR 42601: syntax error at end of input (at 82)
+
+> do $$ declare r text; begin execute format('select %L', 'q\\r') into r; raise notice '%', r; end $$
+WARNING 22P06: nonstandard use of \\ in a string literal (at 57)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 57)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+WARNING 22P06: nonstandard use of \\ in a string literal
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+QUERY: format('select %L', 'q\\r') (at 21)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+NOTICE 00000: q\r
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> set escape_string_warning = off
+-- SET
+
+> create function gxw_p4() returns text language plpgsql as $$ begin return 'w\\x'; end $$
+-- CREATE FUNCTION
+
+> select gxw_p4()
+gxw_p4:text
+w\x
+-- SELECT 1
+
+> drop function gxw_p1(text), gxw_p2(), gxw_p4()
+-- DROP FUNCTION
+
+> do $$
+> declare
+>   a int := 1;
+>   b int := 1/0;
+> begin
+>   null;
+> end $$
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL expression "1/0"
+CONTEXT: PL/pgSQL function inline_code_block line 4 during statement block local variable initialization
+
+> do $$
+> declare a int := 1; b int := 1/0;
+> begin
+>   null;
+> end $$
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL expression "1/0"
+CONTEXT: PL/pgSQL function inline_code_block line 2 during statement block local variable initialization
+
+> do $$
+> <<lbl>>
+> declare
+>   a int := 1;
+> begin
+>   declare
+>     c int :=
+>      1/0;
+>   begin
+>   end;
+> end $$
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL expression "1/0"
+CONTEXT: PL/pgSQL function inline_code_block line 7 during statement block local variable initialization
+
+> SELECT U&'wrong: \061'
+ERROR 0A000: unsafe use of string constant with Unicode escapes (at 8)
+DETAIL: String constants with Unicode escapes cannot be used when "standard_conforming_strings" is off.
+
+> SELECT U&'wrong: \+0061'
+ERROR 0A000: unsafe use of string constant with Unicode escapes (at 8)
+DETAIL: String constants with Unicode escapes cannot be used when "standard_conforming_strings" is off.
+
+> SELECT E'wrong: \u061'
+ERROR 22025: invalid Unicode escape (at 17)
+HINT: Unicode escapes must be \uXXXX or \UXXXXXXXX.
+
+> SELECT E'wrong: \U0061'
+ERROR 22025: invalid Unicode escape (at 17)
+HINT: Unicode escapes must be \uXXXX or \UXXXXXXXX.
+
+> SET standard_conforming_strings TO off
+-- SET
+
+> SELECT U&'d\0061t\+000061' AS U&"d\0061t\+000061"
+ERROR 0A000: unsafe use of string constant with Unicode escapes (at 8)
+DETAIL: String constants with Unicode escapes cannot be used when "standard_conforming_strings" is off.
+
+> SELECT U&'d!0061t\+000061' UESCAPE '!' AS U&"d*0061t\+000061" UESCAPE '*'
+ERROR 0A000: unsafe use of string constant with Unicode escapes (at 8)
+DETAIL: String constants with Unicode escapes cannot be used when "standard_conforming_strings" is off.
+
+> SELECT U&' \' UESCAPE '!' AS "tricky";
+> SELECT 'tricky' AS U&"\" UESCAPE '!';
+> SELECT U&'wrong: \061';
+> SELECT U&'wrong: \+0061';
+> SELECT U&'wrong: +0061' UESCAPE '+';
+> RESET standard_conforming_strings;
+ERROR 0A000: unsafe use of string constant with Unicode escapes (at 8)
+DETAIL: String constants with Unicode escapes cannot be used when "standard_conforming_strings" is off.
+

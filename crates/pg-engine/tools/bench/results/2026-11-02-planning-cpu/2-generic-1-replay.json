@@ -1,0 +1,26 @@
+{
+  "synthetic_replay_only": true,
+  "original": "/home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/capture-20261102T022538Z/2-generic-1.data",
+  "original_sha256": "d32ab88a9b43c30b5a6dee0964848ffbf785c1590ff1fdadbb88fb18d4c213b4",
+  "binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+  "binary_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "replay_sha256": "27ef484f5045d7f37cec766183231f53098a209b9e9f08ccdb9f2048d79d608a",
+  "changes": [
+    {
+      "record_offset": 30352,
+      "old_pgoff": 28647424,
+      "new_pgoff": 28651520
+    },
+    {
+      "record_offset": 30536,
+      "old_pgoff": 69271552,
+      "new_pgoff": 69279744
+    },
+    {
+      "record_offset": 30720,
+      "old_pgoff": 72540160,
+      "new_pgoff": 72552448
+    }
+  ],
+  "warning": "Consume raw IPs only. Replay symbol labels are shifted. Resolve IPs through original mappings/ELF."
+}

@@ -1,0 +1,269 @@
+> CREATE TABLE a6_big (unique1 int, two int, four int, ten int, twenty int, hundred int,
+>   thousand int, fivethous int, tenthous int, filler text)
+-- CREATE TABLE
+
+> INSERT INTO a6_big SELECT i, i % 2, i % 4, i % 10, i % 20, i % 100, i % 1000, i % 5000,
+>   (i * 7) % 10000, repeat('x', 100) FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX a6_big_unique1 ON a6_big (unique1)
+-- CREATE INDEX
+
+> CREATE INDEX a6_big_hundred ON a6_big (hundred)
+-- CREATE INDEX
+
+> ANALYZE a6_big
+-- ANALYZE
+
+> CREATE TABLE a6_part (a int, b int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a6_part_p1 PARTITION OF a6_part FOR VALUES FROM (minvalue) TO (0)
+-- CREATE TABLE
+
+> CREATE TABLE a6_part_p2 PARTITION OF a6_part FOR VALUES FROM (0) TO (maxvalue)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 4
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT (SELECT max((SELECT p1.b FROM a6_part p1 WHERE p1.a = p2.a))) FROM a6_part p2
+QUERY PLAN:text
+Aggregate
+  ->  Gather
+        Workers Planned: 3
+        ->  Parallel Append
+              ->  Parallel Seq Scan on a6_part_p1 p2_1
+              ->  Parallel Seq Scan on a6_part_p2 p2_2
+  SubPlan 2
+    ->  Result
+  SubPlan 1
+    ->  Append
+          ->  Seq Scan on a6_part_p1 p1_1
+                Filter: (a = p2.a)
+          ->  Seq Scan on a6_part_p2 p1_2
+                Filter: (a = p2.a)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(unique1) FROM a6_big
+>   WHERE ten = ANY ((SELECT array_agg(i) FROM generate_series(1, 100, 15) i)::int[])
+QUERY PLAN:text
+Finalize Aggregate
+  InitPlan 1
+    ->  Aggregate
+          ->  Function Scan on generate_series i
+  ->  Gather
+        Workers Planned: 4
+        ->  Partial Aggregate
+              ->  Parallel Seq Scan on a6_big
+                    Filter: (ten = ANY ((InitPlan 1).col1))
+-- EXPLAIN
+
+> SELECT count(unique1) FROM a6_big
+>   WHERE hundred = ANY ((SELECT array_agg(i) FROM generate_series(1, 100, 15) i)::int[])
+count:int8
+700
+-- SELECT 1
+
+> CREATE FUNCTION a6_simple(v int) RETURNS int AS $$ BEGIN RETURN v + 10; END; $$
+>   LANGUAGE plpgsql PARALLEL SAFE
+-- CREATE FUNCTION
+
+> EXPLAIN (COSTS OFF, VERBOSE)
+> SELECT ten, a6_simple(ten) FROM a6_big WHERE ten < 100 ORDER BY ten
+QUERY PLAN:text
+Gather Merge
+  Output: ten, (a6_simple(ten))
+  Workers Planned: 4
+  ->  Result
+        Output: ten, a6_simple(ten)
+        ->  Sort
+              Output: ten
+              Sort Key: a6_big.ten
+              ->  Parallel Seq Scan on public.a6_big
+                    Output: ten
+                    Filter: (a6_big.ten < 100)
+-- EXPLAIN
+
+> EXPLAIN SELECT ten, a6_simple(ten) FROM a6_big WHERE ten < 100 ORDER BY ten
+QUERY PLAN:text
+Gather Merge  (cost=385.40..3032.75 rows=10000 width=8)
+  Workers Planned: 4
+  ->  Result  (cost=385.35..1041.60 rows=2500 width=8)
+        ->  Sort  (cost=385.35..391.60 rows=2500 width=4)
+              Sort Key: ten
+              ->  Parallel Seq Scan on a6_big  (cost=0.00..244.25 rows=2500 width=4)
+                    Filter: (ten < 100)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT unique1 FROM a6_big WHERE fivethous = tenthous + 1
+> UNION ALL
+> SELECT unique1 FROM a6_big WHERE fivethous = tenthous + 1
+QUERY PLAN:text
+Gather
+  Workers Planned: 4
+  ->  Parallel Append
+        ->  Parallel Seq Scan on a6_big
+              Filter: (fivethous = (tenthous + 1))
+        ->  Parallel Seq Scan on a6_big a6_big_1
+              Filter: (fivethous = (tenthous + 1))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT unique1 FROM a6_big WHERE fivethous = tenthous + 1
+QUERY PLAN:text
+Gather
+  Workers Planned: 4
+  ->  Parallel Seq Scan on a6_big
+        Filter: (fivethous = (tenthous + 1))
+-- EXPLAIN
+
+> EXPLAIN SELECT count(*) FROM a6_big GROUP BY twenty, two + 0
+QUERY PLAN:text
+Finalize HashAggregate  (cost=264.70..265.20 rows=40 width=16)
+  Group Key: twenty, ((two + 0))
+  ->  Gather  (cost=263.00..263.50 rows=160 width=16)
+        Workers Planned: 4
+        ->  Partial HashAggregate  (cost=263.00..263.50 rows=40 width=16)
+              Group Key: twenty, (two + 0)
+              ->  Parallel Seq Scan on a6_big  (cost=0.00..244.25 rows=2500 width=8)
+-- EXPLAIN
+
+> SELECT count(*) FROM a6_big GROUP BY twenty, two + 0 ORDER BY 1 LIMIT 3
+count:int8
+500
+500
+500
+-- SELECT 3
+
+> CREATE FUNCTION a6_safe_volatile(a int) RETURNS int AS $$ BEGIN RETURN a; END; $$
+>   PARALLEL SAFE VOLATILE LANGUAGE plpgsql
+-- CREATE FUNCTION
+
+> EXPLAIN SELECT count(*) FROM a6_big GROUP BY twenty, a6_safe_volatile(two)
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=893.27..907.23 rows=40 width=16)
+  Group Key: twenty, (a6_safe_volatile(two))
+  ->  Gather Merge  (cost=893.27..895.63 rows=160 width=16)
+        Workers Planned: 4
+        ->  Sort  (cost=893.21..893.31 rows=40 width=16)
+              Sort Key: twenty, (a6_safe_volatile(two))
+              ->  Partial HashAggregate  (cost=881.75..892.15 rows=40 width=16)
+                    Group Key: twenty, a6_safe_volatile(two)
+                    ->  Parallel Seq Scan on a6_big  (cost=0.00..863.00 rows=2500 width=8)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a6_big WHERE four = 2 ORDER BY four, hundred, a6_safe_volatile(thousand)
+QUERY PLAN:text
+Gather Merge
+  Workers Planned: 4
+  ->  Sort
+        Sort Key: hundred, (a6_safe_volatile(thousand))
+        ->  Parallel Seq Scan on a6_big
+              Filter: (four = 2)
+-- EXPLAIN
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE FUNCTION a6_sort_stats() RETURNS SETOF text LANGUAGE plpgsql AS $$
+> DECLARE ln text;
+> BEGIN
+>   FOR ln IN
+>     EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF, BUFFERS OFF)
+>       SELECT * FROM (SELECT ten FROM a6_big WHERE ten < 100 ORDER BY ten) ss
+>       RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true
+>   LOOP
+>     ln := regexp_replace(ln, 'Memory: \S*', 'Memory: xxx');
+>     RETURN NEXT ln;
+>   END LOOP;
+> END;
+> $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 4
+-- SET
+
+> SET LOCAL enable_indexscan = off
+-- SET
+
+> SET LOCAL enable_hashjoin = off
+-- SET
+
+> SET LOCAL enable_mergejoin = off
+-- SET
+
+> SET LOCAL enable_material = off
+-- SET
+
+> SELECT * FROM a6_sort_stats()
+a6_sort_stats:text
+                    Filter: (ten < 100)
+              ->  Parallel Seq Scan on a6_big (actual rows=2000.00 loops=15)
+              Sort Key: a6_big.ten
+              Sort Method: quicksort  Memory: xxx
+              Worker 0:  Sort Method: quicksort  Memory: xxx
+              Worker 1:  Sort Method: quicksort  Memory: xxx
+              Worker 2:  Sort Method: quicksort  Memory: xxx
+              Worker 3:  Sort Method: quicksort  Memory: xxx
+        ->  Sort (actual rows=2000.00 loops=15)
+        Workers Launched: 4
+        Workers Planned: 4
+  ->  Gather Merge (actual rows=10000.00 loops=3)
+  ->  Values Scan on "*VALUES*" (actual rows=3.00 loops=1)
+Nested Loop Left Join (actual rows=30000.00 loops=1)
+-- SELECT 14
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP FUNCTION a6_sort_stats()
+-- DROP FUNCTION
+
+> SELECT count(*) FROM a6_big a WHERE unique1 IN (SELECT row_number() OVER () FROM a6_big b)
+count:int8
+9999
+-- SELECT 1
+
+> SELECT count(*) FROM a6_big a WHERE (unique1, two) IN (SELECT unique1, row_number() OVER () FROM a6_big b)
+count:int8
+0
+-- SELECT 1
+
+> EXPLAIN SELECT count(*) FROM a6_big GROUP BY twenty, two + 0
+QUERY PLAN:text
+HashAggregate  (cost=413.00..413.50 rows=40 width=16)
+  Group Key: twenty, (two + 0)
+  ->  Seq Scan on a6_big  (cost=0.00..338.00 rows=10000 width=8)
+-- EXPLAIN
+
+> DROP TABLE a6_big, a6_part
+-- DROP TABLE
+

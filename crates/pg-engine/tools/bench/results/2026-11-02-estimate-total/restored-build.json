@@ -1,0 +1,19 @@
+{
+  "at_utc": "2026-11-02T03:19:18.321500+00:00",
+  "source": "7cdbee001d3e2753e19975993a8b62c3083f4817",
+  "src_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "command": "cargo build --release -p pg-engine --bin roll-engine --example bench --example scan_bench",
+  "exit": 0,
+  "target_engine_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "verified_baseline_engine_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "binary_identical_to_verified_baseline": true,
+  "build_environment": {
+    "TMPDIR": "/home/meszmate/.cache/pg-engine-perf-20261102/estimate-total/tmp",
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only"
+  },
+  "earlier_bin_only_restore": "bin-only-restored-build.json",
+  "interpretation": "Matching the baseline selected Cargo targets restores exact baseline executable bytes. The earlier candidate binary comparison selected different targets and does not isolate source changes."
+}

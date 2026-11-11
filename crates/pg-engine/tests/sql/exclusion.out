@@ -1,0 +1,391 @@
+> CREATE TABLE ex1 (id int, r int4range, EXCLUDE USING gist (r WITH &&))
+-- CREATE TABLE
+
+> INSERT INTO ex1 VALUES (1, '[1,5)'), (2, '[5,10)')
+-- INSERT 0 2
+
+> INSERT INTO ex1 VALUES (3, '[3,6)')
+ERROR 23P01: conflicting key value violates exclusion constraint "ex1_r_excl"
+DETAIL: Key (r)=([3,6)) conflicts with existing key (r)=([1,5)).
+OBJECTS: schema=public table=ex1 constraint=ex1_r_excl
+
+> INSERT INTO ex1 VALUES (4, NULL), (5, NULL)
+-- INSERT 0 2
+
+> UPDATE ex1 SET r = '[4,7)' WHERE id = 2
+ERROR 23P01: conflicting key value violates exclusion constraint "ex1_r_excl"
+DETAIL: Key (r)=([4,7)) conflicts with existing key (r)=([1,5)).
+OBJECTS: schema=public table=ex1 constraint=ex1_r_excl
+
+> UPDATE ex1 SET r = '[1,4)' WHERE id = 1
+-- UPDATE 1
+
+> UPDATE ex1 SET id = 10 WHERE id = 2
+-- UPDATE 1
+
+> SELECT * FROM ex1 ORDER BY id
+id:int4 | r:3904
+1 | [1,4)
+4 | NULL
+5 | NULL
+10 | [5,10)
+-- SELECT 4
+
+> SELECT conname, contype, conexclop::regoper[], conkey, conindid::regclass, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ex1'::regclass
+conname:name | contype:char | conexclop:2208 | conkey:int2[] | conindid:regclass | pg_get_constraintdef:text
+ex1_r_excl | x | {pg_catalog.&&} | {2} | ex1_r_excl | EXCLUDE USING gist (r WITH &&)
+-- SELECT 1
+
+> SELECT indexrelid::regclass, indisunique, indisexclusion, indimmediate, pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 'ex1'::regclass
+indexrelid:regclass | indisunique:bool | indisexclusion:bool | indimmediate:bool | pg_get_indexdef:text
+ex1_r_excl | f | t | t | CREATE INDEX ex1_r_excl ON public.ex1 USING gist (r)
+-- SELECT 1
+
+> SELECT c2.relname, i.indisprimary, i.indisunique, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true), pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x')) WHERE c.oid = 'ex1'::regclass AND c.oid = i.indrelid AND i.indexrelid = c2.oid ORDER BY i.indisprimary DESC, c2.relname
+relname:name | indisprimary:bool | indisunique:bool | pg_get_indexdef:text | pg_get_constraintdef:text | contype:char | condeferrable:bool | condeferred:bool
+ex1_r_excl | f | f | CREATE INDEX ex1_r_excl ON ex1 USING gist (r) | EXCLUDE USING gist (r WITH &&) | x | f | f
+-- SELECT 1
+
+> SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'ex1'
+constraint_name:name | constraint_type:varchar
+-- SELECT 0
+
+> CREATE TABLE ex2 (a int, EXCLUDE (a WITH =))
+-- CREATE TABLE
+
+> INSERT INTO ex2 VALUES (1), (1)
+ERROR 23P01: conflicting key value violates exclusion constraint "ex2_a_excl"
+DETAIL: Key (a)=(1) conflicts with existing key (a)=(1).
+OBJECTS: schema=public table=ex2 constraint=ex2_a_excl
+
+> INSERT INTO ex2 VALUES (1), (2)
+-- INSERT 0 2
+
+> INSERT INTO ex2 VALUES (1)
+ERROR 23P01: conflicting key value violates exclusion constraint "ex2_a_excl"
+DETAIL: Key (a)=(1) conflicts with existing key (a)=(1).
+OBJECTS: schema=public table=ex2 constraint=ex2_a_excl
+
+> INSERT INTO ex2 VALUES (1) ON CONFLICT DO NOTHING
+-- INSERT 0 0
+
+> INSERT INTO ex2 VALUES (3), (3) ON CONFLICT DO NOTHING
+-- INSERT 0 1
+
+> SELECT * FROM ex2 ORDER BY a
+a:int4
+1
+2
+3
+-- SELECT 3
+
+> CREATE TABLE ex3 (a int, EXCLUDE (a WITH <>))
+ERROR 42809: operator <>(integer,integer) is not a member of operator family "integer_ops"
+DETAIL: The exclusion operator must be related to the index operator class for the constraint.
+
+> CREATE TABLE ex3 (a int, EXCLUDE (a WITH <))
+ERROR 42809: operator <(integer,integer) is not commutative
+DETAIL: Only commutative operators can be used in exclusion constraints.
+
+> CREATE TABLE ex3 (a int, EXCLUDE USING gist (a WITH =))
+ERROR 42704: data type integer has no default operator class for access method "gist"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> CREATE TABLE ex3 (a int[], EXCLUDE USING gin (a WITH &&))
+ERROR 0A000: access method "gin" does not support exclusion constraints
+
+> CREATE TABLE ex3 (a int, EXCLUDE (a WITH &&))
+ERROR 42883: operator does not exist: integer && integer
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE TABLE ex3 (a int, EXCLUDE USING nope (a WITH =))
+ERROR 42704: access method "nope" does not exist
+
+> CREATE TABLE ex3 (a int, EXCLUDE USING gist (nope WITH &&))
+ERROR 42703: column "nope" named in key does not exist
+
+> CREATE TABLE ex3 (a int4range, EXCLUDE USING gist (a WITH !!))
+ERROR 42883: operator does not exist: int4range !! int4range
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE TABLE ex3 (a int, b int, EXCLUDE USING hash (a WITH =) WHERE (b > 0))
+-- CREATE TABLE
+
+> INSERT INTO ex3 VALUES (1, 1), (1, 0), (1, -1), (2, 5)
+-- INSERT 0 4
+
+> INSERT INTO ex3 VALUES (1, 5)
+ERROR 23P01: conflicting key value violates exclusion constraint "ex3_a_excl"
+DETAIL: Key (a)=(1) conflicts with existing key (a)=(1).
+OBJECTS: schema=public table=ex3 constraint=ex3_a_excl
+
+> SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ex3'::regclass
+pg_get_constraintdef:text
+EXCLUDE USING hash (a WITH =) WHERE ((b > 0))
+-- SELECT 1
+
+> INSERT INTO ex3 VALUES (1, 5) ON CONFLICT DO NOTHING
+-- INSERT 0 0
+
+> INSERT INTO ex3 VALUES (1, 5) ON CONFLICT ON CONSTRAINT ex3_a_excl DO NOTHING
+-- INSERT 0 0
+
+> INSERT INTO ex3 VALUES (1, 5) ON CONFLICT ON CONSTRAINT ex3_a_excl DO UPDATE SET b = 1
+ERROR 42809: ON CONFLICT DO UPDATE not supported with exclusion constraints
+
+> INSERT INTO ex3 VALUES (1, 5) ON CONFLICT (a) DO NOTHING
+ERROR 42P10: there is no unique or exclusion constraint matching the ON CONFLICT specification
+
+> SELECT count(*) FROM ex3
+count:int8
+4
+-- SELECT 1
+
+> CREATE TABLE ex4 (p box, q box, CONSTRAINT nope EXCLUDE USING gist (p WITH &&, q WITH ~=) DEFERRABLE INITIALLY DEFERRED)
+-- CREATE TABLE
+
+> SELECT pg_get_constraintdef(oid), condeferrable, condeferred FROM pg_constraint WHERE conname = 'nope'
+pg_get_constraintdef:text | condeferrable:bool | condeferred:bool
+EXCLUDE USING gist (p WITH &&, q WITH ~=) DEFERRABLE INITIALLY DEFERRED | t | t
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO ex4 VALUES ('(0,0),(1,1)', '(0,0),(1,1)'), ('(0,0),(2,2)', '(0,0),(1,1)')
+-- INSERT 0 2
+
+> SELECT count(*) FROM ex4
+count:int8
+2
+-- SELECT 1
+
+> COMMIT
+ERROR 23P01: conflicting key value violates exclusion constraint "nope"
+DETAIL: Key (p, q)=((2,2),(0,0), (1,1),(0,0)) conflicts with existing key (p, q)=((1,1),(0,0), (1,1),(0,0)).
+OBJECTS: schema=public table=ex4 constraint=nope
+
+> BEGIN
+-- BEGIN
+
+> SET CONSTRAINTS nope IMMEDIATE
+-- SET CONSTRAINTS
+
+> INSERT INTO ex4 VALUES ('(0,0),(1,1)', '(0,0),(1,1)'), ('(0,0),(2,2)', '(0,0),(1,1)')
+ERROR 23P01: conflicting key value violates exclusion constraint "nope"
+DETAIL: Key (p, q)=((2,2),(0,0), (1,1),(0,0)) conflicts with existing key (p, q)=((1,1),(0,0), (1,1),(0,0)).
+OBJECTS: schema=public table=ex4 constraint=nope
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO ex4 VALUES ('(0,0),(1,1)', '(0,0),(1,1)'), ('(0,0),(2,2)', '(0,0),(1,1)')
+-- INSERT 0 2
+
+> SET CONSTRAINTS nope IMMEDIATE
+ERROR 23P01: conflicting key value violates exclusion constraint "nope"
+DETAIL: Key (p, q)=((2,2),(0,0), (1,1),(0,0)) conflicts with existing key (p, q)=((1,1),(0,0), (1,1),(0,0)).
+OBJECTS: schema=public table=ex4 constraint=nope
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO ex4 VALUES ('(0,0),(1,1)', '(0,0),(1,1)'), ('(0,0),(2,2)', '(0,0),(1,1)')
+-- INSERT 0 2
+
+> DELETE FROM ex4 WHERE p ~= '(0,0),(2,2)'
+-- DELETE 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM ex4
+p:603 | q:603
+(1,1),(0,0) | (1,1),(0,0)
+-- SELECT 1
+
+> CREATE TABLE ex6 (c circle, EXCLUDE USING gist (c WITH &&) INCLUDE (c) WITH (fillfactor = 70))
+-- CREATE TABLE
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ex6'::regclass
+conname:name | pg_get_constraintdef:text
+ex6_c_c1_excl | EXCLUDE USING gist (c WITH &&) INCLUDE (c) WITH (fillfactor='70')
+-- SELECT 1
+
+> SELECT pg_get_indexdef(conindid) FROM pg_constraint WHERE conrelid = 'ex6'::regclass
+pg_get_indexdef:text
+CREATE INDEX ex6_c_c1_excl ON public.ex6 USING gist (c) INCLUDE (c) WITH (fillfactor='70')
+-- SELECT 1
+
+> CREATE TABLE ex6b (c circle, EXCLUDE USING gist (c WITH &&) WITH (fillfactor = 5))
+ERROR 22023: value 5 out of bounds for option "fillfactor"
+DETAIL: Valid values are between "10" and "100".
+
+> CREATE TABLE ex6b (c circle, EXCLUDE USING gist (c WITH &&) WITH (nope = 5))
+ERROR 22023: unrecognized parameter "nope"
+
+> CREATE TABLE ex7 (r int4range, EXCLUDE USING gist (int4range(lower(r), upper(r) + 1) WITH &&), EXCLUDE USING spgist (r WITH &&))
+-- CREATE TABLE
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ex7'::regclass ORDER BY 1
+conname:name | pg_get_constraintdef:text
+ex7_int4range_excl | EXCLUDE USING gist (int4range(lower(r), (upper(r) + 1)) WITH &&)
+ex7_r_excl | EXCLUDE USING spgist (r WITH &&)
+-- SELECT 2
+
+> INSERT INTO ex7 VALUES ('[1,3)')
+-- INSERT 0 1
+
+> INSERT INTO ex7 VALUES ('[3,4)')
+ERROR 23P01: conflicting key value violates exclusion constraint "ex7_int4range_excl"
+DETAIL: Key (int4range(lower(r), upper(r) + 1))=([3,5)) conflicts with existing key (int4range(lower(r), upper(r) + 1))=([1,4)).
+OBJECTS: schema=public table=ex7 constraint=ex7_int4range_excl
+
+> INSERT INTO ex7 VALUES ('[3,5)'), ('[4,5)')
+ERROR 23P01: conflicting key value violates exclusion constraint "ex7_int4range_excl"
+DETAIL: Key (int4range(lower(r), upper(r) + 1))=([3,6)) conflicts with existing key (int4range(lower(r), upper(r) + 1))=([1,4)).
+OBJECTS: schema=public table=ex7 constraint=ex7_int4range_excl
+
+> CREATE TABLE ex8 (r int4range, s text, EXCLUDE USING gist (r WITH &&, s WITH =))
+ERROR 42704: data type text has no default operator class for access method "gist"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> CREATE TABLE ex8 (r int4range, EXCLUDE USING gist (r WITH &&) DEFERRABLE)
+-- CREATE TABLE
+
+> INSERT INTO ex8 VALUES ('[1,3)')
+-- INSERT 0 1
+
+> UPDATE ex8 SET r = '[1,4)'
+-- UPDATE 1
+
+> INSERT INTO ex8 VALUES ('[1,3)') ON CONFLICT DO NOTHING
+ERROR 55000: ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters
+OBJECTS: schema=public table=ex8 constraint=ex8_r_excl
+
+> INSERT INTO ex8 VALUES ('[8,9)'), ('[8,9)')
+ERROR 23P01: conflicting key value violates exclusion constraint "ex8_r_excl"
+DETAIL: Key (r)=([8,9)) conflicts with existing key (r)=([8,9)).
+OBJECTS: schema=public table=ex8 constraint=ex8_r_excl
+
+> INSERT INTO ex8 VALUES ('[8,9)'), ('[9,10)')
+-- INSERT 0 2
+
+> SELECT * FROM ex8 ORDER BY r
+r:3904
+[1,4)
+[8,9)
+[9,10)
+-- SELECT 3
+
+> CREATE TABLE ex10 (a int, EXCLUDE USING btree (a DESC NULLS LAST WITH =))
+-- CREATE TABLE
+
+> CREATE TABLE ex11 (a int, EXCLUDE (a text_ops WITH =))
+ERROR 42804: operator class "text_ops" does not accept data type integer
+
+> CREATE TABLE ex11 (a text, EXCLUDE (a COLLATE "C" WITH =))
+-- CREATE TABLE
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN ('ex10'::regclass, 'ex11'::regclass) ORDER BY 1
+conname:name | pg_get_constraintdef:text
+ex10_a_excl | EXCLUDE USING btree (a DESC NULLS LAST WITH =)
+ex11_a_excl | EXCLUDE USING btree (a COLLATE "C" WITH =)
+-- SELECT 2
+
+> CREATE TABLE ex5 (r int4range, s text)
+-- CREATE TABLE
+
+> INSERT INTO ex5 VALUES ('[1,5)', 'a'), ('[2,3)', 'b')
+-- INSERT 0 2
+
+> ALTER TABLE ex5 ADD CONSTRAINT x5 EXCLUDE USING gist (r WITH &&)
+ERROR 23P01: could not create exclusion constraint "x5"
+DETAIL: Key (r)=([1,5)) conflicts with key (r)=([2,3)).
+OBJECTS: schema=public table=ex5 constraint=x5
+
+> ALTER TABLE ex5 ADD EXCLUDE USING gist (r WITH =) WHERE (s = 'zz')
+-- ALTER TABLE
+
+> ALTER TABLE ex5 ADD CONSTRAINT x5b EXCLUDE USING gist (r WITH -|-)
+-- ALTER TABLE
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ex5'::regclass ORDER BY 1
+conname:name | pg_get_constraintdef:text
+ex5_r_excl | EXCLUDE USING gist (r WITH =) WHERE ((s = 'zz'::text))
+x5b | EXCLUDE USING gist (r WITH -|-)
+-- SELECT 2
+
+> INSERT INTO ex5 VALUES ('[5,6)', 'c')
+ERROR 23P01: conflicting key value violates exclusion constraint "x5b"
+DETAIL: Key (r)=([5,6)) conflicts with existing key (r)=([1,5)).
+OBJECTS: schema=public table=ex5 constraint=x5b
+
+> INSERT INTO ex5 VALUES ('[7,8)', 'zz'), ('[7,8)', 'zz')
+ERROR 23P01: conflicting key value violates exclusion constraint "ex5_r_excl"
+DETAIL: Key (r)=([7,8)) conflicts with existing key (r)=([7,8)).
+OBJECTS: schema=public table=ex5 constraint=ex5_r_excl
+
+> DROP INDEX ex5_r_excl
+ERROR 2BP01: cannot drop index ex5_r_excl because constraint ex5_r_excl on table ex5 requires it
+HINT: You can drop constraint ex5_r_excl on table ex5 instead.
+
+> ALTER TABLE ex5 RENAME CONSTRAINT x5b TO x5c
+-- ALTER TABLE
+
+> SELECT relname FROM pg_class WHERE relname LIKE 'x5%' OR relname LIKE 'ex5%' ORDER BY 1
+relname:name
+ex5
+ex5_r_excl
+x5c
+-- SELECT 3
+
+> ALTER TABLE ex5 DROP CONSTRAINT x5c
+-- ALTER TABLE
+
+> ALTER TABLE ex5 DROP CONSTRAINT ex5_r_excl
+-- ALTER TABLE
+
+> SELECT relname FROM pg_class WHERE relname LIKE 'x5%' OR relname LIKE 'ex5%' ORDER BY 1
+relname:name
+ex5
+-- SELECT 1
+
+> INSERT INTO ex5 VALUES ('[7,8)', 'zz'), ('[7,8)', 'zz')
+-- INSERT 0 2
+
+> ALTER TABLE ex5 DROP COLUMN s
+-- ALTER TABLE
+
+> CREATE TABLE ex9 (a int, b int)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX ON ex9 (a) INCLUDE (b)
+-- CREATE INDEX
+
+> CREATE INDEX ON ex9 (a, a)
+-- CREATE INDEX
+
+> CREATE INDEX ON ex9 (a) WITH (fillfactor = 50, deduplicate_items = off)
+-- CREATE INDEX
+
+> CREATE INDEX ON ex9 USING gist (a)
+ERROR 42704: data type integer has no default operator class for access method "gist"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 'ex9'::regclass ORDER BY 1
+pg_get_indexdef:text
+CREATE INDEX ex9_a_a1_idx ON public.ex9 USING btree (a, a)
+CREATE INDEX ex9_a_idx ON public.ex9 USING btree (a) WITH (fillfactor='50', deduplicate_items=off)
+CREATE UNIQUE INDEX ex9_a_b_idx ON public.ex9 USING btree (a) INCLUDE (b)
+-- SELECT 3
+
+> DROP TABLE ex1, ex2, ex3, ex4, ex5, ex6, ex7, ex8, ex9, ex10, ex11
+-- DROP TABLE
+

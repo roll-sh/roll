@@ -1,0 +1,213 @@
+> CREATE FUNCTION a9_snoop(anyelement) RETURNS boolean AS
+> $$ BEGIN RAISE NOTICE 'snooped value: %', $1; RETURN true; END; $$
+> LANGUAGE plpgsql COST 0.000001
+-- CREATE FUNCTION
+
+> CREATE TABLE a9b (id int PRIMARY KEY, data text, deleted boolean)
+-- CREATE TABLE
+
+> INSERT INTO a9b VALUES (1, 'Row 1', false), (2, 'Row 2', true)
+-- INSERT 0 2
+
+> CREATE RULE a9b_ins AS ON INSERT TO a9b
+>   WHERE EXISTS (SELECT 1 FROM a9b t WHERE t.id = new.id)
+>   DO INSTEAD UPDATE a9b SET data = new.data, deleted = false WHERE id = new.id
+-- CREATE RULE
+
+> CREATE RULE a9b_del AS ON DELETE TO a9b
+>   DO INSTEAD UPDATE a9b SET deleted = true WHERE id = old.id
+-- CREATE RULE
+
+> CREATE VIEW a9bv WITH (security_barrier = true) AS SELECT id, data FROM a9b WHERE NOT deleted
+-- CREATE VIEW
+
+> EXPLAIN (COSTS OFF) DELETE FROM a9bv WHERE id = 1 AND a9_snoop(data)
+QUERY PLAN:text
+Update on a9b a9b_1
+  ->  Nested Loop
+        ->  Index Scan using a9b_pkey on a9b a9b_1
+              Index Cond: (id = 1)
+        ->  Index Scan using a9b_pkey on a9b
+              Index Cond: (id = 1)
+              Filter: ((NOT deleted) AND a9_snoop(data))
+-- EXPLAIN
+
+> DELETE FROM a9bv WHERE id = 1 AND a9_snoop(data)
+NOTICE 00000: snooped value: Row 1
+CONTEXT: PL/pgSQL function a9_snoop(anyelement) line 1 at RAISE
+-- DELETE 0
+
+> EXPLAIN (COSTS OFF) INSERT INTO a9bv VALUES (2, 'New row 2')
+QUERY PLAN:text
+Insert on a9b
+  InitPlan 1
+    ->  Index Only Scan using a9b_pkey on a9b t
+          Index Cond: (id = 2)
+  ->  Result
+        One-Time Filter: ((InitPlan 1).col1 IS NOT TRUE)
+
+Update on a9b
+  InitPlan 1
+    ->  Index Only Scan using a9b_pkey on a9b t
+          Index Cond: (id = 2)
+  ->  Result
+        One-Time Filter: (InitPlan 1).col1
+        ->  Index Scan using a9b_pkey on a9b
+              Index Cond: (id = 2)
+-- EXPLAIN
+
+> INSERT INTO a9bv VALUES (2, 'New row 2')
+-- INSERT 0 0
+
+> INSERT INTO a9bv VALUES (3, 'Row 3')
+-- INSERT 0 1
+
+> SELECT * FROM a9b ORDER BY id
+id:int4 | data:text | deleted:bool
+1 | Row 1 | t
+2 | New row 2 | f
+3 | Row 3 | f
+-- SELECT 3
+
+> DROP TABLE a9b CASCADE
+NOTICE 00000: drop cascades to view a9bv
+-- DROP TABLE
+
+> CREATE TABLE a9t1 (a int)
+-- CREATE TABLE
+
+> CREATE VIEW a9v1 WITH (security_barrier = true) AS SELECT * FROM a9t1
+-- CREATE VIEW
+
+> CREATE RULE a9v1_upd AS ON UPDATE TO a9v1 DO INSTEAD UPDATE a9t1 SET a = NEW.a WHERE a = OLD.a
+-- CREATE RULE
+
+> CREATE VIEW a9v2 WITH (security_barrier = true) AS SELECT * FROM a9v1 WHERE EXISTS (SELECT 1)
+-- CREATE VIEW
+
+> EXPLAIN (COSTS OFF) UPDATE a9v2 SET a = 1
+QUERY PLAN:text
+Update on a9t1
+  InitPlan 1
+    ->  Result
+  ->  Merge Join
+        Merge Cond: (a9t1.a = a9v1.a)
+        ->  Sort
+              Sort Key: a9t1.a
+              ->  Seq Scan on a9t1
+        ->  Sort
+              Sort Key: a9v1.a
+              ->  Subquery Scan on a9v1
+                    ->  Result
+                          One-Time Filter: (InitPlan 1).col1
+                          ->  Seq Scan on a9t1 a9t1_1
+-- EXPLAIN
+
+> INSERT INTO a9t1 VALUES (5), (6)
+-- INSERT 0 2
+
+> UPDATE a9v2 SET a = 1
+-- UPDATE 2
+
+> SELECT * FROM a9t1 ORDER BY a
+a:int4
+1
+1
+-- SELECT 2
+
+> DROP VIEW a9v2, a9v1
+-- DROP VIEW
+
+> DROP TABLE a9t1
+-- DROP TABLE
+
+> CREATE TABLE a9k1 (a integer PRIMARY KEY, b text)
+-- CREATE TABLE
+
+> CREATE TABLE a9k2 (a integer PRIMARY KEY, b integer REFERENCES a9k1)
+-- CREATE TABLE
+
+> CREATE RULE a9r1 AS ON DELETE TO a9k1 DO DELETE FROM a9k2 WHERE a9k2.b = old.a
+-- CREATE RULE
+
+> EXPLAIN (COSTS OFF) DELETE FROM a9k1 WHERE a = 1
+QUERY PLAN:text
+Delete on a9k2
+  ->  Nested Loop
+        ->  Index Scan using a9k1_pkey on a9k1
+              Index Cond: (a = 1)
+        ->  Seq Scan on a9k2
+              Filter: (b = 1)
+
+Delete on a9k1
+  ->  Index Scan using a9k1_pkey on a9k1
+        Index Cond: (a = 1)
+-- EXPLAIN
+
+> INSERT INTO a9k1 VALUES (1, 'x'), (2, 'y')
+-- INSERT 0 2
+
+> INSERT INTO a9k2 VALUES (10, 1), (20, 2)
+-- INSERT 0 2
+
+> DELETE FROM a9k1 WHERE a = 1
+-- DELETE 1
+
+> SELECT * FROM a9k1 ORDER BY a
+a:int4 | b:text
+2 | y
+-- SELECT 1
+
+> SELECT * FROM a9k2 ORDER BY a
+a:int4 | b:int4
+20 | 2
+-- SELECT 1
+
+> DROP RULE a9r1 ON a9k1
+-- DROP RULE
+
+> CREATE TABLE a9k3 (a int PRIMARY KEY, c int)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) UPDATE a9k1 SET b = 'z' FROM a9k3 WHERE a9k3.a = a9k1.a AND a9k3.a = 3
+QUERY PLAN:text
+Update on a9k1
+  ->  Nested Loop
+        ->  Index Scan using a9k1_pkey on a9k1
+              Index Cond: (a = 3)
+        ->  Index Scan using a9k3_pkey on a9k3
+              Index Cond: (a = 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM a9k1 USING a9k3 WHERE a9k3.a = a9k1.a AND a9k1.a = 3
+QUERY PLAN:text
+Delete on a9k1
+  ->  Nested Loop
+        ->  Index Scan using a9k1_pkey on a9k1
+              Index Cond: (a = 3)
+        ->  Index Scan using a9k3_pkey on a9k3
+              Index Cond: (a = 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a9k1.b FROM a9k1, a9k3 WHERE a9k3.a = a9k1.a AND a9k1.a = 3 FOR UPDATE OF a9k1
+QUERY PLAN:text
+LockRows
+  ->  Nested Loop
+        ->  Index Scan using a9k1_pkey on a9k1
+              Index Cond: (a = 3)
+        ->  Index Scan using a9k3_pkey on a9k3
+              Index Cond: (a = 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a9k3.a FROM a9k3 WHERE a9k3.a = 3
+QUERY PLAN:text
+Index Only Scan using a9k3_pkey on a9k3
+  Index Cond: (a = 3)
+-- EXPLAIN
+
+> DROP TABLE a9k2, a9k1, a9k3
+-- DROP TABLE
+
+> DROP FUNCTION a9_snoop(anyelement)
+-- DROP FUNCTION
+

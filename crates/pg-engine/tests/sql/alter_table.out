@@ -1,0 +1,324 @@
+> CREATE TABLE a (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO a VALUES (1, 'x'), (2, NULL)
+-- INSERT 0 2
+
+> ALTER TABLE a ADD COLUMN n int DEFAULT 5
+-- ALTER TABLE
+
+> SELECT * FROM a ORDER BY id
+id:int4 | v:text | n:int4
+1 | x | 5
+2 | NULL | 5
+-- SELECT 2
+
+> ALTER TABLE a ADD COLUMN n int
+ERROR 42701: column "n" of relation "a" already exists
+
+> ALTER TABLE a ADD COLUMN IF NOT EXISTS n int
+NOTICE 42701: column "n" of relation "a" already exists, skipping
+-- ALTER TABLE
+
+> ALTER TABLE a ADD COLUMN req int NOT NULL
+ERROR 23502: column "req" of relation "a" contains null values
+OBJECTS: schema=public table=a column=req
+
+> ALTER TABLE a ADD COLUMN req int NOT NULL DEFAULT 0
+-- ALTER TABLE
+
+> ALTER TABLE a ALTER COLUMN v SET NOT NULL
+ERROR 23502: column "v" of relation "a" contains null values
+OBJECTS: schema=public table=a column=v
+
+> UPDATE a SET v = 'y' WHERE id = 2
+-- UPDATE 1
+
+> ALTER TABLE a ALTER COLUMN v SET NOT NULL
+-- ALTER TABLE
+
+> INSERT INTO a (id) VALUES (3)
+ERROR 23502: null value in column "v" of relation "a" violates not-null constraint
+DETAIL: Failing row contains (3, null, 5, 0).
+OBJECTS: schema=public table=a column=v
+
+> ALTER TABLE a ALTER COLUMN v DROP NOT NULL
+-- ALTER TABLE
+
+> ALTER TABLE a ALTER COLUMN v SET DEFAULT 'dflt'
+-- ALTER TABLE
+
+> INSERT INTO a (id) VALUES (3)
+-- INSERT 0 1
+
+> ALTER TABLE a ALTER COLUMN v DROP DEFAULT
+-- ALTER TABLE
+
+> INSERT INTO a (id) VALUES (4)
+-- INSERT 0 1
+
+> SELECT * FROM a ORDER BY id
+id:int4 | v:text | n:int4 | req:int4
+1 | x | 5 | 0
+2 | y | 5 | 0
+3 | dflt | 5 | 0
+4 | NULL | 5 | 0
+-- SELECT 4
+
+> ALTER TABLE a ALTER COLUMN n TYPE bigint
+-- ALTER TABLE
+
+> ALTER TABLE a ALTER COLUMN v TYPE int
+ERROR 42804: column "v" cannot be cast automatically to type integer
+HINT: You might need to specify "USING v::integer".
+
+> ALTER TABLE a ALTER COLUMN v TYPE int USING length(v)
+-- ALTER TABLE
+
+> SELECT id, v, pg_typeof(v), n, pg_typeof(n) FROM a ORDER BY id
+id:int4 | v:int4 | pg_typeof:regtype | n:int8 | pg_typeof:regtype
+1 | 1 | integer | 5 | bigint
+2 | 1 | integer | 5 | bigint
+3 | 4 | integer | 5 | bigint
+4 | NULL | integer | 5 | bigint
+-- SELECT 4
+
+> ALTER TABLE a DROP COLUMN req
+-- ALTER TABLE
+
+> SELECT * FROM a ORDER BY id
+id:int4 | v:int4 | n:int8
+1 | 1 | 5
+2 | 1 | 5
+3 | 4 | 5
+4 | NULL | 5
+-- SELECT 4
+
+> ALTER TABLE a DROP COLUMN nosuch
+ERROR 42703: column "nosuch" of relation "a" does not exist
+
+> ALTER TABLE a DROP COLUMN IF EXISTS nosuch
+NOTICE 00000: column "nosuch" of relation "a" does not exist, skipping
+-- ALTER TABLE
+
+> ALTER TABLE a RENAME COLUMN n TO num
+-- ALTER TABLE
+
+> ALTER TABLE a RENAME TO a2
+-- ALTER TABLE
+
+> SELECT id, num FROM a2 ORDER BY id
+id:int4 | num:int8
+1 | 5
+2 | 5
+3 | 5
+4 | 5
+-- SELECT 4
+
+> ALTER TABLE a2 ADD CONSTRAINT num_pos CHECK (num > 0)
+-- ALTER TABLE
+
+> UPDATE a2 SET num = -1
+ERROR 23514: new row for relation "a2" violates check constraint "num_pos"
+DETAIL: Failing row contains (1, 1, -1).
+OBJECTS: schema=public table=a2 constraint=num_pos
+
+> ALTER TABLE a2 ADD CONSTRAINT v_small CHECK (v < 0)
+ERROR 23514: check constraint "v_small" of relation "a2" is violated by some row
+OBJECTS: schema=public table=a2 constraint=v_small
+
+> ALTER TABLE a2 ADD CONSTRAINT v_small CHECK (v < 0) NOT VALID
+-- ALTER TABLE
+
+> ALTER TABLE a2 VALIDATE CONSTRAINT v_small
+ERROR 23514: check constraint "v_small" of relation "a2" is violated by some row
+OBJECTS: schema=public table=a2 constraint=v_small
+
+> ALTER TABLE a2 DROP CONSTRAINT v_small
+-- ALTER TABLE
+
+> ALTER TABLE a2 DROP CONSTRAINT v_small
+ERROR 42704: constraint "v_small" of relation "a2" does not exist
+
+> ALTER TABLE a2 DROP CONSTRAINT IF EXISTS v_small
+NOTICE 00000: constraint "v_small" of relation "a2" does not exist, skipping
+-- ALTER TABLE
+
+> ALTER TABLE a2 ADD UNIQUE (num)
+ERROR 23505: could not create unique index "a2_num_key"
+DETAIL: Key (num)=(5) is duplicated.
+OBJECTS: schema=public table=a2 constraint=a2_num_key
+
+> ALTER TABLE a2 ADD CONSTRAINT v_uniq UNIQUE (v)
+ERROR 23505: could not create unique index "v_uniq"
+DETAIL: Key (v)=(1) is duplicated.
+OBJECTS: schema=public table=a2 constraint=v_uniq
+
+> SELECT conname, contype FROM pg_constraint WHERE conrelid = 'a2'::regclass ORDER BY conname
+conname:name | contype:char
+a_id_not_null | n
+a_pkey | p
+num_pos | c
+-- SELECT 3
+
+> ALTER TABLE a2 RENAME CONSTRAINT v_uniq TO v_unique
+ERROR 42704: constraint "v_uniq" for table "a2" does not exist
+
+> SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'a2'::regclass ORDER BY 1
+indexrelid:regclass
+a_pkey
+-- SELECT 1
+
+> CREATE TABLE nopk (x int, y text)
+-- CREATE TABLE
+
+> INSERT INTO nopk VALUES (1, 'a'), (1, 'b')
+-- INSERT 0 2
+
+> ALTER TABLE nopk ADD PRIMARY KEY (x)
+ERROR 23505: could not create unique index "nopk_pkey"
+DETAIL: Key (x)=(1) is duplicated.
+OBJECTS: schema=public table=nopk constraint=nopk_pkey
+
+> DELETE FROM nopk WHERE y = 'b'
+-- DELETE 1
+
+> ALTER TABLE nopk ADD PRIMARY KEY (x)
+-- ALTER TABLE
+
+> INSERT INTO nopk VALUES (1, 'c')
+ERROR 23505: duplicate key value violates unique constraint "nopk_pkey"
+DETAIL: Key (x)=(1) already exists.
+OBJECTS: schema=public table=nopk constraint=nopk_pkey
+
+> ALTER TABLE nopk DROP CONSTRAINT nopk_pkey
+-- ALTER TABLE
+
+> INSERT INTO nopk VALUES (1, 'c')
+-- INSERT 0 1
+
+> SELECT * FROM nopk ORDER BY y
+x:int4 | y:text
+1 | a
+1 | c
+-- SELECT 2
+
+> CREATE TABLE ref_target (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO ref_target VALUES (1)
+-- INSERT 0 1
+
+> CREATE TABLE refs (r int)
+-- CREATE TABLE
+
+> INSERT INTO refs VALUES (1), (2)
+-- INSERT 0 2
+
+> ALTER TABLE refs ADD FOREIGN KEY (r) REFERENCES ref_target (id)
+ERROR 23503: insert or update on table "refs" violates foreign key constraint "refs_r_fkey"
+DETAIL: Key (r)=(2) is not present in table "ref_target".
+OBJECTS: schema=public table=refs constraint=refs_r_fkey
+
+> DELETE FROM refs WHERE r = 2
+-- DELETE 1
+
+> ALTER TABLE refs ADD FOREIGN KEY (r) REFERENCES ref_target (id)
+-- ALTER TABLE
+
+> INSERT INTO refs VALUES (3)
+ERROR 23503: insert or update on table "refs" violates foreign key constraint "refs_r_fkey"
+DETAIL: Key (r)=(3) is not present in table "ref_target".
+OBJECTS: schema=public table=refs constraint=refs_r_fkey
+
+> ALTER TABLE ref_target DROP CONSTRAINT ref_target_pkey
+ERROR 2BP01: cannot drop constraint ref_target_pkey on table ref_target because other objects depend on it
+DETAIL: constraint refs_r_fkey on table refs depends on index ref_target_pkey
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE ref_target DROP CONSTRAINT ref_target_pkey CASCADE
+NOTICE 00000: drop cascades to constraint refs_r_fkey on table refs
+-- ALTER TABLE
+
+> INSERT INTO refs VALUES (3)
+-- INSERT 0 1
+
+> CREATE TABLE gen (a int, b int GENERATED ALWAYS AS (a + 1) STORED)
+-- CREATE TABLE
+
+> INSERT INTO gen (a) VALUES (1), (2)
+-- INSERT 0 2
+
+> ALTER TABLE gen ALTER COLUMN b SET EXPRESSION AS (a * 10)
+-- ALTER TABLE
+
+> SELECT * FROM gen ORDER BY a
+a:int4 | b:int4
+1 | 10
+2 | 20
+-- SELECT 2
+
+> ALTER TABLE gen ALTER COLUMN b DROP EXPRESSION
+-- ALTER TABLE
+
+> INSERT INTO gen VALUES (3, 3)
+-- INSERT 0 1
+
+> SELECT * FROM gen ORDER BY a
+a:int4 | b:int4
+1 | 10
+2 | 20
+3 | 3
+-- SELECT 3
+
+> CREATE TABLE ident (id int NOT NULL, v text)
+-- CREATE TABLE
+
+> ALTER TABLE ident ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY
+-- ALTER TABLE
+
+> INSERT INTO ident (v) VALUES ('a'), ('b')
+-- INSERT 0 2
+
+> ALTER TABLE ident ALTER COLUMN id RESTART WITH 100
+-- ALTER TABLE
+
+> INSERT INTO ident (v) VALUES ('c')
+-- INSERT 0 1
+
+> SELECT * FROM ident ORDER BY id
+id:int4 | v:text
+1 | a
+2 | b
+100 | c
+-- SELECT 3
+
+> ALTER TABLE ident ALTER COLUMN id DROP IDENTITY
+-- ALTER TABLE
+
+> INSERT INTO ident (v) VALUES ('d')
+ERROR 23502: null value in column "id" of relation "ident" violates not-null constraint
+DETAIL: Failing row contains (null, d).
+OBJECTS: schema=public table=ident column=id
+
+> ALTER TABLE nosuchtable ADD COLUMN x int
+ERROR 42P01: relation "nosuchtable" does not exist
+
+> ALTER TABLE IF EXISTS nosuchtable ADD COLUMN x int
+NOTICE 00000: relation "nosuchtable" does not exist, skipping
+-- ALTER TABLE
+
+> CREATE SCHEMA s2
+-- CREATE SCHEMA
+
+> ALTER TABLE a2 SET SCHEMA s2
+-- ALTER TABLE
+
+> SELECT count(*) FROM s2.a2
+count:int8
+4
+-- SELECT 1
+
+> SELECT count(*) FROM a2
+ERROR 42P01: relation "a2" does not exist (at 22)
+

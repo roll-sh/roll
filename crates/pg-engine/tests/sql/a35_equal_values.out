@@ -1,0 +1,242 @@
+> SELECT max(x), min(x) FROM (VALUES ('1 mon'::interval), ('30 days'::interval)) v(x)
+max:interval | min:interval
+30 days | 30 days
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES ('30 days'::interval), ('1 mon'::interval)) v(x)
+max:interval | min:interval
+1 mon | 1 mon
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES ('2 mons'::interval), ('60 days'::interval), ('1 day 1416:00:00'::interval)) v(x)
+max:interval | min:interval
+1 day 1416:00:00 | 1 day 1416:00:00
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES (1.0::numeric), (1.00::numeric)) v(x)
+max:numeric | min:numeric
+1.00 | 1.00
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES (1.00::numeric), (1.0::numeric), (1::numeric)) v(x)
+max:numeric | min:numeric
+1 | 1
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES ('-0'::float8), ('0'::float8)) v(x)
+max:float8 | min:float8
+0 | 0
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES ('0'::float4), ('-0'::float4)) v(x)
+max:float4 | min:float4
+-0 | -0
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES (ARRAY[1.0::numeric]), (ARRAY[1.00::numeric])) v(x)
+max:numeric[] | min:numeric[]
+{1.00} | {1.00}
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES (ROW(1.0::numeric)), (ROW(1.00::numeric))) v(x)
+max:record | min:record
+(1.00) | (1.00)
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x)
+max:bpchar | min:bpchar
+a | a
+-- SELECT 1
+
+> SELECT max(x), min(x) FROM (VALUES ('a  '::bpchar), ('a'::bpchar)) v(x)
+max:bpchar | min:bpchar
+a   | a  
+-- SELECT 1
+
+> SELECT max(x::char(3)), min(x::char(3)) FROM (VALUES ('a'), ('a  ')) v(x)
+max:bpchar | min:bpchar
+a   | a  
+-- SELECT 1
+
+> CREATE COLLATION a35_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> SELECT max(x COLLATE a35_ci), min(x COLLATE a35_ci) FROM (VALUES ('abc'), ('ABC'), ('Abc')) v(x)
+max:text | min:text
+Abc | Abc
+-- SELECT 1
+
+> SELECT max(x) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), min(x) OVER (ORDER BY n) FROM (VALUES (1, 1.0::numeric), (2, 1.00::numeric), (3, 1.000::numeric)) v(n, x) ORDER BY n
+max:numeric | min:numeric
+1.0 | 1.0
+1.00 | 1.00
+1.000 | 1.000
+-- SELECT 3
+
+> SELECT k, max(x), min(x) FROM (VALUES (1, '1 day'::interval), (1, '24:00:00'::interval), (2, '1 mon'::interval), (2, '30 days'::interval)) v(k, x) GROUP BY k ORDER BY k
+k:int4 | max:interval | min:interval
+1 | 24:00:00 | 24:00:00
+2 | 30 days | 30 days
+-- SELECT 2
+
+> SELECT greatest('1 mon'::interval, '30 days'::interval), greatest('30 days'::interval, '1 mon'::interval)
+greatest:interval | greatest:interval
+1 mon | 30 days
+-- SELECT 1
+
+> SELECT least('1 mon'::interval, '30 days'::interval), least('30 days'::interval, '1 mon'::interval)
+least:interval | least:interval
+1 mon | 30 days
+-- SELECT 1
+
+> SELECT greatest(1.0, 1.00), least(1.00, 1.0), greatest('-0'::float8, '0'::float8)
+greatest:numeric | least:numeric | greatest:float8
+1.0 | 1.00 | -0
+-- SELECT 1
+
+> SELECT greatest('a'::bpchar, 'a  '::bpchar), least('a  '::bpchar, 'a'::bpchar)
+greatest:bpchar | least:bpchar
+a | a  
+-- SELECT 1
+
+> DROP COLLATION a35_ci
+-- DROP COLLATION
+
+> CREATE TABLE ca (x char(2))
+-- CREATE TABLE
+
+> CREATE TABLE cb (y char(4))
+-- CREATE TABLE
+
+> INSERT INTO ca VALUES ('a'), ('b')
+-- INSERT 0 2
+
+> INSERT INTO cb VALUES ('a'), ('c')
+-- INSERT 0 2
+
+> SELECT * FROM ca JOIN cb ON x = y
+x:bpchar | y:bpchar
+a  | a   
+-- SELECT 1
+
+> SELECT * FROM ca WHERE x IN (SELECT y FROM cb)
+x:bpchar
+a 
+-- SELECT 1
+
+> SELECT x FROM ca UNION SELECT y FROM cb
+x:bpchar
+a 
+b 
+c   
+-- SELECT 3
+
+> SELECT x FROM ca INTERSECT SELECT y FROM cb
+x:bpchar
+a 
+-- SELECT 1
+
+> SELECT x FROM ca EXCEPT SELECT y FROM cb
+x:bpchar
+b 
+-- SELECT 1
+
+> SELECT DISTINCT z FROM (SELECT x::bpchar FROM ca UNION ALL SELECT y::bpchar FROM cb) s(z)
+z:bpchar
+a 
+b 
+c   
+-- SELECT 3
+
+> SELECT z, count(*) FROM (SELECT x::bpchar FROM ca UNION ALL SELECT y::bpchar FROM cb) s(z) GROUP BY z
+z:bpchar | count:int8
+a  | 2
+b  | 1
+c    | 1
+-- SELECT 3
+
+> SET enable_nestloop = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SELECT * FROM ca JOIN cb ON x = y
+x:bpchar | y:bpchar
+a  | a   
+-- SELECT 1
+
+> SELECT * FROM ca FULL JOIN cb ON x = y
+x:bpchar | y:bpchar
+NULL | c   
+a  | a   
+b  | NULL
+-- SELECT 3
+
+> RESET enable_mergejoin
+-- RESET
+
+> SET enable_hashjoin = off
+-- SET
+
+> SELECT * FROM ca JOIN cb ON x = y
+x:bpchar | y:bpchar
+a  | a   
+-- SELECT 1
+
+> SELECT * FROM ca FULL JOIN cb ON x = y
+x:bpchar | y:bpchar
+NULL | c   
+a  | a   
+b  | NULL
+-- SELECT 3
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> SET enable_hashagg = off
+-- SET
+
+> SELECT z, count(*) FROM (SELECT x::bpchar FROM ca UNION ALL SELECT y::bpchar FROM cb) s(z) GROUP BY z
+z:bpchar | count:int8
+a  | 2
+b  | 1
+c    | 1
+-- SELECT 3
+
+> SELECT x FROM ca UNION SELECT y FROM cb
+x:bpchar
+a 
+b 
+c   
+-- SELECT 3
+
+> RESET enable_hashagg
+-- RESET
+
+> SELECT DISTINCT x FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x)
+x:bpchar
+a
+-- SELECT 1
+
+> SELECT x, count(*) FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x) GROUP BY x
+x:bpchar | count:int8
+a | 2
+-- SELECT 1
+
+> SELECT count(DISTINCT x) FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x)
+count:int8
+1
+-- SELECT 1
+
+> SELECT DISTINCT ON (x) x, n FROM (VALUES ('a'::bpchar, 1), ('a  '::bpchar, 2)) v(x, n) ORDER BY x, n
+x:bpchar | n:int4
+a | 1
+-- SELECT 1
+
+> DROP TABLE ca, cb
+-- DROP TABLE
+

@@ -1,0 +1,71 @@
+> create table sbp_t1(a int, b text)
+-- CREATE TABLE
+
+> create table sbp_t2(c int)
+-- CREATE TABLE
+
+> CREATE FUNCTION sbp_e1() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT a FROM sbp_t1; SELECT a FROM sbp_t2; END
+ERROR 42703: column "a" does not exist (at 93)
+
+> CREATE FUNCTION sbp_e2() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 1 + 'x'::int + 'y'; END
+ERROR 22P02: invalid input syntax for type integer: "x" (at 85)
+
+> CREATE FUNCTION sbp_e3(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT x; SELECT x FROM sbp_t1 WHERE b = x; END
+ERROR 42883: operator does not exist: text = integer (at 108)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE FUNCTION sbp_e4(x int) RETURNS int LANGUAGE sql RETURN x + x + nosuch
+ERROR 42703: column "nosuch" does not exist (at 71)
+
+> CREATE FUNCTION sbp_e5(x int) RETURNS int LANGUAGE sql
+> BEGIN ATOMIC
+>   SELECT x; 
+>   SELECT x
+>     FROM sbp_t1 WHERE a = 'x' || x;
+> END
+ERROR 42883: operator does not exist: integer = text (at 117)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE FUNCTION sbp_e6(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN 1 END; SELECT x FROM sbp_t1 WHERE sbp_t1.zz = 1; END
+ERROR 42703: column sbp_t1.zz does not exist (at 131)
+
+> CREATE FUNCTION sbp_e7(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 'end;'; RETURN x + 'q'; END
+ERROR 22P02: invalid input syntax for type integer: "q" (at 95)
+
+> select 1
+?column?:int4
+1
+-- SELECT 1
+
+> CREATE FUNCTION sbp_e8() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT a FROM sbp_t1; SELECT a FROM sbp_t2; END
+ERROR 42703: column "a" does not exist (at 93)
+
+> CREATE FUNCTION sbp_e9(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT x; SELECT x; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION sbp_e10(x text) RETURNS text LANGUAGE sql RETURN x
+-- CREATE FUNCTION
+
+> select proname, prosrc, pg_get_functiondef(oid) from pg_proc where proname in ('sbp_e9','sbp_e10') order by 1
+proname:name | prosrc:text | pg_get_functiondef:text
+sbp_e10 |  | CREATE OR REPLACE FUNCTION public.sbp_e10(x text)
+ RETURNS text
+ LANGUAGE sql
+RETURN x
+
+sbp_e9 |  | CREATE OR REPLACE FUNCTION public.sbp_e9(x integer)
+ RETURNS integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ SELECT x AS x;
+ SELECT x AS x;
+END
+
+-- SELECT 2
+
+> drop function sbp_e9, sbp_e10
+-- DROP FUNCTION
+
+> drop table sbp_t1, sbp_t2
+-- DROP TABLE
+

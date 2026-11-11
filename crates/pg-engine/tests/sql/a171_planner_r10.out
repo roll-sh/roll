@@ -1,0 +1,296 @@
+> CREATE TABLE a171_e (t text, u text COLLATE "C", n name, i int)
+-- CREATE TABLE
+
+> INSERT INTO a171_e SELECT g::text, g::text, g::text, g FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> ANALYZE a171_e
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY t COLLATE "en-x-icu"
+QUERY PLAN:text
+Sort
+  Sort Key: t COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY u COLLATE "en-x-icu" NULLS FIRST
+QUERY PLAN:text
+Sort
+  Sort Key: ((u)::text) COLLATE "en-x-icu" NULLS FIRST
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY u COLLATE "default"
+QUERY PLAN:text
+Sort
+  Sort Key: ((u)::text)
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY lower(t) COLLATE "en-x-icu"
+QUERY PLAN:text
+Sort
+  Sort Key: ((lower(t))::text) COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY (t || 'x') COLLATE "C"
+QUERY PLAN:text
+Sort
+  Sort Key: (((t || 'x'::text))::text) COLLATE "C"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY n COLLATE "en-x-icu"
+QUERY PLAN:text
+Sort
+  Sort Key: ((n)::name) COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT i FROM a171_e ORDER BY t COLLATE "en-x-icu"
+QUERY PLAN:text
+Sort
+  Sort Key: ((t)::text) COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT u FROM a171_e ORDER BY u COLLATE "en-x-icu"
+QUERY PLAN:text
+Sort
+  Sort Key: u COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t, u FROM a171_e ORDER BY u COLLATE "C"
+QUERY PLAN:text
+Sort
+  Sort Key: u COLLATE "C"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY t COLLATE "C" DESC
+QUERY PLAN:text
+Sort
+  Sort Key: t COLLATE "C" DESC
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT lower(t) FROM a171_e ORDER BY lower(t) COLLATE "en-x-icu"
+QUERY PLAN:text
+Sort
+  Sort Key: (lower(t)) COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a.t FROM a171_e a JOIN a171_e b ON a.i = b.i ORDER BY a.t COLLATE "en-x-icu"
+QUERY PLAN:text
+Sort
+  Sort Key: a.t COLLATE "en-x-icu"
+  ->  Hash Join
+        Hash Cond: (a.i = b.i)
+        ->  Seq Scan on a171_e a
+        ->  Hash
+              ->  Seq Scan on a171_e b
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY u COLLATE "en-x-icu" LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: ((u)::text) COLLATE "en-x-icu"
+        ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY u COLLATE "C"
+QUERY PLAN:text
+Sort
+  Sort Key: u COLLATE "C"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a171_e ORDER BY t COLLATE "default"
+QUERY PLAN:text
+Sort
+  Sort Key: t
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT i FROM a171_e ORDER BY t COLLATE "default"
+QUERY PLAN:text
+Sort
+  Sort Key: t
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t, t COLLATE "en-x-icu" AS x FROM a171_e ORDER BY 2
+QUERY PLAN:text
+Sort
+  Sort Key: t COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t COLLATE "en-x-icu" AS x, t FROM a171_e ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: ((t)::text) COLLATE "en-x-icu"
+  ->  Seq Scan on a171_e
+-- EXPLAIN
+
+> SELECT t FROM a171_e WHERE i < 12 ORDER BY u COLLATE "en-x-icu" DESC, i
+t:text
+9
+8
+7
+6
+5
+4
+3
+2
+11
+10
+1
+-- SELECT 11
+
+> EXPLAIN SELECT 'init' FROM pg_create_logical_replication_slot('a', 'test_decoding') s1,
+>   pg_create_logical_replication_slot('b', 'test_decoding') s2, pg_create_logical_replication_slot('c', 'test_decoding') s3
+QUERY PLAN:text
+Nested Loop  (cost=0.01..0.06 rows=1 width=32)
+  ->  Nested Loop  (cost=0.01..0.03 rows=1 width=0)
+        ->  Function Scan on pg_create_logical_replication_slot s1  (cost=0.00..0.01 rows=1 width=0)
+        ->  Function Scan on pg_create_logical_replication_slot s2  (cost=0.00..0.01 rows=1 width=0)
+  ->  Function Scan on pg_create_logical_replication_slot s3  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> EXPLAIN SELECT 1 FROM pg_create_logical_replication_slot('a', 'test_decoding') s1, a171_e WHERE i = 1
+QUERY PLAN:text
+Nested Loop  (cost=0.00..3.27 rows=1 width=4)
+  ->  Function Scan on pg_create_logical_replication_slot s1  (cost=0.00..0.01 rows=1 width=0)
+  ->  Seq Scan on a171_e  (cost=0.00..3.25 rows=1 width=0)
+        Filter: (i = 1)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM pg_partition_ancestors('a171_e'::regclass)
+QUERY PLAN:text
+Function Scan on pg_partition_ancestors  (cost=0.00..0.10 rows=10 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM json_each('{"a": 1}')
+QUERY PLAN:text
+Function Scan on json_each  (cost=0.00..1.00 rows=100 width=64)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM regexp_matches('abc', 'b')
+QUERY PLAN:text
+Function Scan on regexp_matches  (cost=0.00..0.01 rows=1 width=32)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM pg_get_keywords()
+QUERY PLAN:text
+Function Scan on pg_get_keywords  (cost=0.03..5.03 rows=500 width=98)
+-- EXPLAIN
+
+> PREPARE a171_p1 AS SELECT i FROM a171_e WHERE i BETWEEN $1 AND $1 + $2 ORDER BY i
+-- PREPARE
+
+> EXECUTE a171_p1(3, 2)
+i:int4
+3
+4
+5
+-- SELECT 3
+
+> PREPARE a171_p2 AS SELECT i FROM a171_e WHERE i NOT BETWEEN $1 AND $1 + $2 AND i < 6 ORDER BY i
+-- PREPARE
+
+> EXECUTE a171_p2(2, 1)
+i:int4
+1
+4
+5
+-- SELECT 3
+
+> PREPARE a171_p3 AS SELECT i FROM a171_e WHERE i BETWEEN SYMMETRIC $1 AND $1 - $2 ORDER BY i
+-- PREPARE
+
+> EXECUTE a171_p3(5, 2)
+i:int4
+3
+4
+5
+-- SELECT 3
+
+> SELECT parameter_types FROM pg_prepared_statements WHERE name LIKE 'a171_p%' ORDER BY name
+parameter_types:2211
+{integer,integer}
+{integer,integer}
+{integer,integer}
+-- SELECT 3
+
+> SELECT 1 FROM a171_e WHERE i BETWEEN 'x'::text AND nosuch
+ERROR 42883: operator does not exist: integer >= text (at 30)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT 1 FROM a171_e WHERE i BETWEEN 1 AND nosuch
+ERROR 42703: column "nosuch" does not exist (at 44)
+
+> CREATE TABLE a171_p (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE a171_c (id int PRIMARY KEY, p int REFERENCES a171_p)
+-- CREATE TABLE
+
+> INSERT INTO a171_p SELECT generate_series(1, 10)
+-- INSERT 0 10
+
+> INSERT INTO a171_c SELECT g, g % 10 + 1 FROM generate_series(1, 50) g
+-- INSERT 0 50
+
+> ANALYZE a171_p, a171_c
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a171_c WHERE p IN (SELECT generate_series(1, 3) UNION ALL VALUES (5))
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a171_c.p = (generate_series(1, 3)))
+  ->  Seq Scan on a171_c
+  ->  Hash
+        ->  Append
+              ->  ProjectSet
+                    ->  Result
+              ->  Result
+-- EXPLAIN
+
+> SELECT count(*) FROM a171_c WHERE p IN (SELECT generate_series(1, 3) UNION ALL VALUES (5))
+count:int8
+20
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a171_c WHERE p IN (SELECT pg_partition_ancestors('a171_p'::regclass)::int UNION ALL VALUES (5))
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a171_c.p = (((pg_partition_ancestors('a171_p'::regclass)))::integer))
+  ->  Seq Scan on a171_c
+  ->  Hash
+        ->  Append
+              ->  Result
+                    ->  ProjectSet
+                          ->  Result
+              ->  Result
+-- EXPLAIN
+
+> SELECT count(*) FROM a171_c WHERE p NOT IN (SELECT generate_series(1, 3) UNION ALL VALUES (5))
+count:int8
+30
+-- SELECT 1
+
+> DROP TABLE a171_c, a171_p
+-- DROP TABLE
+
+> DEALLOCATE ALL
+-- DEALLOCATE ALL
+
+> DROP TABLE a171_e
+-- DROP TABLE
+

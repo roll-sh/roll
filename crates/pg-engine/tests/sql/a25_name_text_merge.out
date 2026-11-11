@@ -1,0 +1,238 @@
+> drop table if exists nk, tx
+NOTICE 00000: table "nk" does not exist, skipping
+NOTICE 00000: table "tx" does not exist, skipping
+-- DROP TABLE
+
+> create table nk(s name, v int)
+-- CREATE TABLE
+
+> create table tx(i text, w int)
+-- CREATE TABLE
+
+> insert into nk select 'A' || g, g from generate_series(1, 50) g
+-- INSERT 0 50
+
+> insert into tx select 'A' || g, g from generate_series(3, 60) g
+-- INSERT 0 58
+
+> analyze nk
+-- ANALYZE
+
+> analyze tx
+-- ANALYZE
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> explain (costs off) select * from nk join tx on nk.s = tx.i
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (nk.s = (tx.i)::text)
+  ->  Sort
+        Sort Key: nk.s
+        ->  Seq Scan on nk
+  ->  Sort
+        Sort Key: tx.i COLLATE "C"
+        ->  Seq Scan on tx
+-- EXPLAIN
+
+> explain (costs off, verbose) select * from nk join tx on tx.i = nk.s
+QUERY PLAN:text
+Merge Join
+  Output: nk.s, nk.v, tx.i, tx.w
+  Merge Cond: (nk.s = (tx.i)::text)
+  ->  Sort
+        Output: nk.s, nk.v
+        Sort Key: nk.s
+        ->  Seq Scan on public.nk
+              Output: nk.s, nk.v
+  ->  Sort
+        Output: tx.i, tx.w
+        Sort Key: tx.i COLLATE "C"
+        ->  Seq Scan on public.tx
+              Output: tx.i, tx.w
+-- EXPLAIN
+
+> explain (costs off) select * from nk left join tx on nk.s = tx.i
+QUERY PLAN:text
+Merge Left Join
+  Merge Cond: (nk.s = tx.i)
+  ->  Sort
+        Sort Key: nk.s
+        ->  Seq Scan on nk
+  ->  Sort
+        Sort Key: tx.i COLLATE "C"
+        ->  Seq Scan on tx
+-- EXPLAIN
+
+> explain (costs off) select * from tx left join nk on nk.s = tx.i
+QUERY PLAN:text
+Merge Left Join
+  Merge Cond: (tx.i = nk.s)
+  ->  Sort
+        Sort Key: tx.i COLLATE "C"
+        ->  Seq Scan on tx
+  ->  Sort
+        Sort Key: nk.s
+        ->  Seq Scan on nk
+-- EXPLAIN
+
+> explain (costs off) select * from nk full join tx on nk.s = tx.i
+QUERY PLAN:text
+Merge Full Join
+  Merge Cond: (nk.s = tx.i)
+  ->  Sort
+        Sort Key: nk.s
+        ->  Seq Scan on nk
+  ->  Sort
+        Sort Key: tx.i COLLATE "C"
+        ->  Seq Scan on tx
+-- EXPLAIN
+
+> explain (costs off) select * from nk where s in (select i from tx)
+QUERY PLAN:text
+Merge Semi Join
+  Merge Cond: (nk.s = (tx.i)::text)
+  ->  Sort
+        Sort Key: nk.s
+        ->  Seq Scan on nk
+  ->  Sort
+        Sort Key: tx.i COLLATE "C"
+        ->  Seq Scan on tx
+-- EXPLAIN
+
+> explain (costs off) select * from nk join tx on nk.s = tx.i order by tx.i
+QUERY PLAN:text
+Sort
+  Sort Key: tx.i
+  ->  Merge Join
+        Merge Cond: (nk.s = (tx.i)::text)
+        ->  Sort
+              Sort Key: nk.s
+              ->  Seq Scan on nk
+        ->  Sort
+              Sort Key: tx.i COLLATE "C"
+              ->  Seq Scan on tx
+-- EXPLAIN
+
+> explain (costs off) select * from nk join tx on nk.s = tx.i order by nk.s
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (nk.s = (tx.i)::text)
+  ->  Sort
+        Sort Key: nk.s
+        ->  Seq Scan on nk
+  ->  Sort
+        Sort Key: tx.i COLLATE "C"
+        ->  Seq Scan on tx
+-- EXPLAIN
+
+> select count(*), sum(v), sum(w) from nk join tx on nk.s = tx.i
+count:int8 | sum:int8 | sum:int8
+48 | 1272 | 1272
+-- SELECT 1
+
+> select s, v, i, w from nk full join tx on nk.s = tx.i order by v, w
+s:name | v:int4 | i:text | w:int4
+A1 | 1 | NULL | NULL
+A2 | 2 | NULL | NULL
+A3 | 3 | A3 | 3
+A4 | 4 | A4 | 4
+A5 | 5 | A5 | 5
+A6 | 6 | A6 | 6
+A7 | 7 | A7 | 7
+A8 | 8 | A8 | 8
+A9 | 9 | A9 | 9
+A10 | 10 | A10 | 10
+A11 | 11 | A11 | 11
+A12 | 12 | A12 | 12
+A13 | 13 | A13 | 13
+A14 | 14 | A14 | 14
+A15 | 15 | A15 | 15
+A16 | 16 | A16 | 16
+A17 | 17 | A17 | 17
+A18 | 18 | A18 | 18
+A19 | 19 | A19 | 19
+A20 | 20 | A20 | 20
+A21 | 21 | A21 | 21
+A22 | 22 | A22 | 22
+A23 | 23 | A23 | 23
+A24 | 24 | A24 | 24
+A25 | 25 | A25 | 25
+A26 | 26 | A26 | 26
+A27 | 27 | A27 | 27
+A28 | 28 | A28 | 28
+A29 | 29 | A29 | 29
+A30 | 30 | A30 | 30
+A31 | 31 | A31 | 31
+A32 | 32 | A32 | 32
+A33 | 33 | A33 | 33
+A34 | 34 | A34 | 34
+A35 | 35 | A35 | 35
+A36 | 36 | A36 | 36
+A37 | 37 | A37 | 37
+A38 | 38 | A38 | 38
+A39 | 39 | A39 | 39
+A40 | 40 | A40 | 40
+A41 | 41 | A41 | 41
+A42 | 42 | A42 | 42
+A43 | 43 | A43 | 43
+A44 | 44 | A44 | 44
+A45 | 45 | A45 | 45
+A46 | 46 | A46 | 46
+A47 | 47 | A47 | 47
+A48 | 48 | A48 | 48
+A49 | 49 | A49 | 49
+A50 | 50 | A50 | 50
+NULL | NULL | A51 | 51
+NULL | NULL | A52 | 52
+NULL | NULL | A53 | 53
+NULL | NULL | A54 | 54
+NULL | NULL | A55 | 55
+NULL | NULL | A56 | 56
+NULL | NULL | A57 | 57
+NULL | NULL | A58 | 58
+NULL | NULL | A59 | 59
+NULL | NULL | A60 | 60
+-- SELECT 60
+
+> select s, i from tx left join nk on nk.s = tx.i order by w limit 5
+s:name | i:text
+A3 | A3
+A4 | A4
+A5 | A5
+A6 | A6
+A7 | A7
+-- SELECT 5
+
+> create index on tx (i)
+-- CREATE INDEX
+
+> set enable_sort = off
+-- SET
+
+> explain (costs off) select * from nk join tx on nk.s = tx.i
+QUERY PLAN:text
+Nested Loop
+  Disabled: true
+  Join Filter: (nk.s = (tx.i)::text)
+  ->  Seq Scan on tx
+  ->  Materialize
+        ->  Seq Scan on nk
+-- EXPLAIN
+
+> reset enable_sort
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_nestloop
+-- RESET
+
+> drop table nk, tx
+-- DROP TABLE
+

@@ -1,0 +1,225 @@
+> create table coj_u (f1 int, f2 text)
+-- CREATE TABLE
+
+> insert into coj_u values (8, 'one'), (3, 'three'), (100, 'hundred')
+-- INSERT 0 3
+
+> begin
+-- BEGIN
+
+> declare c1 cursor for select * from coj_u a, coj_u b where a.f1 = b.f1 + 5 for share of a
+-- DECLARE CURSOR
+
+> fetch 1 from c1
+f1:int4 | f2:text | f1:int4 | f2:text
+8 | one | 3 | three
+-- FETCH 1
+
+> update coj_u set f1 = f1 + 10 where current of c1
+-- UPDATE 1
+
+> select * from coj_u order by f1
+f1:int4 | f2:text
+3 | three
+18 | one
+100 | hundred
+-- SELECT 3
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c1 cursor for select * from coj_u a, coj_u b where a.f1 = b.f1 + 5 for update
+-- DECLARE CURSOR
+
+> fetch 1 from c1
+f1:int4 | f2:text | f1:int4 | f2:text
+8 | one | 3 | three
+-- FETCH 1
+
+> update coj_u set f1 = f1 + 10 where current of c1
+ERROR 24000: cursor "c1" has multiple FOR UPDATE/SHARE references to table "coj_u"
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c1 cursor for select * from coj_u a, coj_u b where a.f1 = b.f1 + 5
+-- DECLARE CURSOR
+
+> fetch 1 from c1
+f1:int4 | f2:text | f1:int4 | f2:text
+8 | one | 3 | three
+-- FETCH 1
+
+> update coj_u set f1 = f1 + 10 where current of c1
+ERROR 24000: cursor "c1" is not a simply updatable scan of table "coj_u"
+
+> rollback
+-- ROLLBACK
+
+> create table coj_w (k int, v text)
+-- CREATE TABLE
+
+> insert into coj_w values (3, 'x'), (8, 'y')
+-- INSERT 0 2
+
+> begin
+-- BEGIN
+
+> declare c2 cursor for select * from coj_u u join coj_w w on u.f1 = w.k order by u.f1 for update
+-- DECLARE CURSOR
+
+> fetch 1 from c2
+f1:int4 | f2:text | k:int4 | v:text
+3 | three | 3 | x
+-- FETCH 1
+
+> update coj_w set v = v || '!' where current of c2
+-- UPDATE 1
+
+> delete from coj_u where current of c2
+-- DELETE 1
+
+> fetch 1 from c2
+f1:int4 | f2:text | k:int4 | v:text
+8 | one | 8 | y
+-- FETCH 1
+
+> update coj_u set f2 = 'z' where current of c2
+-- UPDATE 1
+
+> select * from coj_u order by f1
+f1:int4 | f2:text
+8 | z
+100 | hundred
+-- SELECT 2
+
+> select * from coj_w order by k
+k:int4 | v:text
+3 | x!
+8 | y
+-- SELECT 2
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c3 cursor for select * from coj_u u join coj_w w on u.f1 = w.k for update of w
+-- DECLARE CURSOR
+
+> update coj_w set v = 'q' where current of c3
+ERROR 24000: cursor "c3" is not positioned on a row
+
+> fetch 1 from c3
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> update coj_u set f2 = 'z' where current of c3
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c4 cursor for select * from coj_u u left join coj_w w on u.f1 = w.k order by u.f1 for update of u
+-- DECLARE CURSOR
+
+> fetch 2 from c4
+f1:int4 | f2:text | k:int4 | v:text
+3 | three | 3 | x
+8 | one | 8 | y
+-- FETCH 2
+
+> delete from coj_u where current of c4 returning *
+f1:int4 | f2:text
+8 | one
+-- DELETE 1
+
+> fetch 1 from c4
+f1:int4 | f2:text | k:int4 | v:text
+100 | hundred | NULL | NULL
+-- FETCH 1
+
+> rollback
+-- ROLLBACK
+
+> create table coj_c () inherits (coj_u)
+-- CREATE TABLE
+
+> insert into coj_c values (13, 'child')
+-- INSERT 0 1
+
+> begin
+-- BEGIN
+
+> declare c5 cursor for select * from coj_u a, coj_u b where a.f1 = b.f1 + 5 order by a.f1 for share of a
+-- DECLARE CURSOR
+
+> fetch 2 from c5
+f1:int4 | f2:text | f1:int4 | f2:text
+13 | child | 8 | one
+8 | one | 3 | three
+-- FETCH 2
+
+> update coj_u set f1 = f1 + 1000 where current of c5
+-- UPDATE 1
+
+> select tableoid::regclass, * from coj_u order by f1
+tableoid:regclass | f1:int4 | f2:text
+coj_u | 3 | three
+coj_u | 8 | one
+coj_u | 100 | hundred
+coj_c | 1013 | child
+-- SELECT 4
+
+> rollback
+-- ROLLBACK
+
+> create view coj_v as select * from coj_u
+-- CREATE VIEW
+
+> create rule coj_r as on delete to coj_v do instead delete from coj_u where f1 = old.f1
+-- CREATE RULE
+
+> begin
+-- BEGIN
+
+> declare c6 cursor for select * from coj_v
+-- DECLARE CURSOR
+
+> fetch from c6
+f1:int4 | f2:text
+8 | one
+-- FETCH 1
+
+> delete from coj_v where current of c6
+ERROR 0A000: WHERE CURRENT OF on a view is not implemented
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c6 cursor for select * from coj_v
+-- DECLARE CURSOR
+
+> fetch from c6
+f1:int4 | f2:text
+8 | one
+-- FETCH 1
+
+> update coj_v set f1 = f1 + 10 where current of c6
+ERROR 0A000: WHERE CURRENT OF on a view is not implemented
+
+> rollback
+-- ROLLBACK
+

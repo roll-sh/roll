@@ -1,0 +1,429 @@
+> CREATE TEXT SEARCH DICTIONARY my_simple (TEMPLATE = simple, STOPWORDS = english, ACCEPT = false)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT dictname, dictnamespace::regnamespace, dicttemplate, dictinitoption FROM pg_ts_dict WHERE dictname = 'my_simple'
+dictname:name | dictnamespace:4089 | dicttemplate:oid | dictinitoption:text
+my_simple | public | 3727 | stopwords = 'english', accept = 'false'
+-- SELECT 1
+
+> SELECT ts_lexize('my_simple', 'The'), ts_lexize('my_simple', 'Cats')
+ts_lexize:text[] | ts_lexize:text[]
+{} | NULL
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY my_simple (ACCEPT = true)
+-- ALTER TEXT SEARCH DICTIONARY
+
+> SELECT dictinitoption FROM pg_ts_dict WHERE dictname = 'my_simple'
+dictinitoption:text
+stopwords = 'english', accept = 'true'
+-- SELECT 1
+
+> SELECT ts_lexize('my_simple', 'Cats')
+ts_lexize:text[]
+{cats}
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY my_simple (STOPWORDS)
+-- ALTER TEXT SEARCH DICTIONARY
+
+> SELECT dictinitoption FROM pg_ts_dict WHERE dictname = 'my_simple'
+dictinitoption:text
+accept = 'true'
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY my_simple (Bogus = 1)
+ERROR 22023: unrecognized simple dictionary parameter: "bogus"
+
+> CREATE TEXT SEARCH DICTIONARY bad1 (TEMPLATE = simple, StopWords = nosuchfile)
+ERROR F0000: could not open stop-word file "/usr/local/share/postgresql/tsearch_data/nosuchfile.stop": No such file or directory
+
+> CREATE TEXT SEARCH DICTIONARY bad2 (STOPWORDS = english)
+ERROR 42P17: text search template is required
+
+> CREATE TEXT SEARCH DICTIONARY bad3 (TEMPLATE = nosuch)
+ERROR 42704: text search template "nosuch" does not exist
+
+> CREATE TEXT SEARCH DICTIONARY my_simple (TEMPLATE = simple)
+ERROR 23505: duplicate key value violates unique constraint "pg_ts_dict_dictname_index"
+DETAIL: Key (dictname, dictnamespace)=(my_simple, 2200) already exists.
+OBJECTS: schema=pg_catalog table=pg_ts_dict constraint=pg_ts_dict_dictname_index
+
+> CREATE TEXT SEARCH DICTIONARY syn (TEMPLATE = synonym, SYNONYMS = synonym_sample)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('syn', 'postgres'), ts_lexize('syn', 'indices'), ts_lexize('syn', 'foo')
+ts_lexize:text[] | ts_lexize:text[] | ts_lexize:text[]
+{pgsql} | {index} | NULL
+-- SELECT 1
+
+> CREATE TEXT SEARCH DICTIONARY my_stem (TEMPLATE = snowball, Language = russian, StopWords = russian)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('my_stem', 'собаки')
+ts_lexize:text[]
+{собак}
+-- SELECT 1
+
+> CREATE TEXT SEARCH DICTIONARY num_opt (TEMPLATE = simple, accept = 1)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT dictinitoption FROM pg_ts_dict WHERE dictname = 'num_opt'
+dictinitoption:text
+accept = 1
+-- SELECT 1
+
+> CREATE TEXT SEARCH DICTIONARY thes (TEMPLATE = thesaurus, DictFile = thesaurus_sample, Dictionary = english_stem)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT dictinitoption FROM pg_ts_dict WHERE dictname = 'thes'
+dictinitoption:text
+dictfile = 'thesaurus_sample', dictionary = 'english_stem'
+-- SELECT 1
+
+> CREATE TEXT SEARCH CONFIGURATION my_cfg (PARSER = default)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> SELECT cfgname, cfgparser, cfgowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) FROM pg_ts_config WHERE cfgname = 'my_cfg'
+cfgname:name | cfgparser:oid | ?column?:bool
+my_cfg | 3722 | t
+-- SELECT 1
+
+> SELECT count(*) FROM pg_ts_config_map WHERE mapcfg = 'my_cfg'::regconfig
+count:int8
+0
+-- SELECT 1
+
+> SELECT to_tsvector('my_cfg', 'The Fat Rats')
+to_tsvector:3614
+
+-- SELECT 1
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg ADD MAPPING FOR asciiword, word WITH my_simple, english_stem
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT maptokentype, mapseqno, mapdict::regdictionary FROM pg_ts_config_map WHERE mapcfg = 'my_cfg'::regconfig ORDER BY 1, 2
+maptokentype:int4 | mapseqno:int4 | mapdict:3769
+1 | 1 | my_simple
+1 | 2 | english_stem
+2 | 1 | my_simple
+2 | 2 | english_stem
+-- SELECT 4
+
+> SELECT to_tsvector('my_cfg', 'The Fat Rats')
+to_tsvector:3614
+'fat':2 'rats':3 'the':1
+-- SELECT 1
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg ALTER MAPPING FOR asciiword WITH english_stem
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT maptokentype, mapseqno, mapdict::regdictionary FROM pg_ts_config_map WHERE mapcfg = 'my_cfg'::regconfig ORDER BY 1, 2
+maptokentype:int4 | mapseqno:int4 | mapdict:3769
+1 | 1 | english_stem
+2 | 1 | my_simple
+2 | 2 | english_stem
+-- SELECT 3
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg ALTER MAPPING REPLACE english_stem WITH simple
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT maptokentype, mapseqno, mapdict::regdictionary FROM pg_ts_config_map WHERE mapcfg = 'my_cfg'::regconfig ORDER BY 1, 2
+maptokentype:int4 | mapseqno:int4 | mapdict:3769
+1 | 1 | simple
+2 | 1 | my_simple
+2 | 2 | simple
+-- SELECT 3
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg ALTER MAPPING FOR word REPLACE simple WITH english_stem
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT maptokentype, mapseqno, mapdict::regdictionary FROM pg_ts_config_map WHERE mapcfg = 'my_cfg'::regconfig ORDER BY 1, 2
+maptokentype:int4 | mapseqno:int4 | mapdict:3769
+1 | 1 | simple
+2 | 1 | my_simple
+2 | 2 | english_stem
+-- SELECT 3
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg ADD MAPPING FOR nosuchtoken WITH simple
+ERROR 22023: token type "nosuchtoken" does not exist
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg ADD MAPPING FOR asciiword WITH nosuchdict
+ERROR 42704: text search dictionary "nosuchdict" does not exist
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg DROP MAPPING FOR word
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg DROP MAPPING FOR word
+ERROR 42704: mapping for token type "word" does not exist
+
+> ALTER TEXT SEARCH CONFIGURATION my_cfg DROP MAPPING IF EXISTS FOR word, email
+NOTICE 00000: mapping for token type "word" does not exist, skipping
+NOTICE 00000: mapping for token type "email" does not exist, skipping
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT maptokentype, mapseqno, mapdict::regdictionary FROM pg_ts_config_map WHERE mapcfg = 'my_cfg'::regconfig ORDER BY 1, 2
+maptokentype:int4 | mapseqno:int4 | mapdict:3769
+1 | 1 | simple
+-- SELECT 1
+
+> ALTER TEXT SEARCH CONFIGURATION nosuchcfg ADD MAPPING FOR word WITH simple
+ERROR 42704: text search configuration "nosuchcfg" does not exist
+
+> CREATE TEXT SEARCH CONFIGURATION my_copy (COPY = english)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> SELECT count(*) FROM pg_ts_config_map WHERE mapcfg = 'my_copy'::regconfig
+count:int8
+19
+-- SELECT 1
+
+> SELECT to_tsvector('my_copy', 'The Fat Rats')
+to_tsvector:3614
+'fat':2 'rat':3
+-- SELECT 1
+
+> CREATE TEXT SEARCH CONFIGURATION bad_cfg (PARSER = default, COPY = english)
+ERROR 42601: cannot specify both PARSER and COPY options
+
+> CREATE TEXT SEARCH CONFIGURATION bad_cfg (bogus = 1)
+ERROR 42601: text search configuration parameter "bogus" not recognized
+
+> CREATE TEXT SEARCH CONFIGURATION bad_cfg ()
+ERROR 42601: syntax error at or near ")" (at 43)
+
+> CREATE TEXT SEARCH CONFIGURATION bad_cfg (PARSER = nosuch)
+ERROR 42704: text search parser "nosuch" does not exist
+
+> ALTER TEXT SEARCH CONFIGURATION my_copy ALTER MAPPING FOR asciiword, asciihword, hword_asciipart WITH thes, english_stem
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('my_copy', 'one postgres two'), to_tsquery('my_copy', 'supernovae & stars'), to_tsvector('my_copy', 'booking the tickets')
+to_tsvector:3614 | to_tsquery:3615 | to_tsvector:3614
+'1':1 '2':3 'postgr':2 | 'sn' & 'star' | 'card':3 'invit':2 'order':1
+-- SELECT 1
+
+> DROP TEXT SEARCH DICTIONARY my_simple
+-- DROP TEXT SEARCH DICTIONARY
+
+> DROP TEXT SEARCH DICTIONARY nosuch
+ERROR 42704: text search dictionary "nosuch" does not exist
+
+> DROP TEXT SEARCH DICTIONARY IF EXISTS nosuch
+NOTICE 00000: text search dictionary "nosuch" does not exist, skipping
+-- DROP TEXT SEARCH DICTIONARY
+
+> DROP TEXT SEARCH CONFIGURATION IF EXISTS nosuch
+NOTICE 00000: text search configuration "nosuch" does not exist, skipping
+-- DROP TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH DICTIONARY syn RENAME TO syn2
+-- ALTER TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('syn2', 'postgres')
+ts_lexize:text[]
+{pgsql}
+-- SELECT 1
+
+> ALTER TEXT SEARCH CONFIGURATION my_copy RENAME TO my_copy2
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT 'my_copy2'::regconfig
+regconfig:3734
+my_copy2
+-- SELECT 1
+
+> CREATE SCHEMA fts_s
+-- CREATE SCHEMA
+
+> ALTER TEXT SEARCH CONFIGURATION my_copy2 SET SCHEMA fts_s
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT 'fts_s.my_copy2'::regconfig, 'fts_s.my_copy2'::regconfig::oid = (SELECT oid FROM pg_ts_config WHERE cfgname = 'my_copy2')
+regconfig:3734 | ?column?:bool
+fts_s.my_copy2 | t
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY syn2 SET SCHEMA fts_s
+-- ALTER TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('fts_s.syn2', 'postgres')
+ts_lexize:text[]
+{pgsql}
+-- SELECT 1
+
+> COMMENT ON TEXT SEARCH DICTIONARY fts_s.syn2 IS 'a synonym dict'
+-- COMMENT
+
+> SELECT obj_description('fts_s.syn2'::regdictionary, 'pg_ts_dict')
+obj_description:text
+a synonym dict
+-- SELECT 1
+
+> COMMENT ON TEXT SEARCH CONFIGURATION fts_s.my_copy2 IS 'copied'
+-- COMMENT
+
+> SELECT obj_description('fts_s.my_copy2'::regconfig, 'pg_ts_config')
+obj_description:text
+copied
+-- SELECT 1
+
+> SET search_path = fts_s, public
+-- SET
+
+> SELECT 'my_copy2'::regconfig
+regconfig:3734
+my_copy2
+-- SELECT 1
+
+> SET default_text_search_config = 'my_copy2'
+-- SET
+
+> SHOW default_text_search_config
+default_text_search_config:text
+fts_s.my_copy2
+-- SHOW
+
+> RESET default_text_search_config
+-- RESET
+
+> RESET search_path
+-- RESET
+
+> DROP SCHEMA fts_s
+ERROR 2BP01: cannot drop schema fts_s because other objects depend on it
+DETAIL: text search dictionary fts_s.syn2 depends on schema fts_s
+DETAIL: text search configuration fts_s.my_copy2 depends on schema fts_s
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> CREATE TABLE fts_t (body text, cfg regconfig)
+-- CREATE TABLE
+
+> CREATE INDEX fts_t_idx ON fts_t (to_tsvector('my_cfg'::regconfig, body))
+-- CREATE INDEX
+
+> DROP TEXT SEARCH CONFIGURATION my_cfg
+ERROR 2BP01: cannot drop text search configuration my_cfg because other objects depend on it
+DETAIL: index fts_t_idx depends on text search configuration my_cfg
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TEXT SEARCH DICTIONARY my_stem
+-- DROP TEXT SEARCH DICTIONARY
+
+> DROP TEXT SEARCH DICTIONARY thes
+ERROR 2BP01: cannot drop text search dictionary thes because other objects depend on it
+DETAIL: text search configuration fts_s.my_copy2 depends on text search dictionary thes
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> CREATE TEXT SEARCH PARSER my_prs (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)
+-- CREATE TEXT SEARCH PARSER
+
+> SELECT prsname, prsstart, prstoken, prsend, prsheadline, prslextype FROM pg_ts_parser ORDER BY oid
+prsname:name | prsstart:regproc | prstoken:regproc | prsend:regproc | prsheadline:regproc | prslextype:regproc
+default | prsd_start | prsd_nexttoken | prsd_end | prsd_headline | prsd_lextype
+my_prs | prsd_start | prsd_nexttoken | prsd_end | - | prsd_lextype
+-- SELECT 2
+
+> CREATE TEXT SEARCH CONFIGURATION prs_cfg (PARSER = my_prs)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH CONFIGURATION prs_cfg ADD MAPPING FOR asciiword WITH simple
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('prs_cfg', 'Hello World'), * FROM ts_parse('my_prs', 'ab cd')
+to_tsvector:3614 | tokid:int4 | token:text
+'hello':1 'world':2 | 1 | ab
+'hello':1 'world':2 | 1 | cd
+'hello':1 'world':2 | 12 |  
+-- SELECT 3
+
+> SELECT ts_headline('prs_cfg', 'Hello World', 'hello')
+ERROR 42725: function ts_headline(unknown, unknown, unknown) is not unique (at 8)
+HINT: Could not choose a best candidate function. You might need to add explicit type casts.
+
+> CREATE TEXT SEARCH PARSER bad_prs (START = prsd_start)
+ERROR 42P17: text search parser gettoken method is required
+
+> CREATE TEXT SEARCH TEMPLATE my_tmpl (LEXIZE = dsimple_lexize, INIT = dsimple_init)
+-- CREATE TEXT SEARCH TEMPLATE
+
+> SELECT tmplname, tmplinit, tmpllexize FROM pg_ts_template ORDER BY oid
+tmplname:name | tmplinit:regproc | tmpllexize:regproc
+simple | dsimple_init | dsimple_lexize
+synonym | dsynonym_init | dsynonym_lexize
+ispell | dispell_init | dispell_lexize
+thesaurus | thesaurus_init | thesaurus_lexize
+snowball | dsnowball_init | dsnowball_lexize
+my_tmpl | dsimple_init | dsimple_lexize
+-- SELECT 6
+
+> CREATE TEXT SEARCH DICTIONARY tmpl_dict (TEMPLATE = my_tmpl, accept = false)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT ts_lexize('tmpl_dict', 'Word')
+ts_lexize:text[]
+NULL
+-- SELECT 1
+
+> CREATE TEXT SEARCH TEMPLATE noinit_tmpl (LEXIZE = dsimple_lexize)
+-- CREATE TEXT SEARCH TEMPLATE
+
+> CREATE TEXT SEARCH DICTIONARY noinit_dict (TEMPLATE = noinit_tmpl, accept = false)
+ERROR 42601: text search template "noinit_tmpl" does not accept options
+
+> DROP TEXT SEARCH TEMPLATE my_tmpl
+ERROR 2BP01: cannot drop text search template my_tmpl because other objects depend on it
+DETAIL: text search dictionary tmpl_dict depends on text search template my_tmpl
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TEXT SEARCH PARSER my_prs
+ERROR 2BP01: cannot drop text search parser my_prs because other objects depend on it
+DETAIL: text search configuration prs_cfg depends on text search parser my_prs
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TEXT SEARCH PARSER my_prs CASCADE
+NOTICE 00000: drop cascades to text search configuration prs_cfg
+-- DROP TEXT SEARCH PARSER
+
+> DROP TEXT SEARCH TEMPLATE my_tmpl CASCADE
+NOTICE 00000: drop cascades to text search dictionary tmpl_dict
+-- DROP TEXT SEARCH TEMPLATE
+
+> SELECT pg_describe_object('pg_ts_config'::regclass, 'english'::regconfig, 0), pg_describe_object('pg_ts_dict'::regclass, 'simple'::regdictionary, 0)
+pg_describe_object:text | pg_describe_object:text
+text search configuration english | text search dictionary simple
+-- SELECT 1
+
+> SELECT * FROM pg_identify_object('pg_ts_config'::regclass, 'english'::regconfig, 0)
+type:text | schema:text | name:text | identity:text
+text search configuration | pg_catalog | english | pg_catalog.english
+-- SELECT 1
+
+> SELECT * FROM pg_identify_object('pg_ts_dict'::regclass, 'english_stem'::regdictionary, 0)
+type:text | schema:text | name:text | identity:text
+text search dictionary | pg_catalog | english_stem | pg_catalog.english_stem
+-- SELECT 1
+
+> SELECT pg_ts_config_is_visible('english'::regconfig), pg_ts_dict_is_visible('english_stem'::regdictionary)
+pg_ts_config_is_visible:bool | pg_ts_dict_is_visible:bool
+t | t
+-- SELECT 1
+
+> DROP TABLE fts_t
+-- DROP TABLE
+
+> DROP TEXT SEARCH CONFIGURATION my_cfg
+-- DROP TEXT SEARCH CONFIGURATION
+
+> DROP TEXT SEARCH CONFIGURATION my_cfg
+ERROR 42704: text search configuration "my_cfg" does not exist
+
+> DROP TEXT SEARCH DICTIONARY my_simple
+ERROR 42704: text search dictionary "my_simple" does not exist
+
+> DROP TEXT SEARCH DICTIONARY my_stem, num_opt
+ERROR 42704: text search dictionary "my_stem" does not exist
+
+> DROP TEXT SEARCH CONFIGURATION english
+-- DROP TEXT SEARCH CONFIGURATION
+

@@ -1,0 +1,155 @@
+> create table jeq1 (a int, t text)
+-- CREATE TABLE
+
+> create table jeq2 (b int, u text)
+-- CREATE TABLE
+
+> create table jeq3 (c int)
+-- CREATE TABLE
+
+> create table jeq4 (d int primary key, e int)
+-- CREATE TABLE
+
+> insert into jeq1 select case when g % 3 = 0 then 1 else g end, 't' || (g % 50) from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> insert into jeq2 select case when g % 2 = 0 then 1 else g % 100 end, 'T' || (g % 30) from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> insert into jeq3 select g % 5 from generate_series(1, 50) g
+-- INSERT 0 50
+
+> insert into jeq4 select g, g % 10 from generate_series(1, 5000) g
+-- INSERT 0 5000
+
+> analyze jeq1
+-- ANALYZE
+
+> analyze jeq2
+-- ANALYZE
+
+> analyze jeq3
+-- ANALYZE
+
+> analyze jeq4
+-- ANALYZE
+
+> explain select count(*) from jeq1 join jeq2 on a = b join jeq3 on c = b
+QUERY PLAN:text
+Aggregate  (cost=51515.39..51515.40 rows=1 width=8)
+  ->  Hash Join  (cost=212.10..42943.53 rows=3428743 width=0)
+        Hash Cond: (jeq2.b = jeq1.a)
+        ->  Seq Scan on jeq2  (cost=0.00..44.00 rows=3000 width=4)
+        ->  Hash  (cost=128.22..128.22 rows=6710 width=8)
+              ->  Hash Join  (cost=2.12..128.22 rows=6710 width=8)
+                    Hash Cond: (jeq1.a = jeq3.c)
+                    ->  Seq Scan on jeq1  (cost=0.00..29.00 rows=2000 width=4)
+                    ->  Hash  (cost=1.50..1.50 rows=50 width=4)
+                          ->  Seq Scan on jeq3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> explain select count(*) from jeq1, jeq2, jeq3 where a = b and b = c
+QUERY PLAN:text
+Aggregate  (cost=51515.39..51515.40 rows=1 width=8)
+  ->  Hash Join  (cost=212.10..42943.53 rows=3428743 width=0)
+        Hash Cond: (jeq2.b = jeq1.a)
+        ->  Seq Scan on jeq2  (cost=0.00..44.00 rows=3000 width=4)
+        ->  Hash  (cost=128.22..128.22 rows=6710 width=8)
+              ->  Hash Join  (cost=2.12..128.22 rows=6710 width=8)
+                    Hash Cond: (jeq1.a = jeq3.c)
+                    ->  Seq Scan on jeq1  (cost=0.00..29.00 rows=2000 width=4)
+                    ->  Hash  (cost=1.50..1.50 rows=50 width=4)
+                          ->  Seq Scan on jeq3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> explain select count(*) from jeq1, jeq2, jeq3 where a = b and a = c
+QUERY PLAN:text
+Aggregate  (cost=51515.39..51515.40 rows=1 width=8)
+  ->  Hash Join  (cost=212.10..42943.53 rows=3428743 width=0)
+        Hash Cond: (jeq2.b = jeq1.a)
+        ->  Seq Scan on jeq2  (cost=0.00..44.00 rows=3000 width=4)
+        ->  Hash  (cost=128.22..128.22 rows=6710 width=8)
+              ->  Hash Join  (cost=2.12..128.22 rows=6710 width=8)
+                    Hash Cond: (jeq1.a = jeq3.c)
+                    ->  Seq Scan on jeq1  (cost=0.00..29.00 rows=2000 width=4)
+                    ->  Hash  (cost=1.50..1.50 rows=50 width=4)
+                          ->  Seq Scan on jeq3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> explain select * from jeq3, jeq1, jeq4 where c = a and a = d
+QUERY PLAN:text
+Hash Join  (cost=4.71..130.81 rows=6710 width=19)
+  Hash Cond: (jeq1.a = jeq3.c)
+  ->  Seq Scan on jeq1  (cost=0.00..29.00 rows=2000 width=7)
+  ->  Hash  (cost=4.09..4.09 rows=50 width=12)
+        ->  Merge Join  (cost=3.24..4.09 rows=50 width=12)
+              Merge Cond: (jeq4.d = jeq3.c)
+              ->  Index Scan using jeq4_pkey on jeq4  (cost=0.28..165.28 rows=5000 width=8)
+              ->  Sort  (cost=2.91..3.04 rows=50 width=4)
+                    Sort Key: jeq3.c
+                    ->  Seq Scan on jeq3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> explain select * from jeq3 join jeq4 on c = d join jeq1 on a = d
+QUERY PLAN:text
+Hash Join  (cost=4.71..130.81 rows=6710 width=19)
+  Hash Cond: (jeq1.a = jeq3.c)
+  ->  Seq Scan on jeq1  (cost=0.00..29.00 rows=2000 width=7)
+  ->  Hash  (cost=4.09..4.09 rows=50 width=12)
+        ->  Merge Join  (cost=3.24..4.09 rows=50 width=12)
+              Merge Cond: (jeq4.d = jeq3.c)
+              ->  Index Scan using jeq4_pkey on jeq4  (cost=0.28..165.28 rows=5000 width=8)
+              ->  Sort  (cost=2.91..3.04 rows=50 width=4)
+                    Sort Key: jeq3.c
+                    ->  Seq Scan on jeq3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> explain select count(*) from jeq1 join jeq2 on a = b join jeq3 on c = b join jeq4 on d = c
+QUERY PLAN:text
+Aggregate  (cost=51608.31..51608.32 rows=1 width=8)
+  ->  Hash Join  (cost=212.39..43036.45 rows=3428743 width=0)
+        Hash Cond: (jeq2.b = jeq1.a)
+        ->  Nested Loop  (cost=0.29..136.92 rows=3000 width=8)
+              ->  Seq Scan on jeq2  (cost=0.00..44.00 rows=3000 width=4)
+              ->  Memoize  (cost=0.29..0.36 rows=1 width=4)
+                    Cache Key: jeq2.b
+                    Cache Mode: logical
+                    ->  Index Only Scan using jeq4_pkey on jeq4  (cost=0.28..0.35 rows=1 width=4)
+                          Index Cond: (d = jeq2.b)
+        ->  Hash  (cost=128.22..128.22 rows=6710 width=8)
+              ->  Hash Join  (cost=2.12..128.22 rows=6710 width=8)
+                    Hash Cond: (jeq1.a = jeq3.c)
+                    ->  Seq Scan on jeq1  (cost=0.00..29.00 rows=2000 width=4)
+                    ->  Hash  (cost=1.50..1.50 rows=50 width=4)
+                          ->  Seq Scan on jeq3  (cost=0.00..1.50 rows=50 width=4)
+-- EXPLAIN
+
+> select count(*) from jeq1 join jeq2 on a = b join jeq3 on c = b where a > 1
+count:int8
+0
+-- SELECT 1
+
+> explain select count(*) from jeq1 join jeq2 on a = b
+QUERY PLAN:text
+Aggregate  (cost=15381.50..15381.51 rows=1 width=8)
+  ->  Hash Join  (cost=54.00..12826.55 rows=1021980 width=0)
+        Hash Cond: (jeq2.b = jeq1.a)
+        ->  Seq Scan on jeq2  (cost=0.00..44.00 rows=3000 width=4)
+        ->  Hash  (cost=29.00..29.00 rows=2000 width=4)
+              ->  Seq Scan on jeq1  (cost=0.00..29.00 rows=2000 width=4)
+-- EXPLAIN
+
+> explain (verbose, costs off) select count(*) from jeq1 join jeq2 on a = b
+QUERY PLAN:text
+Aggregate
+  Output: count(*)
+  ->  Hash Join
+        Hash Cond: (jeq2.b = jeq1.a)
+        ->  Seq Scan on public.jeq2
+              Output: jeq2.b, jeq2.u
+        ->  Hash
+              Output: jeq1.a
+              ->  Seq Scan on public.jeq1
+                    Output: jeq1.a
+-- EXPLAIN
+

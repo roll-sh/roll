@@ -1,0 +1,563 @@
+> CREATE TABLE up1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE up1_p1 PARTITION OF up1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE up1_p3 PARTITION OF up1 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> CREATE TABLE up1_p2 PARTITION OF up1 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> INSERT INTO up1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> CREATE INDEX up1_p1_a ON up1_p1 (a)
+-- CREATE INDEX
+
+> CREATE INDEX up1_p2_a ON up1_p2 (a)
+-- CREATE INDEX
+
+> CREATE INDEX up1_p3_a ON up1_p3 (a)
+-- CREATE INDEX
+
+> CREATE TABLE up2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE up2_p1 PARTITION OF up2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE up2_p2 PARTITION OF up2 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> CREATE TABLE up2_p3 PARTITION OF up2 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO up2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> CREATE INDEX up2_p1_b ON up2_p1 (b)
+-- CREATE INDEX
+
+> CREATE INDEX up2_p2_b ON up2_p2 (b)
+-- CREATE INDEX
+
+> CREATE INDEX up2_p3_b ON up2_p3 (b)
+-- CREATE INDEX
+
+> CREATE TABLE up3 (a int, b int, c int, d varchar) PARTITION BY RANGE (((a + b) / 2))
+-- CREATE TABLE
+
+> CREATE TABLE up3_p1 PARTITION OF up3 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE up3_p2 PARTITION OF up3 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> CREATE TABLE up3_p3 PARTITION OF up3 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO up3 SELECT i, i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> CREATE INDEX up3_p1_ab2 ON up3_p1 (((a + b) / 2))
+-- CREATE INDEX
+
+> CREATE INDEX up3_p2_ab2 ON up3_p2 (((a + b) / 2))
+-- CREATE INDEX
+
+> CREATE INDEX up3_p3_ab2 ON up3_p3 (((a + b) / 2))
+-- CREATE INDEX
+
+> ANALYZE up1, up2, up3
+-- ANALYZE
+
+> SET enable_partitionwise_join = on
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Nested Loop
+              Join Filter: (t1_2.a = t1_5.b)
+              ->  HashAggregate
+                    Group Key: t1_5.b
+                    ->  Hash Join
+                          Hash Cond: (((t2_1.a + t2_1.b) / 2) = t1_5.b)
+                          ->  Seq Scan on up3_p1 t2_1
+                          ->  Hash
+                                ->  Seq Scan on up2_p1 t1_5
+                                      Filter: (a = 0)
+              ->  Index Scan using up1_p1_a on up1_p1 t1_2
+                    Index Cond: (a = ((t2_1.a + t2_1.b) / 2))
+                    Filter: (b = 0)
+        ->  Nested Loop
+              Join Filter: (t1_3.a = t1_6.b)
+              ->  HashAggregate
+                    Group Key: t1_6.b
+                    ->  Hash Join
+                          Hash Cond: (((t2_2.a + t2_2.b) / 2) = t1_6.b)
+                          ->  Seq Scan on up3_p2 t2_2
+                          ->  Hash
+                                ->  Seq Scan on up2_p2 t1_6
+                                      Filter: (a = 0)
+              ->  Index Scan using up1_p2_a on up1_p2 t1_3
+                    Index Cond: (a = ((t2_2.a + t2_2.b) / 2))
+                    Filter: (b = 0)
+        ->  Nested Loop
+              Join Filter: (t1_4.a = t1_7.b)
+              ->  HashAggregate
+                    Group Key: t1_7.b
+                    ->  Nested Loop
+                          ->  Seq Scan on up2_p3 t1_7
+                                Filter: (a = 0)
+                          ->  Index Scan using up3_p3_ab2 on up3_p3 t2_3
+                                Index Cond: (((a + b) / 2) = t1_7.b)
+              ->  Index Scan using up1_p3_a on up1_p3 t1_4
+                    Index Cond: (a = ((t2_3.a + t2_3.b) / 2))
+                    Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a < 3 AND t1.b = (t2.a + t2.b) / 2) AND t1.b < 3 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Nested Loop
+              Join Filter: (t1_2.a = t1_5.b)
+              ->  HashAggregate
+                    Group Key: t1_5.b
+                    ->  Hash Join
+                          Hash Cond: (((t2_1.a + t2_1.b) / 2) = t1_5.b)
+                          ->  Seq Scan on up3_p1 t2_1
+                          ->  Hash
+                                ->  Seq Scan on up2_p1 t1_5
+                                      Filter: (a < 3)
+              ->  Index Scan using up1_p1_a on up1_p1 t1_2
+                    Index Cond: (a = ((t2_1.a + t2_1.b) / 2))
+                    Filter: (b < 3)
+        ->  Nested Loop
+              Join Filter: (t1_3.a = t1_6.b)
+              ->  HashAggregate
+                    Group Key: t1_6.b
+                    ->  Hash Join
+                          Hash Cond: (((t2_2.a + t2_2.b) / 2) = t1_6.b)
+                          ->  Seq Scan on up3_p2 t2_2
+                          ->  Hash
+                                ->  Seq Scan on up2_p2 t1_6
+                                      Filter: (a < 3)
+              ->  Index Scan using up1_p2_a on up1_p2 t1_3
+                    Index Cond: (a = ((t2_2.a + t2_2.b) / 2))
+                    Filter: (b < 3)
+        ->  Nested Loop
+              Join Filter: (t1_4.a = t1_7.b)
+              ->  HashAggregate
+                    Group Key: t1_7.b
+                    ->  Hash Join
+                          Hash Cond: (((t2_3.a + t2_3.b) / 2) = t1_7.b)
+                          ->  Seq Scan on up3_p3 t2_3
+                          ->  Hash
+                                ->  Seq Scan on up2_p3 t1_7
+                                      Filter: (a < 3)
+              ->  Index Scan using up1_p3_a on up1_p3 t1_4
+                    Index Cond: (a = ((t2_3.a + t2_3.b) / 2))
+                    Filter: (b < 3)
+-- EXPLAIN
+
+> SELECT t1.a, t1.c FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a < 3 AND t1.b = (t2.a + t2.b) / 2) AND t1.b < 3 ORDER BY t1.a
+a:int4 | c:varchar
+0 | 0000
+102 | 0102
+126 | 0126
+150 | 0150
+252 | 0252
+276 | 0276
+300 | 0300
+402 | 0402
+426 | 0426
+450 | 0450
+552 | 0552
+576 | 0576
+-- SELECT 12
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Nested Loop
+              Join Filter: (t1_2.a = t1_5.b)
+              ->  Unique
+                    ->  Sort
+                          Sort Key: t1_5.b
+                          ->  Hash Join
+                                Hash Cond: (((t2_1.a + t2_1.b) / 2) = t1_5.b)
+                                ->  Seq Scan on up3_p1 t2_1
+                                ->  Hash
+                                      ->  Seq Scan on up2_p1 t1_5
+                                            Filter: (a = 0)
+              ->  Index Scan using up1_p1_a on up1_p1 t1_2
+                    Index Cond: (a = ((t2_1.a + t2_1.b) / 2))
+                    Filter: (b = 0)
+        ->  Nested Loop
+              Join Filter: (t1_3.a = t1_6.b)
+              ->  Unique
+                    ->  Sort
+                          Sort Key: t1_6.b
+                          ->  Hash Join
+                                Hash Cond: (((t2_2.a + t2_2.b) / 2) = t1_6.b)
+                                ->  Seq Scan on up3_p2 t2_2
+                                ->  Hash
+                                      ->  Seq Scan on up2_p2 t1_6
+                                            Filter: (a = 0)
+              ->  Index Scan using up1_p2_a on up1_p2 t1_3
+                    Index Cond: (a = ((t2_2.a + t2_2.b) / 2))
+                    Filter: (b = 0)
+        ->  Nested Loop
+              Join Filter: (t1_4.a = t1_7.b)
+              ->  Unique
+                    ->  Sort
+                          Sort Key: t1_7.b
+                          ->  Nested Loop
+                                ->  Seq Scan on up2_p3 t1_7
+                                      Filter: (a = 0)
+                                ->  Index Scan using up3_p3_ab2 on up3_p3 t2_3
+                                      Index Cond: (((a + b) / 2) = t1_7.b)
+              ->  Index Scan using up1_p3_a on up1_p3 t1_4
+                    Index Cond: (a = ((t2_3.a + t2_3.b) / 2))
+                    Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> RESET enable_hashagg
+-- RESET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM up3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Nested Loop
+              ->  HashAggregate
+                    Group Key: t1_6.b
+                    ->  Hash Semi Join
+                          Hash Cond: (t1_6.b = ((t1_9.a + t1_9.b) / 2))
+                          ->  Seq Scan on up2_p1 t1_6
+                          ->  Hash
+                                ->  Seq Scan on up3_p1 t1_9
+                                      Filter: (c = 0)
+              ->  Index Scan using up1_p1_a on up1_p1 t1_3
+                    Index Cond: (a = t1_6.b)
+                    Filter: (b = 0)
+        ->  Nested Loop
+              ->  HashAggregate
+                    Group Key: t1_7.b
+                    ->  Hash Semi Join
+                          Hash Cond: (t1_7.b = ((t1_10.a + t1_10.b) / 2))
+                          ->  Seq Scan on up2_p2 t1_7
+                          ->  Hash
+                                ->  Seq Scan on up3_p2 t1_10
+                                      Filter: (c = 0)
+              ->  Index Scan using up1_p2_a on up1_p2 t1_4
+                    Index Cond: (a = t1_7.b)
+                    Filter: (b = 0)
+        ->  Nested Loop
+              ->  HashAggregate
+                    Group Key: t1_8.b
+                    ->  Hash Semi Join
+                          Hash Cond: (t1_8.b = ((t1_11.a + t1_11.b) / 2))
+                          ->  Seq Scan on up2_p3 t1_8
+                          ->  Hash
+                                ->  Seq Scan on up3_p3 t1_11
+                                      Filter: (c = 0)
+              ->  Index Scan using up1_p3_a on up1_p3 t1_5
+                    Index Cond: (a = t1_8.b)
+                    Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM up3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Nested Loop
+        Join Filter: (t1.a = t1_1.b)
+        ->  HashAggregate
+              Group Key: t1_1.b
+              ->  Hash Join
+                    Hash Cond: (((t2.a + t2.b) / 2) = t1_1.b)
+                    ->  Append
+                          ->  Seq Scan on up3_p1 t2_1
+                          ->  Seq Scan on up3_p2 t2_2
+                          ->  Seq Scan on up3_p3 t2_3
+                    ->  Hash
+                          ->  Append
+                                ->  Seq Scan on up2_p1 t1_5
+                                      Filter: (a = 0)
+                                ->  Seq Scan on up2_p2 t1_6
+                                      Filter: (a = 0)
+                                ->  Seq Scan on up2_p3 t1_7
+                                      Filter: (a = 0)
+        ->  Append
+              ->  Index Scan using up1_p1_a on up1_p1 t1_2
+                    Index Cond: (a = ((t2.a + t2.b) / 2))
+                    Filter: (b = 0)
+              ->  Index Scan using up1_p2_a on up1_p2 t1_3
+                    Index Cond: (a = ((t2.a + t2.b) / 2))
+                    Filter: (b = 0)
+              ->  Index Scan using up1_p3_a on up1_p3 t1_4
+                    Index Cond: (a = ((t2.a + t2.b) / 2))
+                    Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM up1 t1 WHERE t1.a IN (SELECT t1.b FROM up2 t1, up3 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF) SELECT t1.* FROM up1_p1 t1 WHERE t1.a IN (SELECT t1.b FROM up2_p1 t1, up3_p1 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0
+QUERY PLAN:text
+Hash Right Semi Join
+  Hash Cond: (t1_1.b = t1.a)
+  ->  Hash Join
+        Hash Cond: (((t2.a + t2.b) / 2) = t1_1.b)
+        ->  Seq Scan on up3_p1 t2
+        ->  Hash
+              ->  Seq Scan on up2_p1 t1_1
+                    Filter: (a = 0)
+  ->  Hash
+        ->  Seq Scan on up1_p1 t1
+              Filter: (b = 0)
+-- EXPLAIN
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM up1_p1 t1 WHERE t1.a IN (SELECT t1.b FROM up2_p1 t1, up3_p1 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on up1_p1 t1
+        Filter: (b = 0)
+  ->  Nested Loop
+        Join Filter: (t1.a = t1_1.b)
+        ->  Index Scan using up3_p1_ab2 on up3_p1 t2
+              Index Cond: (((a + b) / 2) = t1.a)
+        ->  Index Scan using up2_p1_b on up2_p1 t1_1
+              Index Cond: (b = ((t2.a + t2.b) / 2))
+              Filter: (a = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM up1_p1 t1 WHERE t1.a IN (SELECT t1.b FROM up2_p1 t1, up3_p1 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+-- SELECT 2
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> CREATE TABLE sa (a int, b int, c text)
+-- CREATE TABLE
+
+> CREATE TABLE sb (a int, b int, c text)
+-- CREATE TABLE
+
+> CREATE TABLE sc (a int, b int, c text)
+-- CREATE TABLE
+
+> INSERT INTO sa SELECT i, i % 50, 'a' || i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> INSERT INTO sb SELECT i * 2, i % 7, 'b' || i FROM generate_series(1, 500) i
+-- INSERT 0 500
+
+> INSERT INTO sc SELECT i % 300, i, 'c' || i FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> CREATE INDEX ON sa (a)
+-- CREATE INDEX
+
+> CREATE INDEX ON sb (a)
+-- CREATE INDEX
+
+> CREATE INDEX ON sc ((a + b))
+-- CREATE INDEX
+
+> ANALYZE sa, sb, sc
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM sa, sb WHERE sa.a = sb.a AND sa.a IN (SELECT a FROM sc WHERE b < 50)
+QUERY PLAN:text
+Merge Semi Join
+  Merge Cond: (sa.a = sc.a)
+  ->  Merge Join
+        Merge Cond: (sa.a = sb.a)
+        ->  Index Scan using sa_a_idx on sa
+        ->  Index Scan using sb_a_idx on sb
+  ->  Sort
+        Sort Key: sc.a
+        ->  Seq Scan on sc
+              Filter: (b < 50)
+-- EXPLAIN
+
+> SELECT count(*), sum(sa.b) FROM sa, sb WHERE sa.a = sb.a AND sa.a IN (SELECT a FROM sc WHERE b < 50)
+count:int8 | sum:int8
+24 | 600
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM sa WHERE sa.a IN (SELECT sb.a FROM sb, sc WHERE sb.a = sc.a + sc.b AND sc.b < 20)
+QUERY PLAN:text
+Nested Loop
+  ->  HashAggregate
+        Group Key: sb.a
+        ->  Hash Join
+              Hash Cond: (sb.a = (sc.a + sc.b))
+              ->  Seq Scan on sb
+              ->  Hash
+                    ->  Seq Scan on sc
+                          Filter: (b < 20)
+  ->  Index Scan using sa_a_idx on sa
+        Index Cond: (a = sb.a)
+-- EXPLAIN
+
+> SELECT count(*), sum(sa.b) FROM sa WHERE sa.a IN (SELECT sb.a FROM sb, sc WHERE sb.a = sc.a + sc.b AND sc.b < 20)
+count:int8 | sum:int8
+19 | 380
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM sa, sb WHERE sa.b = sb.b AND sa.a IN (SELECT sc.a FROM sc WHERE sc.b < 10) AND sb.a IN (SELECT sc.b FROM sc WHERE sc.a < 3)
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (sa.b = sb.b)
+  ->  Merge Semi Join
+        Merge Cond: (sa.a = sc.a)
+        ->  Index Scan using sa_a_idx on sa
+        ->  Sort
+              Sort Key: sc.a
+              ->  Seq Scan on sc
+                    Filter: (b < 10)
+  ->  Materialize
+        ->  Hash Semi Join
+              Hash Cond: (sb.a = sc_1.b)
+              ->  Seq Scan on sb
+              ->  Hash
+                    ->  Seq Scan on sc sc_1
+                          Filter: (a < 3)
+-- EXPLAIN
+
+> SELECT count(*) FROM sa, sb WHERE sa.b = sb.b AND sa.a IN (SELECT sc.a FROM sc WHERE sc.b < 10) AND sb.a IN (SELECT sc.b FROM sc WHERE sc.a < 3)
+count:int8
+6
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM sa WHERE sa.a IN (SELECT sb.a FROM sb WHERE sb.b IN (SELECT sc.b FROM sc WHERE sc.a = 5))
+QUERY PLAN:text
+Nested Loop
+  ->  Unique
+        ->  Sort
+              Sort Key: sb.a
+              ->  Hash Semi Join
+                    Hash Cond: (sb.b = sc.b)
+                    ->  Seq Scan on sb
+                    ->  Hash
+                          ->  Seq Scan on sc
+                                Filter: (a = 5)
+  ->  Index Scan using sa_a_idx on sa
+        Index Cond: (a = sb.a)
+-- EXPLAIN
+
+> SELECT count(*) FROM sa WHERE sa.a IN (SELECT sb.a FROM sb WHERE sb.b IN (SELECT sc.b FROM sc WHERE sc.a = 5))
+count:int8
+71
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM sa JOIN sb ON sa.a = sb.a WHERE sb.a IN (SELECT sc.a FROM sc, sb s2 WHERE sc.a = s2.a AND s2.b = 1)
+QUERY PLAN:text
+Merge Semi Join
+  Merge Cond: (sa.a = sc.a)
+  ->  Merge Join
+        Merge Cond: (sa.a = sb.a)
+        ->  Index Scan using sa_a_idx on sa
+        ->  Index Scan using sb_a_idx on sb
+  ->  Sort
+        Sort Key: sc.a
+        ->  Hash Join
+              Hash Cond: (sc.a = s2.a)
+              ->  Seq Scan on sc
+              ->  Hash
+                    ->  Seq Scan on sb s2
+                          Filter: (b = 1)
+-- EXPLAIN
+
+> SELECT count(*) FROM sa JOIN sb ON sa.a = sb.a WHERE sb.a IN (SELECT sc.a FROM sc, sb s2 WHERE sc.a = s2.a AND s2.b = 1)
+count:int8
+22
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM sa WHERE EXISTS (SELECT 1 FROM sb, sc WHERE sb.a = sa.a AND sc.a = sb.a AND sc.b < 30)
+QUERY PLAN:text
+Nested Loop
+  ->  HashAggregate
+        Group Key: sb.a
+        ->  Merge Join
+              Merge Cond: (sb.a = sc.a)
+              ->  Index Only Scan using sb_a_idx on sb
+              ->  Sort
+                    Sort Key: sc.a
+                    ->  Seq Scan on sc
+                          Filter: (b < 30)
+  ->  Index Scan using sa_a_idx on sa
+        Index Cond: (a = sb.a)
+-- EXPLAIN
+
+> SELECT count(*) FROM sa WHERE EXISTS (SELECT 1 FROM sb, sc WHERE sb.a = sa.a AND sc.a = sb.a AND sc.b < 30)
+count:int8
+14
+-- SELECT 1
+

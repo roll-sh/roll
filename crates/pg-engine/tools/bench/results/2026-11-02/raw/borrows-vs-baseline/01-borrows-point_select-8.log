@@ -1,0 +1,1 @@
+RESULT	borrows	oltp	point_select	clients=8	tps=34349	ops=103085	elapsed_s=3.001145871	mean_ms=0.232	p50_ms=0.218	p95_ms=0.356	p99_ms=0.491	errors=0	peak_mem_mb=105.6	validation_version=oltp-values-v1	checked_ops=103085

@@ -1,0 +1,171 @@
+> CREATE TABLE a121_w (id int PRIMARY KEY, g int, t1 text, t2 text, n numeric, d date, f float8, b bool, t3 text)
+-- CREATE TABLE
+
+> INSERT INTO a121_w SELECT i, i % 37, 'one ' || i, repeat('x', i % 50), i / 7.0, date '2020-01-01' + i % 400, i * 1.5, i % 3 = 0, 'three ' || (i % 11)
+>   FROM generate_series(1, 3000) i
+-- INSERT 0 3000
+
+> CREATE TABLE a121_v (k int, g int, s text, u text, m numeric, w text, z int)
+-- CREATE TABLE
+
+> INSERT INTO a121_v SELECT i, i % 41, 'vs ' || i, repeat('y', i % 30), i * 0.25, 'w' || (i % 5), i % 7
+>   FROM generate_series(1, 4000) i
+-- INSERT 0 4000
+
+> CREATE INDEX a121_v_g ON a121_v (g)
+-- CREATE INDEX
+
+> ANALYZE a121_w
+-- ANALYZE
+
+> ANALYZE a121_v
+-- ANALYZE
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> SELECT a.id, b.s FROM a121_w a JOIN a121_v b ON b.k = a.id WHERE a.id % 500 = 0 ORDER BY a.id
+id:int4 | s:text
+500 | vs 500
+1000 | vs 1000
+1500 | vs 1500
+2000 | vs 2000
+2500 | vs 2500
+3000 | vs 3000
+-- SELECT 6
+
+> SELECT count(*), sum(b.m), max(b.s) FROM a121_w a JOIN a121_v b ON b.g = a.g
+count:int8 | sum:numeric | max:text
+292866 | 146421731.25 | vs 999
+-- SELECT 1
+
+> SELECT a.g, count(*), sum(a.n) FROM a121_v b JOIN a121_w a ON a.id = b.k GROUP BY a.g ORDER BY a.g LIMIT 5
+g:int4 | count:int8 | sum:numeric
+0 | 81 | 17553.8571428571428571
+1 | 82 | 17565.57142857142857145714
+2 | 82 | 17577.28571428571428571429
+3 | 82 | 17588.99999999999999997143
+4 | 81 | 17172.00000000000000002857
+-- SELECT 5
+
+> SELECT a.id, b.k FROM a121_w a JOIN a121_v b ON lower(b.s) = 'vs ' || a.id WHERE a.id < 6 ORDER BY 1
+id:int4 | k:int4
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+-- SELECT 5
+
+> SELECT a.id, b.k, b.w FROM a121_w a RIGHT JOIN a121_v b ON b.k = a.id WHERE b.k > 2995 ORDER BY b.k LIMIT 8
+id:int4 | k:int4 | w:text
+2996 | 2996 | w1
+2997 | 2997 | w2
+2998 | 2998 | w3
+2999 | 2999 | w4
+3000 | 3000 | w0
+NULL | 3001 | w1
+NULL | 3002 | w2
+NULL | 3003 | w3
+-- SELECT 8
+
+> SELECT a.id, b.k, b.u FROM (SELECT * FROM a121_w WHERE id > 2990) a FULL JOIN (SELECT * FROM a121_v WHERE k BETWEEN 2985 AND 2995) b ON b.k = a.id ORDER BY a.id, b.k
+id:int4 | k:int4 | u:text
+2991 | 2991 | yyyyyyyyyyyyyyyyyyyyy
+2992 | 2992 | yyyyyyyyyyyyyyyyyyyyyy
+2993 | 2993 | yyyyyyyyyyyyyyyyyyyyyyy
+2994 | 2994 | yyyyyyyyyyyyyyyyyyyyyyyy
+2995 | 2995 | yyyyyyyyyyyyyyyyyyyyyyyyy
+2996 | NULL | NULL
+2997 | NULL | NULL
+2998 | NULL | NULL
+2999 | NULL | NULL
+3000 | NULL | NULL
+NULL | 2985 | yyyyyyyyyyyyyyy
+NULL | 2986 | yyyyyyyyyyyyyyyy
+NULL | 2987 | yyyyyyyyyyyyyyyyy
+NULL | 2988 | yyyyyyyyyyyyyyyyyy
+NULL | 2989 | yyyyyyyyyyyyyyyyyyy
+NULL | 2990 | yyyyyyyyyyyyyyyyyyyy
+-- SELECT 16
+
+> SELECT id, t3 FROM (SELECT * FROM a121_w ORDER BY t3 DESC, id) s WHERE id % 300 = 1
+id:int4 | t3:text
+1801 | three 8
+601 | three 7
+2701 | three 6
+1501 | three 5
+301 | three 4
+2401 | three 3
+1201 | three 2
+901 | three 10
+1 | three 1
+2101 | three 0
+-- SELECT 10
+
+> SELECT g, string_agg(t1, ',' ORDER BY id) FROM (SELECT * FROM a121_w ORDER BY g, id) s WHERE id < 100 GROUP BY g ORDER BY g LIMIT 4
+g:int4 | string_agg:text
+0 | one 37,one 74
+1 | one 1,one 38,one 75
+2 | one 2,one 39,one 76
+3 | one 3,one 40,one 77
+-- SELECT 4
+
+> SELECT a.id, b.k, a.t1 FROM a121_w a JOIN a121_v b ON b.k = a.id ORDER BY a.f DESC, b.z LIMIT 5
+id:int4 | k:int4 | t1:text
+3000 | 3000 | one 3000
+2999 | 2999 | one 2999
+2998 | 2998 | one 2998
+2997 | 2997 | one 2997
+2996 | 2996 | one 2996
+-- SELECT 5
+
+> SELECT a.id, b.k, a.d FROM a121_w a JOIN a121_v b ON b.k = a.id ORDER BY a.d, a.id DESC OFFSET 2990
+id:int4 | k:int4 | d:date
+1198 | 1198 | 2021-02-02
+798 | 798 | 2021-02-02
+398 | 398 | 2021-02-02
+2799 | 2799 | 2021-02-03
+2399 | 2399 | 2021-02-03
+1999 | 1999 | 2021-02-03
+1599 | 1599 | 2021-02-03
+1199 | 1199 | 2021-02-03
+799 | 799 | 2021-02-03
+399 | 399 | 2021-02-03
+-- SELECT 10
+
+> RESET enable_nestloop
+-- RESET
+
+> SET enable_hashjoin = off
+-- SET
+
+> SELECT a.id, b.s FROM a121_w a JOIN a121_v b ON b.g = a.g WHERE a.id IN (1, 2) ORDER BY 1, 2 LIMIT 6
+id:int4 | s:text
+1 | vs 1
+1 | vs 1026
+1 | vs 1067
+1 | vs 1108
+1 | vs 1149
+1 | vs 1190
+-- SELECT 6
+
+> SELECT a.id, (SELECT count(*) FROM a121_v b WHERE b.g = a.g AND b.z = 3) FROM a121_w a WHERE a.id < 4 ORDER BY 1
+id:int4 | count:int8
+1 | 14
+2 | 14
+3 | 14
+-- SELECT 3
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> DROP TABLE a121_w, a121_v
+-- DROP TABLE
+

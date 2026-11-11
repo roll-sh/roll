@@ -1,0 +1,118 @@
+> CREATE TABLE s (id int PRIMARY KEY, n int, g text)
+-- CREATE TABLE
+
+> INSERT INTO s VALUES (1, 3, 'a'), (2, 4, 'b') RETURNING id, xmax, cmin, tableoid = 's'::regclass AS same_table
+id:int4 | xmax:28 | cmin:29 | same_table:bool
+1 | 0 | 0 | t
+2 | 0 | 0 | t
+-- INSERT 0 2
+
+> SELECT tableoid::regclass, id FROM s ORDER BY id
+tableoid:regclass | id:int4
+s | 1
+s | 2
+-- SELECT 2
+
+> SELECT s.tableoid::regclass, s.xmax, s.cmax FROM s ORDER BY id
+tableoid:regclass | xmax:28 | cmax:29
+s | 0 | 0
+s | 0 | 0
+-- SELECT 2
+
+> SELECT xmin <> 0 AS has_xmin, ctid IS NOT NULL AS has_ctid FROM s ORDER BY id
+has_xmin:bool | has_ctid:bool
+t | t
+t | t
+-- SELECT 2
+
+> SELECT pg_typeof(ctid), pg_typeof(xmin), pg_typeof(cmin), pg_typeof(tableoid) FROM s LIMIT 1
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+tid | xid | cid | oid
+-- SELECT 1
+
+> INSERT INTO s VALUES (1, 9, 'a'), (3, 5, 'c') ON CONFLICT (id) DO UPDATE SET n = excluded.n RETURNING id, n, (xmax = 0) AS inserted
+id:int4 | n:int4 | inserted:bool
+1 | 9 | f
+3 | 5 | t
+-- INSERT 0 2
+
+> UPDATE s SET n = n + 1 WHERE id = 2 RETURNING n, xmax
+n:int4 | xmax:28
+5 | 0
+-- UPDATE 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO s VALUES (10, 1, 'z')
+-- INSERT 0 1
+
+> SELECT id, xmin = pg_current_xact_id()::text::xid AS mine FROM s WHERE id >= 3 ORDER BY id
+id:int4 | mine:bool
+3 | f
+10 | t
+-- SELECT 2
+
+> COMMIT
+-- COMMIT
+
+> CREATE TABLE r (a int)
+-- CREATE TABLE
+
+> INSERT INTO r VALUES (1), (1), (2), (2), (2), (3)
+-- INSERT 0 6
+
+> DELETE FROM r a USING r b WHERE a.a = b.a AND a.ctid < b.ctid
+-- DELETE 3
+
+> SELECT a FROM r ORDER BY a
+a:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT a FROM r WHERE ctid = (SELECT ctid FROM r WHERE a = 2)
+a:int4
+2
+-- SELECT 1
+
+> SELECT count(*) FROM r x JOIN r y ON x.ctid = y.ctid
+count:int8
+3
+-- SELECT 1
+
+> CREATE TABLE bad (xmin int)
+ERROR 42701: column name "xmin" conflicts with a system column name
+
+> SELECT ctid FROM s, r
+ERROR 42702: column reference "ctid" is ambiguous (at 8)
+
+> SELECT xmin FROM (SELECT 1) x
+ERROR 42703: column "xmin" does not exist (at 8)
+
+> SELECT bit_or(a), cmin FROM r GROUP BY cmin
+bit_or:int4 | cmin:29
+3 | 0
+-- SELECT 1
+
+> CREATE TABLE bad2 (a int)
+-- CREATE TABLE
+
+> ALTER TABLE bad2 ADD COLUMN ctid int
+ERROR 42701: column name "ctid" conflicts with a system column name
+
+> ALTER TABLE bad2 RENAME a TO cmax
+ERROR 42701: column name "cmax" conflicts with a system column name
+
+> CREATE TABLE bad3 AS SELECT 1 AS tableoid
+ERROR 42701: column name "tableoid" conflicts with a system column name
+
+> CREATE VIEW okv AS SELECT 1 AS xmin
+-- CREATE VIEW
+
+> SELECT xmin FROM okv
+xmin:int4
+1
+-- SELECT 1
+

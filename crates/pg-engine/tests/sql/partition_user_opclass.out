@@ -1,0 +1,199 @@
+> create function puo_rev(int4, int4) returns int language sql immutable
+>   as $$ select case when $1 = $2 then 0 when $1 > $2 then -1 else 1 end $$
+-- CREATE FUNCTION
+
+> create operator class puo_rev_ops for type int4 using btree as
+>   operator 1 > (int4, int4), operator 2 >= (int4, int4), operator 3 = (int4, int4),
+>   operator 4 <= (int4, int4), operator 5 < (int4, int4), function 1 puo_rev(int4, int4)
+-- CREATE OPERATOR CLASS
+
+> create table puo_r (a int4) partition by range (a puo_rev_ops)
+-- CREATE TABLE
+
+> create table puo_r1 partition of puo_r for values from (0) to (10)
+ERROR 42P17: empty range bound specified for partition "puo_r1" (at 57)
+DETAIL: Specified lower bound (0) is greater than or equal to upper bound (10).
+
+> create table puo_r1 partition of puo_r for values from (10) to (0)
+-- CREATE TABLE
+
+> create table puo_r2 partition of puo_r for values from (0) to (-10)
+-- CREATE TABLE
+
+> create table puo_r3 partition of puo_r for values from (5) to (-3)
+ERROR 42P17: partition "puo_r3" would overlap partition "puo_r1" (at 57)
+
+> create table puo_r4 partition of puo_r for values from (maxvalue) to (10)
+ERROR 42P17: empty range bound specified for partition "puo_r4" (at 57)
+DETAIL: Specified lower bound (MAXVALUE) is greater than or equal to upper bound (10).
+
+> insert into puo_r values (5), (-5), (10), (0)
+-- INSERT 0 4
+
+> insert into puo_r values (100)
+ERROR 23514: no partition of relation "puo_r" found for row
+DETAIL: Partition key of the failing row contains (a) = (100).
+OBJECTS: schema=public table=puo_r
+
+> insert into puo_r values (-11)
+ERROR 23514: no partition of relation "puo_r" found for row
+DETAIL: Partition key of the failing row contains (a) = (-11).
+OBJECTS: schema=public table=puo_r
+
+> select tableoid::regclass, a from puo_r order by 1, 2
+tableoid:regclass | a:int4
+puo_r1 | 5
+puo_r1 | 10
+puo_r2 | -5
+puo_r2 | 0
+-- SELECT 4
+
+> update puo_r set a = -6 where a = 5
+-- UPDATE 1
+
+> select tableoid::regclass, a from puo_r order by 1, 2
+tableoid:regclass | a:int4
+puo_r1 | 10
+puo_r2 | -6
+puo_r2 | -5
+puo_r2 | 0
+-- SELECT 4
+
+> select relname, pg_get_expr(relpartbound, oid) from pg_class where relname like 'puo_r_' order by 1
+relname:name | pg_get_expr:text
+puo_r1 | FOR VALUES FROM (10) TO (0)
+puo_r2 | FOR VALUES FROM (0) TO ('-10')
+-- SELECT 2
+
+> create table puo_l (a int4) partition by list (a puo_rev_ops)
+-- CREATE TABLE
+
+> create table puo_l1 partition of puo_l for values in (1, 2)
+-- CREATE TABLE
+
+> create table puo_l2 partition of puo_l for values in (2)
+ERROR 42P17: partition "puo_l2" would overlap partition "puo_l1" (at 55)
+
+> insert into puo_l values (2), (3)
+ERROR 23514: no partition of relation "puo_l" found for row
+DETAIL: Partition key of the failing row contains (a) = (3).
+OBJECTS: schema=public table=puo_l
+
+> select tableoid::regclass, a from puo_l order by 1, 2
+tableoid:regclass | a:int4
+-- SELECT 0
+
+> drop table puo_r, puo_l
+-- DROP TABLE
+
+> drop operator class puo_rev_ops using btree
+-- DROP OPERATOR CLASS
+
+> drop function puo_rev(int4, int4)
+-- DROP FUNCTION
+
+> create function puo_hash(value int4, seed int8) returns int8 language sql strict immutable
+>   as $$ select value + seed $$
+-- CREATE FUNCTION
+
+> create operator class puo_hash_ops for type int4 using hash as
+>   operator 1 =, function 2 puo_hash(int4, int8)
+-- CREATE OPERATOR CLASS
+
+> create operator class puo_hash_b for type int4 using hash as
+>   operator 1 =, function 2 hashint4extended(int4, int8)
+-- CREATE OPERATOR CLASS
+
+> create table puo_h (a int, b int) partition by hash (a puo_hash_ops, b puo_hash_b)
+-- CREATE TABLE
+
+> create table puo_h0 partition of puo_h for values with (modulus 4, remainder 0)
+-- CREATE TABLE
+
+> create table puo_h1 partition of puo_h for values with (modulus 4, remainder 1)
+-- CREATE TABLE
+
+> create table puo_h2 partition of puo_h for values with (modulus 4, remainder 2)
+-- CREATE TABLE
+
+> create table puo_h3 partition of puo_h for values with (modulus 4, remainder 3)
+-- CREATE TABLE
+
+> insert into puo_h select g, g % 3 from generate_series(1, 12) g
+-- INSERT 0 12
+
+> insert into puo_h values (null, null), (null, 1), (1, null)
+-- INSERT 0 3
+
+> select tableoid::regclass, a, b from puo_h order by 2, 3
+tableoid:regclass | a:int4 | b:int4
+puo_h2 | 1 | 1
+puo_h1 | 1 | NULL
+puo_h3 | 2 | 2
+puo_h0 | 3 | 0
+puo_h3 | 4 | 1
+puo_h0 | 5 | 2
+puo_h1 | 6 | 0
+puo_h0 | 7 | 1
+puo_h1 | 8 | 2
+puo_h2 | 9 | 0
+puo_h1 | 10 | 1
+puo_h2 | 11 | 2
+puo_h3 | 12 | 0
+puo_h0 | NULL | 1
+puo_h0 | NULL | NULL
+-- SELECT 15
+
+> explain (costs off) select * from puo_h where a = 5 and b = 2
+QUERY PLAN:text
+Seq Scan on puo_h0 puo_h
+  Filter: ((a = 5) AND (b = 2))
+-- EXPLAIN
+
+> explain (costs off) select * from puo_h where a is null and b is null
+QUERY PLAN:text
+Seq Scan on puo_h0 puo_h
+  Filter: ((a IS NULL) AND (b IS NULL))
+-- EXPLAIN
+
+> explain (costs off) select * from puo_h where a = 1 and b is null
+QUERY PLAN:text
+Seq Scan on puo_h1 puo_h
+  Filter: ((b IS NULL) AND (a = 1))
+-- EXPLAIN
+
+> explain (costs off) select * from puo_h where a = 5
+QUERY PLAN:text
+Append
+  ->  Seq Scan on puo_h0 puo_h_1
+        Filter: (a = 5)
+  ->  Seq Scan on puo_h1 puo_h_2
+        Filter: (a = 5)
+  ->  Seq Scan on puo_h2 puo_h_3
+        Filter: (a = 5)
+  ->  Seq Scan on puo_h3 puo_h_4
+        Filter: (a = 5)
+-- EXPLAIN
+
+> select * from puo_h where a = 5 and b = 2
+a:int4 | b:int4
+5 | 2
+-- SELECT 1
+
+> select satisfies_hash_partition('puo_h'::regclass, 4, 0, 5, 2)
+satisfies_hash_partition:bool
+t
+-- SELECT 1
+
+> drop table puo_h
+-- DROP TABLE
+
+> drop operator class puo_hash_ops using hash
+-- DROP OPERATOR CLASS
+
+> drop operator class puo_hash_b using hash
+-- DROP OPERATOR CLASS
+
+> drop function puo_hash(int4, int8)
+-- DROP FUNCTION
+

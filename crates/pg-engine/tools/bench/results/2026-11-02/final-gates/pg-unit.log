@@ -1,0 +1,59 @@
+$ scripts/test-postgres.sh --unit
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (target/debug/deps/pg_control-a16c6e00e254d8b1)
+
+running 11 tests
+test history::tests::latest_takes_newest_on_current_timeline ... ok
+test history::tests::no_history_file_means_no_ancestors ... ok
+test compute::tests::pgdata_is_a_subdirectory_for_every_version ... ok
+test history::tests::point_needs_base_that_ends_before_it ... ok
+test history::tests::skips_bases_from_an_abandoned_future ... ok
+test reconciler::tests::steps_clamp_to_range ... ok
+test store::tests::bases_newest_first ... ok
+test store::tests::branch_and_endpoint_roundtrip ... ok
+test store::tests::lsn_index_resolves_times ... ok
+test store::tests::migrates_a_version_zero_database ... ok
+test store::tests::record_flush_tracks_position ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_proxy-1a9a43652799ec3d)
+
+running 3 tests
+test protocol::tests::endpoint_option_forms ... ok
+test protocol::tests::cancel_roundtrip ... ok
+test protocol::tests::startup_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_storage-13e93ab534b12e61)
+
+running 10 tests
+test lsn::tests::lsn_roundtrip ... ok
+test lsn::tests::segment_names ... ok
+test objects::tests::keys ... ok
+test objects::tests::put_get_list_delete ... ok
+test objects::tests::zstd_upload_sees_raw_bytes ... ok
+test receiver::tests::history_files_are_served ... ok
+test receiver::tests::segments_complete_upload_and_serve ... ok
+test receiver::tests::spool_sweep_uploads_leftovers ... ok
+test receiver::tests::status_update_layout ... ok
+test objects::tests::streaming_upload_and_download ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running unittests src/main.rs (target/debug/deps/roll-4dddcc6a3633d7cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/rolld-a6f5c88189841da0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+postgres: all green

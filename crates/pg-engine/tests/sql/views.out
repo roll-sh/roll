@@ -1,0 +1,163 @@
+> CREATE TABLE base (id int PRIMARY KEY, name text, amount numeric)
+-- CREATE TABLE
+
+> INSERT INTO base VALUES (1, 'a', 10), (2, 'b', 20), (3, 'c', NULL)
+-- INSERT 0 3
+
+> CREATE VIEW v1 AS SELECT id, name FROM base WHERE amount IS NOT NULL
+-- CREATE VIEW
+
+> SELECT * FROM v1 ORDER BY id
+id:int4 | name:text
+1 | a
+2 | b
+-- SELECT 2
+
+> CREATE VIEW v2 (ident, label) AS SELECT id, upper(name) FROM v1
+-- CREATE VIEW
+
+> SELECT * FROM v2 ORDER BY ident
+ident:int4 | label:text
+1 | A
+2 | B
+-- SELECT 2
+
+> CREATE VIEW v1 AS SELECT 1
+ERROR 42P07: relation "v1" already exists
+
+> CREATE OR REPLACE VIEW v1 AS SELECT id, name, amount FROM base
+-- CREATE VIEW
+
+> CREATE OR REPLACE VIEW v1 AS SELECT id FROM base
+ERROR 42P16: cannot drop columns from view
+
+> CREATE OR REPLACE VIEW v1 AS SELECT name, id FROM base
+ERROR 42P16: cannot drop columns from view
+
+> CREATE OR REPLACE VIEW v1 AS SELECT id::text, name FROM base
+ERROR 42P16: cannot drop columns from view
+
+> SELECT * FROM v1 ORDER BY id
+id:int4 | name:text | amount:numeric
+1 | a | 10
+2 | b | 20
+3 | c | NULL
+-- SELECT 3
+
+> SELECT table_name, view_definition IS NOT NULL FROM information_schema.views WHERE table_schema = 'public' ORDER BY 1
+table_name:name | ?column?:bool
+v1 | t
+v2 | t
+-- SELECT 2
+
+> DROP VIEW v1
+ERROR 2BP01: cannot drop view v1 because other objects depend on it
+DETAIL: view v2 depends on view v1
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP VIEW v1 CASCADE
+NOTICE 00000: drop cascades to view v2
+-- DROP VIEW
+
+> SELECT * FROM v2
+ERROR 42P01: relation "v2" does not exist (at 15)
+
+> DROP TABLE base
+-- DROP TABLE
+
+> CREATE VIEW star AS SELECT * FROM base
+ERROR 42P01: relation "base" does not exist (at 35)
+
+> ALTER TABLE base ADD COLUMN extra int
+ERROR 42P01: relation "base" does not exist
+
+> SELECT * FROM star ORDER BY id
+ERROR 42P01: relation "star" does not exist (at 15)
+
+> DROP TABLE base
+ERROR 42P01: table "base" does not exist
+
+> DROP VIEW base
+ERROR 42P01: view "base" does not exist
+
+> DROP TABLE star
+ERROR 42P01: table "star" does not exist
+
+> CREATE MATERIALIZED VIEW mv AS SELECT id, amount * 2 AS dbl FROM base
+ERROR 42P01: relation "base" does not exist (at 66)
+
+> SELECT * FROM mv ORDER BY id
+ERROR 42P01: relation "mv" does not exist (at 15)
+
+> INSERT INTO base VALUES (4, 'd', 40)
+ERROR 42P01: relation "base" does not exist (at 13)
+
+> SELECT count(*) FROM mv
+ERROR 42P01: relation "mv" does not exist (at 22)
+
+> REFRESH MATERIALIZED VIEW mv
+ERROR 42P01: relation "mv" does not exist
+
+> SELECT count(*) FROM mv
+ERROR 42P01: relation "mv" does not exist (at 22)
+
+> CREATE MATERIALIZED VIEW mv_empty AS SELECT * FROM base WITH NO DATA
+ERROR 42P01: relation "base" does not exist (at 52)
+
+> REFRESH MATERIALIZED VIEW mv_empty
+ERROR 42P01: relation "mv_empty" does not exist
+
+> SELECT count(*) FROM mv_empty
+ERROR 42P01: relation "mv_empty" does not exist (at 22)
+
+> REFRESH MATERIALIZED VIEW base
+ERROR 42P01: relation "base" does not exist
+
+> SELECT matviewname FROM pg_matviews ORDER BY 1
+matviewname:name
+-- SELECT 0
+
+> DROP MATERIALIZED VIEW mv
+ERROR 42P01: materialized view "mv" does not exist
+
+> DROP VIEW mv_empty
+ERROR 42P01: view "mv_empty" does not exist
+
+> DROP MATERIALIZED VIEW mv_empty
+ERROR 42P01: materialized view "mv_empty" does not exist
+
+> CREATE VIEW dup_cols AS SELECT 1 AS a, 2 AS a
+ERROR 42701: column "a" specified more than once
+
+> CREATE VIEW too_many (a, b, c) AS SELECT 1, 2
+ERROR 42601: CREATE VIEW specifies more column names than columns
+
+> CREATE VIEW lit AS SELECT 'x' AS s, 1 AS n
+-- CREATE VIEW
+
+> SELECT s, pg_typeof(s) FROM lit
+s:text | pg_typeof:regtype
+x | text
+-- SELECT 1
+
+> CREATE TEMP VIEW tv AS SELECT 1 AS one
+-- CREATE VIEW
+
+> SELECT * FROM tv
+one:int4
+1
+-- SELECT 1
+
+> CREATE VIEW recur AS WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT n FROM r
+-- CREATE VIEW
+
+> SELECT * FROM recur ORDER BY n
+n:int4
+1
+2
+3
+-- SELECT 3
+
+> DROP TABLE base CASCADE
+ERROR 42P01: table "base" does not exist
+

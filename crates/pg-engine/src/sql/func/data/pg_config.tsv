@@ -1,0 +1,23 @@
+BINDIR	/usr/local/bin
+DOCDIR	/usr/local/share/doc/postgresql
+HTMLDIR	/usr/local/share/doc/postgresql
+INCLUDEDIR	/usr/local/include
+PKGINCLUDEDIR	/usr/local/include/postgresql
+INCLUDEDIR-SERVER	/usr/local/include/postgresql/server
+LIBDIR	/usr/local/lib
+PKGLIBDIR	/usr/local/lib/postgresql
+LOCALEDIR	/usr/local/share/locale
+MANDIR	/usr/local/share/man
+SHAREDIR	/usr/local/share/postgresql
+SYSCONFDIR	/usr/local/etc/postgresql
+PGXS	/usr/local/lib/postgresql/pgxs/src/makefiles/pgxs.mk
+CONFIGURE	 '--enable-option-checking=fatal' '--build=aarch64-linux-musl' '--enable-integer-datetimes' '--enable-tap-tests' '--disable-rpath' '--with-uuid=e2fs' '--with-pgport=5432' '--with-system-tzdata=/usr/share/zoneinfo' '--prefix=/usr/local' '--with-includes=/usr/local/include' '--with-libraries=/usr/local/lib' '--with-gssapi' '--with-icu' '--with-ldap' '--with-libcurl' '--with-liburing' '--with-libxml' '--with-libxslt' '--with-llvm' '--with-lz4' '--with-openssl' '--with-perl' '--with-python' '--with-tcl' '--with-zstd' 'build_alias=aarch64-linux-musl' 'LLVM_CONFIG=/usr/lib/llvm21/bin/llvm-config' 'CLANG=clang-21'
+CC	gcc
+CPPFLAGS	-D_GNU_SOURCE -I/usr/include/libxml2
+CFLAGS	-Wall -Wmissing-prototypes -Wpointer-arith -Wdeclaration-after-statement -Werror=vla -Wendif-labels -Wmissing-format-attribute -Wimplicit-fallthrough=3 -Wcast-function-type -Wshadow=compatible-local -Wformat-security -Wmissing-variable-declarations -fno-strict-aliasing -fwrapv -fexcess-precision=standard -Wno-format-truncation -Wno-stringop-truncation -O2
+CFLAGS_SL	-fPIC
+LDFLAGS	-L/usr/local/lib -Wl,--as-needed
+LDFLAGS_EX	
+LDFLAGS_SL	
+LIBS	-lpgcommon -lpgport -lzstd -llz4 -lxslt -lxml2 -lssl -lcrypto -lgssapi_krb5 -lz -ledit -lm 
+VERSION	PostgreSQL 18.6

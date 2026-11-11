@@ -1,0 +1,126 @@
+> create table m0 ()
+-- CREATE TABLE
+
+> create type e as enum ('a', 'b', 'c')
+-- CREATE TYPE
+
+> select t.oid::int8 - t.typarray::int8 as type_after_array, t.typarray::int8 - 'm0'::regclass::int8 as array_after_marker from pg_type t where typname = 'e'
+type_after_array:int8 | array_after_marker:int8
+1 | 3
+-- SELECT 1
+
+> select bool_and(oid::int8 % 2 = 0) as even, min(oid::int8) - 'e'::regtype::oid::int8 between 1 and 2 as first, max(oid::int8) - min(oid::int8) as span from pg_enum where enumtypid = 'e'::regtype
+even:bool | first:bool | span:int8
+t | t | 4
+-- SELECT 1
+
+> select array_agg(enumlabel order by oid) = array_agg(enumlabel order by enumsortorder) from pg_enum where enumtypid = 'e'::regtype
+?column?:bool
+t
+-- SELECT 1
+
+> create table m1 (x e[])
+-- CREATE TABLE
+
+> select 'm1'::regclass::int8 - (select max(oid::int8) from pg_enum where enumtypid = 'e'::regtype) between 1 and 2
+?column?:bool
+t
+-- SELECT 1
+
+> select atttypid = '_e'::regtype, format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'm1'::regclass and attname = 'x'
+?column?:bool | format_type:text
+t | e[]
+-- SELECT 1
+
+> select typname, typelem::regtype, typarray::regtype, typtype from pg_type where typname in ('e', '_e') order by 1
+typname:name | typelem:regtype | typarray:regtype | typtype:char
+_e | e | - | b
+e | - | e[] | e
+-- SELECT 2
+
+> insert into m1 values ('{a,b}')
+-- INSERT 0 1
+
+> select pg_typeof(x), pg_typeof(x[1]), x from m1
+pg_typeof:regtype | pg_typeof:regtype | x:user
+e[] | e | {a,b}
+-- SELECT 1
+
+> select ('{c}'::e[])::text, pg_typeof('{c}'::_e), pg_typeof(array['a'::e])
+text:text | pg_typeof:regtype | pg_typeof:regtype
+{c} | e[] | e[]
+-- SELECT 1
+
+> select array_agg(x) from (select unnest(enum_range(null::e)) x) s
+array_agg:user
+{a,b,c}
+-- SELECT 1
+
+> create type g as enum ()
+-- CREATE TYPE
+
+> select t.oid::int8 - t.typarray::int8 from pg_type t where typname = 'g'
+?column?:int8
+1
+-- SELECT 1
+
+> create type h as enum ('p', 'q')
+-- CREATE TYPE
+
+> select t.oid::int8 - t.typarray::int8 from pg_type t where typname = 'h'
+?column?:int8
+1
+-- SELECT 1
+
+> create table m2 ()
+-- CREATE TABLE
+
+> do $$ begin create type d as enum ('x', 'x'); exception when unique_violation then raise notice '%', sqlerrm; end $$
+NOTICE 00000: duplicate key value violates unique constraint "pg_enum_typid_label_index"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at RAISE
+-- DO
+
+> create table m3 ()
+-- CREATE TABLE
+
+> select 'm3'::regclass::int8 - 'm2'::regclass::int8 > 2
+?column?:bool
+t
+-- SELECT 1
+
+> alter type h add value 'r'
+-- ALTER TYPE
+
+> select enumlabel, enumsortorder from pg_enum where enumtypid = 'h'::regtype order by enumsortorder
+enumlabel:name | enumsortorder:float4
+p | 1
+q | 2
+r | 3
+-- SELECT 3
+
+> create table m4 (y h[], z e)
+-- CREATE TABLE
+
+> select attname, atttypid::regtype from pg_attribute where attrelid = 'm4'::regclass and attnum > 0 order by attnum
+attname:name | atttypid:regtype
+y | h[]
+z | e
+-- SELECT 2
+
+> create function ef(h[]) returns text language sql as 'select $1::text'
+-- CREATE FUNCTION
+
+> select ef('{p,r}')
+ef:text
+{p,r}
+-- SELECT 1
+
+> drop table m0, m1, m2, m3, m4
+-- DROP TABLE
+
+> drop function ef
+-- DROP FUNCTION
+
+> drop type e, g, h
+-- DROP TYPE
+

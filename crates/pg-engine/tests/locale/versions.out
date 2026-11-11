@@ -1,0 +1,140 @@
+> CREATE DATABASE locale_v_icu LOCALE_PROVIDER icu ICU_LOCALE 'en' COLLATION_VERSION '42' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_v_libc COLLATION_VERSION '42' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_v_builtin LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' COLLATION_VERSION '0' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_v_rules LOCALE_PROVIDER icu ICU_LOCALE 'en' ICU_RULES 'garbage &&' TEMPLATE template0
+-- CREATE DATABASE
+
+> SELECT datname, datcollversion, pg_database_collation_actual_version(oid) FROM pg_database WHERE datname LIKE 'locale%' ORDER BY datname
+datname:name | datcollversion:text | pg_database_collation_actual_version:text
+locale_v_builtin | 0 | 1
+locale_v_icu | 42 | 153.136
+locale_v_libc | 42 | NULL
+locale_v_rules | 153.136 | 153.136
+-- SELECT 4
+
+> CREATE DATABASE locale_v_copy TEMPLATE locale_v_icu
+ERROR XX000: template database "locale_v_icu" has a collation version mismatch
+DETAIL: The template database was created using collation version 42, but the operating system provides version 153.136.
+HINT: Rebuild all objects in the template database that use the default collation and run ALTER DATABASE locale_v_icu REFRESH COLLATION VERSION, or build PostgreSQL with the right library version.
+
+> CREATE DATABASE locale_v_copy2 TEMPLATE locale_v_icu COLLATION_VERSION '43'
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_v_copy3 TEMPLATE locale_v_libc
+ERROR XX000: template database "locale_v_libc" has a collation version, but no actual collation version could be determined
+
+> \c locale_v_icu
+WARNING 01000: database "locale_v_icu" has a collation version mismatch
+DETAIL: The database was created using collation version 42, but the operating system provides version 153.136.
+HINT: Rebuild all objects in this database that use the default collation and run ALTER DATABASE locale_v_icu REFRESH COLLATION VERSION, or build PostgreSQL with the right library version.
+
+> SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> \c locale_v_libc
+WARNING 01000: database "locale_v_libc" has no actual collation version, but a version was recorded
+
+> SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> \c locale_v_builtin
+WARNING 01000: database "locale_v_builtin" has a collation version mismatch
+DETAIL: The database was created using collation version 0, but the operating system provides version 1.
+HINT: Rebuild all objects in this database that use the default collation and run ALTER DATABASE locale_v_builtin REFRESH COLLATION VERSION, or build PostgreSQL with the right library version.
+
+> SELECT pg_collation_actual_version(100)
+pg_collation_actual_version:text
+1
+-- SELECT 1
+
+> \c locale_v_rules
+ERROR 22023: could not open collator for locale "en" with rules "garbage &&": U_INVALID_FORMAT_ERROR
+
+(not connected)
+> \c locale_v_copy2
+WARNING 01000: database "locale_v_copy2" has a collation version mismatch
+DETAIL: The database was created using collation version 43, but the operating system provides version 153.136.
+HINT: Rebuild all objects in this database that use the default collation and run ALTER DATABASE locale_v_copy2 REFRESH COLLATION VERSION, or build PostgreSQL with the right library version.
+
+> SELECT datcollversion FROM pg_database WHERE datname = current_database()
+datcollversion:text
+43
+-- SELECT 1
+
+> \c postgres
+
+> ALTER DATABASE locale_v_icu REFRESH COLLATION VERSION
+NOTICE 00000: changing version from 42 to 153.136
+-- ALTER DATABASE
+
+> ALTER DATABASE locale_v_icu REFRESH COLLATION VERSION
+NOTICE 00000: version has not changed
+-- ALTER DATABASE
+
+> ALTER DATABASE locale_v_libc REFRESH COLLATION VERSION
+ERROR XX000: invalid collation version change
+
+> ALTER DATABASE locale_v_builtin REFRESH COLLATION VERSION
+NOTICE 00000: changing version from 0 to 1
+-- ALTER DATABASE
+
+> ALTER DATABASE postgres REFRESH COLLATION VERSION
+NOTICE 00000: version has not changed
+-- ALTER DATABASE
+
+> ALTER DATABASE locale_nosuch REFRESH COLLATION VERSION
+ERROR 3D000: database "locale_nosuch" does not exist
+
+> SELECT datname, datcollversion FROM pg_database WHERE datname LIKE 'locale%' ORDER BY datname
+datname:name | datcollversion:text
+locale_v_builtin | 1
+locale_v_copy2 | 43
+locale_v_icu | 153.136
+locale_v_libc | 42
+locale_v_rules | 153.136
+-- SELECT 5
+
+> CREATE DATABASE locale_v_copy4 TEMPLATE locale_v_icu
+-- CREATE DATABASE
+
+> \c locale_v_icu
+
+> SELECT datcollversion FROM pg_database WHERE datname = current_database()
+datcollversion:text
+153.136
+-- SELECT 1
+
+> \c locale_v_builtin
+
+> SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> \c postgres
+
+> CREATE ROLE locale_r
+-- CREATE ROLE
+
+> SET ROLE locale_r
+-- SET
+
+> ALTER DATABASE locale_v_icu REFRESH COLLATION VERSION
+ERROR 42501: must be owner of database locale_v_icu
+
+> RESET ROLE
+-- RESET
+
+> DROP ROLE locale_r
+-- DROP ROLE
+

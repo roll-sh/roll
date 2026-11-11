@@ -1,0 +1,491 @@
+> SELECT '2024-02-29'::date, '2024-02-29 13:45:06.123456'::timestamp, '13:45:06'::time
+date:date | timestamp:timestamp | time:time
+2024-02-29 | 2024-02-29 13:45:06.123456 | 13:45:06
+-- SELECT 1
+
+> SELECT '2024-02-29 13:45:06+02'::timestamptz
+timestamptz:timestamptz
+2024-02-29 11:45:06+00
+-- SELECT 1
+
+> SELECT 'epoch'::timestamp, 'infinity'::timestamp, '-infinity'::date
+timestamp:timestamp | timestamp:timestamp | date:date
+1970-01-01 00:00:00 | infinity | -infinity
+-- SELECT 1
+
+> SELECT 'Jan 5 2024'::date, '20240105'::date, '2024-1-5'::date
+date:date | date:date | date:date
+2024-01-05 | 2024-01-05 | 2024-01-05
+-- SELECT 1
+
+> SELECT '1 day 2 hours 3 minutes'::interval, '1 year 2 mons'::interval, '-1 day +02:00'::interval
+interval:interval | interval:interval | interval:interval
+1 day 02:03:00 | 1 year 2 mons | -1 days +02:00:00
+-- SELECT 1
+
+> SELECT 'P1Y2M3DT4H5M6S'::interval, '1.5 days'::interval, '90 minutes'::interval
+interval:interval | interval:interval | interval:interval
+1 year 2 mons 3 days 04:05:06 | 1 day 12:00:00 | 01:30:00
+-- SELECT 1
+
+> SELECT '2024-02-30'::date
+ERROR 22008: date/time field value out of range: "2024-02-30" (at 8)
+
+> SELECT '25:00:00'::time
+ERROR 22008: date/time field value out of range: "25:00:00" (at 8)
+
+> SELECT 'nonsense'::timestamp
+ERROR 22007: invalid input syntax for type timestamp: "nonsense" (at 8)
+
+> SELECT '24:00:00'::time, '2024-01-01 24:00:00'::timestamp
+time:time | timestamp:timestamp
+24:00:00 | 2024-01-02 00:00:00
+-- SELECT 1
+
+> SELECT 'today'::date = current_date, 'now'::timestamptz <= now()
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT date '2024-01-31' + 1, date '2024-03-01' - date '2024-02-01', date '2024-01-31' + interval '1 month'
+?column?:date | ?column?:int4 | ?column?:timestamp
+2024-02-01 | 29 | 2024-02-29 00:00:00
+-- SELECT 1
+
+> SELECT timestamp '2024-01-31 10:00' + interval '1 month 1 day 1 hour'
+?column?:timestamp
+2024-03-01 11:00:00
+-- SELECT 1
+
+> SELECT timestamp '2024-03-01' - timestamp '2024-02-01 12:00'
+?column?:interval
+28 days 12:00:00
+-- SELECT 1
+
+> SELECT interval '1 day' * 3, interval '3 hours' / 2, - interval '1 hour', interval '1 day' + interval '25 hours'
+?column?:interval | ?column?:interval | ?column?:interval | ?column?:interval
+3 days | 01:30:00 | -01:00:00 | 1 day 25:00:00
+-- SELECT 1
+
+> SELECT time '10:00' + interval '15 hours', time '23:00' - time '01:30'
+?column?:time | ?column?:interval
+01:00:00 | 21:30:00
+-- SELECT 1
+
+> SELECT date '2024-01-01' + time '10:30'
+?column?:timestamp
+2024-01-01 10:30:00
+-- SELECT 1
+
+> SELECT age(timestamp '2024-03-15', timestamp '2023-01-20')
+age:interval
+1 year 1 mon 26 days
+-- SELECT 1
+
+> SELECT justify_days(interval '35 days'), justify_hours(interval '27 hours'), justify_interval(interval '1 mon -1 hour')
+justify_days:interval | justify_hours:interval | justify_interval:interval
+1 mon 5 days | 1 day 03:00:00 | 29 days 23:00:00
+-- SELECT 1
+
+> SELECT extract(year FROM timestamp '2024-07-04 12:34:56.789'), extract(month FROM date '2024-07-04'), extract(dow FROM date '2024-07-04')
+extract:numeric | extract:numeric | extract:numeric
+2024 | 7 | 4
+-- SELECT 1
+
+> SELECT extract(epoch FROM timestamp '2024-01-01'), extract(epoch FROM interval '1 day 1 hour')
+extract:numeric | extract:numeric
+1704067200.000000 | 90000.000000
+-- SELECT 1
+
+> SELECT extract(doy FROM date '2024-12-31'), extract(week FROM date '2024-12-31'), extract(isodow FROM date '2024-07-07'), extract(quarter FROM date '2024-07-04')
+extract:numeric | extract:numeric | extract:numeric | extract:numeric
+366 | 1 | 7 | 3
+-- SELECT 1
+
+> SELECT extract(microseconds FROM time '10:00:01.5'), extract(century FROM date '2000-01-01'), extract(millennium FROM date '2001-01-01')
+extract:numeric | extract:numeric | extract:numeric
+1500000 | 20 | 3
+-- SELECT 1
+
+> SELECT date_part('hour', timestamp '2024-01-01 17:30'), date_part('minute', interval '2 hours 7 minutes')
+date_part:float8 | date_part:float8
+17 | 7
+-- SELECT 1
+
+> SELECT date_trunc('month', timestamp '2024-07-04 12:34:56'), date_trunc('week', timestamp '2024-07-04 12:34:56'), date_trunc('quarter', date '2024-08-15')
+date_trunc:timestamp | date_trunc:timestamp | date_trunc:timestamptz
+2024-07-01 00:00:00 | 2024-07-01 00:00:00 | 2024-07-01 00:00:00+00
+-- SELECT 1
+
+> SELECT date_trunc('hour', interval '3 days 4 hours 5 minutes'), date_trunc('year', timestamp '2024-07-04')
+date_trunc:interval | date_trunc:timestamp
+3 days 04:00:00 | 2024-01-01 00:00:00
+-- SELECT 1
+
+> SELECT extract(foo FROM date '2024-01-01')
+ERROR 22023: unit "foo" not recognized for type date
+
+> SELECT make_date(2024, 2, 29), make_time(13, 45, 6.5), make_timestamp(2024, 2, 29, 13, 45, 6)
+make_date:date | make_time:time | make_timestamp:timestamp
+2024-02-29 | 13:45:06.5 | 2024-02-29 13:45:06
+-- SELECT 1
+
+> SELECT make_interval(years => 1, days => 2, mins => 3), make_interval(secs => 1.25), make_interval(1, 2), make_interval()
+make_interval:interval | make_interval:interval | make_interval:interval | make_interval:interval
+1 year 2 days 00:03:00 | 00:00:01.25 | 1 year 2 mons | 00:00:00
+-- SELECT 1
+
+> SELECT make_date(year => 2024, month => 2, day => 3), make_date(year => 2024, month => 2)
+ERROR 42883: function make_date(year => integer, month => integer) does not exist (at 55)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT make_date(2023, 2, 29)
+ERROR 22008: date field value out of range: 2023-02-29
+
+> SELECT to_timestamp(0) AT TIME ZONE 'UTC', to_timestamp(1700000000.5) AT TIME ZONE 'UTC'
+timezone:timestamp | timezone:timestamp
+1970-01-01 00:00:00 | 2023-11-14 22:13:20.5
+-- SELECT 1
+
+> SELECT to_char(timestamp '2024-07-04 15:04:05.123', 'YYYY-MM-DD HH24:MI:SS.MS'), to_char(date '2024-07-04', 'Day, DD Month YYYY')
+to_char:text | to_char:text
+2024-07-04 15:04:05.123 | Thursday , 04 July      2024
+-- SELECT 1
+
+> SELECT to_char(timestamp '2024-07-04 03:04:05', 'HH12:MI AM'), to_char(date '2024-07-04', 'FMDay FMMonth DDth'), to_char(interval '25 hours 3 minutes', 'HH24:MI')
+to_char:text | to_char:text | to_char:text
+03:04 AM | Thursday July 04th | 25:03
+-- SELECT 1
+
+> SELECT to_char(date '2024-07-04', 'IYYY-IW-ID'), to_char(date '2024-07-04', 'Q WW J')
+to_char:text | to_char:text
+2024-27-4 | 3 27 2460496
+-- SELECT 1
+
+> SELECT to_date('04 Jul 2024', 'DD Mon YYYY'), to_timestamp('2024-07-04 15:04', 'YYYY-MM-DD HH24:MI') AT TIME ZONE 'UTC'
+to_date:date | timezone:timestamp
+2024-07-04 | 2024-07-04 15:04:00
+-- SELECT 1
+
+> SET TimeZone = 'UTC'
+-- SET
+
+> SELECT timestamptz '2024-07-04 12:00:00+00', timestamptz '2024-07-04 12:00:00 America/New_York'
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-07-04 12:00:00+00 | 2024-07-04 16:00:00+00
+-- SELECT 1
+
+> SELECT timestamp '2024-07-04 12:00' AT TIME ZONE 'America/New_York', timestamptz '2024-07-04 12:00+00' AT TIME ZONE 'Asia/Tokyo'
+timezone:timestamptz | timezone:timestamp
+2024-07-04 16:00:00+00 | 2024-07-04 21:00:00
+-- SELECT 1
+
+> SET TimeZone = 'America/New_York'
+-- SET
+
+> SELECT timestamptz '2024-01-15 12:00:00+00', timestamptz '2024-07-15 12:00:00+00'
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-01-15 07:00:00-05 | 2024-07-15 08:00:00-04
+-- SELECT 1
+
+> SELECT timestamptz '2024-03-10 01:30' + interval '1 hour', timestamptz '2024-03-10 01:30' + interval '1 day'
+?column?:timestamptz | ?column?:timestamptz
+2024-03-10 03:30:00-04 | 2024-03-11 01:30:00-04
+-- SELECT 1
+
+> SELECT extract(timezone FROM timestamptz '2024-07-15 12:00:00+00'), date_trunc('day', timestamptz '2024-07-15 02:00:00+00')
+extract:numeric | date_trunc:timestamptz
+-14400 | 2024-07-14 00:00:00-04
+-- SELECT 1
+
+> SELECT timestamptz '2024-07-15 12:00:00+00'::date, timestamptz '2024-07-15 12:00:00+00'::time, '2024-07-15'::date::timestamptz
+date:date | time:time | timestamptz:timestamptz
+2024-07-15 | 08:00:00 | 2024-07-15 00:00:00-04
+-- SELECT 1
+
+> SET TimeZone = 'Europe/Budapest'
+-- SET
+
+> SELECT timestamptz '2024-10-27 00:30:00+00', timestamptz '2024-10-27 01:30:00+00'
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-10-27 02:30:00+02 | 2024-10-27 02:30:00+01
+-- SELECT 1
+
+> SELECT date_trunc('day', timestamptz '2024-10-27 12:00:00+00', 'UTC')
+date_trunc:timestamptz
+2024-10-27 02:00:00+02
+-- SELECT 1
+
+> RESET TimeZone
+-- RESET
+
+> SHOW TimeZone
+TimeZone:text
+UTC
+-- SHOW
+
+> SET DateStyle = 'SQL, DMY'
+-- SET
+
+> SHOW DateStyle
+DateStyle:text
+SQL, DMY
+-- SHOW
+
+> SELECT date '2024-07-04', timestamp '2024-07-04 15:04:05', timestamptz '2024-07-04 15:04:05+00', date '0044-03-15 BC'
+date:date | timestamp:timestamp | timestamptz:timestamptz | date:date
+04/07/2024 | 04/07/2024 15:04:05 | 04/07/2024 15:04:05 UTC | 15/03/0044 BC
+-- SELECT 1
+
+> SELECT '04/07/2024'::date, '04-07-24'::date
+date:date | date:date
+04/07/2024 | 04/07/2024
+-- SELECT 1
+
+> SET DateStyle = 'SQL'
+-- SET
+
+> SHOW DateStyle
+DateStyle:text
+SQL, DMY
+-- SHOW
+
+> SET DateStyle = 'SQL, MDY'
+-- SET
+
+> SELECT date '2024-07-04', timestamp '2024-07-04 15:04:05.5', '04/07/2024'::date
+date:date | timestamp:timestamp | date:date
+07/04/2024 | 07/04/2024 15:04:05.5 | 04/07/2024
+-- SELECT 1
+
+> SET DateStyle = 'German'
+-- SET
+
+> SHOW DateStyle
+DateStyle:text
+German, DMY
+-- SHOW
+
+> SELECT date '2024-07-04', timestamp '2024-07-04 15:04:05', timestamptz '2024-07-04 15:04:05+00'
+date:date | timestamp:timestamp | timestamptz:timestamptz
+04.07.2024 | 04.07.2024 15:04:05 | 04.07.2024 15:04:05 UTC
+-- SELECT 1
+
+> SET DateStyle = 'Postgres, MDY'
+-- SET
+
+> SELECT date '2024-07-04', timestamp '2024-07-04 15:04:05', timestamptz '2024-07-04 15:04:05+00', timestamp '0044-03-15 12:00 BC'
+date:date | timestamp:timestamp | timestamptz:timestamptz | timestamp:timestamp
+07-04-2024 | Thu Jul 04 15:04:05 2024 | Thu Jul 04 15:04:05 2024 UTC | Fri Mar 15 12:00:00 0044 BC
+-- SELECT 1
+
+> SET DateStyle = 'Postgres, DMY'
+-- SET
+
+> SELECT date '2024-07-04', timestamp '2024-07-07 15:04:05'
+date:date | timestamp:timestamp
+04-07-2024 | Sun 07 Jul 15:04:05 2024
+-- SELECT 1
+
+> SET TimeZone = 'America/New_York'
+-- SET
+
+> SELECT timestamptz '2024-07-04 15:04:05+00', timestamptz '2024-01-04 15:04:05+00'
+timestamptz:timestamptz | timestamptz:timestamptz
+Thu 04 Jul 11:04:05 2024 EDT | Thu 04 Jan 10:04:05 2024 EST
+-- SELECT 1
+
+> SET DateStyle = 'SQL, MDY'
+-- SET
+
+> SELECT timestamptz '2024-07-04 15:04:05+00'
+timestamptz:timestamptz
+07/04/2024 11:04:05 EDT
+-- SELECT 1
+
+> SET TimeZone = 'Asia/Kolkata'
+-- SET
+
+> SELECT timestamptz '2024-07-04 15:04:05+00'
+timestamptz:timestamptz
+07/04/2024 20:34:05 IST
+-- SELECT 1
+
+> SET TimeZone = '+02'
+-- SET
+
+> SELECT timestamptz '2024-07-04 15:04:05+00'
+timestamptz:timestamptz
+07/04/2024 17:04:05 +02
+-- SELECT 1
+
+> RESET TimeZone
+-- RESET
+
+> SET DateStyle = 'ISO, YMD'
+-- SET
+
+> SELECT '24-07-04'::date, '2024/07/04'::date
+date:date | date:date
+2024-07-04 | 2024-07-04
+-- SELECT 1
+
+> SET DateStyle = 'ISO, DMY'
+-- SET
+
+> SELECT '04/07/2024'::date, '13/01/2024'::date
+date:date | date:date
+2024-07-04 | 2024-01-13
+-- SELECT 1
+
+> SET DateStyle = 'ISO, MDY'
+-- SET
+
+> SELECT '13/01/2024'::date
+ERROR 22008: date/time field value out of range: "13/01/2024" (at 8)
+HINT: Perhaps you need a different "DateStyle" setting.
+
+> SET DateStyle = 'ISO, SQL'
+ERROR 22023: invalid value for parameter "DateStyle": "ISO, SQL"
+DETAIL: Conflicting "DateStyle" specifications.
+
+> SET DateStyle = 'nonsense'
+ERROR 22023: invalid value for parameter "DateStyle": "nonsense"
+DETAIL: Unrecognized key word: "nonsense".
+
+> SET DateStyle = 'ISO, MDY'
+-- SET
+
+> SET IntervalStyle = 'iso_8601'
+-- SET
+
+> SELECT interval '1 year 2 months 3 days 04:05:06.5'
+interval:interval
+P1Y2M3DT4H5M6.5S
+-- SELECT 1
+
+> SET IntervalStyle = 'sql_standard'
+-- SET
+
+> SELECT interval '1 year 2 months', interval '3 days 04:05:06', interval '-1 day', interval '0'
+interval:interval | interval:interval | interval:interval | interval:interval
+1-2 | 3 4:05:06 | -1 0:00:00 | 0
+-- SELECT 1
+
+> SELECT interval '1 year 2 months 3 days', interval '-1 year -2 months', interval '-3 days -04:05:06.25', interval '1 day -1 hour', interval '04:05:06.5', interval '-00:00:01'
+interval:interval | interval:interval | interval:interval | interval:interval | interval:interval | interval:interval
++1-2 +3 +0:00:00 | -1-2 | -3 4:05:06.25 | +0-0 +1 -1:00:00 | 4:05:06.5 | -0:00:01
+-- SELECT 1
+
+> SET IntervalStyle = 'postgres_verbose'
+-- SET
+
+> SELECT interval '1 year 2 months 3 days 04:05:06'
+interval:interval
+@ 1 year 2 mons 3 days 4 hours 5 mins 6 secs
+-- SELECT 1
+
+> SELECT interval '-1 year -2 days', interval '1 day -1 hour', interval '-1.5 seconds', interval '1 second', interval '0', interval '-1 day 02:00:00'
+interval:interval | interval:interval | interval:interval | interval:interval | interval:interval | interval:interval
+@ 1 year 2 days ago | @ 1 day -1 hours | @ 1.5 secs ago | @ 1 sec | @ 0 | @ 1 day -2 hours ago
+-- SELECT 1
+
+> RESET IntervalStyle
+-- RESET
+
+> SELECT interval '-1 year -2 days', interval '1 day -1 hour', interval '-1.5 seconds'
+interval:interval | interval:interval | interval:interval
+-1 years -2 days | 1 day -01:00:00 | -00:00:01.5
+-- SELECT 1
+
+> SELECT date '2024-01-01' < timestamp '2024-01-01 00:00:01', timestamp '2024-01-01' = date '2024-01-01'
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT interval '1 day' = interval '24 hours', interval '1 month' = interval '30 days', interval '1 year' > interval '360 days'
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | f
+-- SELECT 1
+
+> SELECT (date '2024-01-01', date '2024-02-01') OVERLAPS (date '2024-01-15', date '2024-03-01')
+overlaps:bool
+t
+-- SELECT 1
+
+> SELECT greatest(date '2024-01-01', date '2023-01-01'), least(timestamp '2024-01-01', timestamp '2025-01-01')
+greatest:date | least:timestamp
+2024-01-01 | 2024-01-01 00:00:00
+-- SELECT 1
+
+> SELECT isfinite(date 'infinity'), isfinite(timestamp '2024-01-01'), date 'infinity' > date '9999-12-31'
+isfinite:bool | isfinite:bool | ?column?:bool
+f | t | t
+-- SELECT 1
+
+> SELECT * FROM generate_series(timestamp '2024-01-01', timestamp '2024-01-03', interval '12 hours')
+generate_series:timestamp
+2024-01-01 00:00:00
+2024-01-01 12:00:00
+2024-01-02 00:00:00
+2024-01-02 12:00:00
+2024-01-03 00:00:00
+-- SELECT 5
+
+> SELECT d::date FROM generate_series(date '2024-01-29', date '2024-02-02', interval '1 day') d
+d:date
+2024-01-29
+2024-01-30
+2024-01-31
+2024-02-01
+2024-02-02
+-- SELECT 5
+
+> CREATE TABLE ev (id int PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), d date, dur interval)
+-- CREATE TABLE
+
+> INSERT INTO ev (id, at, d, dur) VALUES (1, '2024-01-01 10:00+00', '2024-01-01', '1 hour'), (2, '2024-06-01 10:00+00', '2024-06-01', '2 days'), (3, '2024-12-31 23:59:59+00', NULL, NULL)
+-- INSERT 0 3
+
+> SELECT id, at, d, dur FROM ev ORDER BY at DESC
+id:int4 | at:timestamptz | d:date | dur:interval
+3 | 2024-12-31 23:59:59+00 | NULL | NULL
+2 | 2024-06-01 10:00:00+00 | 2024-06-01 | 2 days
+1 | 2024-01-01 10:00:00+00 | 2024-01-01 | 01:00:00
+-- SELECT 3
+
+> SELECT date_trunc('month', at) AS m, count(*) FROM ev GROUP BY 1 ORDER BY 1
+m:timestamptz | count:int8
+2024-01-01 00:00:00+00 | 1
+2024-06-01 00:00:00+00 | 1
+2024-12-01 00:00:00+00 | 1
+-- SELECT 3
+
+> SELECT sum(dur), avg(dur), min(at), max(d) FROM ev
+sum:interval | avg:interval | min:timestamptz | max:date
+2 days 01:00:00 | 1 day 00:30:00 | 2024-01-01 10:00:00+00 | 2024-06-01
+-- SELECT 1
+
+> SELECT id FROM ev WHERE at BETWEEN '2024-01-01' AND '2024-07-01' ORDER BY id
+id:int4
+1
+2
+-- SELECT 2
+
+> SELECT id, at + dur FROM ev WHERE dur IS NOT NULL ORDER BY id
+id:int4 | ?column?:timestamptz
+1 | 2024-01-01 11:00:00+00
+2 | 2024-06-03 10:00:00+00
+-- SELECT 2
+
+> INSERT INTO ev (id) VALUES (4)
+-- INSERT 0 1
+
+> SELECT count(*) FROM ev WHERE at > now() - interval '1 minute'
+count:int8
+1
+-- SELECT 1
+
+> DROP TABLE ev
+-- DROP TABLE
+

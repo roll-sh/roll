@@ -1,0 +1,136 @@
+> CREATE TABLE ts (a int)
+-- CREATE TABLE
+
+> INSERT INTO ts SELECT generate_series(1, 100)
+-- INSERT 0 100
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli (100)
+count:int8
+100
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE system (100)
+count:int8
+100
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE system (0)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli (0) REPEATABLE (5)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli (101)
+ERROR 2202H: sample percentage must be between 0 and 100
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli (-1)
+ERROR 2202H: sample percentage must be between 0 and 100
+
+> SELECT count(*) FROM ts TABLESAMPLE foo (1)
+ERROR 42704: tablesample method foo does not exist (at 37)
+
+> SELECT count(*) FROM ts TABLESAMPLE system (NULL)
+ERROR 2202H: TABLESAMPLE parameter cannot be null
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli (50) REPEATABLE (NULL)
+ERROR 2202G: TABLESAMPLE REPEATABLE parameter cannot be null
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli (1, 2)
+ERROR 2202H: tablesample method bernoulli requires 1 argument, not 2 (at 37)
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli ('x')
+ERROR 22P02: invalid input syntax for type real: "x" (at 48)
+
+> SELECT count(*) <= 100 FROM ts TABLESAMPLE bernoulli ('50')
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT count(*) FROM ts TABLESAMPLE bernoulli (true)
+ERROR 42804: argument of TABLESAMPLE must be type real, not type boolean (at 48)
+
+> SELECT (SELECT array_agg(a ORDER BY a) FROM ts TABLESAMPLE bernoulli (50) REPEATABLE (7)) = (SELECT array_agg(a ORDER BY a) FROM ts TABLESAMPLE bernoulli (50) REPEATABLE (7))
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT count(*) BETWEEN 1 AND 99 FROM ts TABLESAMPLE bernoulli (50) REPEATABLE (1)
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT count(*) FROM ts t TABLESAMPLE bernoulli (100) WHERE t.a > 90
+count:int8
+10
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ts TABLESAMPLE bernoulli (50) REPEATABLE (1) WHERE a > 3
+QUERY PLAN:text
+Sample Scan on ts
+  Sampling: bernoulli ('50'::real) REPEATABLE ('1'::double precision)
+  Filter: (a > 3)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ts TABLESAMPLE system (50)
+QUERY PLAN:text
+Sample Scan on ts
+  Sampling: system ('50'::real)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ts TABLESAMPLE system (10 + 5)
+QUERY PLAN:text
+Sample Scan on ts
+  Sampling: system ('15'::real)
+-- EXPLAIN
+
+> CREATE INDEX ts_a ON ts (a)
+-- CREATE INDEX
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ts TABLESAMPLE bernoulli (50) WHERE a = 3
+QUERY PLAN:text
+Sample Scan on ts
+  Sampling: bernoulli ('50'::real)
+  Filter: (a = 3)
+-- EXPLAIN
+
+> CREATE VIEW tsv AS SELECT * FROM ts TABLESAMPLE system (20) REPEATABLE (3)
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('tsv')
+pg_get_viewdef:text
+ SELECT a
+   FROM ts TABLESAMPLE system (20) REPEATABLE (3);
+-- SELECT 1
+
+> SELECT count(*) FROM tsv TABLESAMPLE system (1)
+ERROR 0A000: TABLESAMPLE clause can only be applied to tables and materialized views (at 22)
+
+> CREATE MATERIALIZED VIEW tsm AS SELECT * FROM ts
+-- SELECT 100
+
+> SELECT count(*) FROM tsm TABLESAMPLE system (100)
+count:int8
+100
+-- SELECT 1
+
+> WITH c AS (SELECT 1) SELECT * FROM c TABLESAMPLE system (1)
+ERROR 0A000: TABLESAMPLE clause can only be applied to tables and materialized views (at 36)
+
+> SELECT count(*) FROM ts JOIN ts t2 TABLESAMPLE bernoulli (100) ON ts.a = t2.a
+count:int8
+100
+-- SELECT 1
+
+> DROP VIEW tsv
+-- DROP VIEW
+
+> DROP MATERIALIZED VIEW tsm
+-- DROP MATERIALIZED VIEW
+
+> DROP TABLE ts
+-- DROP TABLE
+

@@ -1,0 +1,1 @@
+RESULT	auto	oltp	point_select	clients=1	tps=6702	ops=67026	elapsed_s=10.000495201	mean_ms=0.149	p50_ms=0.138	p95_ms=0.204	p99_ms=0.333	errors=0	peak_mem_mb=110.5	validation_version=oltp-values-v1	checked_ops=67026

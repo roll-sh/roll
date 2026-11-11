@@ -1,0 +1,320 @@
+> CREATE DOMAIN gsw_foodomain AS text
+-- CREATE DOMAIN
+
+> CREATE FUNCTION gsw_volfoo(text) RETURNS gsw_foodomain AS 'begin return $1::gsw_foodomain; end' LANGUAGE plpgsql VOLATILE
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gsw_inline_eq(gsw_foodomain, gsw_foodomain) RETURNS boolean AS 'SELECT CASE $2::text WHEN $1::text THEN true ELSE false END' LANGUAGE sql
+-- CREATE FUNCTION
+
+> CREATE OPERATOR = (PROCEDURE = gsw_inline_eq, LEFTARG = gsw_foodomain, RIGHTARG = gsw_foodomain)
+-- CREATE OPERATOR
+
+> SELECT CASE gsw_volfoo('bar') WHEN 'foo'::gsw_foodomain THEN 'is foo' ELSE 'is not foo' END
+case:text
+is not foo
+-- SELECT 1
+
+> SELECT CASE gsw_volfoo('foo') WHEN 'foo'::gsw_foodomain THEN 'is foo' ELSE 'is not foo' END
+case:text
+is foo
+-- SELECT 1
+
+> SELECT gsw_volfoo('bar') = 'bar'::gsw_foodomain, 'a'::text = 'a'::text
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> DROP OPERATOR = (gsw_foodomain, gsw_foodomain)
+-- DROP OPERATOR
+
+> SELECT a, generate_series(1, 3) AS g FROM (VALUES (3), (1), (2)) t(a) ORDER BY a DESC
+a:int4 | g:int4
+3 | 1
+3 | 2
+3 | 3
+2 | 1
+2 | 2
+2 | 3
+1 | 1
+1 | 2
+1 | 3
+-- SELECT 9
+
+> SELECT DISTINCT ON (a) a, b, generate_series(1, 3) AS g FROM (VALUES (3, 2), (3, 1), (1, 1), (1, 4), (5, 3), (5, 1)) AS t(a, b) ORDER BY a, b DESC
+a:int4 | b:int4 | g:int4
+1 | 4 | 1
+1 | 4 | 2
+1 | 4 | 3
+3 | 2 | 1
+3 | 2 | 2
+3 | 2 | 3
+5 | 3 | 1
+5 | 3 | 2
+5 | 3 | 3
+-- SELECT 9
+
+> SELECT DISTINCT ON (a) a, b, generate_series(1, 3) AS g FROM (VALUES (3, 2), (3, 1), (1, 1), (1, 4), (5, 3), (5, 1)) AS t(a, b) ORDER BY a, b DESC, g DESC
+a:int4 | b:int4 | g:int4
+1 | 4 | 3
+3 | 2 | 3
+5 | 3 | 3
+-- SELECT 3
+
+> SELECT DISTINCT ON (a) a, b, generate_series(1, 3) AS g FROM (VALUES (3, 2), (3, 1), (1, 1), (1, 4), (5, 3), (5, 1)) AS t(a, b)
+a:int4 | b:int4 | g:int4
+1 | 1 | 1
+3 | 2 | 1
+5 | 3 | 1
+-- SELECT 3
+
+> SELECT a, generate_series(1, 2) AS g FROM (VALUES (3), (1), (2)) t(a) ORDER BY a LIMIT 3
+a:int4 | g:int4
+1 | 1
+1 | 2
+2 | 1
+-- SELECT 3
+
+> SELECT a, generate_series(1, 2) AS g FROM (VALUES (3), (1), (2)) t(a) ORDER BY g, a
+a:int4 | g:int4
+1 | 1
+2 | 1
+3 | 1
+1 | 2
+2 | 2
+3 | 2
+-- SELECT 6
+
+> SELECT a, generate_series(1, 2) AS g, random() < 2 AS r FROM (VALUES (2), (1)) t(a) ORDER BY a
+a:int4 | g:int4 | r:bool
+1 | 1 | t
+1 | 2 | t
+2 | 1 | t
+2 | 2 | t
+-- SELECT 4
+
+> CREATE COLLATION gsw_ci (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE DOMAIN gsw_d1 AS text COLLATE gsw_ci
+-- CREATE DOMAIN
+
+> CREATE DOMAIN gsw_d2 AS text COLLATE "C"
+-- CREATE DOMAIN
+
+> SELECT JSON_VALUE('{"a": "A"}', '$.a' RETURNING gsw_d1) = 'a'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": "A"}', '$.a' RETURNING gsw_d1 DEFAULT 'C' ON EMPTY) = 'a'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": "A"}', '$.a' RETURNING gsw_d1 DEFAULT 'C'::gsw_d2 ON EMPTY) = 'a'
+ERROR 42P21: collation of DEFAULT expression conflicts with RETURNING clause (at 64)
+DETAIL: "C" versus "gsw_ci"
+
+> SELECT JSON_VALUE('{"a": "A"}', '$.a' RETURNING gsw_d1 DEFAULT 'C' COLLATE "C" ON EMPTY) = 'a'
+ERROR 42P21: collation of DEFAULT expression conflicts with RETURNING clause (at 64)
+DETAIL: "C" versus "gsw_ci"
+
+> SELECT JSON_VALUE('{"a": "A"}', '$.c' RETURNING gsw_d1 DEFAULT 'A' ON EMPTY) = 'a'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"a": "A"}', '$.c' RETURNING gsw_d1 DEFAULT ('A' COLLATE "C") COLLATE gsw_ci ON EMPTY) = 'a'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT set_config('gsw.blah', 'x', true)
+set_config:text
+x
+-- SELECT 1
+
+> SELECT current_setting('gsw.blah') = '' AS empty
+empty:bool
+t
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL gsw.other = 'y'
+-- SET
+
+> COMMIT
+-- COMMIT
+
+> SHOW gsw.other
+gsw.other:text
+
+-- SHOW
+
+> SELECT current_setting('gsw.missing', true) IS NULL AS missing
+missing:bool
+t
+-- SELECT 1
+
+> CREATE TABLE gsw_ct10 (a int, x text COLLATE "C", y text COLLATE "POSIX")
+-- CREATE TABLE
+
+> SELECT array_agg(a ORDER BY x || y) FROM gsw_ct10
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 34)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> CREATE TABLE gsw_foo (f1 int, f2 text, f3 int, f4 int)
+-- CREATE TABLE
+
+> INSERT INTO gsw_foo VALUES (4, 'x', 1, 2), (5, 'y', 3, 4)
+-- INSERT 0 2
+
+> CREATE RULE gsw_del_rule AS ON DELETE TO gsw_foo DO INSTEAD
+>   UPDATE gsw_foo SET f2 = f2 || ' (deleted)', f3 = -1, f4 = -1 WHERE f1 = OLD.f1 RETURNING *
+-- CREATE RULE
+
+> DELETE FROM gsw_foo WHERE f1 = 4 RETURNING *
+f1:int4 | f2:text | f3:int4 | f4:int4
+4 | x (deleted) | -1 | -1
+-- DELETE 0
+
+> DELETE FROM gsw_foo WHERE f1 = 5 RETURNING old.*, new.*
+f1:int4 | f2:text | f3:int4 | f4:int4 | f1:int4 | f2:text | f3:int4 | f4:int4
+5 | y | 3 | 4 | 5 | y (deleted) | -1 | -1
+-- DELETE 0
+
+> DELETE FROM gsw_foo WHERE f1 = 6 RETURNING old.f1
+f1:int4
+-- DELETE 0
+
+> SELECT * FROM gsw_foo ORDER BY f1
+f1:int4 | f2:text | f3:int4 | f4:int4
+4 | x (deleted) | -1 | -1
+5 | y (deleted) | -1 | -1
+-- SELECT 2
+
+> CREATE TABLE gsw_foo3 (f1 int, f2 text)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_log3 (f1 int, f2 text)
+-- CREATE TABLE
+
+> INSERT INTO gsw_foo3 VALUES (4, 'x')
+-- INSERT 0 1
+
+> CREATE RULE gsw_del_rule3 AS ON DELETE TO gsw_foo3 DO INSTEAD INSERT INTO gsw_log3 VALUES (old.f1, old.f2) RETURNING *
+-- CREATE RULE
+
+> DELETE FROM gsw_foo3 WHERE f1 = 4 RETURNING *
+f1:int4 | f2:text
+4 | x
+-- DELETE 0
+
+> SELECT * FROM gsw_log3
+f1:int4 | f2:text
+4 | x
+-- SELECT 1
+
+> CREATE TABLE gsw_rs (f1 int, f2 int DEFAULT 0)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_rl (f1 int, f2 int)
+-- CREATE TABLE
+
+> CREATE TABLE gsw_i4 (f1 int)
+-- CREATE TABLE
+
+> CREATE RULE gsw_r7 AS ON DELETE TO gsw_rs DO INSTEAD
+>   WITH wins AS (INSERT INTO gsw_i4 AS trgt VALUES (0) RETURNING *),
+>        wupd AS (UPDATE gsw_i4 trgt SET f1 = f1 + 1 RETURNING *),
+>        wdel AS (DELETE FROM gsw_i4 trgt WHERE f1 = 0 RETURNING *)
+>   INSERT INTO gsw_rl AS trgt SELECT old.* FROM wins, wupd, wdel
+>   RETURNING trgt.f1, trgt.f2
+-- CREATE RULE
+
+> SELECT pg_get_ruledef(oid, true) FROM pg_rewrite WHERE rulename = 'gsw_r7'
+pg_get_ruledef:text
+CREATE RULE gsw_r7 AS
+    ON DELETE TO gsw_rs DO INSTEAD  WITH wins AS (
+         INSERT INTO gsw_i4 AS trgt_1 (f1)
+          VALUES (0)
+          RETURNING trgt_1.f1
+        ), wupd AS (
+         UPDATE gsw_i4 trgt_1 SET f1 = trgt_1.f1 + 1
+          RETURNING trgt_1.f1
+        ), wdel AS (
+         DELETE FROM gsw_i4 trgt_1
+          WHERE trgt_1.f1 = 0
+          RETURNING trgt_1.f1
+        )
+ INSERT INTO gsw_rl AS trgt (f1, f2)  SELECT old.f1,
+            old.f2
+           FROM wins,
+            wupd,
+            wdel
+  RETURNING trgt.f1,
+    trgt.f2;
+-- SELECT 1
+
+> SELECT pg_read_file('does not exist', 0, -1)
+ERROR 22023: requested length cannot be negative
+
+> SELECT pg_read_binary_file('does not exist', 0, -1, true)
+ERROR 22023: requested length cannot be negative
+
+> CREATE TABLE gsw_c10 (a int, x text COLLATE "C", y text COLLATE "POSIX")
+-- CREATE TABLE
+
+> INSERT INTO gsw_c10 VALUES (1, 'a', 'b')
+-- INSERT 0 1
+
+> SELECT * FROM gsw_c10 WHERE (x COLLATE "POSIX", y COLLATE "C") NOT IN (SELECT y, x FROM gsw_c10)
+a:int4 | x:text | y:text
+1 | a | b
+-- SELECT 1
+
+> SELECT * FROM gsw_c10 WHERE (x COLLATE "POSIX", y COLLATE "C") IN (SELECT y, x FROM gsw_c10)
+a:int4 | x:text | y:text
+-- SELECT 0
+
+> SELECT * FROM gsw_c10 WHERE (x COLLATE "POSIX", y COLLATE "C") = (y, x)
+a:int4 | x:text | y:text
+-- SELECT 0
+
+> SELECT (x COLLATE "POSIX", y COLLATE "C") IN (SELECT y, x FROM gsw_c10) FROM gsw_c10
+?column?:bool
+f
+-- SELECT 1
+
+> CREATE TABLE gsw_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> SELECT q1 FROM gsw_i8 EXCEPT SELECT q2 FROM gsw_i8 ORDER BY q2 LIMIT 1
+ERROR 42703: column "q2" does not exist (at 61)
+DETAIL: There is a column named "q2" in table "*SELECT* 2", but it cannot be referenced from this part of the query.
+
+> SELECT q1 FROM gsw_i8 UNION SELECT q2 FROM gsw_i8 ORDER BY q3
+ERROR 42703: column "q3" does not exist (at 60)
+HINT: Perhaps you meant to reference the column "*SELECT* 1.q1" or the column "*SELECT* 2.q2".
+
+> VALUES (1) ORDER BY colum1
+ERROR 42703: column "colum1" does not exist (at 21)
+HINT: Perhaps you meant to reference the column "*VALUES*.column1".
+
+> CREATE TYPE gsw_myshell
+-- CREATE TYPE
+
+> SELECT pg_identify_object_as_address('pg_type'::regclass, 0, 0)
+pg_identify_object_as_address:record
+(type,,)
+-- SELECT 1
+
+> SELECT pg_identify_object('pg_type'::regclass, 0, 0)
+pg_identify_object:record
+(type,,,)
+-- SELECT 1
+

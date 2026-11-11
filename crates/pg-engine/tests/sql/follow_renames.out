@@ -1,0 +1,708 @@
+> create schema fr_a
+-- CREATE SCHEMA
+
+> create schema fr_b
+-- CREATE SCHEMA
+
+> set search_path = fr_a, public
+-- SET
+
+> create table t (id int primary key, a int, b text)
+-- CREATE TABLE
+
+> create table u (id int, a int, c text)
+-- CREATE TABLE
+
+> insert into t values (1, 10, 'one'), (2, 20, 'two')
+-- INSERT 0 2
+
+> insert into u values (1, 10, 'uno'), (2, 21, 'dos')
+-- INSERT 0 2
+
+> create view vj as select t.id, u.c from t join u using (id, a)
+-- CREATE VIEW
+
+> create view vn as select * from t natural join u
+-- CREATE VIEW
+
+> create view vx as select x.id, y.c from t x join u y on x.id = y.id
+-- CREATE VIEW
+
+> create view vs as select t.a, s.a as sa from t, (select a from u) s where t.id = s.a
+-- CREATE VIEW
+
+> create view vstar as select * from (select * from t) ss
+-- CREATE VIEW
+
+> create view vcte as with w as (select id, a from t) select w.a from w where w.id > 0
+-- CREATE VIEW
+
+> create view vq as select fr_a.t.a, t.b from fr_a.t
+-- CREATE VIEW
+
+> create view vg as select a, count(*) from t group by a order by a
+-- CREATE VIEW
+
+> select pg_get_viewdef('vj', true)
+pg_get_viewdef:text
+ SELECT t.id,
+    u.c
+   FROM t
+     JOIN u USING (id, a);
+-- SELECT 1
+
+> select pg_get_viewdef('vn', true)
+pg_get_viewdef:text
+ SELECT t.id,
+    t.a,
+    t.b,
+    u.c
+   FROM t
+     JOIN u USING (id, a);
+-- SELECT 1
+
+> select pg_get_viewdef('vstar', true)
+pg_get_viewdef:text
+ SELECT id,
+    a,
+    b
+   FROM ( SELECT t.id,
+            t.a,
+            t.b
+           FROM t) ss;
+-- SELECT 1
+
+> alter table t rename column a to aa
+-- ALTER TABLE
+
+> alter table u rename column a to ua
+-- ALTER TABLE
+
+> select pg_get_viewdef('vj', true)
+pg_get_viewdef:text
+ SELECT t.id,
+    u.c
+   FROM t t(id, a, b)
+     JOIN u u(id, a, c) USING (id, a);
+-- SELECT 1
+
+> select pg_get_viewdef('vn', true)
+pg_get_viewdef:text
+ SELECT t.id,
+    t.a,
+    t.b,
+    u.c
+   FROM t t(id, a, b)
+     JOIN u u(id, a, c) USING (id, a);
+-- SELECT 1
+
+> select pg_get_viewdef('vx', true)
+pg_get_viewdef:text
+ SELECT x.id,
+    y.c
+   FROM t x
+     JOIN u y ON x.id = y.id;
+-- SELECT 1
+
+> select pg_get_viewdef('vs', true)
+pg_get_viewdef:text
+ SELECT t.aa AS a,
+    s.a AS sa
+   FROM t,
+    ( SELECT u.ua AS a
+           FROM u) s
+  WHERE t.id = s.a;
+-- SELECT 1
+
+> select pg_get_viewdef('vstar', true)
+pg_get_viewdef:text
+ SELECT id,
+    a,
+    b
+   FROM ( SELECT t.id,
+            t.aa AS a,
+            t.b
+           FROM t) ss;
+-- SELECT 1
+
+> select pg_get_viewdef('vcte', true)
+pg_get_viewdef:text
+ WITH w AS (
+         SELECT t.id,
+            t.aa AS a
+           FROM t
+        )
+ SELECT a
+   FROM w
+  WHERE id > 0;
+-- SELECT 1
+
+> select pg_get_viewdef('vq', true)
+pg_get_viewdef:text
+ SELECT aa AS a,
+    b
+   FROM t;
+-- SELECT 1
+
+> select pg_get_viewdef('vg', true)
+pg_get_viewdef:text
+ SELECT aa AS a,
+    count(*) AS count
+   FROM t
+  GROUP BY aa
+  ORDER BY aa;
+-- SELECT 1
+
+> select * from vj order by id
+id:int4 | c:text
+1 | uno
+-- SELECT 1
+
+> select * from vn order by id
+id:int4 | a:int4 | b:text | c:text
+1 | 10 | one | uno
+-- SELECT 1
+
+> alter table t rename to tt
+-- ALTER TABLE
+
+> alter table tt set schema fr_b
+-- ALTER TABLE
+
+> select pg_get_viewdef('vj', true)
+pg_get_viewdef:text
+ SELECT tt.id,
+    u.c
+   FROM fr_b.tt tt(id, a, b)
+     JOIN u u(id, a, c) USING (id, a);
+-- SELECT 1
+
+> select pg_get_viewdef('vn', true)
+pg_get_viewdef:text
+ SELECT tt.id,
+    tt.a,
+    tt.b,
+    u.c
+   FROM fr_b.tt tt(id, a, b)
+     JOIN u u(id, a, c) USING (id, a);
+-- SELECT 1
+
+> select pg_get_viewdef('vs', true)
+pg_get_viewdef:text
+ SELECT tt.aa AS a,
+    s.a AS sa
+   FROM fr_b.tt,
+    ( SELECT u.ua AS a
+           FROM u) s
+  WHERE tt.id = s.a;
+-- SELECT 1
+
+> select pg_get_viewdef('vstar', true)
+pg_get_viewdef:text
+ SELECT id,
+    a,
+    b
+   FROM ( SELECT tt.id,
+            tt.aa AS a,
+            tt.b
+           FROM fr_b.tt) ss;
+-- SELECT 1
+
+> select pg_get_viewdef('vq', true)
+pg_get_viewdef:text
+ SELECT aa AS a,
+    b
+   FROM fr_b.tt;
+-- SELECT 1
+
+> select * from vstar order by id
+id:int4 | a:int4 | b:text
+1 | 10 | one
+2 | 20 | two
+-- SELECT 2
+
+> alter table fr_b.tt add column z int
+-- ALTER TABLE
+
+> select * from vstar order by id
+id:int4 | a:int4 | b:text
+1 | 10 | one
+2 | 20 | two
+-- SELECT 2
+
+> alter table u add column b int
+-- ALTER TABLE
+
+> select pg_get_viewdef('vn', true)
+pg_get_viewdef:text
+ SELECT tt.id,
+    tt.a,
+    tt.b,
+    u.c
+   FROM fr_b.tt tt(id, a, b, z)
+     JOIN u u(id, a, c, b) USING (id, a);
+-- SELECT 1
+
+> select * from vn order by id
+id:int4 | a:int4 | b:text | c:text
+1 | 10 | one | uno
+-- SELECT 1
+
+> alter schema fr_b rename to fr_c
+-- ALTER SCHEMA
+
+> select pg_get_viewdef('vq', true)
+pg_get_viewdef:text
+ SELECT aa AS a,
+    b
+   FROM fr_c.tt;
+-- SELECT 1
+
+> select * from vq order by a
+a:int4 | b:text
+10 | one
+20 | two
+-- SELECT 2
+
+> create table tx1 (x1 int, x2 int)
+-- CREATE TABLE
+
+> create table tt1 (f1 int, f2 int)
+-- CREATE TABLE
+
+> create view av1 as select * from tt1 where exists (select 1 from tx1 where tt1.f1 = tx1.x1)
+-- CREATE VIEW
+
+> create view av2 as select * from tt1 a1 where exists (select 1 from tx1 where a1.f1 = tx1.x1)
+-- CREATE VIEW
+
+> alter table tx1 rename to a1
+-- ALTER TABLE
+
+> select pg_get_viewdef('av1', true)
+pg_get_viewdef:text
+ SELECT f1,
+    f2
+   FROM tt1
+  WHERE (EXISTS ( SELECT 1
+           FROM a1
+          WHERE tt1.f1 = a1.x1));
+-- SELECT 1
+
+> select pg_get_viewdef('av2', true)
+pg_get_viewdef:text
+ SELECT f1,
+    f2
+   FROM tt1 a1
+  WHERE (EXISTS ( SELECT 1
+           FROM a1 a1_1
+          WHERE a1.f1 = a1_1.x1));
+-- SELECT 1
+
+> alter table tt1 rename to a2
+-- ALTER TABLE
+
+> select pg_get_viewdef('av1', true)
+pg_get_viewdef:text
+ SELECT f1,
+    f2
+   FROM a2
+  WHERE (EXISTS ( SELECT 1
+           FROM a1
+          WHERE a2.f1 = a1.x1));
+-- SELECT 1
+
+> select pg_get_viewdef('av2', true)
+pg_get_viewdef:text
+ SELECT f1,
+    f2
+   FROM a2 a1
+  WHERE (EXISTS ( SELECT 1
+           FROM a1 a1_1
+          WHERE a1.f1 = a1_1.x1));
+-- SELECT 1
+
+> alter table a1 rename to tt1
+-- ALTER TABLE
+
+> select pg_get_viewdef('av2', true)
+pg_get_viewdef:text
+ SELECT f1,
+    f2
+   FROM a2 a1
+  WHERE (EXISTS ( SELECT 1
+           FROM tt1
+          WHERE a1.f1 = tt1.x1));
+-- SELECT 1
+
+> insert into tt1 values (1, 2)
+-- INSERT 0 1
+
+> insert into a2 values (1, 3), (5, 6)
+-- INSERT 0 2
+
+> select * from av1
+f1:int4 | f2:int4
+1 | 3
+-- SELECT 1
+
+> select * from av2
+f1:int4 | f2:int4
+1 | 3
+-- SELECT 1
+
+> reset search_path
+-- RESET
+
+> drop schema fr_a cascade
+NOTICE 00000: drop cascades to 13 other objects
+DETAIL: drop cascades to table fr_a.u
+DETAIL: drop cascades to view fr_a.vj
+DETAIL: drop cascades to view fr_a.vn
+DETAIL: drop cascades to view fr_a.vx
+DETAIL: drop cascades to view fr_a.vs
+DETAIL: drop cascades to view fr_a.vstar
+DETAIL: drop cascades to view fr_a.vcte
+DETAIL: drop cascades to view fr_a.vq
+DETAIL: drop cascades to view fr_a.vg
+DETAIL: drop cascades to table fr_a.tt1
+DETAIL: drop cascades to table fr_a.a2
+DETAIL: drop cascades to view fr_a.av1
+DETAIL: drop cascades to view fr_a.av2
+-- DROP SCHEMA
+
+> drop schema fr_c cascade
+NOTICE 00000: drop cascades to table fr_c.tt
+-- DROP SCHEMA
+
+> create schema fr_d
+-- CREATE SCHEMA
+
+> set search_path = fr_d, public
+-- SET
+
+> create function f(int) returns int language sql immutable return $1 * 2
+-- CREATE FUNCTION
+
+> create type mood as enum ('happy', 'sad')
+-- CREATE TYPE
+
+> create sequence s1
+-- CREATE SEQUENCE
+
+> create table t (id int, a int check (t.a > 0 and f(a) < 100),
+>   g int generated always as (f(a) + 1) stored, d text default 'x'::text)
+-- CREATE TABLE
+
+> create index ti on t (f(a)) where id > 0
+-- CREATE INDEX
+
+> create statistics ts on (f(a)), id from t
+-- CREATE STATISTICS
+
+> create table p (k int, v int) partition by range (f(k))
+-- CREATE TABLE
+
+> create table log (op text, ids int)
+-- CREATE TABLE
+
+> create rule r as on insert to t do also insert into log (op, ids) values ('ins', new.id)
+-- CREATE RULE
+
+> create function tf() returns trigger language plpgsql as $$ begin return new; end $$
+-- CREATE FUNCTION
+
+> create trigger tg before update on t for each row when (new.a <> old.a) execute function tf()
+-- CREATE TRIGGER
+
+> alter table t enable row level security
+-- ALTER TABLE
+
+> create policy pol on t using (a > 0 and f(id) > 0)
+-- CREATE POLICY
+
+> create domain dpos as int check (f(value) > 0)
+-- CREATE DOMAIN
+
+> create function body() returns setof int language sql
+>   begin atomic insert into log (op, ids) select 'x', a from t; select f(a) from t; end
+-- CREATE FUNCTION
+
+> create view v as select 't'::regclass as rc, f(a) as fa, 'happy'::mood as m,
+>   nextval('s1') as nv, t.* from t
+-- CREATE VIEW
+
+> alter table t rename column a to aa
+-- ALTER TABLE
+
+> alter function f(int) rename to ff
+-- ALTER FUNCTION
+
+> alter type mood rename to feeling
+-- ALTER TYPE
+
+> alter sequence s1 rename to s2
+-- ALTER SEQUENCE
+
+> select pg_get_indexdef('ti'::regclass)
+pg_get_indexdef:text
+CREATE INDEX ti ON fr_d.t USING btree (ff(aa)) WHERE (id > 0)
+-- SELECT 1
+
+> select pg_get_statisticsobjdef(oid) from pg_statistic_ext where stxname = 'ts'
+pg_get_statisticsobjdef:text
+CREATE STATISTICS fr_d.ts ON id, ff(aa) FROM t
+-- SELECT 1
+
+> select pg_get_partkeydef('p'::regclass)
+pg_get_partkeydef:text
+RANGE (ff(k))
+-- SELECT 1
+
+> select pg_get_ruledef(oid) from pg_rewrite where rulename = 'r'
+pg_get_ruledef:text
+CREATE RULE r AS
+    ON INSERT TO fr_d.t DO  INSERT INTO log (op, ids)
+  VALUES ('ins'::text, new.id);
+-- SELECT 1
+
+> select pg_get_triggerdef(oid) from pg_trigger where tgname = 'tg'
+pg_get_triggerdef:text
+CREATE TRIGGER tg BEFORE UPDATE ON fr_d.t FOR EACH ROW WHEN ((new.aa <> old.aa)) EXECUTE FUNCTION tf()
+-- SELECT 1
+
+> select qual from pg_policies where policyname = 'pol'
+qual:text
+((aa > 0) AND (ff(id) > 0))
+-- SELECT 1
+
+> select pg_get_constraintdef(oid) from pg_constraint where conname = 't_a_check'
+pg_get_constraintdef:text
+CHECK (((aa > 0) AND (ff(aa) < 100)))
+-- SELECT 1
+
+> select pg_get_constraintdef(oid) from pg_constraint where contypid = 'dpos'::regtype
+pg_get_constraintdef:text
+CHECK ((ff(VALUE) > 0))
+-- SELECT 1
+
+> select pg_get_expr(adbin, adrelid) from pg_attrdef where adrelid = 't'::regclass order by adnum
+pg_get_expr:text
+(ff(aa) + 1)
+'x'::text
+-- SELECT 2
+
+> select pg_get_functiondef('body'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION fr_d.body()
+ RETURNS SETOF integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ INSERT INTO log (op, ids)  SELECT 'x',
+             t.aa AS a
+            FROM t;
+ SELECT ff(t.aa) AS f
+    FROM t;
+END
+
+-- SELECT 1
+
+> select pg_get_viewdef('v')
+pg_get_viewdef:text
+ SELECT 't'::regclass AS rc,
+    ff(aa) AS fa,
+    'happy'::feeling AS m,
+    nextval('s2'::regclass) AS nv,
+    id,
+    aa AS a,
+    g,
+    d
+   FROM t;
+-- SELECT 1
+
+> alter table log rename column ids to idz
+-- ALTER TABLE
+
+> select pg_get_ruledef(oid) from pg_rewrite where rulename = 'r'
+pg_get_ruledef:text
+CREATE RULE r AS
+    ON INSERT TO fr_d.t DO  INSERT INTO log (op, idz)
+  VALUES ('ins'::text, new.id);
+-- SELECT 1
+
+> select pg_get_functiondef('body'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION fr_d.body()
+ RETURNS SETOF integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ INSERT INTO log (op, idz)  SELECT 'x',
+             t.aa AS a
+            FROM t;
+ SELECT ff(t.aa) AS f
+    FROM t;
+END
+
+-- SELECT 1
+
+> alter table t rename to t2
+-- ALTER TABLE
+
+> select pg_get_viewdef('v')
+pg_get_viewdef:text
+ SELECT 't2'::regclass AS rc,
+    ff(aa) AS fa,
+    'happy'::feeling AS m,
+    nextval('s2'::regclass) AS nv,
+    id,
+    aa AS a,
+    g,
+    d
+   FROM t2;
+-- SELECT 1
+
+> insert into t2 (id, aa) values (1, 5)
+-- INSERT 0 1
+
+> select * from log order by op
+op:text | idz:int4
+ins | 1
+-- SELECT 1
+
+> select rc, fa, m, id, a, g, d from v
+rc:regclass | fa:int4 | m:user | id:int4 | a:int4 | g:int4 | d:text
+t2 | 10 | happy | 1 | 5 | 11 | x
+-- SELECT 1
+
+> select * from body()
+body:int4
+10
+-- SELECT 1
+
+> alter schema fr_d rename to fr_e
+-- ALTER SCHEMA
+
+> reset search_path
+-- RESET
+
+> select pg_get_viewdef('fr_e.v')
+pg_get_viewdef:text
+ SELECT 'fr_e.t2'::regclass AS rc,
+    fr_e.ff(aa) AS fa,
+    'happy'::fr_e.feeling AS m,
+    nextval('fr_e.s2'::regclass) AS nv,
+    id,
+    aa AS a,
+    g,
+    d
+   FROM fr_e.t2;
+-- SELECT 1
+
+> select pg_get_functiondef('fr_e.body'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION fr_e.body()
+ RETURNS SETOF integer
+ LANGUAGE sql
+BEGIN ATOMIC
+ INSERT INTO fr_e.log (op, idz)  SELECT 'x',
+             t2.aa AS a
+            FROM fr_e.t2;
+ SELECT fr_e.ff(t2.aa) AS f
+    FROM fr_e.t2;
+END
+
+-- SELECT 1
+
+> drop schema fr_e cascade
+NOTICE 00000: drop cascades to 10 other objects
+DETAIL: drop cascades to function fr_e.ff(integer)
+DETAIL: drop cascades to type fr_e.feeling
+DETAIL: drop cascades to sequence fr_e.s2
+DETAIL: drop cascades to table fr_e.t2
+DETAIL: drop cascades to table fr_e.p
+DETAIL: drop cascades to table fr_e.log
+DETAIL: drop cascades to function fr_e.tf()
+DETAIL: drop cascades to type fr_e.dpos
+DETAIL: drop cascades to function fr_e.body()
+DETAIL: drop cascades to view fr_e.v
+-- DROP SCHEMA
+
+> create schema fr_f
+-- CREATE SCHEMA
+
+> set search_path = fr_f, public
+-- SET
+
+> create table t (id int, a int, b text, c int, d int)
+-- CREATE TABLE
+
+> create view v1 as select id, a as fa from t
+-- CREATE VIEW
+
+> create view v2 as select v1.id, v1.fa from v1 where v1.id > 0
+-- CREATE VIEW
+
+> create table log (x int)
+-- CREATE TABLE
+
+> create rule r as on update to t do also insert into log values (old.b::int)
+-- CREATE RULE
+
+> create function tf() returns trigger language plpgsql as $$ begin return new; end $$
+-- CREATE FUNCTION
+
+> create trigger tg before update of c on t for each row execute function tf()
+-- CREATE TRIGGER
+
+> create policy pol on t using (d > 0)
+-- CREATE POLICY
+
+> create function sb() returns int language sql begin atomic select a from t where id = 1; end
+-- CREATE FUNCTION
+
+> alter view v1 rename column fa to fb
+-- ALTER VIEW
+
+> select pg_get_viewdef('v2', true)
+pg_get_viewdef:text
+ SELECT id,
+    fb AS fa
+   FROM v1
+  WHERE id > 0;
+-- SELECT 1
+
+> alter table t alter column a type bigint
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule _RETURN on view v1 depends on column "a"
+
+> alter table t alter column b type varchar
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule r on table t depends on column "b"
+
+> alter table t alter column c type bigint
+ERROR 0A000: cannot alter type of a column used in a trigger definition
+DETAIL: trigger tg on table t depends on column "c"
+
+> alter table t alter column d type bigint
+ERROR 0A000: cannot alter type of a column used in a policy definition
+DETAIL: policy pol on table t depends on column "d"
+
+> drop function sb()
+-- DROP FUNCTION
+
+> drop view v2, v1
+-- DROP VIEW
+
+> alter table t alter column a type bigint
+-- ALTER TABLE
+
+> reset search_path
+-- RESET
+
+> drop schema fr_f cascade
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table fr_f.t
+DETAIL: drop cascades to table fr_f.log
+DETAIL: drop cascades to function fr_f.tf()
+-- DROP SCHEMA
+

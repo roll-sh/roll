@@ -1,0 +1,616 @@
+> CREATE TABLE ip (a int, b text DEFAULT 'pdef')
+-- CREATE TABLE
+
+> CREATE TABLE ic1 (c int, b text DEFAULT 'c1def') INHERITS (ip)
+NOTICE 00000: merging column "b" with inherited definition
+-- CREATE TABLE
+
+> CREATE TABLE ic2 (d text, a int) INHERITS (ip)
+NOTICE 00000: moving and merging column "a" with inherited definition
+DETAIL: User-specified column moved to the position of the inherited column.
+-- CREATE TABLE
+
+> INSERT INTO ip VALUES (1, 'p1'), (2, 'p2')
+-- INSERT 0 2
+
+> INSERT INTO ic1 (a, b, c) VALUES (3, 'c1a', 30), (4, 'c1b', 40)
+-- INSERT 0 2
+
+> INSERT INTO ic2 (a, b, d) VALUES (5, 'c2a', 'x'), (6, 'c2b', 'y')
+-- INSERT 0 2
+
+> CREATE FUNCTION itrg() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF TG_LEVEL = 'ROW' THEN
+>     RAISE NOTICE '% % % on %: % -> %', TG_WHEN, TG_OP, TG_LEVEL, TG_TABLE_NAME, OLD, NEW;
+>   ELSE
+>     RAISE NOTICE '% % % on %', TG_WHEN, TG_OP, TG_LEVEL, TG_TABLE_NAME;
+>   END IF;
+>   RETURN COALESCE(NEW, OLD);
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER bs BEFORE UPDATE OR DELETE ON ip FOR EACH STATEMENT EXECUTE FUNCTION itrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER zs AFTER UPDATE OR DELETE ON ip FOR EACH STATEMENT EXECUTE FUNCTION itrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER br BEFORE UPDATE OR DELETE ON ip FOR EACH ROW EXECUTE FUNCTION itrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER zr AFTER UPDATE OR DELETE ON ip FOR EACH ROW EXECUTE FUNCTION itrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER br BEFORE UPDATE OR DELETE ON ic1 FOR EACH ROW EXECUTE FUNCTION itrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER zr AFTER UPDATE OR DELETE ON ic2 FOR EACH ROW EXECUTE FUNCTION itrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER cs AFTER UPDATE OR DELETE ON ic1 FOR EACH STATEMENT EXECUTE FUNCTION itrg()
+-- CREATE TRIGGER
+
+> UPDATE ip SET b = b || '!' WHERE a % 2 = 0 RETURNING *, tableoid::regclass
+NOTICE 00000: BEFORE UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on ip: (2,p2) -> (2,p2!)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on ic1: (4,c1b,40) -> (4,c1b!,40)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ip: (2,p2) -> (2,p2!)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ic2: (6,c2b,y) -> (6,c2b!,y)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+a:int4 | b:text | tableoid:regclass
+2 | p2! | ip
+4 | c1b! | ic1
+6 | c2b! | ic2
+-- UPDATE 3
+
+> UPDATE ip SET b = b || '?' WHERE a IN (1, 3, 5) RETURNING ip.*, tableoid::regclass
+NOTICE 00000: BEFORE UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on ip: (1,p1) -> (1,p1?)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on ic1: (3,c1a,30) -> (3,c1a?,30)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ip: (1,p1) -> (1,p1?)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ic2: (5,c2a,x) -> (5,c2a?,x)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+a:int4 | b:text | tableoid:regclass
+1 | p1? | ip
+3 | c1a? | ic1
+5 | c2a? | ic2
+-- UPDATE 3
+
+> UPDATE ip SET b = DEFAULT WHERE a IN (3, 5) RETURNING *, tableoid::regclass
+NOTICE 00000: BEFORE UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on ic1: (3,c1a?,30) -> (3,pdef,30)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ic2: (5,c2a?,x) -> (5,pdef,x)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+a:int4 | b:text | tableoid:regclass
+3 | pdef | ic1
+5 | pdef | ic2
+-- UPDATE 2
+
+> DELETE FROM ip WHERE a IN (2, 4, 6) RETURNING *, tableoid::regclass
+NOTICE 00000: BEFORE DELETE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+NOTICE 00000: BEFORE DELETE ROW on ip: (2,p2!) -> <NULL>
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: BEFORE DELETE ROW on ic1: (4,c1b!,40) -> <NULL>
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE ROW on ip: (2,p2!) -> <NULL>
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE ROW on ic2: (6,c2b!,y) -> <NULL>
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER DELETE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+a:int4 | b:text | tableoid:regclass
+2 | p2! | ip
+4 | c1b! | ic1
+6 | c2b! | ic2
+-- DELETE 3
+
+> UPDATE ONLY ip SET b = 'only' RETURNING *
+NOTICE 00000: BEFORE UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+NOTICE 00000: BEFORE UPDATE ROW on ip: (1,p1?) -> (1,only)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE ROW on ip: (1,p1?) -> (1,only)
+CONTEXT: PL/pgSQL function itrg() line 4 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+a:int4 | b:text
+1 | only
+-- UPDATE 1
+
+> SELECT tableoid::regclass, * FROM ip ORDER BY a
+tableoid:regclass | a:int4 | b:text
+ip | 1 | only
+ic1 | 3 | pdef
+ic2 | 5 | pdef
+-- SELECT 3
+
+> SELECT * FROM ic1 ORDER BY a
+a:int4 | b:text | c:int4
+3 | pdef | 30
+-- SELECT 1
+
+> SELECT * FROM ic2 ORDER BY a
+a:int4 | b:text | d:text
+5 | pdef | x
+-- SELECT 1
+
+> DROP TRIGGER br ON ip
+-- DROP TRIGGER
+
+> DROP TRIGGER zr ON ip
+-- DROP TRIGGER
+
+> DROP TRIGGER br ON ic1
+-- DROP TRIGGER
+
+> DROP TRIGGER zr ON ic2
+-- DROP TRIGGER
+
+> CREATE FUNCTION itrans() RETURNS trigger LANGUAGE plpgsql AS $$
+> DECLARE r record;
+> BEGIN
+>   IF TG_OP IN ('UPDATE', 'DELETE') THEN
+>     FOR r IN SELECT * FROM oldt ORDER BY a LOOP RAISE NOTICE '% old: %', TG_OP, r; END LOOP;
+>   END IF;
+>   IF TG_OP = 'UPDATE' THEN
+>     FOR r IN SELECT * FROM newt ORDER BY a LOOP RAISE NOTICE '% new: %', TG_OP, r; END LOOP;
+>   END IF;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tu AFTER UPDATE ON ip REFERENCING OLD TABLE AS oldt NEW TABLE AS newt FOR EACH STATEMENT EXECUTE FUNCTION itrans()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER td AFTER DELETE ON ip REFERENCING OLD TABLE AS oldt FOR EACH STATEMENT EXECUTE FUNCTION itrans()
+-- CREATE TRIGGER
+
+> UPDATE ip SET a = a + 10
+NOTICE 00000: BEFORE UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+NOTICE 00000: UPDATE old: (1,only)
+CONTEXT: PL/pgSQL function itrans() line 5 at RAISE
+NOTICE 00000: UPDATE old: (3,pdef)
+CONTEXT: PL/pgSQL function itrans() line 5 at RAISE
+NOTICE 00000: UPDATE old: (5,pdef)
+CONTEXT: PL/pgSQL function itrans() line 5 at RAISE
+NOTICE 00000: UPDATE new: (11,only)
+CONTEXT: PL/pgSQL function itrans() line 8 at RAISE
+NOTICE 00000: UPDATE new: (13,pdef)
+CONTEXT: PL/pgSQL function itrans() line 8 at RAISE
+NOTICE 00000: UPDATE new: (15,pdef)
+CONTEXT: PL/pgSQL function itrans() line 8 at RAISE
+NOTICE 00000: AFTER UPDATE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+-- UPDATE 3
+
+> DELETE FROM ip WHERE a > 14
+NOTICE 00000: BEFORE DELETE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+NOTICE 00000: DELETE old: (15,pdef)
+CONTEXT: PL/pgSQL function itrans() line 5 at RAISE
+NOTICE 00000: AFTER DELETE STATEMENT on ip
+CONTEXT: PL/pgSQL function itrg() line 6 at RAISE
+-- DELETE 1
+
+> INSERT INTO ip VALUES (1, 'p1'), (2, 'p2')
+-- INSERT 0 2
+
+> INSERT INTO ic1 (a, b, c) VALUES (3, 'c1a', 30), (4, 'c1b', 40)
+-- INSERT 0 2
+
+> INSERT INTO ic2 (a, b, d) VALUES (5, 'c2a', 'x'), (6, 'c2b', 'y')
+-- INSERT 0 2
+
+> DROP TRIGGER tu ON ip
+-- DROP TRIGGER
+
+> DROP TRIGGER td ON ip
+-- DROP TRIGGER
+
+> DROP TRIGGER bs ON ip
+-- DROP TRIGGER
+
+> DROP TRIGGER zs ON ip
+-- DROP TRIGGER
+
+> DROP TRIGGER cs ON ic1
+-- DROP TRIGGER
+
+> CREATE TABLE src (k int, v text)
+-- CREATE TABLE
+
+> INSERT INTO src VALUES (5, 'five'), (1, 'one'), (4, 'four'), (4, 'four again'), (99, 'none')
+-- INSERT 0 5
+
+> WITH u AS (UPDATE ip SET b = src.v FROM src WHERE ip.a = src.k RETURNING ip.a, ip.b, tableoid::regclass AS t) SELECT * FROM u ORDER BY a
+ERROR 42702: column reference "tableoid" is ambiguous (at 86)
+
+> WITH d AS (DELETE FROM ip USING src WHERE ip.a = src.k AND src.v LIKE 'f%' RETURNING ip.*, src.v) SELECT * FROM d ORDER BY a
+a:int4 | b:text | v:text
+4 | c1b | four again
+5 | c2a | five
+-- SELECT 2
+
+> SELECT tableoid::regclass, * FROM ip ORDER BY a
+tableoid:regclass | a:int4 | b:text
+ip | 1 | p1
+ip | 2 | p2
+ic1 | 3 | c1a
+ic2 | 6 | c2b
+ip | 11 | only
+ic1 | 13 | pdef
+-- SELECT 6
+
+> CREATE TABLE gp (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE gc (g int GENERATED ALWAYS AS (a * 2) STORED) INHERITS (gp)
+-- CREATE TABLE
+
+> CREATE TABLE gc2 (g int GENERATED ALWAYS AS (a * 3) STORED) INHERITS (gp)
+-- CREATE TABLE
+
+> INSERT INTO gc (a, b) VALUES (1, 1), (2, 2)
+-- INSERT 0 2
+
+> INSERT INTO gc2 (a, b) VALUES (10, 10)
+-- INSERT 0 1
+
+> UPDATE gp SET a = a + 1 RETURNING *, tableoid::regclass
+a:int4 | b:int4 | tableoid:regclass
+11 | 10 | gc2
+2 | 1 | gc
+3 | 2 | gc
+-- UPDATE 3
+
+> SELECT * FROM gc ORDER BY a
+a:int4 | b:int4 | g:int4
+2 | 1 | 4
+3 | 2 | 6
+-- SELECT 2
+
+> SELECT * FROM gc2 ORDER BY a
+a:int4 | b:int4 | g:int4
+11 | 10 | 33
+-- SELECT 1
+
+> ALTER TABLE ic1 ADD CONSTRAINT ic1_a CHECK (a < 50)
+-- ALTER TABLE
+
+> UPDATE ip SET a = a + 50 WHERE a > 2
+ERROR 23514: new row for relation "ic1" violates check constraint "ic1_a"
+DETAIL: Failing row contains (63, pdef).
+OBJECTS: schema=public table=ic1 constraint=ic1_a
+
+> UPDATE ip SET a = a + 50 WHERE a = 2 RETURNING *
+a:int4 | b:text
+52 | p2
+-- UPDATE 1
+
+> CREATE VIEW ipv AS SELECT * FROM ip WHERE a < 20 WITH CHECK OPTION
+-- CREATE VIEW
+
+> UPDATE ipv SET a = a + 100 WHERE a = 3
+ERROR 23514: new row for relation "ic1" violates check constraint "ic1_a"
+DETAIL: Failing row contains (103, c1a).
+OBJECTS: schema=public table=ic1 constraint=ic1_a
+
+> UPDATE ipv SET a = a + 1 WHERE a = 3 RETURNING *
+a:int4 | b:text
+4 | c1a
+-- UPDATE 1
+
+> DELETE FROM ipv WHERE a = 4 RETURNING *
+a:int4 | b:text
+4 | c1a
+-- DELETE 1
+
+> SELECT tableoid::regclass, * FROM ip ORDER BY a
+tableoid:regclass | a:int4 | b:text
+ip | 1 | p1
+ic2 | 6 | c2b
+ip | 11 | only
+ic1 | 13 | pdef
+ip | 52 | p2
+-- SELECT 5
+
+> BEGIN
+-- BEGIN
+
+> DECLARE cur CURSOR FOR SELECT * FROM ip WHERE a = 5 FOR UPDATE
+-- DECLARE CURSOR
+
+> FETCH cur
+a:int4 | b:text
+-- FETCH 0
+
+> UPDATE ip SET b = 'cursor' WHERE CURRENT OF cur RETURNING *, tableoid::regclass
+ERROR 24000: cursor "cur" is not positioned on a row
+
+> DELETE FROM ip WHERE CURRENT OF cur RETURNING *
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> COMMIT
+-- ROLLBACK
+
+> SELECT tableoid::regclass, * FROM ip ORDER BY a
+tableoid:regclass | a:int4 | b:text
+ip | 1 | p1
+ic2 | 6 | c2b
+ip | 11 | only
+ic1 | 13 | pdef
+ip | 52 | p2
+-- SELECT 5
+
+> CREATE ROLE regress_gxid_rls
+-- CREATE ROLE
+
+> GRANT ALL ON ip TO regress_gxid_rls
+-- GRANT
+
+> ALTER TABLE ip ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY ip_sel ON ip FOR SELECT USING (true)
+-- CREATE POLICY
+
+> CREATE POLICY ip_upd ON ip FOR UPDATE USING (a % 2 = 0) WITH CHECK (b <> 'bad')
+-- CREATE POLICY
+
+> CREATE POLICY ip_del ON ip FOR DELETE USING (a > 3)
+-- CREATE POLICY
+
+> SET ROLE regress_gxid_rls
+-- SET
+
+> UPDATE ip SET b = b || '+' RETURNING *, tableoid::regclass
+a:int4 | b:text | tableoid:regclass
+52 | p2+ | ip
+6 | c2b+ | ic2
+-- UPDATE 2
+
+> UPDATE ip SET b = 'bad' WHERE a = 6
+ERROR 42501: new row violates row-level security policy for table "ip"
+
+> DELETE FROM ip RETURNING *
+a:int4 | b:text
+11 | only
+13 | pdef
+52 | p2+
+6 | c2b+
+-- DELETE 4
+
+> RESET ROLE
+-- RESET
+
+> DROP POLICY ip_sel ON ip
+-- DROP POLICY
+
+> DROP POLICY ip_upd ON ip
+-- DROP POLICY
+
+> DROP POLICY ip_del ON ip
+-- DROP POLICY
+
+> ALTER TABLE ip DISABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> REVOKE ALL ON ip FROM regress_gxid_rls
+-- REVOKE
+
+> DROP ROLE regress_gxid_rls
+-- DROP ROLE
+
+> SELECT tableoid::regclass, * FROM ip ORDER BY a
+tableoid:regclass | a:int4 | b:text
+ip | 1 | p1
+-- SELECT 1
+
+> INSERT INTO ip VALUES (11, 'p11')
+-- INSERT 0 1
+
+> INSERT INTO ic1 (a, b) VALUES (13, 'c13')
+-- INSERT 0 1
+
+> INSERT INTO ic2 (a, b) VALUES (15, 'c15')
+-- INSERT 0 1
+
+> EXPLAIN (COSTS OFF) UPDATE ip SET b = 'x' WHERE a = 13
+QUERY PLAN:text
+Update on ip
+  Update on ip ip_1
+  Update on ic1 ip_2
+  Update on ic2 ip_3
+  ->  Result
+        ->  Append
+              ->  Seq Scan on ip ip_1
+                    Filter: (a = 13)
+              ->  Seq Scan on ic1 ip_2
+                    Filter: (a = 13)
+              ->  Seq Scan on ic2 ip_3
+                    Filter: (a = 13)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM ip WHERE a = 13
+QUERY PLAN:text
+Delete on ip
+  Delete on ip ip_1
+  Delete on ic1 ip_2
+  Delete on ic2 ip_3
+  ->  Append
+        ->  Seq Scan on ip ip_1
+              Filter: (a = 13)
+        ->  Seq Scan on ic1 ip_2
+              Filter: (a = 13)
+        ->  Seq Scan on ic2 ip_3
+              Filter: (a = 13)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE ip SET b = b || 'x' WHERE a > 10
+QUERY PLAN:text
+Update on public.ip
+  Update on public.ip ip_1
+  Update on public.ic1 ip_2
+  Update on public.ic2 ip_3
+  ->  Result
+        Output: (ip.b || 'x'::text), ip.tableoid, ip.ctid
+        ->  Append
+              ->  Seq Scan on public.ip ip_1
+                    Output: ip_1.b, ip_1.tableoid, ip_1.ctid
+                    Filter: (ip_1.a > 10)
+              ->  Seq Scan on public.ic1 ip_2
+                    Output: ip_2.b, ip_2.tableoid, ip_2.ctid
+                    Filter: (ip_2.a > 10)
+              ->  Seq Scan on public.ic2 ip_3
+                    Output: ip_3.b, ip_3.tableoid, ip_3.ctid
+                    Filter: (ip_3.a > 10)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE ip SET b = 'x' WHERE a > 10 RETURNING *
+QUERY PLAN:text
+Update on public.ip
+  Output: ip_1.a, ip_1.b
+  Update on public.ip ip_1
+  Update on public.ic1 ip_2
+  Update on public.ic2 ip_3
+  ->  Result
+        Output: 'x'::text, ip.tableoid, ip.ctid
+        ->  Append
+              ->  Seq Scan on public.ip ip_1
+                    Output: ip_1.tableoid, ip_1.ctid
+                    Filter: (ip_1.a > 10)
+              ->  Seq Scan on public.ic1 ip_2
+                    Output: ip_2.tableoid, ip_2.ctid
+                    Filter: (ip_2.a > 10)
+              ->  Seq Scan on public.ic2 ip_3
+                    Output: ip_3.tableoid, ip_3.ctid
+                    Filter: (ip_3.a > 10)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) DELETE FROM ip WHERE a > 10 RETURNING *, tableoid
+QUERY PLAN:text
+Delete on public.ip
+  Output: ip_1.a, ip_1.b, ip_1.tableoid
+  Delete on public.ip ip_1
+  Delete on public.ic1 ip_2
+  Delete on public.ic2 ip_3
+  ->  Append
+        ->  Seq Scan on public.ip ip_1
+              Output: ip_1.tableoid, ip_1.ctid
+              Filter: (ip_1.a > 10)
+        ->  Seq Scan on public.ic1 ip_2
+              Output: ip_2.tableoid, ip_2.ctid
+              Filter: (ip_2.a > 10)
+        ->  Seq Scan on public.ic2 ip_3
+              Output: ip_3.tableoid, ip_3.ctid
+              Filter: (ip_3.a > 10)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE ip SET b = 'x' WHERE false
+QUERY PLAN:text
+Update on public.ip
+  ->  Result
+        Output: 'x'::text, NULL::oid, NULL::tid
+        One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE ONLY ip SET b = 'x'
+QUERY PLAN:text
+Update on ip
+  ->  Seq Scan on ip
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) UPDATE ip SET b = b WHERE a > 10
+QUERY PLAN:text
+Update on ip (actual rows=0.00 loops=1)
+  Update on ip ip_1
+  Update on ic1 ip_2
+  Update on ic2 ip_3
+  ->  Append (actual rows=3.00 loops=1)
+        ->  Seq Scan on ip ip_1 (actual rows=1.00 loops=1)
+              Filter: (a > 10)
+              Rows Removed by Filter: 1
+        ->  Seq Scan on ic1 ip_2 (actual rows=1.00 loops=1)
+              Filter: (a > 10)
+        ->  Seq Scan on ic2 ip_3 (actual rows=1.00 loops=1)
+              Filter: (a > 10)
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) DELETE FROM ip WHERE a > 14
+QUERY PLAN:text
+Delete on ip (actual rows=0.00 loops=1)
+  Delete on ip ip_1
+  Delete on ic1 ip_2
+  Delete on ic2 ip_3
+  ->  Append (actual rows=1.00 loops=1)
+        ->  Seq Scan on ip ip_1 (actual rows=0.00 loops=1)
+              Filter: (a > 14)
+              Rows Removed by Filter: 2
+        ->  Seq Scan on ic1 ip_2 (actual rows=0.00 loops=1)
+              Filter: (a > 14)
+              Rows Removed by Filter: 1
+        ->  Seq Scan on ic2 ip_3 (actual rows=1.00 loops=1)
+              Filter: (a > 14)
+-- EXPLAIN
+
+> CREATE TABLE ck1 (CHECK (a > 100)) INHERITS (ip)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) UPDATE ip SET b = 'x' WHERE a = 13
+QUERY PLAN:text
+Update on ip
+  Update on ip ip_1
+  Update on ic1 ip_2
+  Update on ic2 ip_3
+  ->  Result
+        ->  Append
+              ->  Seq Scan on ip ip_1
+                    Filter: (a = 13)
+              ->  Seq Scan on ic1 ip_2
+                    Filter: (a = 13)
+              ->  Seq Scan on ic2 ip_3
+                    Filter: (a = 13)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE ip SET b = 'x' WHERE a = 113
+QUERY PLAN:text
+Update on ip
+  Update on ip ip_1
+  Update on ic2 ip_2
+  Update on ck1 ip_3
+  ->  Result
+        ->  Append
+              ->  Seq Scan on ip ip_1
+                    Filter: (a = 113)
+              ->  Seq Scan on ic2 ip_2
+                    Filter: (a = 113)
+              ->  Seq Scan on ck1 ip_3
+                    Filter: (a = 113)
+-- EXPLAIN
+
+> SELECT tableoid::regclass, * FROM ip ORDER BY a
+tableoid:regclass | a:int4 | b:text
+ip | 1 | p1
+ip | 11 | p11
+ic1 | 13 | c13
+-- SELECT 3
+

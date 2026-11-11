@@ -1,0 +1,286 @@
+> CREATE TABLE pk (id int PRIMARY KEY, r int) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE pk1 PARTITION OF pk FOR VALUES FROM (0) TO (100)
+-- CREATE TABLE
+
+> CREATE TABLE pk2 PARTITION OF pk FOR VALUES FROM (100) TO (200)
+-- CREATE TABLE
+
+> CREATE TABLE fk (a int REFERENCES pk ON DELETE CASCADE, b int) PARTITION BY LIST (b)
+-- CREATE TABLE
+
+> CREATE TABLE fk1 PARTITION OF fk FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE fk2 (a int, b int)
+-- CREATE TABLE
+
+> ALTER TABLE fk ATTACH PARTITION fk2 FOR VALUES IN (2)
+-- ALTER TABLE
+
+> SELECT conname, conrelid::regclass, confrelid::regclass, contype, conislocal, coninhcount, conparentid <> 0 AS child FROM pg_constraint WHERE contype = 'f' AND conrelid::regclass::text LIKE 'fk%' ORDER BY 2, 3, 1
+conname:name | conrelid:regclass | confrelid:regclass | contype:char | conislocal:bool | coninhcount:int2 | child:bool
+fk_a_fkey | fk | pk | f | t | 0 | f
+fk_a_fkey_1 | fk | pk1 | f | f | 1 | t
+fk_a_fkey_2 | fk | pk2 | f | f | 1 | t
+fk_a_fkey | fk1 | pk | f | f | 1 | t
+fk_a_fkey | fk2 | pk | f | f | 1 | t
+-- SELECT 5
+
+> INSERT INTO pk VALUES (1, 0), (150, 0)
+-- INSERT 0 2
+
+> INSERT INTO fk VALUES (1, 1), (150, 2)
+-- INSERT 0 2
+
+> INSERT INTO fk VALUES (5, 1)
+ERROR 23503: insert or update on table "fk1" violates foreign key constraint "fk_a_fkey"
+DETAIL: Key (a)=(5) is not present in table "pk".
+OBJECTS: schema=public table=fk1 constraint=fk_a_fkey
+
+> DELETE FROM pk WHERE id = 150
+-- DELETE 1
+
+> SELECT * FROM fk ORDER BY a
+a:int4 | b:int4
+1 | 1
+-- SELECT 1
+
+> DELETE FROM pk1
+-- DELETE 1
+
+> SELECT * FROM fk ORDER BY a
+a:int4 | b:int4
+-- SELECT 0
+
+> CREATE TABLE plain (x int REFERENCES pk)
+-- CREATE TABLE
+
+> INSERT INTO pk VALUES (2, 0)
+-- INSERT 0 1
+
+> INSERT INTO plain VALUES (2)
+-- INSERT 0 1
+
+> INSERT INTO plain VALUES (3)
+ERROR 23503: insert or update on table "plain" violates foreign key constraint "plain_x_fkey"
+DETAIL: Key (x)=(3) is not present in table "pk".
+OBJECTS: schema=public table=plain constraint=plain_x_fkey
+
+> DELETE FROM pk WHERE id = 2
+ERROR 23503: update or delete on table "pk1" violates foreign key constraint "plain_x_fkey_1" on table "plain"
+DETAIL: Key (id)=(2) is still referenced from table "plain".
+OBJECTS: schema=public table=plain constraint=plain_x_fkey_1
+
+> ALTER TABLE fk1 DROP CONSTRAINT fk_a_fkey
+ERROR 42P16: cannot drop inherited constraint "fk_a_fkey" of relation "fk1"
+
+> ALTER TABLE pk1 DROP CONSTRAINT pk1_pkey
+ERROR 42P16: cannot drop inherited constraint "pk1_pkey" of relation "pk1"
+
+> ALTER TABLE pk DROP CONSTRAINT pk_pkey
+ERROR 2BP01: cannot drop constraint pk_pkey on table pk because other objects depend on it
+DETAIL: constraint fk_a_fkey on table fk depends on index pk2_pkey
+DETAIL: constraint plain_x_fkey on table plain depends on index pk2_pkey
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE fk DROP CONSTRAINT fk_a_fkey
+-- ALTER TABLE
+
+> SELECT conname, conrelid::regclass FROM pg_constraint WHERE conrelid::regclass::text LIKE 'fk%' ORDER BY 2, 1
+conname:name | conrelid:regclass
+-- SELECT 0
+
+> ALTER TABLE pk ADD CONSTRAINT pk_r_ck CHECK (r >= 0)
+-- ALTER TABLE
+
+> SELECT conname, conrelid::regclass, conislocal, coninhcount FROM pg_constraint WHERE conname = 'pk_r_ck' ORDER BY 2
+conname:name | conrelid:regclass | conislocal:bool | coninhcount:int2
+pk_r_ck | pk | t | 0
+pk_r_ck | pk1 | f | 1
+pk_r_ck | pk2 | f | 1
+-- SELECT 3
+
+> ALTER TABLE pk1 DROP CONSTRAINT pk_r_ck
+ERROR 42P16: cannot drop inherited constraint "pk_r_ck" of relation "pk1"
+
+> ALTER TABLE ONLY pk ADD CONSTRAINT pk_r_ck2 CHECK (r < 10)
+ERROR 42P16: constraint must be added to child tables too
+
+> ALTER TABLE pk ADD CONSTRAINT nn CHECK (r IS NOT NULL) NO INHERIT
+ERROR 42P16: cannot add NO INHERIT constraint to partitioned table "pk"
+
+> ALTER TABLE pk DETACH PARTITION pk2
+-- ALTER TABLE
+
+> ALTER TABLE fk DETACH PARTITION fk2
+-- ALTER TABLE
+
+> SELECT conname, conrelid::regclass, confrelid::regclass FROM pg_constraint WHERE conrelid IN ('pk2'::regclass, 'fk2'::regclass) ORDER BY 2, 1
+conname:name | conrelid:regclass | confrelid:regclass
+pk2_pkey | pk2 | -
+pk_id_not_null | pk2 | -
+pk_r_ck | pk2 | -
+-- SELECT 3
+
+> DROP TABLE plain
+-- DROP TABLE
+
+> DROP TABLE fk, fk2, pk, pk2
+-- DROP TABLE
+
+> CREATE TABLE pk (id int PRIMARY KEY) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE pk1 PARTITION OF pk FOR VALUES FROM (0) TO (100)
+-- CREATE TABLE
+
+> CREATE TABLE pk3 PARTITION OF pk FOR VALUES FROM (200) TO (300)
+-- CREATE TABLE
+
+> CREATE TABLE pk2 PARTITION OF pk FOR VALUES FROM (100) TO (200)
+-- CREATE TABLE
+
+> CREATE TABLE plain (x int REFERENCES pk)
+-- CREATE TABLE
+
+> ALTER TABLE pk DROP CONSTRAINT pk_pkey
+ERROR 2BP01: cannot drop constraint pk_pkey on table pk because other objects depend on it
+DETAIL: constraint plain_x_fkey on table plain depends on index pk2_pkey
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> CREATE TABLE pk4 PARTITION OF pk FOR VALUES FROM (300) TO (400)
+-- CREATE TABLE
+
+> ALTER TABLE pk DROP CONSTRAINT pk_pkey
+ERROR 2BP01: cannot drop constraint pk_pkey on table pk because other objects depend on it
+DETAIL: constraint plain_x_fkey on table plain depends on index pk4_pkey
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE pk DROP CONSTRAINT pk_pkey CASCADE
+NOTICE 00000: drop cascades to constraint plain_x_fkey on table plain
+-- ALTER TABLE
+
+> SELECT conname, conrelid::regclass FROM pg_constraint WHERE conrelid IN ('plain'::regclass, 'pk1'::regclass) ORDER BY 1
+conname:name | conrelid:regclass
+pk_id_not_null | pk1
+-- SELECT 1
+
+> SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'pk1'::regclass
+indexrelid:regclass
+-- SELECT 0
+
+> DROP TABLE plain, pk
+-- DROP TABLE
+
+> CREATE TABLE r (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO r VALUES (1), (2)
+-- INSERT 0 2
+
+> CREATE TABLE f (a int REFERENCES r ON DELETE SET NULL ON UPDATE CASCADE, b int) PARTITION BY LIST (b)
+-- CREATE TABLE
+
+> CREATE TABLE f1 PARTITION OF f FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE f2 PARTITION OF f FOR VALUES IN (2) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE f21 PARTITION OF f2 FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> INSERT INTO f VALUES (1, 1), (2, 2), (1, 2)
+-- INSERT 0 3
+
+> UPDATE r SET id = 5 WHERE id = 1
+-- UPDATE 1
+
+> SELECT tableoid::regclass, * FROM f ORDER BY 1, 2
+tableoid:regclass | a:int4 | b:int4
+f1 | 5 | 1
+f21 | 2 | 2
+f21 | 5 | 2
+-- SELECT 3
+
+> DELETE FROM r WHERE id = 2
+-- DELETE 1
+
+> SELECT tableoid::regclass, * FROM f ORDER BY 1, 2
+tableoid:regclass | a:int4 | b:int4
+f1 | 5 | 1
+f21 | 5 | 2
+f21 | NULL | 2
+-- SELECT 3
+
+> SELECT conname, conrelid::regclass, conparentid <> 0 FROM pg_constraint WHERE contype = 'f' AND conrelid IN ('f'::regclass, 'f1'::regclass, 'f2'::regclass, 'f21'::regclass) ORDER BY 2, 1
+conname:name | conrelid:regclass | ?column?:bool
+f_a_fkey | f | f
+f_a_fkey | f1 | t
+f_a_fkey | f2 | t
+f_a_fkey | f21 | t
+-- SELECT 4
+
+> CREATE TABLE f3 (b int, a int)
+-- CREATE TABLE
+
+> INSERT INTO f3 VALUES (3, 7)
+-- INSERT 0 1
+
+> ALTER TABLE f ATTACH PARTITION f3 FOR VALUES IN (3)
+ERROR 23503: insert or update on table "f3" violates foreign key constraint "f_a_fkey"
+DETAIL: Key (a)=(7) is not present in table "r".
+OBJECTS: schema=public table=f3 constraint=f_a_fkey
+
+> CREATE TABLE f4 (b int, a int, CONSTRAINT own FOREIGN KEY (a) REFERENCES r ON DELETE SET NULL ON UPDATE CASCADE)
+-- CREATE TABLE
+
+> ALTER TABLE f ATTACH PARTITION f4 FOR VALUES IN (4)
+-- ALTER TABLE
+
+> SELECT conname, conislocal, coninhcount FROM pg_constraint WHERE conrelid = 'f4'::regclass AND contype = 'f'
+conname:name | conislocal:bool | coninhcount:int2
+own | f | 1
+-- SELECT 1
+
+> ALTER TABLE f DROP CONSTRAINT f_a_fkey
+-- ALTER TABLE
+
+> SELECT conname, conrelid::regclass FROM pg_constraint WHERE contype = 'f' AND conrelid::regclass::text LIKE 'f%' ORDER BY 2, 1
+conname:name | conrelid:regclass
+-- SELECT 0
+
+> DROP TABLE f, f3, r
+-- DROP TABLE
+
+> CREATE TABLE r2 (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO r2 VALUES (1)
+-- INSERT 0 1
+
+> CREATE TABLE g (a int REFERENCES r2 ON UPDATE CASCADE) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE g1 PARTITION OF g FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE g2 PARTITION OF g FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> INSERT INTO g VALUES (1)
+-- INSERT 0 1
+
+> UPDATE r2 SET id = 15
+-- UPDATE 1
+
+> SELECT tableoid::regclass, * FROM g
+tableoid:regclass | a:int4
+g2 | 15
+-- SELECT 1
+
+> DROP TABLE g, r2
+-- DROP TABLE
+

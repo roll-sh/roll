@@ -1,0 +1,325 @@
+> CREATE TABLE gd_am_t (a int, b text)
+-- CREATE TABLE
+
+> CREATE VIEW gd_am_v AS SELECT a, b FROM gd_am_t
+-- CREATE VIEW
+
+> ALTER TABLE gd_am_v ALTER COLUMN a SET DEFAULT 45
+-- ALTER TABLE
+
+> ALTER TABLE gd_am_v ALTER COLUMN a DROP NOT NULL
+ERROR 42809: ALTER action ALTER COLUMN ... DROP NOT NULL cannot be performed on relation "gd_am_v"
+DETAIL: This operation is not supported for views.
+
+> ALTER TABLE gd_am_v DROP COLUMN b
+ERROR 42809: ALTER action DROP COLUMN cannot be performed on relation "gd_am_v"
+DETAIL: This operation is not supported for views.
+
+> ALTER TABLE gd_am_v SET (autovacuum_enabled = false)
+ERROR 22023: unrecognized parameter "autovacuum_enabled"
+
+> ALTER TABLE gd_am_v RESET (autovacuum_enabled)
+-- ALTER TABLE
+
+> ALTER VIEW gd_am_v RESET (autovacuum_enabled)
+-- ALTER VIEW
+
+> INSERT INTO gd_am_v (b) VALUES ('x')
+-- INSERT 0 1
+
+> SELECT * FROM gd_am_t
+a:int4 | b:text
+45 | x
+-- SELECT 1
+
+> ALTER TABLE pg_class ALTER COLUMN relname SET NOT NULL
+ERROR 42501: permission denied: "pg_class" is a system catalog
+
+> ALTER TABLE gd_am_t DROP COLUMN xmin
+ERROR 0A000: cannot drop system column "xmin"
+
+> ALTER TABLE gd_am_t ALTER COLUMN xmin SET DATA TYPE int
+ERROR 0A000: cannot alter system column "xmin" (at 34)
+
+> ALTER TABLE gd_am_t ALTER COLUMN a SET DEFAULT 'nope'
+ERROR 22P02: invalid input syntax for type integer: "nope"
+
+> ALTER TABLE gd_am_t ADD PRIMARY KEY (nope)
+ERROR 42703: column "nope" of relation "gd_am_t" does not exist
+
+> ALTER TABLE IF EXISTS gd_am_nope RENAME CONSTRAINT x TO y
+NOTICE 00000: relation "gd_am_nope" does not exist, skipping
+-- ALTER TABLE
+
+> ALTER TABLE IF EXISTS gd_am_nope SET SCHEMA gd_am_nosuch
+NOTICE 00000: relation "gd_am_nope" does not exist, skipping
+-- ALTER TABLE
+
+> ALTER TABLE gd_am_t DETACH PARTITION gd_am_x FINALIZE
+ERROR 42809: ALTER action DETACH PARTITION ... FINALIZE cannot be performed on relation "gd_am_t"
+DETAIL: This operation is not supported for tables.
+
+> CREATE TABLE pg_catalog.gd_am_sys ()
+ERROR 42501: permission denied to create "pg_catalog.gd_am_sys"
+DETAIL: System catalog modifications are currently disallowed.
+
+> CREATE TABLE gd_am_rp (a int)
+-- CREATE TABLE
+
+> CREATE TABLE gd_am_rc () INHERITS (gd_am_rp)
+-- CREATE TABLE
+
+> ALTER TABLE ONLY gd_am_rp RENAME COLUMN a TO z
+ERROR 42P16: inherited column "a" must be renamed in child tables too
+
+> DROP TABLE gd_am_rp CASCADE
+NOTICE 00000: drop cascades to table gd_am_rc
+-- DROP TABLE
+
+> CREATE TABLE gd_am_ck (s text, cap bool, CHECK (NOT (cap AND tableoid::regclass::text = 'x')))
+-- CREATE TABLE
+
+> CREATE TABLE gd_am_ck2 (s text, CHECK (ctid::text <> 'x'))
+ERROR 42P10: system column "ctid" reference in check constraint is invalid (at 40)
+
+> CREATE TYPE gd_am_pt AS (x int, y int)
+-- CREATE TYPE
+
+> CREATE TABLE gd_am_ck3 (p gd_am_pt CHECK ((p).x IS NOT NULL))
+-- CREATE TABLE
+
+> SELECT conrelid::regclass, conname FROM pg_constraint
+>  WHERE conrelid IN ('gd_am_ck'::regclass, 'gd_am_ck3'::regclass) ORDER BY 1
+conrelid:regclass | conname:name
+gd_am_ck | gd_am_ck_check
+gd_am_ck3 | gd_am_ck3_p_check
+-- SELECT 2
+
+> CREATE INDEX ON gd_am_ck ((s::varchar))
+-- CREATE INDEX
+
+> CREATE INDEX ON gd_am_ck (ctid)
+ERROR 0A000: index creation on system columns is not supported
+
+> CREATE INDEX ON gd_am_ck ((ctid >= '(1000,0)'))
+ERROR 0A000: index creation on system columns is not supported
+
+> CREATE INDEX ON gd_am_ck (s) WHERE ctid >= '(1000,0)'
+ERROR 0A000: index creation on system columns is not supported
+
+> CREATE INDEX ON gd_am_ck ((s || s), (row(s, cap)))
+ERROR 42P16: column "row" has pseudo-type record
+
+> CREATE UNIQUE INDEX gd_am_nnd ON gd_am_ck (s) NULLS NOT DISTINCT
+-- CREATE INDEX
+
+> ALTER TABLE gd_am_ck ADD PRIMARY KEY USING INDEX gd_am_nnd
+ERROR 42P16: primary keys cannot use NULLS NOT DISTINCT indexes
+
+> SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'gd_am_ck'::regclass ORDER BY 1
+indexrelid:regclass
+gd_am_ck_s_idx
+gd_am_nnd
+-- SELECT 2
+
+> DROP TABLE gd_am_ck, gd_am_ck3
+-- DROP TABLE
+
+> DROP TYPE gd_am_pt
+-- DROP TYPE
+
+> CREATE UNLOGGED TABLE gd_am_u1 (a int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE UNLOGGED TABLE gd_am_u2 (a int REFERENCES gd_am_u1)
+-- CREATE TABLE
+
+> ALTER TABLE gd_am_u2 SET LOGGED
+ERROR 42P16: could not change table "gd_am_u2" to logged because it references unlogged table "gd_am_u1"
+OBJECTS: schema=public table=gd_am_u2 constraint=gd_am_u2_a_fkey
+
+> CREATE TABLE gd_am_l1 (a int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE gd_am_l2 (a int REFERENCES gd_am_l1)
+-- CREATE TABLE
+
+> ALTER TABLE gd_am_l1 SET UNLOGGED
+ERROR 42P16: could not change table "gd_am_l1" to unlogged because it references logged table "gd_am_l2"
+OBJECTS: schema=public table=gd_am_l1 constraint=gd_am_l2_a_fkey
+
+> DROP TABLE gd_am_u2, gd_am_u1, gd_am_l2, gd_am_l1
+-- DROP TABLE
+
+> CREATE TABLE gd_am_lk (f1 int PRIMARY KEY, f2 text)
+-- CREATE TABLE
+
+> CREATE TABLE gd_am_lk2 (f3 int PRIMARY KEY, f1 int)
+-- CREATE TABLE
+
+> CREATE VIEW gd_am_lkv AS SELECT * FROM gd_am_lk
+-- CREATE VIEW
+
+> CREATE FUNCTION gd_am_locks() RETURNS TABLE (relname name, mode text) LANGUAGE sql AS $$
+>   SELECT c.relname, (ARRAY['AccessShareLock', 'RowShareLock', 'RowExclusiveLock',
+>       'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock',
+>       'AccessExclusiveLock'])[max(array_position(ARRAY['AccessShareLock', 'RowShareLock',
+>       'RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock',
+>       'ExclusiveLock', 'AccessExclusiveLock'], l.mode))]
+>     FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+>    WHERE l.locktype = 'relation' AND c.relname LIKE 'gd_am_lk%'
+>    GROUP BY c.relname ORDER BY 1 $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE gd_am_lk ALTER COLUMN f2 SET STATISTICS 150
+-- ALTER TABLE
+
+> ALTER TABLE gd_am_lk CLUSTER ON gd_am_lk_pkey
+-- ALTER TABLE
+
+> SELECT * FROM gd_am_locks()
+relname:name | mode:text
+gd_am_lk | ShareUpdateExclusiveLock
+gd_am_lk_pkey | ShareUpdateExclusiveLock
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE gd_am_lk2 ADD FOREIGN KEY (f1) REFERENCES gd_am_lk (f1)
+-- ALTER TABLE
+
+> SELECT * FROM gd_am_locks()
+relname:name | mode:text
+gd_am_lk | ShareRowExclusiveLock
+gd_am_lk2 | ShareRowExclusiveLock
+gd_am_lk2_pkey | AccessShareLock
+gd_am_lk_pkey | AccessShareLock
+-- SELECT 4
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE gd_am_lkv IN EXCLUSIVE MODE
+-- LOCK TABLE
+
+> SELECT * FROM gd_am_locks()
+relname:name | mode:text
+gd_am_lk | ExclusiveLock
+gd_am_lkv | ExclusiveLock
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> ALTER INDEX gd_am_lk_pkey RENAME TO gd_am_lk_pkey2
+-- ALTER INDEX
+
+> SELECT * FROM gd_am_locks()
+relname:name | mode:text
+gd_am_lk_pkey2 | ShareUpdateExclusiveLock
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE gd_am_lk_pkey
+ERROR 42809: cannot lock relation "gd_am_lk_pkey"
+DETAIL: This operation is not supported for indexes.
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP VIEW gd_am_lkv
+-- DROP VIEW
+
+> DROP FUNCTION gd_am_locks()
+-- DROP FUNCTION
+
+> DROP TABLE gd_am_lk2, gd_am_lk
+-- DROP TABLE
+
+> CREATE DOMAIN gd_am_dom AS int CONSTRAINT gd_am_dc CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> COMMENT ON CONSTRAINT gd_am_dc ON DOMAIN gd_am_dom IS 'positive'
+-- COMMENT
+
+> COMMENT ON CONSTRAINT nope ON DOMAIN gd_am_dom IS 'x'
+ERROR 42704: constraint "nope" for domain gd_am_dom does not exist
+
+> COMMENT ON CONSTRAINT gd_am_dc ON DOMAIN gd_am_nodom IS 'x'
+ERROR 42704: type "gd_am_nodom" does not exist
+
+> SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'gd_am_dc'
+obj_description:text
+positive
+-- SELECT 1
+
+> DROP DOMAIN gd_am_dom
+-- DROP DOMAIN
+
+> CREATE MATERIALIZED VIEW gd_am_mv AS SELECT 1 AS i
+-- SELECT 1
+
+> SELECT * FROM gd_am_mv FOR SHARE
+ERROR 42809: cannot lock rows in materialized view "gd_am_mv"
+
+> CREATE FUNCTION gd_am_dropidx() RETURNS bool LANGUAGE plpgsql AS $$
+> BEGIN EXECUTE 'DROP INDEX IF EXISTS public.gd_am_mv_idx'; RETURN true; END $$
+-- CREATE FUNCTION
+
+> CREATE MATERIALIZED VIEW gd_am_mv2 AS SELECT 1 AS i WHERE gd_am_dropidx()
+NOTICE 00000: index "gd_am_mv_idx" does not exist, skipping
+CONTEXT: SQL statement "DROP INDEX IF EXISTS public.gd_am_mv_idx"
+CONTEXT: PL/pgSQL function gd_am_dropidx() line 2 at EXECUTE
+-- SELECT 1
+
+> CREATE UNIQUE INDEX gd_am_mv_idx ON gd_am_mv2 (i)
+-- CREATE INDEX
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY gd_am_mv2
+ERROR 0A000: could not find suitable unique index on materialized view "gd_am_mv2"
+
+> DROP MATERIALIZED VIEW gd_am_mv, gd_am_mv2
+-- DROP MATERIALIZED VIEW
+
+> DROP FUNCTION gd_am_dropidx()
+-- DROP FUNCTION
+
+> CREATE TABLE gd_am_ri (a int NOT NULL, b int NOT NULL)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX gd_am_ri_idx ON gd_am_ri (a, b)
+-- CREATE INDEX
+
+> ALTER TABLE gd_am_ri REPLICA IDENTITY USING INDEX gd_am_ri_idx
+-- ALTER TABLE
+
+> ALTER TABLE gd_am_ri ALTER b DROP NOT NULL
+ERROR 42P16: column "b" is in index used as replica identity
+
+> DROP TABLE gd_am_ri
+-- DROP TABLE
+
+> DROP VIEW gd_am_v
+-- DROP VIEW
+
+> DROP TABLE gd_am_t
+-- DROP TABLE
+

@@ -1,0 +1,303 @@
+> CREATE TABLE sk1 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO sk1 SELECT g % 7, g FROM generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> CREATE INDEX sk1_ab ON sk1 (a, b)
+-- CREATE INDEX
+
+> CREATE TABLE sk2 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO sk2 SELECT g % 10, g / 10 FROM generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> CREATE INDEX sk2_ab ON sk2 (a, b)
+-- CREATE INDEX
+
+> CREATE TABLE sk3 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO sk3 SELECT g / 7, g % 7 FROM generate_series(1, 21000) g
+-- INSERT 0 21000
+
+> CREATE INDEX sk3_ab ON sk3 (a, b)
+-- CREATE INDEX
+
+> CREATE TABLE sk4 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO sk4 SELECT g % 10, g / 10 FROM generate_series(0, 19999) g
+-- INSERT 0 20000
+
+> CREATE INDEX sk4_ab ON sk4 (a, b)
+-- CREATE INDEX
+
+> CREATE TABLE sk5 (a text, b int)
+-- CREATE TABLE
+
+> INSERT INTO sk5 SELECT 'k' || (g % 10), g / 10 FROM generate_series(0, 19999) g
+-- INSERT 0 20000
+
+> CREATE INDEX sk5_ab ON sk5 (a, b)
+-- CREATE INDEX
+
+> CREATE TABLE sk6 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO sk6 SELECT g / 100, g % 100 FROM generate_series(0, 29999) g
+-- INSERT 0 30000
+
+> CREATE INDEX sk6_ab ON sk6 (a, b)
+-- CREATE INDEX
+
+> VACUUM ANALYZE sk1
+-- VACUUM
+
+> VACUUM ANALYZE sk2
+-- VACUUM
+
+> VACUUM ANALYZE sk3
+-- VACUUM
+
+> VACUUM ANALYZE sk4
+-- VACUUM
+
+> VACUUM ANALYZE sk5
+-- VACUUM
+
+> VACUUM ANALYZE sk6
+-- VACUUM
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk1 WHERE b = 7
+QUERY PLAN:text
+Index Only Scan using sk1_ab on sk1 (actual rows=1.00 loops=1)
+  Index Cond: (b = 7)
+  Heap Fetches: 0
+  Index Searches: 8
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk1 WHERE b = 5000
+QUERY PLAN:text
+Index Only Scan using sk1_ab on sk1 (actual rows=1.00 loops=1)
+  Index Cond: (b = 5000)
+  Heap Fetches: 0
+  Index Searches: 9
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk1 WHERE b > 9990
+QUERY PLAN:text
+Index Only Scan using sk1_ab on sk1 (actual rows=10.00 loops=1)
+  Index Cond: (b > 9990)
+  Heap Fetches: 0
+  Index Searches: 8
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk1 WHERE b IN (3, 5000, 9999)
+QUERY PLAN:text
+Index Only Scan using sk1_ab on sk1 (actual rows=3.00 loops=1)
+  Index Cond: (b = ANY ('{3,5000,9999}'::integer[]))
+  Heap Fetches: 0
+  Index Searches: 15
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk2 WHERE b = 500
+QUERY PLAN:text
+Index Only Scan using sk2_ab on sk2 (actual rows=10.00 loops=1)
+  Index Cond: (b = 500)
+  Heap Fetches: 0
+  Index Searches: 12
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk2 WHERE b BETWEEN 500 AND 510
+QUERY PLAN:text
+Index Only Scan using sk2_ab on sk2 (actual rows=110.00 loops=1)
+  Index Cond: ((b >= 500) AND (b <= 510))
+  Heap Fetches: 0
+  Index Searches: 12
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk2 WHERE b < 3
+QUERY PLAN:text
+Index Only Scan using sk2_ab on sk2 (actual rows=29.00 loops=1)
+  Index Cond: (b < 3)
+  Heap Fetches: 0
+  Index Searches: 11
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk2 WHERE b >= 1990
+QUERY PLAN:text
+Index Only Scan using sk2_ab on sk2 (actual rows=101.00 loops=1)
+  Index Cond: (b >= 1990)
+  Heap Fetches: 0
+  Index Searches: 11
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk2 WHERE a > 4 AND b = 500
+QUERY PLAN:text
+Index Only Scan using sk2_ab on sk2 (actual rows=5.00 loops=1)
+  Index Cond: ((a > 4) AND (b = 500))
+  Heap Fetches: 0
+  Index Searches: 6
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk3 WHERE b = 3
+QUERY PLAN:text
+Index Only Scan using sk3_ab on sk3 (actual rows=3000.00 loops=1)
+  Index Cond: (b = 3)
+  Heap Fetches: 0
+  Index Searches: 1
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk3 WHERE b = 3 AND a < 50
+QUERY PLAN:text
+Index Only Scan using sk3_ab on sk3 (actual rows=50.00 loops=1)
+  Index Cond: ((a < 50) AND (b = 3))
+  Heap Fetches: 0
+  Index Searches: 1
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk4 WHERE b BETWEEN 300 AND 700
+QUERY PLAN:text
+Index Only Scan using sk4_ab on sk4 (actual rows=4010.00 loops=1)
+  Index Cond: ((b >= 300) AND (b <= 700))
+  Heap Fetches: 0
+  Index Searches: 11
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk4 WHERE b BETWEEN 300 AND 310
+QUERY PLAN:text
+Index Only Scan using sk4_ab on sk4 (actual rows=110.00 loops=1)
+  Index Cond: ((b >= 300) AND (b <= 310))
+  Heap Fetches: 0
+  Index Searches: 11
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk4 WHERE b BETWEEN 0 AND 1500
+QUERY PLAN:text
+Index Only Scan using sk4_ab on sk4 (actual rows=15010.00 loops=1)
+  Index Cond: ((b >= 0) AND (b <= 1500))
+  Heap Fetches: 0
+  Index Searches: 4
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk5 WHERE b = 500
+QUERY PLAN:text
+Index Only Scan using sk5_ab on sk5 (actual rows=10.00 loops=1)
+  Index Cond: (b = 500)
+  Heap Fetches: 0
+  Index Searches: 21
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk5 WHERE b BETWEEN 300 AND 700
+QUERY PLAN:text
+Index Only Scan using sk5_ab on sk5 (actual rows=4010.00 loops=1)
+  Index Cond: ((b >= 300) AND (b <= 700))
+  Heap Fetches: 0
+  Index Searches: 19
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk6 WHERE b = 50
+QUERY PLAN:text
+Index Only Scan using sk6_ab on sk6 (actual rows=300.00 loops=1)
+  Index Cond: (b = 50)
+  Heap Fetches: 0
+  Index Searches: 1
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk6 WHERE b = 0
+QUERY PLAN:text
+Index Only Scan using sk6_ab on sk6 (actual rows=300.00 loops=1)
+  Index Cond: (b = 0)
+  Heap Fetches: 0
+  Index Searches: 1
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk6 WHERE b BETWEEN 10 AND 20
+QUERY PLAN:text
+Index Only Scan using sk6_ab on sk6 (actual rows=3300.00 loops=1)
+  Index Cond: ((b >= 10) AND (b <= 20))
+  Heap Fetches: 0
+  Index Searches: 1
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT a, b FROM sk6 WHERE a BETWEEN 100 AND 120 AND b = 50
+QUERY PLAN:text
+Index Only Scan using sk6_ab on sk6 (actual rows=21.00 loops=1)
+  Index Cond: ((a >= 100) AND (a <= 120) AND (b = 50))
+  Heap Fetches: 0
+  Index Searches: 2
+-- EXPLAIN
+
+> SET enable_indexonlyscan = off
+-- SET
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT * FROM sk2 WHERE b = 500
+QUERY PLAN:text
+Index Scan using sk2_ab on sk2 (actual rows=10.00 loops=1)
+  Index Cond: (b = 500)
+  Index Searches: 12
+-- EXPLAIN
+
+> RESET enable_indexonlyscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> SET enable_indexscan = off
+-- SET
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM sk2 WHERE b = 500
+QUERY PLAN:text
+Aggregate (actual rows=1.00 loops=1)
+  ->  Bitmap Heap Scan on sk2 (actual rows=10.00 loops=1)
+        Recheck Cond: (b = 500)
+        Heap Blocks: exact=1
+        ->  Bitmap Index Scan on sk2_ab (actual rows=10.00 loops=1)
+              Index Cond: (b = 500)
+              Index Searches: 12
+-- EXPLAIN
+
+> RESET enable_indexscan
+-- RESET
+
+> SELECT a, b FROM sk1 WHERE b IN (3, 5000, 9999) ORDER BY a, b
+a:int4 | b:int4
+2 | 5000
+3 | 3
+3 | 9999
+-- SELECT 3
+
+> SELECT count(*) FROM sk6 WHERE b BETWEEN 10 AND 20
+count:int8
+3300
+-- SELECT 1
+
+> SELECT a, b FROM sk5 WHERE b = 500 ORDER BY a
+a:text | b:int4
+k0 | 500
+k1 | 500
+k2 | 500
+k3 | 500
+k4 | 500
+k5 | 500
+k6 | 500
+k7 | 500
+k8 | 500
+k9 | 500
+-- SELECT 10
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE sk1, sk2, sk3, sk4, sk5, sk6
+-- DROP TABLE
+

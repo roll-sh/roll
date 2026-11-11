@@ -1,0 +1,83 @@
+> select backend_type, datid is null as no_db, usesysid is null as no_role, application_name,
+>        state, query, wait_event_type, wait_event, client_port, backend_start is not null as started
+>   from pg_stat_activity where backend_type <> 'client backend' order by backend_type, pid
+backend_type:text | no_db:bool | no_role:bool | application_name:text | state:text | query:text | wait_event_type:text | wait_event:text | client_port:int4 | started:bool
+autovacuum launcher | t | t |  | NULL |  | Activity | AutovacuumMain | NULL | t
+background writer | t | t |  | NULL |  | Activity | BgwriterMain | NULL | t
+checkpointer | t | t |  | NULL |  | Activity | CheckpointerMain | NULL | t
+io worker | t | t |  | NULL |  | Activity | IoWorkerMain | NULL | t
+io worker | t | t |  | NULL |  | Activity | IoWorkerMain | NULL | t
+io worker | t | t |  | NULL |  | Activity | IoWorkerMain | NULL | t
+logical replication launcher | t | f |  | NULL |  | Activity | LogicalLauncherMain | NULL | t
+walwriter | t | t |  | NULL |  | Activity | WalWriterMain | NULL | t
+-- SELECT 8
+
+> select count(*) from pg_stat_activity where backend_type = 'checkpointer'
+count:int8
+1
+-- SELECT 1
+
+> select pg_log_backend_memory_contexts(pid) from pg_stat_activity where backend_type = 'checkpointer'
+pg_log_backend_memory_contexts:bool
+t
+-- SELECT 1
+
+> select pg_stat_get_backend_activity(b) from pg_stat_get_backend_idset() b
+>   where pg_stat_get_backend_pid(b) in (select pid from pg_stat_activity where backend_type = 'walwriter')
+pg_stat_get_backend_activity:text
+<command string not enabled>
+-- SELECT 1
+
+> create role regress_aux_viewer
+-- CREATE ROLE
+
+> grant pg_signal_backend to regress_aux_viewer
+-- GRANT ROLE
+
+> create function aux_terminate(int) returns bool language plpgsql set client_min_messages = error as $$
+> begin
+>   return pg_terminate_backend($1);
+> exception when others then
+>   return false;
+> end $$
+-- CREATE FUNCTION
+
+> begin
+-- BEGIN
+
+> set local role regress_aux_viewer
+-- SET
+
+> select count(*), count(backend_type) from pg_stat_activity where usesysid is null
+count:int8 | count:int8
+7 | 0
+-- SELECT 1
+
+> select backend_type from pg_stat_activity where coalesce(usesysid, 10) = 10 and aux_terminate(pid)
+backend_type:text
+-- SELECT 0
+
+> rollback
+-- ROLLBACK
+
+> drop function aux_terminate(int)
+-- DROP FUNCTION
+
+> drop role regress_aux_viewer
+-- DROP ROLE
+
+> select array_dims(proargtypes) from pg_proc where oid = 'pg_backend_pid'::regproc
+array_dims:text
+[0:-1]
+-- SELECT 1
+
+> select array_dims(proargtypes) from pg_proc where oid = 'pg_sleep'::regproc
+array_dims:text
+[0:0]
+-- SELECT 1
+
+> select array_dims(indkey) from pg_index where indexrelid = 'pg_class_oid_index'::regclass
+array_dims:text
+[0:0]
+-- SELECT 1
+

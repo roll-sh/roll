@@ -1,0 +1,193 @@
+> CREATE TABLE a148_cd (id int PRIMARY KEY, a int, t text)
+-- CREATE TABLE
+
+> CREATE INDEX a148_cd_a ON a148_cd (a)
+-- CREATE INDEX
+
+> INSERT INTO a148_cd SELECT g, g % 50, 'v' || g FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> ANALYZE a148_cd
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT id, t FROM a148_cd WHERE a = 7 ORDER BY a
+QUERY PLAN:text
+Index Scan using a148_cd_a on a148_cd
+  Index Cond: (a = 7)
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c1 CURSOR FOR SELECT count(*), sum(id) FROM a148_cd WHERE a = 7
+-- DECLARE CURSOR
+
+> DECLARE c2 CURSOR FOR SELECT id, t FROM a148_cd WHERE a = 8 ORDER BY a, id
+-- DECLARE CURSOR
+
+> DELETE FROM a148_cd WHERE a IN (7, 8)
+-- DELETE 120
+
+> FETCH ALL FROM c1
+count:int8 | sum:int8
+60 | 88920
+-- FETCH 1
+
+> FETCH 3 FROM c2
+id:int4 | t:text
+108 | v108
+58 | v58
+8 | v8
+-- FETCH 3
+
+> SELECT count(*) FROM a148_cd WHERE a IN (7, 8)
+count:int8
+0
+-- SELECT 1
+
+> DECLARE c3 CURSOR FOR SELECT count(*) FROM a148_cd WHERE id < 500
+-- DECLARE CURSOR
+
+> DELETE FROM a148_cd WHERE id < 500
+-- DELETE 479
+
+> FETCH ALL FROM c3
+count:int8
+479
+-- FETCH 1
+
+> FETCH ALL FROM c2
+id:int4 | t:text
+1008 | v1008
+1058 | v1058
+1108 | v1108
+1158 | v1158
+1208 | v1208
+1258 | v1258
+1308 | v1308
+1358 | v1358
+1408 | v1408
+1458 | v1458
+1508 | v1508
+1558 | v1558
+158 | v158
+1608 | v1608
+1658 | v1658
+1708 | v1708
+1758 | v1758
+1808 | v1808
+1858 | v1858
+1908 | v1908
+1958 | v1958
+2008 | v2008
+2058 | v2058
+208 | v208
+2108 | v2108
+2158 | v2158
+2208 | v2208
+2258 | v2258
+2308 | v2308
+2358 | v2358
+2408 | v2408
+2458 | v2458
+2508 | v2508
+2558 | v2558
+258 | v258
+2608 | v2608
+2658 | v2658
+2708 | v2708
+2758 | v2758
+2808 | v2808
+2858 | v2858
+2908 | v2908
+2958 | v2958
+308 | v308
+358 | v358
+408 | v408
+458 | v458
+508 | v508
+558 | v558
+608 | v608
+658 | v658
+708 | v708
+758 | v758
+808 | v808
+858 | v858
+908 | v908
+958 | v958
+-- FETCH 57
+
+> SELECT count(*) FROM a148_cd WHERE id < 500
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM a148_cd
+count:int8
+2401
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c4 CURSOR FOR SELECT count(*), sum(id) FROM a148_cd WHERE a = 9
+-- DECLARE CURSOR
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> DELETE FROM a148_cd WHERE a = 9
+-- DELETE 50
+
+> FETCH ALL FROM c4
+count:int8 | sum:int8
+50 | 86700
+-- FETCH 1
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT count(*) FROM a148_cd WHERE a = 9
+count:int8
+50
+-- SELECT 1
+
+> DELETE FROM a148_cd WHERE a = 9
+-- DELETE 50
+
+> SELECT count(*) FROM a148_cd WHERE a = 9
+count:int8
+0
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT count(*), sum(id) FROM a148_cd
+count:int8 | sum:int8
+2351 | 4116800
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> SELECT count(*), sum(id) FROM a148_cd
+count:int8 | sum:int8
+2351 | 4116800
+-- SELECT 1
+
+> DROP TABLE a148_cd
+-- DROP TABLE
+

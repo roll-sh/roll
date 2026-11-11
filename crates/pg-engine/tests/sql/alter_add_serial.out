@@ -1,0 +1,95 @@
+> select true::text, cast(false as varchar), true::char(5), format('%s', true), true || ''
+text:text | varchar:varchar | bpchar:bpchar | format:text | ?column?:text
+true | false | true  | t | true
+-- SELECT 1
+
+> create table gx_s1(a int)
+-- CREATE TABLE
+
+> insert into gx_s1 values (1), (2)
+-- INSERT 0 2
+
+> alter table gx_s1 add column b serial
+-- ALTER TABLE
+
+> select * from gx_s1 order by a
+a:int4 | b:int4
+1 | 1
+2 | 2
+-- SELECT 2
+
+> select currval('gx_s1_b_seq'), lastval()
+currval:int8 | lastval:int8
+2 | 2
+-- SELECT 1
+
+> alter table gx_s1 add column c bigserial, add column d int default 5
+-- ALTER TABLE
+
+> select * from gx_s1 order by a
+a:int4 | b:int4 | c:int8 | d:int4
+1 | 1 | 1 | 5
+2 | 2 | 2 | 5
+-- SELECT 2
+
+> drop table gx_s1
+-- DROP TABLE
+
+> create table gx_s2(a int)
+-- CREATE TABLE
+
+> insert into gx_s2 values (1), (2), (3)
+-- INSERT 0 3
+
+> alter table gx_s2 add column i int generated always as identity
+-- ALTER TABLE
+
+> alter table gx_s2 add column j smallserial
+-- ALTER TABLE
+
+> select * from gx_s2 order by a
+a:int4 | i:int4 | j:int2
+1 | 1 | 1
+2 | 2 | 2
+3 | 3 | 3
+-- SELECT 3
+
+> insert into gx_s2(a) values (4)
+-- INSERT 0 1
+
+> select * from gx_s2 order by a
+a:int4 | i:int4 | j:int2
+1 | 1 | 1
+2 | 2 | 2
+3 | 3 | 3
+4 | 4 | 4
+-- SELECT 4
+
+> begin
+-- BEGIN
+
+> alter table gx_s2 add column k serial
+-- ALTER TABLE
+
+> select k from gx_s2 order by a
+k:int4
+1
+2
+3
+4
+-- SELECT 4
+
+> rollback
+-- ROLLBACK
+
+> select * from gx_s2 order by a
+a:int4 | i:int4 | j:int2
+1 | 1 | 1
+2 | 2 | 2
+3 | 3 | 3
+4 | 4 | 4
+-- SELECT 4
+
+> drop table gx_s2
+-- DROP TABLE
+

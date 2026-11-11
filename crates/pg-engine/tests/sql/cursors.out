@@ -1,0 +1,598 @@
+> CREATE TABLE cur_t (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO cur_t SELECT g, 'v' || g FROM generate_series(1, 6) g
+-- INSERT 0 6
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT id, v FROM cur_t ORDER BY id
+-- DECLARE CURSOR
+
+> FETCH c
+id:int4 | v:text
+1 | v1
+-- FETCH 1
+
+> FETCH 2 FROM c
+id:int4 | v:text
+2 | v2
+3 | v3
+-- FETCH 2
+
+> FETCH NEXT FROM c
+id:int4 | v:text
+4 | v4
+-- FETCH 1
+
+> MOVE FORWARD 1 IN c
+-- MOVE 1
+
+> FETCH ALL FROM c
+id:int4 | v:text
+6 | v6
+-- FETCH 1
+
+> FETCH c
+id:int4 | v:text
+-- FETCH 0
+
+> FETCH PRIOR FROM c
+id:int4 | v:text
+6 | v6
+-- FETCH 1
+
+> FETCH ABSOLUTE 2 FROM c
+id:int4 | v:text
+2 | v2
+-- FETCH 1
+
+> FETCH RELATIVE 2 FROM c
+id:int4 | v:text
+4 | v4
+-- FETCH 1
+
+> FETCH LAST FROM c
+id:int4 | v:text
+6 | v6
+-- FETCH 1
+
+> FETCH FIRST FROM c
+id:int4 | v:text
+1 | v1
+-- FETCH 1
+
+> FETCH BACKWARD 1 FROM c
+id:int4 | v:text
+-- FETCH 0
+
+> SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors ORDER BY name
+name:text | statement:text | is_holdable:bool | is_binary:bool | is_scrollable:bool
+c | DECLARE c CURSOR FOR SELECT id, v FROM cur_t ORDER BY id | f | f | t
+-- SELECT 1
+
+> CLOSE c
+-- CLOSE CURSOR
+
+> FETCH c
+ERROR 34000: cursor "c" does not exist
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DECLARE ns NO SCROLL CURSOR FOR SELECT id FROM cur_t ORDER BY id
+-- DECLARE CURSOR
+
+> FETCH 2 FROM ns
+id:int4
+1
+2
+-- FETCH 2
+
+> FETCH PRIOR FROM ns
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT 1
+-- DECLARE CURSOR
+
+> DECLARE c CURSOR FOR SELECT 2
+ERROR 42P03: cursor "c" already exists
+
+> ROLLBACK
+-- ROLLBACK
+
+> DECLARE c CURSOR FOR SELECT 1
+ERROR 25P01: DECLARE CURSOR can only be used in transaction blocks
+
+> DECLARE h CURSOR WITH HOLD FOR SELECT id FROM cur_t ORDER BY id
+-- DECLARE CURSOR
+
+> FETCH 2 FROM h
+id:int4
+1
+2
+-- FETCH 2
+
+> SELECT name, is_holdable FROM pg_cursors
+name:text | is_holdable:bool
+h | t
+-- SELECT 1
+
+> FETCH h
+id:int4
+3
+-- FETCH 1
+
+> CLOSE h
+-- CLOSE CURSOR
+
+> CLOSE ALL
+-- CLOSE CURSOR ALL
+
+> BEGIN
+-- BEGIN
+
+> DECLARE u CURSOR FOR SELECT * FROM cur_t WHERE id > 2 FOR UPDATE
+-- DECLARE CURSOR
+
+> FETCH u
+id:int4 | v:text
+3 | v3
+-- FETCH 1
+
+> UPDATE cur_t SET v = 'updated' WHERE CURRENT OF u
+-- UPDATE 1
+
+> EXPLAIN (COSTS OFF) UPDATE cur_t SET v = 'updated' WHERE CURRENT OF u
+QUERY PLAN:text
+Update on cur_t
+  ->  Tid Scan on cur_t
+        TID Cond: CURRENT OF u
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM cur_t WHERE CURRENT OF u
+QUERY PLAN:text
+Delete on cur_t
+  ->  Tid Scan on cur_t
+        TID Cond: CURRENT OF u
+-- EXPLAIN
+
+> FETCH 2 FROM u
+id:int4 | v:text
+4 | v4
+5 | v5
+-- FETCH 2
+
+> DELETE FROM cur_t WHERE CURRENT OF u RETURNING *
+id:int4 | v:text
+5 | v5
+-- DELETE 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM cur_t ORDER BY id
+id:int4 | v:text
+1 | v1
+2 | v2
+3 | updated
+4 | v4
+6 | v6
+-- SELECT 5
+
+> BEGIN
+-- BEGIN
+
+> DECLARE u CURSOR FOR SELECT * FROM cur_t
+-- DECLARE CURSOR
+
+> UPDATE cur_t SET v = 'x' WHERE CURRENT OF u
+ERROR 24000: cursor "u" is not positioned on a row
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> UPDATE cur_t SET v = 'x' WHERE CURRENT OF nope
+ERROR 34000: cursor "nope" does not exist
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DECLARE agg CURSOR FOR SELECT count(*) FROM cur_t
+-- DECLARE CURSOR
+
+> FETCH agg
+count:int8
+5
+-- FETCH 1
+
+> UPDATE cur_t SET v = 'x' WHERE CURRENT OF agg
+ERROR 24000: cursor "agg" is not a simply updatable scan of table "cur_t"
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DECLARE s1 CURSOR FOR SELECT 1
+-- DECLARE CURSOR
+
+> DECLARE s2 CURSOR FOR SELECT * FROM cur_t
+-- DECLARE CURSOR
+
+> DECLARE s3 CURSOR FOR SELECT count(*) FROM cur_t
+-- DECLARE CURSOR
+
+> DECLARE s4 CURSOR FOR SELECT generate_series(1, 3)
+-- DECLARE CURSOR
+
+> DECLARE s5 CURSOR FOR SELECT * FROM generate_series(1, 3)
+-- DECLARE CURSOR
+
+> DECLARE s6 CURSOR FOR SELECT * FROM cur_t FOR UPDATE
+-- DECLARE CURSOR
+
+> DECLARE s7 CURSOR FOR VALUES (1), (2)
+-- DECLARE CURSOR
+
+> DECLARE s8 CURSOR FOR SELECT DISTINCT v FROM cur_t
+-- DECLARE CURSOR
+
+> DECLARE s9 CURSOR FOR SELECT id FROM cur_t UNION ALL SELECT 1
+-- DECLARE CURSOR
+
+> DECLARE s10 CURSOR FOR SELECT row_number() OVER () FROM cur_t
+-- DECLARE CURSOR
+
+> DECLARE s11 CURSOR FOR SELECT * FROM cur_t ORDER BY v LIMIT 2
+-- DECLARE CURSOR
+
+> DECLARE s12 SCROLL CURSOR FOR SELECT count(*) FROM cur_t
+-- DECLARE CURSOR
+
+> DECLARE s13 NO SCROLL CURSOR FOR SELECT * FROM cur_t
+-- DECLARE CURSOR
+
+> SELECT name, is_scrollable FROM pg_cursors ORDER BY length(name), name
+name:text | is_scrollable:bool
+s1 | f
+s2 | t
+s3 | f
+s4 | f
+s5 | t
+s6 | f
+s7 | t
+s8 | f
+s9 | f
+s10 | f
+s11 | t
+s12 | t
+s13 | f
+-- SELECT 13
+
+> FETCH s3
+count:int8
+5
+-- FETCH 1
+
+> FETCH PRIOR FROM s3
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+
+> ROLLBACK
+-- ROLLBACK
+
+> DO $$
+> DECLARE
+>   c CURSOR FOR SELECT id, v FROM cur_t ORDER BY id;
+>   r record;
+>   n int := 0;
+> BEGIN
+>   OPEN c;
+>   LOOP
+>     FETCH c INTO r;
+>     EXIT WHEN NOT FOUND;
+>     n := n + 1;
+>     RAISE NOTICE 'row % %', r.id, r.v;
+>   END LOOP;
+>   CLOSE c;
+>   RAISE NOTICE 'n=%', n;
+> END $$
+NOTICE 00000: row 1 v1
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+NOTICE 00000: row 2 v2
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+NOTICE 00000: row 3 updated
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+NOTICE 00000: row 4 v4
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+NOTICE 00000: row 6 v6
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+NOTICE 00000: n=5
+CONTEXT: PL/pgSQL function inline_code_block line 15 at RAISE
+-- DO
+
+> DO $$
+> DECLARE
+>   c CURSOR (lo int, hi int) FOR SELECT id FROM cur_t WHERE id BETWEEN lo AND hi ORDER BY id;
+>   i int;
+> BEGIN
+>   OPEN c(2, 5);
+>   FETCH c INTO i; RAISE NOTICE 'first %', i;
+>   FETCH LAST FROM c INTO i; RAISE NOTICE 'last %', i;
+>   FETCH PRIOR FROM c INTO i; RAISE NOTICE 'prior %', i;
+>   MOVE FIRST FROM c;
+>   FETCH NEXT FROM c INTO i; RAISE NOTICE 'next %', i;
+>   FETCH RELATIVE 5 FROM c INTO i; RAISE NOTICE 'relative % found %', i, FOUND;
+>   CLOSE c;
+>   OPEN c(hi := 3, lo := 1);
+>   FETCH c INTO i; RAISE NOTICE 'named first %', i;
+>   CLOSE c;
+>   FOR r IN c(4, 6) LOOP
+>     RAISE NOTICE 'for %', r.id;
+>   END LOOP;
+> END $$
+NOTICE 00000: first 2
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+NOTICE 00000: last 4
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: prior 3
+CONTEXT: PL/pgSQL function inline_code_block line 9 at RAISE
+NOTICE 00000: next 3
+CONTEXT: PL/pgSQL function inline_code_block line 11 at RAISE
+NOTICE 00000: relative <NULL> found f
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+NOTICE 00000: named first 1
+CONTEXT: PL/pgSQL function inline_code_block line 15 at RAISE
+NOTICE 00000: for 4
+CONTEXT: PL/pgSQL function inline_code_block line 18 at RAISE
+NOTICE 00000: for 6
+CONTEXT: PL/pgSQL function inline_code_block line 18 at RAISE
+-- DO
+
+> DO $$
+> DECLARE
+>   rc refcursor;
+>   t text;
+> BEGIN
+>   OPEN rc FOR SELECT v FROM cur_t WHERE id = 1;
+>   FETCH rc INTO t;
+>   RAISE NOTICE 'unbound %', t;
+>   CLOSE rc;
+>   OPEN rc FOR EXECUTE 'SELECT v FROM cur_t WHERE id = $1' USING 6;
+>   FETCH rc INTO t;
+>   RAISE NOTICE 'execute %', t;
+>   CLOSE rc;
+> END $$
+NOTICE 00000: unbound v1
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: execute v6
+CONTEXT: PL/pgSQL function inline_code_block line 12 at RAISE
+-- DO
+
+> DO $$
+> DECLARE
+>   c CURSOR FOR SELECT * FROM cur_t ORDER BY id FOR UPDATE;
+> BEGIN
+>   FOR r IN c LOOP
+>     IF r.id % 2 = 0 THEN
+>       UPDATE cur_t SET v = v || '!' WHERE CURRENT OF c;
+>     END IF;
+>   END LOOP;
+> END $$
+-- DO
+
+> SELECT * FROM cur_t ORDER BY id
+id:int4 | v:text
+1 | v1
+2 | v2!
+3 | updated
+4 | v4!
+6 | v6!
+-- SELECT 5
+
+> CREATE FUNCTION open_cur(rc refcursor) RETURNS refcursor LANGUAGE plpgsql AS $$
+> BEGIN
+>   OPEN rc FOR SELECT id FROM cur_t ORDER BY id DESC;
+>   RETURN rc;
+> END $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT open_cur('mycur')
+open_cur:refcursor
+mycur
+-- SELECT 1
+
+> FETCH ALL IN mycur
+id:int4
+1
+2
+3
+4
+6
+-- FETCH 5
+
+> COMMIT
+-- COMMIT
+
+> CREATE FUNCTION open_anon() RETURNS refcursor LANGUAGE plpgsql AS $$
+> DECLARE rc refcursor;
+> BEGIN
+>   OPEN rc FOR SELECT 42 AS answer;
+>   RETURN rc;
+> END $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT open_anon() IS NOT NULL
+?column?:bool
+t
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> DO $$
+> DECLARE c CURSOR FOR SELECT 1;
+> BEGIN
+>   OPEN c; OPEN c;
+> END $$
+ERROR 42P03: cursor "<unnamed portal 6>" already in use
+CONTEXT: PL/pgSQL function inline_code_block line 4 at OPEN
+
+> DO $$
+> DECLARE c CURSOR (a int) FOR SELECT a;
+> BEGIN
+>   OPEN c;
+> END $$
+ERROR 42601: cursor "c" has arguments (at 60)
+
+> DO $$
+> DECLARE c CURSOR (a int) FOR SELECT a;
+> BEGIN
+>   OPEN c(1, 2);
+> END $$
+ERROR 42601: too many arguments for cursor "c" (at 62)
+
+> DO $$
+> DECLARE c CURSOR (a int, b int) FOR SELECT a;
+> BEGIN
+>   OPEN c(1);
+> END $$
+ERROR 42601: not enough arguments for cursor "c" (at 69)
+
+> DO $$
+> DECLARE c CURSOR (a int) FOR SELECT a;
+> BEGIN
+>   OPEN c(z := 1);
+> END $$
+ERROR 42601: cursor "c" has no argument named "z" (at 61)
+
+> DO $$
+> DECLARE c CURSOR (a int, b int) FOR SELECT a;
+> BEGIN
+>   OPEN c(a := 1, a := 2);
+> END $$
+ERROR 42601: value for parameter "a" of cursor "c" specified more than once (at 76)
+
+> DO $$
+> DECLARE c CURSOR FOR SELECT 1;
+> BEGIN
+>   OPEN c(1);
+> END $$
+ERROR 42601: cursor "c" has no arguments (at 52)
+
+> DO $$
+> DECLARE c CURSOR FOR SELECT 1;
+> BEGIN
+>   OPEN c FOR SELECT 2;
+> END $$
+ERROR 42601: syntax error at or near "FOR" (at 53)
+
+> DO $$
+> DECLARE rc refcursor;
+> BEGIN
+>   OPEN rc FOR INSERT INTO cur_t VALUES (100, 'x');
+> END $$
+ERROR 42P11: cannot open INSERT query as cursor
+CONTEXT: PL/pgSQL function inline_code_block line 4 at OPEN
+
+> DO $$
+> DECLARE c CURSOR FOR SELECT 1; d CURSOR FOR SELECT 2; e int;
+> BEGIN
+>   OPEN c; RAISE NOTICE 'c is %', c;
+>   FOR r IN d LOOP RAISE NOTICE 'd in loop %', d IS NOT NULL; END LOOP;
+>   RAISE NOTICE 'd after loop %', d;
+>   FOR e IN SELECT 1 LOOP END LOOP;
+>   OPEN d; RAISE NOTICE 'd is %', d;
+>   CLOSE c; RAISE NOTICE 'c after close %', c;
+>   OPEN c; RAISE NOTICE 'c reopened %', c;
+> END $$
+NOTICE 00000: c is <unnamed portal 7>
+CONTEXT: PL/pgSQL function inline_code_block line 4 at RAISE
+NOTICE 00000: d in loop t
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+NOTICE 00000: d after loop <NULL>
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: d is <unnamed portal 10>
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: c after close <unnamed portal 7>
+CONTEXT: PL/pgSQL function inline_code_block line 9 at RAISE
+NOTICE 00000: c reopened <unnamed portal 7>
+CONTEXT: PL/pgSQL function inline_code_block line 10 at RAISE
+-- DO
+
+> DO $$
+> DECLARE rc refcursor;
+> BEGIN
+>   rc := NULL;
+>   FETCH rc INTO rc;
+> END $$
+ERROR 22004: cursor variable "rc" is null
+CONTEXT: PL/pgSQL function inline_code_block line 5 at FETCH
+
+> DO $$
+> DECLARE c CURSOR FOR SELECT 1;
+> BEGIN
+>   CLOSE c;
+> END $$
+ERROR 22004: cursor variable "c" is null
+CONTEXT: PL/pgSQL function inline_code_block line 4 at CLOSE
+
+> DO $$
+> DECLARE c CURSOR FOR SELECT generate_series(1, 3);
+> BEGIN
+>   OPEN c;
+>   MOVE FORWARD 2 IN c;
+>   MOVE BACKWARD ALL FROM c;
+>   RAISE NOTICE 'moved found %', FOUND;
+>   CLOSE c;
+> END $$
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+CONTEXT: PL/pgSQL function inline_code_block line 6 at MOVE
+
+> DO $$
+> DECLARE c NO SCROLL CURSOR FOR SELECT generate_series(1, 3);
+>   i int;
+> BEGIN
+>   OPEN c;
+>   FETCH c INTO i;
+>   FETCH PRIOR FROM c INTO i;
+> END $$
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+CONTEXT: PL/pgSQL function inline_code_block line 7 at FETCH
+
+> DROP FUNCTION open_cur(refcursor)
+-- DROP FUNCTION
+
+> DROP FUNCTION open_anon()
+-- DROP FUNCTION
+
+> DROP TABLE cur_t
+-- DROP TABLE
+

@@ -1,0 +1,50 @@
+> PREPARE a104_p1(numeric(5,2), varchar(3), char(2), interval(0), bit(4), timestamp(0)) AS
+>   SELECT $1, $2, $3, $4, $5::text, $6, pg_typeof($1)::text, pg_typeof($2)::text
+-- PREPARE
+
+> EXECUTE a104_p1(123.456, 'abcd', 'abc', '1.6 sec', B'10', '2025-01-01 10:00:00.75')
+?column?:numeric | ?column?:varchar | ?column?:bpchar | ?column?:interval | text:text | ?column?:timestamp | pg_typeof:text | pg_typeof:text
+123.456 | abcd | abc | 00:00:01.6 | 10 | 2025-01-01 10:00:00.75 | numeric | character varying
+-- SELECT 1
+
+> EXECUTE a104_p1('999.999', 'ab   ', ' ', 'P0.5D', '101', NULL)
+?column?:numeric | ?column?:varchar | ?column?:bpchar | ?column?:interval | text:text | ?column?:timestamp | pg_typeof:text | pg_typeof:text
+999.999 | ab    |   | 12:00:00 | 101 | NULL | numeric | character varying
+-- SELECT 1
+
+> SELECT name, parameter_types::text, result_types::text FROM pg_prepared_statements WHERE name = 'a104_p1'
+name:text | parameter_types:text | result_types:text
+a104_p1 | {numeric,"character varying",character,interval,bit,"timestamp without time zone"} | {numeric,"character varying",character,interval,text,"timestamp without time zone",text,text}
+-- SELECT 1
+
+> DEALLOCATE a104_p1
+-- DEALLOCATE
+
+> CREATE TABLE a104_pt (n numeric(5,2), v varchar(3))
+-- CREATE TABLE
+
+> PREPARE a104_p2(numeric(10,4), text) AS INSERT INTO a104_pt VALUES ($1, $2) RETURNING *
+-- PREPARE
+
+> EXECUTE a104_p2(1.23456, 'abc')
+n:numeric | v:varchar
+1.23 | abc
+-- INSERT 0 1
+
+> EXECUTE a104_p2(1.23456, 'abcd')
+ERROR 22001: value too long for type character varying(3)
+
+> PREPARE a104_p3(varchar(2)[]) AS SELECT $1, pg_typeof($1)::text
+-- PREPARE
+
+> EXECUTE a104_p3('{abcd,e}')
+?column?:varchar[] | pg_typeof:text
+{abcd,e} | character varying[]
+-- SELECT 1
+
+> DEALLOCATE ALL
+-- DEALLOCATE ALL
+
+> DROP TABLE a104_pt
+-- DROP TABLE
+

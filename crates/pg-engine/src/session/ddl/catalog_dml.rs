@@ -1,0 +1,1220 @@
+//! UPDATE of pg_class by a superuser, for the columns tests poke to steer the planner
+//! (`reltuples`, `relpages`, `relallvisible`): the rows to change are found by querying
+//! pg_class, and the new values go into the relations' stored statistics.
+
+use super::Ddl;
+use crate::catalog::RelStats;
+use crate::error::{Error, Result, code};
+use crate::sql::binder::Binder;
+use crate::sql::binder::ast::{inner, mk};
+use crate::types::Value;
+use pg_query::NodeEnum;
+use pg_query::protobuf as pb;
+
+/// The query a superuser's DML on pg_class, pg_depend or pg_description runs, for Parse to
+/// type the statement's parameters by; None for other statements.
+pub(crate) fn catalog_dml_query(node: &NodeEnum) -> Option<pb::Node> {
+    if super::description_dml::is_pg_description_dml(node) {
+        return super::description_dml::description_query(node).ok();
+    }
+    match node {
+        NodeEnum::UpdateStmt(u)
+            if is_pg_class_update(u) && u.relation.as_ref().is_some_and(|rv| rv.relname == "pg_class") =>
+        {
+            class_update_query(u).ok().map(|q| q.0)
+        }
+        NodeEnum::UpdateStmt(u)
+            if is_pg_class_update(u) && u.relation.as_ref().is_some_and(|rv| rv.relname == "pg_attribute") =>
+        {
+            attribute_update_query(u).ok()
+        }
+        NodeEnum::UpdateStmt(u) if is_pg_depend_update(u) => depend_update_query(u).ok(),
+        _ => None,
+    }
+}
+
+/// Whether `s` updates pg_class, pg_attribute, pg_database or pg_constraint (unqualified or
+/// in pg_catalog).
+pub(crate) fn is_pg_class_update(s: &pb::UpdateStmt) -> bool {
+    s.relation.as_ref().is_some_and(|rv| {
+        matches!(rv.relname.as_str(), "pg_class" | "pg_attribute" | "pg_database" | "pg_constraint")
+            && (rv.schemaname.is_empty() || rv.schemaname == "pg_catalog")
+    }) && s.with_clause.is_none()
+        && crate::sql::binder::ast::returning(&s.returning_clause).is_empty()
+        && s.from_clause.is_empty()
+}
+
+fn col(name: &str) -> pb::Node {
+    mk(NodeEnum::ColumnRef(pb::ColumnRef {
+        fields: vec![mk(NodeEnum::String(pb::String {
+            sval: name.to_string(),
+        }))],
+        location: -1,
+    }))
+}
+
+fn target(val: pb::Node) -> pb::Node {
+    mk(NodeEnum::ResTarget(Box::new(pb::ResTarget {
+        name: String::new(),
+        indirection: Vec::new(),
+        val: Some(Box::new(val)),
+        location: -1,
+    })))
+}
+
+fn cast(val: pb::Node, ty: &str) -> pb::Node {
+    mk(NodeEnum::TypeCast(Box::new(pb::TypeCast {
+        arg: Some(Box::new(val)),
+        type_name: Some(pb::TypeName {
+            names: ["pg_catalog", ty]
+                .iter()
+                .map(|n| {
+                    mk(NodeEnum::String(pb::String {
+                        sval: n.to_string(),
+                    }))
+                })
+                .collect(),
+            typemod: -1,
+            location: -1,
+            ..Default::default()
+        }),
+        location: -1,
+    })))
+}
+
+/// UPDATE pg_class (`is_pg_class_update`) as the query it runs: each row's oid, statistics
+/// and relname, then the values SET gives; with the columns SET names. (Parse binds it to
+/// type the statement's parameters.)
+pub(crate) fn class_update_query(s: &pb::UpdateStmt) -> Result<(pb::Node, Vec<&str>)> {
+    // (column, its type, the new value).
+    let mut sets: Vec<(&str, pb::Node)> = Vec::new();
+    for t in &s.target_list {
+        let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+            continue;
+        };
+        let ty = match rt.name.as_str() {
+            "reltuples" => "float4",
+            "relpages" | "relallvisible" | "relallfrozen" => "int4",
+            "reloptions" => "_text",
+            // (Setting a relation's own name: pgjdbc's updatable result sets write
+            // every column back.)
+            "relname" => "name",
+            // (Renumbering a relation: Doctrine DBAL's test moves a table onto another
+            // object's oid and back; `Catalog::rel_oid_edits`.)
+            "oid" => "oid",
+            other => {
+                return Err(crate::error::unsupported(format!(
+                    "UPDATE of pg_class.{other}"
+                )));
+            }
+        };
+        let val = rt.val.as_deref().cloned().unwrap_or_else(|| {
+            mk(NodeEnum::AConst(pb::AConst {
+                isnull: true,
+                val: None,
+                location: -1,
+            }))
+        });
+        sets.push((rt.name.as_str(), cast(val, ty)));
+    }
+    let mut targets = vec![
+        target(col("oid")),
+        target(col("relpages")),
+        target(col("reltuples")),
+        target(col("relallvisible")),
+        target(col("relname")),
+    ];
+    targets.extend(sets.iter().map(|(_, v)| target(v.clone())));
+    let sel = pb::SelectStmt {
+        target_list: targets,
+        from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
+        where_clause: s.where_clause.clone(),
+        ..Default::default()
+    };
+    let names = sets.iter().map(|(n, _)| *n).collect();
+    Ok((mk(NodeEnum::SelectStmt(Box::new(sel))), names))
+}
+
+impl Ddl<'_, '_> {
+    pub(super) fn update_pg_class(&mut self, s: &pb::UpdateStmt) -> Result<String> {
+        if s.relation.as_ref().is_some_and(|rv| rv.relname == "pg_database") {
+            return self.update_pg_database(s);
+        }
+        if s.relation.as_ref().is_some_and(|rv| rv.relname == "pg_constraint") {
+            return self.update_pg_constraint(s);
+        }
+        let me = self.ctx.sess.current_role(&self.cat);
+        let attribute = s.relation.as_ref().is_some_and(|rv| rv.relname == "pg_attribute");
+        if !self.cat.is_superuser(me) {
+            return Err(Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                format!("permission denied for table {}", if attribute { "pg_attribute" } else { "pg_class" }),
+            ));
+        }
+        if attribute {
+            return self.update_pg_attribute(s);
+        }
+        let (node, sets) = class_update_query(s)?;
+        let query = |this: &mut Self| -> Result<Vec<crate::exec::Row>> {
+            let child = this.ctx.child(this.ctx.params);
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            crate::exec::collect(&bq.plan, &child, None)
+        };
+        let mut rows = query(self)?;
+        // heap_update of each row found: a row another transaction is updating (or locking
+        // FOR UPDATE / NO KEY UPDATE) is waited for, then the rows are found again over what
+        // it committed (EvalPlanQual over the newest versions).
+        loop {
+            for r in &rows {
+                if let Value::Oid(oid) = r[0] {
+                    self.ctx.txn.borrow_mut().lock_catalog_row(
+                        1259,
+                        oid,
+                        crate::txn::locks::RowLockMode::NoKeyUpdate,
+                        true,
+                    )?;
+                }
+            }
+            if !self.reload_after_wait() {
+                break;
+            }
+            rows = query(self)?;
+        }
+        let num = |v: &Value| match v {
+            Value::Int4(i) => *i as f64,
+            Value::Float4(f) => *f as f64,
+            Value::Null => 0.0,
+            other => other.as_f64().unwrap_or(0.0),
+        };
+        for r in &rows {
+            let Value::Oid(shown) = r[0] else { continue };
+            // (The relation, whatever oid an earlier UPDATE gave its row.)
+            let oid = self.cat.rel_oid_edits.rel_of(true, shown);
+            let mut st = RelStats {
+                pages: num(&r[1]) as i32,
+                tuples: num(&r[2]),
+                allvisible: num(&r[3]) as i32,
+                allfrozen: self.cat.relstats.get(&oid).map_or(0, |s| s.allfrozen),
+            };
+            let mut stats = false;
+            for (i, name) in sets.iter().enumerate() {
+                let v = &r[5 + i];
+                if *name == "relname" {
+                    let new = match v {
+                        Value::Text(t) => t.to_string(),
+                        Value::Null => {
+                            return Err(Error::new(
+                                code::NOT_NULL_VIOLATION,
+                                "null value in column \"relname\" of relation \"pg_class\" violates not-null constraint",
+                            ));
+                        }
+                        other => crate::types::text::format_value(other, &crate::types::DataType::Text, &Default::default()),
+                    };
+                    if !matches!(&r[4], Value::Text(t) if t.as_ref() == new) {
+                        return Err(crate::error::unsupported(
+                            "UPDATE of pg_class.relname to another name (use ALTER ... RENAME)",
+                        ));
+                    }
+                    continue;
+                }
+                if *name == "oid" {
+                    self.renumber_class(oid, shown, v)?;
+                    continue;
+                }
+                if *name == "reloptions" {
+                    // (Stored as given: Postgres doesn't check a direct catalog update.)
+                    let opts: Vec<String> = match v {
+                        Value::Array(a) => a
+                            .items
+                            .iter()
+                            .filter(|x| !x.is_null())
+                            .map(|x| match x {
+                                Value::Text(t) => t.to_string(),
+                                other => crate::types::text::format_value(
+                                    other,
+                                    &crate::types::DataType::Text,
+                                    &Default::default(),
+                                ),
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    if let Some(t) = self.cat.tables.get(&oid).cloned() {
+                        let mut t = (*t).clone();
+                        t.options = opts;
+                        self.cat.put_storage(t);
+                    } else if let Some(ix) = self.cat.indexes.get(&oid).cloned() {
+                        let mut ix = (*ix).clone();
+                        ix.options = opts;
+                        self.cat.indexes.insert(oid, std::sync::Arc::new(ix));
+                    }
+                    continue;
+                }
+                stats = true;
+                if v.is_null() {
+                    return Err(Error::new(
+                        code::NOT_NULL_VIOLATION,
+                        format!(
+                            "null value in column \"{name}\" of relation \"pg_class\" violates not-null constraint"
+                        ),
+                    ));
+                }
+                match *name {
+                    "reltuples" => st.tuples = num(v),
+                    "relpages" => st.pages = num(v) as i32,
+                    "relallvisible" => st.allvisible = num(v) as i32,
+                    "relallfrozen" => st.allfrozen = num(v) as i32,
+                    _ => {}
+                }
+            }
+            if stats && oid >= crate::catalog::FIRST_USER_OID {
+                self.cat.relstats.insert(oid, st);
+            }
+        }
+        self.save()?;
+        Ok(format!("UPDATE {}", rows.len()))
+    }
+}
+
+impl Ddl<'_, '_> {
+    /// UPDATE pg_class SET oid of relation `rel` (its row showing `shown`): the row shows the
+    /// new oid (`Catalog::rel_oid_edits`), unique among pg_class's oids as its index keeps
+    /// them.
+    fn renumber_class(&mut self, rel: u32, shown: u32, v: &Value) -> Result<()> {
+        let new = match v {
+            Value::Null => {
+                return Err(Error::new(
+                    code::NOT_NULL_VIOLATION,
+                    "null value in column \"oid\" of relation \"pg_class\" violates not-null constraint",
+                )
+                .table("pg_catalog", "pg_class")
+                .column("oid"));
+            }
+            v => v.as_i64().unwrap_or(0) as u32,
+        };
+        if new == shown {
+            return Ok(());
+        }
+        if rel < crate::catalog::FIRST_USER_OID {
+            return Err(crate::error::unsupported("UPDATE of pg_class.oid of a system relation"));
+        }
+        if class_oid_shown(&self.cat, new) {
+            return Err(Error::new(
+                code::UNIQUE_VIOLATION,
+                "duplicate key value violates unique constraint \"pg_class_oid_index\"",
+            )
+            .detail(format!("Key (oid)=({new}) already exists."))
+            .table("pg_catalog", "pg_class")
+            .constraint("pg_class_oid_index"));
+        }
+        let e = &mut self.cat.rel_oid_edits;
+        if new == rel {
+            e.class.remove(&rel);
+        } else {
+            e.class.insert(rel, new);
+        }
+        Ok(())
+    }
+
+    /// UPDATE pg_attribute SET attrelid = ... by a superuser, moving every row of a relation
+    /// to another oid (Doctrine DBAL moves a table's columns onto a function's oid, renumbers
+    /// its pg_class row the same way, and moves both back). pg_attribute is derived from the
+    /// relations' columns, so a relation's rows move together (`Catalog::rel_oid_edits`);
+    /// moving some of them, or onto oids another relation's rows show, isn't supported.
+    fn update_pg_attribute(&mut self, s: &pb::UpdateStmt) -> Result<String> {
+        if let Some(node) = attstorage_update_query(s) {
+            return self.update_attstorage(&node);
+        }
+        let node = attribute_update_query(s)?;
+        let rows = {
+            let child = self.ctx.child(self.ctx.params);
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            crate::exec::collect(&bq.plan, &child, None)?
+        };
+        // Per relation (by the oid its rows show): its rows, those matched, their new oids.
+        let mut rels: std::collections::BTreeMap<u32, (usize, usize, Vec<Value>)> = Default::default();
+        for r in &rows {
+            let Value::Oid(shown) = r[0] else { continue };
+            let e = rels.entry(shown).or_default();
+            e.0 += 1;
+            if r[1] == Value::Bool(true) {
+                e.1 += 1;
+                e.2.push(r[2].clone());
+            }
+        }
+        let mut updated = 0;
+        for (shown, (all, matched, new)) in rels {
+            if matched == 0 {
+                continue;
+            }
+            if new.iter().any(Value::is_null) {
+                return Err(Error::new(
+                    code::NOT_NULL_VIOLATION,
+                    "null value in column \"attrelid\" of relation \"pg_attribute\" violates not-null constraint",
+                )
+                .table("pg_catalog", "pg_attribute")
+                .column("attrelid"));
+            }
+            let rel = self.cat.rel_oid_edits.rel_of(false, shown);
+            let to = new[0].as_i64().unwrap_or(0) as u32;
+            if matched < all || new.iter().any(|v| *v != new[0]) || rel < crate::catalog::FIRST_USER_OID {
+                return Err(crate::error::unsupported(
+                    "UPDATE of pg_attribute.attrelid other than of all of a relation's rows",
+                ));
+            }
+            if to != shown && to != rel && attrs_shown(&self.cat, to) {
+                return Err(crate::error::unsupported(
+                    "UPDATE of pg_attribute.attrelid onto another relation's rows",
+                ));
+            }
+            let e = &mut self.cat.rel_oid_edits;
+            if to == rel {
+                e.attrs.remove(&rel);
+            } else {
+                e.attrs.insert(rel, to);
+            }
+            updated += matched;
+        }
+        self.save()?;
+        Ok(format!("UPDATE {updated}"))
+    }
+
+    /// UPDATE pg_attribute SET attstorage = ... by a superuser (test_decoding's toast test
+    /// gives a primary key's column EXTENDED storage apart from its table's column, "not
+    /// doable via DDL"): a table column's storage, or an index column's own
+    /// (`IndexColumn::storage`). System columns' rows keep theirs.
+    fn update_attstorage(&mut self, node: &pb::Node) -> Result<String> {
+        let rows = {
+            let child = self.ctx.child(self.ctx.params);
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(node)?;
+            crate::exec::collect(&bq.plan, &child, None)?
+        };
+        let mut updated = 0;
+        for r in &rows {
+            let (Value::Oid(shown), Some(num)) = (&r[0], r[1].as_i64()) else {
+                continue;
+            };
+            let ch = match &r[2] {
+                Value::Null => {
+                    return Err(Error::new(
+                        code::NOT_NULL_VIOLATION,
+                        "null value in column \"attstorage\" of relation \"pg_attribute\" violates not-null constraint",
+                    )
+                    .table("pg_catalog", "pg_attribute")
+                    .column("attstorage"));
+                }
+                v => v.as_str().and_then(|s| s.chars().next()).unwrap_or('\0'),
+            };
+            updated += 1;
+            let rel = self.cat.rel_oid_edits.rel_of(false, *shown);
+            let at = num as usize;
+            if num <= 0 {
+                continue;
+            }
+            if let Some(t) = self.cat.tables.get(&rel).filter(|t| at <= t.columns.len()) {
+                let mut t = (**t).clone();
+                t.columns[at - 1].storage = Some(ch);
+                self.cat.put_storage(t);
+            } else if let Some(x) = self.cat.indexes.get(&rel).filter(|x| at <= x.columns.len()) {
+                let mut x = (**x).clone();
+                x.columns[at - 1].storage = Some(ch);
+                self.cat.put_index(x);
+            } else if !(self.cat.indexes.contains_key(&rel) || self.cat.tables.contains_key(&rel)) {
+                return Err(crate::error::unsupported("UPDATE of pg_attribute.attstorage of this relation"));
+            }
+        }
+        self.save()?;
+        Ok(format!("UPDATE {updated}"))
+    }
+}
+
+/// Whether a pg_class row shows `oid`: a relation's own oid not renumbered away, or one a
+/// relation was renumbered to.
+fn class_oid_shown(cat: &crate::catalog::Catalog, oid: u32) -> bool {
+    let e = &cat.rel_oid_edits;
+    e.moved_to(true, oid).is_some() || (!e.class.contains_key(&oid) && is_relation(cat, oid))
+}
+
+/// Whether pg_attribute rows show `oid` as their attrelid.
+fn attrs_shown(cat: &crate::catalog::Catalog, oid: u32) -> bool {
+    let e = &cat.rel_oid_edits;
+    e.moved_to(false, oid).is_some() || (!e.attrs.contains_key(&oid) && is_relation(cat, oid))
+}
+
+/// Whether `oid` is a relation's (pg_class's rows before any renumbering).
+fn is_relation(cat: &crate::catalog::Catalog, oid: u32) -> bool {
+    cat.tables.contains_key(&oid)
+        || cat.views.contains_key(&oid)
+        || cat.sequences.contains_key(&oid)
+        || cat.indexes.contains_key(&oid)
+        || cat.composites.values().any(|c| c.relid == oid)
+        || crate::catalog::static_rows::rows(crate::catalog::system::SysTable::PgClass)
+            .iter()
+            .any(|r| crate::catalog::static_rows::oid_at(r, 0) == oid)
+}
+
+/// UPDATE pg_attribute SET attstorage = <v> WHERE <w> as the query it runs (None for other
+/// updates): the attrelid and attnum of the rows `w` picks, and `v` (as text).
+pub(crate) fn attstorage_update_query(s: &pb::UpdateStmt) -> Option<pb::Node> {
+    let [t] = &s.target_list[..] else {
+        return None;
+    };
+    let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+        return None;
+    };
+    if rt.name != "attstorage" || !rt.indirection.is_empty() {
+        return None;
+    }
+    let sel = pb::SelectStmt {
+        target_list: vec![
+            target(col("attrelid")),
+            target(col("attnum")),
+            target(cast(rt.val.as_deref()?.clone(), "text")),
+        ],
+        from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone()?))],
+        where_clause: s.where_clause.clone(),
+        ..Default::default()
+    };
+    Some(mk(NodeEnum::SelectStmt(Box::new(sel))))
+}
+
+/// UPDATE pg_attribute SET attrelid = <v> WHERE <w> as the query it runs: every row's
+/// attrelid, whether `w` holds for it, and `v` where it does.
+pub(crate) fn attribute_update_query(s: &pb::UpdateStmt) -> Result<pb::Node> {
+    if let Some(q) = attstorage_update_query(s) {
+        return Ok(q);
+    }
+    let mut val = None;
+    for t in &s.target_list {
+        let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+            continue;
+        };
+        if rt.name != "attrelid" || !rt.indirection.is_empty() {
+            return Err(crate::error::unsupported(format!("UPDATE of pg_attribute.{}", rt.name)));
+        }
+        val = rt.val.as_deref().cloned();
+    }
+    let val = val.ok_or_else(|| crate::error::unsupported("UPDATE of pg_attribute"))?;
+    let truth = || {
+        mk(NodeEnum::AConst(pb::AConst {
+            isnull: false,
+            val: Some(pb::a_const::Val::Boolval(pb::Boolean { boolval: true })),
+            location: -1,
+        }))
+    };
+    let cond = s.where_clause.as_deref().cloned().unwrap_or_else(truth);
+    let when = |result: pb::Node| {
+        mk(NodeEnum::CaseExpr(Box::new(pb::CaseExpr {
+            args: vec![mk(NodeEnum::CaseWhen(Box::new(pb::CaseWhen {
+                expr: Some(Box::new(cond.clone())),
+                result: Some(Box::new(result)),
+                location: -1,
+                ..Default::default()
+            })))],
+            location: -1,
+            ..Default::default()
+        })))
+    };
+    let sel = pb::SelectStmt {
+        target_list: vec![target(col("attrelid")), target(when(truth())), target(when(cast(val, "oid")))],
+        from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
+        ..Default::default()
+    };
+    Ok(mk(NodeEnum::SelectStmt(Box::new(sel))))
+}
+
+impl Ddl<'_, '_> {
+    /// UPDATE pg_database SET datacl / datistemplate / datallowconn / datconnlimit = ...: a
+    /// superuser's direct change of databases' ACLs and options (pg_dump's `--clean` unmarks
+    /// a template so it can be dropped; datconnlimit -2 marks a database invalid).
+    /// UPDATE pg_constraint SET convalidated = ...: a superuser marking constraints not
+    /// validated (ActiveRecord's check_all_foreign_keys_valid! sets it false, then ALTER TABLE
+    /// ... VALIDATE CONSTRAINT checks the rows again).
+    fn update_pg_constraint(&mut self, s: &pb::UpdateStmt) -> Result<String> {
+        let me = self.ctx.sess.current_role(&self.cat);
+        if !self.cat.is_superuser(me) {
+            return Err(Error::new(code::INSUFFICIENT_PRIVILEGE, "permission denied for table pg_constraint"));
+        }
+        let mut val = None;
+        for t in &s.target_list {
+            let Some(NodeEnum::ResTarget(rt)) = inner(t) else { continue };
+            match rt.name.as_str() {
+                "convalidated" => val = rt.val.as_deref().cloned(),
+                other => return Err(crate::error::unsupported(format!("UPDATE of pg_constraint.{other}"))),
+            }
+        }
+        let val = val.unwrap_or_else(|| mk(NodeEnum::AConst(pb::AConst { isnull: true, val: None, location: -1 })));
+        let sel = pb::SelectStmt {
+            target_list: vec![target(col("oid")), target(cast(val, "bool"))],
+            from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
+            where_clause: s.where_clause.clone(),
+            ..Default::default()
+        };
+        let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+        let child = self.ctx.child(self.ctx.params);
+        let rows = {
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            crate::exec::collect(&bq.plan, &child, None)?
+        };
+        for r in &rows {
+            let (Value::Oid(oid), v) = (&r[0], &r[1]) else { continue };
+            let validated = match v {
+                Value::Bool(b) => *b,
+                _ => {
+                    return Err(Error::new(
+                        code::NOT_NULL_VIOLATION,
+                        "null value in column \"convalidated\" of relation \"pg_constraint\" violates not-null constraint",
+                    ));
+                }
+            };
+            let owner = self.cat.tables.values().find(|t| t.constraints.iter().any(|c| c.oid == *oid)).cloned();
+            if let Some(t) = owner {
+                let mut t = (*t).clone();
+                for c in t.constraints.iter_mut().filter(|c| c.oid == *oid) {
+                    c.validated = validated;
+                }
+                self.cat.put_storage(t);
+            }
+        }
+        self.save()?;
+        Ok(format!("UPDATE {}", rows.len()))
+    }
+
+    fn update_pg_database(&mut self, s: &pb::UpdateStmt) -> Result<String> {
+        let me = self.ctx.sess.current_role(&self.cat);
+        if !self.cat.is_superuser(me) {
+            return Err(Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                "permission denied for table pg_database",
+            ));
+        }
+        let mut targets = vec![target(col("oid"))];
+        let mut cols = Vec::new();
+        for t in &s.target_list {
+            let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+                continue;
+            };
+            let ty = match rt.name.as_str() {
+                "datacl" => "_aclitem",
+                "datistemplate" | "datallowconn" => "bool",
+                "datconnlimit" => "int4",
+                _ => {
+                    return Err(crate::error::unsupported(format!(
+                        "UPDATE of pg_database.{}",
+                        rt.name
+                    )));
+                }
+            };
+            let val = rt.val.as_deref().cloned().unwrap_or_else(|| {
+                mk(NodeEnum::AConst(pb::AConst {
+                    isnull: true,
+                    val: None,
+                    location: -1,
+                }))
+            });
+            targets.push(target(cast(val, ty)));
+            cols.push(rt.name.as_str());
+        }
+        let sel = pb::SelectStmt {
+            target_list: targets,
+            from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
+            where_clause: s.where_clause.clone(),
+            ..Default::default()
+        };
+        let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+        let child = self.ctx.child(&[]);
+        let rows = {
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            crate::exec::collect(&bq.plan, &child, None)?
+        };
+        for r in &rows {
+            let Value::Oid(oid) = r[0] else { continue };
+            let name = self
+                .ctx
+                .sess
+                .cluster
+                .databases()
+                .into_iter()
+                .find(|d| d.0 == oid)
+                .map(|d| d.1);
+            let old = self.ctx.sess.cluster.database_options(oid);
+            let mut new = old;
+            for (col, v) in cols.iter().zip(&r[1..]) {
+                match (*col, v) {
+                    ("datistemplate", Value::Bool(b)) => new.is_template = *b,
+                    ("datallowconn", Value::Bool(b)) => new.allow_connections = *b,
+                    ("datconnlimit", Value::Int4(n)) => new.conn_limit = *n,
+                    ("datacl", _) => {}
+                    // (The columns are NOT NULL.)
+                    (c, _) => {
+                        return Err(Error::new(
+                            code::NOT_NULL_VIOLATION,
+                            format!("null value in column \"{c}\" of relation \"pg_database\" violates not-null constraint"),
+                        ));
+                    }
+                }
+                if *col != "datacl" {
+                    continue;
+                }
+                let acl = match v {
+                    Value::Array(a) => {
+                        let mut acl = Vec::with_capacity(a.items.len());
+                        for x in a.items.iter().filter(|x| !x.is_null()) {
+                            let text = match x {
+                                Value::Text(t) => t.to_string(),
+                                _ => continue,
+                            };
+                            let (item, _) = crate::catalog::acl::parse_item(&text, &|n| {
+                                self.cat.role_by_name(n).map(|r| r.oid)
+                            })?;
+                            acl.push(item);
+                        }
+                        Some(acl)
+                    }
+                    _ => None,
+                };
+                self.cat
+                    .set_acl(crate::catalog::acl::ObjKind::Database, oid, 0, acl);
+            }
+            if let Some(name) = name {
+                self.set_database_options(&name, old, new)?;
+            }
+        }
+        self.save()?;
+        Ok(format!("UPDATE {}", rows.len()))
+    }
+}
+
+// ── pg_depend ──
+
+/// pg_depend's columns, in order.
+const DEPEND_COLS: [&str; 7] = [
+    "classid",
+    "objid",
+    "objsubid",
+    "refclassid",
+    "refobjid",
+    "refobjsubid",
+    "deptype",
+];
+
+fn is_pg_depend(rv: &pb::RangeVar) -> bool {
+    rv.relname == "pg_depend" && (rv.schemaname.is_empty() || rv.schemaname == "pg_catalog")
+}
+
+/// Whether `s` deletes from pg_depend (unqualified or in pg_catalog).
+pub(crate) fn is_pg_depend_delete(s: &pb::DeleteStmt) -> bool {
+    s.relation.as_ref().is_some_and(is_pg_depend) && s.with_clause.is_none()
+}
+
+/// Whether `s` updates pg_depend (unqualified or in pg_catalog).
+pub(crate) fn is_pg_depend_update(s: &pb::UpdateStmt) -> bool {
+    s.relation.as_ref().is_some_and(is_pg_depend) && s.with_clause.is_none() && crate::sql::binder::ast::returning(&s.returning_clause).is_empty()
+}
+
+/// UPDATE pg_depend as a query: each matching row's columns, then the row as SET leaves
+/// it (the columns SET names cast to theirs). Bound by the caller's binder (a PL/pgSQL
+/// function's sees its variables), run, then applied by `apply_depend_update`.
+pub(crate) fn depend_update_query(s: &pb::UpdateStmt) -> Result<pb::Node> {
+    let rv = s.relation.clone().unwrap();
+    let rel = rv
+        .alias
+        .as_ref()
+        .map_or_else(|| rv.relname.clone(), |a| a.aliasname.clone());
+    let types = ["oid", "oid", "int4", "oid", "oid", "int4", "char"];
+    let mut targets: Vec<pb::Node> = DEPEND_COLS.iter().map(|c| target(qcol(&rel, c))).collect();
+    let mut set: Vec<Option<pb::Node>> = vec![None; DEPEND_COLS.len()];
+    for t in &s.target_list {
+        let Some(NodeEnum::ResTarget(rt)) = inner(t) else { continue };
+        let Some(i) = DEPEND_COLS.iter().position(|c| *c == rt.name) else {
+            return Err(Error::new(
+                code::UNDEFINED_COLUMN,
+                format!("column \"{}\" of relation \"pg_depend\" does not exist", rt.name),
+            ));
+        };
+        set[i] = rt.val.as_deref().cloned();
+    }
+    for (i, v) in set.into_iter().enumerate() {
+        let v = v.unwrap_or_else(|| qcol(&rel, DEPEND_COLS[i]));
+        targets.push(target(cast(v, types[i])));
+    }
+    let mut from = vec![mk(NodeEnum::RangeVar(rv))];
+    from.extend(s.from_clause.iter().cloned());
+    Ok(mk(NodeEnum::SelectStmt(Box::new(pb::SelectStmt {
+        target_list: targets,
+        from_clause: from,
+        where_clause: s.where_clause.clone(),
+        ..Default::default()
+    }))))
+}
+
+/// The rows `depend_update_query` returned, applied: each old row masked, the new one added.
+/// Returns how many rows it updated.
+pub(crate) fn apply_depend_update(ctx: &crate::exec::ExecCtx, rows: &[crate::exec::Row]) -> Result<u64> {
+    let cat = ctx.catalog();
+    if !cat.is_superuser(ctx.sess.current_role(&cat)) {
+        return Err(Error::new(code::INSUFFICIENT_PRIVILEGE, "permission denied for table pg_depend"));
+    }
+    let mut d = Ddl::new(ctx, "");
+    let mut n = 0;
+    for r in rows {
+        let (Some(old), Some(new)) = (depend_row(&r[..7]), depend_row(&r[7..])) else {
+            continue;
+        };
+        d.cat.depend_edits.remove(old);
+        d.cat.depend_edits.add(new);
+        n += 1;
+    }
+    d.save()?;
+    Ok(n)
+}
+
+/// Whether `s` inserts into pg_depend.
+pub(crate) fn is_pg_depend_insert(s: &pb::InsertStmt) -> bool {
+    s.relation.as_ref().is_some_and(is_pg_depend)
+        && s.with_clause.is_none()
+        && s.on_conflict_clause.is_none()
+        && s.select_stmt.is_some()
+}
+
+fn qcol(rel: &str, name: &str) -> pb::Node {
+    mk(NodeEnum::ColumnRef(pb::ColumnRef {
+        fields: [rel, name]
+            .iter()
+            .map(|n| {
+                mk(NodeEnum::String(pb::String {
+                    sval: n.to_string(),
+                }))
+            })
+            .collect(),
+        location: -1,
+    }))
+}
+
+/// A pg_depend row out of its seven column values.
+fn depend_row(r: &[Value]) -> Option<crate::catalog::DependRow> {
+    let oid = |v: &Value| match v {
+        Value::Oid(o) => Some(*o),
+        _ => None,
+    };
+    let int = |v: &Value| match v {
+        Value::Int4(i) => Some(*i),
+        _ => None,
+    };
+    let kind = match &r[6] {
+        Value::Char(c) => *c as char,
+        Value::Text(s) => s.chars().next().unwrap_or('\0'),
+        _ => return None,
+    };
+    Some((
+        (oid(&r[0])?, oid(&r[1])?, int(&r[2])?),
+        (oid(&r[3])?, oid(&r[4])?, int(&r[5])?),
+        kind,
+    ))
+}
+
+/// What a statement on pg_depend returned: RETURNING's columns and rows, and its tag.
+pub(crate) type DependDml = (Vec<crate::sql::plan::OutCol>, Vec<crate::exec::Row>, String);
+
+/// DELETE FROM / INSERT INTO pg_depend by a superuser. pg_depend is derived from the
+/// objects; the rows a DELETE finds are masked and the rows an INSERT gives added, over
+/// it (`Catalog::depend_edits`), so dependency checks see them as Postgres's would.
+pub(crate) fn pg_depend_dml(ctx: &crate::exec::ExecCtx, node: &NodeEnum) -> Result<DependDml> {
+    let cat = ctx.catalog();
+    let me = ctx.sess.current_role(&cat);
+    if !cat.is_superuser(me) {
+        return Err(Error::new(
+            code::INSUFFICIENT_PRIVILEGE,
+            "permission denied for table pg_depend",
+        ));
+    }
+    let child = ctx.child(&[]);
+    let run = |sel: pb::SelectStmt| -> Result<(Vec<crate::sql::plan::OutCol>, Vec<crate::exec::Row>)> {
+        let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+        let mut b = Binder::new(&child, Vec::new());
+        let bq = b.bind_statement(&node)?;
+        let rows = crate::exec::collect(&bq.plan, &child, None)?;
+        Ok((bq.cols.to_vec(), rows))
+    };
+    let mut d = Ddl::new(ctx, "");
+    match node {
+        NodeEnum::UpdateStmt(s) => {
+            let node = depend_update_query(s)?;
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            let rows = crate::exec::collect(&bq.plan, &child, None)?;
+            let n = apply_depend_update(ctx, &rows)?;
+            Ok((Vec::new(), Vec::new(), format!("UPDATE {n}")))
+        }
+        NodeEnum::DeleteStmt(s) => {
+            let rv = s.relation.clone().unwrap();
+            let rel = rv
+                .alias
+                .as_ref()
+                .map_or_else(|| rv.relname.clone(), |a| a.aliasname.clone());
+            let mut targets: Vec<pb::Node> =
+                DEPEND_COLS.iter().map(|c| target(qcol(&rel, c))).collect();
+            targets.extend(crate::sql::binder::ast::returning(&s.returning_clause).iter().cloned());
+            let mut from = vec![mk(NodeEnum::RangeVar(rv))];
+            from.extend(s.using_clause.iter().cloned());
+            let (cols, rows) = run(pb::SelectStmt {
+                target_list: targets,
+                from_clause: from,
+                where_clause: s.where_clause.clone(),
+                ..Default::default()
+            })?;
+            // (A row USING joins more than once is deleted once.)
+            let mut seen: Vec<crate::catalog::DependRow> = Vec::new();
+            let mut out = Vec::new();
+            for r in rows {
+                let Some(row) = depend_row(&r) else { continue };
+                if !s.using_clause.is_empty() && seen.contains(&row) {
+                    continue;
+                }
+                seen.push(row);
+                d.cat.depend_edits.remove(row);
+                out.push(r[DEPEND_COLS.len()..].to_vec());
+            }
+            d.save()?;
+            let cols = cols[DEPEND_COLS.len()..].to_vec();
+            Ok((cols, out, format!("DELETE {}", seen.len())))
+        }
+        NodeEnum::InsertStmt(s) => {
+            if !crate::sql::binder::ast::returning(&s.returning_clause).is_empty() {
+                return Err(crate::error::unsupported("INSERT INTO pg_depend ... RETURNING"));
+            }
+            // The columns given, in pg_depend's order of them.
+            let names: Vec<String> = if s.cols.is_empty() {
+                DEPEND_COLS.iter().map(|c| c.to_string()).collect()
+            } else {
+                s.cols
+                    .iter()
+                    .filter_map(|c| match inner(c) {
+                        Some(NodeEnum::ResTarget(rt)) => Some(rt.name.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for n in &names {
+                if !DEPEND_COLS.contains(&n.as_str()) {
+                    return Err(Error::new(
+                        code::UNDEFINED_COLUMN,
+                        format!("column \"{n}\" of relation \"pg_depend\" does not exist"),
+                    ));
+                }
+            }
+            let types = ["oid", "oid", "int4", "oid", "oid", "int4", "char"];
+            let targets = DEPEND_COLS
+                .iter()
+                .zip(types)
+                .map(|(c, ty)| {
+                    let v = if names.iter().any(|n| n == c) {
+                        qcol("x", c)
+                    } else {
+                        mk(NodeEnum::AConst(pb::AConst {
+                            isnull: true,
+                            val: None,
+                            location: -1,
+                        }))
+                    };
+                    target(cast(v, ty))
+                })
+                .collect();
+            let sub = mk(NodeEnum::RangeSubselect(Box::new(pb::RangeSubselect {
+                lateral: false,
+                subquery: s.select_stmt.clone(),
+                alias: Some(pb::Alias {
+                    aliasname: "x".into(),
+                    colnames: names
+                        .iter()
+                        .map(|n| mk(NodeEnum::String(pb::String { sval: n.clone() })))
+                        .collect(),
+                }),
+            })));
+            let (_, rows) = run(pb::SelectStmt {
+                target_list: targets,
+                from_clause: vec![sub],
+                ..Default::default()
+            })?;
+            for r in &rows {
+                if let Some(i) = r.iter().position(Value::is_null) {
+                    return Err(Error::new(
+                        code::NOT_NULL_VIOLATION,
+                        format!(
+                            "null value in column \"{}\" of relation \"pg_depend\" violates not-null constraint",
+                            DEPEND_COLS[i]
+                        ),
+                    ));
+                }
+                if let Some(row) = depend_row(r) {
+                    d.cat.depend_edits.add(row);
+                }
+            }
+            d.save()?;
+            Ok((Vec::new(), Vec::new(), format!("INSERT 0 {}", rows.len())))
+        }
+        _ => Err(crate::error::internal("not a pg_depend statement")),
+    }
+}
+
+/// The pg_class statistics columns a direct catalog change may set, with their types.
+fn class_stat_type(col: &str) -> Option<&'static str> {
+    Some(match col {
+        "reltuples" => "float4",
+        "relpages" | "relallvisible" | "relallfrozen" => "int4",
+        _ => return None,
+    })
+}
+
+/// Whether `s` could be a MERGE into pg_class (or a plain view of it) that only updates
+/// its statistics columns: every WHEN is MATCHED, with UPDATE SET of those or DO NOTHING.
+pub(crate) fn might_merge_pg_class(s: &pb::MergeStmt) -> bool {
+    s.with_clause.is_none()
+        && !s.merge_when_clauses.is_empty()
+        && s.merge_when_clauses.iter().all(|w| {
+            let Some(NodeEnum::MergeWhenClause(w)) = inner(w) else {
+                return false;
+            };
+            w.match_kind == pb::MergeMatchKind::MergeWhenMatched as i32
+                && match pb::CmdType::try_from(w.command_type) {
+                    Ok(pb::CmdType::CmdNothing) => true,
+                    Ok(pb::CmdType::CmdUpdate) => w.target_list.iter().all(|t| {
+                        matches!(inner(t), Some(NodeEnum::ResTarget(rt))
+                            if rt.indirection.is_empty() && class_stat_type(&rt.name).is_some())
+                    }),
+                    _ => false,
+                }
+        })
+}
+
+/// Whether `rv` names pg_class itself, or a view that is a plain `SELECT * FROM pg_class`
+/// (automatically updatable, so a MERGE into it changes pg_class).
+fn names_pg_class(ctx: &crate::exec::ExecCtx, rv: &pb::RangeVar) -> bool {
+    let is_class = |rv: &pb::RangeVar| {
+        rv.relname == "pg_class" && (rv.schemaname.is_empty() || rv.schemaname == "pg_catalog")
+    };
+    let cat = ctx.catalog();
+    let schema = (!rv.schemaname.is_empty()).then_some(rv.schemaname.as_str());
+    match cat.find(schema, &rv.relname, &ctx.search_path) {
+        Some(crate::catalog::Relation::View(v)) if !v.materialized => {
+            let Ok(stmts) = crate::sql::parse::parse(&v.query) else {
+                return false;
+            };
+            let [stmt] = stmts.as_slice() else {
+                return false;
+            };
+            let Some(NodeEnum::SelectStmt(sel)) = stmt.stmt.as_deref().and_then(inner) else {
+                return false;
+            };
+            // `*`, or pg_class's columns each as itself (as a stored view lists them).
+            let class_cols = crate::catalog::system::SysTable::PgClass.columns();
+            let plain = |t: &pb::Node, want: Option<&str>| {
+                let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+                    return false;
+                };
+                let Some(NodeEnum::ColumnRef(c)) = rt.val.as_deref().and_then(inner) else {
+                    return false;
+                };
+                match (c.fields.last().and_then(inner), want) {
+                    (Some(NodeEnum::AStar(_)), None) => c.fields.len() == 1,
+                    (Some(NodeEnum::String(f)), Some(w)) => {
+                        f.sval == w && (rt.name.is_empty() || rt.name == w)
+                    }
+                    _ => false,
+                }
+            };
+            let star = match sel.target_list.as_slice() {
+                [t] if plain(t, None) => true,
+                ts => {
+                    ts.len() == class_cols.len()
+                        && ts.iter().zip(class_cols.iter()).all(|(t, (n, _))| plain(t, Some(n)))
+                }
+            };
+            star && sel.where_clause.is_none()
+                && sel.group_clause.is_empty()
+                && sel.having_clause.is_none()
+                && sel.distinct_clause.is_empty()
+                && sel.limit_count.is_none()
+                && sel.limit_offset.is_none()
+                && matches!(sel.from_clause.as_slice(), [f] if matches!(inner(f), Some(NodeEnum::RangeVar(r)) if is_class(r)))
+        }
+        Some(_) => false,
+        None => is_class(rv),
+    }
+}
+
+/// MERGE into pg_class (or a plain view of it) by a superuser, its WHEN MATCHED clauses
+/// updating relations' statistics columns: the matched rows are found by querying, the
+/// first clause whose condition holds acts on each, and the new values go into the
+/// relations' stored statistics (as `update_pg_class`). None: not such a MERGE.
+pub(crate) fn merge_pg_class(
+    ctx: &crate::exec::ExecCtx,
+    s: &pb::MergeStmt,
+) -> Result<Option<DependDml>> {
+    let Some(rv) = s.relation.as_ref() else {
+        return Ok(None);
+    };
+    if !might_merge_pg_class(s) || !names_pg_class(ctx, rv) {
+        return Ok(None);
+    }
+    let cat = ctx.catalog();
+    let me = ctx.sess.current_role(&cat);
+    if !cat.is_superuser(me) {
+        return Err(Error::new(
+            code::INSUFFICIENT_PRIVILEGE,
+            "permission denied for table pg_class",
+        ));
+    }
+    let refname = rv
+        .alias
+        .as_ref()
+        .map_or_else(|| rv.relname.clone(), |a| a.aliasname.clone());
+    // oid and the statistics now, then per clause its condition and its SET values, then
+    // RETURNING.
+    let mut targets: Vec<pb::Node> = ["oid", "relpages", "reltuples", "relallvisible"]
+        .iter()
+        .map(|c| target(qcol(&refname, c)))
+        .collect();
+    let mut clauses: Vec<(bool, Vec<String>)> = Vec::new();
+    for w in &s.merge_when_clauses {
+        let Some(NodeEnum::MergeWhenClause(w)) = inner(w) else {
+            continue;
+        };
+        let cond = w.condition.as_deref().cloned().unwrap_or_else(|| {
+            mk(NodeEnum::AConst(pb::AConst {
+                isnull: false,
+                val: Some(pb::a_const::Val::Boolval(pb::Boolean { boolval: true })),
+                location: -1,
+            }))
+        });
+        targets.push(target(cast(cond, "bool")));
+        let update = w.command_type == pb::CmdType::CmdUpdate as i32;
+        let mut cols = Vec::new();
+        for t in &w.target_list {
+            let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+                continue;
+            };
+            let ty = class_stat_type(&rt.name).unwrap_or("float4");
+            let val = rt.val.as_deref().cloned().unwrap_or_else(|| {
+                mk(NodeEnum::AConst(pb::AConst {
+                    isnull: true,
+                    val: None,
+                    location: -1,
+                }))
+            });
+            targets.push(target(cast(val, ty)));
+            cols.push(rt.name.clone());
+        }
+        clauses.push((update, cols));
+    }
+    let nfixed = targets.len();
+    targets.extend(crate::sql::binder::ast::returning(&s.returning_clause).iter().cloned());
+    let mut from = vec![mk(NodeEnum::RangeVar(rv.clone()))];
+    from.extend(s.source_relation.as_deref().cloned());
+    let sel = pb::SelectStmt {
+        target_list: targets,
+        from_clause: from,
+        where_clause: s.join_condition.clone(),
+        ..Default::default()
+    };
+    let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+    let query = || -> Result<(Vec<crate::sql::plan::OutCol>, Vec<crate::exec::Row>)> {
+        let child = ctx.child(&[]);
+        let mut b = Binder::new(&child, Vec::new());
+        let bq = b.bind_statement(&node)?;
+        let rows = crate::exec::collect(&bq.plan, &child, None)?;
+        Ok((bq.cols.to_vec(), rows))
+    };
+    let (mut cols, mut rows) = query()?;
+    // The rows matched are updated (heap_update): one another transaction is updating is
+    // waited for, then the join is run again over what it committed (EvalPlanQual).
+    loop {
+        let before = ctx.catalog().version;
+        for r in &rows {
+            if let Value::Oid(oid) = r[0] {
+                ctx.txn.borrow_mut().lock_catalog_row(
+                    1259,
+                    oid,
+                    crate::txn::locks::RowLockMode::NoKeyUpdate,
+                    true,
+                )?;
+            }
+        }
+        let unchanged = ctx.txn.borrow().changed_catalog().is_none();
+        if !unchanged || ctx.catalog().version == before {
+            break;
+        }
+        (cols, rows) = query()?;
+    }
+    let num = |v: &Value| match v {
+        Value::Int4(i) => *i as f64,
+        Value::Float4(f) => *f as f64,
+        other => other.as_f64().unwrap_or(0.0),
+    };
+    let mut d = Ddl::new(ctx, "");
+    let mut done: Vec<u32> = Vec::new();
+    let mut out = Vec::new();
+    for r in &rows {
+        let Value::Oid(oid) = r[0] else { continue };
+        let mut at = 4;
+        let mut acted = None;
+        for (update, set_cols) in &clauses {
+            let hit = r[at] == Value::Bool(true);
+            let vals = &r[at + 1..at + 1 + set_cols.len()];
+            at += 1 + set_cols.len();
+            if hit {
+                acted = Some((*update, set_cols, vals));
+                break;
+            }
+        }
+        let Some((update, set_cols, vals)) = acted else {
+            continue;
+        };
+        if done.contains(&oid) {
+            return Err(Error::new(
+                code::CARDINALITY_VIOLATION,
+                "MERGE command cannot affect row a second time",
+            )
+            .hint("Ensure that not more than one source row matches any one target row."));
+        }
+        done.push(oid);
+        if !update {
+            continue;
+        }
+        let mut st = RelStats {
+            pages: num(&r[1]) as i32,
+            tuples: num(&r[2]),
+            allvisible: num(&r[3]) as i32,
+            allfrozen: d.cat.relstats.get(&oid).map_or(0, |s| s.allfrozen),
+        };
+        for (name, v) in set_cols.iter().zip(vals) {
+            if v.is_null() {
+                return Err(Error::new(
+                    code::NOT_NULL_VIOLATION,
+                    format!(
+                        "null value in column \"{name}\" of relation \"pg_class\" violates not-null constraint"
+                    ),
+                ));
+            }
+            match name.as_str() {
+                "reltuples" => st.tuples = num(v),
+                "relpages" => st.pages = num(v) as i32,
+                "relallvisible" => st.allvisible = num(v) as i32,
+                "relallfrozen" => st.allfrozen = num(v) as i32,
+                _ => {}
+            }
+        }
+        if oid >= crate::catalog::FIRST_USER_OID {
+            d.cat.relstats.insert(oid, st);
+        }
+        out.push(r[nfixed..].to_vec());
+    }
+    d.save()?;
+    let n = out.len();
+    Ok(Some((cols[nfixed..].to_vec(), out, format!("MERGE {n}"))))
+}

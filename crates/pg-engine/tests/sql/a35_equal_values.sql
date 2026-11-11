@@ -1,0 +1,55 @@
+-- Found by the differential tester (tests/difftest.rs): values that compare equal but differ.
+-- max / min keep the newer of two equal values (X_larger: `cmp > 0 ? old : new`), bpchar
+-- and tid the older; GREATEST / LEAST keep the first. bpchar compares without trailing
+-- spaces in joins, grouping, DISTINCT and set operations.
+SELECT max(x), min(x) FROM (VALUES ('1 mon'::interval), ('30 days'::interval)) v(x);
+SELECT max(x), min(x) FROM (VALUES ('30 days'::interval), ('1 mon'::interval)) v(x);
+SELECT max(x), min(x) FROM (VALUES ('2 mons'::interval), ('60 days'::interval), ('1 day 1416:00:00'::interval)) v(x);
+SELECT max(x), min(x) FROM (VALUES (1.0::numeric), (1.00::numeric)) v(x);
+SELECT max(x), min(x) FROM (VALUES (1.00::numeric), (1.0::numeric), (1::numeric)) v(x);
+SELECT max(x), min(x) FROM (VALUES ('-0'::float8), ('0'::float8)) v(x);
+SELECT max(x), min(x) FROM (VALUES ('0'::float4), ('-0'::float4)) v(x);
+SELECT max(x), min(x) FROM (VALUES (ARRAY[1.0::numeric]), (ARRAY[1.00::numeric])) v(x);
+SELECT max(x), min(x) FROM (VALUES (ROW(1.0::numeric)), (ROW(1.00::numeric))) v(x);
+SELECT max(x), min(x) FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x);
+SELECT max(x), min(x) FROM (VALUES ('a  '::bpchar), ('a'::bpchar)) v(x);
+SELECT max(x::char(3)), min(x::char(3)) FROM (VALUES ('a'), ('a  ')) v(x);
+CREATE COLLATION a35_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+SELECT max(x COLLATE a35_ci), min(x COLLATE a35_ci) FROM (VALUES ('abc'), ('ABC'), ('Abc')) v(x);
+SELECT max(x) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), min(x) OVER (ORDER BY n) FROM (VALUES (1, 1.0::numeric), (2, 1.00::numeric), (3, 1.000::numeric)) v(n, x) ORDER BY n;
+SELECT k, max(x), min(x) FROM (VALUES (1, '1 day'::interval), (1, '24:00:00'::interval), (2, '1 mon'::interval), (2, '30 days'::interval)) v(k, x) GROUP BY k ORDER BY k;
+SELECT greatest('1 mon'::interval, '30 days'::interval), greatest('30 days'::interval, '1 mon'::interval);
+SELECT least('1 mon'::interval, '30 days'::interval), least('30 days'::interval, '1 mon'::interval);
+SELECT greatest(1.0, 1.00), least(1.00, 1.0), greatest('-0'::float8, '0'::float8);
+SELECT greatest('a'::bpchar, 'a  '::bpchar), least('a  '::bpchar, 'a'::bpchar);
+DROP COLLATION a35_ci;
+CREATE TABLE ca (x char(2));
+CREATE TABLE cb (y char(4));
+INSERT INTO ca VALUES ('a'), ('b');
+INSERT INTO cb VALUES ('a'), ('c');
+SELECT * FROM ca JOIN cb ON x = y;
+SELECT * FROM ca WHERE x IN (SELECT y FROM cb);
+SELECT x FROM ca UNION SELECT y FROM cb;
+SELECT x FROM ca INTERSECT SELECT y FROM cb;
+SELECT x FROM ca EXCEPT SELECT y FROM cb;
+SELECT DISTINCT z FROM (SELECT x::bpchar FROM ca UNION ALL SELECT y::bpchar FROM cb) s(z);
+SELECT z, count(*) FROM (SELECT x::bpchar FROM ca UNION ALL SELECT y::bpchar FROM cb) s(z) GROUP BY z;
+SET enable_nestloop = off;
+SET enable_mergejoin = off;
+SELECT * FROM ca JOIN cb ON x = y;
+SELECT * FROM ca FULL JOIN cb ON x = y;
+RESET enable_mergejoin;
+SET enable_hashjoin = off;
+SELECT * FROM ca JOIN cb ON x = y;
+SELECT * FROM ca FULL JOIN cb ON x = y;
+RESET enable_hashjoin;
+RESET enable_nestloop;
+SET enable_hashagg = off;
+SELECT z, count(*) FROM (SELECT x::bpchar FROM ca UNION ALL SELECT y::bpchar FROM cb) s(z) GROUP BY z;
+SELECT x FROM ca UNION SELECT y FROM cb;
+RESET enable_hashagg;
+SELECT DISTINCT x FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x);
+SELECT x, count(*) FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x) GROUP BY x;
+SELECT count(DISTINCT x) FROM (VALUES ('a'::bpchar), ('a  '::bpchar)) v(x);
+SELECT DISTINCT ON (x) x, n FROM (VALUES ('a'::bpchar, 1), ('a  '::bpchar, 2)) v(x, n) ORDER BY x, n;
+DROP TABLE ca, cb;

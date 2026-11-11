@@ -1,0 +1,79 @@
+> PREPARE foo AS SELECT 1
+-- PREPARE
+
+> SET vacuum_cost_delay = 13
+-- SET
+
+> CREATE TEMP TABLE tmp_foo (data text) ON COMMIT DELETE ROWS
+-- CREATE TABLE
+
+> CREATE ROLE regress_gxdisc_user
+-- CREATE ROLE
+
+> SET SESSION AUTHORIZATION regress_gxdisc_user
+-- SET
+
+> SELECT name FROM pg_prepared_statements
+name:text
+foo
+-- SELECT 1
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+13ms
+-- SHOW
+
+> SELECT relname from pg_class where relname = 'tmp_foo'
+relname:name
+tmp_foo
+-- SELECT 1
+
+> SELECT current_user = 'regress_gxdisc_user'
+?column?:bool
+t
+-- SELECT 1
+
+> DISCARD ALL
+-- DISCARD ALL
+
+> SELECT name FROM pg_prepared_statements
+name:text
+-- SELECT 0
+
+> SHOW vacuum_cost_delay
+vacuum_cost_delay:text
+0
+-- SHOW
+
+> SELECT relname from pg_class where relname = 'tmp_foo'
+relname:name
+-- SELECT 0
+
+> SELECT current_user = 'regress_gxdisc_user'
+?column?:bool
+f
+-- SELECT 1
+
+> DROP ROLE regress_gxdisc_user
+-- DROP ROLE
+
+> create function func_with_bad_set() returns int as $$ select 1 $$ language sql set default_text_search_config = no_such_config
+NOTICE 42704: text search configuration "no_such_config" does not exist
+ERROR 22023: invalid value for parameter "default_text_search_config": "no_such_config"
+
+> set check_function_bodies = off
+-- SET
+
+> create function func_with_bad_set() returns int as $$ select 1 $$ language sql set default_text_search_config = no_such_config
+NOTICE 42704: text search configuration "no_such_config" does not exist
+-- CREATE FUNCTION
+
+> select func_with_bad_set()
+ERROR 22023: invalid value for parameter "default_text_search_config": "no_such_config"
+
+> reset check_function_bodies
+-- RESET
+
+> drop function func_with_bad_set()
+-- DROP FUNCTION
+

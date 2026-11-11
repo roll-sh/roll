@@ -1,0 +1,272 @@
+> create function opc_hash(value int4, seed int8) returns int8 as $$ select value + seed $$ language sql strict immutable
+-- CREATE FUNCTION
+
+> create operator class opc_hash_ops for type int4 using hash as operator 1 =, function 2 opc_hash(int4, int8)
+-- CREATE OPERATOR CLASS
+
+> select opcname, opcintype::regtype, opcdefault, opckeytype from pg_opclass where opcname = 'opc_hash_ops'
+opcname:name | opcintype:regtype | opcdefault:bool | opckeytype:oid
+opc_hash_ops | integer | f | 0
+-- SELECT 1
+
+> select opfname, opfmethod from pg_opfamily where opfname = 'opc_hash_ops'
+opfname:name | opfmethod:oid
+opc_hash_ops | 405
+-- SELECT 1
+
+> select amopstrategy, amoplefttype::regtype, amoprighttype::regtype, amopopr::regoperator, amoppurpose from pg_amop a join pg_opfamily f on f.oid = a.amopfamily where f.opfname = 'opc_hash_ops'
+amopstrategy:int2 | amoplefttype:regtype | amoprighttype:regtype | amopopr:2204 | amoppurpose:char
+1 | integer | integer | =(integer,integer) | s
+-- SELECT 1
+
+> select amprocnum, amproclefttype::regtype, amprocrighttype::regtype, amproc::regprocedure from pg_amproc a join pg_opfamily f on f.oid = a.amprocfamily where f.opfname = 'opc_hash_ops'
+amprocnum:int2 | amproclefttype:regtype | amprocrighttype:regtype | amproc:2202
+2 | integer | integer | opc_hash(integer,bigint)
+-- SELECT 1
+
+> select pg_describe_object(classid, objid, objsubid) as obj, pg_describe_object(refclassid, refobjid, refobjsubid) as ref, deptype from pg_depend where classid in ('pg_opclass'::regclass, 'pg_opfamily'::regclass, 'pg_amop'::regclass, 'pg_amproc'::regclass) and objid >= 16384 order by 1, 2
+obj:text | ref:text | deptype:char
+function 2 (integer, integer) of operator family opc_hash_ops for access method hash: opc_hash(integer,bigint) | function opc_hash(integer,bigint) | a
+function 2 (integer, integer) of operator family opc_hash_ops for access method hash: opc_hash(integer,bigint) | operator family opc_hash_ops for access method hash | a
+operator 1 (integer, integer) of operator family opc_hash_ops for access method hash: =(integer,integer) | operator class opc_hash_ops for access method hash | i
+operator class opc_hash_ops for access method hash | operator family opc_hash_ops for access method hash | a
+operator class opc_hash_ops for access method hash | schema public | n
+operator family opc_hash_ops for access method hash | schema public | n
+-- SELECT 6
+
+> create table opc_hp (a int) partition by hash (a opc_hash_ops)
+-- CREATE TABLE
+
+> create table opc_hp0 partition of opc_hp for values with (modulus 4, remainder 0)
+-- CREATE TABLE
+
+> create table opc_hp1 partition of opc_hp for values with (modulus 4, remainder 1)
+-- CREATE TABLE
+
+> create table opc_hp2 partition of opc_hp for values with (modulus 4, remainder 2)
+-- CREATE TABLE
+
+> create table opc_hp3 partition of opc_hp for values with (modulus 4, remainder 3)
+-- CREATE TABLE
+
+> insert into opc_hp select generate_series(1, 12)
+-- INSERT 0 12
+
+> select tableoid::regclass, a from opc_hp order by 2
+tableoid:regclass | a:int4
+opc_hp1 | 1
+opc_hp2 | 2
+opc_hp3 | 3
+opc_hp0 | 4
+opc_hp1 | 5
+opc_hp2 | 6
+opc_hp3 | 7
+opc_hp0 | 8
+opc_hp1 | 9
+opc_hp2 | 10
+opc_hp3 | 11
+opc_hp0 | 12
+-- SELECT 12
+
+> select satisfies_hash_partition('opc_hp'::regclass, 4, 0, 4), satisfies_hash_partition('opc_hp'::regclass, 4, 1, 4)
+satisfies_hash_partition:bool | satisfies_hash_partition:bool
+t | f
+-- SELECT 1
+
+> select satisfies_hash_partition('opc_hp'::regclass, 0, 0, 4)
+ERROR 22023: modulus for hash partition must be an integer value greater than zero
+
+> select satisfies_hash_partition('opc_hp'::regclass, 4, 0, variadic array[4])
+satisfies_hash_partition:bool
+t
+-- SELECT 1
+
+> drop operator class opc_hash_ops using hash
+ERROR 2BP01: cannot drop operator class opc_hash_ops for access method hash because other objects depend on it
+DETAIL: table opc_hp depends on operator class opc_hash_ops for access method hash
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop operator family opc_hash_ops using hash
+ERROR 2BP01: cannot drop operator family opc_hash_ops for access method hash because other objects depend on it
+DETAIL: table opc_hp depends on operator class opc_hash_ops for access method hash
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop operator class opc_hash_ops using btree
+ERROR 42704: operator class "opc_hash_ops" does not exist for access method "btree"
+
+> drop operator class if exists opc_hash_ops using btree
+NOTICE 00000: operator class "opc_hash_ops" does not exist for access method "btree", skipping
+-- DROP OPERATOR CLASS
+
+> drop operator family if exists nope.opc_hash_ops using btree
+NOTICE 00000: schema "nope" does not exist, skipping
+-- DROP OPERATOR FAMILY
+
+> drop operator family if exists opc_hash_ops using nope
+ERROR 42704: access method "nope" does not exist
+
+> drop table opc_hp
+-- DROP TABLE
+
+> drop operator family opc_hash_ops using hash
+-- DROP OPERATOR FAMILY
+
+> create operator family opc_f using btree
+-- CREATE OPERATOR FAMILY
+
+> create operator family opc_f using btree
+ERROR 42710: operator family "opc_f" for access method "btree" already exists
+
+> alter operator family opc_f using btree add operator 1 < (int4, int2), function 1 btint42cmp(int4, int2)
+-- ALTER OPERATOR FAMILY
+
+> alter operator family opc_f using btree add operator 1 < (int4, int2)
+ERROR 42710: operator 1(integer,smallint) already exists in operator family "opc_f"
+
+> alter operator family opc_f using btree add operator 6 < (int4, int2)
+ERROR 42P17: invalid operator number 6, must be between 1 and 5
+
+> alter operator family opc_f using btree add operator 1 <
+ERROR 42601: operator argument types must be specified in ALTER OPERATOR FAMILY
+
+> alter operator family opc_f using btree add operator 2 <= (int4, int2), operator 2 <= (int4, int2)
+ERROR 42P17: operator number 2 for (integer,smallint) appears more than once
+
+> alter operator family opc_f using btree add function 1 abs(int4)
+ERROR 42P17: ordering comparison functions must have two arguments
+
+> alter operator family opc_f using hash add operator 1 = (int4, int4)
+ERROR 42704: operator family "opc_f" does not exist for access method "hash"
+
+> alter operator family opc_f using btree add storage int4
+ERROR 42601: STORAGE cannot be specified in ALTER OPERATOR FAMILY
+
+> select pg_describe_object(classid, objid, objsubid) as obj, pg_describe_object(refclassid, refobjid, refobjsubid) as ref, deptype from pg_depend where classid in ('pg_amop'::regclass, 'pg_amproc'::regclass) and objid >= 16384 order by 1, 2
+obj:text | ref:text | deptype:char
+function 1 (integer, smallint) of operator family opc_f for access method btree: btint42cmp(integer,smallint) | operator family opc_f for access method btree | a
+operator 1 (integer, smallint) of operator family opc_f for access method btree: <(integer,smallint) | operator family opc_f for access method btree | a
+-- SELECT 2
+
+> alter operator family opc_f using btree drop operator 1 (int4, int2), function 1 (int4, int2)
+-- ALTER OPERATOR FAMILY
+
+> alter operator family opc_f using btree drop operator 1 (int4, int2)
+ERROR 42704: operator 1(integer,smallint) does not exist in operator family "opc_f"
+
+> alter operator family opc_f using btree drop operator 1 (int4, int2, int8)
+ERROR 42601: one or two argument types must be specified
+
+> create operator class opc_c for type int4 using btree family opc_f as operator 1 <, operator 3 =, function 1 btint4cmp(int4, int4)
+-- CREATE OPERATOR CLASS
+
+> create operator class opc_c for type int4 using btree family opc_f as operator 1 <
+ERROR 42710: operator class "opc_c" for access method "btree" already exists
+
+> create operator class opc_d default for type int4 using btree family opc_f as operator 1 <
+ERROR 42710: could not make operator class "opc_d" be default for type int4
+DETAIL: Operator class "int4_ops" already is the default.
+
+> create operator class opc_e for type int4 using btree as operator 1 < , storage int8
+ERROR 42P17: storage type cannot be different from data type for access method "btree"
+
+> create operator class opc_e for type int4 using btree as storage int8, storage int8
+ERROR 42P17: storage type specified more than once
+
+> alter operator class opc_c using btree rename to opc_c2
+-- ALTER OPERATOR CLASS
+
+> create schema opc_s
+-- CREATE SCHEMA
+
+> alter operator class opc_c2 using btree set schema opc_s
+-- ALTER OPERATOR CLASS
+
+> alter operator family opc_f using btree set schema opc_s
+-- ALTER OPERATOR FAMILY
+
+> alter operator family opc_s.opc_f using btree rename to opc_f2
+-- ALTER OPERATOR FAMILY
+
+> alter operator family opc_s.opc_f2 using btree rename to opc_f
+-- ALTER OPERATOR FAMILY
+
+> select pg_describe_object(classid, objid, objsubid) as obj, pg_describe_object(refclassid, refobjid, refobjsubid) as ref, deptype from pg_depend where classid in ('pg_amop'::regclass, 'pg_amproc'::regclass, 'pg_opclass'::regclass) and objid >= 16384 order by 1, 2
+obj:text | ref:text | deptype:char
+function 1 (integer, integer) of operator family opc_s.opc_f for access method btree: btint4cmp(integer,integer) | operator class opc_s.opc_c2 for access method btree | i
+operator 1 (integer, integer) of operator family opc_s.opc_f for access method btree: <(integer,integer) | operator class opc_s.opc_c2 for access method btree | i
+operator 3 (integer, integer) of operator family opc_s.opc_f for access method btree: =(integer,integer) | operator class opc_s.opc_c2 for access method btree | i
+operator class opc_s.opc_c2 for access method btree | operator family opc_s.opc_f for access method btree | a
+operator class opc_s.opc_c2 for access method btree | schema opc_s | n
+-- SELECT 5
+
+> select (pg_identify_object(classid, objid, objsubid)).* from pg_depend where classid in ('pg_amop'::regclass, 'pg_amproc'::regclass, 'pg_opclass'::regclass) and objid >= 16384 order by 4
+type:text | schema:text | name:text | identity:text
+function of access method | NULL | NULL | function 1 (integer, integer) of opc_s.opc_f USING btree
+operator class | opc_s | opc_c2 | opc_s.opc_c2 USING btree
+operator class | opc_s | opc_c2 | opc_s.opc_c2 USING btree
+operator of access method | NULL | NULL | operator 1 (integer, integer) of opc_s.opc_f USING btree
+operator of access method | NULL | NULL | operator 3 (integer, integer) of opc_s.opc_f USING btree
+-- SELECT 5
+
+> select (pg_identify_object_as_address(classid, objid, objsubid)).* from pg_depend where classid in ('pg_amop'::regclass, 'pg_opclass'::regclass) and objid >= 16384 order by 1, 2
+type:text | object_names:text[] | object_args:text[]
+operator class | {btree,opc_s,opc_c2} | {}
+operator class | {btree,opc_s,opc_c2} | {}
+operator of access method | {btree,opc_s,opc_f,1} | {integer,integer}
+operator of access method | {btree,opc_s,opc_f,3} | {integer,integer}
+-- SELECT 4
+
+> select pg_get_object_address('operator class', '{btree,opc_s,opc_c2}', '{}') is not null
+?column?:bool
+t
+-- SELECT 1
+
+> select pg_get_object_address('operator of access method', '{btree,opc_s,opc_f,1}', '{int4,int4}') is not null
+?column?:bool
+t
+-- SELECT 1
+
+> select pg_get_object_address('operator of access method', '{btree,integer_ops,1}', '{int4,bool}')
+ERROR 42704: operator 1 (int4, bool) of operator family integer_ops for access method btree does not exist
+
+> select pg_get_object_address('function of access method', '{btree,integer_ops,99}', '{int4,int4}')
+ERROR 42704: function 99 (int4, int4) of operator family integer_ops for access method btree does not exist
+
+> select pg_get_object_address('operator class', '{eins}', '{}')
+ERROR 22023: name list length must be at least 2
+
+> select pg_get_object_address('operator family', '{eins,zwei}', '{}')
+ERROR 42704: access method "eins" does not exist
+
+> create table opc_t (a int)
+-- CREATE TABLE
+
+> create index opc_i on opc_t (a opc_s.opc_c2)
+-- CREATE INDEX
+
+> select pg_get_indexdef('opc_i'::regclass)
+pg_get_indexdef:text
+CREATE INDEX opc_i ON public.opc_t USING btree (a opc_s.opc_c2)
+-- SELECT 1
+
+> drop operator family opc_s.opc_f using btree
+ERROR 2BP01: cannot drop operator family opc_s.opc_f for access method btree because other objects depend on it
+DETAIL: index opc_i depends on operator class opc_s.opc_c2 for access method btree
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop operator family opc_s.opc_f using btree cascade
+NOTICE 00000: drop cascades to index opc_i
+-- DROP OPERATOR FAMILY
+
+> drop operator class int4_ops using btree
+ERROR 2BP01: cannot drop operator class int4_ops for access method btree because it is required by the database system
+
+> drop table opc_t
+-- DROP TABLE
+
+> drop schema opc_s cascade
+-- DROP SCHEMA
+
+> drop function opc_hash(int4, int8)
+-- DROP FUNCTION
+

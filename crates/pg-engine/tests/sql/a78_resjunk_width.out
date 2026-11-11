@@ -1,0 +1,84 @@
+> create table a78_rj (id int, v text)
+-- CREATE TABLE
+
+> insert into a78_rj select g, 'x' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> analyze a78_rj
+-- ANALYZE
+
+> explain select id from a78_rj order by id * 2.5 limit 5
+QUERY PLAN:text
+Limit  (cost=37.61..37.62 rows=5 width=36)
+  ->  Sort  (cost=37.61..40.11 rows=1000 width=36)
+        Sort Key: (((id)::numeric * 2.5))
+        ->  Seq Scan on a78_rj  (cost=0.00..21.00 rows=1000 width=36)
+-- EXPLAIN
+
+> explain select id from a78_rj order by id * 2.5
+QUERY PLAN:text
+Sort  (cost=70.83..73.33 rows=1000 width=36)
+  Sort Key: (((id)::numeric * 2.5))
+  ->  Seq Scan on a78_rj  (cost=0.00..21.00 rows=1000 width=36)
+-- EXPLAIN
+
+> explain select id from a78_rj order by v
+QUERY PLAN:text
+Sort  (cost=65.83..68.33 rows=1000 width=8)
+  Sort Key: v
+  ->  Seq Scan on a78_rj  (cost=0.00..16.00 rows=1000 width=8)
+-- EXPLAIN
+
+> explain select id from a78_rj order by v limit 3
+QUERY PLAN:text
+Limit  (cost=28.92..28.93 rows=3 width=8)
+  ->  Sort  (cost=28.92..31.42 rows=1000 width=8)
+        Sort Key: v
+        ->  Seq Scan on a78_rj  (cost=0.00..16.00 rows=1000 width=8)
+-- EXPLAIN
+
+> explain select id from a78_rj order by length(v), id
+QUERY PLAN:text
+Sort  (cost=68.33..70.83 rows=1000 width=8)
+  Sort Key: (length(v)), id
+  ->  Seq Scan on a78_rj  (cost=0.00..18.50 rows=1000 width=8)
+-- EXPLAIN
+
+> explain select id, count(*) from a78_rj group by id order by sum(id) * 2
+QUERY PLAN:text
+Sort  (cost=85.83..88.33 rows=1000 width=20)
+  Sort Key: ((sum(id) * 2))
+  ->  HashAggregate  (cost=23.50..36.00 rows=1000 width=20)
+        Group Key: id
+        ->  Seq Scan on a78_rj  (cost=0.00..16.00 rows=1000 width=4)
+-- EXPLAIN
+
+> explain select distinct id from a78_rj order by id
+QUERY PLAN:text
+Unique  (cost=65.83..70.83 rows=1000 width=4)
+  ->  Sort  (cost=65.83..68.33 rows=1000 width=4)
+        Sort Key: id
+        ->  Seq Scan on a78_rj  (cost=0.00..16.00 rows=1000 width=4)
+-- EXPLAIN
+
+> explain (verbose) select id from a78_rj order by id * 2.5 limit 5
+QUERY PLAN:text
+Limit  (cost=37.61..37.62 rows=5 width=36)
+  Output: id, (((id)::numeric * 2.5))
+  ->  Sort  (cost=37.61..40.11 rows=1000 width=36)
+        Output: id, (((id)::numeric * 2.5))
+        Sort Key: (((a78_rj.id)::numeric * 2.5))
+        ->  Seq Scan on public.a78_rj  (cost=0.00..21.00 rows=1000 width=36)
+              Output: id, ((id)::numeric * 2.5)
+-- EXPLAIN
+
+> select id from a78_rj order by id * 2.5 desc limit 3
+id:int4
+1000
+999
+998
+-- SELECT 3
+
+> drop table a78_rj
+-- DROP TABLE
+

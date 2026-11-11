@@ -1,0 +1,120 @@
+> CREATE TABLE a140b_cust (c_custkey int PRIMARY KEY, c_name text, c_nationkey int)
+-- CREATE TABLE
+
+> CREATE TABLE a140b_ord (o_orderkey int PRIMARY KEY, o_custkey int, o_orderdate date)
+-- CREATE TABLE
+
+> INSERT INTO a140b_cust SELECT g, 'Customer#' || g, g % 25 FROM generate_series(1, 6000) g
+-- INSERT 0 6000
+
+> INSERT INTO a140b_ord SELECT g, 1 + (g * 7) % 6000, date '1992-01-01' + (g % 2400) FROM generate_series(1, 60000) g
+-- INSERT 0 60000
+
+> VACUUM ANALYZE a140b_cust, a140b_ord
+-- VACUUM
+
+> SET max_parallel_workers_per_gather = 0
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT c_custkey, count(*) FROM a140b_cust, a140b_ord
+> WHERE c_custkey = o_custkey AND o_orderdate < date '1992-02-01'
+> GROUP BY c_custkey, c_name LIMIT 8
+QUERY PLAN:text
+Limit
+  ->  GroupAggregate
+        Group Key: a140b_cust.c_custkey
+        ->  Nested Loop
+              Join Filter: (a140b_cust.c_custkey = a140b_ord.o_custkey)
+              ->  Index Scan using a140b_cust_pkey on a140b_cust
+              ->  Materialize
+                    ->  Seq Scan on a140b_ord
+                          Filter: (o_orderdate < '1992-02-01'::date)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT c_custkey, count(*) FROM a140b_cust, a140b_ord
+> WHERE c_custkey = o_custkey AND o_orderdate < date '1992-02-01'
+> GROUP BY c_custkey, c_name
+QUERY PLAN:text
+HashAggregate
+  Group Key: a140b_cust.c_custkey
+  ->  Hash Join
+        Hash Cond: (a140b_ord.o_custkey = a140b_cust.c_custkey)
+        ->  Seq Scan on a140b_ord
+              Filter: (o_orderdate < '1992-02-01'::date)
+        ->  Hash
+              ->  Seq Scan on a140b_cust
+-- EXPLAIN
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> DROP TABLE a140b_cust, a140b_ord
+-- DROP TABLE
+
+> CREATE FUNCTION a140b_srf() RETURNS SETOF int LANGUAGE sql AS 'SELECT 1 UNION ALL SELECT 2'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a140b_srf2(n int) RETURNS SETOF int LANGUAGE sql ROWS 10 AS 'SELECT generate_series(1, n)'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a140b_srf3(n int) RETURNS SETOF int LANGUAGE sql STABLE COST 7 AS 'SELECT g FROM generate_series(1, n) g'
+-- CREATE FUNCTION
+
+> CREATE TABLE a140b_t (a int)
+-- CREATE TABLE
+
+> INSERT INTO a140b_t SELECT generate_series(1, 100)
+-- INSERT 0 100
+
+> ANALYZE a140b_t
+-- ANALYZE
+
+> EXPLAIN SELECT a140b_srf()
+QUERY PLAN:text
+ProjectSet  (cost=0.00..5.27 rows=1000 width=4)
+  ->  Result  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> EXPLAIN SELECT a140b_srf2(3)
+QUERY PLAN:text
+ProjectSet  (cost=0.00..0.32 rows=10 width=4)
+  ->  Result  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, a140b_srf2(a) FROM a140b_t
+QUERY PLAN:text
+ProjectSet  (cost=0.00..32.50 rows=1000 width=8)
+  ->  Seq Scan on a140b_t  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT a140b_srf3(5)
+QUERY PLAN:text
+ProjectSet  (cost=0.00..5.03 rows=1000 width=4)
+  ->  Result  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, a140b_srf() FROM a140b_t
+QUERY PLAN:text
+ProjectSet  (cost=0.00..527.50 rows=100000 width=8)
+  ->  Seq Scan on a140b_t  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT a140b_srf(), generate_series(1, 3)
+QUERY PLAN:text
+ProjectSet  (cost=0.00..5.27 rows=1000 width=8)
+  ->  Result  (cost=0.00..0.01 rows=1 width=0)
+-- EXPLAIN
+
+> SELECT a140b_srf(), a140b_srf2(3)
+a140b_srf:int4 | a140b_srf2:int4
+1 | 1
+2 | 2
+NULL | 3
+-- SELECT 3
+
+> DROP TABLE a140b_t
+-- DROP TABLE
+
+> DROP FUNCTION a140b_srf(), a140b_srf2(int), a140b_srf3(int)
+-- DROP FUNCTION
+

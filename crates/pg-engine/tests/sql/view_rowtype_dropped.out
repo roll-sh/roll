@@ -1,0 +1,107 @@
+> create table vrd_users (userid text, seq int, email text, todrop bool, moredrop int, enabled bool)
+-- CREATE TABLE
+
+> insert into vrd_users values ('id', 1, 'email', true, 11, true)
+-- INSERT 0 1
+
+> insert into vrd_users values ('id2', 2, 'email2', true, 12, true)
+-- INSERT 0 1
+
+> alter table vrd_users drop column todrop
+-- ALTER TABLE
+
+> create function vrd_get_users() returns setof vrd_users as
+> $$ select * from vrd_users order by userid; $$
+> language sql stable
+-- CREATE FUNCTION
+
+> create view vrd_usersview as
+> select * from rows from(vrd_get_users(), generate_series(10, 11)) with ordinality
+-- CREATE VIEW
+
+> select * from vrd_usersview
+userid:text | seq:int4 | email:text | moredrop:int4 | enabled:bool | generate_series:int4 | ordinality:int8
+id | 1 | email | 11 | t | 10 | 1
+id2 | 2 | email2 | 12 | t | 11 | 2
+-- SELECT 2
+
+> alter table vrd_users add column junk text
+-- ALTER TABLE
+
+> select * from vrd_usersview
+userid:text | seq:int4 | email:text | moredrop:int4 | enabled:bool | generate_series:int4 | ordinality:int8
+id | 1 | email | 11 | t | 10 | 1
+id2 | 2 | email2 | 12 | t | 11 | 2
+-- SELECT 2
+
+> alter table vrd_users drop column moredrop
+ERROR 2BP01: cannot drop column moredrop of table vrd_users because other objects depend on it
+DETAIL: view vrd_usersview depends on column moredrop of table vrd_users
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> begin
+-- BEGIN
+
+> delete from pg_depend where
+>   objid = (select oid from pg_rewrite
+>            where ev_class = 'vrd_usersview'::regclass and rulename = '_RETURN')
+>   and refobjsubid = 5
+> returning pg_describe_object(classid, objid, objsubid) as obj,
+>           pg_describe_object(refclassid, refobjid, refobjsubid) as ref,
+>           deptype
+obj:text | ref:text | deptype:char
+rule _RETURN on view vrd_usersview | column moredrop of table vrd_users | n
+-- DELETE 1
+
+> alter table vrd_users drop column moredrop
+-- ALTER TABLE
+
+> select * from vrd_usersview
+ERROR 42703: attribute 5 of type record has been dropped
+
+> rollback
+-- ROLLBACK
+
+> alter table vrd_users alter column seq type numeric
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule _RETURN on view vrd_usersview depends on column "seq"
+
+> begin
+-- BEGIN
+
+> delete from pg_depend where
+>   objid = (select oid from pg_rewrite
+>            where ev_class = 'vrd_usersview'::regclass and rulename = '_RETURN')
+>   and refobjsubid = 2
+> returning pg_describe_object(classid, objid, objsubid) as obj,
+>           pg_describe_object(refclassid, refobjid, refobjsubid) as ref,
+>           deptype
+obj:text | ref:text | deptype:char
+rule _RETURN on view vrd_usersview | column seq of table vrd_users | n
+-- DELETE 1
+
+> alter table vrd_users alter column seq type numeric
+-- ALTER TABLE
+
+> select * from vrd_usersview
+ERROR 42804: attribute 2 of type record has wrong type
+DETAIL: Table has type numeric, but query expects integer.
+
+> rollback
+-- ROLLBACK
+
+> select * from vrd_usersview
+userid:text | seq:int4 | email:text | moredrop:int4 | enabled:bool | generate_series:int4 | ordinality:int8
+id | 1 | email | 11 | t | 10 | 1
+id2 | 2 | email2 | 12 | t | 11 | 2
+-- SELECT 2
+
+> create view vrd_direct as select userid, seq from vrd_users
+-- CREATE VIEW
+
+> select * from vrd_direct
+userid:text | seq:int4
+id | 1
+id2 | 2
+-- SELECT 2
+

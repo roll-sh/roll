@@ -1,0 +1,157 @@
+> SET enable_partitionwise_join = on
+-- SET
+
+> CREATE TABLE gpu_f1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_f1_p1 PARTITION OF gpu_f1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_f1_p3 PARTITION OF gpu_f1 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_f1_p2 PARTITION OF gpu_f1 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> INSERT INTO gpu_f1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> ANALYZE gpu_f1
+-- ANALYZE
+
+> CREATE TABLE gpu_f2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_f2_p1 PARTITION OF gpu_f2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_f2_p2 PARTITION OF gpu_f2 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_f2_p3 PARTITION OF gpu_f2 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO gpu_f2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> ANALYZE gpu_f2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM gpu_f1 FULL JOIN gpu_f2 p2(b, a, c) USING (a, b) FULL JOIN gpu_f2 p3(b, a, c) USING (a, b)
+>   WHERE a BETWEEN 490 AND 510
+QUERY PLAN:text
+Aggregate
+  ->  Append
+        ->  Hash Full Join
+              Hash Cond: ((COALESCE(gpu_f1_1.a, p2_1.a) = p3_1.a) AND (COALESCE(gpu_f1_1.b, p2_1.b) = p3_1.b))
+              Filter: ((COALESCE(COALESCE(gpu_f1_1.a, p2_1.a), p3_1.a) >= 490) AND (COALESCE(COALESCE(gpu_f1_1.a, p2_1.a), p3_1.a) <= 510))
+              ->  Hash Full Join
+                    Hash Cond: ((gpu_f1_1.a = p2_1.a) AND (gpu_f1_1.b = p2_1.b))
+                    ->  Seq Scan on gpu_f1_p1 gpu_f1_1
+                    ->  Hash
+                          ->  Seq Scan on gpu_f2_p1 p2_1
+              ->  Hash
+                    ->  Seq Scan on gpu_f2_p1 p3_1
+        ->  Hash Full Join
+              Hash Cond: ((COALESCE(gpu_f1_2.a, p2_2.a) = p3_2.a) AND (COALESCE(gpu_f1_2.b, p2_2.b) = p3_2.b))
+              Filter: ((COALESCE(COALESCE(gpu_f1_2.a, p2_2.a), p3_2.a) >= 490) AND (COALESCE(COALESCE(gpu_f1_2.a, p2_2.a), p3_2.a) <= 510))
+              ->  Hash Full Join
+                    Hash Cond: ((gpu_f1_2.a = p2_2.a) AND (gpu_f1_2.b = p2_2.b))
+                    ->  Seq Scan on gpu_f1_p2 gpu_f1_2
+                    ->  Hash
+                          ->  Seq Scan on gpu_f2_p2 p2_2
+              ->  Hash
+                    ->  Seq Scan on gpu_f2_p2 p3_2
+        ->  Hash Full Join
+              Hash Cond: ((COALESCE(gpu_f1_3.a, p2_3.a) = p3_3.a) AND (COALESCE(gpu_f1_3.b, p2_3.b) = p3_3.b))
+              Filter: ((COALESCE(COALESCE(gpu_f1_3.a, p2_3.a), p3_3.a) >= 490) AND (COALESCE(COALESCE(gpu_f1_3.a, p2_3.a), p3_3.a) <= 510))
+              ->  Hash Full Join
+                    Hash Cond: ((gpu_f1_3.a = p2_3.a) AND (gpu_f1_3.b = p2_3.b))
+                    ->  Seq Scan on gpu_f1_p3 gpu_f1_3
+                    ->  Hash
+                          ->  Seq Scan on gpu_f2_p3 p2_3
+              ->  Hash
+                    ->  Seq Scan on gpu_f2_p3 p3_3
+-- EXPLAIN
+
+> SELECT count(*) FROM gpu_f1 FULL JOIN gpu_f2 p2(b, a, c) USING (a, b) FULL JOIN gpu_f2 p3(b, a, c) USING (a, b)
+>   WHERE a BETWEEN 490 AND 510
+count:int8
+14
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM gpu_f1 FULL JOIN gpu_f2 p2(b, a, c) USING (a, b) FULL JOIN gpu_f2 p3(b, a, c) USING (a, b)
+>   FULL JOIN gpu_f1 p4 (a, b, c) USING (a, b)
+>   WHERE a BETWEEN 490 AND 510
+QUERY PLAN:text
+Aggregate
+  ->  Append
+        ->  Hash Full Join
+              Hash Cond: ((COALESCE(COALESCE(gpu_f1_1.a, p2_1.a), p3_1.a) = p4_1.a) AND (COALESCE(COALESCE(gpu_f1_1.b, p2_1.b), p3_1.b) = p4_1.b))
+              Filter: ((COALESCE(COALESCE(COALESCE(gpu_f1_1.a, p2_1.a), p3_1.a), p4_1.a) >= 490) AND (COALESCE(COALESCE(COALESCE(gpu_f1_1.a, p2_1.a), p3_1.a), p4_1.a) <= 510))
+              ->  Hash Full Join
+                    Hash Cond: ((COALESCE(gpu_f1_1.a, p2_1.a) = p3_1.a) AND (COALESCE(gpu_f1_1.b, p2_1.b) = p3_1.b))
+                    ->  Hash Full Join
+                          Hash Cond: ((gpu_f1_1.a = p2_1.a) AND (gpu_f1_1.b = p2_1.b))
+                          ->  Seq Scan on gpu_f1_p1 gpu_f1_1
+                          ->  Hash
+                                ->  Seq Scan on gpu_f2_p1 p2_1
+                    ->  Hash
+                          ->  Seq Scan on gpu_f2_p1 p3_1
+              ->  Hash
+                    ->  Seq Scan on gpu_f1_p1 p4_1
+        ->  Hash Full Join
+              Hash Cond: ((COALESCE(COALESCE(gpu_f1_2.a, p2_2.a), p3_2.a) = p4_2.a) AND (COALESCE(COALESCE(gpu_f1_2.b, p2_2.b), p3_2.b) = p4_2.b))
+              Filter: ((COALESCE(COALESCE(COALESCE(gpu_f1_2.a, p2_2.a), p3_2.a), p4_2.a) >= 490) AND (COALESCE(COALESCE(COALESCE(gpu_f1_2.a, p2_2.a), p3_2.a), p4_2.a) <= 510))
+              ->  Hash Full Join
+                    Hash Cond: ((COALESCE(gpu_f1_2.a, p2_2.a) = p3_2.a) AND (COALESCE(gpu_f1_2.b, p2_2.b) = p3_2.b))
+                    ->  Hash Full Join
+                          Hash Cond: ((gpu_f1_2.a = p2_2.a) AND (gpu_f1_2.b = p2_2.b))
+                          ->  Seq Scan on gpu_f1_p2 gpu_f1_2
+                          ->  Hash
+                                ->  Seq Scan on gpu_f2_p2 p2_2
+                    ->  Hash
+                          ->  Seq Scan on gpu_f2_p2 p3_2
+              ->  Hash
+                    ->  Seq Scan on gpu_f1_p2 p4_2
+        ->  Hash Full Join
+              Hash Cond: ((COALESCE(COALESCE(gpu_f1_3.a, p2_3.a), p3_3.a) = p4_3.a) AND (COALESCE(COALESCE(gpu_f1_3.b, p2_3.b), p3_3.b) = p4_3.b))
+              Filter: ((COALESCE(COALESCE(COALESCE(gpu_f1_3.a, p2_3.a), p3_3.a), p4_3.a) >= 490) AND (COALESCE(COALESCE(COALESCE(gpu_f1_3.a, p2_3.a), p3_3.a), p4_3.a) <= 510))
+              ->  Hash Full Join
+                    Hash Cond: ((COALESCE(gpu_f1_3.a, p2_3.a) = p3_3.a) AND (COALESCE(gpu_f1_3.b, p2_3.b) = p3_3.b))
+                    ->  Hash Full Join
+                          Hash Cond: ((gpu_f1_3.a = p2_3.a) AND (gpu_f1_3.b = p2_3.b))
+                          ->  Seq Scan on gpu_f1_p3 gpu_f1_3
+                          ->  Hash
+                                ->  Seq Scan on gpu_f2_p3 p2_3
+                    ->  Hash
+                          ->  Seq Scan on gpu_f2_p3 p3_3
+              ->  Hash
+                    ->  Seq Scan on gpu_f1_p3 p4_3
+-- EXPLAIN
+
+> SELECT count(*) FROM gpu_f1 FULL JOIN gpu_f2 p2(b, a, c) USING (a, b) FULL JOIN gpu_f2 p3(b, a, c) USING (a, b)
+>   FULL JOIN gpu_f1 p4 (a, b, c) USING (a, b)
+>   WHERE a BETWEEN 490 AND 510
+count:int8
+14
+-- SELECT 1
+
+> SELECT a, b, gpu_f1.c, p2.c, p3.c FROM gpu_f1 FULL JOIN gpu_f2 p2(b, a, c) USING (a, b)
+>   FULL JOIN gpu_f2 p3(b, a, c) USING (a, b)
+>   WHERE a BETWEEN 495 AND 505 ORDER BY 1, 2
+a:int4 | b:int4 | c:varchar | c:varchar | c:varchar
+495 | 20 | NULL | 0495 | 0495
+496 | 21 | 0496 | NULL | NULL
+498 | 23 | 0498 | 0498 | 0498
+500 | 0 | 0500 | NULL | NULL
+501 | 1 | NULL | 0501 | 0501
+502 | 2 | 0502 | NULL | NULL
+504 | 4 | 0504 | 0504 | 0504
+-- SELECT 7
+
+> RESET enable_partitionwise_join
+-- RESET
+

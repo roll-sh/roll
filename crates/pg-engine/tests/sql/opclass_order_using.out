@@ -1,0 +1,107 @@
+> CREATE FUNCTION oou_rcmp(int4, int4) RETURNS int LANGUAGE sql IMMUTABLE AS $$ SELECT CASE WHEN $1 = $2 THEN 0 WHEN $1 > $2 THEN -1 ELSE 1 END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oou_rlt(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 > $2 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oou_rle(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 >= $2 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oou_rgt(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 < $2 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION oou_rge(int4, int4) RETURNS bool LANGUAGE sql IMMUTABLE AS $$ SELECT $1 <= $2 $$
+-- CREATE FUNCTION
+
+> CREATE OPERATOR <<< (leftarg = int4, rightarg = int4, function = oou_rlt)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR <<<= (leftarg = int4, rightarg = int4, function = oou_rle)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR >>> (leftarg = int4, rightarg = int4, function = oou_rgt)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR >>>= (leftarg = int4, rightarg = int4, function = oou_rge)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR === (leftarg = int4, rightarg = int4, function = int4eq)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR ~~~ (leftarg = int4, rightarg = int4, function = int4eq)
+-- CREATE OPERATOR
+
+> SELECT a FROM (VALUES (3), (1), (2)) v(a) ORDER BY a USING <<<
+ERROR 42809: operator <<< is not a valid ordering operator (at 60)
+HINT: Ordering operators must be "<" or ">" members of btree operator families.
+
+> CREATE OPERATOR CLASS oou_rev_ops FOR TYPE int4 USING btree AS
+>   OPERATOR 1 <<<, OPERATOR 2 <<<=, OPERATOR 3 ===, OPERATOR 4 >>>=, OPERATOR 5 >>>,
+>   FUNCTION 1 oou_rcmp(int4, int4)
+-- CREATE OPERATOR CLASS
+
+> CREATE TABLE oou_t (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO oou_t VALUES (3, 'c'), (1, 'a'), (NULL, 'n'), (2, 'b'), (5, 'e'), (4, 'd')
+-- INSERT 0 6
+
+> SELECT a FROM oou_t ORDER BY a USING <<<
+a:int4
+5
+4
+3
+2
+1
+NULL
+-- SELECT 6
+
+> SELECT a FROM oou_t ORDER BY a USING >>>
+a:int4
+NULL
+1
+2
+3
+4
+5
+-- SELECT 6
+
+> SELECT a FROM oou_t ORDER BY a USING <<< NULLS FIRST
+a:int4
+NULL
+5
+4
+3
+2
+1
+-- SELECT 6
+
+> SELECT a, b FROM oou_t ORDER BY a USING >>> NULLS LAST, b
+a:int4 | b:text
+1 | a
+2 | b
+3 | c
+4 | d
+5 | e
+NULL | n
+-- SELECT 6
+
+> SELECT a FROM oou_t ORDER BY a USING ~~~
+ERROR 42809: operator ~~~ is not a valid ordering operator (at 38)
+HINT: Ordering operators must be "<" or ">" members of btree operator families.
+
+> SELECT string_agg(a::text, ',' ORDER BY a USING <<<) FROM oou_t
+string_agg:text
+5,4,3,2,1
+-- SELECT 1
+
+> SELECT a, row_number() OVER (ORDER BY a USING <<<) FROM oou_t ORDER BY a
+a:int4 | row_number:int8
+1 | 5
+2 | 4
+3 | 3
+4 | 2
+5 | 1
+NULL | 6
+-- SELECT 6
+

@@ -1,0 +1,195 @@
+> CREATE TABLE t2 (id int4 PRIMARY KEY, a text, b text)
+-- CREATE TABLE
+
+> INSERT INTO t2 (id, a, b) VALUES (17, 'aa', 'z'), (18, 'ab', 'y')
+-- INSERT 0 2
+
+> SELECT 1 AS c0, t1.b FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1)
+c0:int4 | b:text
+1 | NULL
+NULL | y
+NULL | z
+-- SELECT 3
+
+> SELECT 1 AS c0, 1 AS c1, count(*) FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1) ORDER BY 1, 2, 3
+c0:int4 | c1:int4 | count:int8
+1 | 1 | 2
+NULL | 1 | 1
+NULL | 1 | 1
+-- SELECT 3
+
+> SELECT 1 AS c0, count(*) FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1) HAVING 1 IS DISTINCT FROM NULL
+c0:int4 | count:int8
+1 | 2
+NULL | 1
+NULL | 1
+-- SELECT 3
+
+> SELECT 1 AS c0, count(*) FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1) ORDER BY 1, 2
+c0:int4 | count:int8
+1 | 2
+NULL | 1
+NULL | 1
+-- SELECT 3
+
+> SELECT 1 AS c0, count(*) FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1) ORDER BY 1 DESC, 2
+c0:int4 | count:int8
+NULL | 1
+NULL | 1
+1 | 2
+-- SELECT 3
+
+> SELECT 1::int AS c0, 1::int AS c1, count(*) FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1::int) ORDER BY 1, 2, 3
+c0:int4 | c1:int4 | count:int8
+1 | 1 | 2
+NULL | 1 | 1
+NULL | 1 | 1
+-- SELECT 3
+
+> SELECT 1 AS c0, b, count(*), rank() OVER (PARTITION BY 1 ORDER BY b) FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1) ORDER BY 1, 2, 3
+c0:int4 | b:text | count:int8 | rank:int8
+1 | NULL | 2 | 1
+NULL | y | 1 | 1
+NULL | z | 1 | 2
+-- SELECT 3
+
+> SELECT 1 + 1 AS c0, 1 + 1 AS c1, count(*) FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1 + 1) ORDER BY 1, 2, 3
+c0:int4 | c1:int4 | count:int8
+2 | 2 | 2
+NULL | 2 | 1
+NULL | 2 | 1
+-- SELECT 3
+
+> SELECT 2 AS c0, count(*) FROM t2 t1 GROUP BY ROLLUP (t1.b, 1) HAVING 2 = 2 ORDER BY 1, 2
+c0:int4 | count:int8
+2 | 1
+2 | 1
+NULL | 1
+NULL | 1
+NULL | 2
+-- SELECT 5
+
+> SELECT DISTINCT ON (1) 1 AS c0, b FROM t2 t1 GROUP BY GROUPING SETS ((t1.b), 1) ORDER BY 1, 2
+c0:int4 | b:text
+1 | NULL
+NULL | y
+-- SELECT 2
+
+> SELECT 5 AS x, count(*) FROM t2 GROUP BY x HAVING 5 > 4
+x:int4 | count:int8
+5 | 2
+-- SELECT 1
+
+> SELECT (1+1) + 0 AS c0, count(*) FROM t2 GROUP BY GROUPING SETS ((b), 1+1) ORDER BY 1, 2
+c0:int4 | count:int8
+2 | 1
+2 | 1
+2 | 2
+-- SELECT 3
+
+> SELECT COALESCE(1+1, 5) AS c0, count(*) FROM t2 GROUP BY GROUPING SETS ((b), 1+1) ORDER BY 1, 2
+c0:int4 | count:int8
+2 | 1
+2 | 1
+2 | 2
+-- SELECT 3
+
+> SELECT length(a) + 0 AS c0, count(*) FROM t2 GROUP BY GROUPING SETS ((b), length(a)) ORDER BY 1, 2
+c0:int4 | count:int8
+2 | 2
+NULL | 1
+NULL | 1
+-- SELECT 3
+
+> SELECT COALESCE(length(a), 7) AS c0, count(*) FROM t2 GROUP BY GROUPING SETS ((b), length(a)) ORDER BY 1, 2
+c0:int4 | count:int8
+2 | 2
+7 | 1
+7 | 1
+-- SELECT 3
+
+> SELECT count(*) FROM t2 GROUP BY GROUPING SETS ((b), 1+1) HAVING (1+1) IS NULL
+count:int8
+-- SELECT 0
+
+> SELECT count(*) FROM t2 GROUP BY GROUPING SETS ((b), length(a)) HAVING length(a) IS NULL
+count:int8
+1
+1
+-- SELECT 2
+
+> SELECT abs(-3) AS c0, abs(-3) + 1 AS c1, count(*) FROM t2 GROUP BY GROUPING SETS ((b), abs(-3)) ORDER BY 1, 2, 3
+c0:int4 | c1:int4 | count:int8
+3 | 4 | 2
+NULL | 4 | 1
+NULL | 4 | 1
+-- SELECT 3
+
+> SELECT b, COALESCE(extract(day from '1999-08-11'::date)::int, 0) AS c1 FROM t2 GROUP BY GROUPING SETS ((b), (extract(day from '1999-08-11'::date)::int)) ORDER BY 1, 2
+b:text | c1:int4
+y | 11
+z | 11
+NULL | 11
+-- SELECT 3
+
+> SELECT b, (1+1) AS c1 FROM t2 GROUP BY GROUPING SETS ((b), (1+1)) ORDER BY 1, 2
+b:text | c1:int4
+y | NULL
+z | NULL
+NULL | 2
+-- SELECT 3
+
+> SELECT b, (1+1) * 3 AS c1 FROM t2 GROUP BY GROUPING SETS ((b), (1+1)) ORDER BY 1, 2
+b:text | c1:int4
+y | 6
+z | 6
+NULL | 6
+-- SELECT 3
+
+> SELECT b, upper('x') || '' AS c1 FROM t2 GROUP BY GROUPING SETS ((b), upper('x')) ORDER BY 1, 2
+b:text | c1:text
+y | X
+z | X
+NULL | X
+-- SELECT 3
+
+> SELECT upper('x') || '' AS c0, upper('x') AS c1 FROM t2 GROUP BY GROUPING SETS ((b), upper('x')) ORDER BY 1, 2
+c0:text | c1:text
+X | X
+X | NULL
+X | NULL
+-- SELECT 3
+
+> SELECT b, now() IS NULL AS c1 FROM t2 GROUP BY GROUPING SETS ((b), now()) ORDER BY 1, 2
+b:text | c1:bool
+y | f
+z | f
+NULL | f
+-- SELECT 3
+
+> SELECT b, random() IS NULL AS c1 FROM t2 GROUP BY GROUPING SETS ((b), random()) ORDER BY 1, 2
+b:text | c1:bool
+y | t
+z | t
+NULL | f
+NULL | f
+-- SELECT 4
+
+> SELECT x.id, (SELECT array_agg(c ORDER BY c) FROM (SELECT x.id + 0 AS c FROM t2 GROUP BY GROUPING SETS ((b), x.id)) s) FROM t2 x ORDER BY 1
+id:int4 | array_agg:int4[]
+17 | {17,NULL,NULL}
+18 | {18,NULL,NULL}
+-- SELECT 2
+
+> SELECT x.id, (SELECT array_agg(c ORDER BY c) FROM (SELECT x.id AS c FROM t2 GROUP BY GROUPING SETS ((b), x.id)) s) FROM t2 x ORDER BY 1
+id:int4 | array_agg:int4[]
+17 | {17,NULL,NULL}
+18 | {18,NULL,NULL}
+-- SELECT 2
+
+> SELECT x.id, (SELECT count(*) FROM t2 GROUP BY GROUPING SETS ((b), x.id) HAVING x.id IS NULL) FROM t2 x ORDER BY 1
+id:int4 | count:int8
+17 | NULL
+18 | NULL
+-- SELECT 2
+

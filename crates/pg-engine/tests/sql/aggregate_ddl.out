@@ -1,0 +1,108 @@
+> create aggregate agd_avg (sfunc = int4_avg_accum, basetype = int4, stype = _int8, finalfunc = int8_avg, initcond1 = '{0,0}')
+-- CREATE AGGREGATE
+
+> select aggfnoid::regprocedure, aggkind, aggtransfn, aggfinalfn, aggtranstype::regtype, agginitval from pg_aggregate where aggfnoid = 'agd_avg'::regproc
+aggfnoid:2202 | aggkind:char | aggtransfn:regproc | aggfinalfn:regproc | aggtranstype:regtype | agginitval:text
+agd_avg(integer) | n | int4_avg_accum | int8_avg | bigint[] | {0,0}
+-- SELECT 1
+
+> comment on aggregate agd_nope (*) is 'x'
+ERROR 42883: aggregate agd_nope(*) does not exist
+
+> create function agd_least(int8, int8) returns int8 language sql as 'select least($1, $2)'
+-- CREATE FUNCTION
+
+> create aggregate agd_least_agg(int4) (stype = int8, sfunc = agd_least)
+ERROR 42804: function agd_least(bigint, bigint) requires run-time type coercion
+
+> create aggregate agd_sum (float8) (stype = float8, sfunc = float8pl, mstype = float8, msfunc = float8pl, minvfunc = float8mi)
+-- CREATE AGGREGATE
+
+> select aggmtransfn, aggminvtransfn, aggmtranstype::regtype from pg_aggregate where aggfnoid = 'agd_sum'::regproc
+aggmtransfn:regproc | aggminvtransfn:regproc | aggmtranstype:regtype
+float8pl | float8mi | double precision
+-- SELECT 1
+
+> create aggregate agd_bad1 (float8) (stype = float8, sfunc = float8pl, msfunc = float8pl)
+ERROR 42P13: aggregate msfunc must not be specified without mstype
+
+> create aggregate agd_bad2 (float8) (stype = float8, sfunc = float8pl, mstype = float8, msfunc = float8pl)
+ERROR 42P13: aggregate minvfunc must be specified when mstype is specified
+
+> create aggregate agd_avg2 (numeric) (stype = internal, sfunc = numeric_avg_accum, serialfunc = numeric_avg_serialize)
+ERROR 42P13: must specify both or neither of serialization and deserialization functions
+
+> create aggregate agd_avg2 (numeric) (stype = internal, sfunc = numeric_avg_accum, serialfunc = numeric_avg_serialize, deserialfunc = numeric_avg_deserialize, combinefunc = int4larger)
+ERROR 42883: function int4larger(internal, internal) does not exist
+
+> create aggregate agd_avg2 (numeric) (stype = internal, sfunc = numeric_avg_accum, finalfunc = numeric_avg, serialfunc = numeric_avg_serialize, deserialfunc = numeric_avg_deserialize, combinefunc = numeric_avg_combine, finalfunc_modify = shareable, parallel = safe)
+-- CREATE AGGREGATE
+
+> select aggfnoid, aggtransfn, aggcombinefn, aggtranstype::regtype, aggserialfn, aggdeserialfn, aggfinalmodify from pg_aggregate where aggfnoid = 'agd_avg2'::regproc
+aggfnoid:regproc | aggtransfn:regproc | aggcombinefn:regproc | aggtranstype:regtype | aggserialfn:regproc | aggdeserialfn:regproc | aggfinalmodify:char
+agd_avg2 | numeric_avg_accum | numeric_avg_combine | internal | numeric_avg_serialize | numeric_avg_deserialize | s
+-- SELECT 1
+
+> create or replace aggregate agd_avg2 (numeric) (stype = numeric, sfunc = numeric_add, finalfunc = numeric_out)
+ERROR 42P13: cannot change return type of existing function
+HINT: Use DROP AGGREGATE agd_avg2(numeric) first.
+
+> create or replace aggregate agd_avg2 (order by numeric) (stype = numeric, sfunc = numeric_add)
+ERROR 42809: cannot change routine kind
+DETAIL: "agd_avg2" is an ordinary aggregate function.
+
+> create aggregate agd_bad3 (int) (stype = int, sfunc = int4pl, parallel = pear)
+ERROR 42601: parameter "parallel" must be SAFE, RESTRICTED, or UNSAFE
+
+> create aggregate agd_pct(float8 order by anyelement) (stype = internal, sfunc = ordered_set_transition, finalfunc = percentile_disc_final, finalfunc_extra = true, finalfunc_modify = read_write)
+-- CREATE AGGREGATE
+
+> create aggregate agd_rank(variadic "any" order by variadic "any") (stype = internal, sfunc = ordered_set_transition_multi, finalfunc = rank_final, finalfunc_extra = true, hypothetical)
+-- CREATE AGGREGATE
+
+> select p.proname, a.aggkind, a.aggnumdirectargs, pg_get_function_arguments(p.oid), pg_get_function_result(p.oid) from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid where p.proname like 'agd_%' order by 1
+proname:name | aggkind:char | aggnumdirectargs:int2 | pg_get_function_arguments:text | pg_get_function_result:text
+agd_avg | n | 0 | integer | numeric
+agd_avg2 | n | 0 | numeric | numeric
+agd_pct | o | 1 | double precision ORDER BY anyelement | anyelement
+agd_rank | h | 1 | VARIADIC "any" ORDER BY VARIADIC "any" | bigint
+agd_sum | n | 0 | double precision | double precision
+-- SELECT 5
+
+> create aggregate agd_max (int4) (stype = int4, sfunc = int4larger, sortop = >)
+-- CREATE AGGREGATE
+
+> select aggsortop::regoperator from pg_aggregate where aggfnoid = 'agd_max'::regproc
+aggsortop:2204
+>(integer,integer)
+-- SELECT 1
+
+> create aggregate agd_bad4 (int4, int4) (stype = int4, sfunc = int4larger, sortop = >)
+ERROR 42883: function int4larger(integer, integer, integer) does not exist
+
+> create aggregate agd_bad5 ("Stype" = int4, "Sfunc" = int4pl)
+WARNING 42601: aggregate attribute "Stype" not recognized
+WARNING 42601: aggregate attribute "Sfunc" not recognized
+ERROR 42P13: aggregate stype must be specified
+
+> drop aggregate agd_avg(int4)
+-- DROP AGGREGATE
+
+> drop aggregate agd_sum(float8)
+-- DROP AGGREGATE
+
+> drop aggregate agd_avg2(numeric)
+-- DROP AGGREGATE
+
+> drop aggregate agd_pct(float8 order by anyelement)
+-- DROP AGGREGATE
+
+> drop aggregate agd_rank(variadic "any" order by variadic "any")
+-- DROP AGGREGATE
+
+> drop aggregate agd_max(int4)
+-- DROP AGGREGATE
+
+> drop function agd_least(int8, int8)
+-- DROP FUNCTION
+

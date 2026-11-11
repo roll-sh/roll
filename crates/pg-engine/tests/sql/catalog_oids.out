@@ -1,0 +1,47 @@
+> SELECT 'int4pl'::regproc::oid, 'textcat'::regproc::oid, 'now'::regproc::oid, 'length(text)'::regprocedure::oid, 'network_sub'::regproc::oid, 'bitand'::regproc::oid
+oid:oid | oid:oid | oid:oid | oid:oid | oid:oid | oid:oid
+177 | 1258 | 1299 | 1317 | 927 | 1673
+-- SELECT 1
+
+> SELECT '+(int4,int4)'::regoperator::oid, '=(text,text)'::regoperator::oid, '||(text,text)'::regoperator::oid, '<<(inet,inet)'::regoperator::oid, '~(NONE,bit)'::regoperator::oid
+oid:oid | oid:oid | oid:oid | oid:oid | oid:oid
+551 | 98 | 654 | 931 | 1794
+-- SELECT 1
+
+> SELECT oid, oprname, oprleft::regtype, oprright::regtype, oprcode, oprcom::regoperator, oprnegate::regoperator, oprcanmerge, oprcanhash, oprrest, oprjoin FROM pg_operator WHERE oid IN (96, 98, 97, 521, 664, 931, 1784) ORDER BY oid
+oid:oid | oprname:name | oprleft:regtype | oprright:regtype | oprcode:regproc | oprcom:2204 | oprnegate:2204 | oprcanmerge:bool | oprcanhash:bool | oprrest:regproc | oprjoin:regproc
+96 | = | integer | integer | int4eq | =(integer,integer) | <>(integer,integer) | t | t | eqsel | eqjoinsel
+97 | < | integer | integer | int4lt | >(integer,integer) | >=(integer,integer) | f | f | scalarltsel | scalarltjoinsel
+98 | = | text | text | texteq | =(text,text) | <>(text,text) | t | t | eqsel | eqjoinsel
+521 | > | integer | integer | int4gt | <(integer,integer) | <=(integer,integer) | f | f | scalargtsel | scalargtjoinsel
+664 | < | text | text | text_lt | >(text,text) | >=(text,text) | f | f | scalarltsel | scalarltjoinsel
+931 | << | inet | inet | network_sub | >>(inet,inet) | 0 | f | f | networksel | networkjoinsel
+1784 | = | bit | bit | biteq | =(bit,bit) | <>(bit,bit) | t | f | eqsel | eqjoinsel
+-- SELECT 7
+
+> SELECT count(*) FROM pg_operator WHERE oid >= 16384
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM pg_proc WHERE oid >= 16384
+count:int8
+0
+-- SELECT 1
+
+> SELECT p.oid, proname, pg_get_function_arguments(p.oid) FROM pg_proc p WHERE p.oid IN (177, 1258, 1299, 2116, 2147, 2803, 927) ORDER BY 1
+oid:oid | proname:name | pg_get_function_arguments:text
+177 | int4pl | integer, integer
+927 | network_sub | inet, inet
+1258 | textcat | text, text
+1299 | now | 
+2116 | max | integer
+2147 | count | "any"
+2803 | count | 
+-- SELECT 7
+
+> SELECT int4pl(1, 2), textcat('a', 'b'), network_sub('10.1.0.0/16', '10.0.0.0/8'), int8pl_inet(1, '1.2.3.4')
+int4pl:int4 | textcat:text | network_sub:bool | int8pl_inet:inet
+3 | ab | t | 1.2.3.5
+-- SELECT 1
+

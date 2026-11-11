@@ -1,0 +1,111 @@
+> CREATE TABLE a143_e (id int, k int)
+-- CREATE TABLE
+
+> CREATE TABLE a143_s (k int, z int)
+-- CREATE TABLE
+
+> INSERT INTO a143_e SELECT i, i % 50 FROM generate_series(1, 10000) i
+-- INSERT 0 10000
+
+> INSERT INTO a143_s SELECT i, i % 5 FROM generate_series(1, 20) i
+-- INSERT 0 20
+
+> CREATE SEQUENCE a143_q
+-- CREATE SEQUENCE
+
+> CREATE FUNCTION a143_noisy(int) RETURNS bool LANGUAGE plpgsql AS
+>   $$ BEGIN RAISE NOTICE 'build %', $1; RETURN true; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a143_quiet_notice(int) RETURNS bool LANGUAGE plpgsql IMMUTABLE AS
+>   $$ BEGIN IF $1 = 3 THEN RAISE NOTICE 'immutable build %', $1; END IF; RETURN true; END $$
+-- CREATE FUNCTION
+
+> ANALYZE a143_e
+-- ANALYZE
+
+> ANALYZE a143_s
+-- ANALYZE
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT e.id FROM (SELECT * FROM a143_e WHERE id % 10007 = 10006) e JOIN a143_s s ON s.k = e.k WHERE a143_noisy(s.k)
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a143_e.k = s.k)
+  ->  Seq Scan on a143_e
+        Filter: ((id % 10007) = 10006)
+  ->  Hash
+        ->  Seq Scan on a143_s s
+              Filter: a143_noisy(k)
+-- EXPLAIN
+
+> SELECT e.id FROM (SELECT * FROM a143_e WHERE id % 10007 = 10006) e JOIN a143_s s ON s.k = e.k WHERE a143_noisy(s.k)
+id:int4
+-- SELECT 0
+
+> SELECT e.id FROM (SELECT * FROM a143_e WHERE id % 10007 = 10006) e JOIN a143_s s ON s.k = e.k WHERE a143_quiet_notice(s.z + s.k)
+id:int4
+-- SELECT 0
+
+> SELECT count(*) FROM (SELECT * FROM a143_e WHERE id % 10007 = 10006) e JOIN (SELECT k, nextval('a143_q') AS n FROM a143_s) s ON s.k = e.k
+count:int8
+0
+-- SELECT 1
+
+> SELECT nextval('a143_q')
+nextval:int8
+1
+-- SELECT 1
+
+> SELECT count(*) FROM (SELECT * FROM a143_e WHERE id % 10007 = 10006) e LEFT JOIN a143_s s ON s.k = e.k AND a143_noisy(s.k)
+count:int8
+0
+-- SELECT 1
+
+> INSERT INTO a143_e VALUES (10006, 3)
+-- INSERT 0 1
+
+> SELECT e.id FROM (SELECT * FROM a143_e WHERE id % 10007 = 10006) e JOIN a143_s s ON s.k = e.k WHERE a143_noisy(s.k) AND s.k < 3
+NOTICE 00000: build 1
+CONTEXT: PL/pgSQL function a143_noisy(integer) line 1 at RAISE
+NOTICE 00000: build 2
+CONTEXT: PL/pgSQL function a143_noisy(integer) line 1 at RAISE
+id:int4
+-- SELECT 0
+
+> SELECT count(*) FROM (SELECT * FROM a143_e WHERE id % 10007 = 10006) e JOIN (SELECT k, nextval('a143_q') AS n FROM a143_s) s ON s.k = e.k
+count:int8
+1
+-- SELECT 1
+
+> SELECT nextval('a143_q')
+nextval:int8
+22
+-- SELECT 1
+
+> RESET enable_mergejoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> DROP FUNCTION a143_noisy(int)
+-- DROP FUNCTION
+
+> DROP FUNCTION a143_quiet_notice(int)
+-- DROP FUNCTION
+
+> DROP SEQUENCE a143_q
+-- DROP SEQUENCE
+
+> DROP TABLE a143_e
+-- DROP TABLE
+
+> DROP TABLE a143_s
+-- DROP TABLE
+

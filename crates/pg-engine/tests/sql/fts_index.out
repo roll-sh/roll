@@ -1,0 +1,112 @@
+> CREATE TABLE docs (id int PRIMARY KEY, body text, tsv tsvector)
+-- CREATE TABLE
+
+> INSERT INTO docs SELECT g, 'doc ' || g || CASE WHEN g % 3 = 0 THEN ' fat cats' WHEN g % 3 = 1 THEN ' rats ate' ELSE ' sat on mats' END, NULL FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> UPDATE docs SET tsv = to_tsvector('english', body)
+-- UPDATE 300
+
+> CREATE INDEX docs_gin ON docs USING gin (tsv)
+-- CREATE INDEX
+
+> CREATE INDEX docs_gist ON docs USING gist (to_tsvector('english', body))
+-- CREATE INDEX
+
+> CREATE INDEX docs_gin2 ON docs USING gin (to_tsvector('simple', body)) WITH (fastupdate = off)
+-- CREATE INDEX
+
+> SELECT indexrelid::regclass, indisvalid, pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 'docs'::regclass ORDER BY 1
+indexrelid:regclass | indisvalid:bool | pg_get_indexdef:text
+docs_pkey | t | CREATE UNIQUE INDEX docs_pkey ON public.docs USING btree (id)
+docs_gin | t | CREATE INDEX docs_gin ON public.docs USING gin (tsv)
+docs_gist | t | CREATE INDEX docs_gist ON public.docs USING gist (to_tsvector('english'::regconfig, body))
+docs_gin2 | t | CREATE INDEX docs_gin2 ON public.docs USING gin (to_tsvector('simple'::regconfig, body)) WITH (fastupdate=off)
+-- SELECT 4
+
+> SELECT opcname, opcmethod::regclass IS NULL FROM pg_opclass WHERE opcintype IN ('tsvector'::regtype, 'tsquery'::regtype) ORDER BY 1
+opcname:name | ?column?:bool
+tsquery_ops | f
+tsquery_ops | f
+tsvector_ops | f
+tsvector_ops | f
+tsvector_ops | f
+-- SELECT 5
+
+> SELECT amname FROM pg_am a JOIN pg_opclass o ON o.opcmethod = a.oid WHERE o.opcname IN ('tsvector_ops', 'gist_tsvector_ops', 'gist_tsquery_ops') ORDER BY 1
+amname:name
+btree
+gin
+gist
+-- SELECT 3
+
+> SELECT count(*) FROM docs WHERE tsv @@ to_tsquery('english', 'cat')
+count:int8
+100
+-- SELECT 1
+
+> SELECT count(*) FROM docs WHERE to_tsvector('english', body) @@ to_tsquery('english', 'rat & ate')
+count:int8
+100
+-- SELECT 1
+
+> SELECT id FROM docs WHERE tsv @@ 'mat & 10'::tsquery ORDER BY id
+id:int4
+-- SELECT 0
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT count(*) FROM docs WHERE tsv @@ to_tsquery('english', 'cat | rat')
+count:int8
+200
+-- SELECT 1
+
+> SELECT count(*) FROM docs WHERE to_tsvector('simple', body) @@ to_tsquery('simple', 'fat <-> cats')
+count:int8
+100
+-- SELECT 1
+
+> SELECT count(*) FROM docs WHERE tsv @@ to_tsquery('english', '!cat')
+count:int8
+200
+-- SELECT 1
+
+> SELECT count(*) FROM docs WHERE tsv @@ to_tsquery('english', 'ca:*')
+count:int8
+100
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE INDEX docs_bad ON docs USING gin (body)
+ERROR 42704: data type text has no default operator class for access method "gin"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> CREATE INDEX docs_bad ON docs USING gist (body)
+ERROR 42704: data type text has no default operator class for access method "gist"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> CREATE INDEX docs_q ON docs USING gist (to_tsquery('english', body))
+ERROR 42601: syntax error in tsquery: "doc 1 rats ate"
+
+> CREATE INDEX docs_btree ON docs (tsv)
+-- CREATE INDEX
+
+> SELECT tsv FROM docs ORDER BY tsv LIMIT 3
+tsv:3614
+'1':2 'ate':4 'doc':1 'rat':3
+'10':2 'ate':4 'doc':1 'rat':3
+'11':2 'doc':1 'mat':5 'sat':3
+-- SELECT 3
+
+> SELECT DISTINCT tsv FROM docs ORDER BY 1 DESC LIMIT 2
+tsv:3614
+'300':2 'cat':4 'doc':1 'fat':3
+'299':2 'doc':1 'mat':5 'sat':3
+-- SELECT 2
+
+> DROP TABLE docs
+-- DROP TABLE
+

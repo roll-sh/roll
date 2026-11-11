@@ -1,0 +1,179 @@
+> CREATE TABLE test_oidr (id int NOT NULL, note text)
+-- CREATE TABLE
+
+> CREATE EXTENSION IF NOT EXISTS pg_prewarm
+-- CREATE EXTENSION
+
+> CREATE TEMP TABLE ids AS
+> SELECT (SELECT oid FROM pg_class WHERE relname = 'test_oidr') AS t,
+>        (SELECT objid FROM pg_depend JOIN pg_extension ex ON ex.oid = pg_depend.refobjid
+>         WHERE ex.extname = 'pg_prewarm' ORDER BY objid LIMIT 1) AS f
+-- SELECT 1
+
+> UPDATE pg_attribute SET attrelid = (SELECT f FROM ids) WHERE attrelid = (SELECT t FROM ids)
+-- UPDATE 8
+
+> UPDATE pg_class SET oid = (SELECT f FROM ids) WHERE oid = (SELECT t FROM ids)
+-- UPDATE 1
+
+> SELECT 'test_oidr'::regclass = (SELECT f FROM ids) AS input_moved,
+>        'public.test_oidr'::regclass = (SELECT f FROM ids) AS qualified_moved
+input_moved:bool | qualified_moved:bool
+t | t
+-- SELECT 1
+
+> SELECT to_regclass('test_oidr') = (SELECT f FROM ids) AS to_regclass_moved
+to_regclass_moved:bool
+t
+-- SELECT 1
+
+> SELECT (SELECT f FROM ids)::regclass AS new_oid_out
+new_oid_out:regclass
+test_oidr
+-- SELECT 1
+
+> SELECT (SELECT t FROM ids)::regclass::text = (SELECT t FROM ids)::text AS old_oid_bare
+old_oid_bare:bool
+t
+-- SELECT 1
+
+> SELECT a.attname FROM pg_attribute a
+> WHERE a.attrelid = 'test_oidr'::regclass AND a.attnum > 0 ORDER BY a.attnum
+attname:name
+id
+note
+-- SELECT 2
+
+> SELECT c.relname FROM pg_class c WHERE c.oid = 'test_oidr'::regclass
+relname:name
+test_oidr
+-- SELECT 1
+
+> INSERT INTO test_oidr VALUES (1, 'x')
+-- INSERT 0 1
+
+> SELECT * FROM test_oidr
+id:int4 | note:text
+1 | x
+-- SELECT 1
+
+> UPDATE pg_attribute SET attrelid = (SELECT t FROM ids) WHERE attrelid = (SELECT f FROM ids)
+-- UPDATE 8
+
+> UPDATE pg_class SET oid = (SELECT t FROM ids) WHERE oid = (SELECT f FROM ids)
+-- UPDATE 1
+
+> SELECT 'test_oidr'::regclass = (SELECT t FROM ids) AS input_back
+input_back:bool
+t
+-- SELECT 1
+
+> SELECT (SELECT t FROM ids)::regclass AS own_oid_out
+own_oid_out:regclass
+test_oidr
+-- SELECT 1
+
+> DROP TABLE test_oidr
+-- DROP TABLE
+
+> DROP EXTENSION pg_prewarm
+-- DROP EXTENSION
+
+> CREATE TABLE a133_ct (a varchar(15) DEFAULT '', b varchar(15) DEFAULT 'x', c int DEFAULT 1,
+>   d varchar(10) DEFAULT NULL, e varchar(5) DEFAULT 'ab'::text, f text DEFAULT 'q',
+>   g numeric(5,2) DEFAULT 1.5, h char(3) DEFAULT 'z', i varchar(4) DEFAULT lower('A'))
+-- CREATE TABLE
+
+> ALTER TABLE a133_ct ALTER COLUMN a TYPE text, ALTER COLUMN b TYPE varchar(30),
+>   ALTER COLUMN c TYPE bigint, ALTER COLUMN d TYPE text, ALTER COLUMN e TYPE text,
+>   ALTER COLUMN f TYPE varchar(9), ALTER COLUMN g TYPE numeric(8,3), ALTER COLUMN h TYPE text,
+>   ALTER COLUMN i TYPE text
+-- ALTER TABLE
+
+> SELECT attname, pg_get_expr(adbin, adrelid) FROM pg_attrdef
+>   JOIN pg_attribute ON attrelid = adrelid AND attnum = adnum
+> WHERE adrelid = 'a133_ct'::regclass ORDER BY adnum
+attname:name | pg_get_expr:text
+a | ''::character varying
+b | 'x'::character varying
+c | 1
+d | NULL::character varying
+e | 'ab'::text
+f | 'q'::text
+g | 1.5
+h | 'z'::bpchar
+i | lower('A'::text)
+-- SELECT 9
+
+> SELECT column_name, column_default FROM information_schema.columns
+> WHERE table_name = 'a133_ct' ORDER BY ordinal_position
+column_name:name | column_default:varchar
+a | ''::character varying
+b | 'x'::character varying
+c | 1
+d | NULL::character varying
+e | 'ab'::text
+f | 'q'::text
+g | 1.5
+h | 'z'::bpchar
+i | lower('A'::text)
+-- SELECT 9
+
+> DROP TABLE a133_ct
+-- DROP TABLE
+
+> CREATE TABLE a133_ct (a varchar(15) DEFAULT '', b varchar(15) DEFAULT '7')
+-- CREATE TABLE
+
+> ALTER TABLE a133_ct ALTER COLUMN a TYPE int
+ERROR 42804: column "a" cannot be cast automatically to type integer
+HINT: You might need to specify "USING a::integer".
+
+> ALTER TABLE a133_ct ALTER COLUMN b TYPE int
+ERROR 42804: column "b" cannot be cast automatically to type integer
+HINT: You might need to specify "USING b::integer".
+
+> ALTER TABLE a133_ct ALTER COLUMN b TYPE int USING b::int
+ERROR 42804: default for column "b" cannot be cast automatically to type integer
+
+> SELECT attname, pg_get_expr(adbin, adrelid) FROM pg_attrdef
+>   JOIN pg_attribute ON attrelid = adrelid AND attnum = adnum
+> WHERE adrelid = 'a133_ct'::regclass ORDER BY adnum
+attname:name | pg_get_expr:text
+a | ''::character varying
+b | '7'::character varying
+-- SELECT 2
+
+> DROP TABLE a133_ct
+-- DROP TABLE
+
+> CREATE TABLE a133_ct (a int DEFAULT 1 + 2, b timestamp DEFAULT now(), c text DEFAULT 'x' || 'y',
+>   d varchar(3)[] DEFAULT '{a}', e int[] DEFAULT array[1])
+-- CREATE TABLE
+
+> ALTER TABLE a133_ct ALTER COLUMN a TYPE bigint, ALTER COLUMN b TYPE timestamptz,
+>   ALTER COLUMN c TYPE varchar(5), ALTER COLUMN d TYPE text[], ALTER COLUMN e TYPE bigint[]
+-- ALTER TABLE
+
+> SELECT attname, pg_get_expr(adbin, adrelid) FROM pg_attrdef
+>   JOIN pg_attribute ON attrelid = adrelid AND attnum = adnum
+> WHERE adrelid = 'a133_ct'::regclass ORDER BY adnum
+attname:name | pg_get_expr:text
+a | (1 + 2)
+b | now()
+c | ('x'::text || 'y'::text)
+d | '{a}'::character varying[]
+e | ARRAY[1]
+-- SELECT 5
+
+> INSERT INTO a133_ct DEFAULT VALUES
+-- INSERT 0 1
+
+> SELECT a, b IS NOT NULL AS b, c, d, e FROM a133_ct
+a:int8 | b:bool | c:varchar | d:text[] | e:int8[]
+3 | t | xy | {a} | {1}
+-- SELECT 1
+
+> DROP TABLE a133_ct
+-- DROP TABLE
+

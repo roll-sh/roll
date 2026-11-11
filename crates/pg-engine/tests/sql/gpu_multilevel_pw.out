@@ -1,0 +1,305 @@
+> SET enable_partitionwise_join = on
+-- SET
+
+> CREATE TABLE gpu_m1 (a int, b int, c varchar) PARTITION BY RANGE(a)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m1_p1 PARTITION OF gpu_m1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m1_p2 PARTITION OF gpu_m1 FOR VALUES FROM (250) TO (500) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m1_p2_p1 PARTITION OF gpu_m1_p2 FOR VALUES IN ('0000', '0001')
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m1_p2_p2 PARTITION OF gpu_m1_p2 FOR VALUES IN ('0002', '0003')
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m1_p3 PARTITION OF gpu_m1 FOR VALUES FROM (500) TO (600) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m1_p3_p1 PARTITION OF gpu_m1_p3 FOR VALUES FROM (0) TO (13)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m1_p3_p2 PARTITION OF gpu_m1_p3 FOR VALUES FROM (13) TO (25)
+-- CREATE TABLE
+
+> INSERT INTO gpu_m1 SELECT i, i % 25, to_char(i % 4, 'FM0000') FROM generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> ANALYZE gpu_m1
+-- ANALYZE
+
+> CREATE TABLE gpu_m2 (a int, b int, c varchar) PARTITION BY RANGE(b)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m2_p1 PARTITION OF gpu_m2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m2_p2 PARTITION OF gpu_m2 FOR VALUES FROM (250) TO (500) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m2_p2_p1 PARTITION OF gpu_m2_p2 FOR VALUES IN ('0000', '0001')
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m2_p2_p2 PARTITION OF gpu_m2_p2 FOR VALUES IN ('0002', '0003')
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m2_p3 PARTITION OF gpu_m2 FOR VALUES FROM (500) TO (600) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m2_p3_p1 PARTITION OF gpu_m2_p3 FOR VALUES FROM (0) TO (13)
+-- CREATE TABLE
+
+> CREATE TABLE gpu_m2_p3_p2 PARTITION OF gpu_m2_p3 FOR VALUES FROM (13) TO (25)
+-- CREATE TABLE
+
+> INSERT INTO gpu_m2 SELECT i % 25, i, to_char(i % 4, 'FM0000') FROM generate_series(0, 599, 3) i
+-- INSERT 0 200
+
+> ANALYZE gpu_m2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1, gpu_m2 t2 WHERE t1.a = t2.b AND t1.b = 0 ORDER BY t1.a, t2.b
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t2_1.b = t1_1.a)
+              ->  Seq Scan on gpu_m2_p1 t2_1
+              ->  Hash
+                    ->  Seq Scan on gpu_m1_p1 t1_1
+                          Filter: (b = 0)
+        ->  Hash Join
+              Hash Cond: (t2_3.b = t1_3.a)
+              ->  Append
+                    ->  Seq Scan on gpu_m2_p2_p1 t2_3
+                    ->  Seq Scan on gpu_m2_p2_p2 t2_4
+              ->  Hash
+                    ->  Append
+                          ->  Seq Scan on gpu_m1_p2_p1 t1_3
+                                Filter: (b = 0)
+                          ->  Seq Scan on gpu_m1_p2_p2 t1_4
+                                Filter: (b = 0)
+        ->  Hash Join
+              Hash Cond: (t2_6.b = t1_5.a)
+              ->  Append
+                    ->  Seq Scan on gpu_m2_p3_p1 t2_6
+                    ->  Seq Scan on gpu_m2_p3_p2 t2_7
+              ->  Hash
+                    ->  Seq Scan on gpu_m1_p3_p1 t1_5
+                          Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1, gpu_m2 t2 WHERE t1.a = t2.b AND t1.b = 0 ORDER BY t1.a, t2.b
+a:int4 | c:varchar | b:int4 | c:varchar
+0 | 0000 | 0 | 0000
+150 | 0002 | 150 | 0002
+300 | 0000 | 300 | 0000
+450 | 0002 | 450 | 0002
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1, gpu_m2 t2 WHERE t1.a = t2.a AND t1.a = t2.b AND t1.c = t2.c ORDER BY t1.a, t2.b
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Hash Join
+              Hash Cond: ((t1_1.a = t2_1.a) AND ((t1_1.c)::text = (t2_1.c)::text))
+              ->  Seq Scan on gpu_m1_p1 t1_1
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p1 t2_1
+                          Filter: (a = b)
+        ->  Hash Join
+              Hash Cond: ((t1_2.a = t2_2.a) AND ((t1_2.c)::text = (t2_2.c)::text))
+              ->  Seq Scan on gpu_m1_p2_p1 t1_2
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p2_p1 t2_2
+                          Filter: (a = b)
+        ->  Hash Join
+              Hash Cond: ((t1_3.a = t2_3.a) AND ((t1_3.c)::text = (t2_3.c)::text))
+              ->  Seq Scan on gpu_m1_p2_p2 t1_3
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p2_p2 t2_3
+                          Filter: (a = b)
+        ->  Hash Join
+              Hash Cond: ((t1_5.a = t2_5.a) AND ((t1_5.c)::text = (t2_5.c)::text))
+              ->  Append
+                    ->  Seq Scan on gpu_m1_p3_p1 t1_5
+                    ->  Seq Scan on gpu_m1_p3_p2 t1_6
+              ->  Hash
+                    ->  Append
+                          ->  Seq Scan on gpu_m2_p3_p1 t2_5
+                                Filter: (a = b)
+                          ->  Seq Scan on gpu_m2_p3_p2 t2_6
+                                Filter: (a = b)
+-- EXPLAIN
+
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1, gpu_m2 t2 WHERE t1.a = t2.a AND t1.a = t2.b AND t1.c = t2.c ORDER BY t1.a, t2.b
+a:int4 | c:varchar | b:int4 | c:varchar
+0 | 0000 | 0 | 0000
+6 | 0002 | 6 | 0002
+12 | 0000 | 12 | 0000
+18 | 0002 | 18 | 0002
+24 | 0000 | 24 | 0000
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1 LEFT JOIN gpu_m2 t2 ON t1.a = t2.b AND t1.c = t2.c WHERE t1.b = 0 ORDER BY t1.a, t2.b
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a, t2.b
+  ->  Append
+        ->  Hash Right Join
+              Hash Cond: ((t2_1.b = t1_1.a) AND ((t2_1.c)::text = (t1_1.c)::text))
+              ->  Seq Scan on gpu_m2_p1 t2_1
+              ->  Hash
+                    ->  Seq Scan on gpu_m1_p1 t1_1
+                          Filter: (b = 0)
+        ->  Hash Right Join
+              Hash Cond: ((t2_2.b = t1_2.a) AND ((t2_2.c)::text = (t1_2.c)::text))
+              ->  Seq Scan on gpu_m2_p2_p1 t2_2
+              ->  Hash
+                    ->  Seq Scan on gpu_m1_p2_p1 t1_2
+                          Filter: (b = 0)
+        ->  Hash Right Join
+              Hash Cond: ((t2_3.b = t1_3.a) AND ((t2_3.c)::text = (t1_3.c)::text))
+              ->  Seq Scan on gpu_m2_p2_p2 t2_3
+              ->  Hash
+                    ->  Seq Scan on gpu_m1_p2_p2 t1_3
+                          Filter: (b = 0)
+        ->  Hash Right Join
+              Hash Cond: ((t2_5.b = t1_4.a) AND ((t2_5.c)::text = (t1_4.c)::text))
+              ->  Append
+                    ->  Seq Scan on gpu_m2_p3_p1 t2_5
+                    ->  Seq Scan on gpu_m2_p3_p2 t2_6
+              ->  Hash
+                    ->  Seq Scan on gpu_m1_p3_p1 t1_4
+                          Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1 LEFT JOIN gpu_m2 t2 ON t1.a = t2.b AND t1.c = t2.c WHERE t1.b = 0 ORDER BY t1.a, t2.b
+a:int4 | c:varchar | b:int4 | c:varchar
+0 | 0000 | 0 | 0000
+50 | 0002 | NULL | NULL
+100 | 0000 | NULL | NULL
+150 | 0002 | 150 | 0002
+200 | 0000 | NULL | NULL
+250 | 0002 | NULL | NULL
+300 | 0000 | 300 | 0000
+350 | 0002 | NULL | NULL
+400 | 0000 | NULL | NULL
+450 | 0002 | 450 | 0002
+500 | 0000 | NULL | NULL
+550 | 0002 | NULL | NULL
+-- SELECT 12
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1 RIGHT JOIN gpu_m2 t2 ON t1.a = t2.b AND t1.c = t2.c WHERE t2.a = 0 ORDER BY t1.a, t2.b
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a, t2.b
+  ->  Append
+        ->  Hash Right Join
+              Hash Cond: ((t1_1.a = t2_1.b) AND ((t1_1.c)::text = (t2_1.c)::text))
+              ->  Seq Scan on gpu_m1_p1 t1_1
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p1 t2_1
+                          Filter: (a = 0)
+        ->  Hash Right Join
+              Hash Cond: ((t1_2.a = t2_2.b) AND ((t1_2.c)::text = (t2_2.c)::text))
+              ->  Seq Scan on gpu_m1_p2_p1 t1_2
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p2_p1 t2_2
+                          Filter: (a = 0)
+        ->  Hash Right Join
+              Hash Cond: ((t1_3.a = t2_3.b) AND ((t1_3.c)::text = (t2_3.c)::text))
+              ->  Seq Scan on gpu_m1_p2_p2 t1_3
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p2_p2 t2_3
+                          Filter: (a = 0)
+        ->  Hash Right Join
+              Hash Cond: ((t1_5.a = t2_4.b) AND ((t1_5.c)::text = (t2_4.c)::text))
+              ->  Append
+                    ->  Seq Scan on gpu_m1_p3_p1 t1_5
+                    ->  Seq Scan on gpu_m1_p3_p2 t1_6
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p3_p1 t2_4
+                          Filter: (a = 0)
+-- EXPLAIN
+
+> SELECT t1.a, t1.c, t2.b, t2.c FROM gpu_m1 t1 RIGHT JOIN gpu_m2 t2 ON t1.a = t2.b AND t1.c = t2.c WHERE t2.a = 0 ORDER BY t1.a, t2.b
+a:int4 | c:varchar | b:int4 | c:varchar
+0 | 0000 | 0 | 0000
+150 | 0002 | 150 | 0002
+300 | 0000 | 300 | 0000
+450 | 0002 | 450 | 0002
+NULL | NULL | 75 | 0003
+NULL | NULL | 225 | 0001
+NULL | NULL | 375 | 0003
+NULL | NULL | 525 | 0001
+-- SELECT 8
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM (SELECT * FROM gpu_m1 WHERE gpu_m1.b = 0) t1 FULL JOIN (SELECT * FROM gpu_m2 WHERE gpu_m2.a = 0) t2 ON (t1.a = t2.b AND t1.c = t2.c) ORDER BY t1.a, t2.b
+QUERY PLAN:text
+Sort
+  Sort Key: gpu_m1.a, gpu_m2.b
+  ->  Append
+        ->  Hash Full Join
+              Hash Cond: ((gpu_m1_1.a = gpu_m2_1.b) AND ((gpu_m1_1.c)::text = (gpu_m2_1.c)::text))
+              ->  Seq Scan on gpu_m1_p1 gpu_m1_1
+                    Filter: (b = 0)
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p1 gpu_m2_1
+                          Filter: (a = 0)
+        ->  Hash Full Join
+              Hash Cond: ((gpu_m1_2.a = gpu_m2_2.b) AND ((gpu_m1_2.c)::text = (gpu_m2_2.c)::text))
+              ->  Seq Scan on gpu_m1_p2_p1 gpu_m1_2
+                    Filter: (b = 0)
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p2_p1 gpu_m2_2
+                          Filter: (a = 0)
+        ->  Hash Full Join
+              Hash Cond: ((gpu_m1_3.a = gpu_m2_3.b) AND ((gpu_m1_3.c)::text = (gpu_m2_3.c)::text))
+              ->  Seq Scan on gpu_m1_p2_p2 gpu_m1_3
+                    Filter: (b = 0)
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p2_p2 gpu_m2_3
+                          Filter: (a = 0)
+        ->  Hash Full Join
+              Hash Cond: ((gpu_m1_4.a = gpu_m2_4.b) AND ((gpu_m1_4.c)::text = (gpu_m2_4.c)::text))
+              ->  Seq Scan on gpu_m1_p3_p1 gpu_m1_4
+                    Filter: (b = 0)
+              ->  Hash
+                    ->  Seq Scan on gpu_m2_p3_p1 gpu_m2_4
+                          Filter: (a = 0)
+-- EXPLAIN
+
+> SELECT t1.a, t1.c, t2.b, t2.c FROM (SELECT * FROM gpu_m1 WHERE gpu_m1.b = 0) t1 FULL JOIN (SELECT * FROM gpu_m2 WHERE gpu_m2.a = 0) t2 ON (t1.a = t2.b AND t1.c = t2.c) ORDER BY t1.a, t2.b
+a:int4 | c:varchar | b:int4 | c:varchar
+0 | 0000 | 0 | 0000
+50 | 0002 | NULL | NULL
+100 | 0000 | NULL | NULL
+150 | 0002 | 150 | 0002
+200 | 0000 | NULL | NULL
+250 | 0002 | NULL | NULL
+300 | 0000 | 300 | 0000
+350 | 0002 | NULL | NULL
+400 | 0000 | NULL | NULL
+450 | 0002 | 450 | 0002
+500 | 0000 | NULL | NULL
+550 | 0002 | NULL | NULL
+NULL | NULL | 75 | 0003
+NULL | NULL | 225 | 0001
+NULL | NULL | 375 | 0003
+NULL | NULL | 525 | 0001
+-- SELECT 16
+
+> RESET enable_partitionwise_join
+-- RESET
+

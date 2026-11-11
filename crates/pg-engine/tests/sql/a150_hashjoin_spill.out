@@ -1,0 +1,363 @@
+> create table a150a (id int, t text)
+-- CREATE TABLE
+
+> create table a150b (id int, v text)
+-- CREATE TABLE
+
+> insert into a150a select g, md5(g::text) from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> insert into a150b select g % 15000, md5((g * 7)::text) from generate_series(1, 30000) g
+-- INSERT 0 30000
+
+> insert into a150b select null, 'n' || g from generate_series(1, 20) g
+-- INSERT 0 20
+
+> analyze a150a, a150b
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> create function a150_explain(q text) returns setof text language plpgsql as $$
+> declare ln text;
+> begin
+>   for ln in execute 'explain (analyze, costs off, timing off, summary off, buffers off) ' || q loop
+>     return next ln;
+>   end loop;
+> end $$
+-- CREATE FUNCTION
+
+> select a150_explain('select * from a150a join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 32768  Batches: 1  Memory Usage: 1604kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t || v, ',')) from (select * from a150a join a150b using (id)) s
+md5:text
+2850cc0e9fe7a754826af5d562136ab9
+-- SELECT 1
+
+> set work_mem = '64kB'
+-- SET
+
+> select a150_explain('select * from a150a join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 4096  Batches: 8  Memory Usage: 200kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t || v, ',')) from (select * from a150a join a150b using (id)) s
+md5:text
+7cf749eabeb8ce63acc2afcc5576b127
+-- SELECT 1
+
+> select * from a150a join a150b using (id) limit 5
+id:int4 | t:text | v:text
+14 | aab3238922bcc25a6f606eb525ffdc56 | ed3d2c21991e3bef5e069713af9fa6ca
+15 | 9bf31c7ff062936a96d3c8bd1f8f2ff3 | 65b9eea6e1cc6bb9f0cd2a47751a186f
+19 | 1f0e3dad99908345f7439f8ffabdffc4 | 9fc3d7152ba9336a670e36d0ed79bc43
+20 | 98f13708210194c475687be6106a3b84 | 1385974ed5904a438616ff7bdb3f7439
+21 | 3c59dc048e8850243be8079a5c74d079 | 8d5e957f297893487bd98fa830fa6413
+-- SELECT 5
+
+> select a150_explain('select * from a150b left join a150a using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 4096  Batches: 8  Memory Usage: 207kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Left Join (actual rows=30020.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(coalesce(id, -1) || coalesce(t, '-') || v, ',')) from (select * from a150b left join a150a using (id)) s
+md5:text
+23aa594a3279caacb33f6f4971bb2db2
+-- SELECT 1
+
+> select a150_explain('select * from a150a left join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 4096  Batches: 8  Memory Usage: 200kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Right Join (actual rows=34999.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t || coalesce(v, '-'), ',')) from (select * from a150a left join a150b using (id)) s
+md5:text
+b1f0d9db1b50aa304afd95f012613065
+-- SELECT 1
+
+> select a150_explain('select * from a150a full join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 4096  Batches: 8  Memory Usage: 200kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Full Join (actual rows=35021.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(coalesce(id, -1) || coalesce(t, '-') || coalesce(v, '-'), ',')) from (select * from a150a full join a150b using (id)) s
+md5:text
+da54061dd4e7f3bb16e974bdb91e58e7
+-- SELECT 1
+
+> select a150_explain('select * from a150a where exists (select 1 from a150b where a150b.id = a150a.id)')
+a150_explain:text
+        ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+        Buckets: 8192  Batches: 8  Memory Usage: 196kB
+  ->  Hash (actual rows=30000.00 loops=1)
+  ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+  Hash Cond: (a150a.id = a150b.id)
+Hash Semi Join (actual rows=14999.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t, ',')) from (select * from a150a where exists (select 1 from a150b where a150b.id = a150a.id)) s
+md5:text
+27152ac790ebc772bf80ef9c0e33be29
+-- SELECT 1
+
+> select a150_explain('select * from a150a where not exists (select 1 from a150b where a150b.id = a150a.id)')
+a150_explain:text
+        ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+        Buckets: 8192  Batches: 8  Memory Usage: 196kB
+  ->  Hash (actual rows=30000.00 loops=1)
+  ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+  Hash Cond: (a150a.id = a150b.id)
+Hash Anti Join (actual rows=5001.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t, ',')) from (select * from a150a where not exists (select 1 from a150b where a150b.id = a150a.id)) s
+md5:text
+20945efb4b5fede39db15ae1319212bd
+-- SELECT 1
+
+> select a150_explain('select a150b.v from a150a join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 8192  Batches: 8  Memory Usage: 154kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(v, ',')) from (select a150b.v from a150a join a150b using (id)) s
+md5:text
+1707dc0fd36bfbbef1b0fd7e1a761d0e
+-- SELECT 1
+
+> create table a150c (k int, p text)
+-- CREATE TABLE
+
+> insert into a150c select case when g <= 200 then 7 else g end, repeat('x', 40) from generate_series(1, 9000) g
+-- INSERT 0 9000
+
+> analyze a150c
+-- ANALYZE
+
+> select a150_explain('select count(*) from a150b join a150c on a150c.k = a150b.id')
+a150_explain:text
+              ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+              Buckets: 8192  Batches: 8  Memory Usage: 196kB
+        ->  Hash (actual rows=30000.00 loops=1)
+        ->  Seq Scan on a150c (actual rows=9000.00 loops=1)
+        Hash Cond: (a150c.k = a150b.id)
+  ->  Hash Join (actual rows=18000.00 loops=1)
+Aggregate (actual rows=1.00 loops=1)
+-- SELECT 7
+
+> select md5(string_agg(id || ':' || p || v, ',')) from (select a150b.id, a150b.v, a150c.p from a150b join a150c on a150c.k = a150b.id) s
+md5:text
+10a1e6b1365e35323c3506836b8fdc72
+-- SELECT 1
+
+> create table a150e (k int, w text)
+-- CREATE TABLE
+
+> insert into a150e select case when g % 3 = 0 then 7 else g end, md5(g::text) from generate_series(1, 12000) g
+-- INSERT 0 12000
+
+> analyze a150e
+-- ANALYZE
+
+> select a150_explain('select * from a150c join a150e on a150e.k = a150c.k')
+a150_explain:text
+        ->  Seq Scan on a150c (actual rows=9000.00 loops=1)
+        Buckets: 2048  Batches: 8  Memory Usage: 101kB
+  ->  Hash (actual rows=9000.00 loops=1)
+  ->  Seq Scan on a150e (actual rows=12000.00 loops=1)
+  Hash Cond: (a150e.k = a150c.k)
+Hash Join (actual rows=806066.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(k || p || w, ',')) from (select a150c.k, a150c.p, a150e.w from a150c join a150e on a150e.k = a150c.k) s
+md5:text
+b72b32c0d891484fa643e78f57f95e69
+-- SELECT 1
+
+> select a150_explain('select * from a150c left join a150e on a150e.k = a150c.k')
+a150_explain:text
+        ->  Seq Scan on a150c (actual rows=9000.00 loops=1)
+        Buckets: 2048  Batches: 8  Memory Usage: 101kB
+  ->  Hash (actual rows=9000.00 loops=1)
+  ->  Seq Scan on a150e (actual rows=12000.00 loops=1)
+  Hash Cond: (a150e.k = a150c.k)
+Hash Right Join (actual rows=809000.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(k || p || coalesce(w, '-'), ',')) from (select a150c.k, a150c.p, a150e.w from a150c left join a150e on a150e.k = a150c.k) s
+md5:text
+eee1c35db8ce0dd7902aad3444f90cdd
+-- SELECT 1
+
+> set work_mem = '256kB'
+-- SET
+
+> select a150_explain('select * from a150a join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 8192  Batches: 4  Memory Usage: 399kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t || v, ',')) from (select * from a150a join a150b using (id)) s
+md5:text
+b2835cd6dbe583e2f1712c851e8fd06e
+-- SELECT 1
+
+> select a150_explain('select * from a150b right join a150a using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 8192  Batches: 4  Memory Usage: 399kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Right Join (actual rows=34999.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t || coalesce(v, '-'), ',')) from (select * from a150b right join a150a using (id)) s
+md5:text
+064e1d6dc24414ce46eba3b929ee6dff
+-- SELECT 1
+
+> set work_mem = '1MB'
+-- SET
+
+> select a150_explain('select * from a150a join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 32768  Batches: 1  Memory Usage: 1604kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t || v, ',')) from (select * from a150a join a150b using (id)) s
+md5:text
+2850cc0e9fe7a754826af5d562136ab9
+-- SELECT 1
+
+> set hash_mem_multiplier = 1
+-- SET
+
+> select a150_explain('select * from a150a join a150b using (id)')
+a150_explain:text
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 16384  Batches: 2  Memory Usage: 800kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 6
+
+> select md5(string_agg(id || t || v, ',')) from (select * from a150a join a150b using (id)) s
+md5:text
+28503c9c86c41b70a4e5d10c71fb782f
+-- SELECT 1
+
+> reset hash_mem_multiplier
+-- RESET
+
+> set work_mem = '64kB'
+-- SET
+
+> select a150_explain('select * from a150b join (select * from a150a where id % 7 < 100) a using (id)')
+a150_explain:text
+              Filter: ((id % 7) < 100)
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 2048  Batches: 8  Memory Usage: 193kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 7
+
+> select md5(string_agg(id || t || v, ',')) from (select * from a150b join (select * from a150a where id % 7 < 100) a using (id)) s
+md5:text
+5f5ac42a3cd02c114a6102ad29fea950
+-- SELECT 1
+
+> set work_mem = '512kB'
+-- SET
+
+> select a150_explain('select * from a150b join (select * from a150a where id % 7 < 100) a using (id)')
+a150_explain:text
+              Filter: ((id % 7) < 100)
+        ->  Seq Scan on a150a (actual rows=20000.00 loops=1)
+        Buckets: 16384 (originally 8192)  Batches: 2 (originally 1)  Memory Usage: 897kB
+  ->  Hash (actual rows=20000.00 loops=1)
+  ->  Seq Scan on a150b (actual rows=30020.00 loops=1)
+  Hash Cond: (a150b.id = a150a.id)
+Hash Join (actual rows=29998.00 loops=1)
+-- SELECT 7
+
+> select md5(string_agg(id || t || v, ',')) from (select * from a150b join (select * from a150a where id % 7 < 100) a using (id)) s
+md5:text
+28503c9c86c41b70a4e5d10c71fb782f
+-- SELECT 1
+
+> set work_mem = '64kB'
+-- SET
+
+> set temp_file_limit = '100kB'
+-- SET
+
+> select count(*) from a150a join a150b using (id)
+ERROR 53400: temporary file size exceeds "temp_file_limit" (100kB)
+
+> reset temp_file_limit
+-- RESET
+
+> reset work_mem
+-- RESET
+
+> drop table a150a, a150b, a150c, a150e
+-- DROP TABLE
+
+> drop function a150_explain(text)
+-- DROP FUNCTION
+

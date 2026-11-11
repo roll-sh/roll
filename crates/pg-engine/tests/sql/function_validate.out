@@ -1,0 +1,258 @@
+> CREATE SCHEMA fv
+-- CREATE SCHEMA
+
+> CREATE TABLE fv.tt (a int)
+-- CREATE TABLE
+
+> CREATE TYPE fv.ty AS (x int, y text)
+-- CREATE TYPE
+
+> CREATE FUNCTION fv_v1() RETURNS bigint LANGUAGE sql SET search_path = fv AS $$ SELECT count(*) FROM tt $$
+-- CREATE FUNCTION
+
+> SELECT fv_v1()
+fv_v1:int8
+0
+-- SELECT 1
+
+> CREATE FUNCTION fv_v2() RETURNS bigint LANGUAGE sql AS $$ SELECT count(*) FROM tt $$
+ERROR 42P01: relation "tt" does not exist (at 80)
+
+> CREATE FUNCTION fv_v3() RETURNS int LANGUAGE plpgsql SET search_path = fv, public AS $$
+> DECLARE v ty; w tt.a%TYPE; r tt%ROWTYPE;
+> BEGIN v := ROW(1, 'a'); RETURN v.x; END $$
+-- CREATE FUNCTION
+
+> SELECT fv_v3()
+fv_v3:int4
+1
+-- SELECT 1
+
+> CREATE FUNCTION fv_v4() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE v ty;
+> BEGIN RETURN 1; END $$
+ERROR 42704: type "ty" does not exist (at 70)
+
+> CREATE FUNCTION fv_v5() RETURNS bigint LANGUAGE sql SET check_function_bodies = off AS $$ SELECT count(*) FROM nosuch_fv $$
+-- CREATE FUNCTION
+
+> SELECT proname, proconfig FROM pg_proc WHERE proname = 'fv_v5'
+proname:name | proconfig:text[]
+fv_v5 | {check_function_bodies=off}
+-- SELECT 1
+
+> CREATE FUNCTION fv_v6() RETURNS bigint LANGUAGE sql SET search_path = fv BEGIN ATOMIC SELECT count(*) FROM tt; END
+ERROR 42P01: relation "tt" does not exist (at 108)
+
+> CREATE FUNCTION fv_v7() RETURNS int LANGUAGE sql SET work_mem = 'abc' AS $$ SELECT 1 $$
+ERROR 22023: invalid value for parameter "work_mem": "abc"
+
+> CREATE FUNCTION fv_v7() RETURNS int LANGUAGE sql SET search_path = fv AS $$ SELECT 1::ty $$
+ERROR 42846: cannot cast type integer to ty (at 85)
+
+> CREATE FUNCTION fv_v7() RETURNS fv.ty LANGUAGE sql SET search_path = fv AS $$ SELECT ROW(1, 'a')::ty $$
+-- CREATE FUNCTION
+
+> SELECT fv_v7(), (fv_v7()).y
+fv_v7:user | y:text
+(1,a) | a
+-- SELECT 1
+
+> SELECT * FROM fv_v7()
+x:int4 | y:text
+1 | a
+-- SELECT 1
+
+> SHOW search_path
+search_path:text
+"$user", public
+-- SHOW
+
+> CREATE FUNCTION fv_v8() RETURNS int LANGUAGE sql SET datestyle = 'German' AS $$ SELECT extract(day FROM '01.02.2020'::date)::int $$
+-- CREATE FUNCTION
+
+> SELECT fv_v8()
+fv_v8:int4
+1
+-- SELECT 1
+
+> SET check_function_bodies = off
+-- SET
+
+> CREATE FUNCTION fv_v9() RETURNS int LANGUAGE plpgsql SET check_function_bodies = on AS $$
+> DECLARE v nosuch_fv;
+> BEGIN RETURN 1; END $$
+-- CREATE FUNCTION
+
+> RESET check_function_bodies
+-- RESET
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE a int; v nosuch.col%TYPE;
+> BEGIN RETURN 1; END $$
+ERROR 42P01: relation "nosuch" does not exist
+CONTEXT: compilation of PL/pgSQL function "fv_w1" near line 2
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE a int; v pg_class.nosuch%TYPE;
+> BEGIN RETURN 1; END $$
+ERROR 42703: column "nosuch" of relation "pg_class" does not exist
+CONTEXT: compilation of PL/pgSQL function "fv_w1" near line 2
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE a int; v fv.tt.nosuch%TYPE;
+> BEGIN RETURN 1; END $$
+ERROR 42703: column "nosuch" of relation "tt" does not exist
+CONTEXT: compilation of PL/pgSQL function "fv_w1" near line 2
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE a int; v nosuch%ROWTYPE;
+> BEGIN RETURN 1; END $$
+ERROR 42P01: relation "nosuch" does not exist
+CONTEXT: compilation of PL/pgSQL function "fv_w1" near line 2
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE a int;
+> BEGIN BEGIN DECLARE z nosuch2; BEGIN NULL; END; END; RETURN 1; END $$
+ERROR 42704: type "nosuch2" does not exist (at 97)
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE a int;
+> BEGIN IF false THEN DECLARE z nosuch3; BEGIN NULL; END; END IF; RETURN 1; END $$
+ERROR 42704: type "nosuch3" does not exist (at 105)
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE c CURSOR (x nosuch4) FOR SELECT 1;
+> BEGIN RETURN 1; END $$
+ERROR 42704: type "nosuch4" does not exist (at 80)
+
+> CREATE FUNCTION fv_w1() RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE v int[]; w varchar(3); u nosuch5[];
+> BEGIN RETURN 1; END $$
+ERROR 42704: type "nosuch5[]" does not exist (at 93)
+
+> CREATE FUNCTION fv_w1(p int, OUT q int) LANGUAGE plpgsql AS $$
+> <<lbl>> DECLARE v int; w lbl.v%TYPE; c p%TYPE; d c%TYPE; e fv_w1.p%TYPE; f q%TYPE;
+>   r pg_class%ROWTYPE; s pg_class.relname%TYPE; z pg_catalog.int4; t fv.tt%ROWTYPE; u fv.tt.a%TYPE;
+> BEGIN q := 1; END $$
+-- CREATE FUNCTION
+
+> SELECT fv_w1(1)
+fv_w1:int4
+1
+-- SELECT 1
+
+> DROP FUNCTION fv_w1
+-- DROP FUNCTION
+
+> DROP FUNCTION fv_nope
+ERROR 42883: could not find a function named "fv_nope"
+
+> DROP PROCEDURE fv_nope
+ERROR 42883: could not find a procedure named "fv_nope"
+
+> DROP ROUTINE fv.fv_nope
+ERROR 42883: could not find a function named "fv.fv_nope"
+
+> ALTER FUNCTION fv_nope STABLE
+ERROR 42883: could not find a function named "fv_nope"
+
+> DROP FUNCTION fv_nope()
+ERROR 42883: function fv_nope() does not exist
+
+> DROP FUNCTION IF EXISTS fv_nope
+NOTICE 00000: function fv_nope() does not exist, skipping
+-- DROP FUNCTION
+
+> DROP SCHEMA fv CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table fv.tt
+DETAIL: drop cascades to type fv.ty
+DETAIL: drop cascades to function fv_v7()
+-- DROP SCHEMA
+
+> CREATE TABLE fv_t1 (a int, b text)
+-- CREATE TABLE
+
+> CREATE FUNCTION fv_b() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT nosuch FROM fv_t1; END
+ERROR 42703: column "nosuch" does not exist (at 69)
+
+> CREATE FUNCTION fv_b() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM nosuch_t; END
+ERROR 42P01: relation "nosuch_t" does not exist (at 76)
+
+> CREATE FUNCTION fv_b() RETURNS int LANGUAGE sql RETURN nosuch_fn(1)
+ERROR 42883: function nosuch_fn(integer) does not exist (at 56)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE FUNCTION fv_b(x int) RETURNS int LANGUAGE sql RETURN x + "Nope"
+ERROR 42703: column "Nope" does not exist (at 65)
+
+> CREATE FUNCTION fv_b(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT a FROM fv_t1 WHERE b = 1; END
+ERROR 42883: operator does not exist: text = integer (at 105)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE FUNCTION fv_b(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; INSERT INTO fv_t1 VALUES ('x', 'y'); END
+ERROR 22P02: invalid input syntax for type integer: "x" (at 103)
+
+> CREATE FUNCTION fv_b(x int) RETURNS int
+>   LANGUAGE sql
+>   BEGIN ATOMIC
+>     SELECT 1;
+>     SELECT a FROM fv_t1 WHERE a = 1 + 'z';
+>   END
+ERROR 22P02: invalid input syntax for type integer: "z" (at 123)
+
+> CREATE FUNCTION fv_s1() RETURNS int LANGUAGE sql AS $$ SELECT 1; $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fv_s2() RETURNS int LANGUAGE sql AS '
+>   SELECT 1;
+>   SELECT 2
+> '
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fv_s3() RETURNS bigint LANGUAGE sql AS $$ SELECT count(*) FROM fv_t1 $$
+-- CREATE FUNCTION
+
+> SELECT proname, prosrc, prosqlbody IS NULL AS no_sqlbody FROM pg_proc WHERE proname LIKE 'fv_s%' ORDER BY 1
+proname:name | prosrc:text | no_sqlbody:bool
+fv_s1 |  SELECT 1;  | t
+fv_s2 | 
+  SELECT 1;
+  SELECT 2
+ | t
+fv_s3 |  SELECT count(*) FROM fv_t1  | t
+-- SELECT 3
+
+> SELECT pg_get_functiondef('fv_s1'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.fv_s1()
+ RETURNS integer
+ LANGUAGE sql
+AS $function$ SELECT 1; $function$
+
+-- SELECT 1
+
+> SELECT pg_get_functiondef('fv_s2'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION public.fv_s2()
+ RETURNS integer
+ LANGUAGE sql
+AS $function$
+  SELECT 1;
+  SELECT 2
+$function$
+
+-- SELECT 1
+
+> SELECT fv_s1(), fv_s2(), fv_s3()
+fv_s1:int4 | fv_s2:int4 | fv_s3:int8
+1 | 2 | 0
+-- SELECT 1
+
+> DROP FUNCTION fv_s1, fv_s2, fv_s3
+-- DROP FUNCTION
+
+> DROP TABLE fv_t1
+-- DROP TABLE
+

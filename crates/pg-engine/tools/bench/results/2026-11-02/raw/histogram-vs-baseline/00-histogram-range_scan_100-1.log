@@ -1,0 +1,1 @@
+RESULT	histogram	oltp	range_scan_100	clients=1	tps=2039	ops=6118	elapsed_s=3.000789375	mean_ms=0.490	p50_ms=0.457	p95_ms=0.629	p99_ms=1.085	errors=0	peak_mem_mb=102.3	validation_version=oltp-values-v1	checked_ops=6118

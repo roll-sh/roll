@@ -1,0 +1,693 @@
+> create table t (a int default 1, b text default 'x', c int generated always as (a*2) stored, d int generated always as (a*3) virtual)
+-- CREATE TABLE
+
+> select c.reltype::int8 - c.oid::int8 as rowtype, t.typarray::int8 - c.oid::int8 as arr, c.reltoastrelid::int8 - c.oid::int8 as toast from pg_class c join pg_type t on t.oid = c.reltype where c.relname = 't'
+rowtype:int8 | arr:int8 | toast:int8
+2 | 1 | 7
+-- SELECT 1
+
+> select adnum, oid::int8 - 't'::regclass::oid::int8 from pg_attrdef where adrelid = 't'::regclass order by adnum
+adnum:int2 | ?column?:int8
+1 | 3
+2 | 4
+3 | 5
+4 | 6
+-- SELECT 4
+
+> create view v as select 1 as a
+-- CREATE VIEW
+
+> select c.reltype::int8 - c.oid::int8, t.typarray::int8 - c.oid::int8, (select r.oid::int8 from pg_rewrite r where r.ev_class = c.oid) - c.oid::int8 from pg_class c join pg_type t on t.oid = c.reltype where c.relname = 'v'
+?column?:int8 | ?column?:int8 | ?column?:int8
+2 | 1 | 3
+-- SELECT 1
+
+> create type comp as (a int, b text)
+-- CREATE TYPE
+
+> select c.reltype::int8 - c.oid::int8, t.typarray::int8 - c.oid::int8 from pg_class c join pg_type t on t.oid = c.reltype where c.relname = 'comp'
+?column?:int8 | ?column?:int8
+2 | 1
+-- SELECT 1
+
+> create materialized view mv as select 1 as a, 'x'::text as b
+-- SELECT 1
+
+> select relname ~ '^pg_toast_\d+(_index)?$' as toast, relkind, o::int8 - 'mv'::regclass::oid::int8 from (select relname, relkind, oid o from pg_class union all select typname, 'T', oid from pg_type union all select rulename, 'R', oid from pg_rewrite) s where o >= 'mv'::regclass order by 3
+toast:bool | relkind:char | ?column?:int8
+f | m | 0
+f | T | 1
+f | T | 2
+f | R | 5
+t | t | 9
+t | i | 10
+-- SELECT 6
+
+> create table p (a int default 1 not null, b text default 'z' check (b <> ''), check (a > 0))
+-- CREATE TABLE
+
+> create table ch (c int default 3 check (c > 1), d int not null) inherits (p)
+-- CREATE TABLE
+
+> select k, x, o::int8 - 'ch'::regclass::oid::int8 from (
+> select 'def' k, adnum::text x, oid o from pg_attrdef where adrelid = 'ch'::regclass
+> union all select 'con', conname::text, oid from pg_constraint where conrelid = 'ch'::regclass
+> union all select 'cls', case when relname ~ '^pg_toast' then 'toast' else relname::text end, oid from pg_class where oid > 'ch'::regclass) s order by 3
+k:text | x:text | ?column?:int8
+def | 1 | 3
+def | 2 | 4
+con | p_a_check | 5
+con | p_b_check | 6
+def | 3 | 7
+con | ch_c_check | 8
+con | ch_d_not_null | 9
+con | p_a_not_null | 10
+cls | toast | 11
+cls | toast | 12
+-- SELECT 10
+
+> create table k (a int primary key, b text unique, c int references k, d int check (d > 0) default 4)
+-- CREATE TABLE
+
+> select k, x, o::int8 - 'k'::regclass::oid::int8 from (
+> select 'def' k, adnum::text x, oid o from pg_attrdef where adrelid = 'k'::regclass
+> union all select 'con', conname::text, oid from pg_constraint where conrelid = 'k'::regclass
+> union all select 'cls', case when relname ~ '^pg_toast' then 'toast' else relname::text end, oid from pg_class where oid > 'k'::regclass) s order by 3
+k:text | x:text | ?column?:int8
+def | 4 | 3
+con | k_d_check | 4
+con | k_a_not_null | 5
+cls | toast | 6
+cls | toast | 7
+cls | k_pkey | 8
+con | k_pkey | 9
+cls | k_b_key | 10
+con | k_b_key | 11
+con | k_c_fkey | 12
+-- SELECT 10
+
+> create table pt (a int default 4, b text) partition by list (a)
+-- CREATE TABLE
+
+> create table pt1 partition of pt for values in (1)
+-- CREATE TABLE
+
+> select adrelid::regclass, adnum, oid::int8 - 'pt'::regclass::oid::int8 from pg_attrdef where adrelid in ('pt'::regclass, 'pt1'::regclass) order by 1, 2
+adrelid:regclass | adnum:int2 | ?column?:int8
+pt | 1 | 3
+pt1 | 1 | 7
+-- SELECT 2
+
+> create table pp (a int primary key, b text, c int check (c > 0)) partition by range (a)
+-- CREATE TABLE
+
+> create table pp1 partition of pp (unique (c)) for values from (1) to (10)
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'pp1'::regclass::oid::int8 from (
+> select relname::text n, oid o from pg_class union all select conname::text, oid from pg_constraint union all select 'def ' || adrelid::regclass::text, oid from pg_attrdef union all select typname::text, oid from pg_type) s where o >= 'pp1'::regclass order by 2
+n:text | ?column?:int8
+pp1 | 0
+_pp1 | 1
+pp1 | 2
+pp_c_check | 3
+pp1_pkey | 4
+pp1_pkey | 5
+pp_a_not_null | 6
+toast | 7
+toast | 8
+pp1_c_key | 9
+pp1_c_key | 10
+-- SELECT 11
+
+> create table lk (like t including defaults)
+-- CREATE TABLE
+
+> select adnum, oid::int8 - 'lk'::regclass::oid::int8 from pg_attrdef where adrelid = 'lk'::regclass order by 1
+adnum:int2 | ?column?:int8
+1 | 5
+2 | 6
+-- SELECT 2
+
+> create table s (a int default 1 not null, b text default 'x' check (b <> 'q'), c int generated always as (a*2) stored, d int, constraint zc check (d > 0), constraint ac check (d < 100), unique (d))
+-- CREATE TABLE
+
+> create index s_ix on s (a)
+-- CREATE INDEX
+
+> create table l1 (z int default 9 check (z > 0), like s including all, y text default 'y')
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'l1'::regclass::oid::int8 from (select relname::text n, oid o from pg_class union all select conname::text, oid from pg_constraint union all select 'def ' || adrelid::regclass::text || adnum, oid from pg_attrdef union all select typname::text, oid from pg_type) s where o >= 'l1'::regclass order by 2
+n:text | ?column?:int8
+l1 | 0
+_l1 | 1
+l1 | 2
+def l11 | 3
+def l16 | 4
+l1_z_check | 5
+s_a_not_null | 6
+toast | 7
+toast | 8
+def l12 | 9
+def l13 | 10
+def l14 | 11
+ac | 12
+s_b_check | 13
+zc | 14
+l1_d_key | 15
+l1_d_key | 16
+l1_a_idx | 17
+-- SELECT 18
+
+> create table l2 (like s including defaults including constraints)
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'l2'::regclass::oid::int8 from (select relname::text n, oid o from pg_class union all select conname::text, oid from pg_constraint union all select 'def ' || adrelid::regclass::text || adnum, oid from pg_attrdef union all select typname::text, oid from pg_type) s where o >= 'l2'::regclass order by 2
+n:text | ?column?:int8
+l2 | 0
+_l2 | 1
+l2 | 2
+s_a_not_null | 3
+toast | 4
+toast | 5
+def l21 | 6
+def l22 | 7
+ac | 8
+s_b_check | 9
+zc | 10
+-- SELECT 11
+
+> create table l3 (q int, like s including generated)
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'l3'::regclass::oid::int8 from (select relname::text n, oid o from pg_class union all select conname::text, oid from pg_constraint union all select 'def ' || adrelid::regclass::text || adnum, oid from pg_attrdef union all select typname::text, oid from pg_type) s where o >= 'l3'::regclass order by 2
+n:text | ?column?:int8
+l3 | 0
+_l3 | 1
+l3 | 2
+s_a_not_null | 3
+toast | 4
+toast | 5
+def l34 | 6
+-- SELECT 7
+
+> create table s2 (a int default 1, b text default 'x' check (b <> 'q'), constraint zc check (a > 0), constraint ac check (a < 100))
+-- CREATE TABLE
+
+> create table s3 (e int default 5 check (e > 0), f text)
+-- CREATE TABLE
+
+> create table l4 (k int primary key, like s2 including all, u int references l4, like s3 including all, r int unique)
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'l4'::regclass::oid::int8 from (select relname::text n, oid o from pg_class union all select conname::text, oid from pg_constraint union all select 'def ' || adrelid::regclass::text || adnum, oid from pg_attrdef union all select typname::text, oid from pg_type) s where o >= 'l4'::regclass order by 2
+n:text | ?column?:int8
+l4 | 0
+_l4 | 1
+l4 | 2
+l4_k_not_null | 3
+toast | 4
+toast | 5
+l4_pkey | 6
+l4_pkey | 7
+l4_r_key | 8
+l4_r_key | 9
+def l42 | 10
+def l43 | 11
+ac | 12
+s2_b_check | 13
+zc | 14
+def l45 | 15
+s3_e_check | 16
+l4_u_fkey | 17
+-- SELECT 18
+
+> create table ct as select 1 as a, 'x'::text as b
+-- SELECT 1
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'ct'::regclass::oid::int8 from (
+> select relname::text n, oid o from pg_class union all select typname::text, oid from pg_type) s where o >= 'ct'::regclass order by 2
+n:text | ?column?:int8
+ct | 0
+_ct | 1
+ct | 2
+toast | 3
+toast | 4
+-- SELECT 5
+
+> create table q (a int default 1, b int default 2)
+-- CREATE TABLE
+
+> create table mark1 ()
+-- CREATE TABLE
+
+> alter table q alter column a set default 10
+-- ALTER TABLE
+
+> alter table q alter column b drop default
+-- ALTER TABLE
+
+> alter table q add column c int default 7
+-- ALTER TABLE
+
+> alter table q alter column b set default 3
+-- ALTER TABLE
+
+> create table mark2 ()
+-- CREATE TABLE
+
+> select adnum, oid::int8 - 'mark1'::regclass::oid::int8 from pg_attrdef where adrelid = 'q'::regclass order by 1
+adnum:int2 | ?column?:int8
+1 | 3
+2 | 5
+3 | 4
+-- SELECT 3
+
+> select 'mark2'::regclass::oid::int8 - 'mark1'::regclass::oid::int8
+?column?:int8
+6
+-- SELECT 1
+
+> alter table q alter column a type bigint
+-- ALTER TABLE
+
+> create table mark3 ()
+-- CREATE TABLE
+
+> select adnum, oid::int8 - 'mark2'::regclass::oid::int8 from pg_attrdef where adrelid = 'q'::regclass order by 1
+adnum:int2 | ?column?:int8
+1 | 3
+2 | -1
+3 | -2
+-- SELECT 3
+
+> select 'mark3'::regclass::oid::int8 - 'mark2'::regclass::oid::int8
+?column?:int8
+7
+-- SELECT 1
+
+> create table al (a int)
+-- CREATE TABLE
+
+> alter table al add column b text default 'x', add primary key (a)
+-- ALTER TABLE
+
+> create table mk ()
+-- CREATE TABLE
+
+> select case when n ~ '^pg_toast' then 'toast' else n end, o::int8 - 'al'::regclass::oid::int8 from (
+> select relname::text n, oid o from pg_class union all select conname::text, oid from pg_constraint union all select 'def ' || adrelid::regclass::text, oid from pg_attrdef union all select typname::text, oid from pg_type) s where o >= 'al'::regclass order by 2
+n:text | ?column?:int8
+al | 0
+_al | 1
+al | 2
+def al | 3
+al_a_not_null | 4
+al_pkey | 5
+al_pkey | 6
+toast | 7
+toast | 8
+mk | 9
+_mk | 10
+mk | 11
+-- SELECT 12
+
+> create table nt (a int, b float8, c varchar(100))
+-- CREATE TABLE
+
+> create table wt (a int, b varchar(1000))
+-- CREATE TABLE
+
+> select relname, reltoastrelid <> 0 from pg_class where relname in ('nt', 'wt', 't', 'q') order by 1
+relname:name | ?column?:bool
+nt | f
+q | f
+t | t
+wt | t
+-- SELECT 4
+
+> create table tt (a int, b text)
+-- CREATE TABLE
+
+> select c.relname ~ '^pg_toast_\d+(_index)?$', relnamespace::regnamespace, reltype, reloftype, relowner::regrole, relam, relfilenode = c.oid, reltablespace, relpages, reltuples, relallvisible, relallfrozen, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid::text::int8 > 0, relminmxid, relacl, reloptions, relpartbound from pg_class c where oid in (select reltoastrelid from pg_class where relname = 'tt') or oid in (select indexrelid from pg_index where indrelid = (select reltoastrelid from pg_class where relname = 'tt')) order by relkind desc
+?column?:bool | relnamespace:4089 | reltype:oid | reloftype:oid | relowner:4096 | relam:oid | ?column?:bool | reltablespace:oid | relpages:int4 | reltuples:float4 | relallvisible:int4 | relallfrozen:int4 | reltoastrelid:oid | relhasindex:bool | relisshared:bool | relpersistence:char | relkind:char | relnatts:int2 | relchecks:int2 | relhasrules:bool | relhastriggers:bool | relhassubclass:bool | relrowsecurity:bool | relforcerowsecurity:bool | relispopulated:bool | relreplident:char | relispartition:bool | relrewrite:oid | ?column?:bool | relminmxid:28 | relacl:1034 | reloptions:text[] | relpartbound:194
+t | pg_toast | 0 | 0 | postgres | 2 | t | 0 | 0 | -1 | 0 | 0 | 0 | t | f | p | t | 3 | 0 | f | f | f | f | f | t | n | f | 0 | t | 1 | NULL | NULL | NULL
+t | pg_toast | 0 | 0 | postgres | 403 | t | 0 | 1 | 0 | 0 | 0 | 0 | f | f | p | i | 2 | 0 | f | f | f | f | f | t | n | f | 0 | f | 0 | NULL | NULL | NULL
+-- SELECT 2
+
+> select relname = 'pg_toast_' || 'tt'::regclass::oid from pg_class where oid = (select reltoastrelid from pg_class where relname = 'tt')
+?column?:bool
+t
+-- SELECT 1
+
+> select attname, atttypid::regtype, attlen, attnum, atttypmod, attndims, attbyval, attalign, attstorage, attcompression, attnotnull, atthasdef, attidentity, attgenerated, attisdropped, attislocal, attinhcount, attcollation, attstattarget, attacl, attoptions from pg_attribute where attrelid = (select reltoastrelid from pg_class where relname = 'tt') order by attnum
+attname:name | atttypid:regtype | attlen:int2 | attnum:int2 | atttypmod:int4 | attndims:int2 | attbyval:bool | attalign:char | attstorage:char | attcompression:char | attnotnull:bool | atthasdef:bool | attidentity:char | attgenerated:char | attisdropped:bool | attislocal:bool | attinhcount:int2 | attcollation:oid | attstattarget:int2 | attacl:1034 | attoptions:text[]
+tableoid | oid | 4 | -6 | -1 | 0 | t | i | p |  | t | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+cmax | cid | 4 | -5 | -1 | 0 | t | i | p |  | t | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+xmax | xid | 4 | -4 | -1 | 0 | t | i | p |  | t | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+cmin | cid | 4 | -3 | -1 | 0 | t | i | p |  | t | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+xmin | xid | 4 | -2 | -1 | 0 | t | i | p |  | t | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+ctid | tid | 6 | -1 | -1 | 0 | f | s | p |  | t | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+chunk_id | oid | 4 | 1 | -1 | 0 | t | i | p |  | f | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+chunk_seq | integer | 4 | 2 | -1 | 0 | t | i | p |  | f | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+chunk_data | bytea | -1 | 3 | -1 | 0 | f | i | p |  | f | f |  |  | f | t | 0 | 0 | NULL | NULL | NULL
+-- SELECT 9
+
+> select attname, atttypid::regtype, attlen, attnum, attstorage, attnotnull, attislocal, attcollation from pg_attribute where attrelid = (select indexrelid from pg_index where indrelid = (select reltoastrelid from pg_class where relname = 'tt')) order by attnum
+attname:name | atttypid:regtype | attlen:int2 | attnum:int2 | attstorage:char | attnotnull:bool | attislocal:bool | attcollation:oid
+chunk_id | oid | 4 | 1 | p | f | t | 0
+chunk_seq | integer | 4 | 2 | p | f | t | 0
+-- SELECT 2
+
+> select indnatts, indnkeyatts, indisunique, indnullsnotdistinct, indisprimary, indisexclusion, indimmediate, indisclustered, indisvalid, indcheckxmin, indisready, indislive, indisreplident, indkey, indcollation, indclass, indoption, indexprs, indpred from pg_index where indrelid = (select reltoastrelid from pg_class where relname = 'tt')
+indnatts:int2 | indnkeyatts:int2 | indisunique:bool | indnullsnotdistinct:bool | indisprimary:bool | indisexclusion:bool | indimmediate:bool | indisclustered:bool | indisvalid:bool | indcheckxmin:bool | indisready:bool | indislive:bool | indisreplident:bool | indkey:22 | indcollation:30 | indclass:30 | indoption:22 | indexprs:194 | indpred:194
+2 | 2 | t | f | t | f | t | f | t | f | t | t | f | 1 2 | 0 0 | 1981 1978 | 0 0 | NULL | NULL
+-- SELECT 1
+
+> select classid::regclass, case when objid = (select reltoastrelid from pg_class where relname = 'tt') then 'toast' when objid = 'tt'::regclass then 'tbl' else 'idx' end, objsubid, refclassid::regclass, case when refobjid = (select reltoastrelid from pg_class where relname = 'tt') then 'toast' when refobjid = 'tt'::regclass then 'tbl' else refobjid::text end, refobjsubid, deptype from pg_depend where objid in (select reltoastrelid from pg_class where relname = 'tt') or objid in (select indexrelid from pg_index where indrelid = (select reltoastrelid from pg_class where relname = 'tt')) or refobjid in (select reltoastrelid from pg_class where relname = 'tt') order by 1, 2, 3, 5
+classid:regclass | case:text | objsubid:int4 | refclassid:regclass | refobjid:text | refobjsubid:int4 | deptype:char
+pg_class | idx | 0 | pg_class | toast | 1 | a
+pg_class | idx | 0 | pg_class | toast | 2 | a
+pg_class | toast | 0 | pg_class | tbl | 0 | i
+-- SELECT 3
+
+> select count(*) from pg_type where typrelid = (select reltoastrelid from pg_class where relname = 'tt')
+count:int8
+0
+-- SELECT 1
+
+> select pg_describe_object('pg_class'::regclass, reltoastrelid, 0) ~ '^toast table pg_toast\.pg_toast_\d+$', pg_describe_object('pg_class'::regclass, reltoastrelid, 1) ~ '^column chunk_id of toast table pg_toast\.pg_toast_\d+$', pg_describe_object('pg_class'::regclass, (reltoastrelid::int8 + 1)::oid, 0) ~ '^index pg_toast\.pg_toast_\d+_index$' from pg_class where relname = 'tt'
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+-- SELECT 1
+
+> select (pg_identify_object('pg_class'::regclass, reltoastrelid, 0)).type, (pg_identify_object('pg_class'::regclass, reltoastrelid, 1)).type, (pg_identify_object('pg_class'::regclass, (reltoastrelid::int8 + 1)::oid, 0)).type from pg_class where relname = 'tt'
+type:text | type:text | type:text
+toast table | toast table column | index
+-- SELECT 1
+
+> select reltoastrelid::regclass::text ~ '^pg_toast\.pg_toast_\d+$', ('pg_toast.pg_toast_' || 'tt'::regclass::oid)::regclass = reltoastrelid from pg_class where relname = 'tt'
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> select schemaname, relname ~ '^pg_toast', seq_scan from pg_stat_all_tables where relid = (select reltoastrelid from pg_class where relname = 'tt')
+schemaname:name | ?column?:bool | seq_scan:int8
+pg_toast | t | 0
+-- SELECT 1
+
+> select schemaname, relname ~ '^pg_toast', indexrelname ~ 'index' from pg_stat_all_indexes where relid = (select reltoastrelid from pg_class where relname = 'tt')
+schemaname:name | ?column?:bool | ?column?:bool
+pg_toast | t | t
+-- SELECT 1
+
+> select count(*) from pg_stat_sys_tables where relid = (select reltoastrelid from pg_class where relname = 'tt')
+count:int8
+1
+-- SELECT 1
+
+> select count(*) from pg_tables where schemaname = 'pg_toast'
+count:int8
+0
+-- SELECT 1
+
+> select count(*) from information_schema.tables where table_schema = 'pg_toast'
+count:int8
+0
+-- SELECT 1
+
+> create unlogged table ut (a text)
+-- CREATE TABLE
+
+> select relpersistence, relkind from pg_class where oid = (select reltoastrelid from pg_class where relname = 'ut') or oid = (select indexrelid from pg_index where indrelid = (select reltoastrelid from pg_class where relname = 'ut')) order by 2 desc
+relpersistence:char | relkind:char
+u | t
+u | i
+-- SELECT 2
+
+> create temp table tmp (a text)
+-- CREATE TABLE
+
+> select relnamespace::regnamespace::text ~ '^pg_toast_temp_\d+$', relpersistence, relkind from pg_class where oid = (select reltoastrelid from pg_class where relname = 'tmp') or oid = (select indexrelid from pg_index where indrelid = (select reltoastrelid from pg_class where relname = 'tmp')) order by 3 desc
+?column?:bool | relpersistence:char | relkind:char
+t | t | t
+t | t | i
+-- SELECT 2
+
+> select t.oid::int8 - n.oid::int8 from pg_namespace n, pg_namespace t where n.nspname ~ '^pg_temp_\d+$' and t.nspname ~ '^pg_toast_temp_\d+$'
+?column?:int8
+1
+-- SELECT 1
+
+> create table x (a int)
+-- CREATE TABLE
+
+> create table xp (a int) partition by list (a)
+-- CREATE TABLE
+
+> create sequence xs
+-- CREATE SEQUENCE
+
+> create view xv as select 1
+-- CREATE VIEW
+
+> create materialized view xm as select 1
+-- SELECT 1
+
+> create index on x (a)
+-- CREATE INDEX
+
+> select relkind, relfrozenxid::text::int8 > 0, relminmxid from pg_class where relname in ('x', 'xp', 'xs', 'xv', 'xm', 'x_a_idx', 'comp') order by 1
+relkind:char | ?column?:bool | relminmxid:28
+S | f | 0
+c | f | 0
+i | f | 0
+m | t | 1
+p | f | 0
+r | t | 1
+v | f | 0
+-- SELECT 7
+
+> select attrelid::regclass, count(*) from pg_attribute where attnum < 0 and attrelid in ('x'::regclass, 'xp'::regclass, 'xs'::regclass, 'xv'::regclass, 'xm'::regclass, 'x_a_idx'::regclass, 'comp'::regclass) group by 1 order by 1
+attrelid:regclass | count:int8
+x | 6
+xp | 6
+xs | 6
+xm | 6
+-- SELECT 4
+
+> create table m0 ()
+-- CREATE TABLE
+
+> create table ra (a int primary key, b text, c varchar(10), d int)
+-- CREATE TABLE
+
+> create index ra_d on ra (d)
+-- CREATE INDEX
+
+> create table m1 ()
+-- CREATE TABLE
+
+> alter table ra alter column c type varchar(20)
+-- ALTER TABLE
+
+> create table m2 ()
+-- CREATE TABLE
+
+> alter table ra alter column d type bigint
+-- ALTER TABLE
+
+> create table m3 ()
+-- CREATE TABLE
+
+> vacuum full ra
+-- VACUUM
+
+> create table m4 ()
+-- CREATE TABLE
+
+> cluster ra using ra_pkey
+-- CLUSTER
+
+> create table m5 ()
+-- CREATE TABLE
+
+> truncate ra
+-- TRUNCATE TABLE
+
+> create table m6 ()
+-- CREATE TABLE
+
+> alter table ra add column e float8 default random()
+-- ALTER TABLE
+
+> create table m7 ()
+-- CREATE TABLE
+
+> alter table ra set unlogged
+-- ALTER TABLE
+
+> create table m8 ()
+-- CREATE TABLE
+
+> create table rb (a int)
+-- CREATE TABLE
+
+> create table m9 ()
+-- CREATE TABLE
+
+> truncate rb
+-- TRUNCATE TABLE
+
+> create table m10 ()
+-- CREATE TABLE
+
+> vacuum full rb
+-- VACUUM
+
+> create table m11 ()
+-- CREATE TABLE
+
+> create materialized view rmv as select 1 as a, 'x'::text as b
+-- SELECT 1
+
+> create index on rmv (a)
+-- CREATE INDEX
+
+> create table m12 ()
+-- CREATE TABLE
+
+> refresh materialized view rmv
+-- REFRESH MATERIALIZED VIEW
+
+> create table m13 ()
+-- CREATE TABLE
+
+> alter table rb alter column a type text
+-- ALTER TABLE
+
+> create table m14 ()
+-- CREATE TABLE
+
+> select relname, oid::int8 - lag(oid::int8) over (order by oid) - 3 from pg_class where relname ~ '^m\d+$' order by oid
+relname:name | ?column?:int8
+m0 | NULL
+m1 | 9
+m2 | 0
+m3 | 8
+m4 | 7
+m5 | 7
+m6 | 5
+m7 | 8
+m8 | 7
+m9 | 3
+m10 | 1
+m11 | 3
+m12 | 12
+m13 | 6
+m14 | 7
+-- SELECT 15
+
+> select relname, reltoastrelid <> 0 from pg_class where relname in ('ra', 'rb', 'rmv') order by 1
+relname:name | ?column?:bool
+ra | t
+rb | t
+rmv | t
+-- SELECT 3
+
+> create table n0 ()
+-- CREATE TABLE
+
+> create table z (a int primary key, b int unique, c int check (c > 0), d int)
+-- CREATE TABLE
+
+> create index z_d on z (d)
+-- CREATE INDEX
+
+> create table n1 ()
+-- CREATE TABLE
+
+> alter table z alter column a type bigint
+-- ALTER TABLE
+
+> create table n2 ()
+-- CREATE TABLE
+
+> alter table z alter column c type bigint
+-- ALTER TABLE
+
+> create table n3 ()
+-- CREATE TABLE
+
+> alter table z alter column d type int8, alter column b type int8
+-- ALTER TABLE
+
+> create table n4 ()
+-- CREATE TABLE
+
+> alter table z alter column d type int4 using d::int4
+-- ALTER TABLE
+
+> create table n5 ()
+-- CREATE TABLE
+
+> alter table z add column e int default 5
+-- ALTER TABLE
+
+> create table n6 ()
+-- CREATE TABLE
+
+> alter table z add column g text generated always as ('x') stored
+-- ALTER TABLE
+
+> create table n7 ()
+-- CREATE TABLE
+
+> alter table z add column h int generated always as identity
+-- ALTER TABLE
+
+> create table n8 ()
+-- CREATE TABLE
+
+> create table y (a text, b numeric(10,2), c timestamp(3), e cidr, f varchar)
+-- CREATE TABLE
+
+> create table n9 ()
+-- CREATE TABLE
+
+> alter table y alter column a type varchar
+-- ALTER TABLE
+
+> create table n10 ()
+-- CREATE TABLE
+
+> alter table y alter column b type numeric(12,2), alter column c type timestamp(6), alter column e type inet
+-- ALTER TABLE
+
+> create table n11 ()
+-- CREATE TABLE
+
+> alter table y alter column f type varchar(5)
+-- ALTER TABLE
+
+> create table n12 ()
+-- CREATE TABLE
+
+> select relname, oid::int8 - lag(oid::int8) over (order by oid) - 3 from pg_class where relname ~ '^n\d+$' order by oid
+relname:name | ?column?:int8
+n0 | NULL
+n1 | 10
+n2 | 9
+n3 | 7
+n4 | 9
+n5 | 7
+n6 | 1
+n7 | 11
+n8 | 10
+n9 | 5
+n10 | 0
+n11 | 0
+n12 | 5
+-- SELECT 13
+

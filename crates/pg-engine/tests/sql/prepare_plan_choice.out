@@ -1,0 +1,402 @@
+> create table sk (a int, b text)
+-- CREATE TABLE
+
+> insert into sk select case when g <= 990 then 1 else g end, 'v' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> create index sk_a on sk (a)
+-- CREATE INDEX
+
+> analyze sk
+-- ANALYZE
+
+> prepare q(int) as select b from sk where a = $1
+-- PREPARE
+
+> execute q(995)
+b:text
+v995
+-- SELECT 1
+
+> execute q(996)
+b:text
+v996
+-- SELECT 1
+
+> execute q(997)
+b:text
+v997
+-- SELECT 1
+
+> execute q(998)
+b:text
+v998
+-- SELECT 1
+
+> execute q(999)
+b:text
+v999
+-- SELECT 1
+
+> explain execute q(1000)
+QUERY PLAN:text
+Index Scan using sk_a on sk  (cost=0.15..9.74 rows=91 width=4)
+  Index Cond: (a = $1)
+-- EXPLAIN
+
+> execute q(1000)
+b:text
+v1000
+-- SELECT 1
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'q'
+generic_plans:int8 | custom_plans:int8
+2 | 5
+-- SELECT 1
+
+> explain execute q(1)
+QUERY PLAN:text
+Index Scan using sk_a on sk  (cost=0.15..9.74 rows=91 width=4)
+  Index Cond: (a = $1)
+-- EXPLAIN
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'q'
+generic_plans:int8 | custom_plans:int8
+3 | 5
+-- SELECT 1
+
+> prepare g(int) as select b from sk where a = $1 + 0 and b = 'x'
+-- PREPARE
+
+> execute g(1)
+b:text
+-- SELECT 0
+
+> execute g(1)
+b:text
+-- SELECT 0
+
+> execute g(1)
+b:text
+-- SELECT 0
+
+> execute g(1)
+b:text
+-- SELECT 0
+
+> execute g(1)
+b:text
+-- SELECT 0
+
+> explain execute g(1)
+QUERY PLAN:text
+Index Scan using sk_a on sk  (cost=0.15..9.97 rows=1 width=4)
+  Index Cond: (a = ($1 + 0))
+  Filter: (b = 'x'::text)
+-- EXPLAIN
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'g'
+generic_plans:int8 | custom_plans:int8
+1 | 5
+-- SELECT 1
+
+> prepare r(int) as select $1 + 1
+-- PREPARE
+
+> execute r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> execute r(1)
+?column?:int4
+2
+-- SELECT 1
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'r'
+generic_plans:int8 | custom_plans:int8
+1 | 5
+-- SELECT 1
+
+> create table sk2 (a int primary key, c text)
+-- CREATE TABLE
+
+> insert into sk2 select g, 'c' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> analyze sk2
+-- ANALYZE
+
+> prepare j(int) as select sk.b, sk2.c from sk join sk2 on sk2.a = sk.a where sk.a = $1
+-- PREPARE
+
+> execute j(995)
+b:text | c:text
+v995 | c995
+-- SELECT 1
+
+> execute j(996)
+b:text | c:text
+v996 | c996
+-- SELECT 1
+
+> execute j(997)
+b:text | c:text
+v997 | c997
+-- SELECT 1
+
+> execute j(998)
+b:text | c:text
+v998 | c998
+-- SELECT 1
+
+> execute j(999)
+b:text | c:text
+v999 | c999
+-- SELECT 1
+
+> explain execute j(1000)
+QUERY PLAN:text
+Nested Loop  (cost=0.43..18.95 rows=91 width=8)
+  ->  Index Scan using sk2_pkey on sk2  (cost=0.28..8.29 rows=1 width=8)
+        Index Cond: (a = $1)
+  ->  Index Scan using sk_a on sk  (cost=0.15..9.74 rows=91 width=8)
+        Index Cond: (a = $1)
+-- EXPLAIN
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'j'
+generic_plans:int8 | custom_plans:int8
+1 | 5
+-- SELECT 1
+
+> prepare j2(int) as select sk.b, sk2.c from sk, sk2 where sk2.a = sk.a and sk.a = $1
+-- PREPARE
+
+> execute j2(995)
+b:text | c:text
+v995 | c995
+-- SELECT 1
+
+> execute j2(996)
+b:text | c:text
+v996 | c996
+-- SELECT 1
+
+> execute j2(997)
+b:text | c:text
+v997 | c997
+-- SELECT 1
+
+> execute j2(998)
+b:text | c:text
+v998 | c998
+-- SELECT 1
+
+> execute j2(999)
+b:text | c:text
+v999 | c999
+-- SELECT 1
+
+> explain execute j2(1000)
+QUERY PLAN:text
+Nested Loop  (cost=0.43..18.95 rows=91 width=8)
+  ->  Index Scan using sk2_pkey on sk2  (cost=0.28..8.29 rows=1 width=8)
+        Index Cond: (a = $1)
+  ->  Index Scan using sk_a on sk  (cost=0.15..9.74 rows=91 width=8)
+        Index Cond: (a = $1)
+-- EXPLAIN
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'j2'
+generic_plans:int8 | custom_plans:int8
+1 | 5
+-- SELECT 1
+
+> prepare k(int) as select count(b) from sk where a = $1
+-- PREPARE
+
+> execute k(1)
+count:int8
+990
+-- SELECT 1
+
+> execute k(1)
+count:int8
+990
+-- SELECT 1
+
+> execute k(1)
+count:int8
+990
+-- SELECT 1
+
+> execute k(1)
+count:int8
+990
+-- SELECT 1
+
+> execute k(1)
+count:int8
+990
+-- SELECT 1
+
+> execute k(1)
+count:int8
+990
+-- SELECT 1
+
+> execute k(995)
+count:int8
+1
+-- SELECT 1
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'k'
+generic_plans:int8 | custom_plans:int8
+2 | 5
+-- SELECT 1
+
+> prepare lt(int) as select c from sk2 where a < $1
+-- PREPARE
+
+> execute lt(2)
+c:text
+c1
+-- SELECT 1
+
+> execute lt(3)
+c:text
+c1
+c2
+-- SELECT 2
+
+> execute lt(2)
+c:text
+c1
+-- SELECT 1
+
+> execute lt(3)
+c:text
+c1
+c2
+-- SELECT 2
+
+> execute lt(2)
+c:text
+c1
+-- SELECT 1
+
+> explain execute lt(4)
+QUERY PLAN:text
+Index Scan using sk2_pkey on sk2  (cost=0.28..8.33 rows=3 width=4)
+  Index Cond: (a < 4)
+-- EXPLAIN
+
+> execute lt(4)
+c:text
+c1
+c2
+c3
+-- SELECT 3
+
+> execute lt(5)
+c:text
+c1
+c2
+c3
+c4
+-- SELECT 4
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'lt'
+generic_plans:int8 | custom_plans:int8
+0 | 8
+-- SELECT 1
+
+> set plan_cache_mode = force_generic_plan
+-- SET
+
+> execute lt(4)
+c:text
+c1
+c2
+c3
+-- SELECT 3
+
+> reset plan_cache_mode
+-- RESET
+
+> explain execute lt(4)
+QUERY PLAN:text
+Index Scan using sk2_pkey on sk2  (cost=0.28..8.33 rows=3 width=4)
+  Index Cond: (a < 4)
+-- EXPLAIN
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'lt'
+generic_plans:int8 | custom_plans:int8
+1 | 9
+-- SELECT 1
+
+> create index sk2_c on sk2 (c)
+-- CREATE INDEX
+
+> explain execute lt(4)
+QUERY PLAN:text
+Index Scan using sk2_pkey on sk2  (cost=0.28..8.33 rows=3 width=4)
+  Index Cond: (a < 4)
+-- EXPLAIN
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'lt'
+generic_plans:int8 | custom_plans:int8
+1 | 10
+-- SELECT 1
+
+> prepare u(int) as update sk set b = b where a = $1
+-- PREPARE
+
+> execute u(995)
+-- UPDATE 1
+
+> execute u(996)
+-- UPDATE 1
+
+> execute u(997)
+-- UPDATE 1
+
+> execute u(998)
+-- UPDATE 1
+
+> execute u(999)
+-- UPDATE 1
+
+> execute u(1000)
+-- UPDATE 1
+
+> select generic_plans, custom_plans from pg_prepared_statements where name = 'u'
+generic_plans:int8 | custom_plans:int8
+1 | 5
+-- SELECT 1
+
+> deallocate all
+-- DEALLOCATE ALL
+
+> drop table sk, sk2
+-- DROP TABLE
+

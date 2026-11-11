@@ -1,0 +1,95 @@
+-- pg_class.relpages / reltuples / relallvisible as VACUUM, ANALYZE, CREATE INDEX and TRUNCATE set them
+CREATE TABLE vs (id int PRIMARY KEY, v text);
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('vs', 'vs_pkey') ORDER BY 1;
+INSERT INTO vs SELECT g, 'row ' || g FROM generate_series(1, 500) g;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('vs', 'vs_pkey') ORDER BY 1;
+ANALYZE vs;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('vs', 'vs_pkey') ORDER BY 1;
+VACUUM vs;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('vs', 'vs_pkey') ORDER BY 1;
+CREATE INDEX vs_v ON vs (v);
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('vs', 'vs_pkey', 'vs_v') ORDER BY 1;
+TRUNCATE vs;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('vs', 'vs_pkey', 'vs_v') ORDER BY 1;
+VACUUM vs;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('vs', 'vs_pkey', 'vs_v') ORDER BY 1;
+CREATE TABLE ve (a int);
+CREATE INDEX ve_a ON ve (a);
+SELECT relname, relpages, reltuples FROM pg_class WHERE relname IN ('ve', 've_a') ORDER BY 1;
+INSERT INTO ve VALUES (1), (2), (3);
+CREATE INDEX ve_a2 ON ve (a);
+SELECT relname, relpages, reltuples FROM pg_class WHERE relname IN ('ve', 've_a', 've_a2') ORDER BY 1;
+-- wider rows, nulls, numerics, long text, many pages
+CREATE TABLE vw (a bigint, b numeric, c text, d timestamptz, e bool, f uuid, g int[]);
+INSERT INTO vw SELECT g, g * 1.5, repeat('x', g % 300), '2024-01-01'::timestamptz + g * interval '1 hour',
+  CASE WHEN g % 3 = 0 THEN NULL ELSE g % 2 = 0 END, md5(g::text)::uuid, ARRAY[g, g + 1, g + 2]
+  FROM generate_series(1, 5000) g;
+CREATE INDEX vw_a ON vw (a);
+CREATE INDEX vw_c ON vw (c);
+CREATE INDEX vw_bd ON vw (b, d) INCLUDE (e);
+CREATE INDEX vw_part ON vw (a) WHERE e;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname LIKE 'vw%' ORDER BY 1;
+VACUUM ANALYZE vw;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname LIKE 'vw%' ORDER BY 1;
+CREATE TABLE vn (a int, b text, c varchar(20), d char(10), e smallint, f float8);
+INSERT INTO vn SELECT g, CASE WHEN g % 5 = 0 THEN NULL ELSE 'v' || g END, 'c' || g, 'd', g, g / 7.0 FROM generate_series(1, 2000) g;
+VACUUM vn;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname = 'vn';
+-- relkind defaults
+CREATE SEQUENCE vseq;
+CREATE VIEW vview AS SELECT 1;
+CREATE MATERIALIZED VIEW vmv AS SELECT g AS a FROM generate_series(1, 100) g;
+CREATE TYPE vcomp AS (a int);
+CREATE TABLE vp (a int) PARTITION BY RANGE (a);
+CREATE INDEX vp_a ON vp (a);
+CREATE TABLE vp1 PARTITION OF vp FOR VALUES FROM (0) TO (10);
+CREATE TABLE vp2 PARTITION OF vp FOR VALUES FROM (10) TO (100);
+SELECT relname, relkind, relpages, reltuples, relallvisible FROM pg_class
+  WHERE relname IN ('vseq', 'vview', 'vmv', 'vcomp', 'vp', 'vp_a', 'vp1', 'vp1_a_idx', 'vp2') ORDER BY 1;
+INSERT INTO vp SELECT g FROM generate_series(1, 50) g;
+ANALYZE vp;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname LIKE 'vp%' ORDER BY 1;
+VACUUM vp;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname LIKE 'vp%' ORDER BY 1;
+TRUNCATE vp;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname LIKE 'vp%' ORDER BY 1;
+-- materialized views
+VACUUM vmv;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname = 'vmv';
+REFRESH MATERIALIZED VIEW vmv;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname = 'vmv';
+CREATE INDEX vmv_a ON vmv (a);
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname LIKE 'vmv%' ORDER BY 1;
+REFRESH MATERIALIZED VIEW vmv;
+SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname LIKE 'vmv%' ORDER BY 1;
+-- options and errors
+ANALYZE vs (id, v);
+ANALYZE vs (zz);
+ANALYZE vs (id, id);
+VACUUM (ANALYZE) vs (zz);
+VACUUM vs (id);
+VACUUM FULL vs;
+VACUUM FREEZE vs;
+VACUUM (VERBOSE false, SKIP_LOCKED) vs;
+VACUUM (INDEX_CLEANUP auto, TRUNCATE off, PARALLEL 2) vs;
+VACUUM (FULL, DISABLE_PAGE_SKIPPING) vs;
+VACUUM (foo) vs;
+ANALYZE (freeze) vs;
+VACUUM (analyze maybe) vs;
+VACUUM (parallel 5000) vs;
+VACUUM (ONLY_DATABASE_STATS) vs;
+ANALYZE vview;
+VACUUM vview;
+VACUUM vseq;
+ANALYZE nosuch;
+BEGIN;
+VACUUM vs;
+ROLLBACK;
+BEGIN;
+ANALYZE vs;
+COMMIT;
+DROP TABLE vs, ve, vw, vn, vp;
+DROP SEQUENCE vseq;
+DROP VIEW vview;
+DROP MATERIALIZED VIEW vmv;
+DROP TYPE vcomp;

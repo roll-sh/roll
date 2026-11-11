@@ -1,0 +1,315 @@
+> CREATE TABLE ep (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE ec (x int, y int, CONSTRAINT ec_fk FOREIGN KEY (x) REFERENCES ep NOT ENFORCED, CONSTRAINT ec_chk CHECK (y > 0) NOT ENFORCED)
+-- CREATE TABLE
+
+> SELECT conname, contype, conenforced, convalidated, condeferrable FROM pg_constraint WHERE conrelid = 'ec'::regclass ORDER BY 1
+conname:name | contype:char | conenforced:bool | convalidated:bool | condeferrable:bool
+ec_chk | c | f | f | f
+ec_fk | f | f | f | f
+-- SELECT 2
+
+> INSERT INTO ec VALUES (5, -1)
+-- INSERT 0 1
+
+> SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ec'::regclass ORDER BY conname
+pg_get_constraintdef:text
+CHECK ((y > 0)) NOT ENFORCED
+FOREIGN KEY (x) REFERENCES ep(id) NOT ENFORCED
+-- SELECT 2
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_chk ENFORCED
+ERROR 42809: cannot alter enforceability of constraint "ec_chk" of relation "ec"
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_fk ENFORCED
+ERROR 23503: insert or update on table "ec" violates foreign key constraint "ec_fk"
+DETAIL: Key (x)=(5) is not present in table "ep".
+OBJECTS: schema=public table=ec constraint=ec_fk
+
+> DELETE FROM ec
+-- DELETE 1
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_fk ENFORCED
+-- ALTER TABLE
+
+> SELECT conname, conenforced, convalidated FROM pg_constraint WHERE conrelid = 'ec'::regclass ORDER BY 1
+conname:name | conenforced:bool | convalidated:bool
+ec_chk | f | f
+ec_fk | t | t
+-- SELECT 2
+
+> INSERT INTO ec VALUES (5, 1)
+ERROR 23503: insert or update on table "ec" violates foreign key constraint "ec_fk"
+DETAIL: Key (x)=(5) is not present in table "ep".
+OBJECTS: schema=public table=ec constraint=ec_fk
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_fk NOT ENFORCED
+-- ALTER TABLE
+
+> INSERT INTO ec VALUES (5, 1)
+-- INSERT 0 1
+
+> SELECT conname, conenforced, convalidated FROM pg_constraint WHERE conrelid = 'ec'::regclass ORDER BY 1
+conname:name | conenforced:bool | convalidated:bool
+ec_chk | f | f
+ec_fk | f | f
+-- SELECT 2
+
+> ALTER TABLE ec ADD CONSTRAINT ec_u UNIQUE (x) NOT ENFORCED
+ERROR 0A000: UNIQUE constraints cannot be marked NOT ENFORCED (at 47)
+
+> ALTER TABLE ec ADD CONSTRAINT ec_c2 CHECK (x > 0) ENFORCED
+-- ALTER TABLE
+
+> ALTER TABLE ec ADD CONSTRAINT ec_c3 CHECK (x > 100) NOT ENFORCED NOT VALID
+-- ALTER TABLE
+
+> ALTER TABLE ec VALIDATE CONSTRAINT ec_c3
+ERROR 55000: cannot validate NOT ENFORCED constraint
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_c2 NOT ENFORCED
+ERROR 42809: cannot alter enforceability of constraint "ec_c2" of relation "ec"
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_fk DEFERRABLE
+-- ALTER TABLE
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_c2 NO INHERIT
+ERROR 42809: constraint "ec_c2" of relation "ec" is not a not-null constraint
+
+> SELECT conname, connoinherit FROM pg_constraint WHERE conrelid = 'ec'::regclass ORDER BY 1
+conname:name | connoinherit:bool
+ec_c2 | f
+ec_c3 | f
+ec_chk | f
+ec_fk | t
+-- SELECT 4
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_c2 INHERIT
+ERROR 42809: constraint "ec_c2" of relation "ec" is not a not-null constraint
+
+> ALTER TABLE ec ALTER CONSTRAINT ec_fk NO INHERIT
+ERROR 42809: constraint "ec_fk" of relation "ec" is not a not-null constraint
+
+> CREATE TABLE ec2 (a int NOT NULL)
+-- CREATE TABLE
+
+> ALTER TABLE ec2 ALTER CONSTRAINT ec2_a_not_null NO INHERIT
+-- ALTER TABLE
+
+> SELECT conname, connoinherit FROM pg_constraint WHERE conrelid = 'ec2'::regclass ORDER BY 1
+conname:name | connoinherit:bool
+ec2_a_not_null | t
+-- SELECT 1
+
+> CREATE TABLE ec3 (a int CONSTRAINT a_nn NOT NULL NO INHERIT, b int, CONSTRAINT b_nn NOT NULL b)
+-- CREATE TABLE
+
+> SELECT conname, connoinherit FROM pg_constraint WHERE conrelid = 'ec3'::regclass ORDER BY 1
+conname:name | connoinherit:bool
+a_nn | t
+b_nn | f
+-- SELECT 2
+
+> ALTER TABLE ec3 ADD CONSTRAINT x NOT NULL a
+ERROR 55000: cannot change NO INHERIT status of NOT NULL constraint "a_nn" on relation "ec3"
+HINT: You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT.
+
+> CREATE TABLE ec4 (a int, NOT NULL a NOT ENFORCED)
+ERROR 0A000: NOT NULL constraints cannot be marked NOT ENFORCED (at 37)
+
+> CREATE TABLE ec5 (a int PRIMARY KEY NOT ENFORCED)
+ERROR 42601: misplaced NOT ENFORCED clause (at 37)
+
+> ALTER TABLE ec ALTER CONSTRAINT nosuch ENFORCED
+ERROR 42704: constraint "nosuch" of relation "ec" does not exist
+
+> DROP TABLE ec, ep, ec2, ec3
+-- DROP TABLE
+
+> CREATE TABLE cp (id int PRIMARY KEY, u int UNIQUE, n int NOT NULL, c int CHECK (c > 0), e int, EXCLUDE USING btree (e WITH =))
+-- CREATE TABLE
+
+> CREATE TABLE cf (x int REFERENCES cp, y int NOT NULL NO INHERIT, z int CHECK (z > 0) NO INHERIT)
+-- CREATE TABLE
+
+> SELECT conname, contype, connoinherit, conenforced, convalidated FROM pg_constraint WHERE conrelid IN ('cp'::regclass, 'cf'::regclass) ORDER BY 1
+conname:name | contype:char | connoinherit:bool | conenforced:bool | convalidated:bool
+cf_x_fkey | f | t | t | t
+cf_y_not_null | n | t | t | t
+cf_z_check | c | t | t | t
+cp_c_check | c | f | t | t
+cp_e_excl | x | t | t | t
+cp_id_not_null | n | f | t | t
+cp_n_not_null | n | f | t | t
+cp_pkey | p | t | t | t
+cp_u_key | u | t | t | t
+-- SELECT 9
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'cf'::regclass ORDER BY 1
+conname:name | pg_get_constraintdef:text
+cf_x_fkey | FOREIGN KEY (x) REFERENCES cp(id)
+cf_y_not_null | NOT NULL y NO INHERIT
+cf_z_check | CHECK ((z > 0)) NO INHERIT
+-- SELECT 3
+
+> CREATE TABLE cn (a int CHECK (a > 0) NOT ENFORCED, b int REFERENCES cp NOT ENFORCED, c int CHECK (c > 0) NOT ENFORCED ENFORCED, d int CHECK (d > 0) ENFORCED NOT VALID)
+ERROR 42601: syntax error at or near "VALID" (at 162)
+
+> CREATE TABLE cn (a int PRIMARY KEY NOT ENFORCED)
+ERROR 42601: misplaced NOT ENFORCED clause (at 36)
+
+> CREATE TABLE cn (a int NOT NULL ENFORCED)
+ERROR 42601: misplaced ENFORCED clause (at 33)
+
+> CREATE TABLE cn (a int CHECK (a > 0) NOT ENFORCED NOT ENFORCED)
+ERROR 42601: multiple ENFORCED/NOT ENFORCED clauses not allowed (at 51)
+
+> CREATE TABLE cn (a int CHECK (a > 0) DEFERRABLE)
+ERROR 42601: misplaced DEFERRABLE clause (at 38)
+
+> CREATE TABLE cn (a int CHECK (a > 0) NOT ENFORCED, b int REFERENCES cp NOT ENFORCED DEFERRABLE INITIALLY DEFERRED)
+-- CREATE TABLE
+
+> SELECT conname, conenforced, convalidated, condeferrable, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'cn'::regclass ORDER BY 1
+conname:name | conenforced:bool | convalidated:bool | condeferrable:bool | pg_get_constraintdef:text
+cn_a_check | f | f | f | CHECK ((a > 0)) NOT ENFORCED
+cn_b_fkey | f | f | t | FOREIGN KEY (b) REFERENCES cp(id) DEFERRABLE INITIALLY DEFERRED NOT ENFORCED
+-- SELECT 2
+
+> CREATE TABLE cn2 (LIKE cn INCLUDING ALL)
+-- CREATE TABLE
+
+> SELECT conname, conenforced, convalidated FROM pg_constraint WHERE conrelid = 'cn2'::regclass ORDER BY 1
+conname:name | conenforced:bool | convalidated:bool
+cn_a_check | f | f
+-- SELECT 1
+
+> CREATE TABLE cnc () INHERITS (cn)
+-- CREATE TABLE
+
+> SELECT conname, conenforced, convalidated, coninhcount FROM pg_constraint WHERE conrelid = 'cnc'::regclass ORDER BY 1
+conname:name | conenforced:bool | convalidated:bool | coninhcount:int2
+cn_a_check | f | f | 1
+-- SELECT 1
+
+> CREATE TABLE cnp (a int, b int REFERENCES cp NOT ENFORCED) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE cnp1 PARTITION OF cnp FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> SELECT conname, conenforced, convalidated FROM pg_constraint WHERE conrelid = 'cnp1'::regclass ORDER BY 1
+conname:name | conenforced:bool | convalidated:bool
+cnp_b_fkey | f | f
+-- SELECT 1
+
+> ALTER TABLE cnp ALTER CONSTRAINT cnp_b_fkey ENFORCED
+-- ALTER TABLE
+
+> SELECT conname, conenforced, convalidated FROM pg_constraint WHERE conrelid = 'cnp1'::regclass ORDER BY 1
+conname:name | conenforced:bool | convalidated:bool
+cnp_b_fkey | t | t
+-- SELECT 1
+
+> ALTER TABLE cnp1 ALTER CONSTRAINT cnp_b_fkey NOT ENFORCED
+ERROR 55000: cannot alter constraint "cnp_b_fkey" on relation "cnp1"
+DETAIL: Constraint "cnp_b_fkey" is derived from constraint "cnp_b_fkey" of relation "cnp".
+HINT: You may alter the constraint it derives from instead.
+
+> ALTER TABLE cn ALTER CONSTRAINT cn_b_fkey ENFORCED NOT DEFERRABLE
+-- ALTER TABLE
+
+> SELECT conname, conenforced, condeferrable FROM pg_constraint WHERE conrelid = 'cn'::regclass ORDER BY 1
+conname:name | conenforced:bool | condeferrable:bool
+cn_a_check | f | f
+cn_b_fkey | t | f
+-- SELECT 2
+
+> ALTER TABLE cn ALTER CONSTRAINT cn_b_fkey ENFORCED
+-- ALTER TABLE
+
+> DROP TABLE cf, cn, cn2, cnc, cnp, cp
+-- DROP TABLE
+
+> CREATE TABLE ip (a int NOT NULL)
+-- CREATE TABLE
+
+> CREATE TABLE ic () INHERITS (ip)
+-- CREATE TABLE
+
+> CREATE TABLE ic2 (a int NOT NULL)
+-- CREATE TABLE
+
+> ALTER TABLE ic2 INHERIT ip
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal, connoinherit FROM pg_constraint WHERE contype = 'n' AND conrelid IN ('ip'::regclass,'ic'::regclass,'ic2'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool | connoinherit:bool
+ip | ip_a_not_null | 0 | t | f
+ic | ip_a_not_null | 1 | f | f
+ic2 | ic2_a_not_null | 1 | t | f
+-- SELECT 3
+
+> ALTER TABLE ip ALTER CONSTRAINT ip_a_not_null NO INHERIT
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal, connoinherit FROM pg_constraint WHERE contype = 'n' AND conrelid IN ('ip'::regclass,'ic'::regclass,'ic2'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool | connoinherit:bool
+ip | ip_a_not_null | 0 | t | t
+ic | ip_a_not_null | 0 | t | f
+ic2 | ic2_a_not_null | 0 | t | f
+-- SELECT 3
+
+> ALTER TABLE ip ALTER CONSTRAINT ip_a_not_null INHERIT
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal, connoinherit FROM pg_constraint WHERE contype = 'n' AND conrelid IN ('ip'::regclass,'ic'::regclass,'ic2'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool | connoinherit:bool
+ip | ip_a_not_null | 0 | t | f
+ic | ip_a_not_null | 1 | t | f
+ic2 | ic2_a_not_null | 1 | t | f
+-- SELECT 3
+
+> ALTER TABLE ic ALTER CONSTRAINT ip_a_not_null NO INHERIT
+ERROR 55000: cannot alter inherited constraint "ip_a_not_null" on relation "ic"
+
+> ALTER TABLE ic ALTER CONSTRAINT ip_a_not_null INHERIT
+-- ALTER TABLE
+
+> CREATE TABLE ic3 () INHERITS (ic)
+-- CREATE TABLE
+
+> ALTER TABLE ip ALTER CONSTRAINT ip_a_not_null NO INHERIT
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, coninhcount, conislocal, connoinherit FROM pg_constraint WHERE contype = 'n' AND conrelid IN ('ip'::regclass,'ic'::regclass,'ic2'::regclass,'ic3'::regclass) ORDER BY 1, 2
+conrelid:regclass | conname:name | coninhcount:int2 | conislocal:bool | connoinherit:bool
+ip | ip_a_not_null | 0 | t | t
+ic | ip_a_not_null | 0 | t | f
+ic2 | ic2_a_not_null | 0 | t | f
+ic3 | ip_a_not_null | 1 | f | f
+-- SELECT 4
+
+> ALTER TABLE ip ALTER CONSTRAINT ip_a_not_null NOT DEFERRABLE
+ERROR 42809: constraint "ip_a_not_null" of relation "ip" is not a foreign key constraint
+
+> ALTER TABLE ip ALTER CONSTRAINT ip_a_not_null DEFERRABLE INITIALLY DEFERRED
+ERROR 42809: constraint "ip_a_not_null" of relation "ip" is not a foreign key constraint
+
+> DROP TABLE ip CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table ic
+DETAIL: drop cascades to table ic3
+DETAIL: drop cascades to table ic2
+-- DROP TABLE
+
+> CREATE TABLE pp (a int NOT NULL) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> ALTER TABLE pp ALTER CONSTRAINT pp_a_not_null NO INHERIT
+ERROR 0A000: not-null constraint "pp_a_not_null" on partitioned table "pp" cannot be NO INHERIT
+
+> DROP TABLE pp
+-- DROP TABLE
+

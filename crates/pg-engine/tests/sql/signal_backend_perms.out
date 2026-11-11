@@ -1,0 +1,61 @@
+> select pg_terminate_backend(999999)
+WARNING 01000: PID 999999 is not a PostgreSQL backend process
+pg_terminate_backend:bool
+f
+-- SELECT 1
+
+> select pg_cancel_backend(999999)
+WARNING 01000: PID 999999 is not a PostgreSQL backend process
+pg_cancel_backend:bool
+f
+-- SELECT 1
+
+> select pg_terminate_backend(999999, 10)
+WARNING 01000: PID 999999 is not a PostgreSQL backend process
+pg_terminate_backend:bool
+f
+-- SELECT 1
+
+> select pg_terminate_backend(pg_backend_pid(), -1)
+ERROR 22003: "timeout" must not be negative
+
+> create role sbp_r1
+-- CREATE ROLE
+
+> set role sbp_r1
+-- SET
+
+> select pg_terminate_backend(pg_backend_pid())
+ERROR 42501: permission denied to terminate process
+DETAIL: Only roles with the SUPERUSER attribute may terminate processes of roles with the SUPERUSER attribute.
+
+> select pg_cancel_backend(pg_backend_pid())
+ERROR 42501: permission denied to cancel query
+DETAIL: Only roles with the SUPERUSER attribute may cancel queries of roles with the SUPERUSER attribute.
+
+> reset role
+-- RESET
+
+> create function sbp_terminate_nothrow(pid int) returns bool
+>   language plpgsql security definer set client_min_messages = error as $$
+> begin
+>   return pg_terminate_backend($1);
+> exception when others then
+>   return false;
+> end$$
+-- CREATE FUNCTION
+
+> alter function sbp_terminate_nothrow owner to pg_signal_backend
+-- ALTER FUNCTION
+
+> select sbp_terminate_nothrow(pg_backend_pid())
+sbp_terminate_nothrow:bool
+f
+-- SELECT 1
+
+> drop function sbp_terminate_nothrow(int)
+-- DROP FUNCTION
+
+> drop role sbp_r1
+-- DROP ROLE
+

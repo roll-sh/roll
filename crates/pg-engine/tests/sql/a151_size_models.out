@@ -1,0 +1,500 @@
+> CREATE TABLE sz32 (id int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> CREATE TABLE sz33 (id int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO sz32 SELECT generate_series(1, 7232)
+-- INSERT 0 7232
+
+> INSERT INTO sz33 SELECT generate_series(1, 7458)
+-- INSERT 0 7458
+
+> CREATE INDEX sz32_i ON sz32 (id)
+-- CREATE INDEX
+
+> CREATE INDEX sz33_i ON sz33 (id)
+-- CREATE INDEX
+
+> VACUUM sz32
+-- VACUUM
+
+> VACUUM sz33
+-- VACUUM
+
+> SELECT relname, relpages, reltuples, relallvisible, pg_relation_size(oid) FROM pg_class WHERE relname IN ('sz32', 'sz33', 'sz32_i', 'sz33_i') ORDER BY 1
+relname:name | relpages:int4 | reltuples:float4 | relallvisible:int4 | pg_relation_size:int8
+sz32 | 32 | 7232 | 32 | 262144
+sz32_i | 22 | 7232 | 0 | 180224
+sz33 | 33 | 7458 | 33 | 270336
+sz33_i | 23 | 7458 | 0 | 188416
+-- SELECT 4
+
+> VACUUM sz32
+-- VACUUM
+
+> VACUUM sz33
+-- VACUUM
+
+> SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('sz32', 'sz33', 'sz32_i', 'sz33_i') ORDER BY 1
+relname:name | relpages:int4 | reltuples:float4 | relallvisible:int4
+sz32 | 32 | 7232 | 32
+sz32_i | 22 | 7232 | 0
+sz33 | 33 | 7458 | 33
+sz33_i | 23 | 7458 | 0
+-- SELECT 4
+
+> INSERT INTO sz33 VALUES (7459)
+-- INSERT 0 1
+
+> VACUUM sz33
+-- VACUUM
+
+> SELECT relpages, reltuples, relallvisible FROM pg_class WHERE relname = 'sz33'
+relpages:int4 | reltuples:float4 | relallvisible:int4
+34 | 7458 | 34
+-- SELECT 1
+
+> VACUUM (DISABLE_PAGE_SKIPPING) sz33
+-- VACUUM
+
+> SELECT relpages, reltuples, relallvisible FROM pg_class WHERE relname = 'sz33'
+relpages:int4 | reltuples:float4 | relallvisible:int4
+34 | 7459 | 34
+-- SELECT 1
+
+> DELETE FROM sz33 WHERE id > 7000
+-- DELETE 459
+
+> VACUUM (TRUNCATE false) sz33
+-- VACUUM
+
+> SELECT relpages, reltuples, relallvisible, pg_relation_size(oid) FROM pg_class WHERE relname = 'sz33'
+relpages:int4 | reltuples:float4 | relallvisible:int4 | pg_relation_size:int8
+34 | 7000 | 34 | 278528
+-- SELECT 1
+
+> VACUUM (FREEZE) sz33
+-- VACUUM
+
+> ANALYZE sz33
+-- ANALYZE
+
+> SELECT relname, relpages, reltuples, relallvisible FROM pg_class WHERE relname IN ('sz33', 'sz33_i') ORDER BY 1
+relname:name | relpages:int4 | reltuples:float4 | relallvisible:int4
+sz33 | 31 | 7000 | 31
+sz33_i | 23 | 7000 | 0
+-- SELECT 2
+
+> CREATE TABLE szempty (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) szempty
+-- VACUUM
+
+> INSERT INTO szempty VALUES (1)
+-- INSERT 0 1
+
+> DELETE FROM szempty
+-- DELETE 1
+
+> VACUUM szempty
+-- VACUUM
+
+> SELECT relname, relpages, reltuples, pg_relation_size(oid) FROM pg_class WHERE relname IN ('szempty', 'szempty_pkey') ORDER BY 1
+relname:name | relpages:int4 | reltuples:float4 | pg_relation_size:int8
+szempty | 0 | 0 | 0
+szempty_pkey | 2 | 0 | 16384
+-- SELECT 2
+
+> CREATE TABLE szdup (id int, k int, pad int) WITH (autovacuum_enabled = false, fillfactor = 70)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX szdup_u ON szdup (id)
+-- CREATE INDEX
+
+> CREATE INDEX szdup_k ON szdup (k)
+-- CREATE INDEX
+
+> CREATE INDEX szdup_cover ON szdup (k) INCLUDE (pad)
+-- CREATE INDEX
+
+> INSERT INTO szdup SELECT g, g % 9, 0 FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> INSERT INTO szdup SELECT NULL, NULL, 1 FROM generate_series(1, 300)
+-- INSERT 0 300
+
+> UPDATE szdup SET id = id + 3000 WHERE id % 3 = 0
+-- UPDATE 1000
+
+> UPDATE szdup SET pad = pad + 1 WHERE id % 5 = 0
+-- UPDATE 600
+
+> DELETE FROM szdup WHERE id % 7 = 0
+-- DELETE 429
+
+> VACUUM ANALYZE szdup
+-- VACUUM
+
+> SELECT relname, relpages, reltuples, pg_relation_size(oid) FROM pg_class WHERE relname IN ('szdup', 'szdup_u', 'szdup_k', 'szdup_cover') ORDER BY 1
+relname:name | relpages:int4 | reltuples:float4 | pg_relation_size:int8
+szdup | 26 | 2871 | 212992
+szdup_cover | 22 | 2871 | 180224
+szdup_k | 7 | 2871 | 57344
+szdup_u | 16 | 2871 | 131072
+-- SELECT 4
+
+> SELECT count(*), count(id), sum(pad) FROM szdup
+count:int8 | count:int8 | sum:int8
+2871 | 2571 | 814
+-- SELECT 1
+
+> CREATE TABLE szwide (c0 int, c1 int, c2 int, c3 int, c4 int, c5 int, c6 int, c7 int, c8 int, c9 int, c10 int, c11 int, c12 int, c13 int, c14 int, c15 int, c16 int, c17 int, c18 int, c19 int, c20 int, c21 int, c22 int, c23 int, c24 int, c25 int, c26 int, c27 int, c28 int, c29 int, c30 int, c31 int)
+-- CREATE TABLE
+
+> CREATE INDEX szwide_i ON szwide (c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21, c22, c23, c24, c25, c26, c27, c28, c29, c30, c31) WITH (deduplicate_items = off)
+-- CREATE INDEX
+
+> INSERT INTO szwide SELECT NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int, NULL::int FROM generate_series(1, 800)
+-- INSERT 0 800
+
+> SELECT pg_relation_size('szwide'), pg_relation_size('szwide_i'), count(*) FROM szwide
+pg_relation_size:int8 | pg_relation_size:int8 | count:int8
+32768 | 40960 | 800
+-- SELECT 1
+
+> VACUUM ANALYZE szwide
+-- VACUUM
+
+> SELECT relpages, reltuples FROM pg_class WHERE relname = 'szwide'
+relpages:int4 | reltuples:float4
+4 | 800
+-- SELECT 1
+
+> CREATE TABLE szf (id int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO szf SELECT generate_series(1, 7458)
+-- INSERT 0 7458
+
+> VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) szf
+-- VACUUM
+
+> INSERT INTO szf VALUES (7459)
+-- INSERT 0 1
+
+> VACUUM szf
+-- VACUUM
+
+> SELECT relpages, reltuples FROM pg_class WHERE relname = 'szf'
+relpages:int4 | reltuples:float4
+34 | 7458
+-- SELECT 1
+
+> VACUUM (FREEZE) szf
+-- VACUUM
+
+> SELECT relpages, reltuples FROM pg_class WHERE relname = 'szf'
+relpages:int4 | reltuples:float4
+34 | 7458
+-- SELECT 1
+
+> VACUUM (DISABLE_PAGE_SKIPPING) szf
+-- VACUUM
+
+> SELECT relpages, reltuples FROM pg_class WHERE relname = 'szf'
+relpages:int4 | reltuples:float4
+34 | 7459
+-- SELECT 1
+
+> CREATE TABLE sznd (n int, k int, v int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX sznd_i ON sznd(n,k) INCLUDE(v) NULLS NOT DISTINCT
+-- CREATE INDEX
+
+> INSERT INTO sznd SELECT NULL,g,0 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,1 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,2 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,3 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,4 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,5 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,6 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,7 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,8 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,9 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,10 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,11 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,12 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,13 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,14 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,15 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,16 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,17 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,18 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,19 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> DELETE FROM sznd
+-- DELETE 1500
+
+> INSERT INTO sznd SELECT NULL,g,20 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> SELECT pg_relation_size('sznd_i'), count(*) FROM sznd
+pg_relation_size:int8 | count:int8
+65536 | 1500
+-- SELECT 1
+
+> VACUUM ANALYZE sznd
+-- VACUUM
+
+> SELECT pg_relation_size('sznd_i'), count(*) FROM sznd
+pg_relation_size:int8 | count:int8
+65536 | 1500
+-- SELECT 1
+
+> CREATE TABLE sznum_src (n numeric, k int, v int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO sznum_src SELECT CASE g % 4 WHEN 0 THEN 0::numeric WHEN 1 THEN 'NaN'::numeric WHEN 2 THEN 'Infinity'::numeric ELSE '-Infinity'::numeric END,g,0 FROM generate_series(1,1500)g
+-- INSERT 0 1500
+
+> CREATE TABLE sznum (LIKE sznum_src) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX sznum_i ON sznum(n DESC NULLS FIRST,k) INCLUDE(v)
+-- CREATE INDEX
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> DELETE FROM sznum
+-- DELETE 1500
+
+> INSERT INTO sznum SELECT * FROM sznum_src
+-- INSERT 0 1500
+
+> SELECT pg_relation_size('sznum_i'), count(*) FROM sznum
+pg_relation_size:int8 | count:int8
+98304 | 1500
+-- SELECT 1
+
+> VACUUM ANALYZE sznum
+-- VACUUM
+
+> SELECT pg_relation_size('sznum_i'), count(*) FROM sznum
+pg_relation_size:int8 | count:int8
+98304 | 1500
+-- SELECT 1
+

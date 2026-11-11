@@ -1,0 +1,111 @@
+> create temp table rm_i4 (f1 int)
+-- CREATE TABLE
+
+> insert into rm_i4 values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> create temp table rm_tk (unique1 int, unique2 int, stringu1 text, stringu2 text)
+-- CREATE TABLE
+
+> insert into rm_tk select g, (g * 7) % 1000, 'a' || g, 'b' || g from generate_series(0, 999) g
+-- INSERT 0 1000
+
+> create index rm_tk_u1 on rm_tk (unique1)
+-- CREATE INDEX
+
+> create index rm_tk_u2 on rm_tk (unique2)
+-- CREATE INDEX
+
+> analyze rm_tk
+-- ANALYZE
+
+> analyze rm_i4
+-- ANALYZE
+
+> explain (costs off)
+> select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
+>   rm_tk t1
+>   inner join rm_i4 i1
+>     left join (select v1.x2, v2.y1, 11 AS d1
+>                from (values(1,0)) v1(x1,x2)
+>                left join (values(3,1)) v2(y1,y2)
+>                on v1.x1 = v2.y2) subq1
+>     on (i1.f1 = subq1.x2)
+>   on (t1.unique2 = subq1.d1)
+>   left join rm_tk t2
+>   on (subq1.y1 = t2.unique1)
+> where t1.unique2 < 42 and t1.stringu1 < t2.stringu2
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (t1.stringu1 < t2.stringu2)
+  ->  Nested Loop
+        ->  Seq Scan on rm_i4 i1
+              Filter: (f1 = 0)
+        ->  Index Scan using rm_tk_u2 on rm_tk t1
+              Index Cond: ((unique2 = (11)) AND (unique2 < 42))
+  ->  Index Scan using rm_tk_u1 on rm_tk t2
+        Index Cond: (unique1 = (3))
+-- EXPLAIN
+
+> select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
+>   rm_tk t1
+>   inner join rm_i4 i1
+>     left join (select v1.x2, v2.y1, 11 AS d1
+>                from (values(1,0)) v1(x1,x2)
+>                left join (values(3,1)) v2(y1,y2)
+>                on v1.x1 = v2.y2) subq1
+>     on (i1.f1 = subq1.x2)
+>   on (t1.unique2 = subq1.d1)
+>   left join rm_tk t2
+>   on (subq1.y1 = t2.unique1)
+> where t1.unique2 < 42 and t1.stringu1 < t2.stringu2
+unique2:int4 | stringu1:text | unique1:int4 | stringu2:text
+11 | a573 | 3 | b3
+-- SELECT 1
+
+> select i1.f1, subq1.*
+> from rm_i4 i1
+>   left join (select v1.x2, v2.y1, 11 AS d1
+>              from (values(1,0)) v1(x1,x2)
+>              left join (values(3,2)) v2(y1,y2)
+>              on v1.x1 = v2.y2) subq1
+>   on (i1.f1 = subq1.x2)
+> order by 1
+f1:int4 | x2:int4 | y1:int4 | d1:int4
+-2147483647 | NULL | NULL | NULL
+-123456 | NULL | NULL | NULL
+0 | 0 | NULL | 11
+123456 | NULL | NULL | NULL
+2147483647 | NULL | NULL | NULL
+-- SELECT 5
+
+> select i.f1, s.x, s.c from rm_i4 i
+>   left join (select v.x, 5 as c from (values (0, 1)) v(x, y)) s on s.x = i.f1
+> order by 1
+f1:int4 | x:int4 | c:int4
+-2147483647 | NULL | NULL
+-123456 | NULL | NULL
+0 | 0 | 5
+123456 | NULL | NULL
+2147483647 | NULL | NULL
+-- SELECT 5
+
+> select i.f1, s.x, s.c from rm_i4 i
+>   left join (select v.x, 5 as c from (values (0, 1)) v(x, y)) s on s.x = i.f1
+> where s.x = 0
+> order by 1
+f1:int4 | x:int4 | c:int4
+0 | 0 | 5
+-- SELECT 1
+
+> select i.f1, s.x, s.c from rm_i4 i
+>   full join (select v.x, 5 as c from (values (0, 1)) v(x, y)) s on s.x = i.f1
+> order by 1, 2
+f1:int4 | x:int4 | c:int4
+-2147483647 | NULL | NULL
+-123456 | NULL | NULL
+0 | 0 | 5
+123456 | NULL | NULL
+2147483647 | NULL | NULL
+-- SELECT 5
+

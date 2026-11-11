@@ -1,0 +1,839 @@
+> DROP ROLE IF EXISTS pv_owner, pv_reader, pv_writer, pv_group, pv_other
+NOTICE 00000: role "pv_owner" does not exist, skipping
+NOTICE 00000: role "pv_reader" does not exist, skipping
+NOTICE 00000: role "pv_writer" does not exist, skipping
+NOTICE 00000: role "pv_group" does not exist, skipping
+NOTICE 00000: role "pv_other" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE pv_owner
+-- CREATE ROLE
+
+> CREATE ROLE pv_reader
+-- CREATE ROLE
+
+> CREATE ROLE pv_writer
+-- CREATE ROLE
+
+> CREATE ROLE pv_group
+-- CREATE ROLE
+
+> CREATE ROLE pv_other
+-- CREATE ROLE
+
+> GRANT pv_group TO pv_reader
+-- GRANT ROLE
+
+> CREATE TABLE pv_t (id int PRIMARY KEY, secret text, note text)
+-- CREATE TABLE
+
+> INSERT INTO pv_t VALUES (1, 's1', 'n1'), (2, 's2', 'n2')
+-- INSERT 0 2
+
+> CREATE SEQUENCE pv_seq
+-- CREATE SEQUENCE
+
+> CREATE FUNCTION pv_f(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1'
+-- CREATE FUNCTION
+
+> CREATE VIEW pv_v AS SELECT id, note FROM pv_t
+-- CREATE VIEW
+
+> SELECT relname, relacl FROM pg_class WHERE relname IN ('pv_t', 'pv_seq', 'pv_v') ORDER BY 1
+relname:name | relacl:1034
+pv_seq | NULL
+pv_t | NULL
+pv_v | NULL
+-- SELECT 3
+
+> SELECT proacl FROM pg_proc WHERE proname = 'pv_f'
+proacl:1034
+NULL
+-- SELECT 1
+
+> GRANT SELECT ON pv_t TO pv_reader
+-- GRANT
+
+> GRANT INSERT, UPDATE ON TABLE pv_t TO pv_writer WITH GRANT OPTION
+-- GRANT
+
+> GRANT SELECT (id, note), UPDATE (note) ON pv_t TO pv_other
+-- GRANT
+
+> GRANT ALL ON pv_v TO pv_group
+-- GRANT
+
+> SELECT relname, relacl FROM pg_class WHERE relname IN ('pv_t', 'pv_v') ORDER BY 1
+relname:name | relacl:1034
+pv_t | {postgres=arwdDxtm/postgres,pv_reader=r/postgres,pv_writer=a*w*/postgres}
+pv_v | {postgres=arwdDxtm/postgres,pv_group=arwdDxtm/postgres}
+-- SELECT 2
+
+> SELECT attname, attacl FROM pg_attribute WHERE attrelid = 'pv_t'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attacl:1034
+id | {pv_other=r/postgres}
+secret | NULL
+note | {pv_other=rw/postgres}
+-- SELECT 3
+
+> SELECT x.grantor::regrole, x.grantee::regrole, x.privilege_type, x.is_grantable FROM (SELECT (aclexplode(relacl)).* FROM pg_class WHERE relname = 'pv_t') x ORDER BY 2, 3
+grantor:4096 | grantee:4096 | privilege_type:text | is_grantable:bool
+postgres | postgres | DELETE | f
+postgres | postgres | INSERT | f
+postgres | postgres | MAINTAIN | f
+postgres | postgres | REFERENCES | f
+postgres | postgres | SELECT | f
+postgres | postgres | TRIGGER | f
+postgres | postgres | TRUNCATE | f
+postgres | postgres | UPDATE | f
+postgres | pv_reader | SELECT | f
+postgres | pv_writer | INSERT | t
+postgres | pv_writer | UPDATE | t
+-- SELECT 11
+
+> SELECT (aclexplode(relacl)).privilege_type FROM pg_class WHERE relname = 'pv_v' ORDER BY 1
+privilege_type:text
+DELETE
+DELETE
+INSERT
+INSERT
+MAINTAIN
+MAINTAIN
+REFERENCES
+REFERENCES
+SELECT
+SELECT
+TRIGGER
+TRIGGER
+TRUNCATE
+TRUNCATE
+UPDATE
+UPDATE
+-- SELECT 16
+
+> SELECT a.grantee::regrole, a.privilege_type FROM pg_class c, aclexplode(c.relacl) a WHERE c.relname = 'pv_v' AND a.grantee <> c.relowner ORDER BY 2
+grantee:4096 | privilege_type:text
+pv_group | DELETE
+pv_group | INSERT
+pv_group | MAINTAIN
+pv_group | REFERENCES
+pv_group | SELECT
+pv_group | TRIGGER
+pv_group | TRUNCATE
+pv_group | UPDATE
+-- SELECT 8
+
+> GRANT USAGE ON pv_t TO pv_reader
+ERROR 0LP01: invalid privilege type USAGE for table
+
+> GRANT SELECT ON pv_nope TO pv_reader
+ERROR 42P01: relation "pv_nope" does not exist
+
+> GRANT SELECT ON pv_t TO pv_nobody
+ERROR 42704: role "pv_nobody" does not exist
+
+> GRANT SELECT (nope) ON pv_t TO pv_reader
+ERROR 42703: column "nope" of relation "pv_t" does not exist
+
+> SELECT has_table_privilege('pv_reader', 'pv_t', 'SELECT'), has_table_privilege('pv_reader', 'pv_t', 'INSERT'),
+>        has_table_privilege('pv_writer', 'pv_t', 'INSERT WITH GRANT OPTION'), has_table_privilege('pv_other', 'pv_t', 'SELECT')
+has_table_privilege:bool | has_table_privilege:bool | has_table_privilege:bool | has_table_privilege:bool
+t | f | t | f
+-- SELECT 1
+
+> SELECT has_column_privilege('pv_other', 'pv_t', 'note', 'SELECT'), has_column_privilege('pv_other', 'pv_t', 'secret', 'SELECT'),
+>        has_column_privilege('pv_other', 'pv_t', 'note', 'UPDATE'), has_any_column_privilege('pv_other', 'pv_t', 'SELECT')
+has_column_privilege:bool | has_column_privilege:bool | has_column_privilege:bool | has_any_column_privilege:bool
+t | f | t | t
+-- SELECT 1
+
+> SELECT has_sequence_privilege('pv_reader', 'pv_seq', 'USAGE'), has_function_privilege('pv_reader', 'pv_f(int)', 'EXECUTE'),
+>        has_schema_privilege('pv_reader', 'public', 'USAGE'), has_schema_privilege('pv_reader', 'public', 'CREATE'),
+>        has_database_privilege('pv_reader', current_database(), 'CONNECT'), has_database_privilege('pv_reader', current_database(), 'CREATE')
+has_sequence_privilege:bool | has_function_privilege:bool | has_schema_privilege:bool | has_schema_privilege:bool | has_database_privilege:bool | has_database_privilege:bool
+f | t | t | f | t | f
+-- SELECT 1
+
+> SELECT has_table_privilege('pv_reader', 'pv_t', 'FOO')
+ERROR 22023: unrecognized privilege type: "FOO"
+
+> SELECT has_table_privilege('pv_reader', 'pv_nope', 'SELECT')
+ERROR 42P01: relation "pv_nope" does not exist
+
+> SET ROLE pv_reader
+-- SET
+
+> SELECT current_user, session_user
+current_user:name | session_user:name
+pv_reader | postgres
+-- SELECT 1
+
+> SELECT * FROM pv_t ORDER BY id
+id:int4 | secret:text | note:text
+1 | s1 | n1
+2 | s2 | n2
+-- SELECT 2
+
+> INSERT INTO pv_t VALUES (3, 's3', 'n3')
+ERROR 42501: permission denied for table pv_t
+
+> UPDATE pv_t SET note = 'x'
+ERROR 42501: permission denied for table pv_t
+
+> DELETE FROM pv_t
+ERROR 42501: permission denied for table pv_t
+
+> SELECT nextval('pv_seq')
+ERROR 42501: permission denied for sequence pv_seq
+
+> SELECT pv_f(1)
+pv_f:int4
+2
+-- SELECT 1
+
+> SELECT * FROM pv_v ORDER BY id
+id:int4 | note:text
+1 | n1
+2 | n2
+-- SELECT 2
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE pv_other
+-- SET
+
+> SELECT id, note FROM pv_t ORDER BY id
+id:int4 | note:text
+1 | n1
+2 | n2
+-- SELECT 2
+
+> SELECT secret FROM pv_t
+ERROR 42501: permission denied for table pv_t
+
+> SELECT * FROM pv_t
+ERROR 42501: permission denied for table pv_t
+
+> SELECT count(*) FROM pv_t
+count:int8
+2
+-- SELECT 1
+
+> UPDATE pv_t SET note = 'changed' WHERE id = 1
+-- UPDATE 1
+
+> UPDATE pv_t SET secret = 'changed' WHERE id = 1
+ERROR 42501: permission denied for table pv_t
+
+> UPDATE pv_t SET note = secret WHERE id = 1
+ERROR 42501: permission denied for table pv_t
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE pv_writer
+-- SET
+
+> INSERT INTO pv_t VALUES (3, 's3', 'n3')
+-- INSERT 0 1
+
+> INSERT INTO pv_t VALUES (4, 's4', 'n4') RETURNING id
+ERROR 42501: permission denied for table pv_t
+
+> UPDATE pv_t SET note = 'w' WHERE id = 3
+ERROR 42501: permission denied for table pv_t
+
+> UPDATE pv_t SET note = 'w'
+-- UPDATE 3
+
+> GRANT INSERT ON pv_t TO pv_other
+-- GRANT
+
+> GRANT DELETE ON pv_t TO pv_other
+WARNING 01007: no privileges were granted for "pv_t"
+-- GRANT
+
+> RESET ROLE
+-- RESET
+
+> REVOKE SELECT ON pv_t FROM pv_reader
+-- REVOKE
+
+> SET ROLE pv_group
+-- SET
+
+> SELECT * FROM pv_v ORDER BY id
+id:int4 | note:text
+1 | w
+2 | w
+3 | w
+-- SELECT 3
+
+> SELECT * FROM pv_t
+ERROR 42501: permission denied for table pv_t
+
+> RESET ROLE
+-- RESET
+
+> SELECT relacl FROM pg_class WHERE relname = 'pv_t'
+relacl:1034
+{postgres=arwdDxtm/postgres,pv_writer=a*w*/postgres,pv_other=a/pv_writer}
+-- SELECT 1
+
+> REVOKE INSERT ON pv_t FROM pv_writer
+ERROR 2BP01: dependent privileges exist
+HINT: Use CASCADE to revoke them too.
+
+> REVOKE GRANT OPTION FOR UPDATE ON pv_t FROM pv_writer
+-- REVOKE
+
+> SELECT relacl FROM pg_class WHERE relname = 'pv_t'
+relacl:1034
+{postgres=arwdDxtm/postgres,pv_writer=a*w/postgres,pv_other=a/pv_writer}
+-- SELECT 1
+
+> REVOKE ALL ON pv_t FROM pv_other
+-- REVOKE
+
+> SELECT relacl FROM pg_class WHERE relname = 'pv_t'
+relacl:1034
+{postgres=arwdDxtm/postgres,pv_writer=a*w/postgres,pv_other=a/pv_writer}
+-- SELECT 1
+
+> SELECT attname, attacl FROM pg_attribute WHERE attrelid = 'pv_t'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attacl:1034
+id | NULL
+secret | NULL
+note | NULL
+-- SELECT 3
+
+> GRANT SELECT ON pv_t TO pv_writer WITH GRANT OPTION
+-- GRANT
+
+> SET ROLE pv_writer
+-- SET
+
+> GRANT SELECT ON pv_t TO pv_other
+-- GRANT
+
+> RESET ROLE
+-- RESET
+
+> REVOKE SELECT ON pv_t FROM pv_writer
+ERROR 2BP01: dependent privileges exist
+HINT: Use CASCADE to revoke them too.
+
+> REVOKE SELECT ON pv_t FROM pv_writer CASCADE
+-- REVOKE
+
+> SELECT relacl FROM pg_class WHERE relname = 'pv_t'
+relacl:1034
+{postgres=arwdDxtm/postgres,pv_writer=a*w/postgres,pv_other=a/pv_writer}
+-- SELECT 1
+
+> GRANT SELECT ON pv_t TO PUBLIC
+-- GRANT
+
+> SET ROLE pv_other
+-- SET
+
+> SELECT count(*) FROM pv_t
+count:int8
+3
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> REVOKE SELECT ON pv_t FROM PUBLIC
+-- REVOKE
+
+> REVOKE EXECUTE ON FUNCTION pv_f(int) FROM PUBLIC
+-- REVOKE
+
+> SELECT proacl FROM pg_proc WHERE proname = 'pv_f'
+proacl:1034
+{postgres=X/postgres}
+-- SELECT 1
+
+> SET ROLE pv_reader
+-- SET
+
+> SELECT pv_f(1)
+ERROR 42501: permission denied for function pv_f
+
+> RESET ROLE
+-- RESET
+
+> GRANT EXECUTE ON FUNCTION pv_f(int) TO pv_group
+-- GRANT
+
+> SET ROLE pv_reader
+-- SET
+
+> SELECT pv_f(1)
+pv_f:int4
+2
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> GRANT USAGE ON SEQUENCE pv_seq TO pv_reader
+-- GRANT
+
+> GRANT SELECT ON pv_seq TO pv_other
+-- GRANT
+
+> GRANT EXECUTE ON SEQUENCE pv_seq TO pv_other
+ERROR 0LP01: invalid privilege type EXECUTE for sequence
+
+> SET ROLE pv_reader
+-- SET
+
+> SELECT nextval('pv_seq')
+nextval:int8
+1
+-- SELECT 1
+
+> SELECT setval('pv_seq', 10)
+ERROR 42501: permission denied for sequence pv_seq
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE pv_other
+-- SET
+
+> SELECT last_value FROM pv_seq
+last_value:int8
+1
+-- SELECT 1
+
+> SELECT nextval('pv_seq')
+ERROR 42501: permission denied for sequence pv_seq
+
+> RESET ROLE
+-- RESET
+
+> CREATE SCHEMA pv_s
+-- CREATE SCHEMA
+
+> CREATE TABLE pv_s.t (a int)
+-- CREATE TABLE
+
+> SET ROLE pv_reader
+-- SET
+
+> SELECT * FROM pv_s.t
+ERROR 42501: permission denied for schema pv_s (at 15)
+
+> CREATE TABLE pv_s.t2 (a int)
+ERROR 42501: permission denied for schema pv_s (at 14)
+
+> CREATE TABLE pv_mine (a int)
+ERROR 42501: permission denied for schema public (at 14)
+
+> RESET ROLE
+-- RESET
+
+> GRANT USAGE, CREATE ON SCHEMA pv_s TO pv_reader
+-- GRANT
+
+> SELECT nspname, nspacl FROM pg_namespace WHERE nspname IN ('pv_s', 'public') ORDER BY 1
+nspname:name | nspacl:1034
+public | {pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}
+pv_s | {postgres=UC/postgres,pv_reader=UC/postgres}
+-- SELECT 2
+
+> SET ROLE pv_reader
+-- SET
+
+> SELECT * FROM pv_s.t
+ERROR 42501: permission denied for table t
+
+> CREATE TABLE pv_s.t2 (a int)
+-- CREATE TABLE
+
+> SELECT tableowner FROM pg_tables WHERE tablename = 't2'
+tableowner:name
+pv_reader
+-- SELECT 1
+
+> DROP TABLE pv_s.t
+ERROR 42501: must be owner of table t
+
+> RESET ROLE
+-- RESET
+
+> GRANT SELECT ON ALL TABLES IN SCHEMA pv_s TO pv_other
+-- GRANT
+
+> SELECT relname, relacl FROM pg_class WHERE relnamespace = 'pv_s'::regnamespace ORDER BY 1
+relname:name | relacl:1034
+t | {postgres=arwdDxtm/postgres,pv_other=r/postgres}
+t2 | {pv_reader=arwdDxtm/pv_reader,pv_other=r/pv_reader}
+-- SELECT 2
+
+> ALTER DEFAULT PRIVILEGES IN SCHEMA pv_s GRANT SELECT ON TABLES TO pv_group
+-- ALTER DEFAULT PRIVILEGES
+
+> ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO pv_other
+-- ALTER DEFAULT PRIVILEGES
+
+> ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC
+-- ALTER DEFAULT PRIVILEGES
+
+> SELECT pg_get_userbyid(defaclrole), defaclnamespace::regnamespace, defaclobjtype, defaclacl FROM pg_default_acl ORDER BY 2, 3
+pg_get_userbyid:name | defaclnamespace:4089 | defaclobjtype:char | defaclacl:1034
+postgres | - | f | {postgres=X/postgres,pv_other=X/postgres}
+postgres | pv_s | r | {pv_group=r/postgres}
+-- SELECT 2
+
+> CREATE TABLE pv_s.t3 (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION pv_g() RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> SELECT relacl FROM pg_class WHERE relname = 't3'
+relacl:1034
+{postgres=arwdDxtm/postgres,pv_group=r/postgres}
+-- SELECT 1
+
+> SELECT proacl FROM pg_proc WHERE proname = 'pv_g'
+proacl:1034
+{postgres=X/postgres,pv_other=X/postgres}
+-- SELECT 1
+
+> ALTER DEFAULT PRIVILEGES IN SCHEMA pv_s REVOKE SELECT ON TABLES FROM pv_group
+-- ALTER DEFAULT PRIVILEGES
+
+> ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM pv_other
+-- ALTER DEFAULT PRIVILEGES
+
+> ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC
+-- ALTER DEFAULT PRIVILEGES
+
+> SELECT count(*) FROM pg_default_acl
+count:int8
+0
+-- SELECT 1
+
+> ALTER TABLE pv_t OWNER TO pv_owner
+-- ALTER TABLE
+
+> SELECT relowner::regrole, relacl FROM pg_class WHERE relname = 'pv_t'
+relowner:4096 | relacl:1034
+pv_owner | {pv_owner=arwdDxtm/pv_owner,pv_writer=a*w/pv_owner,pv_other=a/pv_writer}
+-- SELECT 1
+
+> SET ROLE pv_reader
+-- SET
+
+> ALTER TABLE pv_t ADD COLUMN x int
+ERROR 42501: must be owner of table pv_t
+
+> DROP TABLE pv_t
+ERROR 42501: must be owner of table pv_t
+
+> ALTER TABLE pv_t RENAME TO pv_t2
+ERROR 42501: must be owner of table pv_t
+
+> CREATE INDEX ON pv_t (note)
+ERROR 42501: must be owner of table pv_t
+
+> TRUNCATE pv_t
+ERROR 42501: permission denied for table pv_t
+
+> COMMENT ON TABLE pv_t IS 'no'
+ERROR 42501: must be owner of table pv_t
+
+> DROP FUNCTION pv_f(int)
+ERROR 42501: must be owner of function pv_f
+
+> DROP SCHEMA pv_s CASCADE
+ERROR 42501: must be owner of schema pv_s
+
+> DROP SEQUENCE pv_seq
+ERROR 42501: must be owner of sequence pv_seq
+
+> DROP VIEW pv_v
+ERROR 42501: must be owner of view pv_v
+
+> LOCK TABLE pv_t IN ACCESS SHARE MODE
+ERROR 25P01: LOCK TABLE can only be used in transaction blocks
+
+> CREATE SCHEMA pv_nope
+ERROR 42501: permission denied for database golden_privileges
+
+> RESET ROLE
+-- RESET
+
+> GRANT pv_owner TO pv_reader
+-- GRANT ROLE
+
+> SET ROLE pv_reader
+-- SET
+
+> ALTER TABLE pv_t ADD COLUMN x int
+-- ALTER TABLE
+
+> COMMENT ON TABLE pv_t IS 'mine'
+-- COMMENT
+
+> RESET ROLE
+-- RESET
+
+> REVOKE pv_owner FROM pv_reader
+-- REVOKE ROLE
+
+> ALTER FUNCTION pv_f(int) OWNER TO pv_owner
+-- ALTER FUNCTION
+
+> ALTER SEQUENCE pv_seq OWNER TO pv_owner
+-- ALTER SEQUENCE
+
+> ALTER VIEW pv_v OWNER TO pv_owner
+-- ALTER VIEW
+
+> ALTER SCHEMA pv_s OWNER TO pv_owner
+-- ALTER SCHEMA
+
+> SELECT proowner::regrole FROM pg_proc WHERE proname = 'pv_f'
+proowner:4096
+pv_owner
+-- SELECT 1
+
+> SELECT relname, relowner::regrole FROM pg_class WHERE relname IN ('pv_seq', 'pv_v', 'pv_t') ORDER BY 1
+relname:name | relowner:4096
+pv_seq | pv_owner
+pv_t | pv_owner
+pv_v | pv_owner
+-- SELECT 3
+
+> SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'pv_s'
+nspowner:4096
+pv_owner
+-- SELECT 1
+
+> SELECT grantor, grantee, table_name, privilege_type, is_grantable, with_hierarchy FROM information_schema.table_privileges
+> WHERE table_schema IN ('public', 'pv_s') ORDER BY 3, 2, 4
+grantor:name | grantee:name | table_name:name | privilege_type:varchar | is_grantable:varchar | with_hierarchy:varchar
+pv_writer | pv_other | pv_t | INSERT | NO | NO
+pv_owner | pv_owner | pv_t | DELETE | YES | NO
+pv_owner | pv_owner | pv_t | INSERT | YES | NO
+pv_owner | pv_owner | pv_t | REFERENCES | YES | NO
+pv_owner | pv_owner | pv_t | SELECT | YES | YES
+pv_owner | pv_owner | pv_t | TRIGGER | YES | NO
+pv_owner | pv_owner | pv_t | TRUNCATE | YES | NO
+pv_owner | pv_owner | pv_t | UPDATE | YES | NO
+pv_owner | pv_writer | pv_t | INSERT | YES | NO
+pv_owner | pv_writer | pv_t | UPDATE | NO | NO
+pv_owner | pv_group | pv_v | DELETE | NO | NO
+pv_owner | pv_group | pv_v | INSERT | NO | NO
+pv_owner | pv_group | pv_v | REFERENCES | NO | NO
+pv_owner | pv_group | pv_v | SELECT | NO | YES
+pv_owner | pv_group | pv_v | TRIGGER | NO | NO
+pv_owner | pv_group | pv_v | TRUNCATE | NO | NO
+pv_owner | pv_group | pv_v | UPDATE | NO | NO
+pv_owner | pv_owner | pv_v | DELETE | YES | NO
+pv_owner | pv_owner | pv_v | INSERT | YES | NO
+pv_owner | pv_owner | pv_v | REFERENCES | YES | NO
+pv_owner | pv_owner | pv_v | SELECT | YES | YES
+pv_owner | pv_owner | pv_v | TRIGGER | YES | NO
+pv_owner | pv_owner | pv_v | TRUNCATE | YES | NO
+pv_owner | pv_owner | pv_v | UPDATE | YES | NO
+postgres | postgres | t | DELETE | YES | NO
+postgres | postgres | t | INSERT | YES | NO
+postgres | postgres | t | REFERENCES | YES | NO
+postgres | postgres | t | SELECT | YES | YES
+postgres | postgres | t | TRIGGER | YES | NO
+postgres | postgres | t | TRUNCATE | YES | NO
+postgres | postgres | t | UPDATE | YES | NO
+postgres | pv_other | t | SELECT | NO | YES
+pv_reader | pv_other | t2 | SELECT | NO | YES
+pv_reader | pv_reader | t2 | DELETE | YES | NO
+pv_reader | pv_reader | t2 | INSERT | YES | NO
+pv_reader | pv_reader | t2 | REFERENCES | YES | NO
+pv_reader | pv_reader | t2 | SELECT | YES | YES
+pv_reader | pv_reader | t2 | TRIGGER | YES | NO
+pv_reader | pv_reader | t2 | TRUNCATE | YES | NO
+pv_reader | pv_reader | t2 | UPDATE | YES | NO
+postgres | postgres | t3 | DELETE | YES | NO
+postgres | postgres | t3 | INSERT | YES | NO
+postgres | postgres | t3 | REFERENCES | YES | NO
+postgres | postgres | t3 | SELECT | YES | YES
+postgres | postgres | t3 | TRIGGER | YES | NO
+postgres | postgres | t3 | TRUNCATE | YES | NO
+postgres | postgres | t3 | UPDATE | YES | NO
+postgres | pv_group | t3 | SELECT | NO | YES
+-- SELECT 48
+
+> SELECT grantor, grantee, table_name, column_name, privilege_type, is_grantable FROM information_schema.column_privileges
+> WHERE table_schema = 'public' AND grantee <> 'pv_owner' ORDER BY 3, 4, 2, 5
+grantor:name | grantee:name | table_name:name | column_name:name | privilege_type:varchar | is_grantable:varchar
+pv_writer | pv_other | pv_t | id | INSERT | NO
+pv_owner | pv_writer | pv_t | id | INSERT | YES
+pv_owner | pv_writer | pv_t | id | UPDATE | NO
+pv_writer | pv_other | pv_t | note | INSERT | NO
+pv_owner | pv_writer | pv_t | note | INSERT | YES
+pv_owner | pv_writer | pv_t | note | UPDATE | NO
+pv_writer | pv_other | pv_t | secret | INSERT | NO
+pv_owner | pv_writer | pv_t | secret | INSERT | YES
+pv_owner | pv_writer | pv_t | secret | UPDATE | NO
+pv_writer | pv_other | pv_t | x | INSERT | NO
+pv_owner | pv_writer | pv_t | x | INSERT | YES
+pv_owner | pv_writer | pv_t | x | UPDATE | NO
+pv_owner | pv_group | pv_v | id | INSERT | NO
+pv_owner | pv_group | pv_v | id | REFERENCES | NO
+pv_owner | pv_group | pv_v | id | SELECT | NO
+pv_owner | pv_group | pv_v | id | UPDATE | NO
+pv_owner | pv_group | pv_v | note | INSERT | NO
+pv_owner | pv_group | pv_v | note | REFERENCES | NO
+pv_owner | pv_group | pv_v | note | SELECT | NO
+pv_owner | pv_group | pv_v | note | UPDATE | NO
+-- SELECT 20
+
+> SELECT grantor, grantee, routine_name, privilege_type, is_grantable FROM information_schema.routine_privileges
+> WHERE routine_schema = 'public' ORDER BY 3, 2
+grantor:name | grantee:name | routine_name:name | privilege_type:varchar | is_grantable:varchar
+pv_owner | pv_group | pv_f | EXECUTE | NO
+pv_owner | pv_owner | pv_f | EXECUTE | YES
+postgres | postgres | pv_g | EXECUTE | YES
+postgres | pv_other | pv_g | EXECUTE | NO
+-- SELECT 4
+
+> SELECT grantor, grantee, object_name, object_type, privilege_type, is_grantable FROM information_schema.usage_privileges
+> WHERE object_schema = 'public' ORDER BY 3, 2
+grantor:name | grantee:name | object_name:name | object_type:varchar | privilege_type:varchar | is_grantable:varchar
+pv_owner | pv_owner | pv_seq | SEQUENCE | USAGE | YES
+pv_owner | pv_reader | pv_seq | SEQUENCE | USAGE | NO
+-- SELECT 2
+
+> SELECT grantee, role_name, is_grantable FROM information_schema.applicable_roles WHERE role_name LIKE 'pv\_%' ORDER BY 1, 2
+grantee:name | role_name:name | is_grantable:varchar
+pv_reader | pv_group | NO
+-- SELECT 1
+
+> SET ROLE pv_reader
+-- SET
+
+> SELECT role_name FROM information_schema.enabled_roles ORDER BY 1
+role_name:name
+pv_group
+pv_reader
+-- SELECT 2
+
+> SELECT grantee, table_name, privilege_type FROM information_schema.role_table_grants WHERE table_schema IN ('public', 'pv_s') ORDER BY 1, 2, 3
+grantee:name | table_name:name | privilege_type:varchar
+pv_group | pv_v | DELETE
+pv_group | pv_v | INSERT
+pv_group | pv_v | REFERENCES
+pv_group | pv_v | SELECT
+pv_group | pv_v | TRIGGER
+pv_group | pv_v | TRUNCATE
+pv_group | pv_v | UPDATE
+pv_group | t3 | SELECT
+pv_other | t2 | SELECT
+pv_reader | t2 | DELETE
+pv_reader | t2 | INSERT
+pv_reader | t2 | REFERENCES
+pv_reader | t2 | SELECT
+pv_reader | t2 | TRIGGER
+pv_reader | t2 | TRUNCATE
+pv_reader | t2 | UPDATE
+-- SELECT 16
+
+> RESET ROLE
+-- RESET
+
+> REASSIGN OWNED BY pv_owner TO pv_writer
+-- REASSIGN OWNED
+
+> SELECT relname, relowner::regrole FROM pg_class WHERE relname IN ('pv_seq', 'pv_v', 'pv_t') ORDER BY 1
+relname:name | relowner:4096
+pv_seq | pv_writer
+pv_t | pv_writer
+pv_v | pv_writer
+-- SELECT 3
+
+> SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'pv_s'
+nspowner:4096
+pv_writer
+-- SELECT 1
+
+> DROP ROLE pv_writer
+ERROR 2BP01: role "pv_writer" cannot be dropped because some objects depend on it
+DETAIL: owner of table pv_t
+DETAIL: owner of sequence pv_seq
+DETAIL: owner of function pv_f(integer)
+DETAIL: owner of view pv_v
+DETAIL: owner of schema pv_s
+
+> DROP OWNED BY pv_writer, pv_reader, pv_other, pv_group
+ERROR 2BP01: cannot drop desired object(s) because other objects depend on them
+DETAIL: table pv_s.t depends on schema pv_s
+DETAIL: table pv_s.t3 depends on schema pv_s
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> SELECT count(*) FROM pg_class WHERE relname IN ('pv_seq', 'pv_v', 'pv_t')
+count:int8
+3
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> DROP OWNED BY pv_writer, pv_reader, pv_other, pv_group CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to table pv_s.t
+DETAIL: drop cascades to table pv_s.t3
+-- DROP OWNED
+
+> SELECT count(*) FROM pg_class WHERE relname IN ('pv_seq', 'pv_v', 'pv_t', 't', 't2', 't3')
+count:int8
+0
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*) FROM pg_namespace WHERE nspname = 'pv_s'
+count:int8
+1
+-- SELECT 1
+
+> DROP TABLE IF EXISTS pv_mine
+NOTICE 00000: table "pv_mine" does not exist, skipping
+-- DROP TABLE
+
+> DROP FUNCTION pv_g()
+-- DROP FUNCTION
+
+> DROP ROLE pv_owner, pv_reader, pv_writer, pv_group, pv_other
+ERROR 2BP01: role "pv_reader" cannot be dropped because some objects depend on it
+DETAIL: privileges for sequence pv_seq
+DETAIL: privileges for schema pv_s
+DETAIL: owner of table pv_s.t2
+
+> SELECT count(*) FROM pg_roles WHERE rolname LIKE 'pv\_%'
+count:int8
+5
+-- SELECT 1
+
+> DROP OWNED BY pv_owner, pv_reader, pv_writer, pv_group, pv_other CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to table pv_s.t
+DETAIL: drop cascades to table pv_s.t3
+-- DROP OWNED
+
+> DROP ROLE pv_owner, pv_reader, pv_writer, pv_group, pv_other
+-- DROP ROLE
+
+> SELECT count(*) FROM pg_roles WHERE rolname LIKE 'pv\_%'
+count:int8
+0
+-- SELECT 1
+

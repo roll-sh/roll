@@ -1,0 +1,50 @@
+[
+  {
+    "target": "baseline",
+    "case": "point_select",
+    "exit": 101,
+    "rejected": true
+  },
+  {
+    "target": "baseline",
+    "case": "point_select_simple",
+    "exit": 101,
+    "rejected": true
+  },
+  {
+    "target": "baseline",
+    "case": "range_scan_100",
+    "exit": 101,
+    "rejected": true
+  },
+  {
+    "target": "baseline",
+    "case": "secondary_lookup",
+    "exit": 101,
+    "rejected": true
+  },
+  {
+    "target": "postgres",
+    "case": "point_select",
+    "exit": 101,
+    "rejected": true
+  },
+  {
+    "target": "postgres",
+    "case": "point_select_simple",
+    "exit": 101,
+    "rejected": true
+  },
+  {
+    "target": "postgres",
+    "case": "range_scan_100",
+    "exit": 101,
+    "rejected": true
+  },
+  {
+    "target": "postgres",
+    "case": "secondary_lookup",
+    "exit": 101,
+    "rejected": true
+  }
+]

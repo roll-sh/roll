@@ -1,0 +1,126 @@
+> CREATE TABLE a3_cf (two int, four int, f text)
+-- CREATE TABLE
+
+> INSERT INTO a3_cf VALUES (1, 2, 'a'), (2, 3, NULL)
+-- INSERT 0 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a3_cf WHERE two = NULL
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> SELECT * FROM a3_cf WHERE two = NULL
+two:int4 | four:int4 | f:text
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a3_cf WHERE (two * 2) / NULL::int = 1
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT two + NULL, f || NULL, coalesce(NULL::int, 1), coalesce(NULL::int, two, 3, four), concat(f, NULL) FROM a3_cf
+QUERY PLAN:text
+Seq Scan on public.a3_cf
+  Output: NULL::integer, NULL::text, 1, COALESCE(two, 3), concat(f, NULL::unknown)
+-- EXPLAIN
+
+> SELECT two + NULL, f || NULL, coalesce(NULL::int, 1), coalesce(NULL::int, two, 3, four), concat(f, NULL) FROM a3_cf
+?column?:int4 | ?column?:text | coalesce:int4 | coalesce:int4 | concat:text
+NULL | NULL | 1 | 1 | a
+NULL | NULL | 1 | 2 | 
+-- SELECT 2
+
+> PREPARE a3_cfp(int) AS SELECT * FROM a3_cf WHERE two / $1 = 1
+-- PREPARE
+
+> EXPLAIN (COSTS OFF) EXECUTE a3_cfp(NULL)
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXECUTE a3_cfp(NULL)
+two:int4 | four:int4 | f:text
+-- SELECT 0
+
+> EXECUTE a3_cfp(1)
+two:int4 | four:int4 | f:text
+1 | 2 | a
+-- SELECT 1
+
+> DEALLOCATE a3_cfp
+-- DEALLOCATE
+
+> CREATE VIEW a3_cfv AS SELECT two + NULL AS x, coalesce(NULL::int, two) AS y, f FROM a3_cf WHERE four = NULL
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('a3_cfv')
+pg_get_viewdef:text
+ SELECT (two + NULL::integer) AS x,
+    COALESCE(NULL::integer, two) AS y,
+    f
+   FROM a3_cf
+  WHERE (four = NULL::integer);
+-- SELECT 1
+
+> SELECT NULL + 1 / 0
+ERROR 22012: division by zero
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH x AS (SELECT * FROM (SELECT two FROM a3_cf FOR UPDATE) ss)
+> SELECT * FROM x WHERE two = 1
+QUERY PLAN:text
+CTE Scan on x
+  Output: x.two
+  Filter: (x.two = 1)
+  CTE x
+    ->  Subquery Scan on ss
+          Output: ss.two
+          ->  LockRows
+                Output: a3_cf.two, a3_cf.ctid
+                ->  Seq Scan on public.a3_cf
+                      Output: a3_cf.two, a3_cf.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT two FROM a3_cf FOR UPDATE) ss WHERE two = 1
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.two
+  ->  LockRows
+        Output: a3_cf.two, a3_cf.ctid
+        ->  Seq Scan on public.a3_cf
+              Output: a3_cf.two, a3_cf.ctid
+              Filter: (a3_cf.two = 1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT * FROM a3_cf FOR SHARE) ss
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.two, ss.four, ss.f
+  ->  LockRows
+        Output: a3_cf.two, a3_cf.four, a3_cf.f, a3_cf.ctid
+        ->  Seq Scan on public.a3_cf
+              Output: a3_cf.two, a3_cf.four, a3_cf.f, a3_cf.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT two FROM a3_cf FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: two, ctid
+  ->  Seq Scan on public.a3_cf
+        Output: two, ctid
+-- EXPLAIN
+
+> SELECT * FROM (SELECT two FROM a3_cf FOR UPDATE) ss WHERE two = 1
+two:int4
+1
+-- SELECT 1
+
+> DROP VIEW a3_cfv
+-- DROP VIEW
+
+> DROP TABLE a3_cf
+-- DROP TABLE
+

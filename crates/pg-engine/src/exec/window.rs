@@ -1,0 +1,1501 @@
+//! Window functions: partitions, ordering, frames (ROWS / RANGE / GROUPS with offsets and
+//! exclusions), ranking and value functions, and aggregates over frames.
+
+use super::agg::{feed, finish, new_state};
+use super::nodes::compare_values;
+use super::{BoxNode, ExecCtx, Node, Row, eval_all};
+use crate::error::{Error, Result, code};
+use crate::sql::expr::eval;
+use crate::sql::plan::{
+    FrameBound, FrameExclude, FrameUnit, SortKey, WinFunc, WinKind, WindowCall,
+};
+use crate::types::numeric::Numeric;
+use crate::types::value::Interval;
+use crate::types::{DataType, Value};
+use std::cmp::Ordering;
+
+pub struct WindowNode {
+    input: Option<BoxNode>,
+    calls: Vec<WindowCall>,
+    out: std::vec::IntoIter<Row>,
+    /// The sort keys the input is already in (a Sort below), as `key_repr`s.
+    presorted: Vec<String>,
+    /// Read a partition at a time (`streamed_partitions`): its keys, and the next
+    /// partition's first row, read past the one before.
+    stream: Option<Vec<NeedKey>>,
+    pending: Option<Row>,
+    started: bool,
+    /// The Sort the executor put under it (`sort_keys_for`): kept while its node runs, which
+    /// is counted by its address.
+    sort: Option<std::sync::Arc<crate::sql::plan::Plan>>,
+    /// EXPLAIN ANALYZE: each WindowAgg's tuplestore as PostgreSQL's would hold it (`Store`).
+    store: Option<Stores>,
+}
+
+/// What EXPLAIN ANALYZE counts of the windows' tuplestores: the input's column types, the
+/// columns PostgreSQL's input target list keeps, and each window's store (bottom first).
+struct Stores {
+    /// The WindowAgg nodes' counters: the plan's own, and its input's (the lower ones').
+    keys: [usize; 2],
+    types: Vec<DataType>,
+    keep: Option<Vec<bool>>,
+    wins: Vec<super::workmem::WinStore>,
+}
+
+impl WindowNode {
+    pub fn new(input: BoxNode, calls: Vec<WindowCall>) -> Self {
+        WindowNode {
+            input: Some(input),
+            calls,
+            out: Vec::new().into_iter(),
+            presorted: Vec::new(),
+            stream: None,
+            pending: None,
+            started: false,
+            sort: None,
+            store: None,
+        }
+    }
+
+    /// Under EXPLAIN ANALYZE: count the tuplestores of `plan`'s WindowAgg nodes, over
+    /// `input`, whose columns `keep` marks.
+    pub fn counted(
+        mut self,
+        plan: &std::sync::Arc<crate::sql::plan::Plan>,
+        input: &std::sync::Arc<crate::sql::plan::Plan>,
+        keep: Option<Vec<bool>>,
+        ctx: &ExecCtx,
+    ) -> Self {
+        if ctx.instrumented() {
+            self.store = Some(Stores {
+                keys: [std::sync::Arc::as_ptr(plan) as usize, std::sync::Arc::as_ptr(input) as usize],
+                types: crate::sql::paths::analyzejoins::col_types(input),
+                keep,
+                wins: Vec::new(),
+            });
+        }
+        self
+    }
+
+    /// It reads the output of `sort`, a Sort the executor made for it.
+    pub fn holding(mut self, sort: std::sync::Arc<crate::sql::plan::Plan>) -> Self {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// The input is sorted on `keys` (a Sort right below).
+    pub fn presorted(mut self, keys: &[SortKey]) -> Self {
+        self.presorted = keys
+            .iter()
+            .map(|k| key_repr(&k.expr, k.desc, k.nulls_first))
+            .collect();
+        self
+    }
+}
+
+impl Node for WindowNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if !self.started {
+            self.started = true;
+            self.stream = streamed_partitions(&self.calls, &self.presorted, ctx);
+        }
+        loop {
+            if let Some(r) = self.out.next() {
+                return Ok(Some(r));
+            }
+            let Some(input) = self.input.as_mut() else { return Ok(None) };
+            // The whole input, or (streamed) the next partition: its rows until one whose
+            // partition keys differ, kept for the next.
+            let mut rows = Vec::new();
+            match &self.stream {
+                None => {
+                    while let Some(r) = input.next(ctx)? {
+                        ctx.check()?;
+                        rows.push(r);
+                    }
+                    self.input = None;
+                }
+                Some(keys) => {
+                    let first = match self.pending.take() {
+                        Some(r) => r,
+                        None => match input.next(ctx)? {
+                            Some(r) => r,
+                            None => {
+                                self.input = None;
+                                return Ok(None);
+                            }
+                        },
+                    };
+                    let part: Vec<Value> = keys.iter().map(|k| eval(&k.key.expr, &first, ctx)).collect::<Result<_>>()?;
+                    rows.push(first);
+                    loop {
+                        let Some(r) = input.next(ctx)? else {
+                            self.input = None;
+                            break;
+                        };
+                        ctx.check()?;
+                        let mut same = true;
+                        for (k, v) in keys.iter().zip(&part) {
+                            if cmp_need(&eval(&k.key.expr, &r, ctx)?, v, k, ctx)? != Ordering::Equal {
+                                same = false;
+                                break;
+                            }
+                        }
+                        if !same {
+                            self.pending = Some(r);
+                            break;
+                        }
+                        rows.push(r);
+                    }
+                }
+            }
+            self.out = self.compute(rows, ctx)?.into_iter();
+        }
+    }
+}
+
+impl WindowNode {
+    /// The calls' results for `rows`, appended to them, in the order they come out.
+    fn compute(&mut self, rows: Vec<Row>, ctx: &ExecCtx) -> Result<Vec<Row>> {
+        let n = rows.len();
+        // (Row i's results at i * k.., one array for all rows.)
+        let k = self.calls.len();
+        let mut results: Vec<Value> = vec![Value::Null; n * k];
+        let order = run_windows(&self.calls, &rows, &mut results, &self.presorted, self.store.as_mut(), ctx)?;
+        if let Some(st) = &self.store
+            && let Some(instr) = ctx.instr.borrow().clone()
+        {
+            let mut stats = [None; 4];
+            for (s, w) in stats.iter_mut().zip(&st.wins) {
+                let (d, b) = w.stats();
+                *s = Some((d, b as u64));
+            }
+            for key in st.keys {
+                instr.update(key, |s| {
+                    for (x, y) in s.winstore.iter_mut().zip(stats) {
+                        if let Some((d, b)) = y {
+                            let (d0, b0) = x.unwrap_or_default();
+                            *x = Some((d0 || d, b0.max(b)));
+                        }
+                    }
+                });
+            }
+            // (The Sort the executor made shows as PostgreSQL's, whose counters are its
+            // input's.)
+            if let Some(sp) = &self.sort
+                && let Some(sort) = instr.get(std::sync::Arc::as_ptr(sp) as usize).and_then(|s| s.sort)
+            {
+                instr.update(st.keys[1], |s| s.sort = Some(sort));
+            }
+        }
+        let mut out = Vec::with_capacity(n);
+        let mut rows: Vec<Option<Row>> = rows.into_iter().map(Some).collect();
+        for i in order {
+            let mut r = rows[i].take().unwrap();
+            r.reserve_exact(k);
+            r.extend(results[i * k..(i + 1) * k].iter_mut().map(|v| std::mem::replace(v, Value::Null)));
+            out.push(r);
+        }
+        Ok(out)
+    }
+}
+
+/// The keys of the Sort PostgreSQL puts under its WindowAgg (partition keys, then order
+/// keys), when the calls have one window whose partition keys (if any) compare bytewise: the
+/// executor then sorts its input as a Sort node does (work_mem, spilling where tuplesort
+/// would: the order of equal keys is tuplesort's, and EXPLAIN ANALYZE's Sort line its) and,
+/// with partition keys, reads it a partition at a time (`streamed_partitions`).
+pub(super) fn sort_keys_for(calls: &[WindowCall], ctx: &ExecCtx) -> Option<Vec<SortKey>> {
+    let keys = window_keys(calls, true, ctx)?.0;
+    if keys.iter().any(|k| k.coll.is_some()) {
+        return None;
+    }
+    let mut out: Vec<SortKey> = keys.into_iter().map(|k| k.key).collect();
+    let mut seen: Vec<String> = out.iter().map(|k| key_repr(&k.expr, k.desc, k.nulls_first)).collect();
+    for k in calls[0].order_by.iter().filter(|k| !crate::sql::binder::optimize::pseudo_constant(&k.expr)) {
+        let r = key_repr(&k.expr, k.desc, k.nulls_first);
+        if !seen.contains(&r) {
+            seen.push(r);
+            out.push(k.clone());
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The partition keys to read the input a partition at a time by, when that computes what
+/// the whole input would (as WindowAgg reads its input): every call has one window (the
+/// same partitioning, ordering and frame), it has partition keys, and the input is sorted
+/// on its partition and order keys already, so nothing is sorted and each partition's
+/// results are its own. None: the whole input at once.
+fn streamed_partitions(calls: &[WindowCall], presorted: &[String], ctx: &ExecCtx) -> Option<Vec<NeedKey>> {
+    let (keys, need) = window_keys(calls, false, ctx)?;
+    if presorted.len() < need.len() || presorted[..need.len()] != need[..] {
+        return None;
+    }
+    Some(keys)
+}
+
+/// The calls' one window's partition keys (as `NeedKey`s) and the `key_repr`s of what its
+/// input must be sorted on (partition keys, then order keys); None when the calls have
+/// several windows, or the window no partition keys unless `unpartitioned`.
+fn window_keys(calls: &[WindowCall], unpartitioned: bool, ctx: &ExecCtx) -> Option<(Vec<NeedKey>, Vec<String>)> {
+    use crate::sql::binder::optimize::pseudo_constant;
+    let first = calls.first()?;
+    let spec = |c: &WindowCall| {
+        let part: Vec<String> = c.partition_by.iter().filter(|e| !pseudo_constant(e)).map(|e| key_repr(e, false, false)).collect();
+        let order: Vec<String> = c.order_by.iter().map(|k| key_repr(&k.expr, k.desc, k.nulls_first)).collect();
+        format!("{part:?}{order:?}{:?}", c.frame)
+    };
+    let s0 = spec(first);
+    if calls.iter().any(|c| spec(c) != s0) {
+        return None;
+    }
+    let part_exprs: Vec<crate::sql::expr::Expr> = first.partition_by.iter().filter(|e| !pseudo_constant(e)).cloned().collect();
+    if part_exprs.is_empty() && !unpartitioned {
+        return None;
+    }
+    let mut need: Vec<String> = Vec::new();
+    for e in &part_exprs {
+        let r = key_repr(e, false, false);
+        if !need.contains(&r) {
+            need.push(r);
+        }
+    }
+    let nparts = need.len();
+    for k in first.order_by.iter().filter(|k| !pseudo_constant(&k.expr)) {
+        let r = key_repr(&k.expr, k.desc, k.nulls_first);
+        if !need.contains(&r) {
+            need.push(r);
+        }
+    }
+    let colls = partition_collations(&part_exprs, ctx);
+    let mut keys: Vec<NeedKey> = Vec::new();
+    for (e, coll) in part_exprs.into_iter().zip(colls) {
+        let repr = key_repr(&e, false, false);
+        if keys.iter().any(|k| k.repr == repr) {
+            continue;
+        }
+        keys.push(NeedKey {
+            key: SortKey { expr: e, desc: false, nulls_first: false, using: None },
+            coll,
+            repr,
+        });
+    }
+    debug_assert_eq!(keys.len(), nparts);
+    Some((keys, need))
+}
+
+/// A sort key as the window planning compares them.
+fn key_repr(e: &crate::sql::expr::Expr, desc: bool, nulls_first: bool) -> String {
+    format!("{e:?}/{desc}/{nulls_first}")
+}
+
+/// A key a window's sort needs: a partition key (compared under its collation when that
+/// doesn't compare bytes) or an ORDER BY key.
+struct NeedKey {
+    key: SortKey,
+    coll: Option<std::sync::Arc<crate::types::collation::Collation>>,
+    repr: String,
+}
+
+fn cmp_need(a: &Value, b: &Value, k: &NeedKey, ctx: &ExecCtx) -> Result<Ordering> {
+    match (&k.coll, a.is_null() || b.is_null()) {
+        (Some(c), false) => Ok(crate::types::collation::cmp_values(c, a, b)),
+        _ => compare_values(a, b, &k.key, ctx),
+    }
+}
+
+/// The window calls run as Postgres's WindowAgg nodes do: calls with the same window
+/// together, the windows in select_active_windows's order, each over the input sorted
+/// for it (a Sort, or an Incremental Sort when a prefix of its keys is sorted already)
+/// and split into partitions as the sorted rows go by. Returns the rows' final order.
+/// The columns `exprs` are, when every one is a plain column every row has (its values are
+/// then read in place rather than computed into a vector per row).
+fn plain_cols(exprs: &[&crate::sql::expr::Expr], rows: &[Row]) -> Option<Vec<usize>> {
+    let cols: Vec<usize> = exprs
+        .iter()
+        .map(|e| match e {
+            crate::sql::expr::Expr::Col(i, _) => Some(*i),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    rows.iter().all(|r| cols.iter().all(|&c| c < r.len())).then_some(cols)
+}
+
+/// Key `k` of the `j`th row (`rows[at(j)]`): in place (`cols`) or computed before (`vals[j]`).
+#[inline]
+fn key_at<'r>(cols: &Option<Vec<usize>>, rows: &'r [Row], vals: &'r [Vec<Value>], row: usize, j: usize, k: usize) -> &'r Value {
+    match cols {
+        Some(c) => &rows[row][c[k]],
+        None => &vals[j][k],
+    }
+}
+
+fn run_windows(
+    calls: &[WindowCall],
+    rows: &[Row],
+    results: &mut [Value],
+    presorted: &[String],
+    mut store: Option<&mut Stores>,
+    ctx: &ExecCtx,
+) -> Result<Vec<usize>> {
+    use crate::sql::binder::optimize::pseudo_constant;
+    let n = rows.len();
+    // Windows: calls sharing partitioning, ordering and frame.
+    let mut wins: Vec<(String, Vec<usize>)> = Vec::new();
+    for (ci, call) in calls.iter().enumerate() {
+        let part: Vec<String> = call
+            .partition_by
+            .iter()
+            .filter(|e| !pseudo_constant(e))
+            .map(|e| key_repr(e, false, false))
+            .collect();
+        let order: Vec<String> = call
+            .order_by
+            .iter()
+            .map(|k| key_repr(&k.expr, k.desc, k.nulls_first))
+            .collect();
+        let spec = format!("{part:?}{order:?}{:?}", call.frame);
+        match wins.iter_mut().find(|w| w.0 == spec) {
+            Some(w) => w.1.push(ci),
+            None => wins.push((spec, vec![ci])),
+        }
+    }
+    // select_active_windows (as EXPLAIN orders them).
+    let mut refs: Vec<String> = Vec::new();
+    let mut ref_of = |e: &crate::sql::expr::Expr| {
+        let k = format!("{e:?}");
+        match refs.iter().position(|r| *r == k) {
+            Some(i) => i,
+            None => {
+                refs.push(k);
+                refs.len() - 1
+            }
+        }
+    };
+    let mut unique_orders: Vec<Vec<(usize, bool, bool)>> = Vec::new();
+    for (_, cs) in &wins {
+        let call = &calls[cs[0]];
+        for k in &call.order_by {
+            ref_of(&k.expr);
+        }
+        for e in &call.partition_by {
+            ref_of(e);
+        }
+        let mut u: Vec<(usize, bool, bool)> = Vec::new();
+        for e in &call.partition_by {
+            let x = (ref_of(e), false, false);
+            if !u.contains(&x) {
+                u.push(x);
+            }
+        }
+        for k in &call.order_by {
+            let x = (ref_of(&k.expr), k.desc, k.nulls_first);
+            if !u.contains(&x) {
+                u.push(x);
+            }
+        }
+        unique_orders.push(u);
+    }
+    let mut sequence: Vec<usize> = (0..wins.len()).collect();
+    sequence.sort_by(|&a, &b| {
+        for (x, y) in unique_orders[a].iter().zip(&unique_orders[b]) {
+            let o = y
+                .0
+                .cmp(&x.0)
+                .then(x.1.cmp(&y.1).reverse())
+                .then(x.2.cmp(&y.2).reverse());
+            if o != Ordering::Equal {
+                return o;
+            }
+        }
+        unique_orders[b].len().cmp(&unique_orders[a].len())
+    });
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut sorted: Vec<String> = presorted.to_vec();
+    // (No window's results yet: rows that are the same are the same in every way.)
+    let mut first = true;
+    // (The calls of the windows computed so far: the tuples of a WindowAgg above carry them.)
+    let mut done: Vec<usize> = Vec::new();
+    for (si, wi) in sequence.into_iter().enumerate() {
+        let call0 = &calls[wins[wi].1[0]];
+        let part_exprs: Vec<&crate::sql::expr::Expr> = call0
+            .partition_by
+            .iter()
+            .filter(|e| !pseudo_constant(e))
+            .collect();
+        let colls = partition_collations(
+            &part_exprs.iter().map(|e| (*e).clone()).collect::<Vec<_>>(),
+            ctx,
+        );
+        let mut need: Vec<NeedKey> = Vec::new();
+        for (e, coll) in part_exprs.iter().zip(colls) {
+            let repr = key_repr(e, false, false);
+            if !need.iter().any(|k| k.repr == repr) {
+                need.push(NeedKey {
+                    key: SortKey {
+                        expr: (*e).clone(),
+                        desc: false,
+                        nulls_first: false,
+                        using: None,
+                    },
+                    coll,
+                    repr,
+                });
+            }
+        }
+        for k in call0.order_by.iter().filter(|k| !pseudo_constant(&k.expr)) {
+            let repr = key_repr(&k.expr, k.desc, k.nulls_first);
+            if !need.iter().any(|x| x.repr == repr) {
+                need.push(NeedKey {
+                    key: k.clone(),
+                    coll: None,
+                    repr,
+                });
+            }
+        }
+        let common = need
+            .iter()
+            .zip(&sorted)
+            .take_while(|(a, b)| a.repr == **b)
+            .count();
+        if !need.is_empty() && common < need.len() {
+            let vcols = plain_cols(&need.iter().map(|k| &k.key.expr).collect::<Vec<_>>(), rows);
+            let vals: Vec<Vec<Value>> = match vcols {
+                Some(_) => Vec::new(),
+                None => rows
+                    .iter()
+                    .map(|r| need.iter().map(|k| eval(&k.key.expr, r, ctx)).collect())
+                    .collect::<Result<_>>()?,
+            };
+            let val = |r: usize, k: usize| key_at(&vcols, rows, &vals, r, r, k);
+            let cmp_range = |a: usize, b: usize, from: usize, to: usize| -> Result<Ordering> {
+                for (i, k) in need.iter().enumerate().take(to).skip(from) {
+                    match cmp_need(val(a, i), val(b, i), k, ctx)? {
+                        Ordering::Equal => {}
+                        o => return Ok(o),
+                    }
+                }
+                Ok(Ordering::Equal)
+            };
+            let len = need.len();
+            let mut full = |a: &usize, b: &usize| cmp_range(*a, *b, 0, len);
+            let mut cf = super::pgsort::Cmp::new(&mut full);
+            if common > 0 {
+                let mut suffix = |a: &usize, b: &usize| cmp_range(*a, *b, common, len);
+                let mut cs = super::pgsort::Cmp::new(&mut suffix);
+                let mut err = None;
+                let mut same = |a: &usize, b: &usize| match cmp_range(*a, *b, 0, common) {
+                    Ok(o) => o == Ordering::Equal,
+                    Err(e) => {
+                        err.get_or_insert(e);
+                        true
+                    }
+                };
+                let mut stats = super::pgsort::IncrStats::default();
+                order = super::pgsort::incremental_sort(order, None, &mut cf, &mut cs, &mut same, &mut stats);
+                if let Some(e) = err.or(cs.err) {
+                    return Err(e);
+                }
+            } else if let Some(p) = first
+                .then(|| {
+                    let keys: Vec<SortKey> = need.iter().map(|k| k.key.clone()).collect();
+                    // (Partition keys under a nondeterministic collation compare by it.)
+                    if need.iter().any(|k| k.coll.is_some()) {
+                        return None;
+                    }
+                    super::fastsort::order(n, &keys, |i, k| val(order[i], k), |i| &rows[order[i]], None)
+                })
+                .flatten()
+            {
+                order = p.into_iter().map(|j| order[j]).collect();
+            } else {
+                order = super::pgsort::tuplesort(order, None, &mut cf);
+            }
+            if let Some(e) = cf.err {
+                return Err(e);
+            }
+            sorted = need.iter().map(|k| k.repr.clone()).collect();
+        }
+        // Partitions: runs of rows whose partition keys are equal.
+        let npart = need
+            .iter()
+            .take_while(|k| part_exprs.iter().any(|e| key_repr(e, false, false) == k.repr))
+            .count();
+        let pcols = plain_cols(&part_exprs, rows);
+        let pvals: Vec<Vec<Value>> = match pcols {
+            Some(_) => Vec::new(),
+            None => order
+                .iter()
+                .map(|&i| part_exprs.iter().map(|e| eval(e, &rows[i], ctx)).collect())
+                .collect::<Result<_>>()?,
+        };
+        let pkeys: Vec<&NeedKey> = need.iter().take(npart).collect();
+        // (Each partition key's comparison, found once rather than per row.)
+        let pk: Vec<Option<&NeedKey>> = part_exprs
+            .iter()
+            .map(|e| {
+                let r = key_repr(e, false, false);
+                pkeys.iter().find(|k| k.repr == r).copied()
+            })
+            .collect();
+        // (Rows at positions `a` and `b` of the order.)
+        let same_part = |a: usize, b: usize| -> Result<bool> {
+            for (i, k) in pk.iter().enumerate() {
+                let (x, y) = (
+                    key_at(&pcols, rows, &pvals, order[a], a, i),
+                    key_at(&pcols, rows, &pvals, order[b], b, i),
+                );
+                let o = match k {
+                    Some(k) => cmp_need(x, y, k, ctx)?,
+                    None => x.cmp_total(y),
+                };
+                if o != Ordering::Equal {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        let mut parts: Vec<Vec<usize>> = Vec::new();
+        for (p, &i) in order.iter().enumerate() {
+            if p == 0 || !same_part(p - 1, p)? {
+                parts.push(Vec::new());
+            }
+            parts.last_mut().unwrap().push(i);
+        }
+        // (The window's calls share its ORDER BY: its keys computed once.)
+        let okeys: Vec<Vec<Value>> = rows
+            .iter()
+            .map(|r| call0.order_by.iter().map(|k| eval(&k.expr, r, ctx)).collect())
+            .collect::<Result<_>>()?;
+        // (Each partition's peer groups, found by its first call: the window's calls share
+        // its ORDER BY.)
+        let mut peers: Vec<Option<Vec<(usize, usize)>>> = vec![None; parts.len()];
+        for &ci in &wins[wi].1 {
+            let call = &calls[ci];
+            let mut out = vec![Value::Null; n];
+            for (part, pp) in parts.iter().zip(peers.iter_mut()) {
+                if pp.is_none() {
+                    *pp = Some(peer_groups(part, &okeys, &call.order_by, ctx)?);
+                }
+                compute_partition(call, rows, &okeys, part, pp.as_deref().unwrap_or_default(), &mut out, ctx)?;
+            }
+            for (i, v) in out.into_iter().enumerate() {
+                results[i * calls.len() + ci] = v;
+            }
+        }
+        if let Some(st) = store.as_deref_mut() {
+            let w = Win { si, calls: &wins[wi].1, done: &done, parts: &parts, peers: &peers, okeys: &okeys };
+            count_store(st, &w, calls, rows, results, ctx)?;
+        }
+        done.extend_from_slice(&wins[wi].1);
+        first = false;
+    }
+    Ok(order)
+}
+
+/// One window of `run_windows`, as `count_store` reads it.
+struct Win<'a> {
+    /// Its place among the WindowAggs (bottom first), its calls, and those below it.
+    si: usize,
+    calls: &'a [usize],
+    done: &'a [usize],
+    parts: &'a [Vec<usize>],
+    peers: &'a [Option<Vec<(usize, usize)>>],
+    okeys: &'a [Vec<Value>],
+}
+
+/// A lag / lead / nth_value offset that is a constant (get_fn_expr_arg_stable), else None.
+fn const_offset(call: &WindowCall, arg: usize, default: Option<i64>) -> Option<i64> {
+    match call.args.get(arg) {
+        None => default,
+        Some(crate::sql::expr::Expr::Const(v, _)) => v.as_i64(),
+        Some(_) => None,
+    }
+}
+
+/// EXPLAIN ANALYZE: window `w`'s tuplestore over its partitions (`workmem::WinStore`):
+/// before each row's trim, the rows nodeWindowAgg.c has spooled (spool_tuples: to the frame
+/// tail an aggregate or a frame pointer reads one past, the whole partition for a row count)
+/// and the oldest of its read pointers (the current row, the frame head and tail pointers,
+/// the aggregates' and each function's mark).
+fn count_store(st: &mut Stores, w: &Win, calls: &[WindowCall], rows: &[Row], results: &[Value], ctx: &ExecCtx) -> Result<()> {
+    use crate::sql::plan::Frame;
+    let frameless = |c: &WindowCall| {
+        matches!(
+            c.func,
+            WinFunc::Builtin(WinKind::RowNumber | WinKind::Rank | WinKind::DenseRank | WinKind::PercentRank | WinKind::CumeDist | WinKind::Ntile)
+        )
+    };
+    // (optimize_window_clauses: functions that ignore the frame get ROWS UNBOUNDED PRECEDING.)
+    let mut wc = calls[w.calls[0]].clone();
+    if w.calls.iter().all(|&c| frameless(&calls[c])) {
+        wc.frame = Frame {
+            unit: FrameUnit::Rows,
+            start: FrameBound::UnboundedPreceding,
+            end: FrameBound::CurrentRow,
+            exclude: FrameExclude::NoOthers,
+            between: false,
+        };
+    }
+    let f = wc.frame.clone();
+    let ordered = !wc.order_by.is_empty();
+    let ranged = f.unit != FrameUnit::Rows;
+    let offset = |b: &FrameBound| matches!(b, FrameBound::Preceding(_) | FrameBound::Following(_));
+    let head_ptr = ranged && (matches!(f.start, FrameBound::CurrentRow) && ordered || offset(&f.start));
+    let tail_ptr = ranged && (matches!(f.end, FrameBound::CurrentRow) && ordered || offset(&f.end));
+    let excl = f.exclude != FrameExclude::NoOthers;
+    let aggs = w.calls.iter().any(|&c| matches!(calls[c].func, WinFunc::Agg(_)));
+    let agg_mark = aggs && (!matches!(f.start, FrameBound::UnboundedPreceding) || excl);
+    let builtins: Vec<(WinKind, &WindowCall)> = w
+        .calls
+        .iter()
+        .filter_map(|&c| match &calls[c].func {
+            WinFunc::Builtin(k) => Some((*k, &calls[c])),
+            WinFunc::Agg(_) => None,
+        })
+        .collect();
+    while st.wins.len() <= w.si {
+        st.wins.push(super::workmem::WinStore::new(super::workmem::work_mem(ctx), !builtins.is_empty() || agg_mark));
+    }
+    let keep = st.keep.clone();
+    let kept = |c: usize| keep.as_ref().is_none_or(|k| k.get(c).copied().unwrap_or(false));
+    let mut types: Vec<DataType> = st.types.iter().enumerate().filter(|(c, _)| kept(*c)).map(|(_, t)| t.clone()).collect();
+    types.extend(w.done.iter().map(|&d| calls[d].ty.clone()));
+    let offsets = (
+        offset(&f.start).then(|| match &f.start {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => offset_value(e, ctx, f.unit, true),
+            _ => unreachable!(),
+        }).transpose()?,
+        offset(&f.end).then(|| match &f.end {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => offset_value(e, ctx, f.unit, false),
+            _ => unreachable!(),
+        }).transpose()?,
+    );
+    for (part, pp) in w.parts.iter().zip(w.peers) {
+        let m = part.len();
+        let peers = pp.as_deref().unwrap_or_default();
+        let tlens: Vec<i64> = part
+            .iter()
+            .map(|&i| {
+                let mut vals: Vec<Value> = rows[i].iter().enumerate().filter(|(c, _)| kept(*c)).map(|(_, v)| v.clone()).collect();
+                vals.extend(w.done.iter().map(|&d| results[i * calls.len() + d].clone()));
+                super::workmem::minimal_tuple_len(&vals, &types, ctx)
+            })
+            .collect();
+        let frames: Vec<(usize, usize)> =
+            (0..m).map(|r| frame_of(&wc, r, m, peers, part, w.okeys, &offsets, ctx)).collect::<Result<_>>()?;
+        // (update_frametailpos: what it spools for row r.)
+        let tail_spool = |r: usize| match &f.end {
+            FrameBound::UnboundedFollowing => m,
+            FrameBound::CurrentRow if !ranged => r + 1,
+            FrameBound::CurrentRow if !ordered => m,
+            FrameBound::Preceding(_) | FrameBound::Following(_) if !ranged => frames[r].1,
+            _ => frames[r].1 + 1,
+        };
+        let (mut spool, mut oldest) = (vec![0usize; m], vec![0usize; m]);
+        let mut marks = vec![0usize; builtins.len()];
+        for r in 0..m {
+            let (s, e) = frames[r];
+            let (mut sp, mut old) = (r + 1, r + 1);
+            if tail_ptr {
+                sp = sp.max(tail_spool(r));
+                old = old.min(e + 1);
+            }
+            if head_ptr {
+                old = old.min(s + 1);
+            }
+            if aggs {
+                // (The aggregates read rows up to one past the frame's end.)
+                sp = sp.max(e + 1);
+                old = old.min((e + 1).min(m));
+                if agg_mark {
+                    old = old.min(s);
+                }
+            }
+            for ((kind, c), mark) in builtins.iter().zip(marks.iter_mut()) {
+                let mut set = |p: usize| *mark = (*mark).max(p);
+                match kind {
+                    WinKind::RowNumber | WinKind::Rank | WinKind::DenseRank => set(r),
+                    WinKind::PercentRank | WinKind::CumeDist => {
+                        sp = m;
+                        set(r);
+                    }
+                    WinKind::Ntile => sp = m,
+                    WinKind::Lag | WinKind::Lead => {
+                        if let Some(k) = const_offset(c, 1, Some(1)) {
+                            let t = if *kind == WinKind::Lag { r as i64 - k } else { r as i64 + k };
+                            sp = sp.max((t + 1).clamp(0, m as i64) as usize);
+                            if (0..m as i64).contains(&t) {
+                                set(t as usize);
+                            }
+                        }
+                    }
+                    WinKind::FirstValue => {
+                        sp = sp.max(s + 1);
+                        if s < e {
+                            set(s);
+                        }
+                    }
+                    WinKind::LastValue => {
+                        sp = sp.max(tail_spool(r));
+                        if s < e {
+                            set(if excl { s } else { e - 1 });
+                        }
+                    }
+                    WinKind::NthValue => {
+                        if let Some(n) = const_offset(c, 1, None).filter(|n| *n > 0) {
+                            let a = s + n as usize - 1;
+                            sp = sp.max(a + 1);
+                            if a < e {
+                                set(if excl { s } else { a });
+                            }
+                        }
+                    }
+                }
+                old = old.min(*mark);
+            }
+            spool[r] = sp.min(m);
+            oldest[r] = old;
+        }
+        st.wins[w.si].partition(&tlens, |r| spool[r], |r| oldest[r]);
+    }
+    Ok(())
+}
+
+fn cmp_keys(a: &[Value], b: &[Value], keys: &[SortKey], ctx: &ExecCtx) -> Result<Ordering> {
+    for (i, k) in keys.iter().enumerate() {
+        let o = compare_values(&a[i], &b[i], k, ctx)?;
+        if o != Ordering::Equal {
+            return Ok(o);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+
+/// Peer group boundaries: for each position, [start, end) of its peers.
+fn peer_groups(
+    part: &[usize],
+    okeys: &[Vec<Value>],
+    keys: &[SortKey],
+    ctx: &ExecCtx,
+) -> Result<Vec<(usize, usize)>> {
+    let m = part.len();
+    let mut out = vec![(0, 0); m];
+    let mut i = 0;
+    while i < m {
+        let mut j = i + 1;
+        while j < m && cmp_keys(&okeys[part[i]], &okeys[part[j]], keys, ctx)? == Ordering::Equal {
+            j += 1;
+        }
+        for item in out.iter_mut().take(j).skip(i) {
+            *item = (i, j);
+        }
+        i = j;
+    }
+    Ok(out)
+}
+
+fn offset_value(
+    e: &crate::sql::expr::Expr,
+    ctx: &ExecCtx,
+    unit: FrameUnit,
+    start: bool,
+) -> Result<Value> {
+    let which = if start { "starting" } else { "ending" };
+    let v = eval(e, &[], ctx)?;
+    if v.is_null() {
+        return Err(Error::new(
+            code::NULL_VALUE_NOT_ALLOWED,
+            format!("frame {which} offset must not be null"),
+        ));
+    }
+    // RANGE offsets are checked by the in_range functions, when used.
+    if unit != FrameUnit::Range && v.as_i64().is_some_and(|k| k < 0) {
+        return Err(Error::new(
+            code::INVALID_PRECEDING_OR_FOLLOWING_SIZE,
+            format!("frame {which} offset must not be negative"),
+        ));
+    }
+    Ok(v)
+}
+
+fn invalid_size() -> Error {
+    Error::new(
+        code::INVALID_PRECEDING_OR_FOLLOWING_SIZE,
+        "invalid preceding or following size in window function",
+    )
+}
+
+/// The btree in_range support functions: whether `val` is <= (`less`) or >= `base` ∓ `off`
+/// (`sub`: minus), with their treatment of NaN and infinities.
+fn in_range(
+    val: &Value,
+    base: &Value,
+    off: &Value,
+    sub: bool,
+    less: bool,
+    ctx: &ExecCtx,
+) -> Result<bool> {
+    use crate::types::datetime as dt;
+    let pick = |o: Ordering| if less { o != Ordering::Greater } else { o != Ordering::Less };
+    let timestamps = |val: i64, base: i64, iv: &Interval, tz: bool| -> Result<bool> {
+        if iv.cmp_key() < 0 {
+            return Err(invalid_size());
+        }
+        if iv.is_pos_inf() && (if sub { base == dt::TS_POS_INF } else { base == dt::TS_NEG_INF })
+        {
+            return Ok(true);
+        }
+        let iv = if sub { dt::interval_neg(iv)? } else { *iv };
+        let sum = if tz {
+            dt::tstz_add_interval(base, &iv, &ctx.fmt().tz)?
+        } else {
+            dt::ts_add_interval(base, &iv)?
+        };
+        Ok(pick(val.cmp(&sum)))
+    };
+    Ok(match (val, base, off) {
+        (Value::Float4(_) | Value::Float8(_), _, _) => {
+            let (v, b, o) = (
+                val.as_f64().unwrap_or(0.0),
+                base.as_f64().unwrap_or(0.0),
+                off.as_f64().unwrap_or(0.0),
+            );
+            if o.is_nan() || o < 0.0 {
+                return Err(invalid_size());
+            }
+            if v.is_nan() {
+                return Ok(b.is_nan() || !less);
+            }
+            if b.is_nan() {
+                return Ok(less);
+            }
+            if o.is_infinite() && b.is_infinite() && (if sub { b > 0.0 } else { b < 0.0 }) {
+                return Ok(true);
+            }
+            let sum = if sub { b - o } else { b + o };
+            if less { v <= sum } else { v >= sum }
+        }
+        (Value::Numeric(v), Value::Numeric(b), _) => {
+            let o = match off {
+                Value::Numeric(o) => (**o).clone(),
+                o => Numeric::from_i64(o.as_i64().unwrap_or(0)),
+            };
+            if o.is_nan() || o.is_negative() {
+                return Err(invalid_size());
+            }
+            if v.is_nan() {
+                return Ok(b.is_nan() || !less);
+            }
+            if b.is_nan() {
+                return Ok(less);
+            }
+            if matches!(o, Numeric::PosInf)
+                && (if sub { matches!(**b, Numeric::PosInf) } else { matches!(**b, Numeric::NegInf) })
+            {
+                return Ok(true);
+            }
+            let sum = if sub { b.sub(&o) } else { b.add(&o) };
+            pick((**v).cmp(&sum))
+        }
+        (Value::Interval(v), Value::Interval(b), Value::Interval(o)) => {
+            if o.cmp_key() < 0 {
+                return Err(invalid_size());
+            }
+            if o.is_pos_inf() && (if sub { b.is_pos_inf() } else { b.is_neg_inf() }) {
+                return Ok(true);
+            }
+            let sum = if sub { dt::interval_sub(b, o)? } else { dt::interval_add(b, o)? };
+            pick(v.cmp(&sum))
+        }
+        (Value::Timestamp(v), Value::Timestamp(b), Value::Interval(o)) => {
+            timestamps(*v, *b, o, false)?
+        }
+        (Value::Timestamptz(v), Value::Timestamptz(b), Value::Interval(o)) => {
+            timestamps(*v, *b, o, true)?
+        }
+        (Value::Date(v), Value::Date(b), Value::Interval(o)) => {
+            let ts = |d: i32| match d {
+                dt::DATE_NEG_INF => dt::TS_NEG_INF,
+                dt::DATE_POS_INF => dt::TS_POS_INF,
+                d => d as i64 * crate::types::value::USECS_PER_DAY,
+            };
+            timestamps(ts(*v), ts(*b), o, false)?
+        }
+        (Value::Time(v), Value::Time(b), Value::Interval(o)) => {
+            // Only the time part counts (no wraparound); +infinity overflows.
+            if o.micros < 0 {
+                return Err(invalid_size());
+            }
+            let sum = if sub {
+                b - o.micros
+            } else {
+                match b.checked_add(o.micros) {
+                    Some(x) => x,
+                    None => return Ok(less),
+                }
+            };
+            pick(v.cmp(&sum))
+        }
+        (Value::Timetz(v, vz), Value::Timetz(b, bz), Value::Interval(o)) => {
+            if o.micros < 0 {
+                return Err(invalid_size());
+            }
+            let sum = if sub {
+                b - o.micros
+            } else {
+                match b.checked_add(o.micros) {
+                    Some(x) => x,
+                    None => return Ok(less),
+                }
+            };
+            pick(Value::Timetz(*v, *vz).cmp_total(&Value::Timetz(sum, *bz)))
+        }
+        _ => {
+            // Integers (the offset as int8; no overflow in i128).
+            let (v, b, o) = (
+                val.as_i64().unwrap_or(0) as i128,
+                base.as_i64().unwrap_or(0) as i128,
+                off.as_i64().unwrap_or(0) as i128,
+            );
+            if o < 0 {
+                return Err(invalid_size());
+            }
+            let sum = if sub { b - o } else { b + o };
+            if less { v <= sum } else { v >= sum }
+        }
+    })
+}
+
+/// Frame [start, end) for position `i`, plus excluded positions.
+#[allow(clippy::too_many_arguments)]
+fn frame_of(
+    call: &WindowCall,
+    i: usize,
+    m: usize,
+    peers: &[(usize, usize)],
+    part: &[usize],
+    okeys: &[Vec<Value>],
+    offsets: &(Option<Value>, Option<Value>),
+    ctx: &ExecCtx,
+) -> Result<(usize, usize)> {
+    let f = &call.frame;
+    let bound = |b: &FrameBound, off: &Option<Value>, is_start: bool| -> Result<usize> {
+        Ok(match b {
+            FrameBound::UnboundedPreceding => 0,
+            FrameBound::UnboundedFollowing => m,
+            FrameBound::CurrentRow => match f.unit {
+                FrameUnit::Rows => {
+                    if is_start {
+                        i
+                    } else {
+                        i + 1
+                    }
+                }
+                _ => {
+                    if is_start {
+                        peers[i].0
+                    } else {
+                        peers[i].1
+                    }
+                }
+            },
+            FrameBound::Preceding(_) | FrameBound::Following(_) => {
+                let off = off.as_ref().unwrap();
+                let preceding = matches!(b, FrameBound::Preceding(_));
+                match f.unit {
+                    FrameUnit::Rows => {
+                        let k = off.as_i64().unwrap_or(0).max(0) as usize;
+                        let pos = if preceding {
+                            i.saturating_sub(k)
+                        } else {
+                            (i + k).min(m)
+                        };
+                        let pos = if preceding && k > i { 0 } else { pos };
+                        if is_start {
+                            pos.min(m)
+                        } else {
+                            (if preceding && k > i { 0 } else { pos + 1 }).min(m)
+                        }
+                    }
+                    FrameUnit::Groups => {
+                        // Count peer groups.
+                        let k = off.as_i64().unwrap_or(0).max(0) as usize;
+                        let mut starts = Vec::new();
+                        let mut p = 0;
+                        while p < m {
+                            starts.push(p);
+                            p = peers[p].1;
+                        }
+                        let g = starts.iter().position(|s| *s == peers[i].0).unwrap_or(0);
+                        let target = if preceding {
+                            g as i128 - k as i128
+                        } else {
+                            g as i128 + k as i128
+                        };
+                        if is_start {
+                            if target < 0 {
+                                0
+                            } else if target >= starts.len() as i128 {
+                                m
+                            } else {
+                                starts[target as usize]
+                            }
+                        } else if target < 0 {
+                            0
+                        } else if target >= starts.len() as i128 {
+                            m
+                        } else {
+                            peers[starts[target as usize]].1
+                        }
+                    }
+                    FrameUnit::Range => {
+                        // nodeWindowAgg: the head is the first row that satisfies in_range
+                        // (>= current ± offset), the tail the first after it that doesn't
+                        // (<=); NULLs place by NULLS FIRST / LAST alone.
+                        let key = call.order_by.first();
+                        let (desc, nulls_first) =
+                            key.map_or((false, false), |k| (k.desc, k.nulls_first));
+                        let cur = &okeys[part[i]][0];
+                        let (mut sub, mut less) = (preceding, !is_start);
+                        if desc {
+                            sub = !sub;
+                            less = !less;
+                        }
+                        let mut p = 0;
+                        while p < m {
+                            let v = &okeys[part[p]][0];
+                            let stop = if v.is_null() || cur.is_null() {
+                                if is_start {
+                                    if nulls_first {
+                                        !v.is_null() || cur.is_null()
+                                    } else {
+                                        v.is_null() || !cur.is_null()
+                                    }
+                                } else if nulls_first {
+                                    !v.is_null()
+                                } else {
+                                    !cur.is_null()
+                                }
+                            } else {
+                                in_range(v, cur, off, sub, less, ctx)? == is_start
+                            };
+                            if stop {
+                                break;
+                            }
+                            p += 1;
+                        }
+                        p
+                    }
+                }
+            }
+        })
+    };
+    let s = bound(&f.start, &offsets.0, true)?;
+    let e = bound(&f.end, &offsets.1, false)?;
+    Ok((s, e.max(s)))
+}
+
+fn excluded(call: &WindowCall, i: usize, p: usize, peers: &[(usize, usize)]) -> bool {
+    match call.frame.exclude {
+        FrameExclude::NoOthers => false,
+        FrameExclude::CurrentRow => p == i,
+        FrameExclude::Group => p >= peers[i].0 && p < peers[i].1,
+        FrameExclude::Ties => p != i && p >= peers[i].0 && p < peers[i].1,
+    }
+}
+
+fn compute_partition(
+    call: &WindowCall,
+    rows: &[Row],
+    okeys: &[Vec<Value>],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let m = part.len();
+    let offsets = (
+        match &call.frame.start {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => {
+                Some(offset_value(e, ctx, call.frame.unit, true)?)
+            }
+            _ => None,
+        },
+        match &call.frame.end {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => {
+                Some(offset_value(e, ctx, call.frame.unit, false)?)
+            }
+            _ => None,
+        },
+    );
+    match &call.func {
+        WinFunc::Builtin(kind) => {
+            let mut dense = 0i64;
+            let mut last_group = usize::MAX;
+            for i in 0..m {
+                let r = &rows[part[i]];
+                if peers[i].0 != last_group {
+                    dense += 1;
+                    last_group = peers[i].0;
+                }
+                let v = match kind {
+                    WinKind::RowNumber => Value::Int8(i as i64 + 1),
+                    WinKind::Rank => Value::Int8(peers[i].0 as i64 + 1),
+                    WinKind::DenseRank => Value::Int8(dense),
+                    WinKind::PercentRank => Value::Float8(if m <= 1 {
+                        0.0
+                    } else {
+                        peers[i].0 as f64 / (m - 1) as f64
+                    }),
+                    WinKind::CumeDist => Value::Float8(peers[i].1 as f64 / m as f64),
+                    WinKind::Ntile => {
+                        let k = eval(&call.args[0], r, ctx)?;
+                        if k.is_null() {
+                            Value::Null
+                        } else {
+                            let k = k.as_i64().unwrap_or(0);
+                            if k <= 0 {
+                                return Err(Error::new(
+                                    code::INVALID_ARGUMENT_FOR_NTILE,
+                                    "argument of ntile must be greater than zero",
+                                ));
+                            }
+                            let k = k as usize;
+                            let base = m / k;
+                            let extra = m % k;
+                            // The first `extra` buckets have base+1 rows.
+                            let bucket = if i < extra * (base + 1) {
+                                i / (base + 1)
+                            } else {
+                                extra + (i - extra * (base + 1)) / base.max(1)
+                            };
+                            Value::Int8(bucket as i64 + 1)
+                        }
+                    }
+                    WinKind::Lag | WinKind::Lead => {
+                        let off = match call.args.get(1) {
+                            Some(e) => match eval(e, r, ctx)? {
+                                Value::Null => {
+                                    out[part[i]] = Value::Null;
+                                    continue;
+                                }
+                                v => v.as_i64().unwrap_or(1),
+                            },
+                            None => 1,
+                        };
+                        let target = if *kind == WinKind::Lag {
+                            i as i64 - off
+                        } else {
+                            i as i64 + off
+                        };
+                        if call.ignore_nulls {
+                            // Count only non-null values.
+                            let step: i64 = if (*kind == WinKind::Lag) == (off >= 0) {
+                                -1
+                            } else {
+                                1
+                            };
+                            let mut need = off.abs();
+                            let mut p = i as i64;
+                            let mut found = None;
+                            if need == 0 {
+                                found = Some(i);
+                            }
+                            while need > 0 {
+                                p += step;
+                                if p < 0 || p >= m as i64 {
+                                    break;
+                                }
+                                let v = eval(&call.args[0], &rows[part[p as usize]], ctx)?;
+                                if !v.is_null() {
+                                    need -= 1;
+                                    if need == 0 {
+                                        found = Some(p as usize);
+                                    }
+                                }
+                            }
+                            match found {
+                                Some(p) => eval(&call.args[0], &rows[part[p]], ctx)?,
+                                None => match call.args.get(2) {
+                                    Some(d) => eval(d, r, ctx)?,
+                                    None => Value::Null,
+                                },
+                            }
+                        } else if target >= 0 && (target as usize) < m {
+                            eval(&call.args[0], &rows[part[target as usize]], ctx)?
+                        } else {
+                            match call.args.get(2) {
+                                Some(d) => eval(d, r, ctx)?,
+                                None => Value::Null,
+                            }
+                        }
+                    }
+                    WinKind::FirstValue | WinKind::LastValue | WinKind::NthValue => {
+                        let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                        let positions: Vec<usize> =
+                            (s..e).filter(|p| !excluded(call, i, *p, peers)).collect();
+                        let mut vals = Vec::new();
+                        for p in &positions {
+                            let v = eval(&call.args[0], &rows[part[*p]], ctx)?;
+                            if call.ignore_nulls && v.is_null() {
+                                continue;
+                            }
+                            vals.push(v);
+                        }
+                        match kind {
+                            WinKind::FirstValue => vals.first().cloned().unwrap_or(Value::Null),
+                            WinKind::LastValue => vals.last().cloned().unwrap_or(Value::Null),
+                            _ => {
+                                let nth = eval(&call.args[1], r, ctx)?;
+                                if nth.is_null() {
+                                    Value::Null
+                                } else {
+                                    let k = nth.as_i64().unwrap_or(0);
+                                    if k <= 0 {
+                                        return Err(Error::new(
+                                            code::INVALID_ARGUMENT_FOR_NTH_VALUE,
+                                            "argument of nth_value must be greater than zero",
+                                        ));
+                                    }
+                                    vals.get(k as usize - 1).cloned().unwrap_or(Value::Null)
+                                }
+                            }
+                        }
+                    }
+                };
+                out[part[i]] = v;
+            }
+        }
+        WinFunc::Agg(agg)
+            if !matches!(call.frame.start, FrameBound::UnboundedPreceding)
+                && !agg.distinct
+                && agg.order_by.is_empty()
+                && !agg.args.iter().chain(&agg.filter).any(|e| e.is_volatile())
+                && agg.user.as_ref().is_some_and(|u| u.moving.is_some()) =>
+        {
+            let mv = agg.user.as_ref().and_then(|u| u.moving.as_deref()).unwrap();
+            moving_aggregate(call, agg, mv, rows, part, peers, okeys, &offsets, out, ctx)?;
+        }
+        WinFunc::Agg(agg) => {
+            let incremental = matches!(call.frame.start, FrameBound::UnboundedPreceding)
+                && call.frame.exclude == FrameExclude::NoOthers
+                && !agg.distinct
+                && agg.order_by.is_empty();
+            let direct = eval_all(&agg.direct, &[], ctx)?;
+            if incremental {
+                let mut st = new_state(agg, direct.clone())?;
+                let mut fed = 0usize;
+                for i in 0..m {
+                    let (_, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                    while fed < e {
+                        feed(agg, &mut st, &rows[part[fed]], ctx)?;
+                        fed += 1;
+                    }
+                    // finish() consumes buffered state only for DISTINCT/ORDER BY (not here).
+                    let v = snapshot_result(agg, &mut st, ctx)?;
+                    out[part[i]] = v;
+                }
+            } else {
+                for i in 0..m {
+                    let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                    let mut st = new_state(agg, direct.clone())?;
+                    for p in s..e {
+                        if excluded(call, i, p, peers) {
+                            continue;
+                        }
+                        feed(agg, &mut st, &rows[part[p]], ctx)?;
+                    }
+                    out[part[i]] = finish(agg, st, ctx)?;
+                }
+            }
+        }
+    }
+    let _ = DataType::Bool;
+    let _ = Interval::new(0, 0, 0);
+    Ok(())
+}
+
+/// A moving aggregate's transition state (WindowStatePerAggData).
+struct MovingState {
+    value: Value,
+    /// transValueCount: rows aggregated and not yet removed.
+    count: usize,
+}
+
+/// eval_windowaggregates for a user aggregate in moving-aggregate mode: rows leaving the
+/// frame head are removed with the inverse transition (a NULL from it, or removing the last
+/// row, restarts the aggregation).
+#[allow(clippy::too_many_arguments)]
+fn moving_aggregate(
+    call: &WindowCall,
+    agg: &crate::sql::plan::AggCall,
+    mv: &crate::sql::plan::UserAgg,
+    rows: &[Row],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    okeys: &[Vec<Value>],
+    offsets: &(Option<Value>, Option<Value>),
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let m = part.len();
+    let init = |ctx: &ExecCtx| -> Result<MovingState> {
+        Ok(MovingState {
+            value: match &mv.init {
+                Some(e) => eval(e, &[], ctx)?,
+                None => Value::Null,
+            },
+            count: 0,
+        })
+    };
+    // The aggregate's inputs for a row; None when FILTERed out.
+    let inputs = |row: &Row| -> Result<Option<Vec<Value>>> {
+        if let Some(f) = &agg.filter
+            && !crate::sql::expr::eval_bool(f, row, ctx)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(eval_all(&agg.args, row, ctx)?))
+    };
+    let call_with = |e: &crate::sql::expr::Expr, st: &Value, args: &[Value]| -> Result<Value> {
+        let mut r = Vec::with_capacity(args.len() + 1);
+        r.push(st.clone());
+        r.extend_from_slice(args);
+        eval(e, &r, ctx)
+    };
+    let advance = |st: &mut MovingState, row: &Row| -> Result<()> {
+        let Some(args) = inputs(row)? else {
+            return Ok(());
+        };
+        if mv.trans_strict {
+            if args.iter().any(Value::is_null) {
+                return Ok(());
+            }
+            if st.count == 0 && st.value.is_null() {
+                st.value = args.first().cloned().unwrap_or(Value::Null);
+                st.count = 1;
+                return Ok(());
+            }
+            if st.value.is_null() {
+                return Ok(());
+            }
+        }
+        st.count += 1;
+        let v = call_with(&mv.trans, &st.value, &args)?;
+        if v.is_null() {
+            return Err(Error::new(
+                code::NULL_VALUE_NOT_ALLOWED,
+                "moving-aggregate transition function must not return null",
+            ));
+        }
+        st.value = v;
+        Ok(())
+    };
+    // advance_windowaggregate_base: false when the inverse transition can't remove the row.
+    let remove = |st: &mut MovingState, row: &Row| -> Result<bool> {
+        let Some(args) = inputs(row)? else {
+            return Ok(true);
+        };
+        let (inv, inv_strict) = mv.inverse.as_ref().expect("inverse transition");
+        if *inv_strict && args.iter().any(Value::is_null) {
+            return Ok(true);
+        }
+        if st.value.is_null() {
+            return Err(crate::error::internal(
+                "aggregate transition value is NULL before inverse transition",
+            ));
+        }
+        if st.count == 1 {
+            *st = init(ctx)?;
+            return Ok(true);
+        }
+        let v = call_with(inv, &st.value, &args)?;
+        if v.is_null() {
+            return Ok(false);
+        }
+        st.count -= 1;
+        st.value = v;
+        Ok(true)
+    };
+    let finalize = |st: &MovingState| -> Result<Value> {
+        match &mv.final_ {
+            Some(_) if mv.final_strict && st.value.is_null() => Ok(Value::Null),
+            Some(f) => eval(f, std::slice::from_ref(&st.value), ctx),
+            None => Ok(st.value.clone()),
+        }
+    };
+    let exclusion = call.frame.exclude != FrameExclude::NoOthers;
+    let end_reuses = matches!(
+        call.frame.end,
+        FrameBound::UnboundedFollowing | FrameBound::CurrentRow
+    );
+    let mut st = init(ctx)?;
+    let (mut base, mut upto) = (0usize, 0usize);
+    let mut result = Value::Null;
+    for i in 0..m {
+        let (head, tail) = frame_of(call, i, m, peers, part, okeys, offsets, ctx)?;
+        // The frame is the previous row's: its result stands.
+        if i > 0 && base == head && end_reuses && !exclusion && base <= i && upto > i {
+            out[part[i]] = result.clone();
+            continue;
+        }
+        let mut restart = i == 0 || exclusion || upto <= head;
+        while !restart && base < head {
+            if !remove(&mut st, &rows[part[base]])? {
+                restart = true;
+            }
+            base += 1;
+        }
+        base = head;
+        if restart {
+            st = init(ctx)?;
+            upto = head;
+        }
+        while upto < m {
+            if upto >= tail {
+                break;
+            }
+            if !excluded(call, i, upto, peers) {
+                advance(&mut st, &rows[part[upto]])?;
+            }
+            upto += 1;
+        }
+        result = finalize(&st)?;
+        out[part[i]] = result.clone();
+    }
+    Ok(())
+}
+
+/// Result of an unbuffered aggregate state without consuming it.
+fn snapshot_result(
+    agg: &crate::sql::plan::AggCall,
+    st: &mut super::agg::AggState,
+    ctx: &ExecCtx,
+) -> Result<Value> {
+    super::agg::peek(agg, st, ctx)
+}
+
+/// The collations partitioning keys carry (as a COLLATE the binder put on them).
+fn partition_collations(
+    keys: &[crate::sql::expr::Expr],
+    ctx: &ExecCtx,
+) -> Vec<Option<std::sync::Arc<crate::types::collation::Collation>>> {
+    let mut cat = None;
+    keys.iter()
+        .map(|k| match k {
+            crate::sql::expr::Expr::Collate(_, name, _) => {
+                let cat = cat.get_or_insert_with(|| ctx.catalog());
+                crate::types::collation::by_name(cat, name).filter(|c| !c.bytewise())
+            }
+            // Composites by their fields' collations.
+            k if k.ty().holds_composite() => {
+                let cat = cat.get_or_insert_with(|| ctx.catalog());
+                crate::types::collation::for_type(cat, &k.ty())
+            }
+            _ => None,
+        })
+        .collect()
+}

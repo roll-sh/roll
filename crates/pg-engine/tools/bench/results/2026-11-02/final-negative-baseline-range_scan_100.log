@@ -1,0 +1,5 @@
+RESULT	baseline	oltp	range_scan_100	clients=1	tps=0	ops=0	elapsed_s=1.000332913	mean_ms=-0.000	p50_ms=0.000	p95_ms=0.000	p99_ms=0.000	errors=4383	peak_mem_mb=0.0	validation_version=oltp-values-v1	checked_ops=0	first_error=OLTP column 1: expected Int8(7919)
+
+thread 'main' (2680082) panicked at crates/pg-engine/tools/bench/bench.rs:629:5:
+oltp/range_scan_100: 4383 errors, 0 successful operations: OLTP column 1: expected Int8(7919)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

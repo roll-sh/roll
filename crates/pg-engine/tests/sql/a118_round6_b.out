@@ -1,0 +1,245 @@
+> CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE, name text)
+-- CREATE TABLE
+
+> INSERT INTO u VALUES (1, 'a@x', 'x')
+-- INSERT 0 1
+
+> COPY u FROM STDIN
+>> 1	b@x	y
+>> \N	c@x	z
+ERROR 23502: null value in column "id" of relation "u" violates not-null constraint
+DETAIL: Failing row contains (null, c@x, z).
+CONTEXT: COPY u, line 2: "\N	c@x	z"
+OBJECTS: schema=public table=u column=id
+
+> COPY u FROM STDIN (FORMAT binary)
+>> \binary 5047434f50590aff0d0a00000000000000000000030000000400000002000000036240780000000179ffff6a756e6b
+ERROR 22P04: received copy data after EOF marker
+CONTEXT: COPY u, line 2
+
+> COPY u FROM STDIN (FORMAT binary)
+>> \binary 5047434f50590aff0d0a00000000000000000000030000000400000002000000036240780000000179ffff
+-- COPY 1
+
+> SELECT * FROM u ORDER BY id
+id:int4 | email:text | name:text
+1 | a@x | x
+2 | b@x | y
+-- SELECT 2
+
+> COPY (SELECT 'Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric, 1.50::numeric) TO STDOUT (FORMAT binary)
+copy:text
+\x5047434f50590aff0d0a00000000000000000000040000000800000000d00000200000000800000000f00000200000000800000000c00000000000000c000200000000000200011388
+\xffff
+-- COPY 1
+
+> CREATE TABLE tv (id int, a int, e2 int GENERATED ALWAYS AS (a / (id - 3)) VIRTUAL)
+-- CREATE TABLE
+
+> INSERT INTO tv VALUES (3, 4)
+-- INSERT 0 1
+
+> CREATE FUNCTION tvf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tw AFTER UPDATE ON tv FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION tvf()
+-- CREATE TRIGGER
+
+> UPDATE tv SET a = 6
+ERROR 22012: division by zero
+
+> CREATE TABLE pp (k int, v text) PARTITION BY RANGE (k)
+-- CREATE TABLE
+
+> COPY pp TO STDOUT (FORMAT csv, HEADER, FORCE_NOT_NULL (v))
+ERROR 42809: cannot copy from partitioned table "pp"
+HINT: Try the COPY (SELECT ...) TO variant.
+
+> COPY pp (nosuch) TO STDOUT (FORMAT csv, FORCE_NOT_NULL (v))
+ERROR 42703: column "nosuch" of relation "pp" does not exist
+
+> CREATE TABLE ua (id int PRIMARY KEY, a int)
+-- CREATE TABLE
+
+> CREATE TABLE ub (k int PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO ua VALUES (1, 1), (2, 2)
+-- INSERT 0 2
+
+> INSERT INTO ub VALUES (3)
+-- INSERT 0 1
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT id FROM ua UNION ALL SELECT k FROM ub
+-- DECLARE CURSOR
+
+> FETCH NEXT FROM c
+id:int4
+1
+-- FETCH 1
+
+> UPDATE ua SET a = -a WHERE CURRENT OF c RETURNING id, a
+id:int4 | a:int4
+1 | -1
+-- UPDATE 1
+
+> FETCH 2 FROM c
+id:int4
+2
+3
+-- FETCH 2
+
+> UPDATE ua SET a = -a WHERE CURRENT OF c RETURNING id, a
+id:int4 | a:int4
+-- UPDATE 0
+
+> DELETE FROM ub WHERE CURRENT OF c RETURNING k
+k:int4
+3
+-- DELETE 1
+
+> COMMIT
+-- COMMIT
+
+> CREATE TABLE r5 (id int PRIMARY KEY, a int)
+-- CREATE TABLE
+
+> INSERT INTO r5 SELECT g, g % 4 FROM generate_series(1, 9) g
+-- INSERT 0 9
+
+> ANALYZE r5
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT DISTINCT a FROM r5 ORDER BY a
+QUERY PLAN:text
+Sort
+  Sort Key: a
+  ->  HashAggregate
+        Group Key: a
+        ->  Seq Scan on r5
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT a, count(*) FROM r5 GROUP BY a ORDER BY a
+QUERY PLAN:text
+Sort
+  Sort Key: a
+  ->  HashAggregate
+        Group Key: a
+        ->  Seq Scan on r5
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT a, count(*) FROM r5 GROUP BY a ORDER BY a
+-- DECLARE CURSOR
+
+> SELECT is_scrollable FROM pg_cursors
+is_scrollable:bool
+t
+-- SELECT 1
+
+> FETCH 2 FROM c
+a:int4 | count:int8
+0 | 2
+1 | 3
+-- FETCH 2
+
+> FETCH PRIOR FROM c
+a:int4 | count:int8
+0 | 2
+-- FETCH 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE s1 (id int PRIMARY KEY, n int)
+-- CREATE TABLE
+
+> INSERT INTO s1 VALUES (1, 1), (2, 2)
+-- INSERT 0 2
+
+> ALTER TABLE s1 ALTER COLUMN n TYPE bigint
+-- ALTER TABLE
+
+> SELECT reltuples, relpages FROM pg_class WHERE relname = 's1'
+reltuples:float4 | relpages:int4
+2 | 1
+-- SELECT 1
+
+> CREATE TABLE s2 (id int, n int)
+-- CREATE TABLE
+
+> INSERT INTO s2 VALUES (1, 1), (2, 2)
+-- INSERT 0 2
+
+> ALTER TABLE s2 ALTER COLUMN n TYPE bigint
+-- ALTER TABLE
+
+> SELECT reltuples, relpages FROM pg_class WHERE relname = 's2'
+reltuples:float4 | relpages:int4
+-1 | 0
+-- SELECT 1
+
+> CREATE TABLE ft (id int)
+-- CREATE TABLE
+
+> INSERT INTO ft VALUES (1)
+-- INSERT 0 1
+
+> CREATE VIEW fv1 AS WITH w AS (SELECT id FROM ft GROUP BY id) SELECT id FROM ft
+-- CREATE VIEW
+
+> SELECT * FROM fv1 FOR NO KEY UPDATE
+id:int4
+1
+-- SELECT 1
+
+> SELECT * FROM (WITH w AS (SELECT id FROM ft GROUP BY id) SELECT id FROM ft) s FOR UPDATE
+id:int4
+1
+-- SELECT 1
+
+> CREATE TABLE fl (id int)
+-- CREATE TABLE
+
+> INSERT INTO fl VALUES (1)
+-- INSERT 0 1
+
+> CREATE VIEW va AS SELECT sum(id) AS s FROM fl
+-- CREATE VIEW
+
+> SELECT * FROM va FOR UPDATE
+ERROR 0A000: FOR UPDATE is not allowed with aggregate functions
+
+> CREATE VIEW vb AS WITH w AS (SELECT id FROM fl) SELECT sum(id) AS s FROM w
+-- CREATE VIEW
+
+> SELECT * FROM vb FOR UPDATE
+s:int8
+1
+-- SELECT 1
+
+> CREATE VIEW vc AS WITH w AS (SELECT id FROM fl INTERSECT SELECT id FROM fl) SELECT sum(id) AS s FROM w
+-- CREATE VIEW
+
+> SELECT * FROM vc FOR UPDATE
+s:int8
+1
+-- SELECT 1
+
+> CREATE VIEW vd AS WITH w AS (SELECT id FROM fl) SELECT sum(w.id) AS s FROM w JOIN fl USING (id)
+-- CREATE VIEW
+
+> SELECT * FROM vd FOR UPDATE
+ERROR 0A000: FOR UPDATE is not allowed with aggregate functions
+
+> SELECT * FROM (SELECT sum(id) FROM fl) s FOR UPDATE
+ERROR 0A000: FOR UPDATE is not allowed with aggregate functions
+
+> SELECT * FROM (SELECT count(*) FROM generate_series(1, 3) g GROUP BY g) s FOR NO KEY UPDATE
+ERROR 0A000: FOR NO KEY UPDATE is not allowed with GROUP BY clause
+

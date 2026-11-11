@@ -1,0 +1,408 @@
+> create foreign data wrapper ftd_fdw
+-- CREATE FOREIGN DATA WRAPPER
+
+> create server ftd_srv foreign data wrapper ftd_fdw
+-- CREATE SERVER
+
+> create schema ftd_ns
+-- CREATE SCHEMA
+
+> create foreign table ftd_t1 () server ftd_nosrv
+ERROR 42704: server "ftd_nosrv" does not exist
+
+> create foreign table ftd_t1 (a int primary key) server ftd_srv
+ERROR 0A000: primary key constraints are not supported on foreign tables (at 36)
+
+> create foreign table ftd_t1 (a int, unique (a)) server ftd_srv
+ERROR 0A000: unique constraints are not supported on foreign tables (at 37)
+
+> create foreign table ftd_t1 (a int references ftd_t1 (a)) server ftd_srv
+ERROR 0A000: foreign key constraints are not supported on foreign tables (at 36)
+
+> create foreign table ftd_t1 (
+>   a int options (col 'x') not null,
+>   b text options (c1 'v1', c2 'v2') check (b <> ''),
+>   c date default current_date
+> ) server ftd_srv options (o1 'a', "o 2" 'b')
+-- CREATE FOREIGN TABLE
+
+> create foreign table if not exists ftd_t1 (a int) server ftd_srv
+NOTICE 42P07: relation "ftd_t1" already exists, skipping
+-- CREATE FOREIGN TABLE
+
+> select c.relname, c.relkind, c.relam, c.relfilenode, c.reltoastrelid, c.relpersistence, c.relreplident, c.relhasindex
+>   from pg_class c where c.relname = 'ftd_t1'
+relname:name | relkind:char | relam:oid | relfilenode:oid | reltoastrelid:oid | relpersistence:char | relreplident:char | relhasindex:bool
+ftd_t1 | f | 0 | 0 | 0 | p | n | f
+-- SELECT 1
+
+> select ftrelid::regclass, s.srvname, ftoptions from pg_foreign_table f join pg_foreign_server s on s.oid = f.ftserver where ftrelid = 'ftd_t1'::regclass
+ftrelid:regclass | srvname:name | ftoptions:text[]
+ftd_t1 | ftd_srv | {o1=a,"o 2=b"}
+-- SELECT 1
+
+> select attname, attnum, attfdwoptions from pg_attribute where attrelid = 'ftd_t1'::regclass order by attnum
+attname:name | attnum:int2 | attfdwoptions:text[]
+tableoid | -6 | NULL
+cmax | -5 | NULL
+xmax | -4 | NULL
+cmin | -3 | NULL
+xmin | -2 | NULL
+ctid | -1 | NULL
+a | 1 | {col=x}
+b | 2 | {c1=v1,c2=v2}
+c | 3 | NULL
+-- SELECT 9
+
+> select foreign_table_schema, foreign_table_name, foreign_server_name from information_schema.foreign_tables where foreign_table_name like 'ftd%'
+foreign_table_schema:name | foreign_table_name:name | foreign_server_name:name
+public | ftd_t1 | ftd_srv
+-- SELECT 1
+
+> select option_name, option_value from information_schema.foreign_table_options where foreign_table_name = 'ftd_t1' order by 1
+option_name:name | option_value:varchar
+o 2 | b
+o1 | a
+-- SELECT 2
+
+> select pg_describe_object(classid, objid, objsubid), pg_describe_object(refclassid, refobjid, refobjsubid), deptype
+>   from pg_depend where objid = 'ftd_t1'::regclass and objsubid = 0 and refclassid <> 'pg_namespace'::regclass
+pg_describe_object:text | pg_describe_object:text | deptype:char
+foreign table ftd_t1 | server ftd_srv | n
+-- SELECT 1
+
+> select * from ftd_t1
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> insert into ftd_t1 values (1, 'x')
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> update ftd_t1 set a = 2
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> delete from ftd_t1
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> truncate ftd_t1
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> copy ftd_t1 to stdout
+ERROR 42809: cannot copy from foreign table "ftd_t1"
+HINT: Try the COPY (SELECT ...) TO variant.
+
+> create view ftd_v as select * from ftd_t1
+-- CREATE VIEW
+
+> select * from ftd_v
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> drop view ftd_v
+-- DROP VIEW
+
+> create index ftd_i on ftd_t1 (a)
+ERROR 42809: cannot create index on relation "ftd_t1"
+DETAIL: This operation is not supported for foreign tables.
+
+> vacuum ftd_t1
+WARNING 01000: skipping "ftd_t1" --- cannot vacuum non-tables or special system tables
+-- VACUUM
+
+> analyze ftd_t1
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> vacuum analyze ftd_t1
+WARNING 01000: skipping "ftd_t1" --- cannot vacuum non-tables or special system tables
+-- VACUUM
+
+> alter foreign table ftd_t1 add column d int options (p 'q')
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_t1 add column e int primary key
+ERROR 0A000: primary key constraints are not supported on foreign tables (at 45)
+
+> alter foreign table ftd_t1 add constraint ftd_c check (a > 0) not valid
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_t1 add constraint ftd_u unique (a)
+ERROR 0A000: unique constraints are not supported on foreign tables (at 32)
+
+> alter foreign table ftd_t1 alter constraint ftd_c deferrable
+ERROR 42809: ALTER action ALTER CONSTRAINT cannot be performed on relation "ftd_t1"
+DETAIL: This operation is not supported for foreign tables.
+
+> alter foreign table ftd_t1 alter column d options (set p 'r', add s 't')
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_t1 alter column d options (drop nope)
+ERROR 42704: option "nope" not found
+
+> alter foreign table ftd_t1 alter column xmin options (add p 'v')
+ERROR 0A000: cannot alter system column "xmin"
+
+> alter foreign table ftd_t1 alter column nope options (add p 'v')
+ERROR 42703: column "nope" of relation "ftd_t1" does not exist
+
+> alter foreign table ftd_t1 options (drop o1, set "o 2" 'c', add o3 'd')
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_t1 alter column d type text using '0'
+ERROR 42809: "ftd_t1" is not a table
+
+> alter foreign table ftd_t1 alter column d type text
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_t1 set (fillfactor = 10)
+ERROR 42809: ALTER action SET cannot be performed on relation "ftd_t1"
+DETAIL: This operation is not supported for foreign tables.
+
+> alter foreign table ftd_t1 cluster on nope
+ERROR 42809: ALTER action CLUSTER ON cannot be performed on relation "ftd_t1"
+DETAIL: This operation is not supported for foreign tables.
+
+> alter foreign table ftd_t1 set logged
+ERROR 42809: ALTER action SET LOGGED cannot be performed on relation "ftd_t1"
+DETAIL: This operation is not supported for foreign tables.
+
+> alter table ftd_t1 options (set o3 'e')
+-- ALTER TABLE
+
+> alter table ftd_t1 alter column d set statistics 100
+-- ALTER TABLE
+
+> create table ftd_plain (a int)
+-- CREATE TABLE
+
+> alter foreign table ftd_plain add column b int
+ERROR 42809: "ftd_plain" is not a foreign table
+
+> alter table ftd_plain options (add x 'y')
+ERROR 42809: ALTER action OPTIONS cannot be performed on relation "ftd_plain"
+DETAIL: This operation is not supported for tables.
+
+> select attname, attfdwoptions, attstattarget from pg_attribute where attrelid = 'ftd_t1'::regclass and attnum > 0 order by attnum
+attname:name | attfdwoptions:text[] | attstattarget:int2
+a | {col=x} | NULL
+b | {c1=v1,c2=v2} | NULL
+c | NULL | NULL
+d | {p=r,s=t} | 100
+-- SELECT 4
+
+> select ftoptions from pg_foreign_table where ftrelid = 'ftd_t1'::regclass
+ftoptions:text[]
+{"o 2=c",o3=e}
+-- SELECT 1
+
+> select conname, contype, convalidated from pg_constraint where conrelid = 'ftd_t1'::regclass order by 1
+conname:name | contype:char | convalidated:bool
+ftd_c | c | f
+ftd_t1_a_not_null | n | t
+ftd_t1_b_check | c | t
+-- SELECT 3
+
+> create table ftd_uses (x ftd_t1)
+-- CREATE TABLE
+
+> alter foreign table ftd_t1 alter column d type int
+ERROR 0A000: cannot alter foreign table "ftd_t1" because column "ftd_uses.x" uses its row type
+
+> drop table ftd_uses
+-- DROP TABLE
+
+> alter foreign table ftd_t1 rename column d to dd
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_t1 set schema ftd_ns
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_ns.ftd_t1 rename to ftd_t2
+-- ALTER FOREIGN TABLE
+
+> alter foreign table ftd_plain rename to ftd_x
+ERROR 42809: "ftd_plain" is not a foreign table
+
+> alter foreign table if exists ftd_nope add column z int
+NOTICE 00000: relation "ftd_nope" does not exist, skipping
+-- ALTER FOREIGN TABLE
+
+> select relname, relnamespace::regnamespace from pg_class where relname like 'ftd_t%'
+relname:name | relnamespace:4089
+ftd_t2 | ftd_ns
+-- SELECT 1
+
+> create function ftd_trig() returns trigger language plpgsql as $$ begin return null; end $$
+-- CREATE FUNCTION
+
+> create trigger ftd_tr1 before insert on ftd_ns.ftd_t2 for each row execute function ftd_trig()
+-- CREATE TRIGGER
+
+> create trigger ftd_tr2 instead of insert on ftd_ns.ftd_t2 for each row execute function ftd_trig()
+ERROR 42809: "ftd_t2" is a foreign table
+DETAIL: Foreign tables cannot have INSTEAD OF triggers.
+
+> create constraint trigger ftd_tr3 after insert on ftd_ns.ftd_t2 for each row execute function ftd_trig()
+ERROR 42809: "ftd_t2" is a foreign table
+DETAIL: Foreign tables cannot have constraint triggers.
+
+> create trigger ftd_tr4 after insert on ftd_ns.ftd_t2 referencing new table as n for each statement execute function ftd_trig()
+ERROR 42809: "ftd_t2" is a foreign table
+DETAIL: Triggers on foreign tables cannot have transition tables.
+
+> create table ftd_lt (a int) partition by range (a)
+-- CREATE TABLE
+
+> create index on ftd_lt (a)
+-- CREATE INDEX
+
+> create foreign table ftd_p1 partition of ftd_lt for values from (0) to (10) server ftd_srv
+-- CREATE FOREIGN TABLE
+
+> create foreign table ftd_p2 (a int) server ftd_srv
+-- CREATE FOREIGN TABLE
+
+> alter table ftd_lt attach partition ftd_p2 for values from (10) to (20)
+-- ALTER TABLE
+
+> create unique index on ftd_lt (a)
+ERROR 42809: cannot create unique index on partitioned table "ftd_lt"
+DETAIL: Table "ftd_lt" contains partitions that are foreign tables.
+
+> alter table ftd_lt add primary key (a)
+ERROR 42809: cannot create unique index on partitioned table "ftd_lt"
+DETAIL: Table "ftd_lt" contains partitions that are foreign tables.
+
+> select relname, relkind from pg_class where relname like 'ftd_lt%' or relname like 'ftd_p_' order by 1
+relname:name | relkind:char
+ftd_lt | p
+ftd_lt_a_idx | I
+ftd_p1 | f
+ftd_p2 | f
+-- SELECT 4
+
+> insert into ftd_lt values (5)
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> select * from ftd_lt
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> select * from only ftd_lt
+a:int4
+-- SELECT 0
+
+> drop foreign table ftd_p1, ftd_p2
+-- DROP FOREIGN TABLE
+
+> create unique index ftd_lt_u on ftd_lt (a)
+-- CREATE INDEX
+
+> create foreign table ftd_p1 partition of ftd_lt for values from (0) to (10) server ftd_srv
+ERROR 42809: cannot create foreign partition of partitioned table "ftd_lt"
+DETAIL: Table "ftd_lt" contains indexes that are unique.
+
+> create foreign table ftd_p3 (a int) server ftd_srv
+-- CREATE FOREIGN TABLE
+
+> alter table ftd_lt attach partition ftd_p3 for values from (10) to (20)
+ERROR 42809: cannot attach foreign table "ftd_p3" as partition of partitioned table "ftd_lt"
+DETAIL: Partitioned table "ftd_lt" contains unique indexes.
+
+> drop table ftd_lt
+-- DROP TABLE
+
+> create table ftd_parent (a int, b text)
+-- CREATE TABLE
+
+> create foreign table ftd_child () inherits (ftd_parent) server ftd_srv
+-- CREATE FOREIGN TABLE
+
+> select * from ftd_parent
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> select * from only ftd_parent
+a:int4 | b:text
+-- SELECT 0
+
+> alter table ftd_parent add constraint ftd_pc check (a > 0) not valid
+-- ALTER TABLE
+
+> alter table ftd_parent validate constraint ftd_pc
+-- ALTER TABLE
+
+> select conrelid::regclass, conname, convalidated from pg_constraint where conname = 'ftd_pc' order by 1
+conrelid:regclass | conname:name | convalidated:bool
+ftd_parent | ftd_pc | t
+ftd_child | ftd_pc | t
+-- SELECT 2
+
+> alter table ftd_parent alter column b type varchar(10) using b::varchar
+ERROR 42809: "ftd_child" is not a table
+
+> drop table ftd_parent
+ERROR 2BP01: cannot drop table ftd_parent because other objects depend on it
+DETAIL: foreign table ftd_child depends on table ftd_parent
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop table ftd_parent cascade
+NOTICE 00000: drop cascades to foreign table ftd_child
+-- DROP TABLE
+
+> import foreign schema remote from server ftd_srv into ftd_ns
+ERROR 55000: foreign-data wrapper "ftd_fdw" has no handler
+
+> import foreign schema remote from server ftd_nosrv into ftd_ns
+ERROR 42704: server "ftd_nosrv" does not exist
+
+> import foreign schema remote from server ftd_srv into ftd_nope
+ERROR 3F000: schema "ftd_nope" does not exist
+
+> drop table ftd_ns.ftd_t2
+ERROR 42809: "ftd_t2" is not a table
+HINT: Use DROP FOREIGN TABLE to remove a foreign table.
+
+> drop foreign table ftd_x
+ERROR 42704: foreign table "ftd_x" does not exist
+
+> drop foreign table ftd_nope
+ERROR 42704: foreign table "ftd_nope" does not exist
+
+> drop foreign table if exists ftd_nope
+NOTICE 00000: foreign table "ftd_nope" does not exist, skipping
+-- DROP FOREIGN TABLE
+
+> drop server ftd_srv
+ERROR 2BP01: cannot drop server ftd_srv because other objects depend on it
+DETAIL: foreign table ftd_ns.ftd_t2 depends on server ftd_srv
+DETAIL: foreign table ftd_p3 depends on server ftd_srv
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> drop server ftd_srv cascade
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to foreign table ftd_ns.ftd_t2
+DETAIL: drop cascades to foreign table ftd_p3
+-- DROP SERVER
+
+> select count(*) from pg_foreign_table
+count:int8
+0
+-- SELECT 1
+
+> security label on table ftd_x is 'x'
+ERROR 22023: no security label providers have been loaded
+
+> security label for dummy on table ftd_x is 'x'
+ERROR 22023: security label provider "dummy" is not loaded
+
+> security label on role postgres is 'x'
+ERROR 22023: no security label providers have been loaded
+
+> drop table ftd_x
+ERROR 42P01: table "ftd_x" does not exist
+
+> drop function ftd_trig()
+-- DROP FUNCTION
+
+> drop schema ftd_ns
+-- DROP SCHEMA
+
+> drop foreign data wrapper ftd_fdw
+-- DROP FOREIGN DATA WRAPPER
+

@@ -1,0 +1,148 @@
+> create temp table er_nk (u int, s name)
+-- CREATE TABLE
+
+> insert into er_nk select g, 'A' || g from generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> create index er_nk_s on er_nk (s)
+-- CREATE INDEX
+
+> create temp table er_tx (i text)
+-- CREATE TABLE
+
+> insert into er_tx values ('A1'), ('A2')
+-- INSERT 0 2
+
+> analyze er_nk
+-- ANALYZE
+
+> analyze er_tx
+-- ANALYZE
+
+> explain (costs off) select * from er_nk, (values ('A5'), ('A9')) as v(i) where er_nk.s = v.i
+QUERY PLAN:text
+Nested Loop
+  ->  Values Scan on "*VALUES*"
+  ->  Index Scan using er_nk_s on er_nk
+        Index Cond: (s = ("*VALUES*".column1)::text)
+-- EXPLAIN
+
+> explain (costs off) select * from er_nk, er_tx where er_nk.s = er_tx.i
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on er_tx
+  ->  Index Scan using er_nk_s on er_nk
+        Index Cond: (s = (er_tx.i)::text)
+-- EXPLAIN
+
+> explain (costs off) select * from er_nk, (values ('A5'::name), ('A9')) as v(i) where er_nk.s = v.i
+QUERY PLAN:text
+Nested Loop
+  ->  Values Scan on "*VALUES*"
+  ->  Index Scan using er_nk_s on er_nk
+        Index Cond: (s = "*VALUES*".column1)
+-- EXPLAIN
+
+> explain (costs off) select * from er_nk, (values ('A5'::varchar), ('A9')) as v(i) where er_nk.s = v.i
+QUERY PLAN:text
+Nested Loop
+  ->  Values Scan on "*VALUES*"
+  ->  Index Scan using er_nk_s on er_nk
+        Index Cond: (s = ("*VALUES*".column1)::text)
+-- EXPLAIN
+
+> explain (costs off) select * from er_nk where er_nk.s = (select i from er_tx limit 1)
+QUERY PLAN:text
+Index Scan using er_nk_s on er_nk
+  Index Cond: (s = (InitPlan 1).col1)
+  InitPlan 1
+    ->  Limit
+          ->  Seq Scan on er_tx
+-- EXPLAIN
+
+> explain (costs off) select * from er_nk, er_tx where er_nk.s = upper(er_tx.i)
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on er_tx
+  ->  Index Scan using er_nk_s on er_nk
+        Index Cond: (s = (upper(er_tx.i))::text)
+-- EXPLAIN
+
+> explain (costs off) select * from er_tx left join er_nk on er_nk.s = er_tx.i
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on er_tx
+  ->  Index Scan using er_nk_s on er_nk
+        Index Cond: (s = er_tx.i)
+-- EXPLAIN
+
+> explain (costs off) select * from er_nk, er_tx where er_nk.s = er_tx.i and er_nk.u < 5
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on er_tx
+  ->  Index Scan using er_nk_s on er_nk
+        Index Cond: (s = (er_tx.i)::text)
+        Filter: (u < 5)
+-- EXPLAIN
+
+> select * from er_nk, er_tx where er_nk.s = er_tx.i order by 1
+u:int4 | s:name | i:text
+1 | A1 | A1
+2 | A2 | A2
+-- SELECT 2
+
+> select * from er_tx left join er_nk on er_nk.s = er_tx.i || '0' order by 1
+i:text | u:int4 | s:name
+A1 | 10 | A10
+A2 | 20 | A20
+-- SELECT 2
+
+> create temp table er_ok (unique1 int, two int)
+-- CREATE TABLE
+
+> insert into er_ok select g, g % 2 from generate_series(0, 999) g
+-- INSERT 0 1000
+
+> create unique index er_ok_u1 on er_ok (unique1)
+-- CREATE INDEX
+
+> analyze er_ok
+-- ANALYZE
+
+> explain (costs off)
+> select * from er_ok where unique1 in (select x * x from (values (1200), (1)) as x(x))
+QUERY PLAN:text
+Nested Loop
+  ->  Unique
+        ->  Sort
+              Sort Key: (("*VALUES*".column1 * "*VALUES*".column1))
+              ->  Values Scan on "*VALUES*"
+  ->  Index Scan using er_ok_u1 on er_ok
+        Index Cond: (unique1 = ("*VALUES*".column1 * "*VALUES*".column1))
+-- EXPLAIN
+
+> select * from er_ok where unique1 in (select x * x from (values (1200), (1)) as x(x))
+unique1:int4 | two:int4
+1 | 1
+-- SELECT 1
+
+> select * from er_ok where unique1 in (select x * x from (values (2), (-2), (3), (3), (-3), (30)) as x(x))
+> order by 1
+unique1:int4 | two:int4
+4 | 0
+9 | 1
+900 | 0
+-- SELECT 3
+
+> select count(*) from er_ok a where unique1 in (select b.unique1 % 10 from er_ok b where b.two = 1)
+count:int8
+5
+-- SELECT 1
+
+> select * from er_ok where (unique1, two) in (select x * x, y from (values (2, 0), (-2, 0), (3, 1), (3, 0)) as x(x, y))
+> order by 1
+unique1:int4 | two:int4
+4 | 0
+9 | 1
+-- SELECT 2
+

@@ -1,0 +1,318 @@
+> DROP ROLE IF EXISTS a2_uo_owner
+NOTICE 00000: role "a2_uo_owner" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS a2_uo_reader
+NOTICE 00000: role "a2_uo_reader" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE a2_uo_owner
+-- CREATE ROLE
+
+> CREATE ROLE a2_uo_reader
+-- CREATE ROLE
+
+> GRANT CREATE ON SCHEMA public TO a2_uo_owner, a2_uo_reader
+-- GRANT
+
+> CREATE FUNCTION a2_uo_lt(integer, integer) RETURNS boolean
+>   AS 'int4lt' LANGUAGE internal IMMUTABLE STRICT
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a2_uo_eq(integer, integer) RETURNS boolean
+>   AS 'int4eq' LANGUAGE internal IMMUTABLE STRICT
+-- CREATE FUNCTION
+
+> SET SESSION AUTHORIZATION a2_uo_owner
+-- SET
+
+> CREATE TABLE a2_uo AS SELECT x AS a, 10001 - x AS b, x % 10 AS c FROM generate_series(1, 10000) x
+-- SELECT 10000
+
+> CREATE INDEX ON a2_uo (a)
+-- CREATE INDEX
+
+> CREATE INDEX ON a2_uo (abs(a))
+-- CREATE INDEX
+
+> SET default_statistics_target = 10000
+-- SET
+
+> ANALYZE a2_uo
+-- ANALYZE
+
+> RESET default_statistics_target
+-- RESET
+
+> CREATE OPERATOR <<< (procedure = a2_uo_lt, leftarg = integer, rightarg = integer,
+>                      restrict = scalarltsel)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR === (procedure = a2_uo_eq, leftarg = integer, rightarg = integer,
+>                      restrict = eqsel, commutator = ===)
+-- CREATE OPERATOR
+
+> CREATE VIEW a2_uo_v AS SELECT * FROM a2_uo WHERE b <<< 5
+-- CREATE VIEW
+
+> CREATE VIEW a2_uo_sbv WITH (security_barrier = true) AS SELECT * FROM a2_uo WHERE b <<< 5
+-- CREATE VIEW
+
+> EXPLAIN SELECT * FROM a2_uo WHERE b <<< 5
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=4 width=12)
+  Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a2_uo WHERE 5 <<< b
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=3333 width=12)
+  Filter: (5 <<< b)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a2_uo WHERE c === 3
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=1000 width=12)
+  Filter: (c === 3)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a2_uo WHERE 3 === c
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=1000 width=12)
+  Filter: (3 === c)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a2_uo WHERE a === 3
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=1 width=12)
+  Filter: (a === 3)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a2_uo WHERE abs(a) <<< 5
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..214.00 rows=4 width=12)
+  Filter: (abs(a) <<< 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_uo_v x, a2_uo_v y WHERE x.a = y.b
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a2_uo a2_uo_1
+        Filter: (b <<< 5)
+  ->  Index Scan using a2_uo_a_idx on a2_uo
+        Index Cond: (a = a2_uo_1.b)
+        Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_uo x, a2_uo y WHERE x.a = y.b AND abs(y.a) <<< 5
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a2_uo y
+        Filter: (abs(a) <<< 5)
+  ->  Index Scan using a2_uo_a_idx on a2_uo x
+        Index Cond: (a = y.b)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_uo_sbv x, a2_uo_sbv y WHERE x.a = y.b
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (a2_uo.a = a2_uo_1.b)
+  ->  Seq Scan on a2_uo
+        Filter: (b <<< 5)
+  ->  Materialize
+        ->  Seq Scan on a2_uo a2_uo_1
+              Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT * FROM a2_uo WHERE b < 5) x,
+>   (SELECT * FROM a2_uo WHERE b < 5) y WHERE x.a = y.b
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a2_uo a2_uo_1
+        Filter: (b < 5)
+  ->  Index Scan using a2_uo_a_idx on a2_uo
+        Index Cond: (a = a2_uo_1.b)
+        Filter: (b < 5)
+-- EXPLAIN
+
+> SELECT * FROM a2_uo_v x, a2_uo_v y WHERE x.a = y.b
+a:int4 | b:int4 | c:int4 | a:int4 | b:int4 | c:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_uo_v, a2_uo WHERE a2_uo_v.a = a2_uo.b AND a2_uo.c = 1
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (a2_uo.b = a2_uo_1.a)
+  ->  Seq Scan on a2_uo
+        Filter: (c = 1)
+  ->  Hash
+        ->  Seq Scan on a2_uo a2_uo_1
+              Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) WITH w AS (SELECT * FROM a2_uo WHERE c = 1)
+>   SELECT * FROM a2_uo WHERE a IN (SELECT b FROM w)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a2_uo.a = a2_uo_1.b)
+  ->  Seq Scan on a2_uo
+  ->  Hash
+        ->  Seq Scan on a2_uo a2_uo_1
+              Filter: (c = 1)
+-- EXPLAIN
+
+> GRANT SELECT ON a2_uo_v TO PUBLIC
+-- GRANT
+
+> GRANT SELECT ON a2_uo_sbv TO PUBLIC
+-- GRANT
+
+> SET SESSION AUTHORIZATION a2_uo_reader
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_uo_v x, a2_uo_v y WHERE x.a = y.b
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a2_uo a2_uo_1
+        Filter: (b <<< 5)
+  ->  Index Scan using a2_uo_a_idx on a2_uo
+        Index Cond: (a = a2_uo_1.b)
+        Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_uo_v x, a2_uo_v y WHERE x.a = y.b AND abs(y.a) <<< 5
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a2_uo a2_uo_1
+        Filter: ((b <<< 5) AND (abs(a) <<< 5))
+  ->  Index Scan using a2_uo_a_idx on a2_uo
+        Index Cond: (a = a2_uo_1.b)
+        Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_uo_sbv x, a2_uo_sbv y WHERE x.a = y.b AND abs(y.a) <<< 5
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (a2_uo_1.a = y.b)
+  ->  Subquery Scan on y
+        Filter: (abs(y.a) <<< 5)
+        ->  Seq Scan on a2_uo
+              Filter: (b <<< 5)
+  ->  Seq Scan on a2_uo a2_uo_1
+        Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a2_uo_sbv y WHERE abs(y.a) <<< 5
+QUERY PLAN:text
+Subquery Scan on y  (cost=0.00..189.06 rows=1 width=12)
+  Filter: (abs(y.a) <<< 5)
+  ->  Seq Scan on a2_uo  (cost=0.00..189.00 rows=4 width=12)
+        Filter: (b <<< 5)
+-- EXPLAIN
+
+> SET SESSION AUTHORIZATION a2_uo_owner
+-- SET
+
+> GRANT SELECT (a, b) ON a2_uo TO PUBLIC
+-- GRANT
+
+> SET SESSION AUTHORIZATION a2_uo_reader
+-- SET
+
+> EXPLAIN SELECT a, b FROM a2_uo WHERE b <<< 5
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=4 width=8)
+  Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, b FROM a2_uo WHERE abs(a) <<< 5
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..214.00 rows=5000 width=8)
+  Filter: (abs(a) <<< 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT x.a, y.b FROM a2_uo x, a2_uo y WHERE x.a = y.b AND abs(y.a) <<< 5
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (x.a = y.b)
+  ->  Seq Scan on a2_uo x
+  ->  Hash
+        ->  Seq Scan on a2_uo y
+              Filter: (abs(a) <<< 5)
+-- EXPLAIN
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> ALTER TABLE a2_uo ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY a2_uo_p ON a2_uo USING (true)
+-- CREATE POLICY
+
+> SET SESSION AUTHORIZATION a2_uo_reader
+-- SET
+
+> EXPLAIN SELECT a, b FROM a2_uo WHERE b <<< 5
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=5000 width=8)
+  Filter: (b <<< 5)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, b FROM a2_uo WHERE b < 5
+QUERY PLAN:text
+Seq Scan on a2_uo  (cost=0.00..189.00 rows=3 width=8)
+  Filter: (b < 5)
+-- EXPLAIN
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> CREATE TABLE a2_uo_t (unique1 int, fivethous int)
+-- CREATE TABLE
+
+> INSERT INTO a2_uo_t SELECT g, g % 5000 FROM generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> ANALYZE a2_uo_t
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM (SELECT unique1 FROM a2_uo_t INTERSECT SELECT fivethous FROM a2_uo_t) ss
+QUERY PLAN:text
+Aggregate
+  ->  HashSetOp Intersect
+        ->  Seq Scan on a2_uo_t
+        ->  Seq Scan on a2_uo_t a2_uo_t_1
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM (SELECT fivethous FROM a2_uo_t INTERSECT SELECT unique1 FROM a2_uo_t) ss
+QUERY PLAN:text
+Aggregate
+  ->  HashSetOp Intersect
+        ->  Seq Scan on a2_uo_t
+        ->  Seq Scan on a2_uo_t a2_uo_t_1
+-- EXPLAIN
+
+> DROP TABLE a2_uo_t
+-- DROP TABLE
+
+> DROP OWNED BY a2_uo_owner
+-- DROP OWNED
+
+> DROP OWNED BY a2_uo_reader
+-- DROP OWNED
+
+> DROP FUNCTION a2_uo_lt(integer, integer)
+-- DROP FUNCTION
+
+> DROP FUNCTION a2_uo_eq(integer, integer)
+-- DROP FUNCTION
+
+> DROP ROLE a2_uo_owner
+-- DROP ROLE
+
+> DROP ROLE a2_uo_reader
+-- DROP ROLE
+

@@ -1,0 +1,2 @@
+[ perf record: Woken up 20 times to write data ]
+[ perf record: Captured and wrote 4.975 MB /home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/pilot-20261102T021522Z/pilot.data (79 samples) ]

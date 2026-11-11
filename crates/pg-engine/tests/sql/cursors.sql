@@ -1,0 +1,253 @@
+-- SQL cursors
+CREATE TABLE cur_t (id int PRIMARY KEY, v text);
+INSERT INTO cur_t SELECT g, 'v' || g FROM generate_series(1, 6) g;
+BEGIN;
+DECLARE c CURSOR FOR SELECT id, v FROM cur_t ORDER BY id;
+FETCH c;
+FETCH 2 FROM c;
+FETCH NEXT FROM c;
+MOVE FORWARD 1 IN c;
+FETCH ALL FROM c;
+FETCH c;
+FETCH PRIOR FROM c;
+FETCH ABSOLUTE 2 FROM c;
+FETCH RELATIVE 2 FROM c;
+FETCH LAST FROM c;
+FETCH FIRST FROM c;
+FETCH BACKWARD 1 FROM c;
+SELECT name, statement, is_holdable, is_binary, is_scrollable FROM pg_cursors ORDER BY name;
+CLOSE c;
+FETCH c;
+ROLLBACK;
+BEGIN;
+DECLARE ns NO SCROLL CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+FETCH 2 FROM ns;
+FETCH PRIOR FROM ns;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT 1;
+DECLARE c CURSOR FOR SELECT 2;
+ROLLBACK;
+DECLARE c CURSOR FOR SELECT 1;
+DECLARE h CURSOR WITH HOLD FOR SELECT id FROM cur_t ORDER BY id;
+FETCH 2 FROM h;
+SELECT name, is_holdable FROM pg_cursors;
+FETCH h;
+CLOSE h;
+CLOSE ALL;
+
+-- WHERE CURRENT OF
+BEGIN;
+DECLARE u CURSOR FOR SELECT * FROM cur_t WHERE id > 2 FOR UPDATE;
+FETCH u;
+UPDATE cur_t SET v = 'updated' WHERE CURRENT OF u;
+EXPLAIN (COSTS OFF) UPDATE cur_t SET v = 'updated' WHERE CURRENT OF u;
+EXPLAIN (COSTS OFF) DELETE FROM cur_t WHERE CURRENT OF u;
+FETCH 2 FROM u;
+DELETE FROM cur_t WHERE CURRENT OF u RETURNING *;
+COMMIT;
+SELECT * FROM cur_t ORDER BY id;
+BEGIN;
+DECLARE u CURSOR FOR SELECT * FROM cur_t;
+UPDATE cur_t SET v = 'x' WHERE CURRENT OF u;
+ROLLBACK;
+BEGIN;
+UPDATE cur_t SET v = 'x' WHERE CURRENT OF nope;
+ROLLBACK;
+BEGIN;
+DECLARE agg CURSOR FOR SELECT count(*) FROM cur_t;
+FETCH agg;
+UPDATE cur_t SET v = 'x' WHERE CURRENT OF agg;
+ROLLBACK;
+
+-- default scrollability follows the plan
+BEGIN;
+DECLARE s1 CURSOR FOR SELECT 1;
+DECLARE s2 CURSOR FOR SELECT * FROM cur_t;
+DECLARE s3 CURSOR FOR SELECT count(*) FROM cur_t;
+DECLARE s4 CURSOR FOR SELECT generate_series(1, 3);
+DECLARE s5 CURSOR FOR SELECT * FROM generate_series(1, 3);
+DECLARE s6 CURSOR FOR SELECT * FROM cur_t FOR UPDATE;
+DECLARE s7 CURSOR FOR VALUES (1), (2);
+DECLARE s8 CURSOR FOR SELECT DISTINCT v FROM cur_t;
+DECLARE s9 CURSOR FOR SELECT id FROM cur_t UNION ALL SELECT 1;
+DECLARE s10 CURSOR FOR SELECT row_number() OVER () FROM cur_t;
+DECLARE s11 CURSOR FOR SELECT * FROM cur_t ORDER BY v LIMIT 2;
+DECLARE s12 SCROLL CURSOR FOR SELECT count(*) FROM cur_t;
+DECLARE s13 NO SCROLL CURSOR FOR SELECT * FROM cur_t;
+SELECT name, is_scrollable FROM pg_cursors ORDER BY length(name), name;
+FETCH s3;
+FETCH PRIOR FROM s3;
+ROLLBACK;
+
+-- PL/pgSQL cursors
+DO $$
+DECLARE
+  c CURSOR FOR SELECT id, v FROM cur_t ORDER BY id;
+  r record;
+  n int := 0;
+BEGIN
+  OPEN c;
+  LOOP
+    FETCH c INTO r;
+    EXIT WHEN NOT FOUND;
+    n := n + 1;
+    RAISE NOTICE 'row % %', r.id, r.v;
+  END LOOP;
+  CLOSE c;
+  RAISE NOTICE 'n=%', n;
+END $$;
+DO $$
+DECLARE
+  c CURSOR (lo int, hi int) FOR SELECT id FROM cur_t WHERE id BETWEEN lo AND hi ORDER BY id;
+  i int;
+BEGIN
+  OPEN c(2, 5);
+  FETCH c INTO i; RAISE NOTICE 'first %', i;
+  FETCH LAST FROM c INTO i; RAISE NOTICE 'last %', i;
+  FETCH PRIOR FROM c INTO i; RAISE NOTICE 'prior %', i;
+  MOVE FIRST FROM c;
+  FETCH NEXT FROM c INTO i; RAISE NOTICE 'next %', i;
+  FETCH RELATIVE 5 FROM c INTO i; RAISE NOTICE 'relative % found %', i, FOUND;
+  CLOSE c;
+  OPEN c(hi := 3, lo := 1);
+  FETCH c INTO i; RAISE NOTICE 'named first %', i;
+  CLOSE c;
+  FOR r IN c(4, 6) LOOP
+    RAISE NOTICE 'for %', r.id;
+  END LOOP;
+END $$;
+DO $$
+DECLARE
+  rc refcursor;
+  t text;
+BEGIN
+  OPEN rc FOR SELECT v FROM cur_t WHERE id = 1;
+  FETCH rc INTO t;
+  RAISE NOTICE 'unbound %', t;
+  CLOSE rc;
+  OPEN rc FOR EXECUTE 'SELECT v FROM cur_t WHERE id = $1' USING 6;
+  FETCH rc INTO t;
+  RAISE NOTICE 'execute %', t;
+  CLOSE rc;
+END $$;
+DO $$
+DECLARE
+  c CURSOR FOR SELECT * FROM cur_t ORDER BY id FOR UPDATE;
+BEGIN
+  FOR r IN c LOOP
+    IF r.id % 2 = 0 THEN
+      UPDATE cur_t SET v = v || '!' WHERE CURRENT OF c;
+    END IF;
+  END LOOP;
+END $$;
+SELECT * FROM cur_t ORDER BY id;
+
+-- functions returning refcursor
+CREATE FUNCTION open_cur(rc refcursor) RETURNS refcursor LANGUAGE plpgsql AS $$
+BEGIN
+  OPEN rc FOR SELECT id FROM cur_t ORDER BY id DESC;
+  RETURN rc;
+END $$;
+BEGIN;
+SELECT open_cur('mycur');
+FETCH ALL IN mycur;
+COMMIT;
+CREATE FUNCTION open_anon() RETURNS refcursor LANGUAGE plpgsql AS $$
+DECLARE rc refcursor;
+BEGIN
+  OPEN rc FOR SELECT 42 AS answer;
+  RETURN rc;
+END $$;
+BEGIN;
+SELECT open_anon() IS NOT NULL;
+ROLLBACK;
+
+-- errors
+DO $$
+DECLARE c CURSOR FOR SELECT 1;
+BEGIN
+  OPEN c; OPEN c;
+END $$;
+DO $$
+DECLARE c CURSOR (a int) FOR SELECT a;
+BEGIN
+  OPEN c;
+END $$;
+DO $$
+DECLARE c CURSOR (a int) FOR SELECT a;
+BEGIN
+  OPEN c(1, 2);
+END $$;
+DO $$
+DECLARE c CURSOR (a int, b int) FOR SELECT a;
+BEGIN
+  OPEN c(1);
+END $$;
+DO $$
+DECLARE c CURSOR (a int) FOR SELECT a;
+BEGIN
+  OPEN c(z := 1);
+END $$;
+DO $$
+DECLARE c CURSOR (a int, b int) FOR SELECT a;
+BEGIN
+  OPEN c(a := 1, a := 2);
+END $$;
+DO $$
+DECLARE c CURSOR FOR SELECT 1;
+BEGIN
+  OPEN c(1);
+END $$;
+DO $$
+DECLARE c CURSOR FOR SELECT 1;
+BEGIN
+  OPEN c FOR SELECT 2;
+END $$;
+DO $$
+DECLARE rc refcursor;
+BEGIN
+  OPEN rc FOR INSERT INTO cur_t VALUES (100, 'x');
+END $$;
+DO $$
+DECLARE c CURSOR FOR SELECT 1; d CURSOR FOR SELECT 2; e int;
+BEGIN
+  OPEN c; RAISE NOTICE 'c is %', c;
+  FOR r IN d LOOP RAISE NOTICE 'd in loop %', d IS NOT NULL; END LOOP;
+  RAISE NOTICE 'd after loop %', d;
+  FOR e IN SELECT 1 LOOP END LOOP;
+  OPEN d; RAISE NOTICE 'd is %', d;
+  CLOSE c; RAISE NOTICE 'c after close %', c;
+  OPEN c; RAISE NOTICE 'c reopened %', c;
+END $$;
+DO $$
+DECLARE rc refcursor;
+BEGIN
+  rc := NULL;
+  FETCH rc INTO rc;
+END $$;
+DO $$
+DECLARE c CURSOR FOR SELECT 1;
+BEGIN
+  CLOSE c;
+END $$;
+DO $$
+DECLARE c CURSOR FOR SELECT generate_series(1, 3);
+BEGIN
+  OPEN c;
+  MOVE FORWARD 2 IN c;
+  MOVE BACKWARD ALL FROM c;
+  RAISE NOTICE 'moved found %', FOUND;
+  CLOSE c;
+END $$;
+DO $$
+DECLARE c NO SCROLL CURSOR FOR SELECT generate_series(1, 3);
+  i int;
+BEGIN
+  OPEN c;
+  FETCH c INTO i;
+  FETCH PRIOR FROM c INTO i;
+END $$;
+DROP FUNCTION open_cur(refcursor);
+DROP FUNCTION open_anon();
+DROP TABLE cur_t;

@@ -1,0 +1,139 @@
+> SELECT '10.1/16'::cidr, '10/8'::cidr, '10.1.2'::cidr, '192.168'::cidr, '128'::cidr, '1.2.3.4'::cidr, '224'::cidr, '200.1'::cidr, '0x0a01'::cidr
+cidr:cidr | cidr:cidr | cidr:cidr | cidr:cidr | cidr:cidr | cidr:cidr | cidr:cidr | cidr:cidr | cidr:cidr
+10.1.0.0/16 | 10.0.0.0/8 | 10.1.2.0/24 | 192.168.0.0/24 | 128.0.0.0/16 | 1.2.3.4/32 | 224.0.0.0/4 | 200.1.0.0/24 | 10.1.0.0/16
+-- SELECT 1
+
+> SELECT '10/8'::inet, '1.2.3.4/024'::inet, '010.1.2.3'::inet, '::ffff:1.2.3.4/120'::inet, '::1.2.3'::inet, '00::1'::inet
+inet:inet | inet:inet | inet:inet | inet:inet | inet:inet | inet:inet
+10.0.0.0/8 | 1.2.3.4/24 | 10.1.2.3 | ::ffff:1.2.3.4/120 | ::1.2.3.0 | ::1
+-- SELECT 1
+
+> SELECT '10.1.2'::inet
+ERROR 22P02: invalid input syntax for type inet: "10.1.2" (at 8)
+
+> SELECT '1.2.3.4/33'::inet
+ERROR 22P02: invalid input syntax for type inet: "1.2.3.4/33" (at 8)
+
+> SELECT '1.2.3.4/24'::cidr
+ERROR 22P02: invalid cidr value: "1.2.3.4/24" (at 8)
+DETAIL: Value has bits set to right of mask.
+
+> SELECT '::1/129'::inet
+ERROR 22P02: invalid input syntax for type inet: "::1/129" (at 8)
+
+> SELECT ' 1.2.3.4'::inet
+ERROR 22P02: invalid input syntax for type inet: " 1.2.3.4" (at 8)
+
+> SELECT '1.2.3.4/'::inet
+ERROR 22P02: invalid input syntax for type inet: "1.2.3.4/" (at 8)
+
+> SELECT '::1/08'::inet
+ERROR 22P02: invalid input syntax for type inet: "::1/08" (at 8)
+
+> SELECT '1.2.3.4.5'::inet
+ERROR 22P02: invalid input syntax for type inet: "1.2.3.4.5" (at 8)
+
+> SELECT '1:2:3:4:5:6:7:8:9'::inet
+ERROR 22P02: invalid input syntax for type inet: "1:2:3:4:5:6:7:8:9" (at 8)
+
+> SELECT 'garbage'::cidr
+ERROR 22P02: invalid input syntax for type cidr: "garbage" (at 8)
+
+> SELECT '::2'::inet, '::1.2.3.4'::inet, '::0:2:3'::inet, '1::'::inet, '::'::inet, '1:0:0:2:0:0:0:3'::inet, '1:0:0:2:0:0:3:4'::inet, '::ffff:0:0'::inet, 'FFFF::1'::inet
+inet:inet | inet:inet | inet:inet | inet:inet | inet:inet | inet:inet | inet:inet | inet:inet | inet:inet
+::2 | ::1.2.3.4 | ::0.2.0.3 | 1:: | :: | 1:0:0:2::3 | 1::2:0:0:3:4 | ::ffff:0.0.0.0 | ffff::1
+-- SELECT 1
+
+> SELECT abbrev(c), c::text FROM (VALUES ('10.0.0.0/8'::cidr), ('10.128.0.0/9'), ('0.0.0.0/0'), ('10.1.0.0/24'), ('192.168.1.128/25'), ('2001:db8::/32'), ('2001:db8:0:1::/64'), ('::/0'), ('::ffff:1.2.3.0/120'), ('::1.2.0.0/112'), ('::1.2.3.0/127'), ('8000::/1')) v(c)
+abbrev:text | c:text
+0/0 | 0.0.0.0/0
+10.1.0/24 | 10.1.0.0/24
+10.128/9 | 10.128.0.0/9
+10/8 | 10.0.0.0/8
+192.168.1.128/25 | 192.168.1.128/25
+2001:db8/32 | 2001:db8::/32
+2001:db8::1/64 | 2001:db8:0:1::/64
+8000::/1 | 8000::/1
+::/0 | ::/0
+::1.2.3.0/127 | ::1.2.3.0/127
+::1.2/112 | ::1.2.0.0/112
+::ffff:1.2.3/120 | ::ffff:1.2.3.0/120
+-- SELECT 12
+
+> SELECT i FROM (VALUES ('1.2.3.4/16'::inet), ('1.2.0.0/24'), ('1.2.0.0/16'), ('::1'), ('0.0.0.0/0'), ('1.2.3.4'), ('10.0.0.0/8'), ('9.255.0.0/16')) v(i) ORDER BY i
+i:inet
+0.0.0.0/0
+1.2.0.0/16
+1.2.3.4/16
+1.2.0.0/24
+1.2.3.4
+9.255.0.0/16
+10.0.0.0/8
+::1
+-- SELECT 8
+
+> SELECT '1.2.3.4/16'::inet < '1.2.0.0/24'::inet, '1.2.3.4/24'::inet::cidr, cidr('1.2.3.4/24'::inet), max(i), min(i) FROM (VALUES ('1.2.3.4'::inet), ('::1')) v(i)
+?column?:bool | cidr:cidr | cidr:cidr | max:inet | min:inet
+t | 1.2.3.0/24 | 1.2.3.0/24 | ::1 | 1.2.3.4
+-- SELECT 1
+
+> CREATE TABLE gx_net (i inet PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO gx_net VALUES ('1.2.3.4/16'), ('1.2.0.0/24'), ('1.2.0.0/16'), ('10.0.0.0/8'), ('9.255.0.0/16')
+-- INSERT 0 5
+
+> SELECT i FROM gx_net WHERE i > '1.2.0.0/16' ORDER BY i
+i:inet
+1.2.3.4/16
+1.2.0.0/24
+9.255.0.0/16
+10.0.0.0/8
+-- SELECT 4
+
+> SELECT i FROM gx_net ORDER BY i DESC
+i:inet
+10.0.0.0/8
+9.255.0.0/16
+1.2.0.0/24
+1.2.3.4/16
+1.2.0.0/16
+-- SELECT 5
+
+> DROP TABLE gx_net
+-- DROP TABLE
+
+> SELECT '1:2:3:4:5:6'::macaddr, '08-00-2b-01-02-03'::macaddr, '08002b:010203'::macaddr, '08002b-010203'::macaddr, '0800.2b01.0203'::macaddr, '0800-2b01-0203'::macaddr, '08002b010203'::macaddr, ' 08:00:2b:01:02:03 '::macaddr
+macaddr:macaddr | macaddr:macaddr | macaddr:macaddr | macaddr:macaddr | macaddr:macaddr | macaddr:macaddr | macaddr:macaddr | macaddr:macaddr
+01:02:03:04:05:06 | 08:00:2b:01:02:03 | 08:00:2b:01:02:03 | 08:00:2b:01:02:03 | 08:00:2b:01:02:03 | 08:00:2b:01:02:03 | 08:00:2b:01:02:03 | 08:00:2b:01:02:03
+-- SELECT 1
+
+> SELECT '08:00:2b:01:02:03:04:05'::macaddr8, '08-00-2b-01-02-03-04-05'::macaddr8, '08002b0102030405'::macaddr8, '0800.2b01.0203.0405'::macaddr8, '08:00:2b:01:02:03'::macaddr8, ' 08:00:2b:01:02:03:04:05  '::macaddr8
+macaddr8:774 | macaddr8:774 | macaddr8:774 | macaddr8:774 | macaddr8:774 | macaddr8:774
+08:00:2b:01:02:03:04:05 | 08:00:2b:01:02:03:04:05 | 08:00:2b:01:02:03:04:05 | 08:00:2b:01:02:03:04:05 | 08:00:2b:ff:fe:01:02:03 | 08:00:2b:01:02:03:04:05
+-- SELECT 1
+
+> SELECT '08:00:2b:01:02:03:04'::macaddr8
+ERROR 22P02: invalid input syntax for type macaddr8: "08:00:2b:01:02:03:04" (at 8)
+
+> SELECT '08:00-2b:01:02:03'::macaddr8
+ERROR 22P02: invalid input syntax for type macaddr8: "08:00-2b:01:02:03" (at 8)
+
+> SELECT '08:00:2b:01:02:0g'::macaddr
+ERROR 22P02: invalid input syntax for type macaddr: "08:00:2b:01:02:0g" (at 8)
+
+> SELECT '08:00:2b:01:02:100'::macaddr
+ERROR 22003: invalid octet value in "macaddr" value: "08:00:2b:01:02:100" (at 8)
+
+> SELECT '12:34:56:00:00:00:00:00'::macaddr8::macaddr
+ERROR 22003: macaddr8 data out of range to convert to macaddr
+HINT: Only addresses that have FF and FE as values in the 4th and 5th bytes from the left, for example xx:xx:xx:ff:fe:xx:xx:xx, are eligible to be converted from macaddr8 to macaddr.
+
+> SELECT trunc('12:34:56:78:90:ab:cd:ef'::macaddr8), ~ '12:34:56:78:90:ab:cd:ef'::macaddr8, '12:34:56:78:90:ab:cd:ef'::macaddr8 & 'ff:ff:ff:ff:00:00:00:00', '12:34:56:78:90:ab:cd:ef'::macaddr8 < '12:34:56:78:90:ab:cd:f0'
+trunc:774 | ?column?:774 | ?column?:774 | ?column?:bool
+12:34:56:00:00:00:00:00 | ed:cb:a9:87:6f:54:32:10 | 12:34:56:78:00:00:00:00 | t
+-- SELECT 1
+
+> SELECT pg_typeof('1:2:3:4:5:6'::macaddr8), '{08:00:2b:01:02:03:04:05}'::macaddr8[]
+ERROR 22P02: invalid input syntax for type macaddr8: "1:2:3:4:5:6" (at 18)
+

@@ -1,0 +1,152 @@
+> SELECT substr('hello', 2, 3), substring('hello' FROM 2 FOR 2), substring('hello' FROM 'l+'), left('hello', 2), right('hello', 2)
+substr:text | substring:text | substring:text | left:text | right:text
+ell | el | ll | he | lo
+-- SELECT 1
+
+> SELECT position('l' IN 'hello'), strpos('hello', 'lo'), replace('aaa', 'a', 'bb'), translate('hello', 'el', 'ip')
+position:int4 | strpos:int4 | replace:text | translate:text
+3 | 4 | bbbbbb | hippo
+-- SELECT 1
+
+> SELECT trim('  x  '), ltrim('xxyx', 'x'), rtrim('yxx', 'x'), btrim('--a--', '-'), trim(BOTH 'x' FROM 'xxaxx')
+btrim:text | ltrim:text | rtrim:text | btrim:text | btrim:text
+x | yx | y | a | a
+-- SELECT 1
+
+> SELECT lpad('5', 3, '0'), rpad('ab', 5, '*'), repeat('ab', 3), reverse('abc'), initcap('hello world')
+lpad:text | rpad:text | repeat:text | reverse:text | initcap:text
+005 | ab*** | ababab | cba | Hello World
+-- SELECT 1
+
+> SELECT split_part('a,b,c', ',', 2), split_part('a,b,c', ',', -1), string_to_array('a,b,,c', ','), array_to_string(ARRAY['x', NULL, 'z'], '-', '?')
+split_part:text | split_part:text | string_to_array:text[] | array_to_string:text
+b | c | {a,b,"",c} | x-?-z
+-- SELECT 1
+
+> SELECT concat('a', NULL, 1), concat_ws('-', 'a', NULL, 'b'), format('%s is %s', 'x', 1), format('%I %L', 'Foo', 'it''s')
+concat:text | concat_ws:text | format:text | format:text
+a1 | a-b | x is 1 | "Foo" 'it''s'
+-- SELECT 1
+
+> SELECT md5('abc'), sha256('abc'::bytea), encode('hi'::bytea, 'hex'), decode('6869', 'hex'), encode('hello', 'base64')
+md5:text | sha256:bytea | encode:text | decode:bytea | encode:text
+900150983cd24fb0d6963f7d28e17f72 | \xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad | 6869 | \x6869 | aGVsbG8=
+-- SELECT 1
+
+> SELECT ascii('A'), chr(66), length('héllo'), octet_length('héllo'), bit_length('a'), char_length('abc')
+ascii:int4 | chr:text | length:int4 | octet_length:int4 | bit_length:int4 | char_length:int4
+65 | B | 5 | 6 | 8 | 3
+-- SELECT 1
+
+> SELECT 'abc' < 'abd', 'B' < 'a', upper('ß'), lower('ÀB')
+?column?:bool | ?column?:bool | upper:text | lower:text
+t | t | ß | àb
+-- SELECT 1
+
+> SELECT regexp_replace('foo123bar', '[0-9]+', '#'), regexp_replace('aaa', 'a', 'b', 'g'), regexp_match('abc123', '([a-z]+)(\d+)'), regexp_matches('a1b2', '\d', 'g')
+regexp_replace:text | regexp_replace:text | regexp_match:text[] | regexp_matches:text[]
+foo#bar | bbb | {abc,123} | {1}
+foo#bar | bbb | {abc,123} | {2}
+-- SELECT 2
+
+> SELECT 'abc' ~* 'B', 'abc' !~ 'z', regexp_count('banana', 'an'), regexp_split_to_array('a1b22c', '\d+')
+?column?:bool | ?column?:bool | regexp_count:int4 | regexp_split_to_array:text[]
+t | t | 2 | {a,b,c}
+-- SELECT 1
+
+> SELECT * FROM regexp_split_to_table('a b  c', '\s+') x
+x:text
+a
+b
+c
+-- SELECT 3
+
+> SELECT starts_with('hello', 'he'), 'x' || 1 || true, quote_ident('Foo'), quote_literal('it''s'), quote_nullable(NULL)
+starts_with:bool | ?column?:text | quote_ident:text | quote_literal:text | quote_nullable:text
+t | x1true | "Foo" | 'it''s' | NULL
+-- SELECT 1
+
+> SELECT to_hex(255), to_char(1234.5, '9999.99'), to_char(42, '00000'), to_number('1,234.5', '9,999.9')
+to_hex:text | to_char:text | to_char:text | to_number:numeric
+ff |  1234.50 |  00042 | 1234.5
+-- SELECT 1
+
+> SELECT 'a'::char(3) || 'b', length('a '::char(3)), 'abc'::varchar(2), E'tab\there', $$dollar 'quoted'$$
+?column?:text | length:int4 | varchar:varchar | ?column?:text | ?column?:text
+ab | 1 | ab | tab	here | dollar 'quoted'
+-- SELECT 1
+
+> SELECT overlay('Txxxxas' PLACING 'hom' FROM 2 FOR 4), 'abc' LIKE 'a\%', 'a%c' LIKE 'a\%c', 'ABC' NOT ILIKE 'abc'
+overlay:text | ?column?:bool | ?column?:bool | ?column?:bool
+Thomas | f | t | f
+-- SELECT 1
+
+> SELECT string_agg(x, '') FROM unnest(ARRAY['a', 'b']) x
+string_agg:text
+ab
+-- SELECT 1
+
+> SELECT left('abc', -1), repeat('x', 0), substr('abc', 0), substr('abc', 5)
+left:text | repeat:text | substr:text | substr:text
+ab |  | abc | 
+-- SELECT 1
+
+> SELECT lower(NULL), length(NULL::text), NULL || 'a'
+lower:text | length:int4 | ?column?:text
+NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT 'x' * 2
+ERROR 22P02: invalid input syntax for type integer: "x" (at 8)
+
+> SELECT substr(123, 1, 2)
+ERROR 42883: function substr(integer, integer, integer) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT * FROM regexp_matches('foobarbequebaz', '(bar)(beque)')
+regexp_matches:text[]
+{bar,beque}
+-- SELECT 1
+
+> SELECT regexp_matches('abcabc', '(b)(c)?', 'g')
+regexp_matches:text[]
+{b,c}
+{b,c}
+-- SELECT 2
+
+> SELECT * FROM regexp_split_to_table('hello world  x', '\s+') AS t(w)
+w:text
+hello
+world
+x
+-- SELECT 3
+
+> SELECT regexp_split_to_table('a,B,c', ',', 'i')
+regexp_split_to_table:text
+B
+a
+c
+-- SELECT 3
+
+> SELECT * FROM unnest(ARRAY[1,2,3], ARRAY['a','b']) AS u(n, s)
+n:int4 | s:text
+1 | a
+2 | b
+3 | NULL
+-- SELECT 3
+
+> SELECT 'x' || true, 'a'::char(3) || 'b', 1 || 'y', NULL::bool || 'z'
+?column?:text | ?column?:text | ?column?:text | ?column?:text
+xtrue | ab | 1y | NULL
+-- SELECT 1
+
+> SELECT upper('straße'), lower('ΣΑΣ'), initcap('hello wORLD-foo bar_baz')
+upper:text | lower:text | initcap:text
+STRAßE | σασ | Hello World-Foo Bar_Baz
+-- SELECT 1
+
+> SELECT lower('İ'), upper('ᾳᾀῃῳß'), initcap('ᾳbc ßa ǆungla'), casefold('ſςßµİꭰᏸΣAbc'), casefold('ẞ'), casefold('ϐϑϕϖϰϱϵẛι'), casefold(NULL)
+lower:text | upper:text | initcap:text | casefold:text | casefold:text | casefold:text | casefold:text
+i | ᾼᾈῌῼß | ᾼbc ßa Ǆungla | sσßμİᎠᏰσabc | ß | βθφπκρεṡι | NULL
+-- SELECT 1
+

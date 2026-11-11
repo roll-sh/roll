@@ -1,0 +1,154 @@
+> CREATE SCHEMA app
+-- CREATE SCHEMA
+
+> CREATE SCHEMA app
+ERROR 42P06: schema "app" already exists
+
+> CREATE SCHEMA IF NOT EXISTS app
+NOTICE 42P06: schema "app" already exists, skipping
+-- CREATE SCHEMA
+
+> CREATE SCHEMA pg_bad
+ERROR 42939: unacceptable schema name "pg_bad"
+DETAIL: The prefix "pg_" is reserved for system schemas.
+
+> CREATE TABLE app.users (id int PRIMARY KEY, name text)
+-- CREATE TABLE
+
+> INSERT INTO app.users VALUES (1, 'a')
+-- INSERT 0 1
+
+> SELECT * FROM users
+ERROR 42P01: relation "users" does not exist (at 15)
+
+> SET search_path = app, public
+-- SET
+
+> SELECT * FROM users
+id:int4 | name:text
+1 | a
+-- SELECT 1
+
+> SHOW search_path
+search_path:text
+app, public
+-- SHOW
+
+> CREATE TABLE things (x int)
+-- CREATE TABLE
+
+> SELECT schemaname, tablename FROM pg_tables WHERE tablename IN ('users', 'things') ORDER BY 2
+schemaname:name | tablename:name
+app | things
+app | users
+-- SELECT 2
+
+> RESET search_path
+-- RESET
+
+> SELECT current_schema()
+current_schema:name
+public
+-- SELECT 1
+
+> SET search_path = nosuch, public
+-- SET
+
+> SELECT current_schema()
+current_schema:name
+public
+-- SELECT 1
+
+> CREATE TABLE fails (x int)
+-- CREATE TABLE
+
+> RESET search_path
+-- RESET
+
+> CREATE SCHEMA elems CREATE TABLE e1 (a int) CREATE VIEW ev AS SELECT a FROM e1
+-- CREATE SCHEMA
+
+> SELECT count(*) FROM elems.ev
+count:int8
+0
+-- SELECT 1
+
+> DROP SCHEMA app
+ERROR 2BP01: cannot drop schema app because other objects depend on it
+DETAIL: table app.users depends on schema app
+DETAIL: table app.things depends on schema app
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP SCHEMA app CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to table app.users
+DETAIL: drop cascades to table app.things
+-- DROP SCHEMA
+
+> SELECT * FROM app.users
+ERROR 42P01: relation "app.users" does not exist (at 15)
+
+> DROP SCHEMA nosuch
+ERROR 3F000: schema "nosuch" does not exist
+
+> DROP SCHEMA IF EXISTS nosuch
+NOTICE 00000: schema "nosuch" does not exist, skipping
+-- DROP SCHEMA
+
+> DROP SCHEMA public CASCADE
+NOTICE 00000: drop cascades to table fails
+-- DROP SCHEMA
+
+> CREATE SCHEMA public
+-- CREATE SCHEMA
+
+> ALTER SCHEMA elems RENAME TO elements
+-- ALTER SCHEMA
+
+> SELECT count(*) FROM elements.e1
+count:int8
+0
+-- SELECT 1
+
+> SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' ORDER BY 1
+nspname:name
+elements
+public
+-- SELECT 2
+
+> COMMENT ON SCHEMA elements IS 'stuff'
+-- COMMENT
+
+> SELECT obj_description('elements'::regnamespace, 'pg_namespace')
+obj_description:text
+stuff
+-- SELECT 1
+
+> CREATE TABLE cm (a int)
+-- CREATE TABLE
+
+> COMMENT ON TABLE cm IS 'a table'
+-- COMMENT
+
+> COMMENT ON COLUMN cm.a IS 'a column'
+-- COMMENT
+
+> SELECT obj_description('cm'::regclass, 'pg_class'), col_description('cm'::regclass, 1)
+obj_description:text | col_description:text
+a table | a column
+-- SELECT 1
+
+> COMMENT ON TABLE cm IS NULL
+-- COMMENT
+
+> SELECT obj_description('cm'::regclass, 'pg_class')
+obj_description:text
+NULL
+-- SELECT 1
+
+> COMMENT ON TABLE nosuch IS 'x'
+ERROR 42P01: relation "nosuch" does not exist
+
+> COMMENT ON COLUMN cm.nosuch IS 'x'
+ERROR 42703: column "nosuch" of relation "cm" does not exist
+

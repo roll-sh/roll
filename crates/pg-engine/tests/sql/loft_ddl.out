@@ -1,0 +1,184 @@
+> create table rpar (name text, salary int, manager text)
+-- CREATE TABLE
+
+> create table rchild (gpa float) inherits (rpar)
+-- CREATE TABLE
+
+> alter table rpar rename column salary to manager
+ERROR 42701: column "manager" of relation "rchild" already exists
+
+> drop table rchild, rpar
+-- DROP TABLE
+
+> create aggregate newcnt (int) (sfunc = int4inc, stype = int, initcond = '0')
+ERROR 42883: function int4inc(integer, integer) does not exist
+
+> drop aggregate newcnt (nonesuch)
+ERROR 42704: type "nonesuch" does not exist
+
+> drop aggregate newcnt (int)
+ERROR 42883: aggregate newcnt(integer) does not exist
+
+> create table pref (a int primary key)
+-- CREATE TABLE
+
+> create table ptrig (a int, b text) partition by list (a)
+-- CREATE TABLE
+
+> create table ptrig1 partition of ptrig for values in (1)
+-- CREATE TABLE
+
+> create function trig_noop() returns trigger language plpgsql as $$ begin return null; end $$
+-- CREATE FUNCTION
+
+> create constraint trigger ptrig_c after update on ptrig from pref for each row execute procedure trig_noop()
+-- CREATE TRIGGER
+
+> select tgname, conname, t.tgrelid::regclass, t.tgconstrrelid::regclass, c.conrelid::regclass, c.contype, c.conislocal, c.connoinherit from pg_trigger t join pg_constraint c on (t.tgconstraint = c.oid) where tgname = 'ptrig_c' order by t.tgrelid::regclass::text
+tgname:name | conname:name | tgrelid:regclass | tgconstrrelid:regclass | conrelid:regclass | contype:char | conislocal:bool | connoinherit:bool
+ptrig_c | ptrig_c | ptrig | pref | ptrig | t | t | t
+ptrig_c | ptrig_c | ptrig1 | pref | ptrig1 | t | t | t
+-- SELECT 2
+
+> select pg_get_triggerdef(oid) from pg_trigger where tgname = 'ptrig_c' order by 1
+pg_get_triggerdef:text
+CREATE CONSTRAINT TRIGGER ptrig_c AFTER UPDATE ON public.ptrig FROM pref NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION trig_noop()
+CREATE CONSTRAINT TRIGGER ptrig_c AFTER UPDATE ON public.ptrig1 FROM pref NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION trig_noop()
+-- SELECT 2
+
+> create trigger mytrig after insert on ptrig1 for each row execute procedure trig_noop()
+-- CREATE TRIGGER
+
+> create trigger mytrig after insert on ptrig for each row execute procedure trig_noop()
+ERROR 42710: trigger "mytrig" for relation "ptrig1" already exists
+
+> create or replace trigger mytrig after insert on ptrig for each row execute procedure trig_noop()
+-- CREATE TRIGGER
+
+> select tgname, tgrelid::regclass, tgparentid <> 0 as cloned from pg_trigger where tgname = 'mytrig' order by tgrelid::regclass::text
+tgname:name | tgrelid:regclass | cloned:bool
+mytrig | ptrig | f
+mytrig | ptrig1 | t
+-- SELECT 2
+
+> drop table ptrig, pref
+-- DROP TABLE
+
+> drop function trig_noop()
+-- DROP FUNCTION
+
+> create domain pint as int4
+-- CREATE DOMAIN
+
+> create type ddt1 as (f1 pint)
+-- CREATE TYPE
+
+> create table ddt2 (f1 ddt1)
+-- CREATE TABLE
+
+> alter domain pint add constraint c1 check (value >= 0)
+ERROR 0A000: cannot alter type "pint" because column "ddt2.f1" uses it
+
+> drop table ddt2
+-- DROP TABLE
+
+> create type rpint as range (subtype = pint)
+-- CREATE TYPE
+
+> create table ddt2 (f1 rpint)
+-- CREATE TABLE
+
+> alter domain pint add constraint c1 check (value >= 0)
+ERROR 0A000: cannot alter type "pint" because column "ddt2.f1" uses it
+
+> drop table ddt2
+-- DROP TABLE
+
+> drop type rpint
+-- DROP TYPE
+
+> alter domain pint add constraint c1 check (value >= 0)
+-- ALTER DOMAIN
+
+> drop type ddt1
+-- DROP TYPE
+
+> drop domain pint
+-- DROP DOMAIN
+
+> create type ctype as (r float8, i float8)
+-- CREATE TYPE
+
+> create domain dctype as ctype check ((value).r > 0)
+-- CREATE DOMAIN
+
+> alter type ctype alter attribute r type varchar
+ERROR 42883: operator does not exist: character varying > double precision
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> alter type ctype drop attribute r
+ERROR 2BP01: cannot drop column r of composite type ctype because other objects depend on it
+DETAIL: constraint dctype_check depends on column r of composite type ctype
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> alter type ctype drop attribute i
+-- ALTER TYPE
+
+> drop domain dctype
+-- DROP DOMAIN
+
+> drop type ctype
+-- DROP TYPE
+
+> create table another (f1 int, f2 text, f3 text)
+-- CREATE TABLE
+
+> insert into another values (1, 'one', 'uno'), (2, 'two', 'due')
+-- INSERT 0 2
+
+> alter table another alter f1 type text using f2 || ' and ' || f3, alter f2 type bigint using f1 * 10, drop column f3
+-- ALTER TABLE
+
+> select * from another
+f1:text | f2:int8
+one and uno | 10
+two and due | 20
+-- SELECT 2
+
+> create table another_c () inherits (another)
+-- CREATE TABLE
+
+> alter table another alter f2 type int using (pg_column_size(another))
+ERROR 0A000: cannot convert whole-row table reference
+DETAIL: USING expression contains a whole-row table reference.
+
+> drop table another cascade
+NOTICE 00000: drop cascades to table another_c
+-- DROP TABLE
+
+> create table gtoid (a int primary key, b bool generated always as (tableoid = 'gtoid'::regclass) stored)
+-- CREATE TABLE
+
+> insert into gtoid values (1)
+-- INSERT 0 1
+
+> select * from gtoid
+a:int4 | b:bool
+1 | t
+-- SELECT 1
+
+> drop table gtoid
+-- DROP TABLE
+
+> create table nic (a int check (a > 0) no inherit, b int not null no inherit)
+-- CREATE TABLE
+
+> create table nic_p (like nic including all) partition by list (a)
+ERROR 42P16: cannot add NO INHERIT constraint to partitioned table "nic_p"
+
+> drop table nic
+-- DROP TABLE
+
+> create table dflt (a int, b int default ('loft_nonesuch'::regclass::oid::int))
+ERROR 42P01: relation "loft_nonesuch" does not exist (at 42)
+

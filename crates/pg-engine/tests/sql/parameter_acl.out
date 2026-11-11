@@ -1,0 +1,150 @@
+> create role param_acl_r1
+-- CREATE ROLE
+
+> create role param_acl_r2
+-- CREATE ROLE
+
+> select count(*) from pg_parameter_acl
+count:int8
+0
+-- SELECT 1
+
+> grant set on parameter work_mem, "Log_Min_Duration_Statement" to param_acl_r1
+-- GRANT
+
+> grant alter system on parameter work_mem to param_acl_r2 with grant option
+-- GRANT
+
+> grant set, alter system on parameter param_acl.custom to public
+-- GRANT
+
+> select parname, paracl from pg_parameter_acl order by oid
+parname:text | paracl:1034
+work_mem | {postgres=sA/postgres,param_acl_r1=s/postgres,param_acl_r2=A*/postgres}
+log_min_duration_statement | {postgres=sA/postgres,param_acl_r1=s/postgres}
+param_acl.custom | {postgres=sA/postgres,=sA/postgres}
+-- SELECT 3
+
+> select oid::int8 - (select min(oid)::int8 from pg_parameter_acl) from pg_parameter_acl order by oid
+?column?:int8
+0
+1
+2
+-- SELECT 3
+
+> select has_parameter_privilege('param_acl_r1', 'work_mem', 'SET'), has_parameter_privilege('param_acl_r1', 'work_mem', 'ALTER SYSTEM'), has_parameter_privilege('param_acl_r2', 'WORK_MEM', 'alter system with grant option'), has_parameter_privilege('param_acl_r2', 'work_mem', 'SET')
+has_parameter_privilege:bool | has_parameter_privilege:bool | has_parameter_privilege:bool | has_parameter_privilege:bool
+t | f | t | f
+-- SELECT 1
+
+> select has_parameter_privilege('param_acl_r1', 'param_acl.custom', 'SET'), has_parameter_privilege('work_mem', 'SET')
+has_parameter_privilege:bool | has_parameter_privilege:bool
+t | t
+-- SELECT 1
+
+> select pg_describe_object(classid, objid, objsubid), deptype, refobjid::regrole from pg_shdepend where classid = 'pg_parameter_acl'::regclass order by 1, 3
+pg_describe_object:text | deptype:char | refobjid:4096
+parameter log_min_duration_statement | a | param_acl_r1
+parameter work_mem | a | param_acl_r1
+parameter work_mem | a | param_acl_r2
+-- SELECT 3
+
+> select (pg_identify_object('pg_parameter_acl'::regclass, oid, 0)).* from pg_parameter_acl order by oid
+type:text | schema:text | name:text | identity:text
+parameter ACL | NULL | NULL | work_mem
+parameter ACL | NULL | NULL | log_min_duration_statement
+parameter ACL | NULL | NULL | param_acl.custom
+-- SELECT 3
+
+> select (pg_identify_object_as_address('pg_parameter_acl'::regclass, oid, 0)).* from pg_parameter_acl order by oid
+type:text | object_names:text[] | object_args:text[]
+parameter ACL | {work_mem} | {}
+parameter ACL | {log_min_duration_statement} | {}
+parameter ACL | {param_acl.custom} | {}
+-- SELECT 3
+
+> drop role param_acl_r1
+ERROR 2BP01: role "param_acl_r1" cannot be dropped because some objects depend on it
+DETAIL: privileges for parameter work_mem
+DETAIL: privileges for parameter log_min_duration_statement
+
+> revoke set on parameter work_mem from param_acl_r1
+-- REVOKE
+
+> revoke alter system on parameter work_mem from param_acl_r2 cascade
+-- REVOKE
+
+> select parname, paracl from pg_parameter_acl order by oid
+parname:text | paracl:1034
+log_min_duration_statement | {postgres=sA/postgres,param_acl_r1=s/postgres}
+param_acl.custom | {postgres=sA/postgres,=sA/postgres}
+-- SELECT 2
+
+> grant set on parameter nosuch_param to param_acl_r1
+ERROR 42704: unrecognized configuration parameter "nosuch_param"
+
+> grant select on parameter work_mem to param_acl_r1
+ERROR 0LP01: invalid privilege type SELECT for parameter
+
+> grant set on parameter work_mem to param_acl_r1
+-- GRANT
+
+> select parname, paracl from pg_parameter_acl order by oid
+parname:text | paracl:1034
+log_min_duration_statement | {postgres=sA/postgres,param_acl_r1=s/postgres}
+param_acl.custom | {postgres=sA/postgres,=sA/postgres}
+work_mem | {postgres=sA/postgres,param_acl_r1=s/postgres}
+-- SELECT 3
+
+> set role param_acl_r1
+-- SET
+
+> set work_mem = '8MB'
+-- SET
+
+> show work_mem
+work_mem:text
+8MB
+-- SHOW
+
+> set log_min_duration_statement = 10
+-- SET
+
+> show log_min_duration_statement
+log_min_duration_statement:text
+10ms
+-- SHOW
+
+> set lc_messages = 'C'
+ERROR 42501: permission denied to set parameter "lc_messages"
+
+> set session_replication_role = replica
+ERROR 42501: permission denied to set parameter "session_replication_role"
+
+> reset role
+-- RESET
+
+> reset work_mem
+-- RESET
+
+> reset log_min_duration_statement
+-- RESET
+
+> revoke all on parameter work_mem, log_min_duration_statement, param_acl.custom from param_acl_r1, param_acl_r2, public
+-- REVOKE
+
+> select parname, paracl from pg_parameter_acl order by oid
+parname:text | paracl:1034
+-- SELECT 0
+
+> select count(*) from pg_parameter_acl
+count:int8
+0
+-- SELECT 1
+
+> drop role param_acl_r1
+-- DROP ROLE
+
+> drop role param_acl_r2
+-- DROP ROLE
+

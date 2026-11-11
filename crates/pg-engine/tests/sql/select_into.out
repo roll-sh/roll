@@ -1,0 +1,86 @@
+> CREATE TABLE si (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO si VALUES (1, 'x'), (2, 'y')
+-- INSERT 0 2
+
+> SELECT a INTO si2 FROM si WHERE a = 1
+-- SELECT 1
+
+> SELECT * FROM si2
+a:int4
+1
+-- SELECT 1
+
+> SELECT a, b INTO TEMP si3 FROM si ORDER BY a
+-- SELECT 2
+
+> SELECT * FROM si3
+a:int4 | b:text
+1 | x
+2 | y
+-- SELECT 2
+
+> WITH q AS (SELECT 5 AS c) SELECT c INTO si4 FROM q
+-- SELECT 1
+
+> SELECT * FROM si4
+c:int4
+5
+-- SELECT 1
+
+> SELECT 1 AS a INTO si5 UNION SELECT 2
+-- SELECT 2
+
+> SELECT * FROM si5 ORDER BY a
+a:int4
+1
+2
+-- SELECT 2
+
+> SELECT a INTO si2 FROM si
+ERROR 42P07: relation "si2" already exists
+
+> SELECT a INTO UNLOGGED si6 FROM si
+-- SELECT 2
+
+> SELECT relpersistence FROM pg_class WHERE relname = 'si6'
+relpersistence:char
+u
+-- SELECT 1
+
+> PREPARE psi AS SELECT b INTO si7 FROM si WHERE a = $1
+-- PREPARE
+
+> EXECUTE psi(2)
+-- SELECT 1
+
+> SELECT * FROM si7
+b:text
+y
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT a INTO si8 FROM si
+QUERY PLAN:text
+Seq Scan on si
+-- EXPLAIN
+
+> SELECT count(*) FROM pg_class WHERE relname = 'si8'
+count:int8
+0
+-- SELECT 1
+
+> SELECT * INTO si9 FROM si FOR UPDATE
+-- SELECT 2
+
+> SELECT (SELECT a INTO si10 FROM si LIMIT 1)
+ERROR 42601: SELECT ... INTO is not allowed here (at 23)
+
+> CREATE FUNCTION fsi() RETURNS int LANGUAGE sql AS 'SELECT 1 INTO x'
+ERROR 42P13: return type mismatch in function declared to return integer
+DETAIL: Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING.
+CONTEXT: SQL function "fsi"
+
+> DROP TABLE si, si2, si3, si4, si5, si6, si7, si9
+-- DROP TABLE
+

@@ -1,0 +1,779 @@
+> create table a (id int primary key, x int, t text)
+-- CREATE TABLE
+
+> create table b (id int primary key, y int, z int)
+-- CREATE TABLE
+
+> create table c (k int, w int)
+-- CREATE TABLE
+
+> create table d (k int, v text)
+-- CREATE TABLE
+
+> create table big (id int primary key, g int, pad text)
+-- CREATE TABLE
+
+> create table small (s int, t int)
+-- CREATE TABLE
+
+> create table mid (m int, n int)
+-- CREATE TABLE
+
+> insert into a select g, g % 50, 'a' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> insert into b select g, g % 30, g % 7 from generate_series(1, 500) g
+-- INSERT 0 500
+
+> insert into c select g % 10, g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> insert into d select g % 2000, 'd' || g from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> create index on d (k)
+-- CREATE INDEX
+
+> insert into big select i, i % 100, repeat('x', 50) from generate_series(1, 20000) i
+-- INSERT 0 20000
+
+> insert into small select i % 20, i from generate_series(1, 40) i
+-- INSERT 0 40
+
+> insert into mid select i % 3000, i from generate_series(1, 6000) i
+-- INSERT 0 6000
+
+> analyze a
+-- ANALYZE
+
+> analyze b
+-- ANALYZE
+
+> analyze c
+-- ANALYZE
+
+> analyze d
+-- ANALYZE
+
+> analyze big
+-- ANALYZE
+
+> analyze small
+-- ANALYZE
+
+> analyze mid
+-- ANALYZE
+
+> explain select * from a where exists (select 1 from b where b.y = a.x)
+QUERY PLAN:text
+Hash Join  (cost=9.93..35.23 rows=600 width=12)
+  Hash Cond: (a.x = b.y)
+  ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+  ->  Hash  (cost=9.55..9.55 rows=30 width=4)
+        ->  HashAggregate  (cost=9.25..9.55 rows=30 width=4)
+              Group Key: b.y
+              ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=4)
+-- EXPLAIN
+
+> explain select * from a where not exists (select 1 from b where b.y = a.x)
+QUERY PLAN:text
+Hash Anti Join  (cost=14.25..38.30 rows=400 width=12)
+  Hash Cond: (a.x = b.y)
+  ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+  ->  Hash  (cost=8.00..8.00 rows=500 width=4)
+        ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=4)
+-- EXPLAIN
+
+> explain select * from a where a.x in (select y from b)
+QUERY PLAN:text
+Hash Join  (cost=9.93..35.23 rows=600 width=12)
+  Hash Cond: (a.x = b.y)
+  ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+  ->  Hash  (cost=9.55..9.55 rows=30 width=4)
+        ->  HashAggregate  (cost=9.25..9.55 rows=30 width=4)
+              Group Key: b.y
+              ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=4)
+-- EXPLAIN
+
+> explain select * from a where a.id in (select y from b where z = 3)
+QUERY PLAN:text
+Merge Join  (cost=10.66..12.43 rows=30 width=12)
+  Merge Cond: (a.id = b.y)
+  ->  Index Scan using a_pkey on a  (cost=0.28..44.27 rows=1000 width=12)
+  ->  Sort  (cost=10.38..10.45 rows=28 width=4)
+        Sort Key: b.y
+        ->  HashAggregate  (cost=9.43..9.71 rows=28 width=4)
+              Group Key: b.y
+              ->  Seq Scan on b  (cost=0.00..9.25 rows=72 width=4)
+                    Filter: (z = 3)
+-- EXPLAIN
+
+> explain select * from a where a.id in (select k from c)
+QUERY PLAN:text
+Merge Join  (cost=2.80..3.36 rows=10 width=12)
+  Merge Cond: (a.id = c.k)
+  ->  Index Scan using a_pkey on a  (cost=0.28..44.27 rows=1000 width=12)
+  ->  Sort  (cost=2.52..2.54 rows=10 width=4)
+        Sort Key: c.k
+        ->  HashAggregate  (cost=2.25..2.35 rows=10 width=4)
+              Group Key: c.k
+              ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> explain select * from a where exists (select 1 from b where b.id = a.id and b.z = 1)
+QUERY PLAN:text
+Hash Join  (cost=10.15..28.79 rows=72 width=12)
+  Hash Cond: (a.id = b.id)
+  ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+  ->  Hash  (cost=9.25..9.25 rows=72 width=4)
+        ->  Seq Scan on b  (cost=0.00..9.25 rows=72 width=4)
+              Filter: (z = 1)
+-- EXPLAIN
+
+> explain select * from a where a.x not in (select y from b)
+QUERY PLAN:text
+Seq Scan on a  (cost=9.25..27.75 rows=500 width=12)
+  Filter: (NOT (ANY (x = (hashed SubPlan 1).col1)))
+  SubPlan 1
+    ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=4)
+-- EXPLAIN
+
+> explain select * from c where exists (select 1 from a where a.id = c.k)
+QUERY PLAN:text
+Merge Join  (cost=5.65..7.52 rows=100 width=8)
+  Merge Cond: (a.id = c.k)
+  ->  Index Only Scan using a_pkey on a  (cost=0.28..44.27 rows=1000 width=4)
+  ->  Sort  (cost=5.32..5.57 rows=100 width=8)
+        Sort Key: c.k
+        ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=8)
+-- EXPLAIN
+
+> explain select * from c where not exists (select 1 from a where a.id = c.w)
+QUERY PLAN:text
+Merge Right Anti Join  (cost=5.60..11.75 rows=1 width=8)
+  Merge Cond: (a.id = c.w)
+  ->  Index Only Scan using a_pkey on a  (cost=0.28..44.27 rows=1000 width=4)
+  ->  Sort  (cost=5.32..5.57 rows=100 width=8)
+        Sort Key: c.w
+        ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=8)
+-- EXPLAIN
+
+> explain select * from c where exists (select 1 from d where d.k = c.k)
+QUERY PLAN:text
+Nested Loop Semi Join  (cost=0.29..132.91 rows=100 width=8)
+  ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=8)
+  ->  Index Only Scan using d_k_idx on d  (cost=0.29..5.81 rows=10 width=4)
+        Index Cond: (k = c.k)
+-- EXPLAIN
+
+> explain select * from c where c.k in (select k from d)
+QUERY PLAN:text
+Nested Loop Semi Join  (cost=0.29..132.91 rows=100 width=8)
+  ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=8)
+  ->  Index Only Scan using d_k_idx on d  (cost=0.29..5.81 rows=10 width=4)
+        Index Cond: (k = c.k)
+-- EXPLAIN
+
+> explain select * from c where not exists (select 1 from d where d.k = c.w)
+QUERY PLAN:text
+Merge Right Anti Join  (cost=6.14..71.94 rows=1 width=8)
+  Merge Cond: (d.k = c.w)
+  ->  Index Only Scan using d_k_idx on d  (cost=0.29..833.03 rows=20000 width=4)
+  ->  Sort  (cost=5.32..5.57 rows=100 width=8)
+        Sort Key: c.w
+        ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=8)
+-- EXPLAIN
+
+> explain select * from a where exists (select 1 from c where c.w = a.id and c.k > 3)
+QUERY PLAN:text
+Merge Semi Join  (cost=4.30..9.85 rows=60 width=12)
+  Merge Cond: (a.id = c.w)
+  ->  Index Scan using a_pkey on a  (cost=0.28..44.27 rows=1000 width=12)
+  ->  Sort  (cost=4.02..4.17 rows=60 width=4)
+        Sort Key: c.w
+        ->  Seq Scan on c  (cost=0.00..2.25 rows=60 width=4)
+              Filter: (k > 3)
+-- EXPLAIN
+
+> explain select * from a where exists (select 1 from b where b.y < a.x)
+QUERY PLAN:text
+Nested Loop Semi Join  (cost=0.00..5037.72 rows=333 width=12)
+  Join Filter: (b.y < a.x)
+  ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+  ->  Materialize  (cost=0.00..10.50 rows=500 width=4)
+        ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=4)
+-- EXPLAIN
+
+> explain select * from a where not exists (select 1 from b where b.y = a.x and b.z = a.id % 7)
+QUERY PLAN:text
+Hash Anti Join  (cost=15.50..62.89 rows=700 width=12)
+  Hash Cond: ((a.x = b.y) AND ((a.id % 7) = b.z))
+  ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+  ->  Hash  (cost=8.00..8.00 rows=500 width=8)
+        ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=8)
+-- EXPLAIN
+
+> explain select * from b where b.y in (select x from a) and exists (select 1 from c where c.k = b.z)
+QUERY PLAN:text
+Hash Join  (cost=22.10..43.85 rows=500 width=12)
+  Hash Cond: (b.z = c.k)
+  ->  Hash Join  (cost=19.62..34.50 rows=500 width=12)
+        Hash Cond: (b.y = a.x)
+        ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=12)
+        ->  Hash  (cost=19.00..19.00 rows=50 width=4)
+              ->  HashAggregate  (cost=18.50..19.00 rows=50 width=4)
+                    Group Key: a.x
+                    ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=4)
+  ->  Hash  (cost=2.35..2.35 rows=10 width=4)
+        ->  HashAggregate  (cost=2.25..2.35 rows=10 width=4)
+              Group Key: c.k
+              ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> explain select * from a join b on a.id = b.id where exists (select 1 from c where c.w = a.x)
+QUERY PLAN:text
+Hash Semi Join  (cost=17.50..43.01 rows=500 width=24)
+  Hash Cond: (a.x = c.w)
+  ->  Hash Join  (cost=14.25..32.89 rows=500 width=24)
+        Hash Cond: (a.id = b.id)
+        ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+        ->  Hash  (cost=8.00..8.00 rows=500 width=12)
+              ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=12)
+  ->  Hash  (cost=2.00..2.00 rows=100 width=4)
+        ->  Seq Scan on c  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> explain select * from d where d.k in (select w from c where k = 1)
+QUERY PLAN:text
+Merge Semi Join  (cost=3.23..55.09 rows=100 width=10)
+  Merge Cond: (d.k = c.w)
+  ->  Index Scan using d_k_idx on d  (cost=0.29..833.03 rows=20000 width=10)
+  ->  Sort  (cost=2.42..2.44 rows=10 width=4)
+        Sort Key: c.w
+        ->  Seq Scan on c  (cost=0.00..2.25 rows=10 width=4)
+              Filter: (k = 1)
+-- EXPLAIN
+
+> explain select * from a where exists (select 1 from b where b.y = a.x limit 1)
+QUERY PLAN:text
+Hash Join  (cost=9.93..35.23 rows=600 width=12)
+  Hash Cond: (a.x = b.y)
+  ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=12)
+  ->  Hash  (cost=9.55..9.55 rows=30 width=4)
+        ->  HashAggregate  (cost=9.25..9.55 rows=30 width=4)
+              Group Key: b.y
+              ->  Seq Scan on b  (cost=0.00..8.00 rows=500 width=4)
+-- EXPLAIN
+
+> explain select * from b where exists (select 1 from a where a.x = b.y) order by b.id limit 5
+QUERY PLAN:text
+Limit  (cost=0.27..7.92 rows=5 width=12)
+  ->  Nested Loop Semi Join  (cost=0.27..764.82 rows=500 width=12)
+        Join Filter: (b.y = a.x)
+        ->  Index Scan using b_pkey on b  (cost=0.27..29.77 rows=500 width=12)
+        ->  Materialize  (cost=0.00..21.00 rows=1000 width=4)
+              ->  Seq Scan on a  (cost=0.00..16.00 rows=1000 width=4)
+-- EXPLAIN
+
+> explain select * from small s where exists (select 1 from big b where b.g = s.s)
+QUERY PLAN:text
+Hash Join  (cost=479.90..481.80 rows=40 width=8)
+  Hash Cond: (b.g = s.s)
+  ->  HashAggregate  (cost=478.00..479.00 rows=100 width=4)
+        Group Key: b.g
+        ->  Seq Scan on big b  (cost=0.00..428.00 rows=20000 width=4)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=8)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+-- EXPLAIN
+
+> explain select * from mid m where exists (select 1 from small s where s.t = m.n)
+QUERY PLAN:text
+Hash Semi Join  (cost=1.90..105.10 rows=40 width=8)
+  Hash Cond: (m.n = s.t)
+  ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=8)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=4)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=4)
+-- EXPLAIN
+
+> explain select * from mid m where not exists (select 1 from small s where s.t = m.n)
+QUERY PLAN:text
+Hash Anti Join  (cost=1.90..164.30 rows=5960 width=8)
+  Hash Cond: (m.n = s.t)
+  ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=8)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=4)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=4)
+-- EXPLAIN
+
+> explain select * from small s where not exists (select 1 from mid m where m.m = s.t)
+QUERY PLAN:text
+Hash Right Anti Join  (cost=1.90..112.20 rows=1 width=8)
+  Hash Cond: (m.m = s.t)
+  ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=4)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=8)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+-- EXPLAIN
+
+> explain select * from small s where s.t in (select m from mid)
+QUERY PLAN:text
+Hash Right Semi Join  (cost=1.90..112.20 rows=40 width=8)
+  Hash Cond: (mid.m = s.t)
+  ->  Seq Scan on mid  (cost=0.00..87.00 rows=6000 width=4)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=8)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+-- EXPLAIN
+
+> explain select * from mid m where m.m in (select g from big)
+QUERY PLAN:text
+Hash Join  (cost=480.25..585.23 rows=200 width=8)
+  Hash Cond: (m.m = big.g)
+  ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=8)
+  ->  Hash  (cost=479.00..479.00 rows=100 width=4)
+        ->  HashAggregate  (cost=478.00..479.00 rows=100 width=4)
+              Group Key: big.g
+              ->  Seq Scan on big  (cost=0.00..428.00 rows=20000 width=4)
+-- EXPLAIN
+
+> explain select * from small s where exists (select 1 from mid m where m.m = s.t)
+QUERY PLAN:text
+Hash Right Semi Join  (cost=1.90..112.20 rows=40 width=8)
+  Hash Cond: (m.m = s.t)
+  ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=4)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=8)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+-- EXPLAIN
+
+> explain select * from small s join mid m on m.n = s.t where exists (select 1 from big b where b.id = m.m)
+QUERY PLAN:text
+Nested Loop  (cost=2.19..131.60 rows=40 width=16)
+  ->  Hash Join  (cost=1.90..111.80 rows=40 width=16)
+        Hash Cond: (m.n = s.t)
+        ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=8)
+        ->  Hash  (cost=1.40..1.40 rows=40 width=8)
+              ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+  ->  Index Only Scan using big_pkey on big b  (cost=0.29..0.49 rows=1 width=4)
+        Index Cond: (id = m.m)
+-- EXPLAIN
+
+> explain select * from small s where (s.s, s.t) in (select m % 20, n from mid)
+QUERY PLAN:text
+Hash Right Semi Join  (cost=2.00..141.51 rows=20 width=8)
+  Hash Cond: (((mid.m % 20) = s.s) AND (mid.n = s.t))
+  ->  Seq Scan on mid  (cost=0.00..87.00 rows=6000 width=8)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=8)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+-- EXPLAIN
+
+> explain select * from small s where exists (select 1 from big b where b.id = s.t and b.g = 3)
+QUERY PLAN:text
+Merge Join  (cost=2.75..7.01 rows=1 width=8)
+  Merge Cond: (b.id = s.t)
+  ->  Index Scan using big_pkey on big b  (cost=0.29..809.29 rows=200 width=4)
+        Filter: (g = 3)
+  ->  Sort  (cost=2.46..2.56 rows=40 width=8)
+        Sort Key: s.t
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+-- EXPLAIN
+
+> set enable_hashjoin = off
+-- SET
+
+> explain select * from small s where exists (select 1 from mid m where m.m = s.t)
+QUERY PLAN:text
+Merge Join  (cost=307.73..308.53 rows=40 width=8)
+  Merge Cond: (s.t = m.m)
+  ->  Sort  (cost=2.46..2.56 rows=40 width=8)
+        Sort Key: s.t
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+  ->  Sort  (cost=305.26..312.76 rows=3000 width=4)
+        Sort Key: m.m
+        ->  HashAggregate  (cost=102.00..132.00 rows=3000 width=4)
+              Group Key: m.m
+              ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=4)
+-- EXPLAIN
+
+> explain select * from mid m where not exists (select 1 from small s where s.t = m.n)
+QUERY PLAN:text
+Merge Anti Join  (cost=465.99..496.59 rows=5960 width=8)
+  Merge Cond: (m.n = s.t)
+  ->  Sort  (cost=463.52..478.52 rows=6000 width=8)
+        Sort Key: m.n
+        ->  Seq Scan on mid m  (cost=0.00..87.00 rows=6000 width=8)
+  ->  Sort  (cost=2.46..2.56 rows=40 width=4)
+        Sort Key: s.t
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=4)
+-- EXPLAIN
+
+> explain select * from small s where exists (select 1 from big b where b.g = s.s)
+QUERY PLAN:text
+Merge Join  (cost=484.79..485.49 rows=40 width=8)
+  Merge Cond: (s.s = b.g)
+  ->  Sort  (cost=2.46..2.56 rows=40 width=8)
+        Sort Key: s.s
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+  ->  Sort  (cost=482.32..482.57 rows=100 width=4)
+        Sort Key: b.g
+        ->  HashAggregate  (cost=478.00..479.00 rows=100 width=4)
+              Group Key: b.g
+              ->  Seq Scan on big b  (cost=0.00..428.00 rows=20000 width=4)
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> set enable_hashagg = off
+-- SET
+
+> explain select * from small s where exists (select 1 from big b where b.g = s.s)
+QUERY PLAN:text
+Hash Right Semi Join  (cost=1.90..609.90 rows=40 width=8)
+  Hash Cond: (b.g = s.s)
+  ->  Seq Scan on big b  (cost=0.00..428.00 rows=20000 width=4)
+  ->  Hash  (cost=1.40..1.40 rows=40 width=8)
+        ->  Seq Scan on small s  (cost=0.00..1.40 rows=40 width=8)
+-- EXPLAIN
+
+> reset enable_hashagg
+-- RESET
+
+> select count(*) from a where exists (select 1 from b where b.y = a.x)
+count:int8
+600
+-- SELECT 1
+
+> select count(*) from a where not exists (select 1 from b where b.y = a.x)
+count:int8
+400
+-- SELECT 1
+
+> select count(*) from a where a.id in (select y from b where z = 3)
+count:int8
+29
+-- SELECT 1
+
+> select * from c where exists (select 1 from a where a.id = c.k) order by w limit 5
+k:int4 | w:int4
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+-- SELECT 5
+
+> select * from c where not exists (select 1 from a where a.id = c.w)
+k:int4 | w:int4
+-- SELECT 0
+
+> select count(*) from c where exists (select 1 from d where d.k = c.k)
+count:int8
+100
+-- SELECT 1
+
+> select count(*) from a where exists (select 1 from b where b.y < a.x)
+count:int8
+980
+-- SELECT 1
+
+> select count(*) from a where not exists (select 1 from b where b.y = a.x and b.z = a.id % 7)
+count:int8
+400
+-- SELECT 1
+
+> select * from b where b.y in (select x from a) and exists (select 1 from c where c.k = b.z) order by id limit 8
+id:int4 | y:int4 | z:int4
+1 | 1 | 1
+2 | 2 | 2
+3 | 3 | 3
+4 | 4 | 4
+5 | 5 | 5
+6 | 6 | 6
+7 | 7 | 0
+8 | 8 | 1
+-- SELECT 8
+
+> select * from d where d.k in (select w from c where k = 1) order by k, v
+k:int4 | v:text
+1 | d1
+1 | d10001
+1 | d12001
+1 | d14001
+1 | d16001
+1 | d18001
+1 | d2001
+1 | d4001
+1 | d6001
+1 | d8001
+11 | d10011
+11 | d11
+11 | d12011
+11 | d14011
+11 | d16011
+11 | d18011
+11 | d2011
+11 | d4011
+11 | d6011
+11 | d8011
+21 | d10021
+21 | d12021
+21 | d14021
+21 | d16021
+21 | d18021
+21 | d2021
+21 | d21
+21 | d4021
+21 | d6021
+21 | d8021
+31 | d10031
+31 | d12031
+31 | d14031
+31 | d16031
+31 | d18031
+31 | d2031
+31 | d31
+31 | d4031
+31 | d6031
+31 | d8031
+41 | d10041
+41 | d12041
+41 | d14041
+41 | d16041
+41 | d18041
+41 | d2041
+41 | d4041
+41 | d41
+41 | d6041
+41 | d8041
+51 | d10051
+51 | d12051
+51 | d14051
+51 | d16051
+51 | d18051
+51 | d2051
+51 | d4051
+51 | d51
+51 | d6051
+51 | d8051
+61 | d10061
+61 | d12061
+61 | d14061
+61 | d16061
+61 | d18061
+61 | d2061
+61 | d4061
+61 | d6061
+61 | d61
+61 | d8061
+71 | d10071
+71 | d12071
+71 | d14071
+71 | d16071
+71 | d18071
+71 | d2071
+71 | d4071
+71 | d6071
+71 | d71
+71 | d8071
+81 | d10081
+81 | d12081
+81 | d14081
+81 | d16081
+81 | d18081
+81 | d2081
+81 | d4081
+81 | d6081
+81 | d8081
+81 | d81
+91 | d10091
+91 | d12091
+91 | d14091
+91 | d16091
+91 | d18091
+91 | d2091
+91 | d4091
+91 | d6091
+91 | d8091
+91 | d91
+-- SELECT 100
+
+> select * from b where exists (select 1 from a where a.x = b.y) order by b.id limit 5
+id:int4 | y:int4 | z:int4
+1 | 1 | 1
+2 | 2 | 2
+3 | 3 | 3
+4 | 4 | 4
+5 | 5 | 5
+-- SELECT 5
+
+> select * from small s where exists (select 1 from mid m where m.m = s.t) order by t limit 5
+s:int4 | t:int4
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+-- SELECT 5
+
+> select count(*) from small s where not exists (select 1 from mid m where m.m = s.t)
+count:int8
+0
+-- SELECT 1
+
+> select count(*) from mid m where m.m in (select g from big)
+count:int8
+200
+-- SELECT 1
+
+> select * from small s join mid m on m.n = s.t where exists (select 1 from big b where b.id = m.m) order by s.t limit 3
+s:int4 | t:int4 | m:int4 | n:int4
+1 | 1 | 1 | 1
+2 | 2 | 2 | 2
+3 | 3 | 3 | 3
+-- SELECT 3
+
+> select * from small s where (s.s, s.t) in (select m % 20, n from mid) order by t
+s:int4 | t:int4
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+10 | 10
+11 | 11
+12 | 12
+13 | 13
+14 | 14
+15 | 15
+16 | 16
+17 | 17
+18 | 18
+19 | 19
+0 | 20
+1 | 21
+2 | 22
+3 | 23
+4 | 24
+5 | 25
+6 | 26
+7 | 27
+8 | 28
+9 | 29
+10 | 30
+11 | 31
+12 | 32
+13 | 33
+14 | 34
+15 | 35
+16 | 36
+17 | 37
+18 | 38
+19 | 39
+0 | 40
+-- SELECT 40
+
+> select * from small s where exists (select 1 from big b where b.id = s.t and b.g = 3)
+s:int4 | t:int4
+3 | 3
+-- SELECT 1
+
+> select * from small s where exists (select 1 from mid m where m.m = s.t and m.n > s.s) order by t
+s:int4 | t:int4
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+10 | 10
+11 | 11
+12 | 12
+13 | 13
+14 | 14
+15 | 15
+16 | 16
+17 | 17
+18 | 18
+19 | 19
+0 | 20
+1 | 21
+2 | 22
+3 | 23
+4 | 24
+5 | 25
+6 | 26
+7 | 27
+8 | 28
+9 | 29
+10 | 30
+11 | 31
+12 | 32
+13 | 33
+14 | 34
+15 | 35
+16 | 36
+17 | 37
+18 | 38
+19 | 39
+0 | 40
+-- SELECT 40
+
+> select * from small s where not exists (select 1 from mid m where m.m = s.t and m.n > 3000) order by t
+s:int4 | t:int4
+-- SELECT 0
+
+> select * from small s where exists (select 1 from mid m where m.m = s.t) or s.s = 1 order by t
+s:int4 | t:int4
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+10 | 10
+11 | 11
+12 | 12
+13 | 13
+14 | 14
+15 | 15
+16 | 16
+17 | 17
+18 | 18
+19 | 19
+0 | 20
+1 | 21
+2 | 22
+3 | 23
+4 | 24
+5 | 25
+6 | 26
+7 | 27
+8 | 28
+9 | 29
+10 | 30
+11 | 31
+12 | 32
+13 | 33
+14 | 34
+15 | 35
+16 | 36
+17 | 37
+18 | 38
+19 | 39
+0 | 40
+-- SELECT 40
+
+> select * from small s where exists (select 1 from mid m where m.n = 7) order by t limit 3
+s:int4 | t:int4
+1 | 1
+2 | 2
+3 | 3
+-- SELECT 3
+

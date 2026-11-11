@@ -1,0 +1,232 @@
+> SELECT sqrt(2::numeric), sqrt(1e-20::numeric), sqrt(123456789012345678901234567890::numeric), sqrt(0.0000::numeric)
+sqrt:numeric | sqrt:numeric | sqrt:numeric | sqrt:numeric
+1.414213562373095 | 0.0000000001000000000000000 | 351364182882014.4 | 0.000000000000000
+-- SELECT 1
+
+> SELECT exp(1::numeric), exp(-1.5::numeric), exp(100::numeric), exp(0.000001::numeric), exp(-6000::numeric) = 0
+exp:numeric | exp:numeric | exp:numeric | exp:numeric | ?column?:bool
+2.7182818284590452 | 0.2231301601484298 | 26881171418161354484126255515800135873611119 | 1.0000010000005000 | t
+-- SELECT 1
+
+> SELECT ln(2::numeric), ln(1.000001::numeric), ln(1e100::numeric), ln(0.5::numeric)
+ln:numeric | ln:numeric | ln:numeric | ln:numeric
+0.6931471805599453 | 0.0000009999995000003333 | 230.25850929940457 | -0.6931471805599453
+-- SELECT 1
+
+> SELECT log(2::numeric), log(1000::numeric), log10(0.001::numeric), log(2, 1024::numeric), log(1.5, 12.25)
+log:numeric | log:numeric | log10:numeric | log:numeric | log:numeric
+0.3010299956639812 | 3.0000000000000000 | -3.0000000000000000 | 10.0000000000000000 | 6.1793872934742054
+-- SELECT 1
+
+> SELECT power(2::numeric, 0.5), power(2::numeric, -3), power(1.0001, 10000), power(10::numeric, -20), 2::numeric ^ 1000.0 > 1e300
+power:numeric | power:numeric | power:numeric | power:numeric | ?column?:bool
+1.4142135623730950 | 0.1250000000000000 | 2.7181459268252249 | 0.000000000000000000010000000000000000 | t
+-- SELECT 1
+
+> SELECT power(-2::numeric, 3), power(-8::numeric, 1.0), power(0::numeric, 0), power(0::numeric, 2.5), power(1.5::numeric, 'inf'), power(-1::numeric, '-inf')
+power:numeric | power:numeric | power:numeric | power:numeric | power:numeric | power:numeric
+-8.0000000000000000 | -8.0000000000000000 | 1.0000000000000000 | 0.0000000000000000 | Infinity | 1
+-- SELECT 1
+
+> SELECT power('-inf'::numeric, 3), power('-inf'::numeric, 2), power('inf'::numeric, -1), power('nan'::numeric, 0), power(1::numeric, 'nan')
+power:numeric | power:numeric | power:numeric | power:numeric | power:numeric
+-Infinity | Infinity | 0 | 1 | 1
+-- SELECT 1
+
+> SELECT power(-2::numeric, 0.5)
+ERROR 2201F: a negative number raised to a non-integer power yields a complex result
+
+> SELECT power(0::numeric, -1)
+ERROR 2201F: zero raised to a negative power is undefined
+
+> SELECT ln(0::numeric)
+ERROR 2201E: cannot take logarithm of zero
+
+> SELECT ln(-1::numeric)
+ERROR 2201E: cannot take logarithm of a negative number
+
+> SELECT log(1::numeric, 10)
+ERROR 22012: division by zero
+
+> SELECT log(-1::numeric)
+ERROR 2201E: cannot take logarithm of a negative number
+CONTEXT: SQL function "log" statement 1
+
+> SELECT exp(10000::numeric)
+ERROR 22003: value overflows numeric format
+
+> SELECT power(10::numeric, 131072)
+ERROR 22003: value overflows numeric format
+
+> SELECT sqrt(-1::numeric)
+ERROR 2201F: cannot take square root of a negative number
+
+> SELECT '1e131071'::numeric > 0, '1e-16383'::numeric > 0, '1_000.000_1'::numeric, ' -0x1F '::numeric, '0b1_01'::numeric, '0o17'::numeric
+?column?:bool | ?column?:bool | numeric:numeric | numeric:numeric | numeric:numeric | numeric:numeric
+t | t | 1000.0001 | -31 | 5 | 15
+-- SELECT 1
+
+> SELECT '1e131072'::numeric
+ERROR 22003: value overflows numeric format (at 8)
+
+> SELECT '1e-16384'::numeric
+ERROR 22003: value overflows numeric format (at 8)
+
+> SELECT '1e2147483648'::numeric
+ERROR 22003: value overflows numeric format (at 8)
+
+> SELECT '1__0'::numeric
+ERROR 22P02: invalid input syntax for type numeric: "1__0" (at 8)
+
+> SELECT round(1234.5678, -2), round(-2.5::numeric), round(1e-20, 25), trunc(9999.99, -3), round(5e-1001, 1000), trunc(123.456, -100000)
+round:numeric | round:numeric | round:numeric | trunc:numeric | round:numeric | trunc:numeric
+1200 | -3 | 0.0000000000000000000100000 | 9000 | 0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001 | 0
+-- SELECT 1
+
+> SELECT 9.99::numeric(2,0)
+numeric:numeric
+10
+-- SELECT 1
+
+> SELECT 0.5::numeric(2,2), 0.995::numeric(2,2)
+ERROR 22003: numeric field overflow
+DETAIL: A field with precision 2, scale 2 must round to an absolute value less than 1.
+
+> SELECT 123.45::numeric(4,-2), 123.45::numeric(2,-1)
+numeric:numeric | numeric:numeric
+100 | 120
+-- SELECT 1
+
+> SELECT 'inf'::numeric::numeric(3,1)
+ERROR 22003: numeric field overflow
+DETAIL: A field with precision 3, scale 1 cannot hold an infinite value.
+
+> SELECT 1::numeric / 3, 2::numeric / 3.000, 1e-30 / 7, 10::numeric / 4, 12345678901234567890 / 0.0003
+?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:numeric
+0.33333333333333333333 | 0.66666666666666666667 | 0.000000000000000000000000000000142857142857142857 | 2.5000000000000000 | 41152263004115226300000.0000
+-- SELECT 1
+
+> SELECT 1e-10000 * 1e-10000 = 0, (1e-8000 * 1e-8000)::text = '0'
+?column?:bool | ?column?:bool
+t | f
+-- SELECT 1
+
+> SELECT 9e131071 * 10
+ERROR 22003: value overflows numeric format
+
+> SELECT width_bucket(5.35, 0.024, 10.06, 5), width_bucket(-1::numeric, 0, 10, 3), width_bucket(11::numeric, 10, 0, 4), width_bucket(5::numeric, 10, 0, 4)
+width_bucket:int4 | width_bucket:int4 | width_bucket:int4 | width_bucket:int4
+3 | 0 | 0 | 3
+-- SELECT 1
+
+> SELECT width_bucket(5.0::float8, 3.0, 4.0, 2147483647)
+ERROR 22003: integer out of range
+
+> SELECT width_bucket('nan'::numeric, 1, 2, 3)
+ERROR 2201G: operand, lower bound, and upper bound cannot be NaN
+
+> SELECT width_bucket(1::numeric, 1, 'inf', 3)
+ERROR 2201G: lower and upper bounds must be finite
+
+> SELECT width_bucket(0.5::float8, 0, 1e308 * 10, 3)
+ERROR 22003: "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" is out of range for type double precision
+
+> SELECT width_bucket(1::float8, 1, 1, 3)
+ERROR 2201G: lower bound cannot equal upper bound
+
+> SELECT gcd(43312.5::numeric, 4637.5), lcm(4232.820::numeric, 132.72000), gcd('inf'::numeric, 0), lcm(0::numeric, 5)
+gcd:numeric | lcm:numeric | gcd:numeric | lcm:numeric
+87.5 | 118518.96000 | NaN | 0
+-- SELECT 1
+
+> SELECT factorial(20), factorial(0), scale(1.230::numeric), min_scale(1.230::numeric), trim_scale(1.2300::numeric)
+factorial:numeric | factorial:numeric | scale:int4 | min_scale:int4 | trim_scale:numeric
+2432902008176640000 | 1 | 3 | 2 | 1.23
+-- SELECT 1
+
+> SELECT numeric_inc(9.99), pg_lsn(23783416::numeric), pg_lsn(0.4::numeric)
+numeric_inc:numeric | pg_lsn:pg_lsn | pg_lsn:pg_lsn
+10.99 | 0/16AE7F8 | 0/0
+-- SELECT 1
+
+> SELECT pg_lsn(-1::numeric)
+ERROR 22023: pg_lsn out of range
+
+> SELECT variance(x), stddev_samp(x), var_pop(x), stddev_pop(x) FROM (VALUES (1.5), (2.25), (3.125)) v(x)
+variance:numeric | stddev_samp:numeric | var_pop:numeric | stddev_pop:numeric
+0.66145833333333333333 | 0.81330088733096395985 | 0.44097222222222222222 | 0.66405739377121780694
+-- SELECT 1
+
+> SELECT variance(x), var_pop(x) FROM (VALUES (1.50), (1.50)) v(x)
+variance:numeric | var_pop:numeric
+0 | 0
+-- SELECT 1
+
+> SELECT trim_scale(variance(a) * 1e1000) FROM (VALUES (0), (3e-500), (-3e-500), (4e-500 - 1e-16383), (-4e-500 + 1e-16383)) v(a)
+trim_scale:numeric
+12
+-- SELECT 1
+
+> SELECT variance(a) FROM (SELECT 9e131071 + x FROM generate_series(1, 5) x) v(a)
+variance:numeric
+2.5000000000000000
+-- SELECT 1
+
+> SELECT to_char(1234.5::numeric, '9G999D99'), to_char(-0.05::numeric, 'FM990.00'), to_char(1e20::numeric, '9.99EEEE'), to_char(485, 'RN'), to_char(12, 'FM99th')
+to_char:text | to_char:text | to_char:text | to_char:text | to_char:text
+ 1,234.50 | -0.05 |  1.00e+20 |         CDLXXXV | 12th
+-- SELECT 1
+
+> SELECT to_char('inf'::float8, 'MI9999.99'), to_char('nan'::float4, '9999.99'), to_char('-inf'::numeric, '99.99'), to_char(4.2e9::float4, '9999999999.99')
+to_char:text | to_char:text | to_char:text | to_char:text
+ ####.## |   NaN | -##.## |  4200000000
+-- SELECT 1
+
+> SELECT to_number('123456', '99999V99'), to_number('1,234.5-', '9G999D9S'), to_number('<123>', '999PR'), to_char(123, '99V9')
+to_number:numeric | to_number:numeric | to_number:numeric | to_char:text
+1234.560000000000000000 | -1234.5 | -123 |  ###
+-- SELECT 1
+
+> SELECT sind(30), cosd(60), tand(45), cotd(45), asind(0.5), acosd(0.5), atand(1), atan2d(1, 1), sind(-210), cosd(240), tand(270)
+sind:float8 | cosd:float8 | tand:float8 | cotd:float8 | asind:float8 | acosd:float8 | atand:float8 | atan2d:float8 | sind:float8 | cosd:float8 | tand:float8
+0.5 | 0.5 | 1 | 1 | 30 | 60 | 45 | 45 | 0.5 | -0.5 | -Infinity
+-- SELECT 1
+
+> SELECT degrees(pi()), radians(180), erf(0.45), round(erfc(2.1)::numeric, 14), gamma(5), lgamma(1000), round(gamma(0.5)::numeric, 14)
+degrees:float8 | radians:float8 | erf:float8 | round:numeric | gamma:float8 | lgamma:float8 | round:numeric
+180 | 3.141592653589793 | 0.47548171978692366 | 0.00297946665633 | 24 | 5905.220423209181 | 1.77245385090552
+-- SELECT 1
+
+> SELECT gamma(0::float8)
+ERROR 22003: value out of range: overflow
+
+> SELECT lgamma(-1::float8)
+ERROR 22003: value out of range: overflow
+
+> SELECT gamma(-1000.5::float8)
+ERROR 22003: value out of range: underflow
+
+> SELECT exp(-1000::float8)
+ERROR 22003: value out of range: underflow
+
+> SELECT exp(1000::float8)
+ERROR 22003: value out of range: overflow
+
+> SELECT 'nan'::float8 / 0, 'nan'::float4 / 0::float4, float8send(1.5), float4send('7038531e-32'::float4), float4send('82381273e-35'::float4)
+?column?:float8 | ?column?:float4 | float8send:bytea | float4send:bytea | float4send:bytea
+NaN | NaN | \x3ff8000000000000 | \x15ae43fd | \x128289d1
+-- SELECT 1
+
+> SELECT 1::float8 / 0
+ERROR 22012: division by zero
+
+> SELECT covar_pop(y, x), covar_samp(y, x), corr(y, x), regr_slope(y, x), regr_r2(y, x) FROM (VALUES (1::float8, 'inf'::float8), (2, 3)) v(y, x)
+covar_pop:float8 | covar_samp:float8 | corr:float8 | regr_slope:float8 | regr_r2:float8
+NaN | NaN | NaN | NaN | NaN
+-- SELECT 1
+
+> SELECT float8_regr_accum('{4,140,2900,1290,83075,15050}'::float8[], 200, 100), float8_combine('{3,60,200}'::float8[], '{2,180,200}'::float8[])
+float8_regr_accum:float8[] | float8_combine:float8[]
+{5,240,6280,1490,95080,8680} | {5,240,6280}
+-- SELECT 1
+

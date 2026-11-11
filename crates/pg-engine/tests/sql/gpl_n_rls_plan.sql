@@ -1,0 +1,42 @@
+-- Row-level security in plans: permissive policies ORed in reverse name order, a locking
+-- read of an inheritance tree under one LockRows, and WHERE CURRENT OF keeping the
+-- policies as the Tid Scan's filter.
+DROP ROLE IF EXISTS gpl_rls_u;
+CREATE ROLE gpl_rls_u;
+CREATE TABLE gpl_rls_y (a int, b text);
+INSERT INTO gpl_rls_y SELECT i, 'r' || i FROM generate_series(1, 12) i;
+CREATE POLICY p1 ON gpl_rls_y USING (a % 2 = 0);
+CREATE POLICY p2 ON gpl_rls_y USING (a % 3 = 0);
+CREATE POLICY p3 ON gpl_rls_y USING (a % 4 = 0);
+ALTER TABLE gpl_rls_y ENABLE ROW LEVEL SECURITY;
+GRANT ALL ON gpl_rls_y TO gpl_rls_u;
+CREATE TABLE gpl_rls_p (a int, b text);
+CREATE TABLE gpl_rls_c1 () INHERITS (gpl_rls_p);
+CREATE TABLE gpl_rls_c2 () INHERITS (gpl_rls_p);
+INSERT INTO gpl_rls_p VALUES (1, 'p1'), (2, 'p2');
+INSERT INTO gpl_rls_c1 VALUES (3, 'c3'), (4, 'c4');
+INSERT INTO gpl_rls_c2 VALUES (5, 'c5'), (6, 'c6');
+CREATE POLICY pp ON gpl_rls_p USING (a % 2 = 0);
+ALTER TABLE gpl_rls_p ENABLE ROW LEVEL SECURITY;
+GRANT ALL ON gpl_rls_p, gpl_rls_c1, gpl_rls_c2 TO gpl_rls_u;
+CREATE TABLE gpl_rls_cur (id int, payload text);
+INSERT INTO gpl_rls_cur SELECT i, 'x' || i FROM generate_series(1, 6) i;
+CREATE POLICY pc ON gpl_rls_cur USING (id % 2 = 0);
+ALTER TABLE gpl_rls_cur ENABLE ROW LEVEL SECURITY;
+GRANT ALL ON gpl_rls_cur TO gpl_rls_u;
+SET SESSION AUTHORIZATION gpl_rls_u;
+EXPLAIN (COSTS OFF) SELECT * FROM gpl_rls_y WHERE b <> 'r';
+SELECT a FROM gpl_rls_y ORDER BY a;
+EXPLAIN (COSTS OFF) SELECT * FROM gpl_rls_p FOR SHARE;
+SELECT * FROM gpl_rls_p ORDER BY a FOR UPDATE;
+BEGIN;
+DECLARE gpl_rls_k CURSOR FOR SELECT * FROM gpl_rls_cur WHERE id > 2 ORDER BY id FOR UPDATE;
+FETCH gpl_rls_k;
+EXPLAIN (COSTS OFF) UPDATE gpl_rls_cur SET payload = 'y' WHERE CURRENT OF gpl_rls_k;
+UPDATE gpl_rls_cur SET payload = 'y' WHERE CURRENT OF gpl_rls_k RETURNING *;
+COMMIT;
+SELECT * FROM gpl_rls_cur ORDER BY id;
+RESET SESSION AUTHORIZATION;
+DROP TABLE gpl_rls_y, gpl_rls_p, gpl_rls_c1, gpl_rls_c2, gpl_rls_cur;
+DROP OWNED BY gpl_rls_u CASCADE;
+DROP ROLE gpl_rls_u;

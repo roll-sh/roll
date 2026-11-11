@@ -1,0 +1,327 @@
+> select oid, typname, typlen, typbyval, typtype, typcategory, typinput, typoutput, typreceive, typsend, typalign, typstorage, typarray, typelem from pg_type where oid in (3642, 3644, 4600, 4601) order by oid
+oid:oid | typname:name | typlen:int2 | typbyval:bool | typtype:char | typcategory:char | typinput:regproc | typoutput:regproc | typreceive:regproc | typsend:regproc | typalign:char | typstorage:char | typarray:oid | typelem:oid
+3642 | gtsvector | -1 | f | b | U | gtsvectorin | gtsvectorout | - | - | i | p | 3644 | 0
+3644 | _gtsvector | -1 | f | b | A | array_in | array_out | array_recv | array_send | i | x | 0 | 3642
+4600 | pg_brin_bloom_summary | -1 | f | b | Z | brin_bloom_summary_in | brin_bloom_summary_out | brin_bloom_summary_recv | brin_bloom_summary_send | i | x | 0 | 0
+4601 | pg_brin_minmax_multi_summary | -1 | f | b | Z | brin_minmax_multi_summary_in | brin_minmax_multi_summary_out | brin_minmax_multi_summary_recv | brin_minmax_multi_summary_send | i | x | 0 | 0
+-- SELECT 4
+
+> select 'x'::gtsvector
+ERROR 0A000: cannot accept a value of type gtsvector (at 8)
+
+> select 'x'::pg_brin_bloom_summary
+ERROR 0A000: cannot accept a value of type pg_brin_bloom_summary (at 8)
+
+> select 'x'::pg_brin_minmax_multi_summary
+ERROR 0A000: cannot accept a value of type brin_minmax_multi_summary (at 8)
+
+> select cast('x' as gtsvector)
+ERROR 0A000: cannot accept a value of type gtsvector (at 13)
+
+> select 'x'::text::gtsvector
+ERROR 0A000: cannot accept a value of type gtsvector
+
+> select 'x'::unknown::pg_brin_bloom_summary
+ERROR 0A000: cannot accept a value of type pg_brin_bloom_summary (at 8)
+
+> select null::gtsvector, null::pg_brin_bloom_summary is null, null::pg_brin_minmax_multi_summary
+gtsvector:3642 | ?column?:bool | pg_brin_minmax_multi_summary:4601
+NULL | t | NULL
+-- SELECT 1
+
+> select pg_typeof(null::gtsvector), pg_typeof(null::pg_brin_bloom_summary), pg_typeof(null::pg_brin_minmax_multi_summary)
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+gtsvector | pg_brin_bloom_summary | pg_brin_minmax_multi_summary
+-- SELECT 1
+
+> select null::text::gtsvector, null::pg_brin_bloom_summary::text
+gtsvector:3642 | text:text
+NULL | NULL
+-- SELECT 1
+
+> select null::pg_brin_bloom_summary::bytea
+ERROR 42846: cannot cast type pg_brin_bloom_summary to bytea (at 35)
+
+> select 'x'::bytea::pg_brin_bloom_summary
+ERROR 42846: cannot cast type bytea to pg_brin_bloom_summary (at 18)
+
+> select format_type('gtsvector'::regtype, -1), format_type(4600, null), format_type(4601, -1), format_type(3644, -1)
+format_type:text | format_type:text | format_type:text | format_type:text
+gtsvector | pg_brin_bloom_summary | pg_brin_minmax_multi_summary | gtsvector[]
+-- SELECT 1
+
+> select 'gtsvector'::regtype::oid, '_gtsvector'::regtype, 'gtsvector[]'::regtype::oid, 'pg_brin_bloom_summary'::regtype::oid
+oid:oid | regtype:regtype | oid:oid | oid:oid
+3642 | gtsvector[] | 3644 | 4600
+-- SELECT 1
+
+> select '{}'::gtsvector[], '{NULL}'::gtsvector[], pg_typeof('{}'::gtsvector[])
+gtsvector:3644 | gtsvector:3644 | pg_typeof:regtype
+{} | {NULL} | gtsvector[]
+-- SELECT 1
+
+> select '{x}'::gtsvector[]
+ERROR 0A000: cannot accept a value of type gtsvector (at 8)
+
+> select array[null::gtsvector]
+array:3644
+{NULL}
+-- SELECT 1
+
+> select pg_typeof(array[null::pg_brin_minmax_multi_summary])
+ERROR 42704: could not find array type for data type pg_brin_minmax_multi_summary (at 18)
+
+> select '{}'::pg_brin_bloom_summary[]
+ERROR 42704: type "pg_brin_bloom_summary[]" does not exist (at 14)
+
+> select pg_typeof(array[null::pg_node_tree])
+ERROR 42704: could not find array type for data type pg_node_tree (at 18)
+
+> select '{}'::pg_node_tree[]
+ERROR 42704: type "pg_node_tree[]" does not exist (at 14)
+
+> select gtsvectorin('x')
+ERROR 0A000: cannot accept a value of type gtsvector
+
+> select brin_bloom_summary_in('x')
+ERROR 0A000: cannot accept a value of type pg_brin_bloom_summary
+
+> select brin_minmax_multi_summary_in('x')
+ERROR 0A000: cannot accept a value of type brin_minmax_multi_summary
+
+> select gtsvectorin(null), gtsvectorout(null), brin_bloom_summary_out(null), brin_minmax_multi_summary_out(null)
+gtsvectorin:3642 | gtsvectorout:2275 | brin_bloom_summary_out:2275 | brin_minmax_multi_summary_out:2275
+NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> select brin_bloom_summary_send(null), pg_typeof(brin_minmax_multi_summary_send(null)), pg_typeof(gtsvectorout(null))
+brin_bloom_summary_send:bytea | pg_typeof:regtype | pg_typeof:regtype
+NULL | bytea | cstring
+-- SELECT 1
+
+> select gtsvectorin('x'::text)
+ERROR 42883: function gtsvectorin(text) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> select brin_bloom_summary_recv(null)
+ERROR 42883: function brin_bloom_summary_recv(unknown) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> \fcall gtsvectorout(gtsvector) 'x'
+ERROR 0A000: cannot accept a value of type gtsvector
+
+> \fcall gtsvectorout(gtsvector) x:00
+ERROR 42883: no binary input function available for type gtsvector
+
+> \fcall brin_bloom_summary_out(pg_brin_bloom_summary) x:00
+ERROR 0A000: cannot accept a value of type pg_brin_bloom_summary
+
+> \fcall brin_minmax_multi_summary_out(pg_brin_minmax_multi_summary) x:00
+ERROR 0A000: cannot accept a value of type brin_minmax_multi_summary
+
+> \fcall gtsvectorout(gtsvector) NULL
+result:text
+NULL
+-- FASTPATH
+
+> create table gxc_t (a gtsvector, b pg_brin_bloom_summary, c pg_brin_minmax_multi_summary)
+-- CREATE TABLE
+
+> insert into gxc_t values (null, null, null)
+-- INSERT 0 1
+
+> select * from gxc_t
+a:3642 | b:4600 | c:4601
+NULL | NULL | NULL
+-- SELECT 1
+
+> select a::text, b::text, c::text from gxc_t
+a:text | b:text | c:text
+NULL | NULL | NULL
+-- SELECT 1
+
+> create index on gxc_t (a)
+ERROR 42704: data type gtsvector has no default operator class for access method "btree"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> select a from gxc_t order by a
+ERROR 42883: could not identify an ordering operator for type gtsvector (at 30)
+HINT: Use an explicit ordering operator or modify the query.
+
+> select b from gxc_t order by 1
+ERROR 42883: could not identify an ordering operator for type pg_brin_bloom_summary (at 30)
+HINT: Use an explicit ordering operator or modify the query.
+
+> select null::gtsvector = null::gtsvector
+ERROR 42883: operator does not exist: gtsvector = gtsvector (at 24)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> select row(null::gtsvector), null::gtsvector || 'a'
+row:record | ?column?:text
+() | NULL
+-- SELECT 1
+
+> select length(null::gtsvector)
+ERROR 42883: function length(gtsvector) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> select format('%s', null::gtsvector), xmlelement(name a, null::gtsvector), to_json(null::gtsvector), row_to_json(row(null::gtsvector))
+format:text | xmlelement:xml | to_json:json | row_to_json:json
+ | <a/> | NULL | {"f1":null}
+-- SELECT 1
+
+> create domain gxc_d as gtsvector
+-- CREATE DOMAIN
+
+> select null::gxc_d
+gxc_d:3642
+NULL
+-- SELECT 1
+
+> drop domain gxc_d
+-- DROP DOMAIN
+
+> drop table gxc_t
+-- DROP TABLE
+
+> select x from (values ('<a/>'::xml)) t(x) order by x
+ERROR 42883: could not identify an ordering operator for type xml (at 52)
+HINT: Use an explicit ordering operator or modify the query.
+
+> create table gxc_t (a gtsvector, b pg_brin_bloom_summary)
+-- CREATE TABLE
+
+> select a from gxc_t group by a
+ERROR 42883: could not identify an equality operator for type gtsvector (at 30)
+
+> select count(distinct b) from gxc_t
+ERROR 42883: could not identify an equality operator for type pg_brin_bloom_summary (at 23)
+
+> select distinct a from gxc_t
+ERROR 42883: could not identify an equality operator for type gtsvector (at 17)
+
+> select x from (values (null::gtsvector)) t(x) group by grouping sets ((x), ())
+ERROR 42883: could not identify an equality operator for type gtsvector (at 72)
+
+> drop table gxc_t
+-- DROP TABLE
+
+> select distinct '$'::jsonpath
+ERROR 42883: could not identify an equality operator for type jsonpath (at 17)
+
+> select distinct null::refcursor
+ERROR 42883: could not identify an equality operator for type refcursor (at 17)
+
+> select distinct '{}'::json[]
+ERROR 42883: could not identify an equality operator for type json[] (at 17)
+
+> select distinct row('{}'::json)
+row:record
+({})
+-- SELECT 1
+
+> select distinct x from (values (array['{}'::json])) t(x)
+ERROR 42883: could not identify an equality operator for type json[] (at 17)
+
+> select 1 from (values ('{}'::json)) t(x) group by x
+ERROR 42883: could not identify an equality operator for type json (at 51)
+
+> select 1 from (values ('{}'::json)) t(x) group by 1
+?column?:int4
+1
+-- SELECT 1
+
+> select x from (values ('{}'::json)) t(x) group by 1
+ERROR 42883: could not identify an equality operator for type json (at 51)
+
+> select count(distinct x) from (values ('{}'::json)) t(x)
+ERROR 42883: could not identify an equality operator for type json (at 23)
+
+> select x from (values ('{}'::json)) t(x) union select '{}'::json
+ERROR 42883: could not identify an equality operator for type json (at 8)
+
+> select x from (values ('{}'::json)) t(x) intersect all select '{}'::json
+ERROR 42883: could not identify an equality operator for type json (at 8)
+
+> select x from (values ('{}'::json)) t(x) union all select '{}'::json
+x:json
+{}
+{}
+-- SELECT 2
+
+> select 1, x from (values ('{}'::json)) t(x) except select 1, '{}'::json
+ERROR 42883: could not identify an equality operator for type json (at 11)
+
+> (select 1, x from (values ('{}'::json)) t(x) union all select 2, '{}'::json) union select 1, '{}'
+ERROR 42883: could not identify an equality operator for type json (at 12)
+
+> values ('{}'::json) union values ('{}'::json)
+ERROR 42883: could not identify an equality operator for type json
+
+> select distinct on (x) 1 from (values ('{}'::json)) t(x)
+ERROR 42883: could not identify an equality operator for type json (at 21)
+
+> select x, row_number() over (partition by x) from (values ('{}'::json)) t(x)
+ERROR 42883: could not identify an equality operator for type json (at 43)
+
+> select x, row_number() over w from (values ('{}'::json)) t(x) window w as (partition by x)
+ERROR 42883: could not identify an equality operator for type json (at 89)
+
+> select array_agg(distinct x) from (values ('{}'::json)) t(x)
+ERROR 42883: could not identify an equality operator for type json (at 27)
+
+> select distinct null::pg_snapshot
+ERROR 42883: could not identify an equality operator for type pg_snapshot (at 17)
+
+> select distinct null::box
+ERROR 42883: could not identify an equality operator for type box (at 17)
+
+> select distinct null::unknown
+unknown:text
+NULL
+-- SELECT 1
+
+> select distinct null::cstring
+ERROR 42883: could not identify an equality operator for type cstring (at 17)
+
+> select distinct * from (values (1, '{}'::json)) t(a, b)
+ERROR 42883: could not identify an equality operator for type json (at 17)
+
+> select distinct a, * from (values (1, '{}'::json)) t(a, b)
+ERROR 42883: could not identify an equality operator for type json (at 20)
+
+> select distinct 1, point(1,1)
+ERROR 42883: could not identify an equality operator for type point (at 20)
+
+> select distinct indkey from pg_index limit 0
+indkey:22
+-- SELECT 0
+
+> select string_agg(distinct x::text, ',') from (values ('{}'::json)) t(x)
+string_agg:text
+{}
+-- SELECT 1
+
+> select count(distinct (x, 1)) from (values ('{}'::json)) t(x)
+count:int8
+1
+-- SELECT 1
+
+> create table gxc_j (j json, x xml)
+-- CREATE TABLE
+
+> select distinct j from gxc_j
+ERROR 42883: could not identify an equality operator for type json (at 17)
+
+> select distinct x from gxc_j
+ERROR 42883: could not identify an equality operator for type xml (at 17)
+
+> select j, count(*) from gxc_j group by j
+ERROR 42883: could not identify an equality operator for type json (at 40)
+
+> select distinct gxc_j from gxc_j
+ERROR 42883: could not identify an equality operator for type gxc_j (at 17)
+
+> drop table gxc_j
+-- DROP TABLE
+

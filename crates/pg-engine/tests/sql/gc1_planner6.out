@@ -1,0 +1,381 @@
+> CREATE TABLE g6_ev (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> CREATE TABLE g6_ev_child () INHERITS (g6_ev)
+-- CREATE TABLE
+
+> CREATE TABLE g6_other (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO g6_ev SELECT i, 'e' || i FROM generate_series(1, 20) i
+-- INSERT 0 20
+
+> INSERT INTO g6_ev_child SELECT i, 'c' || i FROM generate_series(21, 30) i
+-- INSERT 0 10
+
+> INSERT INTO g6_other SELECT i, 'o' || i FROM generate_series(5, 15) i
+-- INSERT 0 11
+
+> ANALYZE g6_ev, g6_ev_child, g6_other
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT id FROM (SELECT id FROM g6_ev UNION ALL SELECT id FROM g6_other) ss ORDER BY id
+QUERY PLAN:text
+Sort
+  Sort Key: g6_ev.id
+  ->  Append
+        ->  Seq Scan on g6_ev
+        ->  Seq Scan on g6_ev_child g6_ev_1
+        ->  Seq Scan on g6_other
+-- EXPLAIN
+
+> SELECT id FROM (SELECT id FROM g6_ev UNION ALL SELECT id FROM g6_other) ss ORDER BY id LIMIT 6
+id:int4
+1
+2
+3
+4
+5
+5
+-- SELECT 6
+
+> EXPLAIN (COSTS OFF)
+> SELECT id FROM g6_ev UNION ALL SELECT id FROM g6_other ORDER BY id
+QUERY PLAN:text
+Sort
+  Sort Key: g6_ev.id
+  ->  Append
+        ->  Seq Scan on g6_ev
+        ->  Seq Scan on g6_ev_child g6_ev_1
+        ->  Seq Scan on g6_other
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT id FROM (SELECT id FROM g6_ev UNION ALL SELECT id FROM g6_other) ss
+QUERY PLAN:text
+Append
+  ->  Seq Scan on g6_ev
+  ->  Seq Scan on g6_ev_child g6_ev_1
+  ->  Seq Scan on g6_other
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT id FROM g6_ev ORDER BY id
+QUERY PLAN:text
+Sort
+  Sort Key: g6_ev.id
+  ->  Append
+        ->  Seq Scan on g6_ev g6_ev_1
+        ->  Seq Scan on g6_ev_child g6_ev_2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT 1 AS t, generate_series(1, 10) AS x UNION SELECT 2 AS t, 4 AS x) ss
+> WHERE x < 4 ORDER BY x
+QUERY PLAN:text
+Sort
+  Sort Key: ss.x
+  ->  Subquery Scan on ss
+        Filter: (ss.x < 4)
+        ->  HashAggregate
+              Group Key: (1), (generate_series(1, 10))
+              ->  Append
+                    ->  ProjectSet
+                          ->  Result
+                    ->  Result
+-- EXPLAIN
+
+> SELECT * FROM (SELECT 1 AS t, generate_series(1, 10) AS x UNION SELECT 2 AS t, 4 AS x) ss
+> WHERE x < 4 ORDER BY x
+t:int4 | x:int4
+1 | 1
+1 | 2
+1 | 3
+-- SELECT 3
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 1, generate_series(1, 3) + 1 AS x
+QUERY PLAN:text
+Result
+  Output: 1, ((generate_series(1, 3)) + 1)
+  ->  ProjectSet
+        Output: generate_series(1, 3)
+        ->  Result
+-- EXPLAIN
+
+> CREATE TABLE g6_n (n int)
+-- CREATE TABLE
+
+> INSERT INTO g6_n VALUES (0), (5), (17), (40)
+-- INSERT 0 4
+
+> EXPLAIN (COSTS OFF)
+> SELECT n, (SELECT min(id) FROM g6_ev WHERE id > n) FROM g6_n
+QUERY PLAN:text
+Seq Scan on g6_n
+  SubPlan 2
+    ->  Result
+          InitPlan 1
+            ->  Limit
+                  ->  Merge Append
+                        Sort Key: g6_ev.id
+                        ->  Index Only Scan using g6_ev_pkey on g6_ev g6_ev_1
+                              Index Cond: (id > g6_n.n)
+                        ->  Sort
+                              Sort Key: g6_ev_2.id
+                              ->  Seq Scan on g6_ev_child g6_ev_2
+                                    Filter: (id > g6_n.n)
+-- EXPLAIN
+
+> SELECT n, (SELECT min(id) FROM g6_ev WHERE id > n), (SELECT max(id) FROM g6_other WHERE id < n) FROM g6_n ORDER BY n
+n:int4 | min:int4 | max:int4
+0 | 1 | NULL
+5 | 6 | NULL
+17 | 18 | 15
+40 | NULL | 15
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT min(id), max(id) FROM g6_ev
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: (min(g6_ev.id)), (max(g6_ev.id))
+        ->  Aggregate
+              ->  Append
+                    ->  Seq Scan on g6_ev g6_ev_1
+                    ->  Seq Scan on g6_ev_child g6_ev_2
+-- EXPLAIN
+
+> CREATE TABLE g6_p (f int)
+-- CREATE TABLE
+
+> CREATE INDEX g6_p_i ON g6_p (f) WHERE f IS NOT NULL
+-- CREATE INDEX
+
+> INSERT INTO g6_p SELECT i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> ANALYZE g6_p
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT min(f) FROM g6_p
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan using g6_p_i on g6_p
+-- EXPLAIN
+
+> SELECT min(f), max(f) FROM g6_p
+min:int4 | max:int4
+1 | 1000
+-- SELECT 1
+
+> CREATE FUNCTION g6_leak(text) RETURNS bool LANGUAGE plpgsql AS
+>   'BEGIN RAISE NOTICE ''g6_leak => %'', $1; RETURN true; END'
+-- CREATE FUNCTION
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM g6_ev e, g6_other o WHERE e.id = 3 AND o.id = 7 AND g6_leak(e.v) AND g6_leak(o.v)
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on g6_other o
+        Filter: ((id = 7) AND g6_leak(v))
+  ->  Append
+        ->  Seq Scan on g6_ev e_1
+              Filter: ((id = 3) AND g6_leak(v))
+        ->  Seq Scan on g6_ev_child e_2
+              Filter: ((id = 3) AND g6_leak(v))
+-- EXPLAIN
+
+> SELECT * FROM g6_ev e, g6_other o WHERE e.id = 3 AND o.id = 7 AND g6_leak(e.v) AND g6_leak(o.v)
+NOTICE 00000: g6_leak => o7
+CONTEXT: PL/pgSQL function g6_leak(text) line 1 at RAISE
+NOTICE 00000: g6_leak => e3
+CONTEXT: PL/pgSQL function g6_leak(text) line 1 at RAISE
+id:int4 | v:text | id:int4 | v:text
+3 | e3 | 7 | o7
+-- SELECT 1
+
+> CREATE TYPE g6_ty AS (f1 numeric(35,6), f2 numeric(35,2))
+-- CREATE TYPE
+
+> CREATE FUNCTION g6_imm() RETURNS g6_ty AS 'SELECT 7.136178319899999964, 7.136178319899999964'
+>   LANGUAGE sql IMMUTABLE
+-- CREATE FUNCTION
+
+> CREATE FUNCTION g6_vol() RETURNS g6_ty AS 'SELECT 7.136178319899999964, 7.136178319899999964'
+>   LANGUAGE sql VOLATILE
+-- CREATE FUNCTION
+
+> CREATE FUNCTION g6_five() RETURNS int AS 'SELECT 5' LANGUAGE sql VOLATILE
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT g6_imm()
+QUERY PLAN:text
+Result
+  Output: '(7.136178,7.14)'::g6_ty
+-- EXPLAIN
+
+> SELECT g6_imm()
+g6_imm:user
+(7.136178,7.14)
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM g6_imm()
+QUERY PLAN:text
+Function Scan on g6_imm
+  Output: f1, f2
+  Function Call: '(7.136178,7.14)'::g6_ty
+-- EXPLAIN
+
+> SELECT * FROM g6_imm()
+f1:numeric | f2:numeric
+7.136178 | 7.14
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM g6_vol()
+QUERY PLAN:text
+Function Scan on public.g6_vol
+  Output: f1, f2
+  Function Call: g6_vol()
+-- EXPLAIN
+
+> SELECT * FROM g6_vol() t
+f1:numeric | f2:numeric
+7.136178 | 7.14
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM g6_five()
+QUERY PLAN:text
+Result
+  Output: 5
+-- EXPLAIN
+
+> SELECT * FROM g6_five()
+g6_five:int4
+5
+-- SELECT 1
+
+> CREATE TABLE g6_lp (a int) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE g6_lp1 PARTITION OF g6_lp FOR VALUES IN (1)
+-- CREATE TABLE
+
+> SET constraint_exclusion = on
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM g6_lp1 WHERE a = 2
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE g6_lp1 SET a = 1 WHERE a = 2
+QUERY PLAN:text
+Update on g6_lp1
+  ->  Result
+        One-Time Filter: false
+-- EXPLAIN
+
+> RESET constraint_exclusion
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM g6_lp1 WHERE a = 2
+QUERY PLAN:text
+Seq Scan on g6_lp1
+  Filter: (a = 2)
+-- EXPLAIN
+
+> CREATE TYPE g6_c AS (r float8, i float8)
+-- CREATE TYPE
+
+> CREATE TABLE g6_ct (d1 g6_c[])
+-- CREATE TABLE
+
+> INSERT INTO g6_ct VALUES (ARRAY[ROW(1, 2)::g6_c])
+-- INSERT 0 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> UPDATE g6_ct SET d1[1].r = d1[1].r - 1, d1[1].i = d1[1].i + 1 WHERE d1[1].i > 0
+QUERY PLAN:text
+Update on public.g6_ct
+  ->  Seq Scan on public.g6_ct
+        Output: (d1[1].r := (d1[1].r - '1'::double precision))[1].i := (d1[1].i + '1'::double precision), ctid
+        Filter: (g6_ct.d1[1].i > '0'::double precision)
+-- EXPLAIN
+
+> UPDATE g6_ct SET d1[1].r = d1[1].r - 1, d1[1].i = d1[1].i + 1 WHERE d1[1].i > 0 RETURNING *
+d1:user
+{"(0,3)"}
+-- UPDATE 1
+
+> CREATE TABLE g6_r (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO g6_r VALUES (1, 'x')
+-- INSERT 0 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> UPDATE g6_r SET b = 'y' RETURNING WITH (OLD AS o, NEW AS n) o.b, n.b, o.*
+QUERY PLAN:text
+Update on public.g6_r
+  Output: o.b, n.b, o.a, o.b
+  ->  Seq Scan on public.g6_r
+        Output: 'y'::text, ctid
+-- EXPLAIN
+
+> UPDATE g6_r SET b = 'y' RETURNING WITH (OLD AS o, NEW AS n) o.b, n.b, o.*
+b:text | b:text | a:int4 | b:text
+x | y | 1 | x
+-- UPDATE 1
+
+> CREATE TABLE g6_i4 (a int4)
+-- CREATE TABLE
+
+> CREATE TABLE g6_i8 (b int8)
+-- CREATE TABLE
+
+> INSERT INTO g6_i4 SELECT i FROM generate_series(1, 200) i
+-- INSERT 0 200
+
+> INSERT INTO g6_i8 SELECT i * 2 FROM generate_series(1, 200) i
+-- INSERT 0 200
+
+> ANALYZE g6_i4, g6_i8
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM g6_i4 JOIN g6_i8 ON a = b
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (g6_i4.a = g6_i8.b)
+        ->  Seq Scan on g6_i4
+        ->  Hash
+              ->  Seq Scan on g6_i8
+-- EXPLAIN
+
+> SELECT count(*) FROM g6_i4 JOIN g6_i8 ON a = b
+count:int8
+100
+-- SELECT 1
+
+> CREATE TABLE g6_a (id int, b1 bool)
+-- CREATE TABLE
+
+> CREATE TABLE g6_b (id int)
+-- CREATE TABLE
+
+> INSERT INTO g6_a VALUES (1, true), (2, false), (3, true)
+-- INSERT 0 3
+
+> INSERT INTO g6_b VALUES (1), (2)
+-- INSERT 0 2
+
+> SELECT a.id FROM g6_a a LEFT JOIN
+>   (SELECT g6_b.*, (g6_b.id IS NOT NULL) AS nn FROM g6_b) s ON s.id = a.id
+> WHERE a.b1 AND s.nn ORDER BY 1
+id:int4
+1
+-- SELECT 1
+

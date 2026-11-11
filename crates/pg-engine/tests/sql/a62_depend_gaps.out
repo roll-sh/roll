@@ -1,0 +1,1289 @@
+> CREATE SCHEMA pd
+-- CREATE SCHEMA
+
+> SET search_path = pd, public
+-- SET
+
+> CREATE TABLE p (id int PRIMARY KEY, note text, qty int)
+-- CREATE TABLE
+
+> CREATE FUNCTION getp(int) RETURNS p LANGUAGE sql AS 'SELECT * FROM p WHERE id = $1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION getps() RETURNS SETOF p LANGUAGE sql AS 'SELECT * FROM p'
+-- CREATE FUNCTION
+
+> CREATE VIEW v_field AS SELECT (getp(1)).note AS n
+-- CREATE VIEW
+
+> CREATE VIEW v_field2 AS SELECT (getp(1)).*
+-- CREATE VIEW
+
+> CREATE VIEW v_field3 AS SELECT getp(1) AS whole
+-- CREATE VIEW
+
+> CREATE VIEW v_srf AS SELECT note FROM getps()
+-- CREATE VIEW
+
+> CREATE VIEW v_srf2 AS SELECT (getps()).qty
+-- CREATE VIEW
+
+> CREATE TYPE ct AS (a int, b text)
+-- CREATE TYPE
+
+> CREATE TABLE t2 (k int, c ct, ca ct[])
+-- CREATE TABLE
+
+> CREATE VIEW v_cfield AS SELECT (c).b, (ca[1]).a FROM t2
+-- CREATE VIEW
+
+> CREATE VIEW v_rowcast AS SELECT ROW(1,'x')::ct AS r, (ROW(2,'y')::ct).a AS ra
+-- CREATE VIEW
+
+> CREATE VIEW v_sub AS SELECT ((SELECT c FROM t2 LIMIT 1)).a AS sa
+-- CREATE VIEW
+
+> CREATE INDEX t2_ca ON t2 (((c).a))
+-- CREATE INDEX
+
+> ALTER TABLE t2 ADD CONSTRAINT t2_chk CHECK ((c).a > 0)
+-- ALTER TABLE
+
+> ALTER TABLE t2 ADD COLUMN g int GENERATED ALWAYS AS ((c).a * 2) STORED
+-- ALTER TABLE
+
+> ALTER TABLE t2 ADD COLUMN d text DEFAULT (ROW(1,'q')::ct).b
+-- ALTER TABLE
+
+> CREATE FUNCTION fb() RETURNS text LANGUAGE sql BEGIN ATOMIC SELECT (getp(1)).note; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fs() RETURNS void LANGUAGE sql BEGIN ATOMIC UPDATE t2 SET c.a = 1; END
+-- CREATE FUNCTION
+
+> CREATE TABLE logt (id int, c ct)
+-- CREATE TABLE
+
+> CREATE RULE r_ins AS ON INSERT TO t2 DO ALSO INSERT INTO logt (id, c.b) VALUES (NEW.k, (NEW.c).b)
+-- CREATE RULE
+
+> CREATE STATISTICS st_f ON ((c).a), k FROM t2
+-- CREATE STATISTICS
+
+> CREATE POLICY pol_f ON t2 USING ((c).a > 0)
+-- CREATE POLICY
+
+> CREATE FUNCTION trf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'
+-- CREATE FUNCTION
+
+> CREATE TRIGGER trg_f BEFORE UPDATE ON t2 FOR EACH ROW WHEN ((NEW.c).a > 0) EXECUTE FUNCTION trf()
+-- CREATE TRIGGER
+
+> CREATE TABLE pt (k int, c ct) PARTITION BY RANGE (((c).a))
+-- CREATE TABLE
+
+> SELECT pg_describe_object(classid,objid,objsubid) AS obj,
+>        pg_describe_object(refclassid,refobjid,refobjsubid) AS ref, deptype
+> FROM pg_depend
+> WHERE (objid >= 16384 OR refobjid >= 16384)
+>   AND pg_describe_object(classid,objid,objsubid) !~ 'pg_toast'
+>   AND pg_describe_object(refclassid,refobjid,refobjsubid) !~ 'pg_toast'
+>   AND NOT (refclassid = 'pg_namespace'::regclass)
+> ORDER BY 1,2,3
+obj:text | ref:text | deptype:char
+column c of table logt | type ct | n
+column c of table pt | table pt | i
+column c of table pt | type ct | n
+column c of table t2 | type ct | n
+column ca of table t2 | type ct[] | n
+column r of view v_rowcast | type ct | n
+column whole of view v_field3 | type p | n
+composite type ct | type ct | i
+constraint p_id_not_null on table p | column id of table p | a
+constraint p_pkey on table p | column id of table p | a
+constraint t2_chk on table t2 | column a of composite type ct | n
+constraint t2_chk on table t2 | column c of table t2 | a
+constraint t2_chk on table t2 | column c of table t2 | n
+default value for column d of table t2 | column b of composite type ct | n
+default value for column d of table t2 | column d of table t2 | a
+default value for column d of table t2 | type ct | n
+default value for column g of table t2 | column a of composite type ct | n
+default value for column g of table t2 | column c of table t2 | n
+default value for column g of table t2 | column g of table t2 | i
+function fb() | column note of table p | n
+function fb() | function getp(integer) | n
+function fs() | column a of composite type ct | n
+function fs() | column c of table t2 | n
+function getp(integer) | type p | n
+function getps() | type p | n
+function trf() | language plpgsql | n
+index p_pkey | constraint p_pkey on table p | i
+index t2_ca | column a of composite type ct | n
+index t2_ca | column c of table t2 | a
+index t2_ca | table t2 | a
+policy pol_f on table t2 | column a of composite type ct | n
+policy pol_f on table t2 | column c of table t2 | n
+policy pol_f on table t2 | table t2 | a
+rule _RETURN on view v_cfield | column a of composite type ct | n
+rule _RETURN on view v_cfield | column b of composite type ct | n
+rule _RETURN on view v_cfield | column c of table t2 | n
+rule _RETURN on view v_cfield | column ca of table t2 | n
+rule _RETURN on view v_cfield | view v_cfield | i
+rule _RETURN on view v_field | column note of table p | n
+rule _RETURN on view v_field | function getp(integer) | n
+rule _RETURN on view v_field | view v_field | i
+rule _RETURN on view v_field2 | column id of table p | n
+rule _RETURN on view v_field2 | column note of table p | n
+rule _RETURN on view v_field2 | column qty of table p | n
+rule _RETURN on view v_field2 | function getp(integer) | n
+rule _RETURN on view v_field2 | view v_field2 | i
+rule _RETURN on view v_field3 | function getp(integer) | n
+rule _RETURN on view v_field3 | view v_field3 | i
+rule _RETURN on view v_rowcast | column a of composite type ct | n
+rule _RETURN on view v_rowcast | type ct | n
+rule _RETURN on view v_rowcast | view v_rowcast | i
+rule _RETURN on view v_srf | column note of table p | n
+rule _RETURN on view v_srf | function getps() | n
+rule _RETURN on view v_srf | view v_srf | i
+rule _RETURN on view v_srf2 | column qty of table p | n
+rule _RETURN on view v_srf2 | function getps() | n
+rule _RETURN on view v_srf2 | view v_srf2 | i
+rule _RETURN on view v_sub | column a of composite type ct | n
+rule _RETURN on view v_sub | column c of table t2 | n
+rule _RETURN on view v_sub | view v_sub | i
+rule r_ins on table t2 | column b of composite type ct | n
+rule r_ins on table t2 | column c of table logt | n
+rule r_ins on table t2 | column c of table t2 | n
+rule r_ins on table t2 | column id of table logt | n
+rule r_ins on table t2 | column k of table t2 | n
+rule r_ins on table t2 | table t2 | a
+rule r_ins on table t2 | type ct | n
+statistics object st_f | column a of composite type ct | n
+statistics object st_f | column c of table t2 | a
+statistics object st_f | column k of table t2 | a
+table pt | column a of composite type ct | n
+trigger trg_f on table t2 | column a of composite type ct | n
+trigger trg_f on table t2 | column c of table t2 | n
+trigger trg_f on table t2 | function trf() | n
+trigger trg_f on table t2 | table t2 | a
+type ct[] | type ct | i
+type logt | table logt | i
+type logt[] | type logt | i
+type p | table p | i
+type p[] | type p | i
+type pt | table pt | i
+type pt[] | type pt | i
+type t2 | table t2 | i
+type t2[] | type t2 | i
+type v_cfield | view v_cfield | i
+type v_cfield[] | type v_cfield | i
+type v_field | view v_field | i
+type v_field2 | view v_field2 | i
+type v_field2[] | type v_field2 | i
+type v_field3 | view v_field3 | i
+type v_field3[] | type v_field3 | i
+type v_field[] | type v_field | i
+type v_rowcast | view v_rowcast | i
+type v_rowcast[] | type v_rowcast | i
+type v_srf | view v_srf | i
+type v_srf2 | view v_srf2 | i
+type v_srf2[] | type v_srf2 | i
+type v_srf[] | type v_srf | i
+type v_sub | view v_sub | i
+type v_sub[] | type v_sub | i
+-- SELECT 100
+
+> DROP TABLE p
+ERROR 2BP01: cannot drop table p because other objects depend on it
+DETAIL: function getp(integer) depends on type p
+DETAIL: view v_field3 depends on function getp(integer)
+DETAIL: function getps() depends on type p
+DETAIL: view v_field depends on table p
+DETAIL: view v_field2 depends on table p
+DETAIL: view v_srf depends on table p
+DETAIL: view v_srf2 depends on table p
+DETAIL: function fb() depends on table p
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE p DROP COLUMN note
+ERROR 2BP01: cannot drop column note of table p because other objects depend on it
+DETAIL: view v_field depends on column note of table p
+DETAIL: view v_field2 depends on column note of table p
+DETAIL: view v_srf depends on column note of table p
+DETAIL: function fb() depends on column note of table p
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE p DROP COLUMN qty
+ERROR 2BP01: cannot drop column qty of table p because other objects depend on it
+DETAIL: view v_field2 depends on column qty of table p
+DETAIL: view v_srf2 depends on column qty of table p
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TYPE ct DROP ATTRIBUTE b
+ERROR 2BP01: cannot drop column b of composite type ct because other objects depend on it
+DETAIL: view v_cfield depends on column b of composite type ct
+DETAIL: default value for column d of table t2 depends on column b of composite type ct
+DETAIL: rule r_ins on table t2 depends on column b of composite type ct
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TYPE ct DROP ATTRIBUTE a
+ERROR 2BP01: cannot drop column a of composite type ct because other objects depend on it
+DETAIL: view v_cfield depends on column a of composite type ct
+DETAIL: view v_rowcast depends on column a of composite type ct
+DETAIL: view v_sub depends on column a of composite type ct
+DETAIL: index t2_ca depends on column a of composite type ct
+DETAIL: constraint t2_chk on table t2 depends on column a of composite type ct
+DETAIL: column g of table t2 depends on column a of composite type ct
+DETAIL: function fs() depends on column a of composite type ct
+DETAIL: statistics object st_f depends on column a of composite type ct
+DETAIL: policy pol_f on table t2 depends on column a of composite type ct
+DETAIL: trigger trg_f on table t2 depends on column a of composite type ct
+DETAIL: table pt depends on column a of composite type ct
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE p ALTER COLUMN note TYPE varchar
+ERROR 0A000: cannot alter type of a column used by a view or rule
+DETAIL: rule _RETURN on view v_field depends on column "note"
+
+> RESET search_path
+-- RESET
+
+> CREATE SCHEMA pe
+-- CREATE SCHEMA
+
+> SET search_path = pe, public
+-- SET
+
+> CREATE TYPE color AS ENUM ('red', 'green')
+-- CREATE TYPE
+
+> CREATE TYPE ct AS (a int, b text)
+-- CREATE TYPE
+
+> CREATE DOMAIN dpos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE DOMAIN dct AS ct
+-- CREATE DOMAIN
+
+> CREATE COLLATION mycoll FROM "C"
+-- CREATE COLLATION
+
+> CREATE SEQUENCE sq
+-- CREATE SEQUENCE
+
+> CREATE TABLE t (id int, c color, x text COLLATE mycoll, d dpos, arr dpos[], cc ct)
+-- CREATE TABLE
+
+> CREATE VIEW v_const AS SELECT 'red'::color AS c, '{red}'::color[] AS ca, 1::dpos AS d, ARRAY[1]::dpos[] AS da
+-- CREATE VIEW
+
+> CREATE VIEW v_cast AS SELECT id::dpos AS d, c::text AS ct, x::varchar AS xv, cc::dct AS dc FROM t
+-- CREATE VIEW
+
+> CREATE VIEW v_null AS SELECT NULL::color AS n, NULL::ct AS nc
+-- CREATE VIEW
+
+> CREATE VIEW v_coll AS SELECT x COLLATE mycoll AS y, 'q' COLLATE mycoll AS q, x FROM t ORDER BY x COLLATE mycoll
+-- CREATE VIEW
+
+> CREATE VIEW v_coll2 AS SELECT id FROM t WHERE x < 'm' COLLATE mycoll
+-- CREATE VIEW
+
+> CREATE FUNCTION colorlt(color, color) RETURNS bool LANGUAGE sql IMMUTABLE AS 'SELECT $1::text < $2::text'
+-- CREATE FUNCTION
+
+> CREATE OPERATOR <<< (LEFTARG = color, RIGHTARG = color, FUNCTION = colorlt)
+-- CREATE OPERATOR
+
+> CREATE VIEW v_op AS SELECT id FROM t WHERE c <<< 'green'
+-- CREATE VIEW
+
+> CREATE VIEW v_rowcmp AS SELECT id FROM t WHERE (c, id) < ('green'::color, 1)
+-- CREATE VIEW
+
+> CREATE VIEW v_distinct AS SELECT DISTINCT c FROM t
+-- CREATE VIEW
+
+> CREATE VIEW v_group AS SELECT c, count(*) FROM t GROUP BY c
+-- CREATE VIEW
+
+> CREATE VIEW v_order AS SELECT c FROM t ORDER BY c
+-- CREATE VIEW
+
+> CREATE VIEW v_case AS SELECT CASE c WHEN 'red' THEN 1 END AS k, NULLIF(c, 'red') AS nf, c IS DISTINCT FROM 'red' AS dd FROM t
+-- CREATE VIEW
+
+> CREATE VIEW v_in AS SELECT id FROM t WHERE c IN ('red', 'green')
+-- CREATE VIEW
+
+> CREATE VIEW v_seq AS SELECT nextval('sq') AS n, currval('pe.sq'::regclass) AS c2, nextval('sq'::text) AS n3
+-- CREATE VIEW
+
+> CREATE TABLE ts (a int DEFAULT nextval('sq'), b bigint GENERATED ALWAYS AS IDENTITY, c serial)
+-- CREATE TABLE
+
+> CREATE FUNCTION okf(int) RETURNS bool LANGUAGE sql IMMUTABLE AS 'SELECT $1 > 0'
+-- CREATE FUNCTION
+
+> CREATE DOMAIN dchk AS int DEFAULT nextval('sq') CHECK (okf(VALUE))
+-- CREATE DOMAIN
+
+> CREATE DOMAIN dcoll AS text COLLATE mycoll
+-- CREATE DOMAIN
+
+> CREATE DOMAIN darr AS color[]
+-- CREATE DOMAIN
+
+> CREATE TABLE tdom (a dchk, b dcoll, c darr)
+-- CREATE TABLE
+
+> CREATE FUNCTION f_args(a color, b ct, c dpos[], OUT d color, OUT e dct) LANGUAGE sql AS 'SELECT $1, $2::dct'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f_tab(color) RETURNS TABLE (x ct, y dpos) LANGUAGE sql AS 'SELECT NULL::ct, 1::dpos'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f_setof() RETURNS SETOF ct LANGUAGE sql AS 'SELECT NULL::ct'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f_poly(anyelement, color DEFAULT 'red') RETURNS anyelement LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f_rowtype(t) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f_rettype() RETURNS t LANGUAGE sql AS 'SELECT * FROM pe.t'
+-- CREATE FUNCTION
+
+> CREATE PROCEDURE p_inout(INOUT a color) LANGUAGE sql AS 'SELECT $1'
+-- CREATE PROCEDURE
+
+> CREATE FUNCTION f_sup(int) RETURNS int LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION f_variadic(VARIADIC color[]) RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION color2int(color) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE CAST (color AS int) WITH FUNCTION color2int(color)
+-- CREATE CAST
+
+> CREATE CAST (ct AS text) WITH INOUT
+-- CREATE CAST
+
+> CREATE VIEW v_ucast AS SELECT c::int AS ci, cc::text AS ctext FROM t
+-- CREATE VIEW
+
+> CREATE TABLE pk1 (a int, c color, x text) PARTITION BY RANGE (okf(a), x COLLATE mycoll)
+-- CREATE TABLE
+
+> CREATE TABLE pk2 (a int, c color) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE pk2a PARTITION OF pk2 FOR VALUES IN ('red')
+-- CREATE TABLE
+
+> CREATE TABLE pk3 (a int, x text COLLATE mycoll) PARTITION BY HASH (x)
+-- CREATE TABLE
+
+> CREATE TABLE tp (id int, c color)
+-- CREATE TABLE
+
+> CREATE POLICY pol1 ON tp USING (okf(id) AND c = 'red'::color) WITH CHECK (id IN (SELECT id FROM t))
+-- CREATE POLICY
+
+> CREATE FUNCTION trf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'
+-- CREATE FUNCTION
+
+> CREATE TRIGGER trg1 BEFORE UPDATE OF c, id ON tp FOR EACH ROW WHEN (okf(NEW.id) AND NEW.c <<< OLD.c) EXECUTE FUNCTION trf()
+-- CREATE TRIGGER
+
+> CREATE CONSTRAINT TRIGGER trg2 AFTER INSERT ON tp FROM t FOR EACH ROW EXECUTE FUNCTION trf()
+-- CREATE TRIGGER
+
+> CREATE VIEW vtp AS SELECT * FROM tp
+-- CREATE VIEW
+
+> CREATE TRIGGER trg3 INSTEAD OF INSERT ON vtp FOR EACH ROW EXECUTE FUNCTION trf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER trg4 AFTER INSERT ON tp REFERENCING NEW TABLE AS nt FOR EACH STATEMENT EXECUTE FUNCTION trf()
+-- CREATE TRIGGER
+
+> CREATE PUBLICATION pub1 FOR TABLE tp (id, c) WHERE (id > 0 AND id < abs(-5)), t
+WARNING 55000: "wal_level" is insufficient to publish logical changes
+HINT: Set "wal_level" to "logical" before creating subscriptions.
+-- CREATE PUBLICATION
+
+> CREATE PUBLICATION pub2 FOR TABLES IN SCHEMA pe
+WARNING 55000: "wal_level" is insufficient to publish logical changes
+HINT: Set "wal_level" to "logical" before creating subscriptions.
+-- CREATE PUBLICATION
+
+> CREATE STATISTICS st1 ON okf(id), (c::text), x FROM t
+-- CREATE STATISTICS
+
+> CREATE STATISTICS st2 (ndistinct) ON id, c FROM t
+-- CREATE STATISTICS
+
+> CREATE INDEX ix1 ON t (x COLLATE mycoll)
+-- CREATE INDEX
+
+> CREATE INDEX ix2 ON t (okf(id)) WHERE c = 'red'
+-- CREATE INDEX
+
+> CREATE MATERIALIZED VIEW mv1 AS SELECT c::int AS ci, x COLLATE mycoll AS xc FROM t
+-- SELECT 0
+
+> CREATE RULE r1 AS ON UPDATE TO tp WHERE NEW.c = 'red' DO INSTEAD NOTHING
+-- CREATE RULE
+
+> SELECT pg_describe_object(classid,objid,objsubid) AS obj,
+>        pg_describe_object(refclassid,refobjid,refobjsubid) AS ref, deptype
+> FROM pg_depend
+> WHERE (objid >= 16384 OR refobjid >= 16384)
+>   AND pg_describe_object(classid,objid,objsubid) !~ 'pg_toast'
+>   AND pg_describe_object(refclassid,refobjid,refobjsubid) !~ 'pg_toast'
+>   AND NOT (refclassid = 'pg_namespace'::regclass)
+>   AND NOT (deptype = 'i' AND pg_describe_object(classid,objid,objsubid) ~ '^type .*(\[\]|_)$')
+> ORDER BY 1,2,3
+obj:text | ref:text | deptype:char
+cast from color to integer | function color2int(color) | n
+cast from color to integer | type color | n
+cast from ct to text | type ct | n
+column a of table pk1 | table pk1 | i
+column a of table tdom | type dchk | n
+column arr of table t | type dpos[] | n
+column b of table tdom | collation mycoll | n
+column b of table tdom | type dcoll | n
+column c of table pd.logt | type pd.ct | n
+column c of table pd.pt | table pd.pt | i
+column c of table pd.pt | type pd.ct | n
+column c of table pd.t2 | type pd.ct | n
+column c of table pk1 | type color | n
+column c of table pk2 | table pk2 | i
+column c of table pk2 | type color | n
+column c of table pk2a | type color | n
+column c of table t | type color | n
+column c of table tdom | type darr | n
+column c of table tp | type color | n
+column c of view v_const | type color | n
+column c of view v_distinct | type color | n
+column c of view v_group | type color | n
+column c of view v_order | type color | n
+column c of view vtp | type color | n
+column ca of table pd.t2 | type pd.ct[] | n
+column ca of view v_const | type color[] | n
+column cc of table t | type ct | n
+column d of table t | type dpos | n
+column d of view v_cast | type dpos | n
+column d of view v_const | type dpos | n
+column da of view v_const | type dpos[] | n
+column dc of view v_cast | type dct | n
+column n of view v_null | type color | n
+column nc of view v_null | type ct | n
+column nf of view v_case | type color | n
+column q of view v_coll | collation mycoll | n
+column r of view pd.v_rowcast | type pd.ct | n
+column whole of view pd.v_field3 | type pd.p | n
+column x of table pk1 | table pk1 | i
+column x of table pk3 | collation mycoll | n
+column x of table pk3 | table pk3 | i
+column x of table t | collation mycoll | n
+column x of view v_coll | collation mycoll | n
+column xc of materialized view mv1 | collation mycoll | n
+column xv of view v_cast | collation mycoll | n
+column y of view v_coll | collation mycoll | n
+composite type ct | type ct | i
+composite type pd.ct | type pd.ct | i
+constraint dchk_check | function okf(integer) | n
+constraint dchk_check | type dchk | a
+constraint dpos_check | type dpos | a
+constraint p_id_not_null on table pd.p | column id of table pd.p | a
+constraint p_pkey on table pd.p | column id of table pd.p | a
+constraint t2_chk on table pd.t2 | column a of composite type pd.ct | n
+constraint t2_chk on table pd.t2 | column c of table pd.t2 | a
+constraint t2_chk on table pd.t2 | column c of table pd.t2 | n
+constraint trg2 on table tp | table tp | a
+constraint trg2 on table tp | trigger trg2 on table tp | i
+constraint ts_b_not_null on table ts | column b of table ts | a
+constraint ts_c_not_null on table ts | column c of table ts | a
+default value for column a of table ts | column a of table ts | a
+default value for column a of table ts | sequence sq | n
+default value for column c of table ts | column c of table ts | a
+default value for column c of table ts | sequence ts_c_seq | n
+default value for column d of table pd.t2 | column b of composite type pd.ct | n
+default value for column d of table pd.t2 | column d of table pd.t2 | a
+default value for column d of table pd.t2 | type pd.ct | n
+default value for column g of table pd.t2 | column a of composite type pd.ct | n
+default value for column g of table pd.t2 | column c of table pd.t2 | n
+default value for column g of table pd.t2 | column g of table pd.t2 | i
+function color2int(color) | type color | n
+function colorlt(color,color) | type color | n
+function f_args(color,ct,dpos[]) | type color | n
+function f_args(color,ct,dpos[]) | type ct | n
+function f_args(color,ct,dpos[]) | type dct | n
+function f_args(color,ct,dpos[]) | type dpos[] | n
+function f_poly(anyelement,color) | type color | n
+function f_poly(anyelement,color) | type color | n
+function f_rettype() | type t | n
+function f_rowtype(t) | type t | n
+function f_setof() | type ct | n
+function f_tab(color) | type color | n
+function f_tab(color) | type ct | n
+function f_tab(color) | type dpos | n
+function f_variadic(color[]) | type color[] | n
+function p_inout(color) | type color | n
+function pd.fb() | column note of table pd.p | n
+function pd.fb() | function pd.getp(integer) | n
+function pd.fs() | column a of composite type pd.ct | n
+function pd.fs() | column c of table pd.t2 | n
+function pd.getp(integer) | type pd.p | n
+function pd.getps() | type pd.p | n
+function pd.trf() | language plpgsql | n
+function trf() | language plpgsql | n
+index ix1 | collation mycoll | n
+index ix1 | column x of table t | a
+index ix2 | column c of table t | a
+index ix2 | column id of table t | a
+index ix2 | function okf(integer) | n
+index ix2 | table t | a
+index ix2 | type color | n
+index pd.p_pkey | constraint p_pkey on table pd.p | i
+index pd.t2_ca | column a of composite type pd.ct | n
+index pd.t2_ca | column c of table pd.t2 | a
+index pd.t2_ca | table pd.t2 | a
+operator <<<(color,color) | function colorlt(color,color) | n
+operator <<<(color,color) | type color | n
+policy pol1 on table tp | column c of table tp | n
+policy pol1 on table tp | column id of table t | n
+policy pol1 on table tp | column id of table tp | n
+policy pol1 on table tp | column id of table tp | n
+policy pol1 on table tp | function okf(integer) | n
+policy pol1 on table tp | table tp | a
+policy pol1 on table tp | type color | n
+policy pol_f on table pd.t2 | column a of composite type pd.ct | n
+policy pol_f on table pd.t2 | column c of table pd.t2 | n
+policy pol_f on table pd.t2 | table pd.t2 | a
+publication of schema pe in publication pub2 | publication pub2 | a
+publication of table t in publication pub1 | publication pub1 | a
+publication of table t in publication pub1 | table t | a
+publication of table tp in publication pub1 | column c of table tp | n
+publication of table tp in publication pub1 | column id of table tp | n
+publication of table tp in publication pub1 | column id of table tp | n
+publication of table tp in publication pub1 | publication pub1 | a
+publication of table tp in publication pub1 | table tp | a
+rule _RETURN on materialized view mv1 | collation mycoll | n
+rule _RETURN on materialized view mv1 | column c of table t | n
+rule _RETURN on materialized view mv1 | column x of table t | n
+rule _RETURN on materialized view mv1 | function color2int(color) | n
+rule _RETURN on materialized view mv1 | materialized view mv1 | i
+rule _RETURN on view pd.v_cfield | column a of composite type pd.ct | n
+rule _RETURN on view pd.v_cfield | column b of composite type pd.ct | n
+rule _RETURN on view pd.v_cfield | column c of table pd.t2 | n
+rule _RETURN on view pd.v_cfield | column ca of table pd.t2 | n
+rule _RETURN on view pd.v_cfield | view pd.v_cfield | i
+rule _RETURN on view pd.v_field | column note of table pd.p | n
+rule _RETURN on view pd.v_field | function pd.getp(integer) | n
+rule _RETURN on view pd.v_field | view pd.v_field | i
+rule _RETURN on view pd.v_field2 | column id of table pd.p | n
+rule _RETURN on view pd.v_field2 | column note of table pd.p | n
+rule _RETURN on view pd.v_field2 | column qty of table pd.p | n
+rule _RETURN on view pd.v_field2 | function pd.getp(integer) | n
+rule _RETURN on view pd.v_field2 | view pd.v_field2 | i
+rule _RETURN on view pd.v_field3 | function pd.getp(integer) | n
+rule _RETURN on view pd.v_field3 | view pd.v_field3 | i
+rule _RETURN on view pd.v_rowcast | column a of composite type pd.ct | n
+rule _RETURN on view pd.v_rowcast | type pd.ct | n
+rule _RETURN on view pd.v_rowcast | view pd.v_rowcast | i
+rule _RETURN on view pd.v_srf | column note of table pd.p | n
+rule _RETURN on view pd.v_srf | function pd.getps() | n
+rule _RETURN on view pd.v_srf | view pd.v_srf | i
+rule _RETURN on view pd.v_srf2 | column qty of table pd.p | n
+rule _RETURN on view pd.v_srf2 | function pd.getps() | n
+rule _RETURN on view pd.v_srf2 | view pd.v_srf2 | i
+rule _RETURN on view pd.v_sub | column a of composite type pd.ct | n
+rule _RETURN on view pd.v_sub | column c of table pd.t2 | n
+rule _RETURN on view pd.v_sub | view pd.v_sub | i
+rule _RETURN on view v_case | column c of table t | n
+rule _RETURN on view v_case | type color | n
+rule _RETURN on view v_case | view v_case | i
+rule _RETURN on view v_cast | collation mycoll | n
+rule _RETURN on view v_cast | column c of table t | n
+rule _RETURN on view v_cast | column cc of table t | n
+rule _RETURN on view v_cast | column id of table t | n
+rule _RETURN on view v_cast | column x of table t | n
+rule _RETURN on view v_cast | type dct | n
+rule _RETURN on view v_cast | type dpos | n
+rule _RETURN on view v_cast | view v_cast | i
+rule _RETURN on view v_coll | collation mycoll | n
+rule _RETURN on view v_coll | column x of table t | n
+rule _RETURN on view v_coll | view v_coll | i
+rule _RETURN on view v_coll2 | collation mycoll | n
+rule _RETURN on view v_coll2 | column id of table t | n
+rule _RETURN on view v_coll2 | column x of table t | n
+rule _RETURN on view v_coll2 | view v_coll2 | i
+rule _RETURN on view v_const | type color | n
+rule _RETURN on view v_const | type color[] | n
+rule _RETURN on view v_const | type dpos | n
+rule _RETURN on view v_const | view v_const | i
+rule _RETURN on view v_distinct | column c of table t | n
+rule _RETURN on view v_distinct | view v_distinct | i
+rule _RETURN on view v_group | column c of table t | n
+rule _RETURN on view v_group | view v_group | i
+rule _RETURN on view v_in | column c of table t | n
+rule _RETURN on view v_in | column id of table t | n
+rule _RETURN on view v_in | type color | n
+rule _RETURN on view v_in | view v_in | i
+rule _RETURN on view v_null | type color | n
+rule _RETURN on view v_null | type ct | n
+rule _RETURN on view v_null | view v_null | i
+rule _RETURN on view v_op | column c of table t | n
+rule _RETURN on view v_op | column id of table t | n
+rule _RETURN on view v_op | operator <<<(color,color) | n
+rule _RETURN on view v_op | type color | n
+rule _RETURN on view v_op | view v_op | i
+rule _RETURN on view v_order | column c of table t | n
+rule _RETURN on view v_order | view v_order | i
+rule _RETURN on view v_rowcmp | column c of table t | n
+rule _RETURN on view v_rowcmp | column id of table t | n
+rule _RETURN on view v_rowcmp | type color | n
+rule _RETURN on view v_rowcmp | view v_rowcmp | i
+rule _RETURN on view v_seq | sequence sq | n
+rule _RETURN on view v_seq | view v_seq | i
+rule _RETURN on view v_ucast | column c of table t | n
+rule _RETURN on view v_ucast | column cc of table t | n
+rule _RETURN on view v_ucast | function color2int(color) | n
+rule _RETURN on view v_ucast | view v_ucast | i
+rule _RETURN on view vtp | column c of table tp | n
+rule _RETURN on view vtp | column id of table tp | n
+rule _RETURN on view vtp | view vtp | i
+rule r1 on table tp | column c of table tp | n
+rule r1 on table tp | table tp | a
+rule r1 on table tp | table tp | n
+rule r1 on table tp | type color | n
+rule r_ins on table pd.t2 | column b of composite type pd.ct | n
+rule r_ins on table pd.t2 | column c of table pd.logt | n
+rule r_ins on table pd.t2 | column c of table pd.t2 | n
+rule r_ins on table pd.t2 | column id of table pd.logt | n
+rule r_ins on table pd.t2 | column k of table pd.t2 | n
+rule r_ins on table pd.t2 | table pd.t2 | a
+rule r_ins on table pd.t2 | type pd.ct | n
+sequence ts_b_seq | column b of table ts | i
+sequence ts_c_seq | column c of table ts | a
+statistics object pd.st_f | column a of composite type pd.ct | n
+statistics object pd.st_f | column c of table pd.t2 | a
+statistics object pd.st_f | column k of table pd.t2 | a
+statistics object st1 | column c of table t | a
+statistics object st1 | column id of table t | a
+statistics object st1 | column x of table t | a
+statistics object st1 | function okf(integer) | n
+statistics object st2 | column c of table t | a
+statistics object st2 | column id of table t | a
+table pd.pt | column a of composite type pd.ct | n
+table pk1 | collation mycoll | n
+table pk1 | function okf(integer) | n
+table pk2a | table pk2 | a
+table pk3 | collation mycoll | n
+trigger trg1 on table tp | column c of table tp | n
+trigger trg1 on table tp | column c of table tp | n
+trigger trg1 on table tp | column id of table tp | n
+trigger trg1 on table tp | column id of table tp | n
+trigger trg1 on table tp | function okf(integer) | n
+trigger trg1 on table tp | function trf() | n
+trigger trg1 on table tp | operator <<<(color,color) | n
+trigger trg1 on table tp | table tp | a
+trigger trg2 on table tp | function trf() | n
+trigger trg2 on table tp | table t | a
+trigger trg2 on table tp | table tp | a
+trigger trg3 on view vtp | function trf() | n
+trigger trg3 on view vtp | view vtp | a
+trigger trg4 on table tp | function trf() | n
+trigger trg4 on table tp | table tp | a
+trigger trg_f on table pd.t2 | column a of composite type pd.ct | n
+trigger trg_f on table pd.t2 | column c of table pd.t2 | n
+trigger trg_f on table pd.t2 | function pd.trf() | n
+trigger trg_f on table pd.t2 | table pd.t2 | a
+type darr | type color[] | n
+type dchk | sequence sq | n
+type dcoll | collation mycoll | n
+type dcoll[] | collation mycoll | n
+type dct | type ct | n
+type mv1 | materialized view mv1 | i
+type pd.logt | table pd.logt | i
+type pd.p | table pd.p | i
+type pd.pt | table pd.pt | i
+type pd.t2 | table pd.t2 | i
+type pd.v_cfield | view pd.v_cfield | i
+type pd.v_field | view pd.v_field | i
+type pd.v_field2 | view pd.v_field2 | i
+type pd.v_field3 | view pd.v_field3 | i
+type pd.v_rowcast | view pd.v_rowcast | i
+type pd.v_srf | view pd.v_srf | i
+type pd.v_srf2 | view pd.v_srf2 | i
+type pd.v_sub | view pd.v_sub | i
+type pk1 | table pk1 | i
+type pk2 | table pk2 | i
+type pk2a | table pk2a | i
+type pk3 | table pk3 | i
+type t | table t | i
+type tdom | table tdom | i
+type tp | table tp | i
+type ts | table ts | i
+type v_case | view v_case | i
+type v_cast | view v_cast | i
+type v_coll | view v_coll | i
+type v_coll2 | view v_coll2 | i
+type v_const | view v_const | i
+type v_distinct | view v_distinct | i
+type v_group | view v_group | i
+type v_in | view v_in | i
+type v_null | view v_null | i
+type v_op | view v_op | i
+type v_order | view v_order | i
+type v_rowcmp | view v_rowcmp | i
+type v_seq | view v_seq | i
+type v_ucast | view v_ucast | i
+type vtp | view vtp | i
+-- SELECT 297
+
+> RESET search_path
+-- RESET
+
+> CREATE SCHEMA pf
+-- CREATE SCHEMA
+
+> SET search_path = pf
+-- SET
+
+> CREATE TABLE t (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE lg (x int)
+-- CREATE TABLE
+
+> CREATE RULE r1 AS ON INSERT TO t DO ALSO INSERT INTO lg VALUES (1)
+-- CREATE RULE
+
+> CREATE RULE r2 AS ON UPDATE TO t WHERE NEW.a > 0 DO ALSO INSERT INTO lg VALUES (2)
+-- CREATE RULE
+
+> CREATE RULE r3 AS ON DELETE TO t DO INSTEAD NOTHING
+-- CREATE RULE
+
+> CREATE RULE r4 AS ON UPDATE TO t DO ALSO (INSERT INTO lg VALUES (OLD.b); INSERT INTO lg VALUES (3))
+-- CREATE RULE
+
+> CREATE RULE r5 AS ON INSERT TO t WHERE NEW.b > 0 DO ALSO NOTIFY t_chan
+ERROR 42P17: rules with WHERE conditions can only have SELECT, INSERT, UPDATE, or DELETE actions
+
+> CREATE RULE r6 AS ON INSERT TO t DO ALSO SELECT 1
+-- CREATE RULE
+
+> CREATE RULE r7 AS ON INSERT TO t WHERE NEW.a = 1 DO INSTEAD NOTHING
+-- CREATE RULE
+
+> SELECT pg_describe_object(classid,objid,objsubid) AS obj,
+>        pg_describe_object(refclassid,refobjid,refobjsubid) AS ref, deptype
+> FROM pg_depend WHERE classid = 'pg_rewrite'::regclass AND objid >= 16384 ORDER BY 1,2,3
+obj:text | ref:text | deptype:char
+rule _RETURN on materialized view pe.mv1 | collation pe.mycoll | n
+rule _RETURN on materialized view pe.mv1 | column c of table pe.t | n
+rule _RETURN on materialized view pe.mv1 | column x of table pe.t | n
+rule _RETURN on materialized view pe.mv1 | function pe.color2int(pe.color) | n
+rule _RETURN on materialized view pe.mv1 | materialized view pe.mv1 | i
+rule _RETURN on view pd.v_cfield | column a of composite type pd.ct | n
+rule _RETURN on view pd.v_cfield | column b of composite type pd.ct | n
+rule _RETURN on view pd.v_cfield | column c of table pd.t2 | n
+rule _RETURN on view pd.v_cfield | column ca of table pd.t2 | n
+rule _RETURN on view pd.v_cfield | view pd.v_cfield | i
+rule _RETURN on view pd.v_field | column note of table pd.p | n
+rule _RETURN on view pd.v_field | function pd.getp(integer) | n
+rule _RETURN on view pd.v_field | view pd.v_field | i
+rule _RETURN on view pd.v_field2 | column id of table pd.p | n
+rule _RETURN on view pd.v_field2 | column note of table pd.p | n
+rule _RETURN on view pd.v_field2 | column qty of table pd.p | n
+rule _RETURN on view pd.v_field2 | function pd.getp(integer) | n
+rule _RETURN on view pd.v_field2 | view pd.v_field2 | i
+rule _RETURN on view pd.v_field3 | function pd.getp(integer) | n
+rule _RETURN on view pd.v_field3 | view pd.v_field3 | i
+rule _RETURN on view pd.v_rowcast | column a of composite type pd.ct | n
+rule _RETURN on view pd.v_rowcast | type pd.ct | n
+rule _RETURN on view pd.v_rowcast | view pd.v_rowcast | i
+rule _RETURN on view pd.v_srf | column note of table pd.p | n
+rule _RETURN on view pd.v_srf | function pd.getps() | n
+rule _RETURN on view pd.v_srf | view pd.v_srf | i
+rule _RETURN on view pd.v_srf2 | column qty of table pd.p | n
+rule _RETURN on view pd.v_srf2 | function pd.getps() | n
+rule _RETURN on view pd.v_srf2 | view pd.v_srf2 | i
+rule _RETURN on view pd.v_sub | column a of composite type pd.ct | n
+rule _RETURN on view pd.v_sub | column c of table pd.t2 | n
+rule _RETURN on view pd.v_sub | view pd.v_sub | i
+rule _RETURN on view pe.v_case | column c of table pe.t | n
+rule _RETURN on view pe.v_case | type pe.color | n
+rule _RETURN on view pe.v_case | view pe.v_case | i
+rule _RETURN on view pe.v_cast | collation pe.mycoll | n
+rule _RETURN on view pe.v_cast | column c of table pe.t | n
+rule _RETURN on view pe.v_cast | column cc of table pe.t | n
+rule _RETURN on view pe.v_cast | column id of table pe.t | n
+rule _RETURN on view pe.v_cast | column x of table pe.t | n
+rule _RETURN on view pe.v_cast | type pe.dct | n
+rule _RETURN on view pe.v_cast | type pe.dpos | n
+rule _RETURN on view pe.v_cast | view pe.v_cast | i
+rule _RETURN on view pe.v_coll | collation pe.mycoll | n
+rule _RETURN on view pe.v_coll | column x of table pe.t | n
+rule _RETURN on view pe.v_coll | view pe.v_coll | i
+rule _RETURN on view pe.v_coll2 | collation pe.mycoll | n
+rule _RETURN on view pe.v_coll2 | column id of table pe.t | n
+rule _RETURN on view pe.v_coll2 | column x of table pe.t | n
+rule _RETURN on view pe.v_coll2 | view pe.v_coll2 | i
+rule _RETURN on view pe.v_const | type pe.color | n
+rule _RETURN on view pe.v_const | type pe.color[] | n
+rule _RETURN on view pe.v_const | type pe.dpos | n
+rule _RETURN on view pe.v_const | view pe.v_const | i
+rule _RETURN on view pe.v_distinct | column c of table pe.t | n
+rule _RETURN on view pe.v_distinct | view pe.v_distinct | i
+rule _RETURN on view pe.v_group | column c of table pe.t | n
+rule _RETURN on view pe.v_group | view pe.v_group | i
+rule _RETURN on view pe.v_in | column c of table pe.t | n
+rule _RETURN on view pe.v_in | column id of table pe.t | n
+rule _RETURN on view pe.v_in | type pe.color | n
+rule _RETURN on view pe.v_in | view pe.v_in | i
+rule _RETURN on view pe.v_null | type pe.color | n
+rule _RETURN on view pe.v_null | type pe.ct | n
+rule _RETURN on view pe.v_null | view pe.v_null | i
+rule _RETURN on view pe.v_op | column c of table pe.t | n
+rule _RETURN on view pe.v_op | column id of table pe.t | n
+rule _RETURN on view pe.v_op | operator pe.<<<(pe.color,pe.color) | n
+rule _RETURN on view pe.v_op | type pe.color | n
+rule _RETURN on view pe.v_op | view pe.v_op | i
+rule _RETURN on view pe.v_order | column c of table pe.t | n
+rule _RETURN on view pe.v_order | view pe.v_order | i
+rule _RETURN on view pe.v_rowcmp | column c of table pe.t | n
+rule _RETURN on view pe.v_rowcmp | column id of table pe.t | n
+rule _RETURN on view pe.v_rowcmp | type pe.color | n
+rule _RETURN on view pe.v_rowcmp | view pe.v_rowcmp | i
+rule _RETURN on view pe.v_seq | sequence pe.sq | n
+rule _RETURN on view pe.v_seq | view pe.v_seq | i
+rule _RETURN on view pe.v_ucast | column c of table pe.t | n
+rule _RETURN on view pe.v_ucast | column cc of table pe.t | n
+rule _RETURN on view pe.v_ucast | function pe.color2int(pe.color) | n
+rule _RETURN on view pe.v_ucast | view pe.v_ucast | i
+rule _RETURN on view pe.vtp | column c of table pe.tp | n
+rule _RETURN on view pe.vtp | column id of table pe.tp | n
+rule _RETURN on view pe.vtp | view pe.vtp | i
+rule r1 on table pe.tp | column c of table pe.tp | n
+rule r1 on table pe.tp | table pe.tp | a
+rule r1 on table pe.tp | table pe.tp | n
+rule r1 on table pe.tp | type pe.color | n
+rule r1 on table t | column x of table lg | n
+rule r1 on table t | table t | a
+rule r1 on table t | table t | n
+rule r2 on table t | column a of table t | n
+rule r2 on table t | column x of table lg | n
+rule r2 on table t | table t | a
+rule r2 on table t | table t | n
+rule r3 on table t | table t | a
+rule r3 on table t | table t | n
+rule r4 on table t | column b of table t | n
+rule r4 on table t | column x of table lg | n
+rule r4 on table t | table t | a
+rule r6 on table t | table t | a
+rule r6 on table t | table t | n
+rule r7 on table t | column a of table t | n
+rule r7 on table t | table t | a
+rule r7 on table t | table t | n
+rule r_ins on table pd.t2 | column b of composite type pd.ct | n
+rule r_ins on table pd.t2 | column c of table pd.logt | n
+rule r_ins on table pd.t2 | column c of table pd.t2 | n
+rule r_ins on table pd.t2 | column id of table pd.logt | n
+rule r_ins on table pd.t2 | column k of table pd.t2 | n
+rule r_ins on table pd.t2 | table pd.t2 | a
+rule r_ins on table pd.t2 | type pd.ct | n
+-- SELECT 113
+
+> CREATE SCHEMA pg2
+-- CREATE SCHEMA
+
+> SET search_path = pg2
+-- SET
+
+> CREATE COLLATION mycoll2 FROM "C"
+-- CREATE COLLATION
+
+> CREATE TABLE t (id int, x text COLLATE mycoll2, y varchar COLLATE mycoll2)
+-- CREATE TABLE
+
+> CREATE VIEW c1 AS SELECT x FROM t
+-- CREATE VIEW
+
+> CREATE VIEW c2 AS SELECT x::varchar AS v FROM t
+-- CREATE VIEW
+
+> CREATE VIEW c3 AS SELECT x || 'a' AS v FROM t
+-- CREATE VIEW
+
+> CREATE VIEW c4 AS SELECT id FROM t WHERE x = 'a'
+-- CREATE VIEW
+
+> CREATE VIEW c5 AS SELECT upper(x) AS u FROM t
+-- CREATE VIEW
+
+> CREATE VIEW c6 AS SELECT y::text AS yt, x::name AS xn FROM t
+-- CREATE VIEW
+
+> CREATE VIEW c7 AS SELECT 'a'::text COLLATE mycoll2 AS k
+-- CREATE VIEW
+
+> CREATE VIEW c8 AS SELECT id FROM t ORDER BY x
+-- CREATE VIEW
+
+> CREATE VIEW c9 AS SELECT max(x) AS m FROM t
+-- CREATE VIEW
+
+> CREATE VIEW c10 AS SELECT (SELECT x FROM t LIMIT 1) AS s
+-- CREATE VIEW
+
+> CREATE VIEW c11 AS SELECT x FROM t UNION SELECT 'z'
+-- CREATE VIEW
+
+> CREATE TABLE t2 (k int, x text DEFAULT 'a' COLLATE mycoll2 CHECK (x > 'a' COLLATE mycoll2))
+-- CREATE TABLE
+
+> CREATE INDEX t2i ON t2 ((x COLLATE mycoll2))
+-- CREATE INDEX
+
+> CREATE FUNCTION fd(a text DEFAULT 'q' COLLATE mycoll2) RETURNS text LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION fb() RETURNS text LANGUAGE sql BEGIN ATOMIC SELECT 'q' COLLATE mycoll2; END
+-- CREATE FUNCTION
+
+> SELECT pg_describe_object(classid,objid,objsubid) AS obj,
+>        pg_describe_object(refclassid,refobjid,refobjsubid) AS ref, deptype
+> FROM pg_depend WHERE refclassid = 'pg_collation'::regclass AND refobjid >= 16384 ORDER BY 1,2,3
+obj:text | ref:text | deptype:char
+column b of table pe.tdom | collation pe.mycoll | n
+column k of view c7 | collation mycoll2 | n
+column m of view c9 | collation mycoll2 | n
+column q of view pe.v_coll | collation pe.mycoll | n
+column s of view c10 | collation mycoll2 | n
+column u of view c5 | collation mycoll2 | n
+column v of view c2 | collation mycoll2 | n
+column v of view c3 | collation mycoll2 | n
+column x of table pe.pk3 | collation pe.mycoll | n
+column x of table pe.t | collation pe.mycoll | n
+column x of table t | collation mycoll2 | n
+column x of table t2 | collation mycoll2 | n
+column x of view c1 | collation mycoll2 | n
+column x of view c11 | collation mycoll2 | n
+column x of view pe.v_coll | collation pe.mycoll | n
+column xc of materialized view pe.mv1 | collation pe.mycoll | n
+column xn of view c6 | collation mycoll2 | n
+column xv of view pe.v_cast | collation pe.mycoll | n
+column y of table t | collation mycoll2 | n
+column y of view pe.v_coll | collation pe.mycoll | n
+column yt of view c6 | collation mycoll2 | n
+constraint t2_x_check on table t2 | collation mycoll2 | n
+function fb() | collation mycoll2 | n
+function fd(text) | collation mycoll2 | n
+index pe.ix1 | collation pe.mycoll | n
+index t2i | collation mycoll2 | n
+rule _RETURN on materialized view pe.mv1 | collation pe.mycoll | n
+rule _RETURN on view c2 | collation mycoll2 | n
+rule _RETURN on view c6 | collation mycoll2 | n
+rule _RETURN on view c7 | collation mycoll2 | n
+rule _RETURN on view pe.v_cast | collation pe.mycoll | n
+rule _RETURN on view pe.v_coll | collation pe.mycoll | n
+rule _RETURN on view pe.v_coll2 | collation pe.mycoll | n
+table pe.pk1 | collation pe.mycoll | n
+table pe.pk3 | collation pe.mycoll | n
+type pe.dcoll | collation pe.mycoll | n
+type pe.dcoll[] | collation pe.mycoll | n
+-- SELECT 37
+
+> CREATE SCHEMA ph
+-- CREATE SCHEMA
+
+> SET search_path = ph
+-- SET
+
+> CREATE TYPE color AS ENUM ('red', 'green')
+-- CREATE TYPE
+
+> CREATE TYPE ct AS (a int, b text)
+-- CREATE TYPE
+
+> CREATE COLLATION mycoll3 FROM "C"
+-- CREATE COLLATION
+
+> CREATE SEQUENCE sq3
+-- CREATE SEQUENCE
+
+> CREATE DOMAIN dpos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE FUNCTION okf(int) RETURNS bool LANGUAGE sql IMMUTABLE AS 'SELECT $1 > 0'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION colorlt(color, color) RETURNS bool LANGUAGE sql IMMUTABLE AS 'SELECT $1::text < $2::text'
+-- CREATE FUNCTION
+
+> CREATE OPERATOR <<< (LEFTARG = color, RIGHTARG = color, FUNCTION = colorlt)
+-- CREATE OPERATOR
+
+> CREATE FUNCTION color2int(color) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE CAST (color AS int) WITH FUNCTION color2int(color)
+-- CREATE CAST
+
+> CREATE TABLE t (id int, c color, x text COLLATE mycoll3, d dpos, cc ct)
+-- CREATE TABLE
+
+> CREATE VIEW v1 AS SELECT c::int AS ci FROM t
+-- CREATE VIEW
+
+> CREATE VIEW v2 AS SELECT id FROM t WHERE x < 'm' COLLATE mycoll3
+-- CREATE VIEW
+
+> CREATE VIEW v3 AS SELECT (cc).a FROM t
+-- CREATE VIEW
+
+> CREATE VIEW v4 AS SELECT nextval('sq3') AS n
+-- CREATE VIEW
+
+> CREATE VIEW v5 AS SELECT id FROM t WHERE c <<< 'green'
+-- CREATE VIEW
+
+> CREATE TABLE pk1 (a int, x text) PARTITION BY RANGE (okf(a), x COLLATE mycoll3)
+-- CREATE TABLE
+
+> CREATE TABLE tp (id int, c color)
+-- CREATE TABLE
+
+> CREATE FUNCTION trf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'
+-- CREATE FUNCTION
+
+> CREATE CONSTRAINT TRIGGER trg2 AFTER INSERT ON tp FROM t FOR EACH ROW EXECUTE FUNCTION trf()
+-- CREATE TRIGGER
+
+> CREATE RULE r3 AS ON DELETE TO tp DO INSTEAD NOTHING
+-- CREATE RULE
+
+> BEGIN
+-- BEGIN
+
+> DROP FUNCTION color2int(color)
+ERROR 2BP01: cannot drop function color2int(color) because other objects depend on it
+DETAIL: cast from color to integer depends on function color2int(color)
+DETAIL: view v1 depends on function color2int(color)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP CAST (color AS int)
+-- DROP CAST
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP COLLATION mycoll3
+ERROR 2BP01: cannot drop collation mycoll3 because other objects depend on it
+DETAIL: column x of table t depends on collation mycoll3
+DETAIL: view v2 depends on collation mycoll3
+DETAIL: table pk1 depends on collation mycoll3
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP SEQUENCE sq3
+ERROR 2BP01: cannot drop sequence sq3 because other objects depend on it
+DETAIL: view v4 depends on sequence sq3
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP OPERATOR <<< (color, color)
+ERROR 2BP01: cannot drop operator <<<(color,color) because other objects depend on it
+DETAIL: view v5 depends on operator <<<(color,color)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP FUNCTION okf(int)
+ERROR 2BP01: cannot drop function okf(integer) because other objects depend on it
+DETAIL: table pk1 depends on function okf(integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP TYPE ct
+ERROR 2BP01: cannot drop type ct because other objects depend on it
+DETAIL: column cc of table t depends on type ct
+DETAIL: view v3 depends on column cc of table t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> ALTER TYPE ct DROP ATTRIBUTE a
+ERROR 2BP01: cannot drop column a of composite type ct because other objects depend on it
+DETAIL: view v3 depends on column a of composite type ct
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> ALTER TYPE ct DROP ATTRIBUTE b
+-- ALTER TYPE
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> ALTER TYPE ct DROP ATTRIBUTE a CASCADE
+NOTICE 00000: drop cascades to view v3
+-- ALTER TYPE
+
+> SELECT count(*) FROM pg_views WHERE viewname = 'v3'
+count:int8
+0
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP TABLE t
+ERROR 2BP01: cannot drop table t because other objects depend on it
+DETAIL: view v1 depends on table t
+DETAIL: view v2 depends on table t
+DETAIL: view v3 depends on table t
+DETAIL: view v5 depends on table t
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP TABLE t CASCADE
+NOTICE 00000: drop cascades to 4 other objects
+DETAIL: drop cascades to view v1
+DETAIL: drop cascades to view v2
+DETAIL: drop cascades to view v3
+DETAIL: drop cascades to view v5
+-- DROP TABLE
+
+> SELECT tgname FROM pg_trigger WHERE tgname = 'trg2'
+tgname:name
+trg2
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP TABLE tp
+-- DROP TABLE
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DROP COLLATION mycoll3 CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to column x of table t
+DETAIL: drop cascades to view v2
+DETAIL: drop cascades to table pk1
+-- DROP COLLATION
+
+> SELECT relname FROM pg_class WHERE relname IN ('pk1','v2','t') ORDER BY 1
+relname:name
+pk1
+t
+t
+t
+t
+-- SELECT 5
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE SCHEMA pi
+-- CREATE SCHEMA
+
+> SET search_path = pi
+-- SET
+
+> CREATE TABLE t (id int)
+-- CREATE TABLE
+
+> CREATE TABLE tp (id int)
+-- CREATE TABLE
+
+> CREATE FUNCTION trf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'
+-- CREATE FUNCTION
+
+> CREATE CONSTRAINT TRIGGER trg2 AFTER INSERT ON tp FROM t DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION trf()
+-- CREATE TRIGGER
+
+> SELECT conname, contype, condeferrable, condeferred, conrelid::regclass FROM pg_constraint WHERE conname = 'trg2'
+conname:name | contype:char | condeferrable:bool | condeferred:bool | conrelid:regclass
+trg2 | t | f | f | pe.tp
+trg2 | t | f | f | ph.tp
+trg2 | t | t | t | tp
+-- SELECT 3
+
+> SELECT tgname, tgconstrrelid::regclass, tgconstraint <> 0 AS hascon, tgdeferrable, tginitdeferred FROM pg_trigger WHERE tgname = 'trg2'
+tgname:name | tgconstrrelid:regclass | hascon:bool | tgdeferrable:bool | tginitdeferred:bool
+trg2 | pe.t | t | f | f
+trg2 | ph.t | t | f | f
+trg2 | t | t | t | t
+-- SELECT 3
+
+> DROP TABLE t
+-- DROP TABLE
+

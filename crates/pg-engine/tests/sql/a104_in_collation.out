@@ -1,0 +1,73 @@
+> CREATE COLLATION a104_ai (provider = icu, locale = 'und-u-ks-level1', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE a104_in (id int PRIMARY KEY, b text COLLATE a104_ai)
+-- CREATE TABLE
+
+> INSERT INTO a104_in VALUES (1, 'Z'), (3, 'ö'), (9, 'ss'), (11, 'E'), (12, 'é'), (13, 'a')
+-- INSERT 0 6
+
+> SELECT id, b FROM a104_in WHERE b IN ('E', 'A' COLLATE "de-x-icu") ORDER BY b, id
+id:int4 | b:text
+11 | E
+-- SELECT 1
+
+> SELECT id, b FROM a104_in WHERE b IN ('E', 'A' COLLATE "de-x-icu") OR b > 'E' ORDER BY b, id
+id:int4 | b:text
+11 | E
+3 | ö
+9 | ss
+1 | Z
+-- SELECT 4
+
+> SELECT id, b FROM a104_in WHERE b NOT IN ('E', 'A' COLLATE "de-x-icu") ORDER BY b, id
+id:int4 | b:text
+13 | a
+12 | é
+3 | ö
+9 | ss
+1 | Z
+-- SELECT 5
+
+> SELECT id, b FROM a104_in WHERE b IN ('E' COLLATE "C", 'a') ORDER BY b, id
+id:int4 | b:text
+13 | a
+11 | E
+-- SELECT 2
+
+> SELECT id, b FROM a104_in WHERE b IN ('E', 'a') ORDER BY b, id
+id:int4 | b:text
+13 | a
+11 | E
+12 | é
+-- SELECT 3
+
+> SELECT id, b FROM a104_in WHERE b IN ('E', 'A' COLLATE "de-x-icu", b) ORDER BY b, id
+id:int4 | b:text
+13 | a
+11 | E
+12 | é
+3 | ö
+9 | ss
+1 | Z
+-- SELECT 6
+
+> SELECT id, b FROM a104_in WHERE b IN (upper('e'), 'A' COLLATE "de-x-icu") ORDER BY b, id
+id:int4 | b:text
+11 | E
+-- SELECT 1
+
+> SELECT x.id, y.id FROM a104_in x JOIN a104_in y ON x.b IN (y.b, 'e' COLLATE "C") WHERE x.id < y.id ORDER BY 1, 2
+id:int4 | id:int4
+11 | 12
+-- SELECT 1
+
+> SELECT id FROM a104_in WHERE b IN ('E' COLLATE "C", 'a' COLLATE "POSIX")
+ERROR 42P21: collation mismatch between explicit collations "C" and "POSIX" (at 57)
+
+> DROP TABLE a104_in
+-- DROP TABLE
+
+> DROP COLLATION a104_ai
+-- DROP COLLATION
+

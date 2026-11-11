@@ -1,0 +1,166 @@
+> CREATE TABLE a15_la (id int PRIMARY KEY, x int, other text)
+-- CREATE TABLE
+
+> CREATE TABLE a15_lb (id int, y int)
+-- CREATE TABLE
+
+> INSERT INTO a15_la SELECT g, g % 10, 'o' || g FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> INSERT INTO a15_lb SELECT g % 50, g FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> ANALYZE a15_la
+-- ANALYZE
+
+> ANALYZE a15_lb
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT s.id FROM (SELECT * FROM a15_la OFFSET 0) s, a15_lb WHERE s.id = a15_lb.id FOR SHARE OF a15_lb
+QUERY PLAN:text
+LockRows
+  Output: s.id, a15_lb.ctid, s.*
+  ->  Hash Join
+        Output: s.id, a15_lb.ctid, s.*
+        Hash Cond: (a15_lb.id = s.id)
+        ->  Seq Scan on public.a15_lb
+              Output: a15_lb.ctid, a15_lb.id
+        ->  Hash
+              Output: s.id, s.*
+              ->  Subquery Scan on s
+                    Output: s.id, s.*
+                    ->  Seq Scan on public.a15_la
+                          Output: a15_la.id, a15_la.x, a15_la.other
+-- EXPLAIN
+
+> SELECT s.id FROM (SELECT * FROM a15_la OFFSET 0) s, a15_lb WHERE s.id = a15_lb.id AND s.id < 3
+>   ORDER BY 1 FOR SHARE OF a15_lb
+id:int4
+1
+1
+2
+2
+-- SELECT 4
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT s.id, b.y FROM (SELECT id, x, other FROM a15_la WHERE id < 5 FOR SHARE) s JOIN a15_lb b ON s.id = b.id FOR UPDATE OF b
+QUERY PLAN:text
+LockRows
+  Output: s.id, b.y, b.ctid, s.*
+  ->  Hash Join
+        Output: s.id, b.y, b.ctid, s.*
+        Hash Cond: (b.id = s.id)
+        ->  Seq Scan on public.a15_lb b
+              Output: b.y, b.ctid, b.id
+        ->  Hash
+              Output: s.id, s.*
+              ->  Subquery Scan on s
+                    Output: s.id, s.*
+                    ->  LockRows
+                          Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+                          ->  Seq Scan on public.a15_la
+                                Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+                                Filter: (a15_la.id < 5)
+-- EXPLAIN
+
+> SELECT s.id, b.y FROM (SELECT id, x, other FROM a15_la WHERE id < 3 FOR SHARE) s JOIN a15_lb b ON s.id = b.id
+>   ORDER BY 1, 2 FOR UPDATE OF b
+id:int4 | y:int4
+1 | 1
+1 | 51
+2 | 2
+2 | 52
+-- SELECT 4
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a15_la LIMIT 5 FOR UPDATE
+QUERY PLAN:text
+Limit
+  Output: id, x, other, ctid
+  ->  LockRows
+        Output: id, x, other, ctid
+        ->  Seq Scan on public.a15_la
+              Output: id, x, other, ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x FROM a15_la LIMIT 5 FOR UPDATE
+QUERY PLAN:text
+Limit
+  Output: x, ctid
+  ->  LockRows
+        Output: x, ctid
+        ->  Seq Scan on public.a15_la
+              Output: x, ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x FROM a15_la ORDER BY id LIMIT 2 OFFSET 1 FOR SHARE
+QUERY PLAN:text
+Limit
+  Output: x, id, ctid
+  ->  LockRows
+        Output: x, id, ctid
+        ->  Index Scan using a15_la_pkey on public.a15_la
+              Output: x, id, ctid
+-- EXPLAIN
+
+> SELECT x FROM a15_la ORDER BY id LIMIT 2 OFFSET 1 FOR SHARE
+x:int4
+2
+3
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT * FROM a15_la OFFSET 0) s FOR UPDATE OF s
+QUERY PLAN:text
+LockRows
+  Output: s.id, s.x, s.other, s.*
+  ->  Subquery Scan on s
+        Output: s.id, s.x, s.other, s.*
+        ->  LockRows
+              Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+              ->  Seq Scan on public.a15_la
+                    Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+-- EXPLAIN
+
+> SELECT * FROM (SELECT * FROM a15_la OFFSET 0) s WHERE id < 3 ORDER BY 1 FOR UPDATE OF s
+id:int4 | x:int4 | other:text
+1 | 1 | o1
+2 | 2 | o2
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT * FROM a15_la OFFSET 0) s FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: s.id, s.x, s.other, s.*
+  ->  Subquery Scan on s
+        Output: s.id, s.x, s.other, s.*
+        ->  LockRows
+              Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+              ->  Seq Scan on public.a15_la
+                    Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT * FROM a15_la FOR UPDATE) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.id, s.x, s.other
+  ->  LockRows
+        Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+        ->  Seq Scan on public.a15_la
+              Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT * FROM a15_la FOR UPDATE) s FOR UPDATE OF s
+QUERY PLAN:text
+LockRows
+  Output: s.id, s.x, s.other, s.*
+  ->  Subquery Scan on s
+        Output: s.id, s.x, s.other, s.*
+        ->  LockRows
+              Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+              ->  Seq Scan on public.a15_la
+                    Output: a15_la.id, a15_la.x, a15_la.other, a15_la.ctid
+-- EXPLAIN
+
+> DROP TABLE a15_la, a15_lb
+-- DROP TABLE
+

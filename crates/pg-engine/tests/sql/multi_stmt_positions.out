@@ -1,0 +1,67 @@
+> create table msp_t(a int, b text)
+-- CREATE TABLE
+
+> ; select nosuch from msp_t
+ERROR 42703: column "nosuch" does not exist (at 10)
+
+> ; create function msp_f() returns int language sql as $$ select nosuch $$
+ERROR 42703: column "nosuch" does not exist (at 65)
+
+> ; create function msp_f() returns int return nosuch
+ERROR 42703: column "nosuch" does not exist (at 46)
+
+> ; create function msp_f(a int, a int) returns int return 1
+ERROR 42P13: parameter name "a" used more than once (at 32)
+
+> ; create table msp_u(a int check (nosuch > 0))
+ERROR 42703: column "nosuch" does not exist (at 35)
+
+> ; create table msp_u(a int, constraint c check (a > 'x'))
+ERROR 22P02: invalid input syntax for type integer: "x" (at 53)
+
+> ; alter table msp_t add constraint c check (nosuch > 0)
+ERROR 42703: column "nosuch" does not exist
+
+> ; alter table msp_t add column c int check (nosuch > 0)
+ERROR 42703: column "nosuch" does not exist
+
+> ; create domain msp_d as int check (value > nosuch)
+ERROR 42703: column "nosuch" does not exist
+
+> ; create trigger tr before insert on msp_t for each row when (new.nosuch) execute function nosuch()
+ERROR 42703: column new.nosuch does not exist (at 63)
+
+> ; copy (select nosuch) to stdout
+ERROR 42703: column "nosuch" does not exist (at 16)
+
+> ; declare c cursor for select nosuch
+ERROR 42703: column "nosuch" does not exist (at 31)
+
+> ; select 1 +
+ERROR 42601: syntax error at end of input (at 13)
+
+> ;
+>   select 'é' || nosuch
+ERROR 42703: column "nosuch" does not exist (at 19)
+
+> create function msp_f() returns int return nosuch
+ERROR 42703: column "nosuch" does not exist (at 44)
+
+> create table msp_u(a int check (nosuch > 0))
+ERROR 42703: column "nosuch" does not exist (at 33)
+
+> create domain msp_d as int check (value > nosuch)
+ERROR 42703: column "nosuch" does not exist
+
+> create trigger tr before insert on msp_t for each row when (new.nosuch) execute function nosuch()
+ERROR 42703: column new.nosuch does not exist (at 61)
+
+> copy (select nosuch) to stdout
+ERROR 42703: column "nosuch" does not exist (at 14)
+
+> declare c cursor for select nosuch
+ERROR 42703: column "nosuch" does not exist (at 29)
+
+> alter table msp_t add constraint c check (nosuch > 0)
+ERROR 42703: column "nosuch" does not exist
+

@@ -1,0 +1,242 @@
+> CREATE TABLE a14_p (aa int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE a14_c (cc int) INHERITS (a14_p)
+-- CREATE TABLE
+
+> CREATE TABLE a14_q (aa int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE a14_i (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH wcte AS (INSERT INTO a14_i VALUES (42, 47) RETURNING q2)
+> DELETE FROM a14_p USING wcte WHERE aa = q2
+QUERY PLAN:text
+Delete on public.a14_p
+  Delete on public.a14_p a14_p_1
+  Delete on public.a14_c a14_p_2
+  CTE wcte
+    ->  Insert on public.a14_i
+          Output: a14_i.q2
+          ->  Result
+                Output: '42'::bigint, '47'::bigint
+  ->  Hash Join
+        Output: wcte.*, a14_p.tableoid, a14_p.ctid
+        Hash Cond: (a14_p.aa = wcte.q2)
+        ->  Append
+              ->  Seq Scan on public.a14_p a14_p_1
+                    Output: a14_p_1.aa, a14_p_1.tableoid, a14_p_1.ctid
+              ->  Seq Scan on public.a14_c a14_p_2
+                    Output: a14_p_2.aa, a14_p_2.tableoid, a14_p_2.ctid
+        ->  Hash
+              Output: wcte.*, wcte.q2
+              ->  CTE Scan on wcte
+                    Output: wcte.*, wcte.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH wcte AS (INSERT INTO a14_i VALUES (42, 47) RETURNING q2)
+> DELETE FROM ONLY a14_p USING wcte WHERE aa = q2
+QUERY PLAN:text
+Delete on public.a14_p
+  CTE wcte
+    ->  Insert on public.a14_i
+          Output: a14_i.q2
+          ->  Result
+                Output: '42'::bigint, '47'::bigint
+  ->  Nested Loop
+        Output: a14_p.ctid, wcte.*
+        Join Filter: (a14_p.aa = wcte.q2)
+        ->  Seq Scan on public.a14_p
+              Output: a14_p.ctid, a14_p.aa
+        ->  CTE Scan on wcte
+              Output: wcte.*, wcte.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH wcte AS (INSERT INTO a14_i VALUES (42, 47) RETURNING q2)
+> UPDATE a14_p SET b = 'x' FROM wcte WHERE aa = q2
+QUERY PLAN:text
+Update on public.a14_p
+  Update on public.a14_p a14_p_1
+  Update on public.a14_c a14_p_2
+  CTE wcte
+    ->  Insert on public.a14_i
+          Output: a14_i.q2
+          ->  Result
+                Output: '42'::bigint, '47'::bigint
+  ->  Hash Join
+        Output: 'x'::text, wcte.*, a14_p.tableoid, a14_p.ctid
+        Hash Cond: (a14_p.aa = wcte.q2)
+        ->  Append
+              ->  Seq Scan on public.a14_p a14_p_1
+                    Output: a14_p_1.aa, a14_p_1.tableoid, a14_p_1.ctid
+              ->  Seq Scan on public.a14_c a14_p_2
+                    Output: a14_p_2.aa, a14_p_2.tableoid, a14_p_2.ctid
+        ->  Hash
+              Output: wcte.*, wcte.q2
+              ->  CTE Scan on wcte
+                    Output: wcte.*, wcte.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> DELETE FROM a14_p USING a14_i WHERE aa = q2
+QUERY PLAN:text
+Delete on public.a14_p
+  Delete on public.a14_p a14_p_1
+  Delete on public.a14_c a14_p_2
+  ->  Merge Join
+        Output: a14_i.ctid, a14_p.tableoid, a14_p.ctid
+        Merge Cond: (a14_p.aa = a14_i.q2)
+        ->  Sort
+              Output: a14_p.aa, a14_p.tableoid, a14_p.ctid
+              Sort Key: a14_p.aa
+              ->  Append
+                    ->  Seq Scan on public.a14_p a14_p_1
+                          Output: a14_p_1.aa, a14_p_1.tableoid, a14_p_1.ctid
+                    ->  Seq Scan on public.a14_c a14_p_2
+                          Output: a14_p_2.aa, a14_p_2.tableoid, a14_p_2.ctid
+        ->  Sort
+              Output: a14_i.ctid, a14_i.q2
+              Sort Key: a14_i.q2
+              ->  Seq Scan on public.a14_i
+                    Output: a14_i.ctid, a14_i.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> UPDATE a14_p SET b = q1::text FROM a14_i WHERE aa = q2
+QUERY PLAN:text
+Update on public.a14_p
+  Update on public.a14_p a14_p_1
+  Update on public.a14_c a14_p_2
+  ->  Merge Join
+        Output: (a14_i.q1)::text, a14_i.ctid, a14_p.tableoid, a14_p.ctid
+        Merge Cond: (a14_p.aa = a14_i.q2)
+        ->  Sort
+              Output: a14_p.aa, a14_p.tableoid, a14_p.ctid
+              Sort Key: a14_p.aa
+              ->  Append
+                    ->  Seq Scan on public.a14_p a14_p_1
+                          Output: a14_p_1.aa, a14_p_1.tableoid, a14_p_1.ctid
+                    ->  Seq Scan on public.a14_c a14_p_2
+                          Output: a14_p_2.aa, a14_p_2.tableoid, a14_p_2.ctid
+        ->  Sort
+              Output: a14_i.q1, a14_i.ctid, a14_i.q2
+              Sort Key: a14_i.q2
+              ->  Seq Scan on public.a14_i
+                    Output: a14_i.q1, a14_i.ctid, a14_i.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> DELETE FROM a14_p USING (VALUES (1), (2)) v(x) WHERE aa = x
+QUERY PLAN:text
+Delete on public.a14_p
+  Delete on public.a14_p a14_p_1
+  Delete on public.a14_c a14_p_2
+  ->  Hash Join
+        Output: "*VALUES*".*, a14_p.tableoid, a14_p.ctid
+        Hash Cond: (a14_p.aa = "*VALUES*".column1)
+        ->  Append
+              ->  Seq Scan on public.a14_p a14_p_1
+                    Output: a14_p_1.aa, a14_p_1.tableoid, a14_p_1.ctid
+              ->  Seq Scan on public.a14_c a14_p_2
+                    Output: a14_p_2.aa, a14_p_2.tableoid, a14_p_2.ctid
+        ->  Hash
+              Output: "*VALUES*".*, "*VALUES*".column1
+              ->  Values Scan on "*VALUES*"
+                    Output: "*VALUES*".*, "*VALUES*".column1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH wcte AS (INSERT INTO a14_i VALUES (42, 47) RETURNING q2)
+> DELETE FROM a14_q USING wcte WHERE aa = q2
+QUERY PLAN:text
+Delete on public.a14_q
+  CTE wcte
+    ->  Insert on public.a14_i
+          Output: a14_i.q2
+          ->  Result
+                Output: '42'::bigint, '47'::bigint
+  ->  Hash Join
+        Output: a14_q.ctid, wcte.*
+        Hash Cond: (a14_q.aa = wcte.q2)
+        ->  Seq Scan on public.a14_q
+              Output: a14_q.ctid, a14_q.aa
+        ->  Hash
+              Output: wcte.*, wcte.q2
+              ->  CTE Scan on wcte
+                    Output: wcte.*, wcte.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> DELETE FROM a14_q USING a14_i WHERE aa = q2
+QUERY PLAN:text
+Delete on public.a14_q
+  ->  Merge Join
+        Output: a14_q.ctid, a14_i.ctid
+        Merge Cond: (a14_q.aa = a14_i.q2)
+        ->  Sort
+              Output: a14_q.ctid, a14_q.aa
+              Sort Key: a14_q.aa
+              ->  Seq Scan on public.a14_q
+                    Output: a14_q.ctid, a14_q.aa
+        ->  Sort
+              Output: a14_i.ctid, a14_i.q2
+              Sort Key: a14_i.q2
+              ->  Seq Scan on public.a14_i
+                    Output: a14_i.ctid, a14_i.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> UPDATE a14_q SET b = 'x' FROM (VALUES (1), (2)) v(x) WHERE aa = x
+QUERY PLAN:text
+Update on public.a14_q
+  ->  Hash Join
+        Output: 'x'::text, a14_q.ctid, "*VALUES*".*
+        Hash Cond: (a14_q.aa = "*VALUES*".column1)
+        ->  Seq Scan on public.a14_q
+              Output: a14_q.ctid, a14_q.aa
+        ->  Hash
+              Output: "*VALUES*".*, "*VALUES*".column1
+              ->  Values Scan on "*VALUES*"
+                    Output: "*VALUES*".*, "*VALUES*".column1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> UPDATE a14_q SET b = 'y' FROM generate_series(1, 3) g WHERE aa = g
+QUERY PLAN:text
+Update on public.a14_q
+  ->  Hash Join
+        Output: 'y'::text, a14_q.ctid, g.*
+        Hash Cond: (a14_q.aa = g.g)
+        ->  Seq Scan on public.a14_q
+              Output: a14_q.ctid, a14_q.aa
+        ->  Hash
+              Output: g.*, g.g
+              ->  Function Scan on pg_catalog.generate_series g
+                    Output: g.*, g.g
+                    Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> INSERT INTO a14_p VALUES (47, 'p')
+-- INSERT 0 1
+
+> INSERT INTO a14_c VALUES (47, 'c', 1)
+-- INSERT 0 1
+
+> WITH wcte AS (INSERT INTO a14_i VALUES (42, 47) RETURNING q2)
+> DELETE FROM a14_p USING wcte WHERE aa = q2 RETURNING a14_p.*
+aa:int4 | b:text
+47 | c
+47 | p
+-- DELETE 2
+
+> SELECT * FROM a14_p
+aa:int4 | b:text
+-- SELECT 0
+
+> DROP TABLE a14_c, a14_p, a14_q, a14_i
+-- DROP TABLE
+

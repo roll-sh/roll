@@ -1,0 +1,213 @@
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, copy_data = true)
+ERROR 42601: connect = false and copy_data = true are mutually exclusive options
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, enabled = true)
+ERROR 42601: connect = false and enabled = true are mutually exclusive options
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (slot_name = none)
+ERROR 42601: subscription with slot_name = NONE must also set enabled = false
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (slot_name = none, enabled = false)
+ERROR 42601: subscription with slot_name = NONE must also set create_slot = false
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (slot_name = '')
+ERROR 42602: replication slot name "" is too short
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (slot_name = 'Bad-Name', connect = false)
+ERROR 42602: replication slot name "Bad-Name" contains invalid character
+HINT: Replication slot names may only contain lower case letters, numbers, and the underscore character.
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, origin = 'x')
+ERROR 22023: unrecognized origin value: "x"
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, streaming = 'x')
+ERROR 42601: streaming requires a Boolean value or "parallel"
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, binary = 'x')
+ERROR 42601: binary requires a Boolean value
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, synchronous_commit = 'x')
+ERROR 22023: invalid value for parameter "synchronous_commit": "x"
+HINT: Available values: local, remote_write, remote_apply, on, off.
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, nope = 1)
+ERROR 42601: unrecognized subscription parameter: "nope"
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false, connect = false)
+ERROR 42601: conflicting or redundant options (at 99)
+
+> create subscription subd_s connection 'nope' publication p1 with (connect = false)
+ERROR 42601: invalid connection string syntax: missing "=" after "nope" in connection info string
+
+
+> create subscription subd_s connection 'host=a bogus=1' publication p1 with (connect = false)
+ERROR 42601: invalid connection string syntax: invalid connection option "bogus"
+
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1, p2, p1 with (connect = false)
+ERROR 42710: publication name "p1" used more than once
+
+> create subscription subd_s connection 'port=-1' publication p1
+ERROR 08006: subscription "subd_s" could not connect to the publisher: invalid port number: "-1"
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1, p2 with (connect = false)
+WARNING 01000: subscription was created, but is not connected
+HINT: To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- CREATE SUBSCRIPTION
+
+> create subscription subd_s connection 'dbname=subd_nowhere' publication p1 with (connect = false)
+ERROR 42710: subscription "subd_s" already exists
+
+> create subscription subd_t connection 'dbname=subd_nowhere' publication p1 with (connect = false, slot_name = none, binary = true, streaming = off, two_phase = true, disable_on_error = true, origin = none, synchronous_commit = local, failover = true, run_as_owner = true)
+WARNING 01000: subscription was created, but is not connected
+HINT: To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+-- CREATE SUBSCRIPTION
+
+> select subname, subenabled, subbinary, substream, subtwophasestate, subdisableonerr, subpasswordrequired, subrunasowner, subfailover, subconninfo, subslotname, subsynccommit, subpublications, suborigin, subskiplsn
+>   from pg_subscription where subname like 'subd%' order by 1
+subname:name | subenabled:bool | subbinary:bool | substream:char | subtwophasestate:char | subdisableonerr:bool | subpasswordrequired:bool | subrunasowner:bool | subfailover:bool | subconninfo:text | subslotname:name | subsynccommit:text | subpublications:text[] | suborigin:text | subskiplsn:pg_lsn
+subd_s | f | f | p | d | f | t | f | f | dbname=subd_nowhere | subd_s | off | {p1,p2} | any | 0/0
+subd_t | f | t | f | p | t | t | t | t | dbname=subd_nowhere | NULL | local | {p1} | none | 0/0
+-- SELECT 2
+
+> comment on subscription subd_s is 'a subscription'
+-- COMMENT
+
+> select obj_description(oid, 'pg_subscription') from pg_subscription where subname = 'subd_s'
+obj_description:text
+a subscription
+-- SELECT 1
+
+> select subname, stats_reset is null from pg_stat_subscription_stats where subname like 'subd%' order by 1
+subname:name | ?column?:bool
+subd_s | t
+subd_t | t
+-- SELECT 2
+
+> select pg_stat_reset_subscription_stats(oid) from pg_subscription where subname = 'subd_s'
+pg_stat_reset_subscription_stats:void
+
+-- SELECT 1
+
+> select subname, stats_reset is null from pg_stat_subscription_stats where subname like 'subd%' order by 1
+subname:name | ?column?:bool
+subd_s | f
+subd_t | t
+-- SELECT 2
+
+> alter subscription subd_s connection 'nope'
+ERROR 42601: invalid connection string syntax: missing "=" after "nope" in connection info string
+
+
+> alter subscription subd_s connection 'port=-1 dbname=subd_other'
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s set (slot_name = 'subd_slot', binary = true, streaming = parallel)
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s set (create_slot = true)
+ERROR 42601: unrecognized subscription parameter: "create_slot"
+
+> alter subscription subd_s set (slot_name = '')
+ERROR 42602: replication slot name "" is too short
+
+> alter subscription subd_s add publication p2
+ERROR 42710: publication "p2" is already in subscription "subd_s"
+
+> alter subscription subd_s add publication p3, p3 with (refresh = false)
+ERROR 42710: publication name "p3" used more than once
+
+> alter subscription subd_s add publication p3 with (refresh = false)
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s drop publication p9 with (refresh = false)
+ERROR 42P17: publication "p9" is not in subscription "subd_s"
+
+> alter subscription subd_s drop publication p1, p2, p3 with (refresh = false)
+ERROR 42P17: cannot drop all the publications from a subscription
+
+> alter subscription subd_s drop publication p2 with (refresh = false)
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s set publication p4, p5 with (refresh = false)
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s refresh publication
+ERROR 55000: ALTER SUBSCRIPTION ... REFRESH is not allowed for disabled subscriptions
+
+> alter subscription subd_s skip (lsn = '0/12345')
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s skip (lsn = '0/0')
+ERROR 22023: invalid WAL location (LSN): 0/0
+
+> alter subscription subd_t enable
+ERROR 55000: cannot enable subscription that does not have a slot name
+
+> alter subscription subd_s enable
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s set (slot_name = none)
+ERROR 55000: cannot set slot_name = NONE for enabled subscription
+
+> alter subscription subd_s set (failover = true)
+ERROR 55000: cannot set option "failover" for enabled subscription
+
+> alter subscription subd_s disable
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_s rename to subd_t
+ERROR 42710: subscription "subd_t" already exists
+
+> alter subscription subd_s rename to subd_u
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_nope rename to subd_v
+ERROR 42704: subscription "subd_nope" does not exist
+
+> select subname, subenabled, subbinary, substream, subconninfo, subslotname, subpublications, subskiplsn from pg_subscription where subname like 'subd%' order by 1
+subname:name | subenabled:bool | subbinary:bool | substream:char | subconninfo:text | subslotname:name | subpublications:text[] | subskiplsn:pg_lsn
+subd_t | f | t | f | dbname=subd_nowhere | NULL | {p1} | 0/0
+subd_u | f | t | p | port=-1 dbname=subd_other | subd_slot | {p4,p5} | 0/12345
+-- SELECT 2
+
+> begin
+-- BEGIN
+
+> drop subscription subd_u
+ERROR 25001: DROP SUBSCRIPTION cannot run inside a transaction block
+
+> rollback
+-- ROLLBACK
+
+> drop subscription subd_u
+ERROR 08006: could not connect to publisher when attempting to drop replication slot "subd_slot": invalid port number: "-1"
+HINT: Use ALTER SUBSCRIPTION ... DISABLE to disable the subscription, and then use ALTER SUBSCRIPTION ... SET (slot_name = NONE) to disassociate it from the slot.
+
+> alter subscription subd_u set (slot_name = none)
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_u disable
+-- ALTER SUBSCRIPTION
+
+> alter subscription subd_u set (slot_name = none)
+-- ALTER SUBSCRIPTION
+
+> drop subscription subd_u
+-- DROP SUBSCRIPTION
+
+> drop subscription subd_nope
+ERROR 42704: subscription "subd_nope" does not exist
+
+> drop subscription if exists subd_nope
+NOTICE 00000: subscription "subd_nope" does not exist, skipping
+-- DROP SUBSCRIPTION
+
+> drop subscription subd_t
+-- DROP SUBSCRIPTION
+
+> select count(*) from pg_subscription where subname like 'subd%'
+count:int8
+0
+-- SELECT 1
+

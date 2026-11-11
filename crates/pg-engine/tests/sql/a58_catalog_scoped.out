@@ -1,0 +1,483 @@
+> CREATE SCHEMA a58
+-- CREATE SCHEMA
+
+> SET search_path = a58, public
+-- SET
+
+> CREATE TABLE a58.p (id int PRIMARY KEY, note text)
+-- CREATE TABLE
+
+> CREATE TABLE a58.c (id serial PRIMARY KEY, p_id int REFERENCES a58.p, body text DEFAULT 'x')
+-- CREATE TABLE
+
+> CREATE VIEW a58.v1 AS SELECT id, note FROM a58.p
+-- CREATE VIEW
+
+> CREATE VIEW a58.v2 AS SELECT id FROM a58.v1 WHERE id > 0
+-- CREATE VIEW
+
+> CREATE VIEW a58."MixedCase" AS SELECT body FROM a58.c
+-- CREATE VIEW
+
+> DROP TABLE a58.p
+ERROR 2BP01: cannot drop table p because other objects depend on it
+DETAIL: constraint c_p_id_fkey on table c depends on table p
+DETAIL: view v1 depends on table p
+DETAIL: view v2 depends on view v1
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP VIEW a58.v1
+ERROR 2BP01: cannot drop view v1 because other objects depend on it
+DETAIL: view v2 depends on view v1
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> BEGIN
+-- BEGIN
+
+> DROP TABLE a58.p CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to constraint c_p_id_fkey on table c
+DETAIL: drop cascades to view v1
+DETAIL: drop cascades to view v2
+-- DROP TABLE
+
+> SELECT relname FROM pg_class WHERE relnamespace = 'a58'::regnamespace ORDER BY 1
+relname:name
+MixedCase
+c
+c_id_seq
+c_pkey
+-- SELECT 4
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT relname FROM pg_class WHERE relnamespace = 'a58'::regnamespace ORDER BY 1
+relname:name
+MixedCase
+c
+c_id_seq
+c_pkey
+p
+p_pkey
+v1
+v2
+-- SELECT 8
+
+> CREATE FUNCTION a58.getp(int) RETURNS a58.p LANGUAGE sql AS 'SELECT * FROM a58.p WHERE id = $1'
+-- CREATE FUNCTION
+
+> CREATE VIEW a58.v3 AS SELECT note FROM a58.getp(1)
+-- CREATE VIEW
+
+> CREATE FUNCTION a58.countc() RETURNS bigint LANGUAGE sql BEGIN ATOMIC SELECT count(*) FROM a58.c; END
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a58.plain() RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> DROP TABLE a58.c
+ERROR 2BP01: cannot drop table c because other objects depend on it
+DETAIL: view "MixedCase" depends on table c
+DETAIL: function countc() depends on table c
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE a58.p
+ERROR 2BP01: cannot drop table p because other objects depend on it
+DETAIL: function getp(integer) depends on type p
+DETAIL: constraint c_p_id_fkey on table c depends on table p
+DETAIL: view v1 depends on table p
+DETAIL: view v2 depends on view v1
+DETAIL: view v3 depends on table p
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> BEGIN
+-- BEGIN
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> DROP TABLE a58.c CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to view "MixedCase"
+DETAIL: drop cascades to function countc()
+-- DROP TABLE
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> DROP FUNCTION a58.countc()
+-- DROP FUNCTION
+
+> DROP TABLE a58.c CASCADE
+NOTICE 00000: drop cascades to view "MixedCase"
+-- DROP TABLE
+
+> SELECT proname FROM pg_proc WHERE pronamespace = 'a58'::regnamespace ORDER BY 1
+proname:name
+getp
+plain
+-- SELECT 2
+
+> COMMIT
+-- COMMIT
+
+> CREATE DOMAIN a58.pd AS a58.p CHECK ((VALUE).id > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE a58.holder (k int, r a58.p, d a58.pd)
+-- CREATE TABLE
+
+> DROP TABLE a58.p
+ERROR 2BP01: cannot drop table p because other objects depend on it
+DETAIL: function getp(integer) depends on type p
+DETAIL: type pd depends on type p
+DETAIL: column d of table holder depends on type pd
+DETAIL: column r of table holder depends on type p
+DETAIL: view v1 depends on table p
+DETAIL: view v2 depends on view v1
+DETAIL: view v3 depends on table p
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> CREATE TABLE a58.pt (k int NOT NULL, v text, PRIMARY KEY (k)) PARTITION BY RANGE (k)
+-- CREATE TABLE
+
+> CREATE TABLE a58.pt1 PARTITION OF a58.pt FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE a58.pt2 PARTITION OF a58.pt FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE INDEX ON a58.pt (v)
+-- CREATE INDEX
+
+> CREATE TABLE a58.ref (k int REFERENCES a58.pt)
+-- CREATE TABLE
+
+> CREATE FUNCTION a58.trg() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'
+-- CREATE FUNCTION
+
+> CREATE TRIGGER t1 BEFORE INSERT ON a58.pt FOR EACH ROW EXECUTE FUNCTION a58.trg()
+-- CREATE TRIGGER
+
+> CREATE POLICY pol ON a58.pt1 USING (k > 0)
+-- CREATE POLICY
+
+> CREATE STATISTICS a58.st ON k, v FROM a58.pt1
+-- CREATE STATISTICS
+
+> CREATE TABLE a58.log (k int)
+-- CREATE TABLE
+
+> CREATE RULE r1 AS ON INSERT TO a58.log DO ALSO SELECT count(*) FROM a58.pt2
+-- CREATE RULE
+
+> DROP TABLE a58.pt1
+ERROR 2BP01: cannot drop table pt1 because other objects depend on it
+DETAIL: constraint ref_k_fkey on table ref depends on table pt1
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE a58.pt
+ERROR 2BP01: cannot drop table pt because other objects depend on it
+DETAIL: rule r1 on table log depends on table pt2
+DETAIL: constraint ref_k_fkey on table ref depends on table pt
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> BEGIN
+-- BEGIN
+
+> DROP TABLE a58.pt CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to rule r1 on table log
+DETAIL: drop cascades to constraint ref_k_fkey on table ref
+-- DROP TABLE
+
+> SELECT relname FROM pg_class WHERE relnamespace = 'a58'::regnamespace ORDER BY 1
+relname:name
+holder
+log
+p
+p_pkey
+ref
+v1
+v2
+v3
+-- SELECT 8
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP INDEX a58.pt_v_idx
+-- DROP INDEX
+
+> DROP INDEX a58.pt1_v_idx
+ERROR 42704: index "pt1_v_idx" does not exist
+
+> ALTER TABLE a58.pt DROP CONSTRAINT pt_pkey
+ERROR 2BP01: cannot drop constraint pt_pkey on table pt because other objects depend on it
+DETAIL: constraint ref_k_fkey on table ref depends on index pt2_pkey
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE a58.pt DROP CONSTRAINT pt_pkey CASCADE
+NOTICE 00000: drop cascades to constraint ref_k_fkey on table ref
+-- ALTER TABLE
+
+> DROP TABLE a58.pt2 CASCADE
+NOTICE 00000: drop cascades to rule r1 on table log
+-- DROP TABLE
+
+> DROP TABLE a58.pt CASCADE
+-- DROP TABLE
+
+> SELECT relname FROM pg_class WHERE relnamespace = 'a58'::regnamespace ORDER BY 1
+relname:name
+holder
+log
+p
+p_pkey
+ref
+v1
+v2
+v3
+-- SELECT 8
+
+> CREATE TABLE a58.art (id int PRIMARY KEY, title text)
+-- CREATE TABLE
+
+> CREATE VIEW a58.artv AS SELECT id, title FROM a58.art GROUP BY id
+-- CREATE VIEW
+
+> ALTER TABLE a58.art DROP CONSTRAINT art_pkey
+ERROR 2BP01: cannot drop constraint art_pkey on table art because other objects depend on it
+DETAIL: view artv depends on constraint art_pkey on table art
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP VIEW a58.artv
+-- DROP VIEW
+
+> ALTER TABLE a58.art DROP CONSTRAINT art_pkey
+-- ALTER TABLE
+
+> DROP RULE "_RETURN" ON a58.v2
+ERROR 2BP01: cannot drop rule _RETURN on view v2 because view v2 requires it
+HINT: You can drop view v2 instead.
+
+> CREATE SEQUENCE a58.s1
+-- CREATE SEQUENCE
+
+> CREATE TABLE a58.useseq (k int DEFAULT nextval('a58.s1'))
+-- CREATE TABLE
+
+> DROP SEQUENCE a58.s1
+ERROR 2BP01: cannot drop sequence s1 because other objects depend on it
+DETAIL: default value for column k of table useseq depends on sequence s1
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP SEQUENCE a58.s1 CASCADE
+NOTICE 00000: drop cascades to default value for column k of table useseq
+-- DROP SEQUENCE
+
+> SELECT a.attname, (SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum) FROM pg_attribute a WHERE a.attrelid = 'a58.useseq'::regclass AND a.attnum > 0 ORDER BY a.attnum
+attname:name | pg_get_expr:text
+k | NULL
+-- SELECT 1
+
+> CREATE TABLE a58.tab_one (a int)
+-- CREATE TABLE
+
+> CREATE TABLE a58.tab_two (a int)
+-- CREATE TABLE
+
+> CREATE TABLE a58."Tab_Up" (a int)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> CREATE TABLE a58.tab_three (a int)
+-- CREATE TABLE
+
+> SELECT c.relname FROM pg_class c WHERE c.relname ~ '^(tab_three)$' ORDER BY 1
+relname:name
+tab_three
+-- SELECT 1
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> ALTER TABLE a58.tab_three RENAME TO tab_four
+-- ALTER TABLE
+
+> SELECT c.relname FROM pg_class c WHERE c.relname ~ '^(tab_.*)$' ORDER BY 1
+relname:name
+tab_four
+tab_one
+tab_two
+-- SELECT 3
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT c.relname FROM pg_class c WHERE c.relname ~ '^(tab_.*)$' ORDER BY 1
+relname:name
+tab_one
+tab_three
+tab_two
+-- SELECT 3
+
+> COMMIT
+-- COMMIT
+
+> SELECT c.relname FROM pg_class c WHERE c.relname = 'Tab_Up'
+relname:name
+Tab_Up
+-- SELECT 1
+
+> SELECT c.relname FROM pg_class c WHERE c.relname ~ '^(Tab.*)$' ORDER BY 1
+relname:name
+Tab_Up
+-- SELECT 1
+
+> SELECT c.relname FROM pg_class c WHERE c.relname >= 'tab_o' AND c.relname < 'tab_u' ORDER BY 1
+relname:name
+tab_one
+tab_three
+tab_two
+-- SELECT 3
+
+> SELECT c.relname FROM pg_class c WHERE c.relname ~ '^(pg_class)$'
+relname:name
+pg_class
+-- SELECT 1
+
+> SELECT count(*) > 0 FROM pg_class c WHERE c.relname ~ '^(pg_toast_.*)$'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT c.relname FROM pg_class c WHERE c.relname ~ '^(nosuch)$'
+relname:name
+-- SELECT 0
+
+> SELECT n.nspname, c.relname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p') AND c.relname OPERATOR(pg_catalog.~) '^(tab.*)$' COLLATE pg_catalog.default AND n.nspname OPERATOR(pg_catalog.~) '^(a58)$' COLLATE pg_catalog.default ORDER BY 1, 2
+nspname:name | relname:name
+a58 | tab_one
+a58 | tab_three
+a58 | tab_two
+-- SELECT 3
+
+> SELECT c.relname, n.nspname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relname OPERATOR(pg_catalog.~) '^(tab_one)$' COLLATE pg_catalog.default AND n.nspname OPERATOR(pg_catalog.~) '^(a58)$' COLLATE pg_catalog.default ORDER BY 2, 1
+relname:name | nspname:name
+tab_one | a58
+-- SELECT 1
+
+> CREATE INDEX tab_one_a ON a58.tab_one (a)
+-- CREATE INDEX
+
+> SELECT indexrelid::regclass, indnatts, indisunique FROM pg_index WHERE indrelid = 'a58.tab_one'::regclass
+indexrelid:regclass | indnatts:int2 | indisunique:bool
+tab_one_a | 1 | f
+-- SELECT 1
+
+> SELECT count(*) FROM pg_index WHERE indrelid = 'a58.tab_two'::regclass
+count:int8
+0
+-- SELECT 1
+
+> SELECT table_name, column_name, ordinal_position, data_type, column_default
+>   FROM information_schema.columns WHERE table_schema = 'a58' AND table_name = 'useseq'
+>   ORDER BY ordinal_position
+table_name:name | column_name:name | ordinal_position:int4 | data_type:varchar | column_default:varchar
+useseq | k | 1 | integer | NULL
+-- SELECT 1
+
+> SELECT column_name FROM information_schema.columns WHERE table_name = 'Tab_Up'
+column_name:name
+a
+-- SELECT 1
+
+> SELECT column_name FROM information_schema.columns WHERE table_name = 'tab_up'
+column_name:name
+-- SELECT 0
+
+> SELECT column_name FROM information_schema.columns
+>   WHERE table_name = 'tab_one' AND table_name = 'tab_two'
+column_name:name
+-- SELECT 0
+
+> SELECT table_schema, column_name FROM information_schema.columns
+>   WHERE table_name = 'pg_am' ORDER BY 1, 2
+table_schema:name | column_name:name
+pg_catalog | amhandler
+pg_catalog | amname
+pg_catalog | amtype
+pg_catalog | oid
+-- SELECT 4
+
+> SELECT table_name, table_type FROM information_schema.tables
+>   WHERE table_schema = 'a58' ORDER BY 1
+table_name:name | table_type:varchar
+Tab_Up | BASE TABLE
+art | BASE TABLE
+holder | BASE TABLE
+log | BASE TABLE
+p | BASE TABLE
+ref | BASE TABLE
+tab_one | BASE TABLE
+tab_three | BASE TABLE
+tab_two | BASE TABLE
+useseq | BASE TABLE
+v1 | VIEW
+v2 | VIEW
+v3 | VIEW
+-- SELECT 13
+
+> SELECT table_name, table_type FROM information_schema.tables
+>   WHERE table_schema = 'a58' AND table_name = 'v2'
+table_name:name | table_type:varchar
+v2 | VIEW
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE a58.tab_two ADD COLUMN b text DEFAULT 'q'
+-- ALTER TABLE
+
+> SELECT column_name, column_default FROM information_schema.columns
+>   WHERE table_schema = 'a58' AND table_name = 'tab_two' ORDER BY ordinal_position
+column_name:name | column_default:varchar
+a | NULL
+b | 'q'::text
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT column_name, column_default FROM information_schema.columns
+>   WHERE table_schema = 'a58' AND table_name = 'tab_two' ORDER BY ordinal_position
+column_name:name | column_default:varchar
+a | NULL
+-- SELECT 1
+
+> DROP SCHEMA a58 CASCADE
+NOTICE 00000: drop cascades to 17 other objects
+DETAIL: drop cascades to table p
+DETAIL: drop cascades to view v1
+DETAIL: drop cascades to view v2
+DETAIL: drop cascades to function getp(integer)
+DETAIL: drop cascades to view v3
+DETAIL: drop cascades to function plain()
+DETAIL: drop cascades to type pd
+DETAIL: drop cascades to table holder
+DETAIL: drop cascades to table ref
+DETAIL: drop cascades to function trg()
+DETAIL: drop cascades to table log
+DETAIL: drop cascades to table art
+DETAIL: drop cascades to table useseq
+DETAIL: drop cascades to table tab_one
+DETAIL: drop cascades to table tab_two
+DETAIL: drop cascades to table "Tab_Up"
+DETAIL: drop cascades to table tab_three
+-- DROP SCHEMA
+

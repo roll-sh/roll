@@ -1,0 +1,15 @@
+CREATE UNLOGGED TABLE unlogged1(f1 SERIAL PRIMARY KEY, f2 TEXT);
+SELECT relname, relkind, relpersistence FROM pg_class WHERE relname ~ '^unlogged1' UNION ALL SELECT r.relname || ' toast table', t.relkind, t.relpersistence FROM pg_class r JOIN pg_class t ON t.oid = r.reltoastrelid WHERE r.relname ~ '^unlogged1' UNION ALL SELECT r.relname || ' toast index', ri.relkind, ri.relpersistence FROM pg_class r join pg_class t ON t.oid = r.reltoastrelid JOIN pg_index i ON i.indrelid = t.oid JOIN pg_class ri ON ri.oid = i.indexrelid WHERE r.relname ~ '^unlogged1' ORDER BY relname;
+SELECT count(*) FROM pg_class r JOIN pg_class t ON t.oid = r.reltoastrelid JOIN pg_index i ON i.indrelid = t.oid WHERE r.relname ~ '^unlogged1';
+SELECT count(*) FROM pg_class r JOIN pg_class t ON t.oid = r.reltoastrelid JOIN pg_index i ON i.indrelid = t.oid JOIN pg_class ri ON ri.oid = i.indexrelid WHERE r.relname = 'unlogged1';
+ALTER TABLE unlogged1 SET LOGGED;
+SELECT relname, relkind, relpersistence FROM pg_class WHERE relname ~ '^unlogged1' UNION ALL SELECT r.relname || ' toast table', t.relkind, t.relpersistence FROM pg_class r JOIN pg_class t ON t.oid = r.reltoastrelid WHERE r.relname ~ '^unlogged1' UNION ALL SELECT r.relname || ' toast index', ri.relkind, ri.relpersistence FROM pg_class r join pg_class t ON t.oid = r.reltoastrelid JOIN pg_index i ON i.indrelid = t.oid JOIN pg_class ri ON ri.oid = i.indexrelid WHERE r.relname ~ '^unlogged1' ORDER BY relname;
+CREATE TABLE ja (id int, x int);
+CREATE TABLE jb (id int, aid int);
+CREATE TABLE jc (id int, bid int);
+INSERT INTO ja SELECT g, g FROM generate_series(1, 50) g;
+INSERT INTO jb SELECT g, g FROM generate_series(1, 50) g;
+INSERT INTO jc SELECT g, g FROM generate_series(1, 50) g;
+SELECT count(*) FROM ja JOIN jb ON jb.aid = ja.id JOIN jc ON jc.bid = jb.aid WHERE ja.x < 10;
+SELECT count(*) FROM ja JOIN jb ON jb.aid = ja.id JOIN jc ON jc.bid = ja.id JOIN (SELECT 1 AS one) s ON true WHERE ja.x < 10;
+SELECT count(*) FROM ja JOIN (SELECT id, aid FROM jb OFFSET 0) b ON b.aid = ja.id JOIN jc ON jc.bid = b.aid AND jc.id = ja.x WHERE ja.x < 10;

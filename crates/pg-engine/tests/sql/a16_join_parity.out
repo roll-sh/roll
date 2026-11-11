@@ -1,0 +1,225 @@
+> create table a16_sj (a int unique, b int, c int unique)
+-- CREATE TABLE
+
+> insert into a16_sj values (1, null, 2), (null, 2, null), (2, 1, 1)
+-- INSERT 0 3
+
+> analyze a16_sj
+-- ANALYZE
+
+> create table a16_p (a int primary key, b int)
+-- CREATE TABLE
+
+> insert into a16_p select i, i from generate_series(1, 100) i
+-- INSERT 0 100
+
+> analyze a16_p
+-- ANALYZE
+
+> explain (costs off) select * from a16_p t1 where exists (select 1 from a16_p t2 where t1.b = t2.b and t1.b = 1)
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a16_p t1
+        Filter: (b = 1)
+  ->  Seq Scan on a16_p t2
+        Filter: (b = 1)
+-- EXPLAIN
+
+> explain (costs off) select * from a16_p t1 where exists (select 1 from a16_p t2 where t1.b = t2.b and t1.a < 5)
+QUERY PLAN:text
+Hash Right Semi Join
+  Hash Cond: (t2.b = t1.b)
+  ->  Seq Scan on a16_p t2
+  ->  Hash
+        ->  Seq Scan on a16_p t1
+              Filter: (a < 5)
+-- EXPLAIN
+
+> explain (costs off) select * from a16_p t1 where t1.b in (select t2.b from a16_p t2 where t1.a < 5)
+QUERY PLAN:text
+Hash Right Semi Join
+  Hash Cond: (t2.b = t1.b)
+  ->  Seq Scan on a16_p t2
+  ->  Hash
+        ->  Seq Scan on a16_p t1
+              Filter: (a < 5)
+-- EXPLAIN
+
+> select count(*) from a16_p t1 where exists (select 1 from a16_p t2 where t1.b = t2.b and t1.a < 5)
+count:int8
+4
+-- SELECT 1
+
+> explain (costs off) select * from a16_p t1 where not exists (select 1 from a16_p t2 where t1.b = t2.b and t1.a < 5)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (t1.b = t2.b)
+  Join Filter: (t1.a < 5)
+  ->  Seq Scan on a16_p t1
+  ->  Hash
+        ->  Seq Scan on a16_p t2
+-- EXPLAIN
+
+> select count(*) from a16_p t1 where not exists (select 1 from a16_p t2 where t1.b = t2.b and t1.a < 5)
+count:int8
+96
+-- SELECT 1
+
+> explain (costs off) select * from a16_p t1 where exists (select 1 from a16_p t2 where t1.a = t2.a and t1.a = 1)
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a16_p t1
+        Filter: (a = 1)
+  ->  Seq Scan on a16_p t2
+        Filter: (a = 1)
+-- EXPLAIN
+
+> create table a16_pp (a int, b int) partition by range (a)
+-- CREATE TABLE
+
+> create table a16_pp1 partition of a16_pp for values from (0) to (10)
+-- CREATE TABLE
+
+> create table a16_pp2 partition of a16_pp for values from (10) to (20)
+-- CREATE TABLE
+
+> insert into a16_pp select i, i from generate_series(0, 19) i
+-- INSERT 0 20
+
+> explain (costs off) select * from a16_pp t1 where exists (select 1 from a16_pp t2 where t1.a = t2.a and t1.a = 1)
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a16_pp1 t1
+        Filter: (a = 1)
+  ->  Materialize
+        ->  Seq Scan on a16_pp1 t2
+              Filter: (a = 1)
+-- EXPLAIN
+
+> select * from a16_pp t1 where exists (select 1 from a16_pp t2 where t1.a = t2.a and t1.a = 1)
+a:int4 | b:int4
+1 | 1
+-- SELECT 1
+
+> explain (verbose, costs off)
+> select t3.a from a16_sj t1
+> 	join a16_sj t2 on t1.a = t2.a
+> 	join lateral (select t1.a offset 0) t3 on true
+QUERY PLAN:text
+Nested Loop
+  Output: (t2.a)
+  ->  Seq Scan on public.a16_sj t2
+        Output: t2.a, t2.b, t2.c
+        Filter: (t2.a IS NOT NULL)
+  ->  Result
+        Output: t2.a
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select t4.a from a16_sj t1
+> 	join a16_sj t2 on t1.a = t2.a
+> 	join lateral (select t3.a from a16_sj t3, (select t1.a) offset 0) t4 on true
+QUERY PLAN:text
+Nested Loop
+  Output: t3.a
+  ->  Seq Scan on public.a16_sj t2
+        Output: t2.a, t2.b, t2.c
+        Filter: (t2.a IS NOT NULL)
+  ->  Seq Scan on public.a16_sj t3
+        Output: t3.a
+-- EXPLAIN
+
+> select t3.a from a16_sj t1
+> 	join a16_sj t2 on t1.a = t2.a
+> 	join lateral (select t1.a offset 0) t3 on true order by 1
+a:int4
+1
+2
+-- SELECT 2
+
+> explain (costs off)
+> select * from a16_sj t1
+>     join lateral
+>       (select * from a16_sj tablesample system(t1.b)) s
+>     on t1.a = s.a
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a16_sj t1
+  ->  Memoize
+        Cache Key: t1.a, t1.b
+        Cache Mode: binary
+        ->  Sample Scan on a16_sj
+              Sampling: system (t1.b)
+              Filter: (t1.a = a)
+-- EXPLAIN
+
+> create table a16_j1 (id1 int, id2 int, primary key(id1,id2))
+-- CREATE TABLE
+
+> create table a16_j2 (id1 int, id2 int, primary key(id1,id2))
+-- CREATE TABLE
+
+> insert into a16_j1 values(1,1),(1,2)
+-- INSERT 0 2
+
+> insert into a16_j2 values(1,1),(1,2)
+-- INSERT 0 2
+
+> analyze a16_j1
+-- ANALYZE
+
+> analyze a16_j2
+-- ANALYZE
+
+> set enable_nestloop to 0
+-- SET
+
+> set enable_hashjoin to 0
+-- SET
+
+> set enable_sort to 0
+-- SET
+
+> create index a16_j1_id1_idx on a16_j1 (id1) where id1 % 1000 = 1
+-- CREATE INDEX
+
+> create index a16_j2_id1_idx on a16_j2 (id1) where id1 % 1000 = 1
+-- CREATE INDEX
+
+> explain (costs off) select * from a16_j1
+> inner join a16_j2 on a16_j1.id1 = a16_j2.id1 and a16_j1.id2 = a16_j2.id2
+> where a16_j1.id1 % 1000 = 1 and a16_j2.id1 % 1000 = 1
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (a16_j1.id1 = a16_j2.id1)
+  Join Filter: (a16_j2.id2 = a16_j1.id2)
+  ->  Index Scan using a16_j1_id1_idx on a16_j1
+  ->  Index Scan using a16_j2_id1_idx on a16_j2
+-- EXPLAIN
+
+> select * from a16_j1
+> inner join a16_j2 on a16_j1.id1 = a16_j2.id1 and a16_j1.id2 = a16_j2.id2
+> where a16_j1.id1 % 1000 = 1 and a16_j2.id1 % 1000 = 1
+id1:int4 | id2:int4 | id1:int4 | id2:int4
+1 | 1 | 1 | 1
+1 | 2 | 1 | 2
+-- SELECT 2
+
+> explain (costs off) select * from a16_j1 inner join a16_j2 on a16_j1.id1 = a16_j2.id1
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (a16_j1.id1 = a16_j2.id1)
+  ->  Index Only Scan using a16_j1_pkey on a16_j1
+  ->  Materialize
+        ->  Index Only Scan using a16_j2_pkey on a16_j2
+-- EXPLAIN
+
+> reset enable_nestloop
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_sort
+-- RESET
+

@@ -1,0 +1,1 @@
+RESULT	baseline	oltp	secondary_lookup	clients=8	tps=24543	ops=73654	elapsed_s=3.001035864	mean_ms=0.325	p50_ms=0.308	p95_ms=0.521	p99_ms=0.804	errors=0	peak_mem_mb=113.0	validation_version=oltp-values-v1	checked_ops=73654

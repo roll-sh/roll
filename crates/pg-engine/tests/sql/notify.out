@@ -1,0 +1,127 @@
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+-- SELECT 0
+
+> LISTEN chan_a
+-- LISTEN
+
+> LISTEN "Chan B"
+-- LISTEN
+
+> LISTEN chan_a
+-- LISTEN
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+Chan B
+chan_a
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> LISTEN chan_c
+-- LISTEN
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+Chan B
+chan_a
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+Chan B
+chan_a
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> UNLISTEN chan_a
+-- UNLISTEN
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+Chan B
+chan_a
+-- SELECT 2
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+Chan B
+-- SELECT 1
+
+> NOTIFY chan_a
+-- NOTIFY
+
+> NOTIFY chan_a, 'payload'
+-- NOTIFY
+
+> SELECT pg_notify('chan_a', 'from function')
+pg_notify:void
+
+-- SELECT 1
+
+> SELECT pg_notify('chan_a', NULL)
+pg_notify:void
+
+-- SELECT 1
+
+> SELECT pg_notify('', 'x')
+ERROR 22023: channel name cannot be empty
+
+> SELECT pg_notify(NULL, 'x')
+ERROR 22023: channel name cannot be empty
+
+> SELECT pg_notify(repeat('c', 64), 'x')
+ERROR 22023: channel name too long
+
+> SELECT pg_notify('chan_a', repeat('x', 8000))
+ERROR 22023: payload string too long
+
+> NOTIFY chan_a, 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+-- NOTIFY
+
+> SELECT pg_notification_queue_usage()
+pg_notification_queue_usage:float8
+0
+-- SELECT 1
+
+> DO $$
+> BEGIN
+>   LISTEN chan_plpgsql;
+>   PERFORM pg_notify('chan_plpgsql', 'p');
+>   NOTIFY chan_plpgsql, 'q';
+> END $$
+-- DO
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+Chan B
+chan_plpgsql
+-- SELECT 2
+
+> UNLISTEN *
+-- UNLISTEN
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+-- SELECT 0
+
+> LISTEN chan_d
+-- LISTEN
+
+> DISCARD ALL
+-- DISCARD ALL
+
+> SELECT * FROM pg_listening_channels()
+pg_listening_channels:text
+-- SELECT 0
+

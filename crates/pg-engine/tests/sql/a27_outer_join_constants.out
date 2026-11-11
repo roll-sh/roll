@@ -1,0 +1,262 @@
+> create table ojc_t (f1 text)
+-- CREATE TABLE
+
+> insert into ojc_t values ('doh!'), ('hi de ho neighbor')
+-- INSERT 0 2
+
+> vacuum ojc_t
+-- VACUUM
+
+> create table ojc_i (f1 int, g int)
+-- CREATE TABLE
+
+> insert into ojc_i values (0, 1), (1, 2), (1, 3), (2, 4), (null, 5)
+-- INSERT 0 5
+
+> analyze ojc_i
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select 1 from
+>   ojc_t as tt1
+>   inner join ojc_t as tt2 on (tt1.f1 = 'foo')
+>   left join ojc_t as tt3 on (tt3.f1 = 'foo')
+>   left join ojc_t as tt4 on (tt3.f1 = tt4.f1),
+>   lateral (select tt4.f1 as c0 from ojc_t as tt5 limit 1) as ss1
+> where tt1.f1 = ss1.c0
+QUERY PLAN:text
+Nested Loop
+  Output: 1
+  ->  Nested Loop Left Join
+        Output: tt1.f1, tt4.f1
+        ->  Nested Loop
+              Output: tt1.f1
+              ->  Seq Scan on public.ojc_t tt1
+                    Output: tt1.f1
+                    Filter: (tt1.f1 = 'foo'::text)
+              ->  Seq Scan on public.ojc_t tt2
+                    Output: tt2.f1
+        ->  Materialize
+              Output: tt4.f1
+              ->  Nested Loop Left Join
+                    Output: tt4.f1
+                    ->  Seq Scan on public.ojc_t tt3
+                          Output: tt3.f1
+                          Filter: (tt3.f1 = 'foo'::text)
+                    ->  Seq Scan on public.ojc_t tt4
+                          Output: tt4.f1
+                          Filter: (tt4.f1 = 'foo'::text)
+  ->  Memoize
+        Output: ss1.c0
+        Cache Key: tt4.f1
+        Cache Mode: binary
+        ->  Subquery Scan on ss1
+              Output: ss1.c0
+              Filter: (ss1.c0 = 'foo'::text)
+              ->  Limit
+                    Output: (tt4.f1)
+                    ->  Seq Scan on public.ojc_t tt5
+                          Output: tt4.f1
+-- EXPLAIN
+
+> select 1 from
+>   ojc_t as tt1
+>   inner join ojc_t as tt2 on (tt1.f1 = 'foo')
+>   left join ojc_t as tt3 on (tt3.f1 = 'foo')
+>   left join ojc_t as tt4 on (tt3.f1 = tt4.f1),
+>   lateral (select tt4.f1 as c0 from ojc_t as tt5 limit 1) as ss1
+> where tt1.f1 = ss1.c0
+?column?:int4
+-- SELECT 0
+
+> explain (costs off)
+> select * from ojc_t tt1 left join ojc_t tt3 on (tt3.f1 = 'foo') left join ojc_t as tt4 on (tt3.f1 = tt4.f1)
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on ojc_t tt1
+  ->  Materialize
+        ->  Nested Loop Left Join
+              ->  Seq Scan on ojc_t tt3
+                    Filter: (f1 = 'foo'::text)
+              ->  Seq Scan on ojc_t tt4
+                    Filter: (f1 = 'foo'::text)
+-- EXPLAIN
+
+> explain (costs off)
+> select * from ojc_i t0 left join ojc_i tt3 on tt3.f1 = 1 and t0.g = tt3.g left join ojc_i tt4 on tt3.f1 = tt4.f1
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (tt3.f1 = tt4.f1)
+  ->  Hash Left Join
+        Hash Cond: (t0.g = tt3.g)
+        ->  Seq Scan on ojc_i t0
+        ->  Hash
+              ->  Seq Scan on ojc_i tt3
+                    Filter: (f1 = 1)
+  ->  Hash
+        ->  Seq Scan on ojc_i tt4
+              Filter: (f1 = 1)
+-- EXPLAIN
+
+> select * from ojc_i t0 left join ojc_i tt3 on tt3.f1 = 1 and t0.g = tt3.g left join ojc_i tt4 on tt3.f1 = tt4.f1
+> order by 1, 2, 3, 4, 5, 6
+f1:int4 | g:int4 | f1:int4 | g:int4 | f1:int4 | g:int4
+0 | 1 | NULL | NULL | NULL | NULL
+1 | 2 | 1 | 2 | 1 | 2
+1 | 2 | 1 | 2 | 1 | 3
+1 | 3 | 1 | 3 | 1 | 2
+1 | 3 | 1 | 3 | 1 | 3
+2 | 4 | NULL | NULL | NULL | NULL
+NULL | 5 | NULL | NULL | NULL | NULL
+-- SELECT 7
+
+> explain (costs off)
+> select * from ojc_i t0 left join ojc_i tt3 on tt3.f1 = 1 left join ojc_i tt4 on tt3.f1 = tt4.f1
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on ojc_i t0
+  ->  Materialize
+        ->  Nested Loop Left Join
+              ->  Seq Scan on ojc_i tt3
+                    Filter: (f1 = 1)
+              ->  Materialize
+                    ->  Seq Scan on ojc_i tt4
+                          Filter: (f1 = 1)
+-- EXPLAIN
+
+> select * from ojc_i t0 left join ojc_i tt3 on tt3.f1 = 1 left join ojc_i tt4 on tt3.f1 = tt4.f1
+> order by 1, 2, 3, 4, 5, 6
+f1:int4 | g:int4 | f1:int4 | g:int4 | f1:int4 | g:int4
+0 | 1 | 1 | 2 | 1 | 2
+0 | 1 | 1 | 2 | 1 | 3
+0 | 1 | 1 | 3 | 1 | 2
+0 | 1 | 1 | 3 | 1 | 3
+1 | 2 | 1 | 2 | 1 | 2
+1 | 2 | 1 | 2 | 1 | 3
+1 | 2 | 1 | 3 | 1 | 2
+1 | 2 | 1 | 3 | 1 | 3
+1 | 3 | 1 | 2 | 1 | 2
+1 | 3 | 1 | 2 | 1 | 3
+1 | 3 | 1 | 3 | 1 | 2
+1 | 3 | 1 | 3 | 1 | 3
+2 | 4 | 1 | 2 | 1 | 2
+2 | 4 | 1 | 2 | 1 | 3
+2 | 4 | 1 | 3 | 1 | 2
+2 | 4 | 1 | 3 | 1 | 3
+NULL | 5 | 1 | 2 | 1 | 2
+NULL | 5 | 1 | 2 | 1 | 3
+NULL | 5 | 1 | 3 | 1 | 2
+NULL | 5 | 1 | 3 | 1 | 3
+-- SELECT 20
+
+> explain (costs off)
+> select * from ojc_i t0 join ojc_i tt3 on tt3.f1 = 1 left join ojc_i tt4 on tt3.f1 = tt4.f1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ojc_i t0
+  ->  Materialize
+        ->  Nested Loop Left Join
+              ->  Seq Scan on ojc_i tt3
+                    Filter: (f1 = 1)
+              ->  Materialize
+                    ->  Seq Scan on ojc_i tt4
+                          Filter: (f1 = 1)
+-- EXPLAIN
+
+> select * from ojc_i t0 join ojc_i tt3 on tt3.f1 = 1 left join ojc_i tt4 on tt3.f1 = tt4.f1
+> order by 1, 2, 3, 4, 5, 6
+f1:int4 | g:int4 | f1:int4 | g:int4 | f1:int4 | g:int4
+0 | 1 | 1 | 2 | 1 | 2
+0 | 1 | 1 | 2 | 1 | 3
+0 | 1 | 1 | 3 | 1 | 2
+0 | 1 | 1 | 3 | 1 | 3
+1 | 2 | 1 | 2 | 1 | 2
+1 | 2 | 1 | 2 | 1 | 3
+1 | 2 | 1 | 3 | 1 | 2
+1 | 2 | 1 | 3 | 1 | 3
+1 | 3 | 1 | 2 | 1 | 2
+1 | 3 | 1 | 2 | 1 | 3
+1 | 3 | 1 | 3 | 1 | 2
+1 | 3 | 1 | 3 | 1 | 3
+2 | 4 | 1 | 2 | 1 | 2
+2 | 4 | 1 | 2 | 1 | 3
+2 | 4 | 1 | 3 | 1 | 2
+2 | 4 | 1 | 3 | 1 | 3
+NULL | 5 | 1 | 2 | 1 | 2
+NULL | 5 | 1 | 2 | 1 | 3
+NULL | 5 | 1 | 3 | 1 | 2
+NULL | 5 | 1 | 3 | 1 | 3
+-- SELECT 20
+
+> explain (costs off)
+> select * from ojc_i tt4 right join (ojc_i t0 left join ojc_i tt3 on tt3.f1 = 1) on tt3.f1 = tt4.f1
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on ojc_i t0
+  ->  Materialize
+        ->  Nested Loop Left Join
+              ->  Seq Scan on ojc_i tt3
+                    Filter: (f1 = 1)
+              ->  Materialize
+                    ->  Seq Scan on ojc_i tt4
+                          Filter: (f1 = 1)
+-- EXPLAIN
+
+> select * from ojc_i tt4 right join (ojc_i t0 left join ojc_i tt3 on tt3.f1 = 1) on tt3.f1 = tt4.f1
+> order by 1, 2, 3, 4, 5, 6
+f1:int4 | g:int4 | f1:int4 | g:int4 | f1:int4 | g:int4
+1 | 2 | 0 | 1 | 1 | 2
+1 | 2 | 0 | 1 | 1 | 3
+1 | 2 | 1 | 2 | 1 | 2
+1 | 2 | 1 | 2 | 1 | 3
+1 | 2 | 1 | 3 | 1 | 2
+1 | 2 | 1 | 3 | 1 | 3
+1 | 2 | 2 | 4 | 1 | 2
+1 | 2 | 2 | 4 | 1 | 3
+1 | 2 | NULL | 5 | 1 | 2
+1 | 2 | NULL | 5 | 1 | 3
+1 | 3 | 0 | 1 | 1 | 2
+1 | 3 | 0 | 1 | 1 | 3
+1 | 3 | 1 | 2 | 1 | 2
+1 | 3 | 1 | 2 | 1 | 3
+1 | 3 | 1 | 3 | 1 | 2
+1 | 3 | 1 | 3 | 1 | 3
+1 | 3 | 2 | 4 | 1 | 2
+1 | 3 | 2 | 4 | 1 | 3
+1 | 3 | NULL | 5 | 1 | 2
+1 | 3 | NULL | 5 | 1 | 3
+-- SELECT 20
+
+> explain (costs off)
+> select * from ojc_i t0 right join ojc_i tt3 on tt3.f1 = 1 and t0.g = tt3.g right join ojc_i tt4 on tt3.f1 = tt4.f1
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (tt3.f1 = tt4.f1)
+  ->  Hash Left Join
+        Hash Cond: (tt3.g = t0.g)
+        Join Filter: (tt3.f1 = 1)
+        ->  Seq Scan on ojc_i tt3
+        ->  Hash
+              ->  Seq Scan on ojc_i t0
+  ->  Hash
+        ->  Seq Scan on ojc_i tt4
+-- EXPLAIN
+
+> select * from ojc_i t0 right join ojc_i tt3 on tt3.f1 = 1 and t0.g = tt3.g right join ojc_i tt4 on tt3.f1 = tt4.f1
+> order by 1, 2, 3, 4, 5, 6
+f1:int4 | g:int4 | f1:int4 | g:int4 | f1:int4 | g:int4
+1 | 2 | 1 | 2 | 1 | 2
+1 | 2 | 1 | 2 | 1 | 3
+1 | 3 | 1 | 3 | 1 | 2
+1 | 3 | 1 | 3 | 1 | 3
+NULL | NULL | 0 | 1 | 0 | 1
+NULL | NULL | 2 | 4 | 2 | 4
+NULL | NULL | NULL | NULL | NULL | 5
+-- SELECT 7
+
+> drop table ojc_t
+-- DROP TABLE
+
+> drop table ojc_i
+-- DROP TABLE
+

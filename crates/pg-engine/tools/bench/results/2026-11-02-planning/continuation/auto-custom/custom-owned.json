@@ -1,0 +1,24 @@
+{
+  "pid": 373459,
+  "data": "/home/meszmate/.cache/pg-engine-perf-20261102/planning-diagnostic/run-20261102T015527Z-370539/auto-custom/custom-data",
+  "argv": [
+    "taskset",
+    "-c",
+    "28-31",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+    "--data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/planning-diagnostic/run-20261102T015527Z-370539/auto-custom/custom-data",
+    "--listen",
+    "127.0.0.1:53323",
+    "--password",
+    "pw",
+    "--cache-mb",
+    "2048",
+    "-c",
+    "maintenance_work_mem=256MB",
+    "-c",
+    "max_connections=100",
+    "-c",
+    "plan_cache_mode=force_custom_plan"
+  ]
+}

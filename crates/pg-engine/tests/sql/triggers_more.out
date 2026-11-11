@@ -1,0 +1,368 @@
+> CREATE TABLE tm (a int PRIMARY KEY, b text, c int CHECK (c >= 0))
+-- CREATE TABLE
+
+> CREATE VIEW tmv AS SELECT a, b FROM tm
+-- CREATE VIEW
+
+> CREATE FUNCTION tm_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE '% % % % argv=%', TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, TG_ARGV;
+>   IF TG_LEVEL = 'STATEMENT' THEN RETURN NULL; END IF;
+>   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER x AFTER INSERT OR UPDATE ON tm REFERENCING NEW TABLE AS nn FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 0A000: transition tables cannot be specified for triggers with more than one event
+
+> CREATE TRIGGER x AFTER UPDATE ON tm REFERENCING NEW TABLE AS nn OLD TABLE AS nn FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 42P17: OLD TABLE name and NEW TABLE name cannot be the same
+
+> CREATE TRIGGER x AFTER UPDATE ON tm REFERENCING OLD ROW AS r FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 0A000: ROW variable naming in the REFERENCING clause is not supported
+HINT: Use OLD TABLE or NEW TABLE for naming transition tables.
+
+> CREATE TRIGGER x AFTER UPDATE OF a ON tm REFERENCING OLD TABLE AS r FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 0A000: transition tables cannot be specified for triggers with column lists
+
+> CREATE TRIGGER x AFTER INSERT ON tm REFERENCING OLD TABLE AS r FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 42P17: OLD TABLE can only be specified for a DELETE or UPDATE trigger
+
+> CREATE TRIGGER x AFTER TRUNCATE ON tm REFERENCING OLD TABLE AS r FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 0A000: TRUNCATE triggers with transition tables are not supported
+
+> CREATE TRIGGER x AFTER DELETE ON tm REFERENCING NEW TABLE AS r FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 42P17: NEW TABLE can only be specified for an INSERT or UPDATE trigger
+
+> CREATE TRIGGER x AFTER DELETE ON tm REFERENCING OLD TABLE AS r OLD TABLE AS s FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 42P17: OLD TABLE cannot be specified multiple times
+
+> CREATE TRIGGER x INSTEAD OF INSERT ON tmv REFERENCING NEW TABLE AS r FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 42809: "tmv" is a view
+DETAIL: Triggers on views cannot have transition tables.
+
+> CREATE TRIGGER x INSTEAD OF INSERT ON tmv FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 0A000: INSTEAD OF triggers must be FOR EACH ROW
+
+> CREATE TRIGGER x INSTEAD OF UPDATE OF a ON tmv FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 0A000: INSTEAD OF triggers cannot have column lists
+
+> CREATE TRIGGER x INSTEAD OF INSERT ON tmv FOR EACH ROW WHEN (NEW.a > 0) EXECUTE FUNCTION tm_fn()
+ERROR 0A000: INSTEAD OF triggers cannot have WHEN conditions
+
+> CREATE TRIGGER x BEFORE INSERT ON tmv FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 42809: "tmv" is a view
+DETAIL: Views cannot have row-level BEFORE or AFTER triggers.
+
+> CREATE TRIGGER x BEFORE TRUNCATE ON tmv FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+ERROR 42809: "tmv" is a view
+DETAIL: Views cannot have TRUNCATE triggers.
+
+> CREATE TRIGGER x INSTEAD OF INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 42809: "tm" is a table
+DETAIL: Tables cannot have INSTEAD OF triggers.
+
+> CREATE TRIGGER x BEFORE INSERT ON tm FOR EACH ROW EXECUTE FUNCTION nope()
+ERROR 42883: function nope() does not exist
+
+> CREATE TRIGGER x BEFORE INSERT ON nope FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 42P01: relation "nope" does not exist
+
+> CREATE TRIGGER x BEFORE UPDATE OF zz ON tm FOR EACH ROW EXECUTE FUNCTION tm_fn()
+ERROR 42703: column "zz" of relation "tm" does not exist
+
+> CREATE TRIGGER x BEFORE INSERT ON tm FOR EACH ROW WHEN (OLD.a = 1) EXECUTE FUNCTION tm_fn()
+ERROR 42P17: INSERT trigger's WHEN condition cannot reference OLD values (at 57)
+
+> CREATE TRIGGER x BEFORE DELETE ON tm FOR EACH ROW WHEN (NEW.a = 1) EXECUTE FUNCTION tm_fn()
+ERROR 42P17: DELETE trigger's WHEN condition cannot reference NEW values (at 57)
+
+> CREATE TRIGGER v_bs BEFORE INSERT OR UPDATE OR DELETE ON tmv FOR EACH STATEMENT EXECUTE FUNCTION tm_fn('view')
+-- CREATE TRIGGER
+
+> CREATE TRIGGER v_as AFTER INSERT ON tmv FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+-- CREATE TRIGGER
+
+> CREATE FUNCTION tmv_ins() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF NEW.a < 0 THEN RETURN NULL; END IF;
+>   INSERT INTO tm VALUES (NEW.a, NEW.b, 0);
+>   NEW.b := NEW.b || ' (via view)';
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER v_io INSTEAD OF INSERT ON tmv FOR EACH ROW EXECUTE FUNCTION tmv_ins()
+-- CREATE TRIGGER
+
+> INSERT INTO tmv VALUES (1, 'one'), (-1, 'skipped'), (2, 'two') RETURNING *
+NOTICE 00000: v_bs BEFORE STATEMENT INSERT argv=[0:0]={view}
+CONTEXT: PL/pgSQL function tm_fn() line 3 at RAISE
+NOTICE 00000: v_as AFTER STATEMENT INSERT argv=<NULL>
+CONTEXT: PL/pgSQL function tm_fn() line 3 at RAISE
+a:int4 | b:text
+1 | one (via view)
+2 | two (via view)
+-- INSERT 0 2
+
+> UPDATE tmv SET b = 'x'
+-- UPDATE 2
+
+> DELETE FROM tmv
+-- DELETE 2
+
+> SELECT * FROM tm ORDER BY a
+a:int4 | b:text | c:int4
+-- SELECT 0
+
+> SELECT table_name, is_insertable_into, is_trigger_insertable_into, is_trigger_updatable, is_trigger_deletable FROM information_schema.views WHERE table_name = 'tmv'
+table_name:name | is_insertable_into:varchar | is_trigger_insertable_into:varchar | is_trigger_updatable:varchar | is_trigger_deletable:varchar
+tmv | YES | YES | NO | NO
+-- SELECT 1
+
+> SELECT tgname, pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgrelid = 'tmv'::regclass ORDER BY tgname
+tgname:name | pg_get_triggerdef:text
+v_as | CREATE TRIGGER v_as AFTER INSERT ON tmv FOR EACH STATEMENT EXECUTE FUNCTION tm_fn()
+v_bs | CREATE TRIGGER v_bs BEFORE INSERT OR DELETE OR UPDATE ON tmv FOR EACH STATEMENT EXECUTE FUNCTION tm_fn('view')
+v_io | CREATE TRIGGER v_io INSTEAD OF INSERT ON tmv FOR EACH ROW EXECUTE FUNCTION tmv_ins()
+-- SELECT 3
+
+> CREATE TRIGGER r1 BEFORE INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_fn('first')
+-- CREATE TRIGGER
+
+> CREATE TRIGGER r1 BEFORE INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_fn('dup')
+ERROR 42710: trigger "r1" for relation "tm" already exists
+
+> CREATE OR REPLACE TRIGGER r1 AFTER INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_fn('second')
+-- CREATE TRIGGER
+
+> INSERT INTO tm VALUES (5, 'five', 1)
+NOTICE 00000: r1 AFTER ROW INSERT argv=[0:0]={second}
+CONTEXT: PL/pgSQL function tm_fn() line 3 at RAISE
+-- INSERT 0 1
+
+> SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'r1'
+pg_get_triggerdef:text
+CREATE TRIGGER r1 AFTER INSERT ON public.tm FOR EACH ROW EXECUTE FUNCTION tm_fn('second')
+-- SELECT 1
+
+> DROP TRIGGER r1 ON tm
+-- DROP TRIGGER
+
+> CREATE FUNCTION tm_neg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.c := -1; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tm_neg BEFORE INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_neg()
+-- CREATE TRIGGER
+
+> INSERT INTO tm VALUES (6, 'six', 1)
+ERROR 23514: new row for relation "tm" violates check constraint "tm_c_check"
+DETAIL: Failing row contains (6, six, -1).
+OBJECTS: schema=public table=tm constraint=tm_c_check
+
+> DROP TRIGGER tm_neg ON tm
+-- DROP TRIGGER
+
+> CREATE FUNCTION tm_shape() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN ROW(1); END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tm_shape BEFORE INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_shape()
+-- CREATE TRIGGER
+
+> INSERT INTO tm VALUES (7, 'seven', 1)
+ERROR 42804: returned row structure does not match the structure of the triggering table
+DETAIL: Number of returned columns (1) does not match expected column count (3).
+CONTEXT: PL/pgSQL function tm_shape() during function exit
+
+> DROP TRIGGER tm_shape ON tm
+-- DROP TRIGGER
+
+> CREATE FUNCTION tm_noreturn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tm_noreturn BEFORE INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_noreturn()
+-- CREATE TRIGGER
+
+> INSERT INTO tm VALUES (8, 'eight', 1)
+ERROR 2F005: control reached end of trigger procedure without RETURN
+CONTEXT: PL/pgSQL function tm_noreturn()
+
+> DROP TRIGGER tm_noreturn ON tm
+-- DROP TRIGGER
+
+> CREATE TRIGGER e1 AFTER UPDATE ON tm FOR EACH ROW EXECUTE FUNCTION tm_fn()
+-- CREATE TRIGGER
+
+> ALTER TABLE tm DISABLE TRIGGER USER
+-- ALTER TABLE
+
+> UPDATE tm SET b = 'quiet' WHERE a = 5
+-- UPDATE 1
+
+> ALTER TABLE tm ENABLE ALWAYS TRIGGER e1
+-- ALTER TABLE
+
+> SELECT tgname, tgenabled FROM pg_trigger WHERE tgname = 'e1'
+tgname:name | tgenabled:char
+e1 | A
+-- SELECT 1
+
+> ALTER TABLE tm ENABLE REPLICA TRIGGER e1
+-- ALTER TABLE
+
+> SELECT tgname, tgenabled FROM pg_trigger WHERE tgname = 'e1'
+tgname:name | tgenabled:char
+e1 | R
+-- SELECT 1
+
+> ALTER TABLE tm ENABLE TRIGGER USER
+-- ALTER TABLE
+
+> ALTER TABLE tm DISABLE TRIGGER nope
+ERROR 42704: trigger "nope" for table "tm" does not exist
+
+> UPDATE tm SET b = 'loud' WHERE a = 5
+NOTICE 00000: e1 AFTER ROW UPDATE argv=<NULL>
+CONTEXT: PL/pgSQL function tm_fn() line 3 at RAISE
+-- UPDATE 1
+
+> COMMENT ON TRIGGER e1 ON tm IS 'an update trigger'
+-- COMMENT
+
+> SELECT obj_description(oid, 'pg_trigger') FROM pg_trigger WHERE tgname = 'e1'
+obj_description:text
+an update trigger
+-- SELECT 1
+
+> ALTER TRIGGER e1 ON tm RENAME TO e2
+-- ALTER TRIGGER
+
+> ALTER TRIGGER e2 ON tm RENAME TO v_bs
+-- ALTER TRIGGER
+
+> ALTER TRIGGER nope ON tm RENAME TO zz
+ERROR 42704: trigger "nope" for table "tm" does not exist
+
+> DROP FUNCTION tm_fn()
+ERROR 2BP01: cannot drop function tm_fn() because other objects depend on it
+DETAIL: trigger v_bs on view tmv depends on function tm_fn()
+DETAIL: trigger v_as on view tmv depends on function tm_fn()
+DETAIL: trigger v_bs on table tm depends on function tm_fn()
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP FUNCTION tm_fn() CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to trigger v_bs on view tmv
+DETAIL: drop cascades to trigger v_as on view tmv
+DETAIL: drop cascades to trigger v_bs on table tm
+-- DROP FUNCTION
+
+> SELECT count(*) FROM pg_trigger WHERE tgrelid IN ('tm'::regclass, 'tmv'::regclass)
+count:int8
+1
+-- SELECT 1
+
+> CREATE FUNCTION tm_deferred() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'constraint trigger for %', NEW.a;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE CONSTRAINT TRIGGER ct AFTER INSERT ON tm DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION tm_deferred()
+-- CREATE TRIGGER
+
+> SELECT tgname, tgdeferrable, tginitdeferred, pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'ct'
+tgname:name | tgdeferrable:bool | tginitdeferred:bool | pg_get_triggerdef:text
+ct | t | t | CREATE CONSTRAINT TRIGGER ct AFTER INSERT ON public.tm DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION tm_deferred()
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO tm VALUES (10, 'ten', 0)
+-- INSERT 0 1
+
+> SELECT 'before commit'
+?column?:text
+before commit
+-- SELECT 1
+
+> COMMIT
+NOTICE 00000: constraint trigger for 10
+CONTEXT: PL/pgSQL function tm_deferred() line 3 at RAISE
+-- COMMIT
+
+> CREATE CONSTRAINT TRIGGER ct2 AFTER INSERT ON tm FOR EACH ROW EXECUTE FUNCTION tm_deferred()
+-- CREATE TRIGGER
+
+> INSERT INTO tm VALUES (11, 'eleven', 0)
+NOTICE 00000: constraint trigger for 11
+CONTEXT: PL/pgSQL function tm_deferred() line 3 at RAISE
+NOTICE 00000: constraint trigger for 11
+CONTEXT: PL/pgSQL function tm_deferred() line 3 at RAISE
+-- INSERT 0 1
+
+> DROP TRIGGER ct ON tm
+-- DROP TRIGGER
+
+> DROP TRIGGER ct2 ON tm
+-- DROP TRIGGER
+
+> CREATE TABLE tc (k int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> CREATE FUNCTION tc_dump() RETURNS trigger LANGUAGE plpgsql AS $$
+> DECLARE n int; o int;
+> BEGIN
+>   IF TG_OP = 'INSERT' THEN
+>     SELECT count(*) INTO n FROM nt;
+>     RAISE NOTICE '% inserted %', TG_NAME, n;
+>   ELSE
+>     SELECT count(*) INTO o FROM ot;
+>     SELECT count(*) INTO n FROM nt;
+>     RAISE NOTICE '% updated old=% new=% sum=%', TG_NAME, o, n, (SELECT sum(v) FROM nt);
+>   END IF;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER tc_i AFTER INSERT ON tc REFERENCING NEW TABLE AS nt FOR EACH STATEMENT EXECUTE FUNCTION tc_dump()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER tc_u AFTER UPDATE ON tc REFERENCING OLD TABLE AS ot NEW TABLE AS nt FOR EACH STATEMENT EXECUTE FUNCTION tc_dump()
+-- CREATE TRIGGER
+
+> INSERT INTO tc VALUES (1, 1), (2, 2)
+NOTICE 00000: tc_i inserted 2
+CONTEXT: PL/pgSQL function tc_dump() line 6 at RAISE
+-- INSERT 0 2
+
+> INSERT INTO tc VALUES (2, 20), (3, 30) ON CONFLICT (k) DO UPDATE SET v = excluded.v
+NOTICE 00000: tc_u updated old=1 new=1 sum=20
+CONTEXT: PL/pgSQL function tc_dump() line 10 at RAISE
+NOTICE 00000: tc_i inserted 1
+CONTEXT: PL/pgSQL function tc_dump() line 6 at RAISE
+-- INSERT 0 2
+
+> UPDATE tc SET v = v + 1 WHERE false
+NOTICE 00000: tc_u updated old=0 new=0 sum=<NULL>
+CONTEXT: PL/pgSQL function tc_dump() line 10 at RAISE
+-- UPDATE 0
+
+> SELECT * FROM nt
+ERROR 42P01: relation "nt" does not exist (at 15)
+
+> DROP TABLE tc
+-- DROP TABLE
+
+> DROP VIEW tmv
+-- DROP VIEW
+
+> DROP TABLE tm
+-- DROP TABLE
+
+> DROP FUNCTION tmv_ins(), tm_neg(), tm_shape(), tm_noreturn(), tm_deferred(), tc_dump()
+-- DROP FUNCTION
+

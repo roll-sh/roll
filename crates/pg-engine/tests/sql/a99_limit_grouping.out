@@ -1,0 +1,95 @@
+> CREATE TABLE lg_orders (id int PRIMARY KEY, customer text NOT NULL, amount numeric)
+>   WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE INDEX lg_orders_customer ON lg_orders (customer)
+-- CREATE INDEX
+
+> INSERT INTO lg_orders SELECT i, 'C' || lpad(((i * 7) % 89)::text, 3, '0'), i % 13 FROM generate_series(1, 830) i
+-- INSERT 0 830
+
+> EXPLAIN SELECT customer, count(*) FROM lg_orders GROUP BY customer LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.15..1.82 rows=5 width=40)
+  ->  GroupAggregate  (cost=0.15..67.15 rows=200 width=40)
+        Group Key: customer
+        ->  Index Only Scan using lg_orders_customer on lg_orders  (cost=0.15..60.90 rows=850 width=32)
+-- EXPLAIN
+
+> SELECT customer, count(*) FROM lg_orders GROUP BY customer LIMIT 5
+customer:text | count:int8
+C000 | 9
+C001 | 9
+C002 | 10
+C003 | 9
+C004 | 10
+-- SELECT 5
+
+> EXPLAIN SELECT customer, count(*) FROM lg_orders GROUP BY customer
+QUERY PLAN:text
+HashAggregate  (cost=22.75..24.75 rows=200 width=40)
+  Group Key: customer
+  ->  Seq Scan on lg_orders  (cost=0.00..18.50 rows=850 width=32)
+-- EXPLAIN
+
+> ANALYZE lg_orders
+-- ANALYZE
+
+> EXPLAIN SELECT customer, count(*) FROM lg_orders GROUP BY customer LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.15..2.71 rows=5 width=13)
+  ->  GroupAggregate  (cost=0.15..45.64 rows=89 width=13)
+        Group Key: customer
+        ->  Index Only Scan using lg_orders_customer on lg_orders  (cost=0.15..40.60 rows=830 width=5)
+-- EXPLAIN
+
+> SELECT customer, count(*) FROM lg_orders GROUP BY customer LIMIT 5
+customer:text | count:int8
+C000 | 9
+C001 | 9
+C002 | 10
+C003 | 9
+C004 | 10
+-- SELECT 5
+
+> EXPLAIN SELECT customer, max(amount) FROM lg_orders GROUP BY customer LIMIT 3 OFFSET 2
+QUERY PLAN:text
+Limit  (cost=1.17..2.71 rows=3 width=37)
+  ->  GroupAggregate  (cost=0.15..45.64 rows=89 width=37)
+        Group Key: customer
+        ->  Index Scan using lg_orders_customer on lg_orders  (cost=0.15..40.60 rows=830 width=9)
+-- EXPLAIN
+
+> SELECT customer, max(amount) FROM lg_orders GROUP BY customer LIMIT 3 OFFSET 2
+customer:text | max:numeric
+C002 | 12
+C003 | 12
+C004 | 12
+-- SELECT 3
+
+> EXPLAIN SELECT customer, count(*) FROM lg_orders GROUP BY customer LIMIT 80
+QUERY PLAN:text
+Limit  (cost=17.45..18.25 rows=80 width=13)
+  ->  HashAggregate  (cost=17.45..18.34 rows=89 width=13)
+        Group Key: customer
+        ->  Seq Scan on lg_orders  (cost=0.00..13.30 rows=830 width=5)
+-- EXPLAIN
+
+> EXPLAIN SELECT DISTINCT customer FROM lg_orders LIMIT 4
+QUERY PLAN:text
+Limit  (cost=0.15..2.06 rows=4 width=5)
+  ->  Unique  (cost=0.15..42.67 rows=89 width=5)
+        ->  Index Only Scan using lg_orders_customer on lg_orders  (cost=0.15..40.60 rows=830 width=5)
+-- EXPLAIN
+
+> SELECT DISTINCT customer FROM lg_orders LIMIT 4
+customer:text
+C000
+C001
+C002
+C003
+-- SELECT 4
+
+> DROP TABLE lg_orders
+-- DROP TABLE
+

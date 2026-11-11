@@ -1,0 +1,352 @@
+> CREATE DATABASE locale_b1 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_b2 LOCALE_PROVIDER builtin LOCALE 'C.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_b3 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'PG_UNICODE_FAST' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_b4 LOCALE_PROVIDER builtin LOCALE 'C' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_b5 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_b6 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' LC_COLLATE 'en_US.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i1 LOCALE_PROVIDER icu ICU_LOCALE 'en-US' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i2 LOCALE_PROVIDER icu ICU_LOCALE 'de' ICU_RULES '&a < b' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i3 LOCALE_PROVIDER icu LOCALE 'sv-SE' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i4 LOCALE_PROVIDER icu LOCALE 'en_US.utf8' TEMPLATE template0
+NOTICE 00000: using standard form "en-US" for ICU locale "en_US.utf8"
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i5 LOCALE_PROVIDER icu LOCALE 'und' ICU_LOCALE 'en' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i6 LOCALE_PROVIDER icu ICU_LOCALE '' TEMPLATE template0
+NOTICE 00000: using standard form "und" for ICU locale ""
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i7 LOCALE_PROVIDER icu ICU_LOCALE 'root' TEMPLATE template0
+NOTICE 00000: using standard form "und" for ICU locale "root"
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i8 LOCALE_PROVIDER icu ICU_LOCALE 'nonsense-xx' TEMPLATE template0
+NOTICE 00000: using standard form "nonsense-XX" for ICU locale "nonsense-xx"
+WARNING 22023: ICU locale "nonsense-XX" has unknown language "nonsense"
+HINT: To disable ICU locale validation, set the parameter "icu_validation_level" to "disabled".
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i9 LOCALE_PROVIDER icu ICU_LOCALE 'en-u-kn-true' TEMPLATE template0
+NOTICE 00000: using standard form "en-u-kn" for ICU locale "en-u-kn-true"
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i10 LOCALE_PROVIDER ICU ICU_LOCALE 'EN' TEMPLATE template0
+NOTICE 00000: using standard form "en" for ICU locale "EN"
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i11 LOCALE_PROVIDER icu LOCALE 'tr_TR' TEMPLATE template0
+NOTICE 00000: using standard form "tr-TR" for ICU locale "tr_TR"
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_i12 OWNER postgres LOCALE_PROVIDER icu ICU_LOCALE 'ja' ICU_RULES '' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c1 LOCALE 'en_US.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c2 LOCALE 'xx_YY' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c3 LC_COLLATE 'fr_FR.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c4 LC_CTYPE 'de_DE.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c5 LOCALE 'C' TEMPLATE template1
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c6 LOCALE 'POSIX' TEMPLATE template1
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c7 LOCALE 'C.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c8 LOCALE '' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c9 LOCALE 'a/b' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c10 LOCALE 'abcdefghijklmnopqrstuvwxyz' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c11 LOCALE '.foo' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c12 LOCALE 'C' LC_COLLATE 'C' ENCODING utf8 TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c13 ENCODING 6 TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_v1 COLLATION_VERSION '42' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_v2 LOCALE_PROVIDER icu ICU_LOCALE 'en' COLLATION_VERSION '42' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_t1 TEMPLATE locale_i1
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_t2 TEMPLATE locale_b1 BUILTIN_LOCALE 'PG_UNICODE_FAST'
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_t3 TEMPLATE locale_c1
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_e1 TEMPLATE locale_i1 LOCALE_PROVIDER icu ICU_LOCALE 'fr'
+ERROR 22023: new ICU locale (fr) is incompatible with the ICU locale of the template database (en-US)
+HINT: Use the same ICU locale as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e2 LOCALE 'en_US.UTF-8' TEMPLATE template1
+ERROR 22023: new collation (en_US.UTF-8) is incompatible with the collation of the template database (C)
+HINT: Use the same collation as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e3 LC_CTYPE 'C.UTF-8' TEMPLATE template1
+ERROR 22023: new LC_CTYPE (C.UTF-8) is incompatible with the LC_CTYPE of the template database (C)
+HINT: Use the same LC_CTYPE as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e4 LOCALE_PROVIDER icu ICU_LOCALE 'en-US'
+ERROR 22023: new locale provider (icu) does not match locale provider of the template database (libc)
+HINT: Use the same locale provider as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e5 LOCALE_PROVIDER libc TEMPLATE locale_i1
+ERROR 22023: new locale provider (libc) does not match locale provider of the template database (icu)
+HINT: Use the same locale provider as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e6 TEMPLATE locale_b1
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_e7 TEMPLATE locale_c1 LOCALE 'fr_FR'
+ERROR 22023: new collation (fr_FR) is incompatible with the collation of the template database (en_US.UTF-8)
+HINT: Use the same collation as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e8 TEMPLATE locale_i2 ICU_RULES '&b<a'
+ERROR 22023: new ICU collation rules (&b<a) are incompatible with the ICU collation rules of the template database (&a < b)
+HINT: Use the same ICU collation rules as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e9 TEMPLATE locale_nosuch
+ERROR 3D000: template database "locale_nosuch" does not exist
+
+> CREATE DATABASE locale_e10 LOCALE_PROVIDER builtin TEMPLATE template0
+ERROR 22023: LOCALE or BUILTIN_LOCALE must be specified
+
+> CREATE DATABASE locale_e11 LOCALE_PROVIDER icu TEMPLATE template0
+ERROR 22023: LOCALE or ICU_LOCALE must be specified
+
+> CREATE DATABASE locale_e12 LOCALE_PROVIDER libc ICU_LOCALE 'en' TEMPLATE template0
+ERROR 42P17: ICU locale cannot be specified unless locale provider is ICU
+
+> CREATE DATABASE locale_e13 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'xx' TEMPLATE template0
+ERROR 42809: invalid locale name "xx" for builtin provider
+
+> CREATE DATABASE locale_e14 LOCALE_PROVIDER foo TEMPLATE template0
+ERROR 42P17: unrecognized locale provider: foo
+
+> CREATE DATABASE locale_e15 LOCALE_PROVIDER libc LOCALE 'C' ICU_RULES '&a<b' TEMPLATE template0
+ERROR 42P17: ICU rules cannot be specified unless locale provider is ICU
+
+> CREATE DATABASE locale_e16 LOCALE_PROVIDER icu LOCALE 'en' BUILTIN_LOCALE 'C' TEMPLATE template0
+ERROR 42P17: BUILTIN_LOCALE cannot be specified unless locale provider is builtin
+
+> CREATE DATABASE locale_e17 LOCALE_PROVIDER builtin LOCALE 'C' ICU_LOCALE 'en' TEMPLATE template0
+ERROR 42P17: ICU locale cannot be specified unless locale provider is ICU
+
+> CREATE DATABASE locale_e18 ENCODING 'UTF8' ENCODING 'UTF8' TEMPLATE template0
+ERROR 42601: conflicting or redundant options (at 44)
+
+> CREATE DATABASE locale_e19 ENCODING 'foo' TEMPLATE template0
+ERROR 42704: foo is not a valid encoding name (at 28)
+
+> CREATE DATABASE locale_e20 ENCODING 99 TEMPLATE template0
+ERROR 42704: 99 is not a valid encoding code (at 28)
+
+> CREATE DATABASE locale_e21 LOCALE_PROVIDER 'builtin' BUILTIN_LOCALE 'c.utf8' TEMPLATE template0
+ERROR 42809: invalid locale name "c.utf8" for builtin provider
+
+> CREATE DATABASE locale_e22 ENCODING 'LATIN1' LOCALE 'en_US.UTF-8' TEMPLATE template0
+ERROR 22023: encoding "LATIN1" does not match locale "en_US.UTF-8"
+DETAIL: The chosen LC_CTYPE setting requires encoding "UTF8".
+
+> CREATE DATABASE locale_e23 ENCODING 'LATIN1' LOCALE 'en_US' TEMPLATE template0
+ERROR 22023: encoding "LATIN1" does not match locale "en_US"
+DETAIL: The chosen LC_CTYPE setting requires encoding "UTF8".
+
+> CREATE DATABASE locale_e24 ENCODING 'SQL_ASCII' LOCALE_PROVIDER icu ICU_LOCALE 'en' TEMPLATE template0
+ERROR 22023: encoding "SQL_ASCII" is not supported with ICU provider
+
+> CREATE DATABASE locale_e25 ENCODING 'LATIN1' LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' TEMPLATE template0
+ERROR 42809: encoding "LATIN1" does not match locale "C.UTF-8"
+
+> CREATE DATABASE locale_e26 ENCODING 'LATIN1' TEMPLATE template1
+ERROR 22023: new encoding (LATIN1) is incompatible with the encoding of the template database (UTF8)
+HINT: Use the same encoding as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_e27 LOCALE 'é' TEMPLATE template0
+WARNING 22023: locale name "é" contains non-ASCII characters
+ERROR 42809: invalid LC_COLLATE locale name: "é"
+
+> CREATE DATABASE locale_e28 STRATEGY bogus TEMPLATE template0
+ERROR 22023: invalid create database strategy "bogus"
+HINT: Valid strategies are "wal_log" and "file_copy".
+
+> CREATE DATABASE locale_e29 BOGUS 1 TEMPLATE template0
+ERROR 42601: option "bogus" not recognized (at 28)
+
+> CREATE DATABASE locale_e30 LOCALE_PROVIDER icu ICU_LOCALE 'xx-invalid-@@' TEMPLATE template0
+WARNING 22023: could not convert locale name "xx-invalid-@@" to language tag: U_ILLEGAL_ARGUMENT_ERROR
+WARNING 22023: ICU locale "xx-invalid-@@" has unknown language "xx"
+HINT: To disable ICU locale validation, set the parameter "icu_validation_level" to "disabled".
+-- CREATE DATABASE
+
+> SET icu_validation_level = error
+-- SET
+
+> CREATE DATABASE locale_e31 LOCALE_PROVIDER icu ICU_LOCALE 'nonsense-xx' TEMPLATE template0
+NOTICE 00000: using standard form "nonsense-XX" for ICU locale "nonsense-xx"
+ERROR 22023: ICU locale "nonsense-XX" has unknown language "nonsense"
+HINT: To disable ICU locale validation, set the parameter "icu_validation_level" to "disabled".
+
+> SET icu_validation_level = disabled
+-- SET
+
+> CREATE DATABASE locale_i13 LOCALE_PROVIDER icu ICU_LOCALE 'nonsense-yy' TEMPLATE template0
+NOTICE 00000: using standard form "nonsense-YY" for ICU locale "nonsense-yy"
+-- CREATE DATABASE
+
+> RESET icu_validation_level
+-- RESET
+
+> SELECT datname, datlocprovider, datcollate, datctype, datlocale, daticurules, datcollversion, encoding
+>   FROM pg_database WHERE datname LIKE 'locale%' OR datname IN ('postgres', 'template0', 'template1') ORDER BY datname
+datname:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text | daticurules:text | datcollversion:text | encoding:int4
+locale_b1 | b | C | C | C.UTF-8 | NULL | 1 | 6
+locale_b2 | b | C | C.UTF-8 | C.UTF-8 | NULL | 1 | 6
+locale_b3 | b | C | C | PG_UNICODE_FAST | NULL | 1 | 6
+locale_b4 | b | C | C | C | NULL | 1 | 6
+locale_b5 | b | C | C | C.UTF-8 | NULL | 1 | 6
+locale_b6 | b | en_US.UTF-8 | C | C.UTF-8 | NULL | 1 | 6
+locale_c1 | c | en_US.UTF-8 | en_US.UTF-8 | NULL | NULL | NULL | 6
+locale_c10 | c | C | C.UTF-8 | NULL | NULL | NULL | 6
+locale_c11 | c | C | C.UTF-8 | NULL | NULL | NULL | 6
+locale_c12 | c | C | C | NULL | NULL | NULL | 6
+locale_c13 | c | C | C | NULL | NULL | NULL | 6
+locale_c2 | c | xx_YY | xx_YY | NULL | NULL | NULL | 6
+locale_c3 | c | fr_FR.UTF-8 | C | NULL | NULL | NULL | 6
+locale_c4 | c | C | de_DE.UTF-8 | NULL | NULL | NULL | 6
+locale_c5 | c | C | C | NULL | NULL | NULL | 6
+locale_c6 | c | C | C | NULL | NULL | NULL | 6
+locale_c7 | c | C | C.UTF-8 | NULL | NULL | NULL | 6
+locale_c8 | c | C | C | NULL | NULL | NULL | 6
+locale_c9 | c | C | C.UTF-8 | NULL | NULL | NULL | 6
+locale_e30 | i | C | C | xx-invalid-@@ | NULL | 153.136 | 6
+locale_e6 | b | C | C | C.UTF-8 | NULL | 1 | 6
+locale_i1 | i | C | C | en-US | NULL | 153.136 | 6
+locale_i10 | i | C | C | en | NULL | 153.136 | 6
+locale_i11 | i | tr_TR | tr_TR | tr-TR | NULL | 153.136.48 | 6
+locale_i12 | i | C | C | ja |  | 153.136.48 | 6
+locale_i13 | i | C | C | nonsense-YY | NULL | 153.136 | 6
+locale_i2 | i | C | C | de | &a < b | 153.136 | 6
+locale_i3 | i | sv-SE | sv-SE | sv-SE | NULL | 153.136.48 | 6
+locale_i4 | i | en_US.utf8 | en_US.utf8 | en-US | NULL | 153.136 | 6
+locale_i5 | i | und | und | en | NULL | 153.136 | 6
+locale_i6 | i | C | C | und | NULL | 153.136 | 6
+locale_i7 | i | C | C | und | NULL | 153.136 | 6
+locale_i8 | i | C | C | nonsense-XX | NULL | 153.136 | 6
+locale_i9 | i | C | C | en-u-kn | NULL | 153.136 | 6
+locale_t1 | i | C | C | en-US | NULL | 153.136 | 6
+locale_t2 | b | C | C | PG_UNICODE_FAST | NULL | 1 | 6
+locale_t3 | c | en_US.UTF-8 | en_US.UTF-8 | NULL | NULL | NULL | 6
+locale_v1 | c | C | C | NULL | NULL | 42 | 6
+locale_v2 | i | C | C | en | NULL | 42 | 6
+postgres | c | C | C | NULL | NULL | NULL | 6
+template0 | c | C | C | NULL | NULL | NULL | 6
+template1 | c | C | C | NULL | NULL | NULL | 6
+-- SELECT 42
+
+> SELECT datname, pg_database_collation_actual_version(oid) FROM pg_database WHERE datname LIKE 'locale%' ORDER BY datname
+datname:name | pg_database_collation_actual_version:text
+locale_b1 | 1
+locale_b2 | 1
+locale_b3 | 1
+locale_b4 | 1
+locale_b5 | 1
+locale_b6 | 1
+locale_c1 | NULL
+locale_c10 | NULL
+locale_c11 | NULL
+locale_c12 | NULL
+locale_c13 | NULL
+locale_c2 | NULL
+locale_c3 | NULL
+locale_c4 | NULL
+locale_c5 | NULL
+locale_c6 | NULL
+locale_c7 | NULL
+locale_c8 | NULL
+locale_c9 | NULL
+locale_e30 | 153.136
+locale_e6 | 1
+locale_i1 | 153.136
+locale_i10 | 153.136
+locale_i11 | 153.136.48
+locale_i12 | 153.136.48
+locale_i13 | 153.136
+locale_i2 | 153.136
+locale_i3 | 153.136.48
+locale_i4 | 153.136
+locale_i5 | 153.136
+locale_i6 | 153.136
+locale_i7 | 153.136
+locale_i8 | 153.136
+locale_i9 | 153.136
+locale_t1 | 153.136
+locale_t2 | 1
+locale_t3 | NULL
+locale_v1 | NULL
+locale_v2 | 153.136
+-- SELECT 39
+
+> SELECT pg_database_collation_actual_version(0)
+ERROR 42704: database with OID 0 does not exist
+
+> SELECT pg_collation_actual_version(100), pg_collation_actual_version(950), pg_collation_actual_version('ucs_basic'::regcollation), pg_collation_actual_version('pg_c_utf8'::regcollation)
+pg_collation_actual_version:text | pg_collation_actual_version:text | pg_collation_actual_version:text | pg_collation_actual_version:text
+NULL | NULL | 1 | 1
+-- SELECT 1
+
+> SHOW lc_collate
+ERROR 42704: unrecognized configuration parameter "lc_collate"
+
+> SHOW lc_ctype
+ERROR 42704: unrecognized configuration parameter "lc_ctype"
+
+> SELECT name, setting, source FROM pg_settings WHERE name LIKE 'lc\_%' ORDER BY name
+name:text | setting:text | source:text
+lc_messages | C | configuration file
+lc_monetary | C | configuration file
+lc_numeric | C | configuration file
+lc_time | C | configuration file
+-- SELECT 4
+

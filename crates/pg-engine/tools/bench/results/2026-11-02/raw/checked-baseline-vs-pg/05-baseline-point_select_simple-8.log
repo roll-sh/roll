@@ -1,0 +1,1 @@
+RESULT	baseline	oltp	point_select_simple	clients=8	tps=31978	ops=95961	elapsed_s=3.000863187	mean_ms=0.250	p50_ms=0.232	p95_ms=0.407	p99_ms=0.604	errors=0	peak_mem_mb=127.4	validation_version=oltp-values-v1	checked_ops=95961

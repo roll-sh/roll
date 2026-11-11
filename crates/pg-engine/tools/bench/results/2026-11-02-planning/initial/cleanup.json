@@ -1,0 +1,17 @@
+[
+  {
+    "pid": 250232,
+    "stopped": true,
+    "exit": 0
+  },
+  {
+    "pid": 251621,
+    "stopped": true,
+    "exit": 0
+  },
+  {
+    "helper_id": "7f60cd246987ec57e0e8999ce48b0254241ae05f0895a1786a4f7c71814115b8",
+    "remove_exit": 0,
+    "stderr": ""
+  }
+]

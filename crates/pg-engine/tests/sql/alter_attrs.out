@@ -1,0 +1,425 @@
+> create table at1 (a int primary key, b text, c numeric, d int not null)
+-- CREATE TABLE
+
+> create unique index at1_d on at1(d)
+-- CREATE INDEX
+
+> create index at1_b on at1(b)
+-- CREATE INDEX
+
+> alter table at1 alter column b set statistics 500
+-- ALTER TABLE
+
+> alter table at1 alter column b set statistics -1
+-- ALTER TABLE
+
+> alter table at1 alter column c set statistics 20000
+WARNING 22023: lowering statistics target to 10000
+-- ALTER TABLE
+
+> alter table at1 alter column c set statistics -5
+ERROR 22023: statistics target -5 is too low
+
+> alter table at1 alter column c set statistics 50
+-- ALTER TABLE
+
+> alter table at1 alter column zz set statistics 5
+ERROR 42703: column "zz" of relation "at1" does not exist
+
+> alter table at1 alter column 2 set statistics 5
+ERROR 0A000: cannot refer to non-index column by number
+
+> alter index at1_b alter column 1 set statistics 5
+ERROR 0A000: cannot alter statistics on non-expression column "b" of index "at1_b"
+HINT: Alter statistics on table column instead.
+
+> create index at1_e on at1((b||'x'))
+-- CREATE INDEX
+
+> alter index at1_e alter column 1 set statistics 77
+-- ALTER INDEX
+
+> alter index at1_e alter column 2 set statistics 77
+ERROR 42703: column number 2 of relation "at1_e" does not exist
+
+> select attname, attstattarget, attstorage, attcompression, attoptions from pg_attribute where attrelid = 'at1'::regclass and attnum > 0 order by attnum
+attname:name | attstattarget:int2 | attstorage:char | attcompression:char | attoptions:text[]
+a | NULL | p |  | NULL
+b | NULL | x |  | NULL
+c | 50 | m |  | NULL
+d | NULL | p |  | NULL
+-- SELECT 4
+
+> select attname, attstattarget from pg_attribute where attrelid = 'at1_e'::regclass
+attname:name | attstattarget:int2
+expr | 77
+-- SELECT 1
+
+> alter table at1 alter column b set (n_distinct = 100, n_distinct_inherited = -0.5)
+-- ALTER TABLE
+
+> alter table at1 alter column b set (foo = 1)
+ERROR 22023: unrecognized parameter "foo"
+
+> alter table at1 alter column b set (n_distinct = -2)
+ERROR 22023: value -2 out of bounds for option "n_distinct"
+DETAIL: Valid values are between "-1.000000" and "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.000000".
+
+> alter table at1 alter column b reset (n_distinct)
+-- ALTER TABLE
+
+> alter table at1 alter column c set storage external
+-- ALTER TABLE
+
+> alter table at1 alter column a set storage external
+ERROR 0A000: column data type integer can only have storage PLAIN
+
+> alter table at1 alter column a set storage plain
+-- ALTER TABLE
+
+> alter table at1 alter column b set storage main
+-- ALTER TABLE
+
+> alter table at1 alter column b set storage default
+-- ALTER TABLE
+
+> alter table at1 alter column b set storage bogus
+ERROR 22023: invalid storage type "bogus"
+
+> alter table at1 alter column b set compression lz4
+-- ALTER TABLE
+
+> alter table at1 alter column b set compression pglz
+-- ALTER TABLE
+
+> alter table at1 alter column b set compression bogus
+ERROR 22023: invalid compression method "bogus"
+
+> alter table at1 alter column a set compression pglz
+ERROR 0A000: column data type integer does not support compression
+
+> alter table at1 alter column c set compression default
+-- ALTER TABLE
+
+> select attname, attstattarget, attstorage, attcompression, attoptions from pg_attribute where attrelid = 'at1'::regclass and attnum > 0 order by attnum
+attname:name | attstattarget:int2 | attstorage:char | attcompression:char | attoptions:text[]
+a | NULL | p |  | NULL
+b | NULL | x | p | {n_distinct_inherited=-0.5}
+c | 50 | e |  | NULL
+d | NULL | p |  | NULL
+-- SELECT 4
+
+> select relreplident from pg_class where relname = 'at1'
+relreplident:char
+d
+-- SELECT 1
+
+> alter table at1 replica identity full
+-- ALTER TABLE
+
+> select relreplident from pg_class where relname = 'at1'
+relreplident:char
+f
+-- SELECT 1
+
+> alter table at1 replica identity using index at1_d
+-- ALTER TABLE
+
+> select relreplident from pg_class where relname = 'at1'
+relreplident:char
+i
+-- SELECT 1
+
+> select indexrelid::regclass, indisreplident from pg_index where indrelid = 'at1'::regclass order by 1
+indexrelid:regclass | indisreplident:bool
+at1_pkey | f
+at1_d | t
+at1_b | f
+at1_e | f
+-- SELECT 4
+
+> alter table at1 replica identity using index at1_b
+ERROR 42809: cannot use non-unique index "at1_b" as replica identity
+
+> alter table at1 replica identity nothing
+-- ALTER TABLE
+
+> alter table at1 replica identity default
+-- ALTER TABLE
+
+> select relreplident from pg_class where relname = 'at1'
+relreplident:char
+d
+-- SELECT 1
+
+> create unique index at1_p on at1(d) where d > 0
+-- CREATE INDEX
+
+> alter table at1 replica identity using index at1_p
+ERROR 0A000: cannot use partial index "at1_p" as replica identity
+
+> create unique index at1_n on at1(b)
+-- CREATE INDEX
+
+> alter table at1 replica identity using index at1_n
+ERROR 42809: index "at1_n" cannot be used as replica identity because column "b" is nullable
+
+> alter table at1 set access method heap
+-- ALTER TABLE
+
+> alter table at1 set access method btree
+ERROR 55000: access method "btree" is not of type TABLE
+
+> alter table at1 set access method nosuch
+ERROR 42704: access method "nosuch" does not exist
+
+> alter table at1 set tablespace pg_default
+-- ALTER TABLE
+
+> alter table at1 set tablespace nosuch
+ERROR 42704: tablespace "nosuch" does not exist
+
+> alter index at1_b set tablespace pg_default
+-- ALTER INDEX
+
+> create table at2 (x int references at1(a), y int unique)
+-- CREATE TABLE
+
+> alter table at2 alter constraint at2_x_fkey deferrable initially deferred
+-- ALTER TABLE
+
+> select conname, condeferrable, condeferred from pg_constraint where conrelid = 'at2'::regclass order by 1
+conname:name | condeferrable:bool | condeferred:bool
+at2_x_fkey | t | t
+at2_y_key | f | f
+-- SELECT 2
+
+> alter table at2 alter constraint at2_y_key deferrable
+ERROR 42809: constraint "at2_y_key" of relation "at2" is not a foreign key constraint
+
+> alter table at2 alter constraint nosuch deferrable
+ERROR 42704: constraint "nosuch" of relation "at2" does not exist
+
+> alter table at2 alter constraint at2_x_fkey not deferrable
+-- ALTER TABLE
+
+> select conname, condeferrable, condeferred from pg_constraint where conrelid = 'at2'::regclass order by 1
+conname:name | condeferrable:bool | condeferred:bool
+at2_x_fkey | f | f
+at2_y_key | f | f
+-- SELECT 2
+
+> alter table at2 alter constraint at2_x_fkey initially deferred
+-- ALTER TABLE
+
+> alter table at2 alter constraint at2_x_fkey deferrable initially immediate
+-- ALTER TABLE
+
+> select conname, condeferrable, condeferred from pg_constraint where conrelid = 'at2'::regclass order by 1
+conname:name | condeferrable:bool | condeferred:bool
+at2_x_fkey | t | f
+at2_y_key | f | f
+-- SELECT 2
+
+> begin
+-- BEGIN
+
+> alter table at2 alter constraint at2_x_fkey deferrable initially deferred
+-- ALTER TABLE
+
+> insert into at2 values (99, 1)
+-- INSERT 0 1
+
+> commit
+ERROR 23503: insert or update on table "at2" violates foreign key constraint "at2_x_fkey"
+DETAIL: Key (x)=(99) is not present in table "at1".
+OBJECTS: schema=public table=at2 constraint=at2_x_fkey
+
+> create table zq(a int)
+-- CREATE TABLE
+
+> alter table zq set access method btree
+ERROR 55000: access method "btree" is not of type TABLE
+
+> alter table zq set tablespace pg_global
+ERROR 22023: only shared relations can be placed in pg_global tablespace
+
+> alter table zq alter column a set (n_distinct = abc)
+ERROR 22023: invalid value for floating point option "n_distinct": abc
+
+> alter table zq alter column a reset (n_distinct = 1)
+ERROR 42601: RESET must not include values for parameters
+
+> alter table zq alter column ctid set statistics 5
+ERROR 0A000: cannot alter system column "ctid"
+
+> alter table zq alter column a set statistics default
+-- ALTER TABLE
+
+> alter index zq set (fillfactor=50)
+ERROR 42809: "zq" is not an index
+
+> create index zqi on zq(a)
+-- CREATE INDEX
+
+> alter index zqi set (fillfactor=50)
+-- ALTER INDEX
+
+> select reloptions from pg_class where relname='zqi'
+reloptions:text[]
+{fillfactor=50}
+-- SELECT 1
+
+> alter index zqi set (fillfactor=5)
+ERROR 22023: value 5 out of bounds for option "fillfactor"
+DETAIL: Valid values are between "10" and "100".
+
+> alter index zqi set (deduplicate_items=off)
+-- ALTER INDEX
+
+> alter index zqi reset (fillfactor)
+-- ALTER INDEX
+
+> select reloptions from pg_class where relname='zqi'
+reloptions:text[]
+{deduplicate_items=off}
+-- SELECT 1
+
+> alter index zqi alter column a set statistics 5
+ERROR 0A000: cannot alter statistics on non-expression column "a" of index "zqi"
+HINT: Alter statistics on table column instead.
+
+> create index zqe on zq((a + 1), a, (a * 2)) include (a)
+-- CREATE INDEX
+
+> select attname from pg_attribute where attrelid = 'zqe'::regclass order by attnum
+attname:name
+expr
+a
+expr1
+a1
+-- SELECT 4
+
+> alter index zqe alter column expr1 set statistics 9
+-- ALTER INDEX
+
+> alter index zqe alter column 4 set statistics 9
+ERROR 0A000: cannot alter statistics on included column "a1" of index "zqe"
+
+> alter index zqe alter column a1 set statistics 9
+ERROR 0A000: cannot alter statistics on included column "a1" of index "zqe"
+
+> select attname, attstattarget from pg_attribute where attrelid = 'zqe'::regclass order by attnum
+attname:name | attstattarget:int2
+expr | NULL
+a | NULL
+expr1 | 9
+a1 | NULL
+-- SELECT 4
+
+> alter index zqi set tablespace nosuch
+ERROR 42704: tablespace "nosuch" does not exist
+
+> alter index zqi set tablespace pg_default
+-- ALTER INDEX
+
+> create table zc (a text storage external compression lz4, b int compression pglz)
+ERROR 0A000: column data type integer does not support compression
+
+> create table zc (a text storage bogus)
+ERROR 22023: invalid storage type "bogus"
+
+> create table zc (a int storage external)
+ERROR 0A000: column data type integer can only have storage PLAIN
+
+> create table zc (a text storage external compression lz4, b text, c int)
+-- CREATE TABLE
+
+> select attname, attstorage, attcompression from pg_attribute where attrelid='zc'::regclass and attnum>0
+attname:name | attstorage:char | attcompression:char
+a | e | l
+b | x | 
+c | p | 
+-- SELECT 3
+
+> create table zc2 (like zc including storage including compression)
+-- CREATE TABLE
+
+> select attname, attstorage, attcompression from pg_attribute where attrelid='zc2'::regclass and attnum>0
+attname:name | attstorage:char | attcompression:char
+a | e | l
+b | x | 
+c | p | 
+-- SELECT 3
+
+> create table zc3 (like zc)
+-- CREATE TABLE
+
+> select attname, attstorage, attcompression from pg_attribute where attrelid='zc3'::regclass and attnum>0
+attname:name | attstorage:char | attcompression:char
+a | x | 
+b | x | 
+c | p | 
+-- SELECT 3
+
+> create table zc4 () inherits (zc)
+-- CREATE TABLE
+
+> select attname, attstorage, attcompression from pg_attribute where attrelid='zc4'::regclass and attnum>0
+attname:name | attstorage:char | attcompression:char
+a | e | l
+b | x | 
+c | p | 
+-- SELECT 3
+
+> create table zc5 (a text storage main)
+-- CREATE TABLE
+
+> create table zc6 () inherits (zc, zc5)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+ERROR 42804: inherited column "a" has a storage parameter conflict
+DETAIL: EXTERNAL versus MAIN
+
+> alter table zc add column d text storage main compression pglz
+-- ALTER TABLE
+
+> select attname, attstorage, attcompression from pg_attribute where attrelid='zc'::regclass and attnum>0
+attname:name | attstorage:char | attcompression:char
+a | e | l
+b | x | 
+c | p | 
+d | m | p
+-- SELECT 4
+
+> alter table zc alter column b set statistics 33
+-- ALTER TABLE
+
+> alter table only zc alter column c set statistics 44
+-- ALTER TABLE
+
+> select attrelid::regclass, attname, attstattarget from pg_attribute where attrelid in ('zc'::regclass, 'zc4'::regclass) and attname in ('b', 'c') order by 1, 2
+attrelid:regclass | attname:name | attstattarget:int2
+zc | b | 33
+zc | c | 44
+zc4 | b | 33
+zc4 | c | NULL
+-- SELECT 4
+
+> select typname, typstorage from pg_type where typname in ('int4', 'text', 'numeric', 'inet', 'bytea', 'jsonb', 'interval') order by 1
+typname:name | typstorage:char
+bytea | x
+inet | m
+int4 | p
+interval | p
+jsonb | x
+numeric | m
+text | x
+-- SELECT 7
+
+> drop table zc, zc2, zc3, zc5, zq cascade
+NOTICE 00000: drop cascades to table zc4
+-- DROP TABLE
+
+> drop table at2, at1
+-- DROP TABLE
+

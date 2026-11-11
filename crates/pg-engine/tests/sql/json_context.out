@@ -1,0 +1,130 @@
+> SELECT '{"a": 1, "b": }'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Expected JSON value, but found "}".
+CONTEXT: JSON data, line 1: {"a": 1, "b": }
+
+> SELECT '{"a": 1 "b": 2}'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Expected "," or "}", but found ""b"".
+CONTEXT: JSON data, line 1: {"a": 1 "b"...
+
+> SELECT '[1, 2, 3,]'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Expected JSON value, but found "]".
+CONTEXT: JSON data, line 1: [1, 2, 3,]
+
+> SELECT '{"aaaaaaaaaa": 1, "bbbbbbbbbbbb": 2, "cccccccccccc": 3, "dddddddddd": x}'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "x" is invalid.
+CONTEXT: JSON data, line 1: ...bbbbbbbbb": 2, "cccccccccccc": 3, "dddddddddd": x...
+
+> SELECT '{"aaaaaaaaaa": 1, "bbbbbbbbbbbb": 2, "cccccccccccc": 3, "dddddddddd": 4, "e": tru, "f": 1}'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "tru" is invalid.
+CONTEXT: JSON data, line 1: ...: 2, "cccccccccccc": 3, "dddddddddd": 4, "e": tru...
+
+> SELECT E'{\n  "a": 1,\n  "b": nul\n}'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "nul" is invalid.
+CONTEXT: JSON data, line 3:   "b": nul
+
+> SELECT E'[1,\n2,\n'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 3: 
+
+> SELECT '"abc\q"'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Escape sequence "\q" is invalid.
+CONTEXT: JSON data, line 1: "abc\q...
+
+> SELECT '"\u12"'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: "\u" must be followed by four hexadecimal digits.
+CONTEXT: JSON data, line 1: "\u12"
+
+> SELECT '"\ud800"'::json
+json:json
+"\ud800"
+-- SELECT 1
+
+> SELECT '"\udc00x"'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Unicode low surrogate must follow a high surrogate.
+CONTEXT: JSON data, line 1: "\udc00...
+
+> SELECT E'"a\tb"'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Character with value 0x09 must be escaped.
+CONTEXT: JSON data, line 1: "a...
+
+> SELECT '01'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "01" is invalid.
+CONTEXT: JSON data, line 1: 01
+
+> SELECT '1.'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "1." is invalid.
+CONTEXT: JSON data, line 1: 1.
+
+> SELECT '-'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "-" is invalid.
+CONTEXT: JSON data, line 1: -
+
+> SELECT 'nulll'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "nulll" is invalid.
+CONTEXT: JSON data, line 1: nulll
+
+> SELECT '{"a":1} x'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "x" is invalid.
+CONTEXT: JSON data, line 1: {"a":1} x
+
+> SELECT '"é ü \u0000 tail"'::jsonb
+ERROR 22P05: unsupported Unicode escape sequence (at 8)
+DETAIL: \u0000 cannot be converted to text.
+CONTEXT: JSON data, line 1: "é ü \u0000...
+
+> SELECT '[1, 2'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1: [1, 2
+
+> SELECT '{'::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1: {
+
+> SELECT ''::json
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1: 
+
+> SELECT '   '::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1:    
+
+> SELECT '{"a" 1}'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Expected ":", but found "1".
+CONTEXT: JSON data, line 1: {"a" 1...
+
+> SELECT '{1: 2}'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Expected string or "}", but found "1".
+CONTEXT: JSON data, line 1: {1...
+
+> SELECT json_extract_path('{"a": }', 'a')
+ERROR 22P02: invalid input syntax for type json (at 26)
+DETAIL: Expected JSON value, but found "}".
+CONTEXT: JSON data, line 1: {"a": }
+
+> SELECT '{"x": [1, 2, {"y": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" , "w": ]}]}'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Expected JSON value, but found "]".
+CONTEXT: JSON data, line 1: ...zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" , "w": ]...
+

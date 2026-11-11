@@ -1,0 +1,110 @@
+> create table qs_a (id int primary key, u int unique, v int, w int)
+-- CREATE TABLE
+
+> create table qs_b (id int primary key, a_id int, t int)
+-- CREATE TABLE
+
+> insert into qs_a select g, 1000 - g, g % 10, g % 7 from generate_series(1, 500) g
+-- INSERT 0 500
+
+> insert into qs_b select g, g % 400, g % 9 from generate_series(1, 800) g
+-- INSERT 0 800
+
+> create index on qs_b (a_id)
+-- CREATE INDEX
+
+> analyze qs_a
+-- ANALYZE
+
+> analyze qs_b
+-- ANALYZE
+
+> explain (costs off) select * from qs_a where id = id and v = v
+QUERY PLAN:text
+Seq Scan on qs_a
+  Filter: (v IS NOT NULL)
+-- EXPLAIN
+
+> explain (costs off) select * from qs_a where id = id or v = 1
+QUERY PLAN:text
+Seq Scan on qs_a
+  Filter: ((id = id) OR (v = 1))
+-- EXPLAIN
+
+> explain (costs off) select * from qs_a where id = u and u = 42
+QUERY PLAN:text
+Index Scan using qs_a_u_key on qs_a
+  Index Cond: (u = 42)
+  Filter: (id = 42)
+-- EXPLAIN
+
+> explain (costs off) select * from qs_a where v = 3 and id = v
+QUERY PLAN:text
+Index Scan using qs_a_pkey on qs_a
+  Index Cond: (id = 3)
+  Filter: (v = 3)
+-- EXPLAIN
+
+> explain (costs off) select * from qs_a a join qs_b b on a.id = b.a_id and false
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> explain (costs off) select * from qs_a a left join qs_b b on a.id = b.a_id and false
+QUERY PLAN:text
+Nested Loop Left Join
+  Join Filter: false
+  ->  Seq Scan on qs_a a
+  ->  Result
+        One-Time Filter: false
+-- EXPLAIN
+
+> explain (costs off) select * from qs_a a left join qs_b b on a.id = b.a_id and (b.t = 1 or true)
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (b.a_id = a.id)
+  ->  Seq Scan on qs_b b
+  ->  Hash
+        ->  Seq Scan on qs_a a
+-- EXPLAIN
+
+> explain (costs off) select count(*) from qs_a a left join qs_b b on a.id = b.a_id and exists (select 1 from qs_a c where c.u = b.t)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Right Join
+        Hash Cond: (b.a_id = a.id)
+        ->  Hash Join
+              Hash Cond: (b.t = c.u)
+              ->  Seq Scan on qs_b b
+              ->  Hash
+                    ->  Seq Scan on qs_a c
+        ->  Hash
+              ->  Seq Scan on qs_a a
+-- EXPLAIN
+
+> explain (costs off) select * from qs_a where false and v = 1
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> select count(*) from qs_a where id = id and v = v
+count:int8
+500
+-- SELECT 1
+
+> select * from qs_a where id = u and u = 42
+id:int4 | u:int4 | v:int4 | w:int4
+-- SELECT 0
+
+> select count(*) from qs_a a left join qs_b b on a.id = b.a_id and exists (select 1 from qs_a c where c.u = b.t + 995)
+count:int8
+544
+-- SELECT 1
+
+> select count(*), count(b.id) from qs_a a left join qs_b b on a.id = b.a_id and not exists (select 1 from qs_a c where c.id = b.t)
+count:int8 | count:int8
+500 | 88
+-- SELECT 1
+

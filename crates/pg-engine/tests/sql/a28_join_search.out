@@ -1,0 +1,236 @@
+> create table a28_t (a int unique, b int)
+-- CREATE TABLE
+
+> insert into a28_t values (1, 2)
+-- INSERT 0 1
+
+> explain (costs off)
+> select t1.a from a28_t t1
+>   left join a28_t t2 on t1.a = t2.a
+>        join a28_t t3 on true
+> where exists (select 1 from a28_t t4
+>                 join a28_t t5 on t4.b = t5.b
+>                 join a28_t t6 on t5.b = t6.b
+>               where t1.a = t4.a and t3.a = t5.a and t4.a = 1)
+QUERY PLAN:text
+Nested Loop
+  ->  Nested Loop
+        ->  Index Only Scan using a28_t_a_key on a28_t t1
+              Index Cond: (a = 1)
+        ->  HashAggregate
+              Group Key: t5.a
+              ->  Hash Join
+                    Hash Cond: (t6.b = t4.b)
+                    ->  Seq Scan on a28_t t6
+                    ->  Hash
+                          ->  Hash Join
+                                Hash Cond: (t5.b = t4.b)
+                                ->  Seq Scan on a28_t t5
+                                ->  Hash
+                                      ->  Index Scan using a28_t_a_key on a28_t t4
+                                            Index Cond: (a = 1)
+  ->  Index Only Scan using a28_t_a_key on a28_t t3
+        Index Cond: (a = t5.a)
+-- EXPLAIN
+
+> select t1.a from a28_t t1
+>   left join a28_t t2 on t1.a = t2.a
+>        join a28_t t3 on true
+> where exists (select 1 from a28_t t4
+>                 join a28_t t5 on t4.b = t5.b
+>                 join a28_t t6 on t5.b = t6.b
+>               where t1.a = t4.a and t3.a = t5.a and t4.a = 1)
+a:int4
+1
+-- SELECT 1
+
+> create table a28_sj (a int unique, b int, c int)
+-- CREATE TABLE
+
+> insert into a28_sj values (2, 1, null), (null, 2, null), (1, 3, 1)
+-- INSERT 0 3
+
+> create table a28_sl (a int, b int, c int)
+-- CREATE TABLE
+
+> insert into a28_sl values (1, 1, 1), (2, 2, 2)
+-- INSERT 0 2
+
+> explain (costs off)
+> select * from
+>   (select n2.a from a28_sj n1, a28_sj n2 where n1.a <> n2.a) q0, a28_sl
+> where q0.a = 1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a28_sl
+  ->  Materialize
+        ->  Nested Loop
+              Join Filter: (n1.a <> n2.a)
+              ->  Index Only Scan using a28_sj_a_key on a28_sj n2
+                    Index Cond: (a = 1)
+              ->  Seq Scan on a28_sj n1
+-- EXPLAIN
+
+> select * from
+>   (select n2.a from a28_sj n1, a28_sj n2 where n1.a <> n2.a) q0, a28_sl
+> where q0.a = 1
+a:int4 | a:int4 | b:int4 | c:int4
+1 | 1 | 1 | 1
+1 | 2 | 2 | 2
+-- SELECT 2
+
+> create table a28_big (id int primary key, a int, pad text)
+-- CREATE TABLE
+
+> insert into a28_big select i, i % 50, repeat('x', 20) from generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> vacuum analyze a28_big
+-- VACUUM
+
+> explain
+> select * from a28_big x, a28_big y, a28_big z
+> where x.id = 1 and x.id = y.id and y.a = z.a
+QUERY PLAN:text
+Nested Loop  (cost=8.58..57.70 rows=40 width=87)
+  ->  Index Scan using a28_big_pkey on a28_big x  (cost=0.28..8.29 rows=1 width=29)
+        Index Cond: (id = 1)
+  ->  Hash Join  (cost=8.31..49.00 rows=40 width=58)
+        Hash Cond: (z.a = y.a)
+        ->  Seq Scan on a28_big z  (cost=0.00..35.00 rows=2000 width=29)
+        ->  Hash  (cost=8.29..8.29 rows=1 width=29)
+              ->  Index Scan using a28_big_pkey on a28_big y  (cost=0.28..8.29 rows=1 width=29)
+                    Index Cond: (id = 1)
+-- EXPLAIN
+
+> select count(*) from a28_big x, a28_big y, a28_big z
+> where x.id = 1 and x.id = y.id and y.a = z.a
+count:int8
+40
+-- SELECT 1
+
+> explain (costs off)
+> select t1.a from a28_sj t1 left join a28_sj t2 on t2.a = 1 where t2.a is null
+QUERY PLAN:text
+Nested Loop Anti Join
+  ->  Seq Scan on a28_sj t1
+  ->  Materialize
+        ->  Index Only Scan using a28_sj_a_key on a28_sj t2
+              Index Cond: (a = 1)
+-- EXPLAIN
+
+> select t1.a from a28_sj t1 left join a28_sj t2 on t2.a = 1 where t2.a is null
+a:int4
+-- SELECT 0
+
+> explain (costs off)
+> select * from a28_sl s right join (values (1), (2), (3)) v(x) on true
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Values Scan on "*VALUES*"
+  ->  Materialize
+        ->  Seq Scan on a28_sl s
+-- EXPLAIN
+
+> select * from a28_sl s right join (values (1), (2), (3)) v(x) on true order by 1, 2, 3, 4
+a:int4 | b:int4 | c:int4 | x:int4
+1 | 1 | 1 | 1
+1 | 1 | 1 | 2
+1 | 1 | 1 | 3
+2 | 2 | 2 | 1
+2 | 2 | 2 | 2
+2 | 2 | 2 | 3
+-- SELECT 6
+
+> create table a28_sa (x int, y int)
+-- CREATE TABLE
+
+> create table a28_sb (x int primary key, y int)
+-- CREATE TABLE
+
+> create table a28_sc (x int, z int)
+-- CREATE TABLE
+
+> insert into a28_sa select i, i from generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> insert into a28_sb select i, i from generate_series(1, 100) i
+-- INSERT 0 100
+
+> insert into a28_sc select i % 10, i from generate_series(1, 500) i
+-- INSERT 0 500
+
+> create index on a28_sc (x)
+-- CREATE INDEX
+
+> analyze a28_sa
+-- ANALYZE
+
+> analyze a28_sb
+-- ANALYZE
+
+> analyze a28_sc
+-- ANALYZE
+
+> explain select * from a28_sa join a28_sb on a28_sa.x = a28_sb.x
+>   where exists (select 1 from a28_sc where a28_sc.x = a28_sa.x)
+QUERY PLAN:text
+Nested Loop  (cost=9.62..28.93 rows=1 width=16)
+  ->  Hash Join  (cost=9.47..27.21 rows=10 width=12)
+        Hash Cond: (a28_sa.x = a28_sc.x)
+        ->  Seq Scan on a28_sa  (cost=0.00..15.00 rows=1000 width=8)
+        ->  Hash  (cost=9.35..9.35 rows=10 width=4)
+              ->  HashAggregate  (cost=9.25..9.35 rows=10 width=4)
+                    Group Key: a28_sc.x
+                    ->  Seq Scan on a28_sc  (cost=0.00..8.00 rows=500 width=4)
+  ->  Index Scan using a28_sb_pkey on a28_sb  (cost=0.14..0.17 rows=1 width=8)
+        Index Cond: (x = a28_sa.x)
+-- EXPLAIN
+
+> explain select * from a28_sa join a28_sb on a28_sa.x = a28_sb.x
+>   where exists (select 1 from a28_sc where a28_sc.x = a28_sb.x and a28_sc.z > 5)
+QUERY PLAN:text
+Nested Loop  (cost=10.86..31.28 rows=1 width=16)
+  ->  Hash Join  (cost=10.71..29.56 rows=10 width=12)
+        Hash Cond: (a28_sa.x = a28_sc.x)
+        ->  Seq Scan on a28_sa  (cost=0.00..15.00 rows=1000 width=8)
+        ->  Hash  (cost=10.59..10.59 rows=10 width=4)
+              ->  HashAggregate  (cost=10.49..10.59 rows=10 width=4)
+                    Group Key: a28_sc.x
+                    ->  Seq Scan on a28_sc  (cost=0.00..9.25 rows=495 width=4)
+                          Filter: (z > 5)
+  ->  Index Scan using a28_sb_pkey on a28_sb  (cost=0.14..0.17 rows=1 width=8)
+        Index Cond: (x = a28_sa.x)
+-- EXPLAIN
+
+> explain select * from a28_sa join a28_sb on a28_sa.y = a28_sb.y
+>   where a28_sa.x in (select x from a28_sc) and a28_sb.x in (select x from a28_sc)
+QUERY PLAN:text
+Nested Loop Semi Join  (cost=27.48..29.93 rows=1 width=16)
+  ->  Hash Join  (cost=27.34..29.72 rows=1 width=16)
+        Hash Cond: (a28_sb.y = a28_sa.y)
+        ->  Seq Scan on a28_sb  (cost=0.00..2.00 rows=100 width=8)
+        ->  Hash  (cost=27.21..27.21 rows=10 width=8)
+              ->  Hash Join  (cost=9.47..27.21 rows=10 width=8)
+                    Hash Cond: (a28_sa.x = a28_sc.x)
+                    ->  Seq Scan on a28_sa  (cost=0.00..15.00 rows=1000 width=8)
+                    ->  Hash  (cost=9.35..9.35 rows=10 width=4)
+                          ->  HashAggregate  (cost=9.25..9.35 rows=10 width=4)
+                                Group Key: a28_sc.x
+                                ->  Seq Scan on a28_sc  (cost=0.00..8.00 rows=500 width=4)
+  ->  Index Only Scan using a28_sc_x_idx on a28_sc a28_sc_1  (cost=0.15..1.22 rows=50 width=4)
+        Index Cond: (x = a28_sb.x)
+-- EXPLAIN
+
+> select count(*) from a28_sa join a28_sb on a28_sa.x = a28_sb.x
+>   where exists (select 1 from a28_sc where a28_sc.x = a28_sb.x and a28_sc.z > 5)
+count:int8
+9
+-- SELECT 1
+
+> select count(*) from a28_sa join a28_sb on a28_sa.y = a28_sb.y
+>   where a28_sa.x in (select x from a28_sc) and a28_sb.x in (select x from a28_sc)
+count:int8
+9
+-- SELECT 1
+

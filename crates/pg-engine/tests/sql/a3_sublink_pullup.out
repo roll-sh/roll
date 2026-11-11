@@ -1,0 +1,290 @@
+> CREATE TABLE a3_sp_a (id int PRIMARY KEY, grp int, odd int, v text)
+-- CREATE TABLE
+
+> CREATE TABLE a3_sp_b (id int, grp int, odd int)
+-- CREATE TABLE
+
+> INSERT INTO a3_sp_a SELECT g, g % 100, g % 2, 'v' || g FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> INSERT INTO a3_sp_b SELECT g, g % 100, g % 2 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> CREATE INDEX ON a3_sp_b (grp)
+-- CREATE INDEX
+
+> ANALYZE a3_sp_a
+-- ANALYZE
+
+> ANALYZE a3_sp_b
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a3_sp_a WHERE id IN (VALUES (1), (2), (3))
+QUERY PLAN:text
+Index Scan using a3_sp_a_pkey on a3_sp_a
+  Index Cond: (id = ANY ('{1,2,3}'::integer[]))
+-- EXPLAIN
+
+> SELECT * FROM a3_sp_a WHERE id IN (VALUES (1), (2), (3)) ORDER BY id
+id:int4 | grp:int4 | odd:int4 | v:text
+1 | 1 | 1 | v1
+2 | 2 | 0 | v2
+3 | 3 | 1 | v3
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a3_sp_a WHERE 1.0::int IN ((VALUES (1), (3)))
+QUERY PLAN:text
+Seq Scan on a3_sp_a
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a3_sp_a WHERE 2 IN ((VALUES (1), (3)))
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_a WHERE 2 IN ((VALUES (1), (3)))
+count:int8
+0
+-- SELECT 1
+
+> SELECT * FROM a3_sp_a WHERE id IN (SELECT x * x FROM (VALUES (30), (1)) AS x(x)) ORDER BY id
+id:int4 | grp:int4 | odd:int4 | v:text
+1 | 1 | 1 | v1
+900 | 0 | 0 | v900
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT v FROM a3_sp_a WHERE id IN (VALUES (1), (2) LIMIT 1)
+QUERY PLAN:text
+Nested Loop
+  ->  HashAggregate
+        Group Key: "*VALUES*".column1
+        ->  Limit
+              ->  Values Scan on "*VALUES*"
+  ->  Index Scan using a3_sp_a_pkey on a3_sp_a
+        Index Cond: (id = "*VALUES*".column1)
+-- EXPLAIN
+
+> SELECT v FROM a3_sp_a WHERE id IN (VALUES (1), (2) LIMIT 1)
+v:text
+v1
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT v FROM a3_sp_a WHERE id IN (VALUES (1), (2) OFFSET 1)
+QUERY PLAN:text
+Nested Loop
+  ->  HashAggregate
+        Group Key: "*VALUES*".column1
+        ->  Limit
+              ->  Values Scan on "*VALUES*"
+  ->  Index Scan using a3_sp_a_pkey on a3_sp_a
+        Index Cond: (id = "*VALUES*".column1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT v FROM a3_sp_a WHERE id IN (VALUES (1), (2) ORDER BY 1)
+QUERY PLAN:text
+Nested Loop
+  ->  Unique
+        ->  Sort
+              Sort Key: "*VALUES*".column1
+              ->  Sort
+                    Sort Key: "*VALUES*".column1
+                    ->  Values Scan on "*VALUES*"
+  ->  Index Scan using a3_sp_a_pkey on a3_sp_a
+        Index Cond: (id = "*VALUES*".column1)
+-- EXPLAIN
+
+> SELECT v FROM a3_sp_a WHERE id IN (VALUES (2), (1) ORDER BY 1) ORDER BY 1
+v:text
+v1
+v2
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a3_sp_a WHERE (id, odd) IN (VALUES (1, 1), (20, 0), (99, 9), (17, 99)) ORDER BY id
+QUERY PLAN:text
+Sort
+  Sort Key: a3_sp_a.id
+  ->  Hash Semi Join
+        Hash Cond: ((a3_sp_a.id = "*VALUES*".column1) AND (a3_sp_a.odd = "*VALUES*".column2))
+        ->  Seq Scan on a3_sp_a
+        ->  Hash
+              ->  Values Scan on "*VALUES*"
+-- EXPLAIN
+
+> SELECT * FROM a3_sp_a WHERE (id, odd) IN (VALUES (1, 1), (20, 0), (99, 9), (17, 99)) ORDER BY id
+id:int4 | grp:int4 | odd:int4 | v:text
+1 | 1 | 1 | v1
+20 | 20 | 0 | v20
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT v FROM a3_sp_a WHERE id IN (VALUES (0), ((2 IN (SELECT (3)))::integer))
+QUERY PLAN:text
+Nested Loop
+  ->  Unique
+        ->  Sort
+              Sort Key: "*VALUES*".column1
+              ->  Values Scan on "*VALUES*"
+                    SubPlan 1
+                      ->  Result
+  ->  Index Scan using a3_sp_a_pkey on a3_sp_a
+        Index Cond: (id = "*VALUES*".column1)
+-- EXPLAIN
+
+> SELECT v FROM a3_sp_a WHERE id IN (VALUES (0), ((2 IN (SELECT (3)))::integer))
+v:text
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_a a WHERE grp IN (SELECT grp FROM a3_sp_b b WHERE b.odd = a.odd)
+QUERY PLAN:text
+Hash Join
+  Hash Cond: ((a.odd = b.odd) AND (a.grp = b.grp))
+  ->  Seq Scan on a3_sp_a a
+  ->  Hash
+        ->  HashAggregate
+              Group Key: b.odd, b.grp
+              ->  Seq Scan on a3_sp_b b
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_a a WHERE grp IN (SELECT grp FROM a3_sp_b b WHERE b.odd = a.odd)
+count:int8
+1000
+-- SELECT 1
+
+> SELECT count(*) FROM a3_sp_a a JOIN a3_sp_b b ON a.grp IN (SELECT c.grp FROM a3_sp_b c WHERE c.odd = b.odd)
+> WHERE a.id < 50 AND b.id < 50
+count:int8
+1201
+-- SELECT 1
+
+> SELECT count(*) FROM a3_sp_a a JOIN a3_sp_b b ON a.id = b.id AND NOT EXISTS (SELECT 1 FROM a3_sp_b c WHERE c.id = a.id + 1)
+> WHERE a.id < 50
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE a3_sp_o (unique1 int, unique2 int, ten int)
+-- CREATE TABLE
+
+> INSERT INTO a3_sp_o SELECT g, 1001 - g, g % 10 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> CREATE UNIQUE INDEX ON a3_sp_o (unique1)
+-- CREATE INDEX
+
+> ANALYZE a3_sp_o
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_o WHERE (unique1, ten) IN (VALUES (1,1), (20,0), (99,9), (17,99)) ORDER BY unique1
+QUERY PLAN:text
+Sort
+  Sort Key: a3_sp_o.unique1
+  ->  Hash Semi Join
+        Hash Cond: ((a3_sp_o.unique1 = "*VALUES*".column1) AND (a3_sp_o.ten = "*VALUES*".column2))
+        ->  Seq Scan on a3_sp_o
+        ->  Hash
+              ->  Values Scan on "*VALUES*"
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT ten FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2))
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a3_sp_o t
+  ->  Values Scan on "*VALUES*"
+        Filter: (t.unique1 = column1)
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2))
+count:int8
+0
+-- SELECT 1
+
+> SELECT ten FROM a3_sp_o t WHERE unique1 IN (VALUES (0), (unique2 - 500)) ORDER BY 1 LIMIT 3
+ten:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a3_sp_o t1
+  ->  Hash Semi Join
+        Hash Cond: (t2.ten = "*VALUES*".column1)
+        ->  Seq Scan on a3_sp_o t2
+        ->  Hash
+              ->  Values Scan on "*VALUES*"
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_o t1, LATERAL (SELECT * FROM a3_sp_o t2 WHERE t2.ten IN (VALUES (t1.ten), (1))) ss
+> WHERE t1.unique1 < 20
+count:int8
+3600
+-- SELECT 1
+
+> CREATE TABLE a3_sp_t1 (unique1 int, unique2 int, hundred int, odd int, thousand int)
+-- CREATE TABLE
+
+> INSERT INTO a3_sp_t1 SELECT g, 10000 - g, g % 100, (g % 100) * 2 + 1, g % 1000 FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> CREATE TABLE a3_sp_t2 AS SELECT * FROM a3_sp_t1
+-- SELECT 2000
+
+> ANALYZE a3_sp_t1
+-- ANALYZE
+
+> ANALYZE a3_sp_t2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_t1 a INNER JOIN a3_sp_t2 b
+> ON a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd)
+> WHERE a.thousand < 750
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (c.odd = b.odd)
+  ->  Hash Join
+        Hash Cond: (a.hundred = c.hundred)
+        ->  Seq Scan on a3_sp_t1 a
+              Filter: (thousand < 750)
+        ->  Hash
+              ->  HashAggregate
+                    Group Key: c.odd, c.hundred
+                    ->  Seq Scan on a3_sp_t2 c
+  ->  Hash
+        ->  Seq Scan on a3_sp_t2 b
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_t1 a INNER JOIN a3_sp_t2 b
+> ON a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd)
+> WHERE a.thousand < 750
+count:int8
+30000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_sp_t1 a WHERE EXISTS
+> (SELECT 1 FROM a3_sp_t2 b WHERE a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd))
+QUERY PLAN:text
+Nested Loop Semi Join
+  Join Filter: (ANY (a.hundred = (SubPlan 1).col1))
+  ->  Seq Scan on a3_sp_t1 a
+  ->  Materialize
+        ->  Seq Scan on a3_sp_t2 b
+  SubPlan 1
+    ->  Seq Scan on a3_sp_t2 c
+          Filter: (odd = b.odd)
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_sp_t1 a WHERE EXISTS
+> (SELECT 1 FROM a3_sp_t2 b WHERE a.hundred IN (SELECT c.hundred FROM a3_sp_t2 c WHERE c.odd = b.odd))
+> AND a.unique1 < 40
+count:int8
+39
+-- SELECT 1
+
+> DROP TABLE a3_sp_a, a3_sp_b, a3_sp_o, a3_sp_t1, a3_sp_t2
+-- DROP TABLE
+

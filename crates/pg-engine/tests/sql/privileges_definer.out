@@ -1,0 +1,295 @@
+> DROP ROLE IF EXISTS pd_owner, pd_user
+NOTICE 00000: role "pd_owner" does not exist, skipping
+NOTICE 00000: role "pd_user" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE pd_owner
+-- CREATE ROLE
+
+> CREATE ROLE pd_user
+-- CREATE ROLE
+
+> GRANT CREATE ON SCHEMA public TO pd_owner
+-- GRANT
+
+> SET ROLE pd_owner
+-- SET
+
+> CREATE TABLE pd_t (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO pd_t VALUES (1, 'a'), (2, 'b')
+-- INSERT 0 2
+
+> CREATE FUNCTION pd_count_invoker() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM pd_t'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION pd_count_definer() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT count(*) FROM pd_t'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION pd_pl_definer() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+> BEGIN
+>   INSERT INTO pd_t VALUES ((SELECT max(id) + 1 FROM pd_t), current_user);
+>   RETURN current_user || '/' || session_user;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION pd_pl_invoker() RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   RETURN current_user;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION pd_whoami() RETURNS text LANGUAGE sql SECURITY DEFINER AS 'SELECT current_user::text'
+-- CREATE FUNCTION
+
+> RESET ROLE
+-- RESET
+
+> SELECT proname, prosecdef, proowner::regrole FROM pg_proc WHERE proname LIKE 'pd\_%' ORDER BY 1
+proname:name | prosecdef:bool | proowner:4096
+pd_count_definer | t | pd_owner
+pd_count_invoker | f | pd_owner
+pd_pl_definer | t | pd_owner
+pd_pl_invoker | f | pd_owner
+pd_whoami | t | pd_owner
+-- SELECT 5
+
+> SET ROLE pd_user
+-- SET
+
+> SELECT pd_count_invoker()
+ERROR 42501: permission denied for table pd_t
+CONTEXT: SQL function "pd_count_invoker" statement 1
+
+> SELECT pd_count_definer()
+pd_count_definer:int8
+2
+-- SELECT 1
+
+> SELECT pd_pl_definer()
+pd_pl_definer:text
+pd_owner/postgres
+-- SELECT 1
+
+> SELECT pd_pl_invoker()
+pd_pl_invoker:text
+pd_user
+-- SELECT 1
+
+> SELECT current_user
+current_user:name
+pd_user
+-- SELECT 1
+
+> SELECT * FROM pd_t
+ERROR 42501: permission denied for table pd_t
+
+> SELECT pd_whoami()
+pd_whoami:text
+pd_owner
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> SELECT id, v FROM pd_t ORDER BY id
+id:int4 | v:text
+1 | a
+2 | b
+3 | pd_owner
+-- SELECT 3
+
+> GRANT SELECT ON pd_t TO pd_user
+-- GRANT
+
+> SET ROLE pd_user
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE pd_t IN ACCESS SHARE MODE
+-- LOCK TABLE
+
+> LOCK TABLE pd_t IN ROW EXCLUSIVE MODE
+ERROR 42501: permission denied for table pd_t
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE pd_t
+ERROR 42501: permission denied for table pd_t
+
+> ROLLBACK
+-- ROLLBACK
+
+> RESET ROLE
+-- RESET
+
+> GRANT UPDATE ON pd_t TO pd_user
+-- GRANT
+
+> SET ROLE pd_user
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE pd_t IN EXCLUSIVE MODE
+-- LOCK TABLE
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE pd_child (id int REFERENCES pd_t)
+ERROR 42501: permission denied for schema public (at 14)
+
+> RESET ROLE
+-- RESET
+
+> GRANT CREATE ON SCHEMA public TO pd_user
+-- GRANT
+
+> SET ROLE pd_user
+-- SET
+
+> CREATE TABLE pd_child (id int REFERENCES pd_t)
+ERROR 42501: permission denied for table pd_t
+
+> CREATE TABLE pd_child (id int)
+-- CREATE TABLE
+
+> ALTER TABLE pd_child ADD FOREIGN KEY (id) REFERENCES pd_t
+ERROR 42501: permission denied for table pd_t
+
+> CREATE FUNCTION pd_trig() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER pd_tr BEFORE INSERT ON pd_t FOR EACH ROW EXECUTE FUNCTION pd_trig()
+ERROR 42501: permission denied for table pd_t
+
+> RESET ROLE
+-- RESET
+
+> GRANT REFERENCES (id) ON pd_t TO pd_user
+-- GRANT
+
+> GRANT TRIGGER ON pd_t TO pd_user
+-- GRANT
+
+> SET ROLE pd_user
+-- SET
+
+> ALTER TABLE pd_child ADD FOREIGN KEY (id) REFERENCES pd_t
+-- ALTER TABLE
+
+> CREATE TRIGGER pd_tr BEFORE INSERT ON pd_t FOR EACH ROW EXECUTE FUNCTION pd_trig()
+-- CREATE TRIGGER
+
+> SELECT tgname, tgrelid::regclass FROM pg_trigger WHERE tgname = 'pd_tr'
+tgname:name | tgrelid:regclass
+pd_tr | pd_t
+-- SELECT 1
+
+> DROP TRIGGER pd_tr ON pd_t
+ERROR 42501: must be owner of relation pd_t
+
+> RESET ROLE
+-- RESET
+
+> DROP TRIGGER pd_tr ON pd_t
+-- DROP TRIGGER
+
+> SET ROLE pd_user
+-- SET
+
+> CREATE TEMP TABLE pd_tmp (a int)
+-- CREATE TABLE
+
+> INSERT INTO pd_tmp VALUES (1)
+-- INSERT 0 1
+
+> SELECT * FROM pd_tmp
+a:int4
+1
+-- SELECT 1
+
+> DROP TABLE pd_tmp
+-- DROP TABLE
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE pd_owner
+-- SET
+
+> CREATE TYPE pd_mood AS ENUM ('sad', 'ok')
+-- CREATE TYPE
+
+> CREATE DOMAIN pd_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE pd_user
+-- SET
+
+> ALTER TYPE pd_mood ADD VALUE 'happy'
+ERROR 42501: must be owner of type pd_mood
+
+> DROP TYPE pd_mood
+ERROR 42501: must be owner of type pd_mood
+
+> DROP DOMAIN pd_pos
+ERROR 42501: must be owner of type pd_pos
+
+> COMMENT ON TYPE pd_mood IS 'x'
+ERROR 42501: must be owner of type pd_mood
+
+> SELECT 'ok'::pd_mood, 5::pd_pos
+pd_mood:user | pd_pos:int4
+ok | 5
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> REVOKE USAGE ON TYPE pd_mood FROM PUBLIC
+-- REVOKE
+
+> REVOKE USAGE ON DOMAIN pd_pos FROM PUBLIC
+-- REVOKE
+
+> SELECT typname, typacl FROM pg_type WHERE typname IN ('pd_mood', 'pd_pos') ORDER BY 1
+typname:name | typacl:1034
+pd_mood | {pd_owner=U/pd_owner}
+pd_pos | {pd_owner=U/pd_owner}
+-- SELECT 2
+
+> SELECT grantor, grantee, object_name, object_type, privilege_type FROM information_schema.usage_privileges WHERE object_schema = 'public' ORDER BY 3, 2
+grantor:name | grantee:name | object_name:name | object_type:varchar | privilege_type:varchar
+pd_owner | pd_owner | pd_pos | DOMAIN | USAGE
+-- SELECT 1
+
+> SELECT grantor, grantee, udt_name, privilege_type FROM information_schema.udt_privileges WHERE udt_schema = 'public' ORDER BY 3, 2
+grantor:name | grantee:name | udt_name:name | privilege_type:varchar
+pd_user | PUBLIC | pd_child | TYPE USAGE
+pd_user | pd_user | pd_child | TYPE USAGE
+pd_owner | PUBLIC | pd_t | TYPE USAGE
+pd_owner | pd_owner | pd_t | TYPE USAGE
+-- SELECT 4
+
+> DROP OWNED BY pd_owner, pd_user CASCADE
+-- DROP OWNED
+
+> REVOKE CREATE ON SCHEMA public FROM pd_owner, pd_user
+-- REVOKE
+
+> DROP ROLE pd_owner, pd_user
+-- DROP ROLE
+

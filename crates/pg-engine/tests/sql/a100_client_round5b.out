@@ -1,0 +1,352 @@
+> CREATE SCHEMA a100_api
+-- CREATE SCHEMA
+
+> SET search_path = a100_api, public
+-- SET
+
+> CREATE TABLE a100_api.authors (id int PRIMARY KEY, name text)
+-- CREATE TABLE
+
+> CREATE TABLE a100_api.books (id serial PRIMARY KEY, author_id int REFERENCES a100_api.authors, title text, pages int)
+-- CREATE TABLE
+
+> INSERT INTO a100_api.authors VALUES (1, 'Le Guin'), (2, 'Lem')
+-- INSERT 0 2
+
+> INSERT INTO a100_api.books (author_id, title, pages) VALUES (1, 'Earthsea', 183), (1, 'Dispossessed', 387), (2, 'Solaris', 204)
+-- INSERT 0 3
+
+> CREATE FUNCTION a100_api.book_count(a100_api.authors) RETURNS bigint LANGUAGE sql STABLE
+>   AS 'SELECT count(*) FROM a100_api.books WHERE author_id = $1.id'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a100_api.full_title(a100_api.books) RETURNS text LANGUAGE sql STABLE
+>   AS $$ SELECT $1.title || ' (' || $1.pages || ')' $$
+-- CREATE FUNCTION
+
+> SELECT "a100_api"."authors"."name", "a100_api"."authors"."book_count" FROM "a100_api"."authors" ORDER BY 1
+name:text | book_count:int8
+Le Guin | 2
+Lem | 1
+-- SELECT 2
+
+> SELECT a100_api.books.full_title FROM a100_api.books WHERE a100_api.books.book_count IS NULL
+ERROR 42703: column books.book_count does not exist (at 60)
+
+> SELECT a100_api.books.full_title FROM a100_api.books ORDER BY 1
+full_title:text
+Dispossessed (387)
+Earthsea (183)
+Solaris (204)
+-- SELECT 3
+
+> SELECT name FROM a100_api.authors WHERE a100_api.authors.book_count > 1
+name:text
+Le Guin
+-- SELECT 1
+
+> SELECT "a100_api"."authors"."nosuch" FROM "a100_api"."authors"
+ERROR 42703: column authors.nosuch does not exist (at 8)
+
+> SELECT authors.nosuch FROM a100_api.authors
+ERROR 42703: column authors.nosuch does not exist (at 8)
+
+> SELECT a100_api.authors.id FROM a100_api.authors x
+ERROR 42P01: invalid reference to FROM-clause entry for table "authors" (at 8)
+HINT: Perhaps you meant to reference the table alias "x".
+
+> RESET search_path
+-- RESET
+
+> SELECT a100_api.authors.book_count FROM a100_api.authors
+ERROR 42703: column authors.book_count does not exist (at 8)
+
+> DROP SCHEMA a100_api CASCADE
+NOTICE 00000: drop cascades to 4 other objects
+DETAIL: drop cascades to table a100_api.authors
+DETAIL: drop cascades to table a100_api.books
+DETAIL: drop cascades to function a100_api.book_count(a100_api.authors)
+DETAIL: drop cascades to function a100_api.full_title(a100_api.books)
+-- DROP SCHEMA
+
+> CREATE TABLE a100_ro (a int)
+-- CREATE TABLE
+
+> CREATE TEMP TABLE a100_ro_tmp (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION a100_ro_upd() RETURNS int LANGUAGE plpgsql AS $$ BEGIN UPDATE a100_ro SET a = 1 WHERE false; RETURN 1; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a100_ro_tmp_f() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO a100_ro_tmp VALUES (1); DELETE FROM a100_ro_tmp; RETURN 2; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a100_ro_sql() RETURNS int LANGUAGE sql AS $$ DELETE FROM a100_ro WHERE false; SELECT 3 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a100_ro_merge() RETURNS int LANGUAGE plpgsql AS $$ BEGIN MERGE INTO a100_ro USING (SELECT 1 a) s ON false WHEN NOT MATCHED THEN DO NOTHING; RETURN 4; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a100_ro_dyn() RETURNS int LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'INSERT INTO a100_ro SELECT 1 WHERE false'; RETURN 5; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a100_ro_lock() RETURNS int LANGUAGE plpgsql AS $$ BEGIN PERFORM * FROM a100_ro FOR UPDATE; RETURN 6; END $$
+-- CREATE FUNCTION
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT a100_ro_upd()
+ERROR 25006: cannot execute UPDATE in a read-only transaction
+CONTEXT: SQL statement "UPDATE a100_ro SET a = 1 WHERE false"
+CONTEXT: PL/pgSQL function a100_ro_upd() line 1 at SQL statement
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT a100_ro_tmp_f()
+a100_ro_tmp_f:int4
+2
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT a100_ro_sql()
+ERROR 25006: cannot execute DELETE in a read-only transaction
+CONTEXT: SQL function "a100_ro_sql" statement 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT a100_ro_merge()
+a100_ro_merge:int4
+4
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT a100_ro_dyn()
+ERROR 25006: cannot execute INSERT in a read-only transaction
+CONTEXT: SQL statement "INSERT INTO a100_ro SELECT 1 WHERE false"
+CONTEXT: PL/pgSQL function a100_ro_dyn() line 1 at EXECUTE
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT a100_ro_lock()
+ERROR 25006: cannot execute SELECT FOR UPDATE in a read-only transaction
+CONTEXT: SQL statement "SELECT * FROM a100_ro FOR UPDATE"
+CONTEXT: PL/pgSQL function a100_ro_lock() line 1 at PERFORM
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> WITH x AS (INSERT INTO a100_ro VALUES (1) RETURNING a) SELECT * FROM x
+ERROR 25006: cannot execute SELECT in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> WITH x AS (DELETE FROM a100_ro RETURNING a) SELECT * FROM x
+ERROR 25006: cannot execute SELECT in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> DO $$ BEGIN UPDATE a100_ro SET a = 2; END $$
+ERROR 25006: cannot execute UPDATE in a read-only transaction
+CONTEXT: SQL statement "UPDATE a100_ro SET a = 2"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at SQL statement
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP FUNCTION a100_ro_upd(), a100_ro_tmp_f(), a100_ro_sql(), a100_ro_merge(), a100_ro_dyn(), a100_ro_lock()
+-- DROP FUNCTION
+
+> DROP TABLE a100_ro
+-- DROP TABLE
+
+> CREATE DOMAIN a100_digits AS text CHECK (VALUE ~ '^[0-9]+$')
+-- CREATE DOMAIN
+
+> CREATE TABLE a100_sq (id serial, a a100_digits, b text)
+-- CREATE TABLE
+
+> INSERT INTO a100_sq (a, b) SELECT 'x', 'y'
+ERROR 23514: value for domain a100_digits violates check constraint "a100_digits_check"
+OBJECTS: schema=public datatype=a100_digits constraint=a100_digits_check
+
+> SELECT last_value FROM a100_sq_id_seq
+last_value:int8
+1
+-- SELECT 1
+
+> INSERT INTO a100_sq (a, b) SELECT r.a, r.b FROM json_to_record('{"a": "x", "b": "y"}') AS r(a a100_digits, b text)
+ERROR 23514: value for domain a100_digits violates check constraint "a100_digits_check"
+OBJECTS: schema=public datatype=a100_digits constraint=a100_digits_check
+
+> INSERT INTO a100_sq (a, b) SELECT r.a, r.b FROM (SELECT '{"a": "x"}'::json AS j) p,
+>   LATERAL (SELECT a, b FROM json_to_record(p.j) AS _(a a100_digits, b text)) r
+ERROR 23514: value for domain a100_digits violates check constraint "a100_digits_check"
+OBJECTS: schema=public datatype=a100_digits constraint=a100_digits_check
+
+> INSERT INTO a100_sq (a, b) SELECT r.a, r.b FROM jsonb_to_recordset('[{"a": "1"}, {"a": "x"}]') AS r(a a100_digits, b text)
+ERROR 23514: value for domain a100_digits violates check constraint "a100_digits_check"
+OBJECTS: schema=public datatype=a100_digits constraint=a100_digits_check
+
+> INSERT INTO a100_sq (a, b) SELECT r.a, r.b FROM json_populate_record(null::a100_sq, '{"a": "x"}') AS r
+ERROR 23514: value for domain a100_digits violates check constraint "a100_digits_check"
+OBJECTS: schema=public datatype=a100_digits constraint=a100_digits_check
+
+> SELECT last_value FROM a100_sq_id_seq
+last_value:int8
+1
+-- SELECT 1
+
+> SELECT count(*) FROM json_to_record('{"a": "x"}') AS r(a a100_digits)
+ERROR 23514: value for domain a100_digits violates check constraint "a100_digits_check"
+OBJECTS: schema=public datatype=a100_digits constraint=a100_digits_check
+
+> SELECT * FROM json_to_record('{"a": "x"}') AS r(a a100_digits) WHERE false
+a:text
+-- SELECT 0
+
+> SELECT count(*) FROM jsonb_to_recordset('[{"a": "12"}, {"a": "34"}]') AS r(a a100_digits)
+count:int8
+2
+-- SELECT 1
+
+> SELECT x FROM jsonb_array_elements_text('["1", "2", "x"]') x WHERE x::int > 0
+ERROR 22P02: invalid input syntax for type integer: "x"
+
+> SELECT count(*) FROM a100_sq
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE a100_sq
+-- DROP TABLE
+
+> DROP DOMAIN a100_digits
+-- DROP DOMAIN
+
+> CREATE TABLE a100_hot (id int PRIMARY KEY, k int, v numeric)
+-- CREATE TABLE
+
+> CREATE INDEX a100_hot_k ON a100_hot (k)
+-- CREATE INDEX
+
+> INSERT INTO a100_hot SELECT g, g % 2, g FROM generate_series(1, 8) g
+-- INSERT 0 8
+
+> UPDATE a100_hot SET v = v + 1 WHERE id = 2
+-- UPDATE 1
+
+> UPDATE a100_hot SET v = v + 1 WHERE id = 4
+-- UPDATE 1
+
+> SELECT id, ctid FROM a100_hot ORDER BY id
+id:int4 | ctid:27
+1 | (0,1)
+2 | (0,9)
+3 | (0,3)
+4 | (0,10)
+5 | (0,5)
+6 | (0,6)
+7 | (0,7)
+8 | (0,8)
+-- SELECT 8
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> SELECT id FROM a100_hot WHERE k = 0
+id:int4
+2
+4
+6
+8
+-- SELECT 4
+
+> BEGIN
+-- BEGIN
+
+> UPDATE a100_hot SET v = 0 WHERE k = 0 RETURNING id
+id:int4
+2
+4
+6
+8
+-- UPDATE 4
+
+> ROLLBACK
+-- ROLLBACK
+
+> SET enable_indexscan = off
+-- SET
+
+> SET enable_bitmapscan = on
+-- SET
+
+> SELECT id FROM a100_hot WHERE k = 0
+id:int4
+2
+4
+6
+8
+-- SELECT 4
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> RESET enable_indexscan
+-- RESET
+
+> SELECT id FROM a100_hot
+id:int4
+1
+2
+3
+4
+5
+6
+7
+8
+-- SELECT 8
+
+> DROP TABLE a100_hot
+-- DROP TABLE
+

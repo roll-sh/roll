@@ -1,0 +1,356 @@
+> CREATE TABLE a5_pb (id int PRIMARY KEY) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE a5_pb1 PARTITION OF a5_pb FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> INSERT INTO a5_pb VALUES (1), (2)
+-- INSERT 0 2
+
+> EXPLAIN (COSTS OFF)
+> SELECT 1 FROM (SELECT t1.id FROM a5_pb t1 LEFT JOIN a5_pb t2 ON t1.id = t2.id) s WHERE s.id = 1 GROUP BY ()
+QUERY PLAN:text
+Result
+-- EXPLAIN
+
+> SELECT 1 FROM (SELECT t1.id FROM a5_pb t1 LEFT JOIN a5_pb t2 ON t1.id = t2.id) s WHERE s.id = 1 GROUP BY ()
+?column?:int4
+1
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT 1 FROM a5_pb GROUP BY (), ()
+QUERY PLAN:text
+Result
+-- EXPLAIN
+
+> SELECT 1 FROM a5_pb GROUP BY (), ()
+?column?:int4
+1
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT 1 FROM a5_pb HAVING 1 > 2
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> SELECT 1 FROM a5_pb HAVING 1 > 2
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM a5_pb WHERE false GROUP BY ()
+?column?:int4
+1
+-- SELECT 1
+
+> CREATE TABLE a5_onek (unique1 int, unique2 int)
+-- CREATE TABLE
+
+> INSERT INTO a5_onek SELECT g, 999 - g FROM generate_series(0, 999) g
+-- INSERT 0 1000
+
+> CREATE UNIQUE INDEX a5_onek_u1 ON a5_onek (unique1)
+-- CREATE INDEX
+
+> CREATE TABLE a5_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a5_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123)
+-- INSERT 0 3
+
+> ANALYZE a5_onek
+-- ANALYZE
+
+> ANALYZE a5_i8
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT a.unique1, b.unique2
+>   FROM a5_onek a LEFT JOIN a5_onek b ON a.unique1 = b.unique2
+>   WHERE (b.unique2, random() > 0) = ANY (SELECT q1, random() > 0 FROM a5_i8 c WHERE c.q1 < b.unique1)
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (b.unique2 = a.unique1)
+  ->  Seq Scan on a5_onek b
+        Filter: (ANY ((unique2 = (SubPlan 1).col1) AND ((random() > '0'::double precision) = (SubPlan 1).col2)))
+        SubPlan 1
+          ->  Seq Scan on a5_i8 c
+                Filter: (q1 < b.unique1)
+  ->  Hash
+        ->  Seq Scan on a5_onek a
+-- EXPLAIN
+
+> SELECT a.unique1, b.unique2
+>   FROM a5_onek a LEFT JOIN a5_onek b ON a.unique1 = b.unique2
+>   WHERE (b.unique2, random() > 0) = ANY (SELECT q1, random() > 0 FROM a5_i8 c WHERE c.q1 < b.unique1)
+unique1:int4 | unique2:int4
+123 | 123
+-- SELECT 1
+
+> CREATE TABLE a5_t (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO a5_t VALUES (1, 2), (1, 3), (2, 2)
+-- INSERT 0 3
+
+> ANALYZE a5_t
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a5_t t1, a5_t t2 WHERE EXISTS
+>   (SELECT 1 FROM a5_t t3 WHERE t1.a = t3.a AND t2.b = t3.b AND t3.a = 1 AND t3.b = 2)
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Nested Loop
+        ->  Seq Scan on a5_t t1
+              Filter: (a = 1)
+        ->  Materialize
+              ->  Seq Scan on a5_t t2
+                    Filter: (b = 2)
+  ->  Materialize
+        ->  Seq Scan on a5_t t3
+              Filter: ((a = 1) AND (b = 2))
+-- EXPLAIN
+
+> SELECT * FROM a5_t t1, a5_t t2 WHERE EXISTS
+>   (SELECT 1 FROM a5_t t3 WHERE t1.a = t3.a AND t2.b = t3.b AND t3.a = 1 AND t3.b = 2) ORDER BY 1, 2, 3, 4
+a:int4 | b:int4 | a:int4 | b:int4
+1 | 2 | 1 | 2
+1 | 2 | 2 | 2
+1 | 3 | 1 | 2
+1 | 3 | 2 | 2
+-- SELECT 4
+
+> CREATE TABLE a5_tbl1 (col1 int)
+-- CREATE TABLE
+
+> INSERT INTO a5_tbl1 VALUES (501), (505)
+-- INSERT 0 2
+
+> CREATE TABLE a5_tprt (col1 int) PARTITION BY RANGE (col1)
+-- CREATE TABLE
+
+> CREATE TABLE a5_tprt_1 PARTITION OF a5_tprt FOR VALUES FROM (1) TO (501)
+-- CREATE TABLE
+
+> CREATE TABLE a5_tprt_2 PARTITION OF a5_tprt FOR VALUES FROM (501) TO (1001)
+-- CREATE TABLE
+
+> CREATE TABLE a5_tprt_3 PARTITION OF a5_tprt FOR VALUES FROM (1001) TO (2001)
+-- CREATE TABLE
+
+> CREATE INDEX ON a5_tprt_1 (col1)
+-- CREATE INDEX
+
+> CREATE INDEX ON a5_tprt_2 (col1)
+-- CREATE INDEX
+
+> CREATE INDEX ON a5_tprt_3 (col1)
+-- CREATE INDEX
+
+> INSERT INTO a5_tprt VALUES (10), (20), (501), (502), (505), (1001)
+-- INSERT 0 6
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_indexonlyscan = off
+-- SET
+
+> EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
+> SELECT * FROM a5_tbl1 JOIN a5_tprt ON a5_tbl1.col1 > a5_tprt.col1
+QUERY PLAN:text
+Nested Loop (actual rows=6.00 loops=1)
+  ->  Seq Scan on a5_tbl1 (actual rows=2.00 loops=1)
+  ->  Append (actual rows=3.00 loops=2)
+        ->  Index Scan using a5_tprt_1_col1_idx on a5_tprt_1 (actual rows=2.00 loops=2)
+              Index Cond: (col1 < a5_tbl1.col1)
+              Index Searches: 2
+        ->  Index Scan using a5_tprt_2_col1_idx on a5_tprt_2 (actual rows=2.00 loops=1)
+              Index Cond: (col1 < a5_tbl1.col1)
+              Index Searches: 1
+        ->  Index Scan using a5_tprt_3_col1_idx on a5_tprt_3 (never executed)
+              Index Cond: (col1 < a5_tbl1.col1)
+              Index Searches: 0
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a5_tbl1 LEFT JOIN a5_tprt ON a5_tbl1.col1 < a5_tprt.col1
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on a5_tbl1
+  ->  Append
+        ->  Index Scan using a5_tprt_1_col1_idx on a5_tprt_1
+              Index Cond: (col1 > a5_tbl1.col1)
+        ->  Index Scan using a5_tprt_2_col1_idx on a5_tprt_2
+              Index Cond: (col1 > a5_tbl1.col1)
+        ->  Index Scan using a5_tprt_3_col1_idx on a5_tprt_3
+              Index Cond: (col1 > a5_tbl1.col1)
+-- EXPLAIN
+
+> SELECT a5_tbl1.col1, a5_tprt.col1 FROM a5_tbl1 JOIN a5_tprt ON a5_tbl1.col1 > a5_tprt.col1 ORDER BY 1, 2
+col1:int4 | col1:int4
+501 | 10
+501 | 20
+505 | 10
+505 | 20
+505 | 501
+505 | 502
+-- SELECT 6
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> RESET enable_indexonlyscan
+-- RESET
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SET enable_indexscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
+> SELECT * FROM a5_t t1 JOIN a5_t t2 ON t1.a < t2.b
+QUERY PLAN:text
+Nested Loop (actual rows=7.00 loops=1)
+  Join Filter: (t1.a < t2.b)
+  Rows Removed by Join Filter: 2
+  ->  Seq Scan on a5_t t1 (actual rows=3.00 loops=1)
+  ->  Materialize (actual rows=3.00 loops=3)
+        Storage: Memory  Maximum Storage: 17kB
+        ->  Seq Scan on a5_t t2 (actual rows=3.00 loops=1)
+-- EXPLAIN
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> RESET enable_indexscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> SET enable_partitionwise_join = on
+-- SET
+
+> CREATE TABLE a5_p1 (a int, b int, c text) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE a5_p1_x PARTITION OF a5_p1 FOR VALUES IN ('0000', '0001')
+-- CREATE TABLE
+
+> CREATE TABLE a5_p1_y PARTITION OF a5_p1 FOR VALUES IN ('0002', '0003')
+-- CREATE TABLE
+
+> CREATE TABLE a5_p2 (a int, b int, c text) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE a5_p2_x PARTITION OF a5_p2 FOR VALUES IN ('0000', '0001')
+-- CREATE TABLE
+
+> CREATE TABLE a5_p2_y PARTITION OF a5_p2 FOR VALUES IN ('0002', '0003')
+-- CREATE TABLE
+
+> INSERT INTO a5_p1 SELECT i, i % 25, to_char(i % 4, 'FM0000') FROM generate_series(0, 299) i
+-- INSERT 0 300
+
+> INSERT INTO a5_p2 SELECT i, i % 25, to_char(i % 4, 'FM0000') FROM generate_series(0, 299, 3) i
+-- INSERT 0 100
+
+> ANALYZE a5_p1
+-- ANALYZE
+
+> ANALYZE a5_p2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT avg(t1.a), avg(t2.b), t1.c, t2.c FROM a5_p1 t1, a5_p2 t2
+>   WHERE t1.b = t2.b AND t1.c = t2.c GROUP BY t1.c, t2.c ORDER BY t1.c, t2.c
+QUERY PLAN:text
+Sort
+  Sort Key: t1.c
+  ->  HashAggregate
+        Group Key: t1.c
+        ->  Append
+              ->  Hash Join
+                    Hash Cond: ((t1_1.b = t2_1.b) AND (t1_1.c = t2_1.c))
+                    ->  Seq Scan on a5_p1_x t1_1
+                    ->  Hash
+                          ->  Seq Scan on a5_p2_x t2_1
+              ->  Hash Join
+                    Hash Cond: ((t1_2.b = t2_2.b) AND (t1_2.c = t2_2.c))
+                    ->  Seq Scan on a5_p1_y t1_2
+                    ->  Hash
+                          ->  Seq Scan on a5_p2_y t2_2
+-- EXPLAIN
+
+> SELECT avg(t1.a), avg(t2.b), t1.c, t2.c FROM a5_p1 t1, a5_p2 t2
+>   WHERE t1.b = t2.b AND t1.c = t2.c GROUP BY t1.c, t2.c ORDER BY t1.c, t2.c
+avg:numeric | avg:numeric | c:text | c:text
+148.0000000000000000 | 12.0000000000000000 | 0000 | 0000
+149.0000000000000000 | 12.0000000000000000 | 0001 | 0001
+150.0000000000000000 | 12.0000000000000000 | 0002 | 0002
+151.0000000000000000 | 12.0000000000000000 | 0003 | 0003
+-- SELECT 4
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> CREATE TABLE a5_tk (unique1 int, unique2 int, thousand int, twothousand int)
+-- CREATE TABLE
+
+> INSERT INTO a5_tk SELECT g, g, g % 1000, g % 2000 FROM generate_series(0, 9999) g
+-- INSERT 0 10000
+
+> CREATE INDEX ON a5_tk (unique2)
+-- CREATE INDEX
+
+> CREATE INDEX ON a5_tk (thousand)
+-- CREATE INDEX
+
+> ANALYZE a5_tk
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
+>   FROM a5_tk a LEFT JOIN a5_tk b ON b.thousand = a.unique1
+>   LEFT JOIN a5_tk c ON c.unique2 = coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 < 10 AND coalesce(b.twothousand, a.twothousand) = 44
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Hash Right Join
+        Hash Cond: (b.thousand = a.unique1)
+        Filter: (COALESCE(b.twothousand, a.twothousand) = 44)
+        ->  Seq Scan on a5_tk b
+        ->  Hash
+              ->  Index Scan using a5_tk_unique2_idx on a5_tk a
+                    Index Cond: (unique2 < 10)
+  ->  Index Scan using a5_tk_unique2_idx on a5_tk c
+        Index Cond: (unique2 = 44)
+-- EXPLAIN
+
+> SELECT a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
+>   FROM a5_tk a LEFT JOIN a5_tk b ON b.thousand = a.unique1
+>   LEFT JOIN a5_tk c ON c.unique2 = coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 < 10 AND coalesce(b.twothousand, a.twothousand) = 44
+unique1:int4 | unique1:int4 | unique1:int4 | coalesce:int4
+-- SELECT 0
+
+> DROP TABLE a5_pb, a5_onek, a5_i8, a5_t, a5_tbl1, a5_tprt, a5_p1, a5_p2, a5_tk
+-- DROP TABLE
+

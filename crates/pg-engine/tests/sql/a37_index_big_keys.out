@@ -1,0 +1,37 @@
+> CREATE TABLE a37_cm (f1 text COMPRESSION pglz)
+-- CREATE TABLE
+
+> INSERT INTO a37_cm VALUES (repeat('1234567890', 1000))
+-- INSERT 0 1
+
+> ALTER TABLE a37_cm ALTER COLUMN f1 SET COMPRESSION lz4
+-- ALTER TABLE
+
+> INSERT INTO a37_cm VALUES (repeat('123456789', 4004))
+-- INSERT 0 1
+
+> INSERT INTO a37_cm SELECT repeat(md5(i::text), 400) FROM generate_series(1, 20) i
+-- INSERT 0 20
+
+> CREATE INDEX a37_cm_idx ON a37_cm (f1)
+-- CREATE INDEX
+
+> SELECT relname, relpages, reltuples FROM pg_class WHERE relname = 'a37_cm_idx'
+relname:name | relpages:int4 | reltuples:float4
+a37_cm_idx | 2 | 22
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT count(*) FROM a37_cm WHERE f1 = repeat('123456789', 4004)
+count:int8
+1
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE a37_cm
+-- DROP TABLE
+

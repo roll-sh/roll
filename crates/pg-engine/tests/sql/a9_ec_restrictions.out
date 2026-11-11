@@ -1,0 +1,214 @@
+> CREATE TABLE a9t (f1 int, f2 text, f3 bigint, f4 numeric)
+-- CREATE TABLE
+
+> CREATE TABLE a9u (f1 int, f2 text COLLATE "C", f3 bigint, f4 numeric)
+-- CREATE TABLE
+
+> CREATE TABLE a9w (k int, v text)
+-- CREATE TABLE
+
+> INSERT INTO a9t SELECT g % 7, 'x' || (g % 5), g % 3, (g % 4) / 2.0 FROM generate_series(1, 60) g
+-- INSERT 0 60
+
+> INSERT INTO a9t VALUES (NULL, NULL, NULL, NULL), (4, NULL, 4, 4.0)
+-- INSERT 0 2
+
+> INSERT INTO a9u SELECT g % 6, 'x' || (g % 4), g % 5, (g % 3) / 2.0 FROM generate_series(1, 40) g
+-- INSERT 0 40
+
+> INSERT INTO a9u VALUES (NULL, 'x1', NULL, NULL), (4, 'x4', 4, 4)
+-- INSERT 0 2
+
+> INSERT INTO a9w SELECT g, 'v' || g FROM generate_series(1, 10) g
+-- INSERT 0 10
+
+> ANALYZE a9t
+-- ANALYZE
+
+> ANALYZE a9u
+-- ANALYZE
+
+> ANALYZE a9w
+-- ANALYZE
+
+> SELECT count(*), sum(t.f3), sum(s.f3) FROM a9t t JOIN (SELECT * FROM a9t WHERE f1 = 4) s ON t.f1 = s.f1
+count:int8 | sum:numeric | sum:numeric
+100 | 130 | 130
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a9t t JOIN (SELECT * FROM a9t WHERE f1 = 4) s ON t.f1 = s.f1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a9t t
+        Filter: (f1 = 4)
+  ->  Materialize
+        ->  Seq Scan on a9t
+              Filter: (f1 = 4)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a9t t, (SELECT * FROM a9u WHERE f1 = 4) s WHERE t.f1 = s.f1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a9t t
+        Filter: (f1 = 4)
+  ->  Materialize
+        ->  Seq Scan on a9u
+              Filter: (f1 = 4)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE a9t t SET f2 = 'x' FROM (SELECT * FROM a9u WHERE f1 = 4) s WHERE t.f1 = s.f1
+QUERY PLAN:text
+Update on a9t t
+  ->  Nested Loop
+        ->  Seq Scan on a9t t
+              Filter: (f1 = 4)
+        ->  Materialize
+              ->  Seq Scan on a9u
+                    Filter: (f1 = 4)
+-- EXPLAIN
+
+> SELECT count(*) FROM a9t t, (SELECT * FROM a9u WHERE f1 = 4) s WHERE t.f1 = s.f1
+count:int8
+80
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t, (SELECT * FROM a9u WHERE f3 = 4) s WHERE t.f1 = s.f3
+count:int8
+90
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t, (SELECT * FROM a9u WHERE f4 = 0.5) s WHERE t.f4 = s.f4
+count:int8
+210
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t, (SELECT * FROM a9u WHERE f4 = 1) s WHERE t.f1 = s.f4
+count:int8
+117
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t, (SELECT * FROM a9u WHERE f2 = 'x1') s WHERE t.f2 = s.f2
+count:int8
+132
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t LEFT JOIN (SELECT * FROM a9u WHERE f1 = 4) s ON t.f1 = s.f1
+count:int8
+132
+-- SELECT 1
+
+> SELECT count(*), count(s.f1) FROM (SELECT * FROM a9u WHERE f1 = 4) s RIGHT JOIN a9t t ON t.f1 = s.f1
+count:int8 | count:int8
+132 | 80
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t FULL JOIN (SELECT * FROM a9u WHERE f1 = 4) s ON t.f1 = s.f1
+count:int8
+132
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT * FROM a9u WHERE f1 = 4) s ON t.f1 = s.f1 JOIN a9w w ON w.k = s.f1
+count:int8
+80
+-- SELECT 1
+
+> SELECT count(*) FROM a9w w, LATERAL (SELECT * FROM a9u u WHERE u.f1 = w.k) s, a9t t WHERE t.f1 = s.f1
+count:int8
+317
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT u.* FROM a9u u JOIN a9w w ON w.k = u.f1 WHERE u.f3 = 4) s ON t.f3 = s.f3
+count:int8
+8
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT f1 + 0 AS g, f3 FROM a9u WHERE f1 = 4) s ON t.f1 = s.g
+count:int8
+80
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT f1 AS g FROM a9u WHERE f1 + 0 = 4) s ON t.f1 = s.g
+count:int8
+80
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT * FROM a9u WHERE f1 = 4 OR f1 = 5) s ON t.f1 = s.f1
+count:int8
+128
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT * FROM a9u WHERE f1 IS NULL) s ON t.f1 = s.f1
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT * FROM a9u WHERE f1 = 4 LIMIT 3) s ON t.f1 = s.f1
+count:int8
+30
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT DISTINCT f1 FROM a9u WHERE f1 = 4) s ON t.f1 = s.f1
+count:int8
+10
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t WHERE t.f1 IN (SELECT f1 FROM a9u WHERE f1 = 4)
+count:int8
+10
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t WHERE EXISTS (SELECT FROM a9u u WHERE u.f1 = t.f1 AND u.f1 = 4)
+count:int8
+10
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t WHERE NOT EXISTS (SELECT FROM a9u u WHERE u.f1 = t.f1 AND u.f1 = 4)
+count:int8
+52
+-- SELECT 1
+
+> PREPARE a9q(int) AS SELECT count(*) FROM a9t t JOIN (SELECT * FROM a9u WHERE f1 = $1) s ON t.f1 = s.f1
+-- PREPARE
+
+> EXECUTE a9q(4)
+count:int8
+80
+-- SELECT 1
+
+> EXECUTE a9q(2)
+count:int8
+63
+-- SELECT 1
+
+> DEALLOCATE a9q
+-- DEALLOCATE
+
+> SELECT count(*) FROM a9t t JOIN (SELECT * FROM a9u WHERE f1 = (SELECT max(k) - 6 FROM a9w)) s ON t.f1 = s.f1
+count:int8
+80
+-- SELECT 1
+
+> SELECT count(*) FROM a9t t JOIN (SELECT * FROM a9u WHERE f2 = 'x1' COLLATE "C") s ON t.f2 = s.f2
+count:int8
+132
+-- SELECT 1
+
+> UPDATE a9t t SET f2 = 'upd' FROM (SELECT * FROM a9u WHERE f1 = 4) s WHERE t.f1 = s.f1 AND s.f3 = 4
+-- UPDATE 10
+
+> SELECT count(*) FROM a9t WHERE f2 = 'upd'
+count:int8
+10
+-- SELECT 1
+
+> DELETE FROM a9t t USING (SELECT * FROM a9u WHERE f1 = 3) s WHERE t.f1 = s.f1
+-- DELETE 9
+
+> SELECT count(*) FROM a9t
+count:int8
+53
+-- SELECT 1
+
+> DROP TABLE a9t, a9u, a9w
+-- DROP TABLE
+

@@ -1,0 +1,366 @@
+> CREATE TABLE pdc_acl (a int)
+-- CREATE TABLE
+
+> REVOKE ALL ON pdc_acl FROM postgres
+-- REVOKE
+
+> SELECT relacl, cardinality(relacl), array_length(relacl, 1), relacl = '{}' FROM pg_class WHERE relname = 'pdc_acl'
+relacl:1034 | cardinality:int4 | array_length:int4 | ?column?:bool
+{} | 0 | 0 | f
+-- SELECT 1
+
+> SELECT CASE WHEN pg_catalog.array_length(c.relacl, 1) = 0 THEN '(none)' ELSE pg_catalog.array_to_string(c.relacl, E'\n') END AS "Access privileges" FROM pg_class c WHERE relname = 'pdc_acl'
+Access privileges:text
+(none)
+-- SELECT 1
+
+> CREATE PROCEDURE pdc_proc(x text) LANGUAGE sql AS $$ SELECT 1 $$
+-- CREATE PROCEDURE
+
+> SELECT pg_get_function_result('pdc_proc'::regproc) IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE FUNCTION pdc_out1(a int DEFAULT 1, OUT sum int, b int DEFAULT 2) LANGUAGE sql AS $$ SELECT $1 + $2 $$
+-- CREATE FUNCTION
+
+> SELECT pg_get_function_result('pdc_out1'::regproc), pg_get_function_arguments('pdc_out1'::regproc)
+pg_get_function_result:text | pg_get_function_arguments:text
+integer | a integer DEFAULT 1, OUT sum integer, b integer DEFAULT 2
+-- SELECT 1
+
+> CREATE FUNCTION pdc_out2(a int, OUT x int, OUT y text) LANGUAGE sql AS $$ SELECT $1, 'a' $$
+-- CREATE FUNCTION
+
+> SELECT pg_get_function_result('pdc_out2'::regproc)
+pg_get_function_result:text
+record
+-- SELECT 1
+
+> CREATE FUNCTION pdc_setof(a int, OUT x int) RETURNS SETOF int LANGUAGE sql AS $$ SELECT $1 $$
+-- CREATE FUNCTION
+
+> SELECT pg_get_function_result('pdc_setof'::regproc)
+pg_get_function_result:text
+SETOF integer
+-- SELECT 1
+
+> CREATE FUNCTION pdc_table(a int) RETURNS TABLE (x int, y text) LANGUAGE sql AS $$ SELECT $1, 'a' $$
+-- CREATE FUNCTION
+
+> SELECT pg_get_function_result('pdc_table'::regproc)
+pg_get_function_result:text
+TABLE(x integer, y text)
+-- SELECT 1
+
+> CREATE TABLE pg_attrdef (a int)
+-- CREATE TABLE
+
+> SELECT 'public.pg_attrdef'::regclass, 'pg_attrdef'::regclass::oid < 16384
+regclass:regclass | ?column?:bool
+public.pg_attrdef | t
+-- SELECT 1
+
+> SELECT relname FROM pg_class WHERE oid = 'public.pg_attrdef'::regclass
+relname:name
+pg_attrdef
+-- SELECT 1
+
+> DROP TABLE public.pg_attrdef
+-- DROP TABLE
+
+> CREATE SCHEMA pdc_s
+-- CREATE SCHEMA
+
+> SET search_path = pdc_s
+-- SET
+
+> CREATE TABLE pk (x int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE fk (b int REFERENCES pk)
+-- CREATE TABLE
+
+> SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'fk_b_fkey'
+pg_get_constraintdef:text
+FOREIGN KEY (b) REFERENCES pk(x)
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'fk_b_fkey'
+pg_get_constraintdef:text
+FOREIGN KEY (b) REFERENCES pdc_s.pk(x)
+-- SELECT 1
+
+> CREATE TABLE pdc_d (d date) PARTITION BY RANGE (d)
+-- CREATE TABLE
+
+> CREATE TABLE pdc_d1 PARTITION OF pdc_d FOR VALUES FROM ('2016-07-01') TO ('2016-08-01')
+-- CREATE TABLE
+
+> SET datestyle = 'Postgres, MDY'
+-- SET
+
+> SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'pdc_d1'
+pg_get_expr:text
+FOR VALUES FROM ('07-01-2016') TO ('08-01-2016')
+-- SELECT 1
+
+> RESET datestyle
+-- RESET
+
+> SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'pdc_d1'
+pg_get_expr:text
+FOR VALUES FROM ('2016-07-01') TO ('2016-08-01')
+-- SELECT 1
+
+> CREATE TABLE pdc_arr (a int[]) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE pdc_arr1 PARTITION OF pdc_arr FOR VALUES IN ('{1}', '{2}')
+-- CREATE TABLE
+
+> CREATE TABLE pdc_arr2 PARTITION OF pdc_arr FOR VALUES IN ('{3}')
+-- CREATE TABLE
+
+> SELECT pg_get_partition_constraintdef('pdc_arr1'::regclass)
+pg_get_partition_constraintdef:text
+((a IS NOT NULL) AND ((a = '{1}'::integer[]) OR (a = '{2}'::integer[])))
+-- SELECT 1
+
+> SELECT pg_get_partition_constraintdef('pdc_arr2'::regclass)
+pg_get_partition_constraintdef:text
+((a IS NOT NULL) AND (a = '{3}'::integer[]))
+-- SELECT 1
+
+> CREATE TABLE pdc_x (a int, d float8, e int, n name, t text, i int[], v tsvector)
+-- CREATE TABLE
+
+> CREATE INDEX pdc_xi ON pdc_x (a, (d + e), n)
+-- CREATE INDEX
+
+> CREATE INDEX pdc_gin ON pdc_x USING gin (i)
+-- CREATE INDEX
+
+> ALTER TABLE pdc_x ALTER COLUMN t SET STORAGE external
+-- ALTER TABLE
+
+> CREATE INDEX pdc_xt ON pdc_x (t)
+-- CREATE INDEX
+
+> SELECT attrelid::regclass, attname, atttypid::regtype, attstorage FROM pg_attribute WHERE attrelid IN ('pdc_xi'::regclass, 'pdc_gin'::regclass, 'pdc_xt'::regclass) ORDER BY attrelid::regclass::text, attnum
+attrelid:regclass | attname:name | atttypid:regtype | attstorage:char
+pdc_gin | i | integer | p
+pdc_xi | a | integer | p
+pdc_xi | expr | double precision | p
+pdc_xi | n | cstring | p
+pdc_xt | t | text | e
+-- SELECT 5
+
+> CREATE INDEX pdc_v1 ON pdc_x USING gist (v tsvector_ops (siglen = 100))
+-- CREATE INDEX
+
+> CREATE INDEX pdc_v2 ON pdc_x USING gist (v tsvector_ops (siglen = 0))
+ERROR 22023: value 0 out of bounds for option "siglen"
+DETAIL: Valid values are between "1" and "2024".
+
+> CREATE INDEX pdc_v3 ON pdc_x USING gist (v tsvector_ops (siglen = 100, foo = 'bar'))
+ERROR 22023: unrecognized parameter "foo"
+
+> CREATE INDEX pdc_v4 ON pdc_x USING gist (v tsvector_ops (siglen = 1, siglen = 2))
+ERROR 22023: parameter "siglen" specified more than once
+
+> CREATE INDEX pdc_v5 ON pdc_x USING gist (v tsvector_ops (siglen = abc))
+ERROR 22023: invalid value for integer option "siglen": abc
+
+> CREATE INDEX pdc_a1 ON pdc_x (a int4_ops (foo = 1))
+ERROR 22023: operator class int4_ops has no options
+
+> CREATE INDEX pdc_b1 ON pdc_x USING brin (a int4_minmax_multi_ops (values_per_range = 4))
+ERROR 22023: value 4 out of bounds for option "values_per_range"
+DETAIL: Valid values are between "8" and "256".
+
+> CREATE INDEX pdc_b2 ON pdc_x USING brin (a int4_bloom_ops (n_distinct_per_range = 10, false_positive_rate = 0.01))
+-- CREATE INDEX
+
+> CREATE INDEX pdc_b3 ON pdc_x USING brin (a int4_bloom_ops (false_positive_rate = 0.9))
+ERROR 22023: value 0.9 out of bounds for option "false_positive_rate"
+DETAIL: Valid values are between "0.000100" and "0.250000".
+
+> SELECT pg_get_indexdef('pdc_v1'::regclass), pg_get_indexdef('pdc_b2'::regclass)
+pg_get_indexdef:text | pg_get_indexdef:text
+CREATE INDEX pdc_v1 ON public.pdc_x USING gist (v tsvector_ops (siglen='100')) | CREATE INDEX pdc_b2 ON public.pdc_x USING brin (a int4_bloom_ops (n_distinct_per_range='10', false_positive_rate='0.01'))
+-- SELECT 1
+
+> SELECT attoptions FROM pg_attribute WHERE attrelid = 'pdc_v1'::regclass
+attoptions:text[]
+{siglen=100}
+-- SELECT 1
+
+> SELECT pg_get_indexdef('pg_class_oid_index'::regclass), pg_get_indexdef('pg_class_oid_index'::regclass, 0, true)
+pg_get_indexdef:text | pg_get_indexdef:text
+CREATE UNIQUE INDEX pg_class_oid_index ON pg_catalog.pg_class USING btree (oid) | CREATE UNIQUE INDEX pg_class_oid_index ON pg_class USING btree (oid)
+-- SELECT 1
+
+> SELECT pg_get_indexdef('pg_toast.pg_toast_2619_index'::regclass), pg_get_indexdef('pg_toast.pg_toast_2619_index'::regclass, 2, true)
+pg_get_indexdef:text | pg_get_indexdef:text
+CREATE UNIQUE INDEX pg_toast_2619_index ON pg_toast.pg_toast_2619 USING btree (chunk_id, chunk_seq) | chunk_seq
+-- SELECT 1
+
+> CREATE UNLOGGED TABLE pdc_ul (a int GENERATED ALWAYS AS IDENTITY, b serial)
+-- CREATE TABLE
+
+> SELECT relname, relpersistence FROM pg_class WHERE relname LIKE 'pdc_ul%' ORDER BY 1
+relname:name | relpersistence:char
+pdc_ul | u
+pdc_ul_a_seq | u
+pdc_ul_b_seq | u
+-- SELECT 3
+
+> CREATE TYPE pdc_ct AS (a int, b text)
+-- CREATE TYPE
+
+> SELECT relkind, pg_table_is_visible(oid) FROM pg_class WHERE relname = 'pdc_ct'
+relkind:char | pg_table_is_visible:bool
+c | t
+-- SELECT 1
+
+> CREATE STATISTICS pdc_st ON a, d FROM pdc_x
+-- CREATE STATISTICS
+
+> SELECT stxname, pg_statistics_obj_is_visible(oid) FROM pg_statistic_ext WHERE stxname = 'pdc_st'
+stxname:name | pg_statistics_obj_is_visible:bool
+pdc_st | t
+-- SELECT 1
+
+> CREATE OPERATOR ### (leftarg = int, rightarg = int, function = int4pl)
+-- CREATE OPERATOR
+
+> CREATE OPERATOR pdc_s.### (leftarg = int, rightarg = int, function = int4mi)
+-- CREATE OPERATOR
+
+> CREATE TYPE pdc_e AS ENUM ('a')
+-- CREATE TYPE
+
+> CREATE TYPE pdc_s.pdc_e AS ENUM ('b')
+-- CREATE TYPE
+
+> CREATE COLLATION pdc_coll (locale = 'C')
+-- CREATE COLLATION
+
+> CREATE OPERATOR FAMILY pdc_fam USING btree
+-- CREATE OPERATOR FAMILY
+
+> SET search_path = pdc_s, public
+-- SET
+
+> SELECT oprnamespace::regnamespace, pg_operator_is_visible(oid) FROM pg_operator WHERE oprname = '###' ORDER BY 1
+oprnamespace:4089 | pg_operator_is_visible:bool
+public | f
+pdc_s | t
+-- SELECT 2
+
+> SELECT typnamespace::regnamespace, pg_type_is_visible(oid) FROM pg_type WHERE typname = 'pdc_e' ORDER BY 1
+typnamespace:4089 | pg_type_is_visible:bool
+public | f
+pdc_s | t
+-- SELECT 2
+
+> SELECT collname, pg_collation_is_visible(oid) FROM pg_collation WHERE collname = 'pdc_coll'
+collname:name | pg_collation_is_visible:bool
+pdc_coll | t
+-- SELECT 1
+
+> SELECT opfname, pg_opfamily_is_visible(oid) FROM pg_opfamily WHERE opfname = 'pdc_fam'
+opfname:name | pg_opfamily_is_visible:bool
+pdc_fam | t
+-- SELECT 1
+
+> SELECT pg_operator_is_visible(oid) FROM pg_operator WHERE oprname = '+' AND oprleft = 'int4'::regtype AND oprright = 'int4'::regtype
+pg_operator_is_visible:bool
+t
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT typnamespace::regnamespace, pg_type_is_visible(oid) FROM pg_type WHERE typname = 'pdc_e' ORDER BY 1
+typnamespace:4089 | pg_type_is_visible:bool
+public | t
+pdc_s | f
+-- SELECT 2
+
+> CREATE TABLE pdc_ip (a int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE pdc_ip1 PARTITION OF pdc_ip FOR VALUES FROM (0) TO (10) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE pdc_ip11 PARTITION OF pdc_ip1 FOR VALUES FROM (0) TO (5)
+-- CREATE TABLE
+
+> CREATE INDEX pdc_ipi ON pdc_ip (a)
+-- CREATE INDEX
+
+> SELECT relname, relkind, relispartition FROM pg_class WHERE relname LIKE 'pdc_ip%' ORDER BY 1
+relname:name | relkind:char | relispartition:bool
+pdc_ip | p | f
+pdc_ip1 | p | t
+pdc_ip11 | r | t
+pdc_ip11_a_idx | i | t
+pdc_ip1_a_idx | I | t
+pdc_ipi | I | f
+-- SELECT 6
+
+> SELECT inhrelid::regclass, inhparent::regclass FROM pg_inherits WHERE inhparent = 'pdc_ipi'::regclass
+inhrelid:regclass | inhparent:regclass
+pdc_ip1_a_idx | pdc_ipi
+-- SELECT 1
+
+> SELECT pg_get_functiondef('abs(int)'::regprocedure)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION pg_catalog.abs(integer)
+ RETURNS integer
+ LANGUAGE internal
+ IMMUTABLE PARALLEL SAFE STRICT
+AS $function$int4abs$function$
+
+-- SELECT 1
+
+> SELECT pg_get_functiondef('interval_pl_time'::regproc)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION pg_catalog.interval_pl_time(interval, time without time zone)
+ RETURNS time without time zone
+ LANGUAGE sql
+ IMMUTABLE PARALLEL SAFE STRICT COST 1
+RETURN ($2 + $1)
+
+-- SELECT 1
+
+> SELECT 'information_schema._pg_index_position'::regproc
+regproc:regproc
+information_schema._pg_index_position
+-- SELECT 1
+
+> SELECT pg_get_functiondef('information_schema._pg_index_position(oid, smallint)'::regprocedure)
+pg_get_functiondef:text
+CREATE OR REPLACE FUNCTION information_schema._pg_index_position(oid, smallint)
+ RETURNS integer
+ LANGUAGE sql
+ STABLE STRICT
+BEGIN ATOMIC
+ SELECT (ss.a).n AS n
+    FROM ( SELECT information_schema._pg_expandarray(pg_index.indkey) AS a
+            FROM pg_index
+           WHERE (pg_index.indexrelid = $1)) ss
+   WHERE ((ss.a).x = $2);
+END
+
+-- SELECT 1
+
+> SELECT pg_get_functiondef('sum(int)'::regprocedure)
+ERROR 42809: "sum" is an aggregate function
+

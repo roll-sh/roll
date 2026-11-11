@@ -1,0 +1,16 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6m 43s
+     Running unittests tools/bench/bench.rs (target/release/examples/bench-35a323a1af63ae05)
+
+running 6 tests
+test oltp_validation_tests::point_rejects_each_wrong_field_null_and_type ... ok
+test oltp_validation_tests::range_rejects_wrong_values_duplicates_reordering_and_stale_parameters ... ok
+test oltp_validation_tests::simple_text_retains_nulls_and_checks_all_five_values ... ok
+test oltp_validation_tests::wire_decoders_keep_dates_and_numeric_exact ... ok
+test oltp_validation_tests::wire_numeric_checks_scale_and_exact_length_before_decoding ... ok
+test oltp_validation_tests::secondary_matches_fixture_at_owner_and_alternation_boundaries ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `release` profile [optimized + debuginfo] target(s) in 10.72s

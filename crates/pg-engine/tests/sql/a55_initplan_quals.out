@@ -1,0 +1,67 @@
+> CREATE TABLE a55_c (id int, bal numeric, phone text)
+-- CREATE TABLE
+
+> INSERT INTO a55_c SELECT g, g % 100 - 20, lpad((g % 40)::text, 2, '1') || '-555' FROM generate_series(1, 500) g
+-- INSERT 0 500
+
+> CREATE TABLE a55_o (cid int)
+-- CREATE TABLE
+
+> INSERT INTO a55_o SELECT g * 3 FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> ANALYZE a55_c, a55_o
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a55_c
+> WHERE substring(phone FROM 1 FOR 2) IN ('13', '31', '23', '29', '30', '18', '17')
+>   AND bal > (SELECT avg(bal) FROM a55_c WHERE bal > 0)
+QUERY PLAN:text
+Aggregate
+  InitPlan 1
+    ->  Aggregate
+          ->  Seq Scan on a55_c a55_c_1
+                Filter: (bal > '0'::numeric)
+  ->  Seq Scan on a55_c
+        Filter: ((bal > (InitPlan 1).col1) AND (SUBSTRING(phone FROM 1 FOR 2) = ANY ('{13,31,23,29,30,18,17}'::text[])))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a55_c c
+> WHERE substring(phone FROM 1 FOR 2) IN ('13', '31', '23')
+>   AND EXISTS (SELECT 1 FROM a55_o WHERE cid > 250)
+>   AND bal > (SELECT max(o.cid) - 290 FROM a55_o o WHERE o.cid < c.id)
+QUERY PLAN:text
+Aggregate
+  InitPlan 1
+    ->  Seq Scan on a55_o
+          Filter: (cid > 250)
+  ->  Result
+        One-Time Filter: (InitPlan 1).col1
+        ->  Seq Scan on a55_c c
+              Filter: ((SUBSTRING(phone FROM 1 FOR 2) = ANY ('{13,31,23}'::text[])) AND (bal > ((SubPlan 2))::numeric))
+              SubPlan 2
+                ->  Aggregate
+                      ->  Seq Scan on a55_o o
+                            Filter: (cid < c.id)
+-- EXPLAIN
+
+> SELECT count(*) FROM a55_c
+> WHERE substring(phone FROM 1 FOR 2) IN ('13', '31', '23', '29', '30', '18', '17')
+>   AND bal > (SELECT avg(bal) FROM a55_c WHERE bal > 0)
+count:int8
+50
+-- SELECT 1
+
+> SELECT count(*) FROM a55_c c
+> WHERE substring(phone FROM 1 FOR 2) IN ('13', '31', '23')
+>   AND EXISTS (SELECT 1 FROM a55_o WHERE cid > 250)
+>   AND bal > (SELECT max(o.cid) - 290 FROM a55_o o WHERE o.cid < c.id)
+count:int8
+43
+-- SELECT 1
+
+> DROP TABLE a55_c, a55_o
+-- DROP TABLE
+

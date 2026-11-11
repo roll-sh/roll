@@ -1,0 +1,310 @@
+> CREATE COLLATION regress_builtin_c (
+>   provider = builtin, locale = 'C')
+-- CREATE COLLATION
+
+> SELECT LOWER(U&'\00C1' COLLATE regress_builtin_c) = U&'\00C1'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT UPPER(U&'\00E1' COLLATE regress_builtin_c) = U&'\00E1'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT U&'\00C1\00E1' !~ '[[:alpha:]]' COLLATE regress_builtin_c
+?column?:bool
+t
+-- SELECT 1
+
+> DROP COLLATION regress_builtin_c
+-- DROP COLLATION
+
+> CREATE COLLATION regress_pg_c_utf8 (
+>   provider = builtin, locale = 'C_UTF8')
+ERROR 42809: invalid locale name "C_UTF8" for builtin provider
+
+> CREATE COLLATION regress_pg_c_utf8 (
+>   provider = builtin, locale = 'C.UTF8')
+-- CREATE COLLATION
+
+> DROP COLLATION regress_pg_c_utf8
+-- DROP COLLATION
+
+> CREATE COLLATION regress_pg_c_utf8 (
+>   provider = builtin, locale = 'C.UTF-8')
+-- CREATE COLLATION
+
+> CREATE TABLE test_pg_c_utf8 (
+>   t TEXT COLLATE PG_C_UTF8
+> )
+-- CREATE TABLE
+
+> INSERT INTO test_pg_c_utf8 VALUES
+>   ('abc DEF 123abc'),
+>   ('ábc sßs ßss DÉF'),
+>   ('ǄxxǄ ǆxxǅ ǅxxǆ'),
+>   (U&'Λλ 1a \FF11a'),
+>   ('ȺȺȺ'),
+>   ('ⱥⱥⱥ'),
+>   ('ⱥȺ')
+-- INSERT 0 7
+
+> SELECT
+>     t, lower(t), initcap(t), upper(t),
+>     length(convert_to(t, 'UTF8')) AS t_bytes,
+>     length(convert_to(lower(t), 'UTF8')) AS lower_t_bytes,
+>     length(convert_to(initcap(t), 'UTF8')) AS initcap_t_bytes,
+>     length(convert_to(upper(t), 'UTF8')) AS upper_t_bytes
+>   FROM test_pg_c_utf8
+t:text | lower:text | initcap:text | upper:text | t_bytes:int4 | lower_t_bytes:int4 | initcap_t_bytes:int4 | upper_t_bytes:int4
+abc DEF 123abc | abc def 123abc | Abc Def 123abc | ABC DEF 123ABC | 14 | 14 | 14 | 14
+ábc sßs ßss DÉF | ábc sßs ßss déf | Ábc Sßs ßss Déf | ÁBC SßS ßSS DÉF | 19 | 19 | 19 | 19
+ǄxxǄ ǆxxǅ ǅxxǆ | ǆxxǆ ǆxxǆ ǆxxǆ | Ǆxxǆ Ǆxxǆ Ǆxxǆ | ǄXXǄ ǄXXǄ ǄXXǄ | 20 | 20 | 20 | 20
+ȺȺȺ | ⱥⱥⱥ | Ⱥⱥⱥ | ȺȺȺ | 6 | 9 | 8 | 6
+Λλ 1a １a | λλ 1a １a | Λλ 1a １A | ΛΛ 1A １A | 12 | 12 | 12 | 12
+ⱥȺ | ⱥⱥ | Ⱥⱥ | ȺȺ | 5 | 6 | 5 | 4
+ⱥⱥⱥ | ⱥⱥⱥ | Ⱥⱥⱥ | ȺȺȺ | 9 | 9 | 8 | 6
+-- SELECT 7
+
+> DROP TABLE test_pg_c_utf8
+-- DROP TABLE
+
+> SELECT lower('ΑΣ' COLLATE PG_C_UTF8)
+lower:text
+ασ
+-- SELECT 1
+
+> SELECT lower('ΑͺΣͺ' COLLATE PG_C_UTF8)
+lower:text
+αͺσͺ
+-- SELECT 1
+
+> SELECT lower('Α΄Σ΄' COLLATE PG_C_UTF8)
+lower:text
+α΄σ΄
+-- SELECT 1
+
+> SELECT 'xyz' ~ '[[:alnum:]]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xyz' !~ '[[:upper:]]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT '@' !~ '[[:alnum:]]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT '=' ~ '[[:punct:]]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'a8a' ~ '[[:digit:]]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT '൧' !~ '\d' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xYz' ~* 'XyZ' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xAb' ~* '[W-Y]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xAb' !~* '[c-d]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'Δ' ~* '[γ-λ]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'δ' ~* '[Γ-Λ]' COLLATE PG_C_UTF8
+?column?:bool
+t
+-- SELECT 1
+
+> select casefold('AbCd 123 #$% ıiIİ ẞ ß Ǆǅǆ Σσς' collate PG_C_UTF8)
+casefold:text
+abcd 123 #$% ıiiİ ß ß ǆǆǆ σσσ
+-- SELECT 1
+
+> CREATE COLLATION regress_pg_unicode_fast (
+>   provider = builtin, locale = 'unicode')
+ERROR 42809: invalid locale name "unicode" for builtin provider
+
+> CREATE COLLATION regress_pg_unicode_fast (
+>   provider = builtin, locale = 'PG_UNICODE_FAST')
+-- CREATE COLLATION
+
+> CREATE TABLE test_pg_unicode_fast (
+>   t TEXT COLLATE PG_UNICODE_FAST
+> )
+-- CREATE TABLE
+
+> INSERT INTO test_pg_unicode_fast VALUES
+>   ('abc DEF 123abc'),
+>   ('ábc sßs ßss DÉF'),
+>   ('ǄxxǄ ǆxxǅ ǅxxǆ'),
+>   (U&'Λλ 1a \FF11a'),
+>   ('ȺȺȺ'),
+>   ('ⱥⱥⱥ'),
+>   ('ⱥȺ')
+-- INSERT 0 7
+
+> SELECT
+>     t, lower(t), initcap(t), upper(t),
+>     length(convert_to(t, 'UTF8')) AS t_bytes,
+>     length(convert_to(lower(t), 'UTF8')) AS lower_t_bytes,
+>     length(convert_to(initcap(t), 'UTF8')) AS initcap_t_bytes,
+>     length(convert_to(upper(t), 'UTF8')) AS upper_t_bytes
+>   FROM test_pg_unicode_fast
+t:text | lower:text | initcap:text | upper:text | t_bytes:int4 | lower_t_bytes:int4 | initcap_t_bytes:int4 | upper_t_bytes:int4
+abc DEF 123abc | abc def 123abc | Abc Def 123abc | ABC DEF 123ABC | 14 | 14 | 14 | 14
+ábc sßs ßss DÉF | ábc sßs ßss déf | Ábc Sßs Ssss Déf | ÁBC SSSS SSSS DÉF | 19 | 19 | 19 | 19
+ǄxxǄ ǆxxǅ ǅxxǆ | ǆxxǆ ǆxxǆ ǆxxǆ | ǅxxǆ ǅxxǆ ǅxxǆ | ǄXXǄ ǄXXǄ ǄXXǄ | 20 | 20 | 20 | 20
+ȺȺȺ | ⱥⱥⱥ | Ⱥⱥⱥ | ȺȺȺ | 6 | 9 | 8 | 6
+Λλ 1a １a | λλ 1a １a | Λλ 1a １a | ΛΛ 1A １A | 12 | 12 | 12 | 12
+ⱥȺ | ⱥⱥ | Ⱥⱥ | ȺȺ | 5 | 6 | 5 | 4
+ⱥⱥⱥ | ⱥⱥⱥ | Ⱥⱥⱥ | ȺȺȺ | 9 | 9 | 8 | 6
+-- SELECT 7
+
+> DROP TABLE test_pg_unicode_fast
+-- DROP TABLE
+
+> SELECT lower('ΑΣ' COLLATE PG_UNICODE_FAST)
+lower:text
+ας
+-- SELECT 1
+
+> SELECT lower('ΑΣ0' COLLATE PG_UNICODE_FAST)
+lower:text
+ας0
+-- SELECT 1
+
+> SELECT lower('ἈΣ̓' COLLATE PG_UNICODE_FAST)
+lower:text
+ἀς̓
+-- SELECT 1
+
+> SELECT lower('ᾼΣͅ' COLLATE PG_UNICODE_FAST)
+lower:text
+ᾳςͅ
+-- SELECT 1
+
+> SELECT lower('Σ' COLLATE PG_UNICODE_FAST)
+lower:text
+σ
+-- SELECT 1
+
+> SELECT lower('0Σ' COLLATE PG_UNICODE_FAST)
+lower:text
+0σ
+-- SELECT 1
+
+> SELECT lower('ΑΣΑ' COLLATE PG_UNICODE_FAST)
+lower:text
+ασα
+-- SELECT 1
+
+> SELECT lower('ἈΣ̓Α' COLLATE PG_UNICODE_FAST)
+lower:text
+ἀσ̓α
+-- SELECT 1
+
+> SELECT lower('ᾼΣͅΑ' COLLATE PG_UNICODE_FAST)
+lower:text
+ᾳσͅα
+-- SELECT 1
+
+> SELECT lower(U&'\0300\03A3' COLLATE PG_UNICODE_FAST)
+lower:text
+̀σ
+-- SELECT 1
+
+> SELECT 'xyz' ~ '[[:alnum:]]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xyz' !~ '[[:upper:]]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT '@' !~ '[[:alnum:]]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT '=' !~ '[[:punct:]]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'a8a' ~ '[[:digit:]]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT '൧' ~ '\d' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xYz' ~* 'XyZ' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xAb' ~* '[W-Y]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'xAb' !~* '[c-d]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'Δ' ~* '[γ-λ]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'δ' ~* '[Γ-Λ]' COLLATE PG_UNICODE_FAST
+?column?:bool
+t
+-- SELECT 1
+
+> select casefold('AbCd 123 #$% ıiIİ ẞ ß Ǆǅǆ Σσς' collate PG_UNICODE_FAST)
+casefold:text
+abcd 123 #$% ıiii̇ ss ss ǆǆǆ σσσ
+-- SELECT 1
+
+> select unicode_version(), icu_unicode_version()
+unicode_version:text | icu_unicode_version:text
+16.0 | 17.0
+-- SELECT 1
+
+> select unicode_assigned('abc'), unicode_assigned(U&'\+0E0000'), unicode_assigned(U&'\+0323B0'), unicode_assigned(U&'\+01FAEA'), unicode_assigned('')
+unicode_assigned:bool | unicode_assigned:bool | unicode_assigned:bool | unicode_assigned:bool | unicode_assigned:bool
+t | f | f | f | t
+-- SELECT 1
+

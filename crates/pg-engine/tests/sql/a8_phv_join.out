@@ -1,0 +1,342 @@
+> CREATE TABLE a8_pa (f1 int)
+-- CREATE TABLE
+
+> INSERT INTO a8_pa VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> CREATE TABLE a8_pb (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a8_pb VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> CREATE TABLE a8_one ()
+-- CREATE TABLE
+
+> INSERT INTO a8_one DEFAULT VALUES
+-- INSERT 0 1
+
+> CREATE TABLE a8_big (unique1 int, unique2 int, stringu1 name, stringu2 name)
+-- CREATE TABLE
+
+> INSERT INTO a8_big SELECT i, (i * 7) % 1000, 'S' || (i % 17), 'T' || (i % 13) FROM generate_series(0, 999) i
+-- INSERT 0 1000
+
+> CREATE UNIQUE INDEX a8_big_u1 ON a8_big (unique1)
+-- CREATE INDEX
+
+> CREATE UNIQUE INDEX a8_big_u2 ON a8_big (unique2)
+-- CREATE INDEX
+
+> ANALYZE a8_pa
+-- ANALYZE
+
+> ANALYZE a8_pb
+-- ANALYZE
+
+> ANALYZE a8_one
+-- ANALYZE
+
+> ANALYZE a8_big
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_pa i1
+>   LEFT JOIN (SELECT v1.x2, v2.y1, 11 AS d1
+>              FROM (SELECT 1, 0 FROM a8_one) v1(x1, x2)
+>              LEFT JOIN (SELECT 3, 1 FROM a8_one) v2(y1, y2)
+>              ON v1.x1 = v2.y2) subq1
+>   ON (i1.f1 = subq1.x2)
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i1.f1, (0), (3), (11)
+  Join Filter: (i1.f1 = 0)
+  ->  Seq Scan on public.a8_pa i1
+        Output: i1.f1
+  ->  Materialize
+        Output: (3), (0), (11)
+        ->  Nested Loop Left Join
+              Output: (3), 0, 11
+              ->  Seq Scan on public.a8_one
+              ->  Seq Scan on public.a8_one a8_one_1
+                    Output: 3
+-- EXPLAIN
+
+> SELECT * FROM a8_pa i1
+>   LEFT JOIN (SELECT v1.x2, v2.y1, 11 AS d1
+>              FROM (SELECT 1, 0 FROM a8_one) v1(x1, x2)
+>              LEFT JOIN (SELECT 3, 1 FROM a8_one) v2(y1, y2)
+>              ON v1.x1 = v2.y2) subq1
+>   ON (i1.f1 = subq1.x2)
+> ORDER BY 1
+f1:int4 | x2:int4 | y1:int4 | d1:int4
+-2147483647 | NULL | NULL | NULL
+-123456 | NULL | NULL | NULL
+0 | 0 | 3 | 11
+123456 | NULL | NULL | NULL
+2147483647 | NULL | NULL | NULL
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_pa i1
+>   LEFT JOIN (SELECT a.f1 AS x, 5 AS c FROM a8_pa a JOIN a8_pa b ON a.f1 = b.f1) s
+>   ON i1.f1 = s.c
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i1.f1, a.f1, (5)
+  Join Filter: (i1.f1 = 5)
+  ->  Seq Scan on public.a8_pa i1
+        Output: i1.f1
+  ->  Materialize
+        Output: a.f1, (5)
+        ->  Hash Join
+              Output: a.f1, 5
+              Hash Cond: (a.f1 = b.f1)
+              ->  Seq Scan on public.a8_pa a
+                    Output: a.f1
+              ->  Hash
+                    Output: b.f1
+                    ->  Seq Scan on public.a8_pa b
+                          Output: b.f1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_pa i1
+>   LEFT JOIN (SELECT a.f1 AS x, 5 AS c FROM a8_pa a JOIN a8_pa b ON a.f1 = b.f1) s
+>   ON i1.f1 = s.c + 0
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i1.f1, a.f1, (5)
+  Join Filter: (i1.f1 = 5)
+  ->  Seq Scan on public.a8_pa i1
+        Output: i1.f1
+  ->  Materialize
+        Output: a.f1, (5)
+        ->  Hash Join
+              Output: a.f1, 5
+              Hash Cond: (a.f1 = b.f1)
+              ->  Seq Scan on public.a8_pa a
+                    Output: a.f1
+              ->  Hash
+                    Output: b.f1
+                    ->  Seq Scan on public.a8_pa b
+                          Output: b.f1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_pa i1
+>   LEFT JOIN (SELECT a.f1 AS x, 5 AS c FROM a8_pa a JOIN a8_pa b ON a.f1 = b.f1) s
+>   ON i1.f1 = s.x AND s.c > 0
+QUERY PLAN:text
+Hash Right Join
+  Output: i1.f1, a.f1, (5)
+  Hash Cond: (a.f1 = i1.f1)
+  ->  Hash Join
+        Output: a.f1, 5
+        Hash Cond: (a.f1 = b.f1)
+        ->  Seq Scan on public.a8_pa a
+              Output: a.f1
+        ->  Hash
+              Output: b.f1
+              ->  Seq Scan on public.a8_pa b
+                    Output: b.f1
+  ->  Hash
+        Output: i1.f1
+        ->  Seq Scan on public.a8_pa i1
+              Output: i1.f1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_pa i1
+>   LEFT JOIN (SELECT a.f1 AS x, 5 AS c FROM a8_pa a JOIN a8_pa b ON a.f1 = b.f1) s
+>   ON i1.f1 = s.c WHERE s.x = 1
+QUERY PLAN:text
+Nested Loop
+  Output: i1.f1, a.f1, 5
+  ->  Nested Loop
+        Output: i1.f1, a.f1
+        ->  Seq Scan on public.a8_pa i1
+              Output: i1.f1
+              Filter: (i1.f1 = 5)
+        ->  Seq Scan on public.a8_pa a
+              Output: a.f1
+              Filter: (a.f1 = 1)
+  ->  Seq Scan on public.a8_pa b
+        Output: b.f1
+        Filter: (b.f1 = 1)
+-- EXPLAIN
+
+> SELECT t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 FROM
+>   a8_big t1
+>   INNER JOIN a8_pa i1
+>     LEFT JOIN (SELECT v1.x2, v2.y1, 11 AS d1
+>                FROM (SELECT 1, 0 FROM a8_one) v1(x1, x2)
+>                LEFT JOIN (SELECT 3, 1 FROM a8_one) v2(y1, y2)
+>                ON v1.x1 = v2.y2) subq1
+>     ON (i1.f1 = subq1.x2)
+>   ON (t1.unique2 = subq1.d1)
+>   LEFT JOIN a8_big t2
+>   ON (subq1.y1 = t2.unique1)
+> WHERE t1.unique2 < 42 AND t1.stringu1 > t2.stringu2
+unique2:int4 | stringu1:name | unique1:int4 | stringu2:name
+-- SELECT 0
+
+> CREATE TABLE a8_nt1 (id int PRIMARY KEY, a1 boolean, a2 boolean)
+-- CREATE TABLE
+
+> CREATE TABLE a8_nt2 (id int PRIMARY KEY, nt1_id int, b1 boolean, b2 boolean)
+-- CREATE TABLE
+
+> CREATE TABLE a8_nt3 (id int PRIMARY KEY, nt2_id int, c1 boolean)
+-- CREATE TABLE
+
+> INSERT INTO a8_nt1 VALUES (1, true, true), (2, true, false), (3, false, false)
+-- INSERT 0 3
+
+> INSERT INTO a8_nt2 VALUES (1, 1, true, true), (2, 2, true, false), (3, 3, false, false)
+-- INSERT 0 3
+
+> INSERT INTO a8_nt3 VALUES (1, 1, true), (2, 2, false), (3, 3, true)
+-- INSERT 0 3
+
+> EXPLAIN (COSTS OFF)
+> SELECT nt3.id
+> FROM a8_nt3 AS nt3
+>   LEFT JOIN
+>     (SELECT nt2.*, (nt2.b1 AND ss1.a3) AS b3
+>      FROM a8_nt2 AS nt2
+>        LEFT JOIN
+>          (SELECT nt1.*, (nt1.id IS NOT NULL) AS a3 FROM a8_nt1 AS nt1) AS ss1
+>          ON ss1.id = nt2.nt1_id
+>     ) AS ss2
+>     ON ss2.id = nt3.nt2_id
+> WHERE nt3.id = 1 AND ss2.b3
+QUERY PLAN:text
+Nested Loop
+  ->  Nested Loop
+        ->  Index Scan using a8_nt3_pkey on a8_nt3 nt3
+              Index Cond: (id = 1)
+        ->  Index Scan using a8_nt2_pkey on a8_nt2 nt2
+              Index Cond: (id = nt3.nt2_id)
+  ->  Index Only Scan using a8_nt1_pkey on a8_nt1 nt1
+        Index Cond: (id = nt2.nt1_id)
+        Filter: (nt2.b1 AND (id IS NOT NULL))
+-- EXPLAIN
+
+> SELECT nt3.id, ss2.* FROM a8_nt3 nt3
+>   LEFT JOIN (SELECT nt2.*, (nt2.b1 AND ss1.a3) AS b3
+>              FROM a8_nt2 nt2 LEFT JOIN (SELECT nt1.*, (nt1.id IS NOT NULL) AS a3 FROM a8_nt1 nt1) AS ss1
+>              ON ss1.id = nt2.nt1_id) AS ss2
+>   ON ss2.id = nt3.nt2_id ORDER BY 1
+id:int4 | id:int4 | nt1_id:int4 | b1:bool | b2:bool | b3:bool
+1 | 1 | 1 | t | t | t
+2 | 2 | 2 | t | f | t
+3 | 3 | 3 | f | f | f
+-- SELECT 3
+
+> SELECT nt3.id, ss2.b3 FROM a8_nt3 nt3
+>   LEFT JOIN (SELECT nt2.*, (nt2.b1 OR ss1.a3) AS b3
+>              FROM a8_nt2 nt2 LEFT JOIN (SELECT nt1.*, (nt1.id > 1) AS a3 FROM a8_nt1 nt1) AS ss1
+>              ON ss1.id = nt2.nt1_id + 1) AS ss2
+>   ON ss2.id = nt3.nt2_id WHERE ss2.b3 IS NOT TRUE ORDER BY 1
+id:int4 | b3:bool
+3 | NULL
+-- SELECT 1
+
+> SELECT i1.f1, s.* FROM a8_pa i1
+>   LEFT JOIN (SELECT a.f1 AS x, 5 AS c, coalesce(b.f1, -1) AS cb
+>              FROM a8_pa a LEFT JOIN a8_pa b ON a.f1 = b.f1 + 0) s
+>   ON i1.f1 = s.x ORDER BY 1, 2
+f1:int4 | x:int4 | c:int4 | cb:int4
+-2147483647 | -2147483647 | 5 | -2147483647
+-123456 | -123456 | 5 | -123456
+0 | 0 | 5 | 0
+123456 | 123456 | 5 | 123456
+2147483647 | 2147483647 | 5 | 2147483647
+-- SELECT 5
+
+> SELECT i1.f1, s.c, s.x FROM a8_pa i1
+>   LEFT JOIN (SELECT a.f1 AS x, 5 AS c FROM a8_pa a JOIN a8_pa b ON a.f1 = b.f1 WHERE a.f1 > 0) s
+>   ON i1.f1 = s.x WHERE s.c IS NULL ORDER BY 1
+f1:int4 | c:int4 | x:int4
+-2147483647 | NULL | NULL
+-123456 | NULL | NULL
+0 | NULL | NULL
+-- SELECT 3
+
+> SELECT i1.f1, s.c, i2.f1 FROM a8_pa i1
+>   LEFT JOIN (SELECT a.f1 AS x, 5 AS c FROM a8_pa a JOIN a8_pa b ON a.f1 = b.f1 WHERE a.f1 > 0) s
+>   ON i1.f1 = s.x
+>   LEFT JOIN a8_pa i2 ON i2.f1 = s.c ORDER BY 1, 3
+f1:int4 | c:int4 | f1:int4
+-2147483647 | NULL | NULL
+-123456 | NULL | NULL
+0 | NULL | NULL
+123456 | 5 | NULL
+2147483647 | 5 | NULL
+-- SELECT 5
+
+> SELECT q1, ss.* FROM a8_pb t
+>   LEFT JOIN (SELECT i.f1, coalesce(j.q2, 42) AS z, (i.f1 IS NULL) AS n
+>              FROM a8_pa i LEFT JOIN a8_pb j ON i.f1 = j.q1) ss
+>   ON t.q2 = ss.f1 ORDER BY 1, 2, 3
+q1:int8 | f1:int4 | z:int8 | n:bool
+123 | NULL | NULL | NULL
+123 | NULL | NULL | NULL
+4567890123456789 | NULL | NULL | NULL
+4567890123456789 | NULL | NULL | NULL
+4567890123456789 | NULL | NULL | NULL
+-- SELECT 5
+
+> SELECT count(*), count(ss.t), count(ss.s) FROM a8_pb t0
+>   LEFT JOIN (SELECT a.q1, 'x'::text AS t, coalesce(b.q2, 0) AS s
+>              FROM a8_pb a LEFT JOIN a8_pb b ON a.q2 = b.q1 AND b.q1 > 1000) ss ON t0.q1 = ss.q1 + 1
+count:int8 | count:int8 | count:int8
+5 | 0 | 0
+-- SELECT 1
+
+> SELECT t0.q1, ss.* FROM a8_pb t0
+>   LEFT JOIN (SELECT a.q1, 'x'::text AS t, coalesce(b.q2, 0) AS s
+>              FROM a8_pb a LEFT JOIN a8_pb b ON a.q2 = b.q1) ss ON t0.q1 = ss.q1 AND ss.s > 100
+>   ORDER BY 1, 2, 4
+q1:int8 | q1:int8 | t:text | s:int8
+123 | 123 | x | 123
+123 | 123 | x | 123
+123 | 123 | x | 4567890123456789
+123 | 123 | x | 4567890123456789
+4567890123456789 | 4567890123456789 | x | 123
+4567890123456789 | 4567890123456789 | x | 123
+4567890123456789 | 4567890123456789 | x | 123
+4567890123456789 | 4567890123456789 | x | 456
+4567890123456789 | 4567890123456789 | x | 456
+4567890123456789 | 4567890123456789 | x | 456
+4567890123456789 | 4567890123456789 | x | 4567890123456789
+4567890123456789 | 4567890123456789 | x | 4567890123456789
+4567890123456789 | 4567890123456789 | x | 4567890123456789
+4567890123456789 | 4567890123456789 | x | 4567890123456789
+4567890123456789 | 4567890123456789 | x | 4567890123456789
+4567890123456789 | 4567890123456789 | x | 4567890123456789
+-- SELECT 16
+
+> DROP TABLE a8_nt3
+-- DROP TABLE
+
+> DROP TABLE a8_nt2
+-- DROP TABLE
+
+> DROP TABLE a8_nt1
+-- DROP TABLE
+
+> DROP TABLE a8_big
+-- DROP TABLE
+
+> DROP TABLE a8_one
+-- DROP TABLE
+
+> DROP TABLE a8_pb
+-- DROP TABLE
+
+> DROP TABLE a8_pa
+-- DROP TABLE
+

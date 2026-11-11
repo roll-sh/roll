@@ -1,0 +1,43 @@
+{
+  "at_utc": "2026-11-02T02:11:23.808927+00:00",
+  "pid_absent": {
+    "250232": true,
+    "251621": true,
+    "372052": true,
+    "373459": true,
+    "470527": true,
+    "472224": true
+  },
+  "ports": {
+    "53320": {
+      "connection_refused": true
+    },
+    "53321": {
+      "connection_refused": true
+    },
+    "53322": {
+      "connection_refused": true
+    },
+    "53323": {
+      "connection_refused": true
+    },
+    "53324": {
+      "connection_refused": true
+    },
+    "53325": {
+      "connection_refused": true
+    }
+  },
+  "helpers": [
+    {
+      "id": "7f60cd246987ec57e0e8999ce48b0254241ae05f0895a1786a4f7c71814115b8",
+      "inspect_exit": 1,
+      "stderr": "Error response from daemon: No such container: 7f60cd246987ec57e0e8999ce48b0254241ae05f0895a1786a4f7c71814115b8"
+    },
+    {
+      "id": "ae28ce54f35ce13859d40f62db23521731ca10000ec983f0729d72f33b451c6a",
+      "inspect_exit": 1,
+      "stderr": "Error response from daemon: No such container: ae28ce54f35ce13859d40f62db23521731ca10000ec983f0729d72f33b451c6a"
+    }
+  ]
+}

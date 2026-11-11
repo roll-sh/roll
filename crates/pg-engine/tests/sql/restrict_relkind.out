@@ -1,0 +1,129 @@
+> CREATE TABLE rr_tbl (a int)
+-- CREATE TABLE
+
+> CREATE VIEW rr_v AS SELECT a FROM rr_tbl
+-- CREATE VIEW
+
+> CREATE FOREIGN DATA WRAPPER rr_fdw
+-- CREATE FOREIGN DATA WRAPPER
+
+> CREATE SERVER rr_srv FOREIGN DATA WRAPPER rr_fdw
+-- CREATE SERVER
+
+> CREATE FOREIGN TABLE rr_ft (a int) SERVER rr_srv
+-- CREATE FOREIGN TABLE
+
+> SET restrict_nonsystem_relation_kind TO 'view'
+-- SET
+
+> SHOW restrict_nonsystem_relation_kind
+restrict_nonsystem_relation_kind:text
+view
+-- SHOW
+
+> SELECT a FROM rr_v WHERE a > 0
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> INSERT INTO rr_v VALUES (1)
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> UPDATE rr_v SET a = 2
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> DELETE FROM rr_v
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> MERGE INTO rr_v t USING (SELECT 1 a) s ON t.a = s.a WHEN MATCHED THEN DELETE
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> SELECT * FROM rr_tbl, LATERAL (SELECT * FROM rr_v) s
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> EXPLAIN (COSTS OFF) SELECT * FROM rr_v
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> WITH x AS (SELECT * FROM rr_v) SELECT 1
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> COPY (SELECT * FROM rr_v) TO stdout
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> CREATE TABLE rr_tbl2 AS SELECT * FROM rr_v
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> CREATE VIEW rr_v2 AS SELECT * FROM rr_v
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('rr_v'::regclass)
+pg_get_viewdef:text
+ SELECT a
+   FROM rr_tbl;
+-- SELECT 1
+
+> SELECT count(*) FROM pg_views WHERE viewname = 'rr_v'
+count:int8
+1
+-- SELECT 1
+
+> SELECT table_name FROM information_schema.tables WHERE table_name = 'rr_tbl'
+table_name:name
+rr_tbl
+-- SELECT 1
+
+> SET restrict_nonsystem_relation_kind TO 'foreign-table'
+-- SET
+
+> SELECT * FROM rr_ft
+ERROR 55000: access to non-system foreign table is restricted
+
+> INSERT INTO rr_ft VALUES (1)
+ERROR 55000: access to non-system foreign table is restricted
+
+> SELECT a FROM rr_v
+a:int4
+-- SELECT 0
+
+> SET restrict_nonsystem_relation_kind TO 'view, foreign-table'
+-- SET
+
+> SHOW restrict_nonsystem_relation_kind
+restrict_nonsystem_relation_kind:text
+view, foreign-table
+-- SHOW
+
+> SELECT * FROM rr_ft
+ERROR 55000: access to non-system foreign table is restricted
+
+> SET restrict_nonsystem_relation_kind TO 'table'
+ERROR 22023: invalid value for parameter "restrict_nonsystem_relation_kind": "table"
+DETAIL: Unrecognized key word: "table".
+
+> SET restrict_nonsystem_relation_kind TO 'view,'
+ERROR 22023: invalid value for parameter "restrict_nonsystem_relation_kind": "view,"
+DETAIL: List syntax is invalid.
+
+> SET restrict_nonsystem_relation_kind TO ''
+-- SET
+
+> SELECT a FROM rr_v
+a:int4
+-- SELECT 0
+
+> SET restrict_nonsystem_relation_kind TO 'VIEW'
+-- SET
+
+> SHOW restrict_nonsystem_relation_kind
+restrict_nonsystem_relation_kind:text
+VIEW
+-- SHOW
+
+> SELECT * FROM rr_v
+ERROR 55000: access to non-system view "rr_v" is restricted
+
+> RESET restrict_nonsystem_relation_kind
+-- RESET
+
+> SELECT * FROM rr_v
+a:int4
+-- SELECT 0
+

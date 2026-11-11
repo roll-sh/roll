@@ -1,0 +1,36 @@
+> COPY (SELECT ''::text AS a, 'x' AS b, NULL::text AS c) TO STDOUT (FORMAT csv)
+copy:text
+"",x,
+-- COPY 1
+
+> COPY (SELECT ''::text AS a, 'x' AS b, NULL::text AS c) TO STDOUT (FORMAT csv, NULL 'N')
+copy:text
+,x,N
+-- COPY 1
+
+> COPY (SELECT ''::text AS a, 'N' AS b, NULL::text AS c) TO STDOUT (FORMAT csv, NULL 'N', HEADER)
+copy:text
+,"N",N
+a,b,c
+-- COPY 1
+
+> COPY (SELECT ''::tsvector AS a, ' ' AS b) TO STDOUT (FORMAT csv, DELIMITER ';', NULL 'N')
+copy:text
+; 
+-- COPY 1
+
+> COPY (SELECT ''::text AS a) TO STDOUT (FORMAT csv, NULL 'N')
+copy:text
+
+-- COPY 1
+
+> COPY (SELECT ''::text AS a, 'q' AS b) TO STDOUT (FORMAT csv, FORCE_QUOTE (a), NULL 'N')
+copy:text
+"",q
+-- COPY 1
+
+> COPY (SELECT ''::text AS a, 'q' AS b) TO STDOUT (FORMAT text, NULL 'N')
+copy:text
+	q
+-- COPY 1
+

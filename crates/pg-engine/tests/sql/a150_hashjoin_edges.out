@@ -1,0 +1,83 @@
+> create table a150l (id int, k text, v int)
+-- CREATE TABLE
+
+> create table a150r (id bigint, k text, v int)
+-- CREATE TABLE
+
+> insert into a150l select case when g % 100 = 0 then null else g % 6000 end, case when g % 73 = 0 then null else (g % 3)::text end, g from generate_series(1, 8000) g
+-- INSERT 0 8000
+
+> insert into a150r select case when g % 101 = 0 then null else g % 6000 end, case when g % 71 = 0 then null else (g % 3)::text end, g from generate_series(1, 16000) g
+-- INSERT 0 16000
+
+> analyze a150l, a150r
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> set work_mem = '64kB'
+-- SET
+
+> select count(*), sum(l.v), sum(r.v) from a150l l join a150r r on l.id = r.id and l.k = r.k and l.v < r.v
+count:int8 | sum:int8 | sum:int8
+11439 | 38124590 | 129642590
+-- SELECT 1
+
+> select count(*), sum(l.v), sum(r.v) from a150l l left join a150r r on l.id = r.id and l.k = r.k and l.v > r.v
+count:int8 | sum:int8 | sum:int8
+8000 | 32004000 | 1906565
+-- SELECT 1
+
+> select count(*), sum(l.v), sum(r.v) from a150l l right join a150r r on l.id = r.id and l.k = r.k and l.v > r.v
+count:int8 | sum:int8 | sum:int8
+16000 | 13354565 | 128008000
+-- SELECT 1
+
+> select count(*), sum(l.v), sum(r.v) from a150l l full join a150r r on l.id = r.id and l.k = r.k and l.v > r.v
+count:int8 | sum:int8 | sum:int8
+22092 | 32004000 | 128008000
+-- SELECT 1
+
+> select count(*), sum(l.v) from a150l l where exists (select 1 from a150r r where l.id = r.id and l.k = r.k and l.v < r.v)
+count:int8 | sum:int8
+7716 | 30678678
+-- SELECT 1
+
+> select count(*), sum(l.v) from a150l l where not exists (select 1 from a150r r where l.id = r.id and l.k = r.k and l.v < r.v)
+count:int8 | sum:int8
+284 | 1325322
+-- SELECT 1
+
+> select count(*), sum(r.v) from a150r r where exists (select 1 from a150l l where l.id = r.id and l.k = r.k and l.v < r.v)
+count:int8 | sum:int8
+9560 | 105216468
+-- SELECT 1
+
+> select count(*), sum(r.v) from a150r r where not exists (select 1 from a150l l where l.id = r.id and l.k = r.k and l.v < r.v)
+count:int8 | sum:int8
+6440 | 22791532
+-- SELECT 1
+
+> select count(*) from a150l l full join (select * from a150r where v < 0) r on l.id = r.id
+count:int8
+8000
+-- SELECT 1
+
+> select count(*) from (select * from a150l where v < 0) l full join a150r r on l.id = r.id
+count:int8
+16000
+-- SELECT 1
+
+> reset work_mem
+-- RESET
+
+> drop table a150l, a150r
+-- DROP TABLE
+

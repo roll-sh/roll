@@ -1,0 +1,882 @@
+> CREATE DATABASE locale_icu LOCALE_PROVIDER icu ICU_LOCALE 'en' LOCALE 'C' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_icu2 LOCALE_PROVIDER icu ICU_LOCALE 'en' LOCALE 'C' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_icu3 LOCALE_PROVIDER icu ICU_LOCALE 'en' LOCALE 'C' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_c TEMPLATE template0
+-- CREATE DATABASE
+
+> \c locale_icu
+
+> CREATE TABLE t (id int, s text)
+-- CREATE TABLE
+
+> INSERT INTO t VALUES (1,'a'),(2,'B'),(3,'b'),(4,'A'),(5,'é'),(6,'e'),(7,'Z'),(8,'_x'),(9,'1'),(10,'ab')
+-- INSERT 0 10
+
+> SELECT string_agg(s, ' ' ORDER BY s) FROM t
+string_agg:text
+_x 1 a A ab b B e é Z
+-- SELECT 1
+
+> SELECT min(s), max(s) FROM t
+min:text | max:text
+_x | Z
+-- SELECT 1
+
+> SELECT DISTINCT ON (s) s FROM t ORDER BY s LIMIT 4
+s:text
+_x
+1
+a
+A
+-- SELECT 4
+
+> SELECT string_agg(s, ' ') FROM (SELECT s FROM t ORDER BY s DESC) x
+string_agg:text
+Z é e B b ab A a 1 _x
+-- SELECT 1
+
+> SELECT array_agg(s ORDER BY s) FROM t
+array_agg:text[]
+{_x,1,a,A,ab,b,B,e,é,Z}
+-- SELECT 1
+
+> SELECT s, rank() OVER (ORDER BY s) FROM t ORDER BY 2 LIMIT 3
+s:text | rank:int8
+_x | 1
+1 | 2
+a | 3
+-- SELECT 3
+
+> SELECT ARRAY['b','A'] < ARRAY['a','B']
+?column?:bool
+f
+-- SELECT 1
+
+> SELECT ROW('b','x') < ROW('A','x')
+?column?:bool
+f
+-- SELECT 1
+
+> SELECT 'b'::text < 'A'
+?column?:bool
+f
+-- SELECT 1
+
+> SELECT textrange('a','B')
+ERROR 42883: function textrange(unknown, unknown) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT textrange('b','A')
+ERROR 42883: function textrange(unknown, unknown) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT textrange('a','z') @> 'B'::text
+ERROR 42883: function textrange(unknown, unknown) does not exist (at 8)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT '{"b":1,"A":2}'::jsonb
+jsonb:jsonb
+{"A": 2, "b": 1}
+-- SELECT 1
+
+> SELECT '"b"'::jsonb < '"A"'::jsonb
+?column?:bool
+f
+-- SELECT 1
+
+> SELECT x FROM jsonb_array_elements('["b","A","a"]') x ORDER BY x
+x:jsonb
+"a"
+"A"
+"b"
+-- SELECT 3
+
+> CREATE INDEX t_s ON t (s)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t ORDER BY s
+QUERY PLAN:text
+Index Only Scan using t_s on t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s > 'b'
+QUERY PLAN:text
+Index Only Scan using t_s on t
+  Index Cond: (s > 'b'::text)
+-- EXPLAIN
+
+> SELECT string_agg(s, ' ') FROM (SELECT s FROM t WHERE s > 'b' ORDER BY s) x
+string_agg:text
+B e é Z
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s LIKE 'a%'
+QUERY PLAN:text
+Index Only Scan using t_s on t
+  Filter: (s ~~ 'a%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT min(s) FROM t
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan using t_s on t
+                Index Cond: (s IS NOT NULL)
+-- EXPLAIN
+
+> SELECT min(s) FROM t
+min:text
+_x
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE TABLE p (s text) PARTITION BY RANGE (s)
+-- CREATE TABLE
+
+> CREATE TABLE p1 PARTITION OF p FOR VALUES FROM ('a') TO ('b')
+-- CREATE TABLE
+
+> CREATE TABLE p2 PARTITION OF p FOR VALUES FROM ('b') TO ('z')
+-- CREATE TABLE
+
+> INSERT INTO p VALUES ('B')
+-- INSERT 0 1
+
+> SELECT tableoid::regclass, s FROM p
+tableoid:regclass | s:text
+p2 | B
+-- SELECT 1
+
+> CREATE TABLE u (s text COLLATE "und-x-icu" UNIQUE)
+-- CREATE TABLE
+
+> CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE v (s text COLLATE ci PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO v VALUES ('abc')
+-- INSERT 0 1
+
+> INSERT INTO v VALUES ('ABC')
+ERROR 23505: duplicate key value violates unique constraint "v_pkey"
+DETAIL: Key (s)=(ABC) already exists.
+OBJECTS: schema=public table=v constraint=v_pkey
+
+> CREATE TABLE w (s text COLLATE ci UNIQUE)
+-- CREATE TABLE
+
+> INSERT INTO w VALUES ('abc'), ('ABC')
+ERROR 23505: duplicate key value violates unique constraint "w_s_key"
+DETAIL: Key (s)=(ABC) already exists.
+OBJECTS: schema=public table=w constraint=w_s_key
+
+> SELECT count(DISTINCT s) FROM t
+count:int8
+10
+-- SELECT 1
+
+> SELECT s FROM v WHERE s = 'ABC'
+s:text
+abc
+-- SELECT 1
+
+> CREATE TYPE tr AS RANGE (subtype = text)
+-- CREATE TYPE
+
+> SELECT tr('a','B')
+tr:user
+[a,B)
+-- SELECT 1
+
+> SELECT tr('b','A')
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> SELECT tr('a','z') @> 'B'::text
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT tr('a','c') < tr('B','c')
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT tr('a','c') && tr('B','d')
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT tr_multirange(tr('a','b'), tr('B','C'))
+tr_multirange:user
+{[a,b),[B,C)}
+-- SELECT 1
+
+> SELECT range_merge(tr('a','b'), tr('B','C'))
+range_merge:user
+[a,C)
+-- SELECT 1
+
+> CREATE TABLE r (x tr)
+-- CREATE TABLE
+
+> INSERT INTO r VALUES (tr('a','b')), (tr('B','C')), (tr('A','c')), (tr('b','c'))
+-- INSERT 0 4
+
+> SELECT x FROM r ORDER BY x
+x:user
+[a,b)
+[A,c)
+[b,c)
+[B,C)
+-- SELECT 4
+
+> CREATE INDEX r_x ON r (x)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT x FROM r ORDER BY x
+x:user
+[a,b)
+[A,c)
+[b,c)
+[B,C)
+-- SELECT 4
+
+> SELECT x FROM r WHERE x > tr('a','b') ORDER BY x
+x:user
+[A,c)
+[b,c)
+[B,C)
+-- SELECT 3
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE EXTENSION citext
+-- CREATE EXTENSION
+
+> CREATE TABLE c (s citext)
+-- CREATE TABLE
+
+> INSERT INTO c VALUES ('b'),('A'),('_x'),('é'),('E'),('Z'),('a')
+-- INSERT 0 7
+
+> SELECT string_agg(s::text, ' ' ORDER BY s) FROM c
+string_agg:text
+_x a A b E é Z
+-- SELECT 1
+
+> SELECT 'b'::citext < 'A'::citext, '_x'::citext < 'a'::citext
+?column?:bool | ?column?:bool
+f | t
+-- SELECT 1
+
+> CREATE INDEX c_s ON c (s)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(s::text, ' ') FROM (SELECT s FROM c ORDER BY s) x
+string_agg:text
+_x A a b E é Z
+-- SELECT 1
+
+> SELECT string_agg(s::text, ' ') FROM (SELECT s FROM c WHERE s > 'a' ORDER BY s) x
+string_agg:text
+b E é Z
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT s FROM c WHERE s > 'a'
+QUERY PLAN:text
+Index Only Scan using c_s on c
+  Index Cond: (s > 'a'::citext)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE TABLE e (s text, EXCLUDE USING btree (s WITH =))
+-- CREATE TABLE
+
+> INSERT INTO e VALUES ('a'), ('A')
+-- INSERT 0 2
+
+> CREATE TABLE m1 (s text)
+-- CREATE TABLE
+
+> CREATE TABLE m2 (s text)
+-- CREATE TABLE
+
+> INSERT INTO m1 SELECT chr(65 + i % 58) FROM generate_series(1,100) i
+-- INSERT 0 100
+
+> INSERT INTO m2 SELECT chr(65 + i % 58) FROM generate_series(1,100) i
+-- INSERT 0 100
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> SELECT count(*) FROM m1 JOIN m2 USING (s)
+count:int8
+184
+-- SELECT 1
+
+> SELECT m1.s FROM m1 JOIN m2 USING (s) ORDER BY 1 LIMIT 3 OFFSET 40
+s:text
+c
+C
+C
+-- SELECT 3
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> SELECT s, count(*) OVER (PARTITION BY s ORDER BY s) FROM (VALUES ('b'),('A'),('a')) v(s)
+s:text | count:int8
+a | 1
+A | 1
+b | 1
+-- SELECT 3
+
+> SELECT (VALUES ('b'),('A')) < 'x'
+ERROR 21000: more than one row returned by a subquery used as an expression
+
+> SELECT greatest('b','A'), least('b','A')
+greatest:text | least:text
+b | A
+-- SELECT 1
+
+> SELECT ARRAY['b','A','a'] @> ARRAY['A']
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT array_sort(ARRAY['b','A','a','_'])
+array_sort:text[]
+{_,a,A,b}
+-- SELECT 1
+
+> SELECT jsonb_path_query('["b","A"]', '$[*] ? (@ < "a")')
+jsonb_path_query:jsonb
+"A"
+-- SELECT 1
+
+> \c locale_icu2
+
+> CREATE TABLE t (id int, s text, c char(3), v varchar)
+-- CREATE TABLE
+
+> INSERT INTO t SELECT i, chr(65 + i % 58) || i, chr(65 + i % 58), chr(97 + i % 26) FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> CREATE INDEX t_s ON t (s)
+-- CREATE INDEX
+
+> CREATE INDEX t_c ON t (c)
+-- CREATE INDEX
+
+> CREATE INDEX t_vd ON t (v DESC, id)
+-- CREATE INDEX
+
+> CREATE INDEX t_p ON t (s text_pattern_ops)
+-- CREATE INDEX
+
+> ANALYZE t
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t ORDER BY s LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using t_s on t
+-- EXPLAIN
+
+> SELECT s FROM t ORDER BY s LIMIT 5
+s:text
+_1016
+_1074
+_1132
+_1190
+_1248
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t ORDER BY s DESC LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan Backward using t_s on t
+-- EXPLAIN
+
+> SELECT s FROM t ORDER BY s DESC LIMIT 5
+s:text
+z985
+Z953
+z927
+Z895
+z869
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s BETWEEN 'b' AND 'c' ORDER BY s
+QUERY PLAN:text
+Sort
+  Sort Key: s
+  ->  Bitmap Heap Scan on t
+        Recheck Cond: ((s >= 'b'::text) AND (s <= 'c'::text))
+        ->  Bitmap Index Scan on t_s
+              Index Cond: ((s >= 'b'::text) AND (s <= 'c'::text))
+-- EXPLAIN
+
+> SELECT count(*) FROM t WHERE s BETWEEN 'b' AND 'c'
+count:int8
+69
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t ORDER BY s COLLATE "C" LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: s COLLATE "C"
+        ->  Seq Scan on t
+-- EXPLAIN
+
+> SELECT s FROM t ORDER BY s COLLATE "C" LIMIT 5
+s:text
+A1044
+A1102
+A116
+A1160
+A1218
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s < 'B' COLLATE "C"
+QUERY PLAN:text
+Seq Scan on t
+  Filter: (s < 'B'::text COLLATE "C")
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s LIKE 'a1%'
+QUERY PLAN:text
+Index Only Scan using t_p on t
+  Index Cond: ((s ~>=~ 'a1'::text) AND (s ~<~ 'a2'::text))
+  Filter: (s ~~ 'a1%'::text)
+-- EXPLAIN
+
+> SELECT count(*) FROM t WHERE s LIKE 'a1%'
+count:int8
+18
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s ~>=~ 'a' AND s ~<~ 'b'
+QUERY PLAN:text
+Index Only Scan using t_p on t
+  Index Cond: ((s ~>=~ 'a'::text) AND (s ~<~ 'b'::text))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT c FROM t WHERE c > 'x' ORDER BY c LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using t_c on t
+        Index Cond: (c > 'x'::bpchar)
+-- EXPLAIN
+
+> SELECT c FROM t WHERE c > 'x' ORDER BY c LIMIT 3
+c:bpchar
+X  
+X  
+X  
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT v, id FROM t ORDER BY v DESC, id LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using t_vd on t
+-- EXPLAIN
+
+> SELECT v, id FROM t ORDER BY v DESC, id LIMIT 3
+v:varchar | id:int4
+z | 25
+z | 51
+z | 77
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT v FROM t WHERE v = 'B'
+QUERY PLAN:text
+Index Only Scan using t_vd on t
+  Index Cond: (v = 'B'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT min(s), max(s) FROM t
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan using t_s on t
+                Index Cond: (s IS NOT NULL)
+  InitPlan 2
+    ->  Limit
+          ->  Index Only Scan Backward using t_s on t t_1
+                Index Cond: (s IS NOT NULL)
+-- EXPLAIN
+
+> SELECT min(s), max(s) FROM t
+min:text | max:text
+_1016 | z985
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s IN ('a1', 'B2', 'z')
+QUERY PLAN:text
+Bitmap Heap Scan on t
+  Recheck Cond: (s = ANY ('{a1,B2,z}'::text[]))
+  ->  Bitmap Index Scan on t_p
+        Index Cond: (s = ANY ('{a1,B2,z}'::text[]))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT s FROM t WHERE s < 'b'
+QUERY PLAN:text
+HashAggregate
+  Group Key: s
+  ->  Bitmap Heap Scan on t
+        Recheck Cond: (s < 'b'::text)
+        ->  Bitmap Index Scan on t_s
+              Index Cond: (s < 'b'::text)
+-- EXPLAIN
+
+> CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE n (id int, s text COLLATE ci)
+-- CREATE TABLE
+
+> INSERT INTO n SELECT i, (ARRAY['abc','ABC','Abd','b','B','é','E'])[1 + i % 7] FROM generate_series(1, 700) i
+-- INSERT 0 700
+
+> CREATE INDEX n_s ON n (s)
+-- CREATE INDEX
+
+> ANALYZE n
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM n WHERE s = 'abc'
+QUERY PLAN:text
+Aggregate
+  ->  Seq Scan on n
+        Filter: (s = 'abc'::text)
+-- EXPLAIN
+
+> SELECT count(*) FROM n WHERE s = 'abc'
+count:int8
+200
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM n WHERE s > 'abc'
+QUERY PLAN:text
+Aggregate
+  ->  Seq Scan on n
+        Filter: (s > 'abc'::text)
+-- EXPLAIN
+
+> SELECT count(*) FROM n WHERE s > 'abc'
+count:int8
+500
+-- SELECT 1
+
+> SELECT count(*) FROM n WHERE s >= 'ABC' AND s <= 'abd'
+count:int8
+300
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT s FROM n ORDER BY s LIMIT 2
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using n_s on n
+-- EXPLAIN
+
+> CREATE UNIQUE INDEX n_u ON n (s)
+ERROR 23505: could not create unique index "n_u"
+DETAIL: Key (s)=(b) is duplicated.
+OBJECTS: schema=public table=n constraint=n_u
+
+> CREATE TABLE nu (s text COLLATE ci UNIQUE)
+-- CREATE TABLE
+
+> INSERT INTO nu VALUES ('x'), ('y')
+-- INSERT 0 2
+
+> INSERT INTO nu VALUES ('X')
+ERROR 23505: duplicate key value violates unique constraint "nu_s_key"
+DETAIL: Key (s)=(X) already exists.
+OBJECTS: schema=public table=nu constraint=nu_s_key
+
+> UPDATE nu SET s = 'Y' WHERE s = 'x'
+ERROR 23505: duplicate key value violates unique constraint "nu_s_key"
+DETAIL: Key (s)=(Y) already exists.
+OBJECTS: schema=public table=nu constraint=nu_s_key
+
+> INSERT INTO nu VALUES ('X') ON CONFLICT (s) DO UPDATE SET s = excluded.s RETURNING *
+s:text
+X
+-- INSERT 0 1
+
+> SELECT * FROM nu ORDER BY s
+s:text
+X
+y
+-- SELECT 2
+
+> \c locale_icu3
+
+> CREATE TABLE t (id int, s text, c char(3), v varchar)
+-- CREATE TABLE
+
+> INSERT INTO t SELECT i, chr(65 + i % 58) || i, chr(65 + i % 58), chr(97 + i % 26) FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> CREATE INDEX t_s ON t (s)
+-- CREATE INDEX
+
+> ANALYZE t
+-- ANALYZE
+
+> EXPLAIN SELECT s FROM t WHERE s < 'b'
+QUERY PLAN:text
+Bitmap Heap Scan on t  (cost=10.43..24.91 rows=278 width=5)
+  Recheck Cond: (s < 'b'::text)
+  ->  Bitmap Index Scan on t_s  (cost=0.00..10.36 rows=278 width=0)
+        Index Cond: (s < 'b'::text)
+-- EXPLAIN
+
+> EXPLAIN SELECT DISTINCT s FROM t WHERE s < 'b'
+QUERY PLAN:text
+HashAggregate  (cost=25.60..28.38 rows=278 width=5)
+  Group Key: s
+  ->  Bitmap Heap Scan on t  (cost=10.43..24.91 rows=278 width=5)
+        Recheck Cond: (s < 'b'::text)
+        ->  Bitmap Index Scan on t_s  (cost=0.00..10.36 rows=278 width=0)
+              Index Cond: (s < 'b'::text)
+-- EXPLAIN
+
+> CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE n (id int, s text COLLATE ci)
+-- CREATE TABLE
+
+> INSERT INTO n SELECT i, (ARRAY['abc','ABC','Abd','b','B','é','E'])[1 + i % 7] FROM generate_series(1, 700) i
+-- INSERT 0 700
+
+> CREATE INDEX n_s ON n (s)
+-- CREATE INDEX
+
+> ANALYZE n
+-- ANALYZE
+
+> EXPLAIN SELECT count(*) FROM n WHERE s = 'abc'
+QUERY PLAN:text
+Aggregate  (cost=13.25..13.26 rows=1 width=8)
+  ->  Seq Scan on n  (cost=0.00..12.75 rows=200 width=0)
+        Filter: (s = 'abc'::text)
+-- EXPLAIN
+
+> SELECT most_common_vals, most_common_freqs FROM pg_stats WHERE tablename = 'n' AND attname = 's'
+most_common_vals:2277 | most_common_freqs:float4[]
+{ABC,b,Abd,E,é} | {0.2857143,0.2857143,0.14285715,0.14285715,0.14285715}
+-- SELECT 1
+
+> \c locale_c
+
+> CREATE TABLE t (id int, s text COLLATE "en-x-icu", k text)
+-- CREATE TABLE
+
+> INSERT INTO t SELECT i, chr(65 + i % 58) || i, chr(65 + i % 58) || i FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> CREATE INDEX t_s ON t (s)
+-- CREATE INDEX
+
+> CREATE INDEX t_k ON t (k)
+-- CREATE INDEX
+
+> CREATE INDEX t_kc ON t (k COLLATE "en-x-icu")
+-- CREATE INDEX
+
+> ANALYZE t
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t ORDER BY s LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using t_s on t
+-- EXPLAIN
+
+> SELECT s FROM t ORDER BY s LIMIT 3
+s:text
+_1016
+_1074
+_1132
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s > 'z' ORDER BY s
+QUERY PLAN:text
+Sort
+  Sort Key: s COLLATE "en-x-icu"
+  ->  Bitmap Heap Scan on t
+        Recheck Cond: (s > 'z'::text)
+        ->  Bitmap Index Scan on t_s
+              Index Cond: (s > 'z'::text)
+-- EXPLAIN
+
+> SELECT s FROM t WHERE s > 'z9' ORDER BY s
+s:text
+z927
+Z953
+z985
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT k FROM t ORDER BY k COLLATE "en-x-icu" LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using t_kc on t
+-- EXPLAIN
+
+> SELECT k FROM t ORDER BY k COLLATE "en-x-icu" LIMIT 3
+k:text
+_1016
+_1074
+_1132
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT k FROM t WHERE k COLLATE "en-x-icu" < 'B'
+QUERY PLAN:text
+Bitmap Heap Scan on t
+  Recheck Cond: ((k)::text < 'B'::text)
+  ->  Bitmap Index Scan on t_kc
+        Index Cond: ((k)::text < 'B'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT k FROM t WHERE k < 'B' LIMIT 1
+QUERY PLAN:text
+Limit
+  ->  Seq Scan on t
+        Filter: (k < 'B'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t ORDER BY s COLLATE "C" LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: s COLLATE "C"
+        ->  Seq Scan on t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT k FROM t WHERE k LIKE 'a1%'
+QUERY PLAN:text
+Bitmap Heap Scan on t
+  Filter: (k ~~ 'a1%'::text)
+  ->  Bitmap Index Scan on t_k
+        Index Cond: ((k >= 'a1'::text) AND (k < 'a2'::text))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT s FROM t WHERE s LIKE 'a1%'
+QUERY PLAN:text
+Seq Scan on t
+  Filter: (s ~~ 'a1%'::text)
+-- EXPLAIN
+
+> CREATE TABLE pt (s text COLLATE "en-x-icu") PARTITION BY RANGE (s)
+-- CREATE TABLE
+
+> CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM ('a') TO ('m')
+-- CREATE TABLE
+
+> CREATE TABLE pt2 PARTITION OF pt FOR VALUES FROM ('m') TO ('zzz')
+-- CREATE TABLE
+
+> INSERT INTO pt SELECT chr(97 + i % 26) || i FROM generate_series(1, 500) i
+-- INSERT 0 500
+
+> INSERT INTO pt VALUES ('B'), ('N')
+-- INSERT 0 2
+
+> SELECT tableoid::regclass, s FROM pt WHERE s IN ('B', 'N')
+tableoid:regclass | s:text
+pt1 | B
+pt2 | N
+-- SELECT 2
+
+> CREATE INDEX ON pt (s)
+-- CREATE INDEX
+
+> ANALYZE pt
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT s FROM pt ORDER BY s LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Append
+        ->  Index Only Scan using pt1_s_idx on pt1 pt_1
+        ->  Index Only Scan using pt2_s_idx on pt2 pt_2
+-- EXPLAIN
+
+> SELECT s FROM pt ORDER BY s LIMIT 3
+s:text
+a104
+a130
+a156
+-- SELECT 3
+
+> SELECT s FROM pt ORDER BY s DESC LIMIT 3
+s:text
+z77
+z51
+z493
+-- SELECT 3
+
+> CREATE TYPE tr AS RANGE (subtype = text, collation = "en-x-icu")
+-- CREATE TYPE
+
+> CREATE TABLE r (x tr)
+-- CREATE TABLE
+
+> INSERT INTO r SELECT tr(chr(65 + i % 58), 'zz') FROM generate_series(1, 300) i
+-- INSERT 0 300
+
+> CREATE INDEX r_x ON r (x)
+-- CREATE INDEX
+
+> ANALYZE r
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT x FROM r ORDER BY x LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan using r_x on r
+-- EXPLAIN
+
+> SELECT x FROM r ORDER BY x LIMIT 3
+x:user
+[_,zz)
+[_,zz)
+[_,zz)
+-- SELECT 3
+

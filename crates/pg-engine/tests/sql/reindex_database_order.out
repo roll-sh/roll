@@ -1,0 +1,142 @@
+> create schema rdo
+-- CREATE SCHEMA
+
+> set search_path = rdo
+-- SET
+
+> create table t1 (a int primary key)
+-- CREATE TABLE
+
+> create table t2 (a int primary key)
+-- CREATE TABLE
+
+> create table t3 (a int primary key)
+-- CREATE TABLE
+
+> create table t4 (a int primary key)
+-- CREATE TABLE
+
+> create table t5 (a int primary key)
+-- CREATE TABLE
+
+> create table t6 (a int primary key, b text)
+-- CREATE TABLE
+
+> create table t7 (a int primary key)
+-- CREATE TABLE
+
+> create table t8 (a int primary key)
+-- CREATE TABLE
+
+> create table t9 (a int primary key)
+-- CREATE TABLE
+
+> create table t10 (a int primary key)
+-- CREATE TABLE
+
+> create materialized view m1 as select 1 as a
+-- SELECT 1
+
+> create unique index on m1 (a)
+-- CREATE INDEX
+
+> alter table t1 add column b int
+-- ALTER TABLE
+
+> alter table t2 rename to t2x
+-- ALTER TABLE
+
+> alter table t3 add constraint c check (a > 0)
+-- ALTER TABLE
+
+> grant select on t4 to public
+-- GRANT
+
+> create function rdo_tf() returns trigger language plpgsql as $$ begin return new; end $$
+-- CREATE FUNCTION
+
+> create trigger tr after insert on t5 for each row execute function rdo_tf()
+-- CREATE TRIGGER
+
+> truncate t7
+-- TRUNCATE TABLE
+
+> analyze t8
+-- ANALYZE
+
+> create index on t9 (a)
+-- CREATE INDEX
+
+> alter table t10 owner to current_user
+-- ALTER TABLE
+
+> reindex schema rdo
+-- REINDEX
+
+> select c.relname, rank() over (order by c.relfilenode) from pg_class c where c.relkind = 'i' and c.relnamespace = 'rdo'::regnamespace order by c.relfilenode
+relname:name | rank:int8
+t6_pkey | 1
+t8_pkey | 2
+t9_pkey | 3
+t9_a_idx | 4
+t10_pkey | 5
+m1_a_idx | 6
+t1_pkey | 7
+t2_pkey | 8
+t3_pkey | 9
+t4_pkey | 10
+t5_pkey | 11
+t7_pkey | 12
+-- SELECT 12
+
+> create table t11 (a int primary key)
+-- CREATE TABLE
+
+> alter table t6 add column c int
+-- ALTER TABLE
+
+> reindex database
+-- REINDEX
+
+> select c.relname, rank() over (order by c.relfilenode) from pg_class c where c.relkind = 'i' and c.relnamespace = 'rdo'::regnamespace order by c.relfilenode
+relname:name | rank:int8
+t8_pkey | 1
+t9_pkey | 2
+t9_a_idx | 3
+t10_pkey | 4
+m1_a_idx | 5
+t1_pkey | 6
+t2_pkey | 7
+t3_pkey | 8
+t4_pkey | 9
+t5_pkey | 10
+t7_pkey | 11
+t11_pkey | 12
+t6_pkey | 13
+-- SELECT 13
+
+> create table t12 (a int primary key) inherits (t8)
+NOTICE 00000: merging column "a" with inherited definition
+-- CREATE TABLE
+
+> reindex schema rdo
+-- REINDEX
+
+> select c.relname, rank() over (order by c.relfilenode) from pg_class c where c.relkind = 'i' and c.relnamespace = 'rdo'::regnamespace order by c.relfilenode
+relname:name | rank:int8
+t9_pkey | 1
+t9_a_idx | 2
+t10_pkey | 3
+m1_a_idx | 4
+t1_pkey | 5
+t2_pkey | 6
+t3_pkey | 7
+t4_pkey | 8
+t5_pkey | 9
+t7_pkey | 10
+t11_pkey | 11
+t6_pkey | 12
+t12_pkey | 13
+t8_pkey | 14
+-- SELECT 14
+

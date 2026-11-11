@@ -1,0 +1,83 @@
+> create table atc_p (a float check (a > 10.2), b float)
+-- CREATE TABLE
+
+> create table atc_c () inherits (atc_p)
+-- CREATE TABLE
+
+> alter table atc_p alter column a type numeric
+-- ALTER TABLE
+
+> alter table atc_p add constraint bnoinherit check (b > 100) no inherit
+-- ALTER TABLE
+
+> alter table atc_c add constraint blocal check (b < 1000)
+-- ALTER TABLE
+
+> alter table atc_c add constraint bmerged check (b > 1)
+-- ALTER TABLE
+
+> alter table atc_p add constraint bmerged check (b > 1)
+NOTICE 00000: merging constraint "bmerged" with inherited definition
+-- ALTER TABLE
+
+> alter table atc_p alter column b type numeric
+NOTICE 00000: merging constraint "bmerged" with inherited definition
+-- ALTER TABLE
+
+> select c.relname, conname, coninhcount, conislocal, connoinherit, pg_get_constraintdef(con.oid)
+>   from pg_constraint con join pg_class c on c.oid = con.conrelid
+>   where c.relname like 'atc_%' and contype = 'c' order by 1, 2
+relname:name | conname:name | coninhcount:int2 | conislocal:bool | connoinherit:bool | pg_get_constraintdef:text
+atc_c | atc_p_a_check | 1 | f | f | CHECK (((a)::double precision > (10.2)::double precision))
+atc_c | blocal | 0 | t | f | CHECK (((b)::double precision < (1000)::double precision))
+atc_c | bmerged | 1 | t | f | CHECK (((b)::double precision > (1)::double precision))
+atc_p | atc_p_a_check | 0 | t | f | CHECK (((a)::double precision > (10.2)::double precision))
+atc_p | bmerged | 0 | t | f | CHECK (((b)::double precision > (1)::double precision))
+atc_p | bnoinherit | 0 | t | t | CHECK (((b)::double precision > (100)::double precision)) NO INHERIT
+-- SELECT 6
+
+> drop table atc_p cascade
+NOTICE 00000: drop cascades to table atc_c
+-- DROP TABLE
+
+> create table atc_k (id int primary key, t text)
+-- CREATE TABLE
+
+> create table atc_r (id text references atc_k)
+ERROR 42804: foreign key constraint "atc_r_id_fkey" cannot be implemented
+DETAIL: Key columns "id" of the referencing table and "id" of the referenced table are of incompatible types: text and integer.
+
+> create table atc_r2 (id bigint references atc_k)
+-- CREATE TABLE
+
+> alter table atc_k alter column id type text
+ERROR 42804: foreign key constraint "atc_r2_id_fkey" cannot be implemented
+DETAIL: Key columns "id" of the referencing table and "id" of the referenced table are of incompatible types: bigint and text.
+
+> alter table atc_k alter column id type bigint
+-- ALTER TABLE
+
+> alter table atc_r2 alter column id type text
+ERROR 42804: foreign key constraint "atc_r2_id_fkey" cannot be implemented
+DETAIL: Key columns "id" of the referencing table and "id" of the referenced table are of incompatible types: text and bigint.
+
+> alter table atc_r2 alter column id type smallint
+-- ALTER TABLE
+
+> create table atc_s (id int primary key, parent int references atc_s)
+-- CREATE TABLE
+
+> alter table atc_s alter column parent type text
+ERROR 42804: foreign key constraint "atc_s_parent_fkey" cannot be implemented
+DETAIL: Key columns "parent" of the referencing table and "id" of the referenced table are of incompatible types: text and integer.
+
+> alter table atc_s alter column id type text
+ERROR 42804: foreign key constraint "atc_s_parent_fkey" cannot be implemented
+DETAIL: Key columns "parent" of the referencing table and "id" of the referenced table are of incompatible types: integer and text.
+
+> alter table atc_s alter column id type bigint
+-- ALTER TABLE
+
+> drop table atc_r, atc_r2, atc_k, atc_s
+ERROR 42P01: table "atc_r" does not exist
+

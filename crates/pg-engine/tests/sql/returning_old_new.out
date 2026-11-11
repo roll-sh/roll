@@ -1,0 +1,163 @@
+> CREATE TABLE ro (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO ro VALUES (1, 'a'), (2, 'b') RETURNING old.*, new.*
+id:int4 | v:text | id:int4 | v:text
+NULL | NULL | 1 | a
+NULL | NULL | 2 | b
+-- INSERT 0 2
+
+> INSERT INTO ro VALUES (1, 'z') ON CONFLICT (id) DO UPDATE SET v = excluded.v RETURNING old.v AS ov, new.v AS nv, v
+ov:text | nv:text | v:text
+a | z | z
+-- INSERT 0 1
+
+> UPDATE ro SET v = v || '!' WHERE id = 2 RETURNING old.v, new.v, old, new
+v:text | v:text | old:user | new:user
+b | b! | (2,b) | (2,b!)
+-- UPDATE 1
+
+> UPDATE ro SET v = 'q' RETURNING WITH (OLD AS o, NEW AS n) o.v, n.v, o.id = n.id
+v:text | v:text | ?column?:bool
+b! | q | t
+z | q | t
+-- UPDATE 2
+
+> DELETE FROM ro WHERE id = 1 RETURNING old.*, new.*, new IS NULL
+id:int4 | v:text | id:int4 | v:text | ?column?:bool
+1 | q | NULL | NULL | t
+-- DELETE 1
+
+> INSERT INTO ro VALUES (3, 'c') RETURNING WITH (old AS o) o.v, new.v
+v:text | v:text
+NULL | c
+-- INSERT 0 1
+
+> UPDATE ro SET v = 'x' RETURNING WITH (OLD AS o, OLD AS p) o.v
+ERROR 42601: OLD cannot be specified multiple times (at 49)
+
+> UPDATE ro SET v = 'x' RETURNING WITH (OLD AS o, NEW AS o) o.v
+ERROR 42712: table name "o" specified more than once (at 49)
+
+> UPDATE ro SET v = 'x' RETURNING WITH (OLD AS ro) ro.v
+ERROR 42712: table name "ro" specified more than once (at 39)
+
+> MERGE INTO ro t USING (VALUES (2, 'm'), (9, 'n')) s(id, v) ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.v) RETURNING merge_action(), old.v, new.v
+merge_action:text | v:text | v:text
+INSERT | NULL | n
+UPDATE | q | m
+-- MERGE 2
+
+> CREATE VIEW rov AS SELECT * FROM ro
+-- CREATE VIEW
+
+> UPDATE rov SET v = 'vv' WHERE id = 2 RETURNING old.v, new.v
+v:text | v:text
+m | vv
+-- UPDATE 1
+
+> SELECT old FROM ro
+ERROR 42703: column "old" does not exist (at 8)
+
+> CREATE FUNCTION rof() RETURNS SETOF text LANGUAGE sql AS $$ UPDATE ro SET v = 'f' RETURNING old.v || '->' || new.v $$
+-- CREATE FUNCTION
+
+> SELECT rof()
+rof:text
+c->f
+n->f
+vv->f
+-- SELECT 3
+
+> WITH u AS (UPDATE ro SET v = 'w' RETURNING old.v AS a, new.v AS b) SELECT * FROM u ORDER BY 1
+a:text | b:text
+f | w
+f | w
+f | w
+-- SELECT 3
+
+> DROP TABLE ro CASCADE
+NOTICE 00000: drop cascades to view rov
+-- DROP TABLE
+
+> DROP FUNCTION rof
+-- DROP FUNCTION
+
+> CREATE TABLE rp (k int, v text) PARTITION BY LIST (k)
+-- CREATE TABLE
+
+> CREATE TABLE rp1 PARTITION OF rp FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE rp2 PARTITION OF rp FOR VALUES IN (2)
+-- CREATE TABLE
+
+> INSERT INTO rp VALUES (1, 'a')
+-- INSERT 0 1
+
+> UPDATE rp SET k = 2 RETURNING old.tableoid::regclass, old.k, new.k, tableoid::regclass, new.tableoid::regclass
+tableoid:regclass | k:int4 | k:int4 | tableoid:regclass | tableoid:regclass
+rp1 | 1 | 2 | rp2 | rp2
+-- UPDATE 1
+
+> UPDATE rp SET k = 1 RETURNING old.*, new.*, *
+k:int4 | v:text | k:int4 | v:text | k:int4 | v:text
+2 | a | 1 | a | 1 | a
+-- UPDATE 1
+
+> DROP TABLE rp
+-- DROP TABLE
+
+> CREATE TABLE rg (a int, b int GENERATED ALWAYS AS (a * 2) STORED, c int GENERATED ALWAYS AS (a * 3))
+-- CREATE TABLE
+
+> INSERT INTO rg (a) VALUES (1) RETURNING old.b, new.b, new.c
+b:int4 | b:int4 | c:int4
+NULL | 2 | 3
+-- INSERT 0 1
+
+> UPDATE rg SET a = 5 RETURNING old.b, old.c, new.b, new.c
+b:int4 | c:int4 | b:int4 | c:int4
+2 | 3 | 10 | 15
+-- UPDATE 1
+
+> CREATE TABLE rs (a int, w text)
+-- CREATE TABLE
+
+> INSERT INTO rs VALUES (5, 'five')
+-- INSERT 0 1
+
+> UPDATE rg SET a = 6 FROM rs WHERE rs.a = rg.a RETURNING old.a, new.a, rs.w, (SELECT old.a + new.a)
+a:int4 | a:int4 | w:text | ?column?:int4
+5 | 6 | five | 11
+-- UPDATE 1
+
+> UPDATE rg AS old SET a = 7 RETURNING old.a, new.a
+a:int4 | a:int4
+7 | 7
+-- UPDATE 1
+
+> UPDATE rg AS new SET a = 8 RETURNING old.a, new.a
+a:int4 | a:int4
+7 | 8
+-- UPDATE 1
+
+> UPDATE rg AS o SET a = 9 RETURNING WITH (new AS old) old.a
+a:int4
+9
+-- UPDATE 1
+
+> DELETE FROM rg USING rs RETURNING old.a, new.a, rs.a, old.ctid IS NULL
+a:int4 | a:int4 | a:int4 | ?column?:bool
+9 | NULL | 5 | f
+-- DELETE 1
+
+> SELECT 1 FROM rs WHERE (old.a) = 1
+ERROR 42P01: missing FROM-clause entry for table "old" (at 25)
+
+> INSERT INTO rs VALUES (1, 'x') RETURNING old.nope
+ERROR 42703: column old.nope does not exist (at 42)
+
+> DROP TABLE rg, rs
+-- DROP TABLE
+

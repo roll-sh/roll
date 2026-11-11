@@ -1,0 +1,40 @@
+
+running 1 test
+test probe ... > \x2 types=1007 p=b00000007
+SELECT $1::int[]
+ERROR 54000: number of array dimensions (7) exceeds the maximum allowed (6)
+
+> \x2 types=1007 p=bffffffff
+SELECT $1::int[]
+ERROR 22P03: invalid number of dimensions: -1
+
+> \x2 types=1007 p=b0000000000000002
+SELECT $1::int[]
+ERROR 22P03: invalid array flags
+
+> \x2 types=1007 p=b0000000000000000
+SELECT $1::int[]
+ERROR 08P01: insufficient data left in message
+
+> \x2 types=1007 p=b000000070000000000000017
+SELECT $1::int[]
+ERROR 54000: number of array dimensions (7) exceeds the maximum allowed (6)
+
+> \x2 types=1007 p=bffffffff0000000000000017
+SELECT $1::int[]
+ERROR 22P03: invalid number of dimensions: -1
+
+> \x2 types=1007 p=b
+SELECT $1::int[]
+ERROR 08P01: insufficient data left in message
+
+> \x2 types=1007 p=b000000000000000000000017
+SELECT $1::int[]
+int4:1007
+{}
+-- SELECT 1 [I]
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.41s
+

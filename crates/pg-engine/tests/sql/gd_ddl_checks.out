@@ -1,0 +1,252 @@
+> CREATE TYPE gd_dc_comp AS (u unknown)
+ERROR 42P16: column "u" has pseudo-type unknown
+
+> CREATE TYPE gd_dc_comp AS (r record)
+ERROR 42P16: column "r" has pseudo-type record
+
+> CREATE TABLE gd_dc_d1 (id int DEFAULT (id))
+ERROR 0A000: cannot use column reference in DEFAULT expression (at 40)
+
+> CREATE TABLE gd_dc_d1 (id int DEFAULT (avg(nope)))
+ERROR 0A000: cannot use column reference in DEFAULT expression (at 44)
+
+> CREATE TABLE gd_dc_d1 (a int DEFAULT (SELECT 1))
+ERROR 0A000: cannot use subquery in DEFAULT expression (at 38)
+
+> CREATE TABLE gd_dc_d1 (a int DEFAULT (generate_series(1, 3)))
+ERROR 0A000: set-returning functions are not allowed in DEFAULT expressions (at 39)
+
+> CREATE TABLE gd_dc_d1 (a int CHECK (a > (SELECT 1)))
+ERROR 0A000: cannot use subquery in check constraint (at 41)
+
+> CREATE UNLOGGED TABLE pg_temp.gd_dc_u (a int)
+ERROR 42P16: only temporary relations may be created in temporary schemas (at 23)
+
+> CREATE TABLE gd_dc_inh (a int)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_p (a int) INHERITS (gd_dc_nope) PARTITION BY LIST (a)
+ERROR 42P17: cannot create partitioned table as inheritance child
+
+> CREATE FUNCTION gd_dc_srf(int) RETURNS SETOF int LANGUAGE sql IMMUTABLE AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gd_dc_plus(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION gd_dc_vol(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + random()::int'
+-- CREATE FUNCTION
+
+> CREATE TABLE gd_dc_p (a int) PARTITION BY RANGE (gd_dc_srf(a))
+ERROR 0A000: set-returning functions are not allowed in partition key expressions
+
+> CREATE TABLE gd_dc_p (a int) PARTITION BY RANGE ((avg(a)))
+ERROR 42803: aggregate functions are not allowed in partition key expressions
+
+> CREATE TABLE gd_dc_p (a int) PARTITION BY LIST ((a = (SELECT 1)))
+ERROR 0A000: cannot use subquery in partition key expression
+
+> CREATE TABLE gd_dc_p (a int) PARTITION BY RANGE ((42))
+ERROR 42P17: cannot use constant expression as partition key
+
+> CREATE TABLE gd_dc_p (a int, b int) PARTITION BY RANGE (((a, b)))
+ERROR 42P16: partition key column 1 has pseudo-type record
+
+> CREATE TABLE gd_dc_p (a int, b int) PARTITION BY RANGE (a, ('unknown'))
+ERROR 42P16: partition key column 2 has pseudo-type unknown
+
+> CREATE TABLE gd_dc_p (a int) PARTITION BY RANGE (gd_dc_vol(a))
+ERROR 42P17: functions in partition key expression must be marked IMMUTABLE
+
+> CREATE TABLE gd_dc_p (a point) PARTITION BY LIST (a)
+ERROR 42704: data type point has no default operator class for access method "btree"
+HINT: You must specify a btree operator class or define a default btree operator class for the data type.
+
+> CREATE TABLE gd_dc_p (a int, b int, c text, d text)
+>   PARTITION BY RANGE (a oid_ops, gd_dc_plus(b), c COLLATE "default", d COLLATE "C")
+-- CREATE TABLE
+
+> SELECT pg_get_partkeydef('gd_dc_p'::regclass)
+pg_get_partkeydef:text
+RANGE (a oid_ops, gd_dc_plus(b), c, d COLLATE "C")
+-- SELECT 1
+
+> DROP FUNCTION gd_dc_plus(int)
+ERROR 2BP01: cannot drop function gd_dc_plus(integer) because other objects depend on it
+DETAIL: table gd_dc_p depends on function gd_dc_plus(integer)
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE gd_dc_p
+-- DROP TABLE
+
+> CREATE TABLE gd_dc_p (a int, b int) PARTITION BY LIST ((row(a, b)::gd_dc_p))
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_p1 PARTITION OF gd_dc_p FOR VALUES IN ('(1,2)')
+-- CREATE TABLE
+
+> INSERT INTO gd_dc_p VALUES (1, 2)
+-- INSERT 0 1
+
+> SELECT * FROM gd_dc_p
+a:int4 | b:int4
+1 | 2
+-- SELECT 1
+
+> DROP TABLE gd_dc_p
+-- DROP TABLE
+
+> CREATE TABLE gd_dc_l (a int) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_l1 PARTITION OF gd_dc_l FOR VALUES IN (sum(a))
+ERROR 0A000: cannot use column reference in partition bound expression (at 63)
+
+> CREATE TABLE gd_dc_l1 PARTITION OF gd_dc_l FOR VALUES IN (sum(1))
+ERROR 42803: aggregate functions are not allowed in partition bound (at 59)
+
+> CREATE TABLE gd_dc_l1 PARTITION OF gd_dc_l FOR VALUES IN (generate_series(1, 2))
+ERROR 0A000: set-returning functions are not allowed in partition bound (at 59)
+
+> CREATE TABLE gd_dc_l1 PARTITION OF gd_dc_l FOR VALUES IN ((SELECT 1))
+ERROR 0A000: cannot use subquery in partition bound (at 59)
+
+> CREATE TABLE gd_dc_r (a int, b int) PARTITION BY RANGE (a, b)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_r1 PARTITION OF gd_dc_r FOR VALUES FROM (null, 1) TO (2, 3)
+ERROR 42P17: cannot specify NULL in range bound
+
+> CREATE TABLE gd_dc_r0 PARTITION OF gd_dc_r FOR VALUES FROM (0, minvalue) TO (0, maxvalue)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_r10 PARTITION OF gd_dc_r FOR VALUES FROM (1, minvalue) TO (1, 1)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_r11 PARTITION OF gd_dc_r FOR VALUES FROM (1, 1) TO (1, 10)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_r12 PARTITION OF gd_dc_r FOR VALUES FROM (1, 10) TO (1, maxvalue)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_rx PARTITION OF gd_dc_r FOR VALUES FROM (0, minvalue) TO (0, 1)
+ERROR 42P17: partition "gd_dc_rx" would overlap partition "gd_dc_r0" (at 61)
+
+> CREATE TABLE gd_dc_rx PARTITION OF gd_dc_r FOR VALUES FROM (1, minvalue) TO (1, maxvalue)
+ERROR 42P17: partition "gd_dc_rx" would overlap partition "gd_dc_r10" (at 61)
+
+> CREATE TABLE gd_dc_rx PARTITION OF gd_dc_r FOR VALUES FROM (1, 10) TO (1, 20)
+ERROR 42P17: partition "gd_dc_rx" would overlap partition "gd_dc_r12" (at 64)
+
+> CREATE TABLE gd_dc_rx PARTITION OF gd_dc_r FOR VALUES FROM (1, 5) TO (1, 2)
+ERROR 42P17: empty range bound specified for partition "gd_dc_rx" (at 64)
+DETAIL: Specified lower bound (1, 5) is greater than or equal to upper bound (1, 2).
+
+> CREATE TABLE gd_dc_rx PARTITION OF gd_dc_r FOR VALUES FROM (-1, 0) TO (0, 5)
+ERROR 42P17: partition "gd_dc_rx" would overlap partition "gd_dc_r0" (at 75)
+
+> CREATE TABLE gd_dc_pt (a text, b int NOT NULL DEFAULT 0, CONSTRAINT gd_dc_ck CHECK (length(a) > 0))
+>   PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE gd_dc_pt_b PARTITION OF gd_dc_pt (b NOT NULL, b DEFAULT 1) FOR VALUES IN ('b')
+ERROR 42701: column "b" specified more than once
+
+> CREATE TABLE gd_dc_pt_b PARTITION OF gd_dc_pt (CONSTRAINT gd_dc_ck CHECK (length(a) > 0),
+>   CONSTRAINT gd_dc_ck2 CHECK (b >= 0)) FOR VALUES IN ('b')
+NOTICE 00000: merging constraint "gd_dc_ck" with inherited definition
+-- CREATE TABLE
+
+> ALTER TABLE gd_dc_pt ADD CONSTRAINT gd_dc_ck2 CHECK (b >= 0)
+NOTICE 00000: merging constraint "gd_dc_ck2" with inherited definition
+-- ALTER TABLE
+
+> SELECT conname, conislocal, coninhcount FROM pg_constraint
+>  WHERE conrelid = 'gd_dc_pt_b'::regclass AND contype = 'c' ORDER BY 1
+conname:name | conislocal:bool | coninhcount:int2
+gd_dc_ck | f | 1
+gd_dc_ck2 | f | 1
+-- SELECT 2
+
+> ALTER TABLE gd_dc_pt DROP CONSTRAINT gd_dc_ck, DROP CONSTRAINT gd_dc_ck2
+-- ALTER TABLE
+
+> SELECT count(*) FROM pg_constraint WHERE conrelid = 'gd_dc_pt_b'::regclass AND contype = 'c'
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE gd_dc_tt (a int, b int)
+-- CREATE TABLE
+
+> CREATE FUNCTION gd_dc_tf() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN ALTER TABLE gd_dc_tt ADD PRIMARY KEY (a); RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gd_dc_tg BEFORE INSERT ON gd_dc_tt FOR EACH ROW EXECUTE FUNCTION gd_dc_tf()
+-- CREATE TRIGGER
+
+> INSERT INTO gd_dc_tt VALUES (1, 2)
+ERROR 55006: cannot ALTER TABLE "gd_dc_tt" because it is being used by active queries in this session
+CONTEXT: SQL statement "ALTER TABLE gd_dc_tt ADD PRIMARY KEY (a)"
+CONTEXT: PL/pgSQL function gd_dc_tf() line 2 at SQL statement
+
+> CREATE OR REPLACE FUNCTION gd_dc_tf() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN CREATE INDEX ON gd_dc_tt (b); RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> INSERT INTO gd_dc_tt VALUES (1, 2)
+ERROR 55006: cannot CREATE INDEX "gd_dc_tt" because it is being used by active queries in this session
+CONTEXT: SQL statement "CREATE INDEX ON gd_dc_tt (b)"
+CONTEXT: PL/pgSQL function gd_dc_tf() line 2 at SQL statement
+
+> CREATE OR REPLACE FUNCTION gd_dc_tf() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN EXECUTE 'create table gd_dc_l9 partition of gd_dc_l for values in (9)'; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gd_dc_tg2 BEFORE INSERT ON gd_dc_l FOR EACH STATEMENT EXECUTE FUNCTION gd_dc_tf()
+-- CREATE TRIGGER
+
+> INSERT INTO gd_dc_l VALUES (9)
+ERROR 55006: cannot CREATE TABLE .. PARTITION OF "gd_dc_l" because it is being used by active queries in this session
+CONTEXT: SQL statement "create table gd_dc_l9 partition of gd_dc_l for values in (9)"
+CONTEXT: PL/pgSQL function gd_dc_tf() line 2 at EXECUTE
+
+> CREATE FUNCTION gd_dc_nf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER gd_dc_w1 BEFORE INSERT ON gd_dc_tt FOR EACH STATEMENT WHEN (true) EXECUTE FUNCTION gd_dc_nf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER gd_dc_w2 BEFORE INSERT ON gd_dc_tt FOR EACH STATEMENT WHEN (new.a > 0) EXECUTE FUNCTION gd_dc_nf()
+ERROR 42P17: statement trigger's WHEN condition cannot reference column values (at 76)
+
+> CREATE TRIGGER gd_dc_w3 BEFORE INSERT OR UPDATE ON gd_dc_tt FOR EACH ROW WHEN (OLD.a <> NEW.a) EXECUTE FUNCTION gd_dc_nf()
+ERROR 42P17: INSERT trigger's WHEN condition cannot reference OLD values (at 80)
+
+> CREATE TRIGGER gd_dc_w3 BEFORE DELETE OR UPDATE ON gd_dc_tt FOR EACH ROW WHEN (OLD.a <> NEW.a) EXECUTE FUNCTION gd_dc_nf()
+ERROR 42P17: DELETE trigger's WHEN condition cannot reference NEW values (at 89)
+
+> CREATE TRIGGER gd_dc_w3 BEFORE INSERT ON gd_dc_tt FOR EACH ROW WHEN (NEW.tableoid <> 0) EXECUTE FUNCTION gd_dc_nf()
+ERROR 0A000: BEFORE trigger's WHEN condition cannot reference NEW system columns (at 70)
+
+> CREATE TRIGGER gd_dc_w3 AFTER INSERT ON gd_dc_tt FOR EACH ROW WHEN (NEW.tableoid <> 0) EXECUTE FUNCTION gd_dc_nf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER gd_dc_w4 BEFORE UPDATE OF a, a ON gd_dc_tt FOR EACH ROW EXECUTE FUNCTION gd_dc_nf()
+ERROR 42701: column "a" specified more than once
+
+> CREATE TRIGGER gd_dc_w4 BEFORE UPDATE OF a ON gd_dc_tt FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION gd_dc_nf()
+-- CREATE TRIGGER
+
+> SELECT pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgname = 'gd_dc_w4'
+pg_get_triggerdef:text
+CREATE TRIGGER gd_dc_w4 BEFORE UPDATE OF a ON gd_dc_tt FOR EACH ROW WHEN (old.* IS DISTINCT FROM new.*) EXECUTE FUNCTION gd_dc_nf()
+-- SELECT 1
+
+> DROP TABLE gd_dc_l, gd_dc_r, gd_dc_pt, gd_dc_tt, gd_dc_inh
+-- DROP TABLE
+
+> DROP FUNCTION gd_dc_srf(int), gd_dc_vol(int), gd_dc_tf(), gd_dc_nf()
+-- DROP FUNCTION
+

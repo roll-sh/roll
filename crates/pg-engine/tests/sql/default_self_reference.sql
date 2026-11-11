@@ -1,0 +1,24 @@
+create table dsr_t9 (a int, r regclass default 'dsr_t9'::regclass, s text default 'dsr_t9'::regclass::text);
+insert into dsr_t9 (a) values (1);
+select a, r, s from dsr_t9;
+select pg_get_expr(adbin, adrelid) from pg_attrdef where adrelid = 'dsr_t9'::regclass order by adnum;
+create table dsr_t10 (a int default (select count(*) from dsr_t10));
+create table dsr_t11 (a int, b int default nextval('dsr_t11'));
+create table dsr_t12 (a regclass default 'dsr_nosuch'::regclass);
+create table dsr_t13 (a int check (a > 0), r regclass default 'dsr_t13'::regclass, b nosuchtype);
+create table dsr_t14 (r regclass default 'dsr_t14'::regclass, b int default 'x');
+create table dsr_t15 (r oid default 'dsr_t15'::regclass, like dsr_t9);
+-- generated columns and defaults cook in column order
+create table dsr_g (a int default 'x', b int generated always as (nosuch) stored);
+create table dsr_g (b int generated always as (nosuch) stored, a int default 'x');
+create table dsr_p (a int, r regclass default 'dsr_p'::regclass) partition by list (a);
+create table dsr_p1 partition of dsr_p (r default 'dsr_p1'::regclass) for values in (1);
+insert into dsr_p (a) values (1);
+select tableoid::regclass, * from dsr_p;
+create table dsr_i (r regclass default 'dsr_i'::regclass) inherits (dsr_t9);
+insert into dsr_i (a) values (2);
+select a, r, s from dsr_i;
+alter table dsr_t9 add column z regclass default 'dsr_t9'::regclass;
+select a, z from dsr_t9 order by a;
+drop table dsr_t9 cascade;
+drop table dsr_t11, dsr_p;

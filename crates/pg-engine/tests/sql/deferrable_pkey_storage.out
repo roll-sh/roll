@@ -1,0 +1,500 @@
+> create table dpk_d (k int primary key deferrable, v text)
+-- CREATE TABLE
+
+> insert into dpk_d select g, 'v' || g from generate_series(1, 5) g
+-- INSERT 0 5
+
+> insert into dpk_d values (3, 'x')
+ERROR 23505: duplicate key value violates unique constraint "dpk_d_pkey"
+DETAIL: Key (k)=(3) already exists.
+OBJECTS: schema=public table=dpk_d constraint=dpk_d_pkey
+
+> update dpk_d set k = k + 1
+-- UPDATE 5
+
+> select * from dpk_d order by k
+k:int4 | v:text
+2 | v1
+3 | v2
+4 | v3
+5 | v4
+6 | v5
+-- SELECT 5
+
+> update dpk_d set k = k - 1
+-- UPDATE 5
+
+> select * from dpk_d order by k
+k:int4 | v:text
+1 | v1
+2 | v2
+3 | v3
+4 | v4
+5 | v5
+-- SELECT 5
+
+> update dpk_d set k = 6 - k
+-- UPDATE 5
+
+> select * from dpk_d order by k
+k:int4 | v:text
+1 | v5
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+-- SELECT 5
+
+> update dpk_d set k = 1 where k = 2
+ERROR 23505: duplicate key value violates unique constraint "dpk_d_pkey"
+DETAIL: Key (k)=(1) already exists.
+OBJECTS: schema=public table=dpk_d constraint=dpk_d_pkey
+
+> select * from dpk_d order by k
+k:int4 | v:text
+1 | v5
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+-- SELECT 5
+
+> begin
+-- BEGIN
+
+> set constraints dpk_d_pkey deferred
+-- SET CONSTRAINTS
+
+> insert into dpk_d values (1, 'dup1'), (2, 'dup2')
+-- INSERT 0 2
+
+> select * from dpk_d order by k, v
+k:int4 | v:text
+1 | dup1
+1 | v5
+2 | dup2
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+-- SELECT 7
+
+> select * from dpk_d where k = 1 order by v
+k:int4 | v:text
+1 | dup1
+1 | v5
+-- SELECT 2
+
+> update dpk_d set k = k + 10 where v like 'dup%'
+-- UPDATE 2
+
+> commit
+-- COMMIT
+
+> select * from dpk_d order by k, v
+k:int4 | v:text
+1 | v5
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+11 | dup1
+12 | dup2
+-- SELECT 7
+
+> begin
+-- BEGIN
+
+> set constraints all deferred
+-- SET CONSTRAINTS
+
+> insert into dpk_d values (5, 'five')
+-- INSERT 0 1
+
+> delete from dpk_d where v = 'v5'
+-- DELETE 1
+
+> insert into dpk_d values (4, 'four')
+-- INSERT 0 1
+
+> commit
+ERROR 23505: duplicate key value violates unique constraint "dpk_d_pkey"
+DETAIL: Key (k)=(5) already exists.
+OBJECTS: schema=public table=dpk_d constraint=dpk_d_pkey
+
+> select * from dpk_d order by k, v
+k:int4 | v:text
+1 | v5
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+11 | dup1
+12 | dup2
+-- SELECT 7
+
+> begin
+-- BEGIN
+
+> set constraints all deferred
+-- SET CONSTRAINTS
+
+> savepoint s1
+-- SAVEPOINT
+
+> insert into dpk_d values (1, 'sp')
+-- INSERT 0 1
+
+> rollback to s1
+-- ROLLBACK
+
+> commit
+-- COMMIT
+
+> select count(*) from dpk_d
+count:int8
+7
+-- SELECT 1
+
+> insert into dpk_d values (1, 'oc') on conflict (k) do nothing
+ERROR 55000: ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters
+OBJECTS: schema=public table=dpk_d constraint=dpk_d_pkey
+
+> insert into dpk_d values (1, 'oc') on conflict do nothing
+ERROR 55000: ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters
+OBJECTS: schema=public table=dpk_d constraint=dpk_d_pkey
+
+> insert into dpk_d values (1, 'oc') on conflict on constraint dpk_d_pkey do update set v = 'z'
+ERROR 55000: ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters
+OBJECTS: schema=public table=dpk_d constraint=dpk_d_pkey
+
+> create table dpk_r (k int references dpk_d)
+ERROR 55000: cannot use a deferrable primary key for referenced table "dpk_d"
+
+> create table dpk_r (k int references dpk_d (k))
+ERROR 55000: cannot use a deferrable unique constraint for referenced table "dpk_d"
+
+> select k, v from dpk_d group by k
+ERROR 42803: column "dpk_d.v" must appear in the GROUP BY clause or be used in an aggregate function (at 11)
+
+> select count(*), sum(k) from dpk_d
+count:int8 | sum:int8
+7 | 38
+-- SELECT 1
+
+> select indisprimary, indimmediate, indisunique from pg_index where indexrelid = 'dpk_d_pkey'::regclass
+indisprimary:bool | indimmediate:bool | indisunique:bool
+t | f | t
+-- SELECT 1
+
+> select conname, contype, condeferrable, condeferred from pg_constraint where conrelid = 'dpk_d'::regclass order by conname
+conname:name | contype:char | condeferrable:bool | condeferred:bool
+dpk_d_k_not_null | n | f | f
+dpk_d_pkey | p | t | f
+-- SELECT 2
+
+> create table dpk_m (a int, b text, c int, primary key (a, b) deferrable initially deferred)
+-- CREATE TABLE
+
+> insert into dpk_m values (1, 'x', 1), (1, 'y', 2), (2, 'x', 3)
+-- INSERT 0 3
+
+> begin
+-- BEGIN
+
+> insert into dpk_m values (1, 'x', 4)
+-- INSERT 0 1
+
+> select * from dpk_m order by a, b, c
+a:int4 | b:text | c:int4
+1 | x | 1
+1 | x | 4
+1 | y | 2
+2 | x | 3
+-- SELECT 4
+
+> update dpk_m set a = 9 where c = 4
+-- UPDATE 1
+
+> commit
+-- COMMIT
+
+> select * from dpk_m order by a, b, c
+a:int4 | b:text | c:int4
+1 | x | 1
+1 | y | 2
+2 | x | 3
+9 | x | 4
+-- SELECT 4
+
+> insert into dpk_m values (2, 'x', 5)
+ERROR 23505: duplicate key value violates unique constraint "dpk_m_pkey"
+DETAIL: Key (a, b)=(2, x) already exists.
+OBJECTS: schema=public table=dpk_m constraint=dpk_m_pkey
+
+> select * from dpk_m order by a, b, c
+a:int4 | b:text | c:int4
+1 | x | 1
+1 | y | 2
+2 | x | 3
+9 | x | 4
+-- SELECT 4
+
+> create table dpk_a (k int not null, v int)
+-- CREATE TABLE
+
+> insert into dpk_a values (1, 1), (2, 2), (2, 3)
+-- INSERT 0 3
+
+> alter table dpk_a add primary key (k) deferrable
+ERROR 23505: could not create unique index "dpk_a_pkey"
+DETAIL: Key (k)=(2) is duplicated.
+OBJECTS: schema=public table=dpk_a constraint=dpk_a_pkey
+
+> delete from dpk_a where v = 3
+-- DELETE 1
+
+> alter table dpk_a add primary key (k) deferrable
+-- ALTER TABLE
+
+> begin
+-- BEGIN
+
+> set constraints all deferred
+-- SET CONSTRAINTS
+
+> insert into dpk_a values (1, 10)
+-- INSERT 0 1
+
+> update dpk_a set k = 3 where v = 10
+-- UPDATE 1
+
+> commit
+-- COMMIT
+
+> select * from dpk_a order by k
+k:int4 | v:int4
+1 | 1
+2 | 2
+3 | 10
+-- SELECT 3
+
+> alter table dpk_a drop constraint dpk_a_pkey
+-- ALTER TABLE
+
+> insert into dpk_a values (1, 99)
+-- INSERT 0 1
+
+> select * from dpk_a order by k, v
+k:int4 | v:int4
+1 | 1
+1 | 99
+2 | 2
+3 | 10
+-- SELECT 4
+
+> create table dpk_u (k int not null, v int)
+-- CREATE TABLE
+
+> insert into dpk_u values (1, 1), (2, 2)
+-- INSERT 0 2
+
+> create unique index dpk_u_idx on dpk_u (k)
+-- CREATE INDEX
+
+> alter table dpk_u add constraint dpk_u_pk primary key using index dpk_u_idx deferrable initially deferred
+NOTICE 00000: ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "dpk_u_idx" to "dpk_u_pk"
+-- ALTER TABLE
+
+> begin
+-- BEGIN
+
+> insert into dpk_u values (1, 3)
+-- INSERT 0 1
+
+> update dpk_u set k = k * 10 where v = 3
+-- UPDATE 1
+
+> commit
+-- COMMIT
+
+> select * from dpk_u order by k
+k:int4 | v:int4
+1 | 1
+2 | 2
+10 | 3
+-- SELECT 3
+
+> create table dpk_l (like dpk_d including indexes)
+-- CREATE TABLE
+
+> insert into dpk_l values (1, 'a'), (2, 'b')
+-- INSERT 0 2
+
+> begin
+-- BEGIN
+
+> set constraints all deferred
+-- SET CONSTRAINTS
+
+> insert into dpk_l values (1, 'c')
+-- INSERT 0 1
+
+> select * from dpk_l order by k, v
+k:int4 | v:text
+1 | a
+1 | c
+2 | b
+-- SELECT 3
+
+> rollback
+-- ROLLBACK
+
+> select * from dpk_l order by k, v
+k:int4 | v:text
+1 | a
+2 | b
+-- SELECT 2
+
+> create table dpk_p (k int, v text, primary key (k) deferrable) partition by range (k)
+-- CREATE TABLE
+
+> create table dpk_p1 partition of dpk_p for values from (0) to (100)
+-- CREATE TABLE
+
+> create table dpk_p2 partition of dpk_p for values from (100) to (200)
+-- CREATE TABLE
+
+> insert into dpk_p values (1, 'a'), (2, 'b'), (150, 'c')
+-- INSERT 0 3
+
+> update dpk_p set k = k + 1
+-- UPDATE 3
+
+> select tableoid::regclass, * from dpk_p order by k
+tableoid:regclass | k:int4 | v:text
+dpk_p1 | 2 | a
+dpk_p1 | 3 | b
+dpk_p2 | 151 | c
+-- SELECT 3
+
+> begin
+-- BEGIN
+
+> set constraints all deferred
+-- SET CONSTRAINTS
+
+> insert into dpk_p values (2, 'dup')
+-- INSERT 0 1
+
+> select * from dpk_p order by k, v
+k:int4 | v:text
+2 | a
+2 | dup
+3 | b
+151 | c
+-- SELECT 4
+
+> commit
+ERROR 23505: duplicate key value violates unique constraint "dpk_p1_pkey"
+DETAIL: Key (k)=(2) already exists.
+OBJECTS: schema=public table=dpk_p1 constraint=dpk_p1_pkey
+
+> select * from dpk_p order by k, v
+k:int4 | v:text
+2 | a
+3 | b
+151 | c
+-- SELECT 3
+
+> begin
+-- BEGIN
+
+> set constraints all deferred
+-- SET CONSTRAINTS
+
+> insert into dpk_d values (1, 'tmp')
+-- INSERT 0 1
+
+> delete from dpk_d where k = 1 and v <> 'tmp'
+-- DELETE 1
+
+> commit
+-- COMMIT
+
+> select * from dpk_d order by k, v
+k:int4 | v:text
+1 | tmp
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+11 | dup1
+12 | dup2
+-- SELECT 7
+
+> merge into dpk_d d using (values (1, 'm1'), (99, 'm99')) s(k, v) on d.k = s.k
+>   when matched then update set v = s.v
+>   when not matched then insert values (s.k, s.v)
+-- MERGE 2
+
+> select * from dpk_d order by k, v
+k:int4 | v:text
+1 | m1
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+11 | dup1
+12 | dup2
+99 | m99
+-- SELECT 8
+
+> begin
+-- BEGIN
+
+> set constraints all deferred
+-- SET CONSTRAINTS
+
+> copy dpk_d from stdin
+>> 1	copied
+-- COPY 1
+
+> select * from dpk_d where k = 1 order by v
+k:int4 | v:text
+1 | copied
+1 | m1
+-- SELECT 2
+
+> commit
+ERROR 23505: duplicate key value violates unique constraint "dpk_d_pkey"
+DETAIL: Key (k)=(1) already exists.
+OBJECTS: schema=public table=dpk_d constraint=dpk_d_pkey
+
+> select * from dpk_d order by k, v
+k:int4 | v:text
+1 | m1
+2 | v4
+3 | v3
+4 | v2
+5 | v1
+11 | dup1
+12 | dup2
+99 | m99
+-- SELECT 8
+
+> select v from dpk_d where k = 99
+v:text
+m99
+-- SELECT 1
+
+> select v from dpk_d where k between 2 and 4 order by k
+v:text
+v4
+v3
+v2
+-- SELECT 3
+
+> drop table dpk_d, dpk_m, dpk_a, dpk_u, dpk_l, dpk_p
+-- DROP TABLE
+

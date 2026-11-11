@@ -1,0 +1,321 @@
+> SELECT size, pg_size_bytes(size) FROM     (VALUES ('1'), ('123bytes'), ('256 B'), ('1kB'), ('1MB'), (' 1 GB'), ('1.5 GB '),             ('1TB'), ('3000 TB'), ('1e6 MB'), ('99 PB')) x(size)
+size:text | pg_size_bytes:int8
+ 1 GB | 1073741824
+1 | 1
+1.5 GB  | 1610612736
+123bytes | 123
+1MB | 1048576
+1TB | 1099511627776
+1e6 MB | 1048576000000
+1kB | 1024
+256 B | 256
+3000 TB | 3298534883328000
+99 PB | 111464090777419776
+-- SELECT 11
+
+> SELECT size, pg_size_bytes(size) FROM     (VALUES ('1'), ('123bYteS'), ('1kb'), ('1mb'), (' 1 Gb'), ('1.5 gB '),             ('1tb'), ('3000 tb'), ('1e6 mb'), ('99 pb')) x(size)
+size:text | pg_size_bytes:int8
+ 1 Gb | 1073741824
+1 | 1
+1.5 gB  | 1610612736
+123bYteS | 123
+1e6 mb | 1048576000000
+1kb | 1024
+1mb | 1048576
+1tb | 1099511627776
+3000 tb | 3298534883328000
+99 pb | 111464090777419776
+-- SELECT 10
+
+> SELECT size, pg_size_bytes(size) FROM     (VALUES ('-1'), ('-123bytes'), ('-1kb'), ('-1mb'), (' -1 Gb'), ('-1.5 gB '),             ('-1tb'), ('-3000 TB'), ('-10e-1 MB'), ('-99 PB')) x(size)
+size:text | pg_size_bytes:int8
+ -1 Gb | -1073741824
+-1 | -1
+-1.5 gB  | -1610612736
+-10e-1 MB | -1048576
+-123bytes | -123
+-1kb | -1024
+-1mb | -1048576
+-1tb | -1099511627776
+-3000 TB | -3298534883328000
+-99 PB | -111464090777419776
+-- SELECT 10
+
+> SELECT size, pg_size_bytes(size) FROM      (VALUES ('-1.'), ('-1.kb'), ('-1. kb'), ('-0. gb'),              ('-.1'), ('-.1kb'), ('-.1 kb'), ('-.0 gb')) x(size)
+size:text | pg_size_bytes:int8
+-.0 gb | 0
+-.1 kb | -102
+-.1 | 0
+-.1kb | -102
+-0. gb | 0
+-1. kb | -1024
+-1. | -1
+-1.kb | -1024
+-- SELECT 8
+
+> SELECT pg_size_bytes('1 AB')
+ERROR 22023: invalid size: "1 AB"
+DETAIL: Invalid size unit: "AB".
+HINT: Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
+
+> SELECT pg_size_bytes('1 AB A')
+ERROR 22023: invalid size: "1 AB A"
+DETAIL: Invalid size unit: "AB A".
+HINT: Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
+
+> SELECT pg_size_bytes('1 AB A    ')
+ERROR 22023: invalid size: "1 AB A    "
+DETAIL: Invalid size unit: "AB A".
+HINT: Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
+
+> SELECT pg_size_bytes('9223372036854775807.9')
+ERROR 22003: bigint out of range
+
+> SELECT pg_size_bytes('1e100')
+ERROR 22003: bigint out of range
+
+> SELECT pg_size_bytes('1e1000000000000000000')
+ERROR 22003: value overflows numeric format
+
+> SELECT pg_size_bytes('1 byte')
+ERROR 22023: invalid size: "1 byte"
+DETAIL: Invalid size unit: "byte".
+HINT: Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
+
+> SELECT pg_size_bytes('kb')
+ERROR 22023: invalid size: "kb"
+
+> SELECT pg_size_bytes('..')
+ERROR 22023: invalid size: ".."
+
+> SELECT pg_size_bytes('-.')
+ERROR 22023: invalid size: "-."
+
+> SELECT pg_size_bytes('-.kb')
+ERROR 22023: invalid size: "-.kb"
+
+> SELECT pg_size_bytes('-. kb')
+ERROR 22023: invalid size: "-. kb"
+
+> SELECT pg_size_bytes('.+912')
+ERROR 22023: invalid size: ".+912"
+
+> SELECT pg_size_bytes('+912+ kB')
+ERROR 22023: invalid size: "+912+ kB"
+DETAIL: Invalid size unit: "+ kB".
+HINT: Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
+
+> SELECT pg_size_bytes('++123 kB')
+ERROR 22023: invalid size: "++123 kB"
+
+> r := parse_ident('Schemax.Tabley')
+ERROR 42601: syntax error at or near "r" (at 1)
+
+> r := parse_ident('"SchemaX"."TableY"')
+ERROR 42601: syntax error at or near "r" (at 1)
+
+> SELECT parse_ident('foo.boo')
+parse_ident:text[]
+{foo,boo}
+-- SELECT 1
+
+> SELECT parse_ident('foo.boo[]')
+ERROR 22023: string is not a valid identifier: "foo.boo[]"
+
+> SELECT parse_ident('foo.boo[]', strict => false)
+parse_ident:text[]
+{foo,boo}
+-- SELECT 1
+
+> SELECT parse_ident(' ')
+ERROR 22023: string is not a valid identifier: " "
+
+> SELECT parse_ident(' .aaa')
+ERROR 22023: string is not a valid identifier: " .aaa"
+DETAIL: No valid identifier before ".".
+
+> SELECT parse_ident(' aaa . ')
+ERROR 22023: string is not a valid identifier: " aaa . "
+DETAIL: No valid identifier after ".".
+
+> SELECT parse_ident('aaa.a%b')
+ERROR 22023: string is not a valid identifier: "aaa.a%b"
+
+> SELECT parse_ident(E'X\rXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+ERROR 22023: string is not a valid identifier: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+> SELECT length(a[1]), length(a[2]) from parse_ident('"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy') as a
+length:int4 | length:int4
+414 | 289
+-- SELECT 1
+
+> SELECT parse_ident(' first . "  second  " ."   third   ". "  ' || repeat('x',66) || '"')
+parse_ident:text[]
+{first,"  second  ","   third   ","  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+-- SELECT 1
+
+> SELECT parse_ident(' first . "  second  " ."   third   ". "  ' || repeat('x',66) || '"')::name[]
+parse_ident:name[]
+{first,"  second  ","   third   ","  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+-- SELECT 1
+
+> SELECT parse_ident(E'"c".X XXXX\002XXXXXX')
+ERROR 22023: string is not a valid identifier: ""c".X XXXXXXXXXX"
+
+> SELECT parse_ident('1020')
+ERROR 22023: string is not a valid identifier: "1020"
+
+> SELECT parse_ident('10.20')
+ERROR 22023: string is not a valid identifier: "10.20"
+
+> SELECT parse_ident('.')
+ERROR 22023: string is not a valid identifier: "."
+DETAIL: No valid identifier before ".".
+
+> SELECT parse_ident('.1020')
+ERROR 22023: string is not a valid identifier: ".1020"
+DETAIL: No valid identifier before ".".
+
+> SELECT parse_ident('xxx.1020')
+ERROR 22023: string is not a valid identifier: "xxx.1020"
+DETAIL: No valid identifier after ".".
+
+> select v, v is null as "is null" from string_to_table('1|2|3', '|') g(v)
+v:text | is null:bool
+1 | f
+2 | f
+3 | f
+-- SELECT 3
+
+> select v, v is null as "is null" from string_to_table('1|2|3|', '|') g(v)
+v:text | is null:bool
+ | f
+1 | f
+2 | f
+3 | f
+-- SELECT 4
+
+> select v, v is null as "is null" from string_to_table('1||2|3||', '||') g(v)
+v:text | is null:bool
+ | f
+1 | f
+2|3 | f
+-- SELECT 3
+
+> select v, v is null as "is null" from string_to_table('1|2|3', '') g(v)
+v:text | is null:bool
+1|2|3 | f
+-- SELECT 1
+
+> select v, v is null as "is null" from string_to_table('', '|') g(v)
+v:text | is null:bool
+-- SELECT 0
+
+> select v, v is null as "is null" from string_to_table('1|2|3', NULL) g(v)
+v:text | is null:bool
+1 | f
+2 | f
+3 | f
+| | f
+| | f
+-- SELECT 5
+
+> select v, v is null as "is null" from string_to_table(NULL, '|') g(v)
+v:text | is null:bool
+-- SELECT 0
+
+> select v, v is null as "is null" from string_to_table('abc', '') g(v)
+v:text | is null:bool
+abc | f
+-- SELECT 1
+
+> select v, v is null as "is null" from string_to_table('abc', '', 'abc') g(v)
+v:text | is null:bool
+NULL | t
+-- SELECT 1
+
+> select v, v is null as "is null" from string_to_table('abc', ',') g(v)
+v:text | is null:bool
+abc | f
+-- SELECT 1
+
+> select v, v is null as "is null" from string_to_table('abc', ',', 'abc') g(v)
+v:text | is null:bool
+NULL | t
+-- SELECT 1
+
+> select v, v is null as "is null" from string_to_table('1,2,3,4,,6', ',') g(v)
+v:text | is null:bool
+ | f
+1 | f
+2 | f
+3 | f
+4 | f
+6 | f
+-- SELECT 6
+
+> select v, v is null as "is null" from string_to_table('1,2,3,4,,6', ',', '') g(v)
+v:text | is null:bool
+1 | f
+2 | f
+3 | f
+4 | f
+6 | f
+NULL | t
+-- SELECT 6
+
+> select v, v is null as "is null" from string_to_table('1,2,3,4,*,6', ',', '*') g(v)
+v:text | is null:bool
+1 | f
+2 | f
+3 | f
+4 | f
+6 | f
+NULL | t
+-- SELECT 6
+
+> SELECT crc32('')
+crc32:int8
+0
+-- SELECT 1
+
+> SELECT crc32('The quick brown fox jumps over the lazy dog.')
+crc32:int8
+1368401385
+-- SELECT 1
+
+> SELECT crc32c('')
+crc32c:int8
+0
+-- SELECT 1
+
+> SELECT crc32c('The quick brown fox jumps over the lazy dog.')
+crc32c:int8
+419469235
+-- SELECT 1
+
+> SELECT crc32c(repeat('A', 127)::bytea)
+crc32c:int8
+291820082
+-- SELECT 1
+
+> SELECT crc32c(repeat('A', 128)::bytea)
+crc32c:int8
+816091258
+-- SELECT 1
+
+> SELECT crc32c(repeat('A', 129)::bytea)
+crc32c:int8
+4213642571
+-- SELECT 1
+
+> SELECT crc32c(repeat('A', 800)::bytea)
+crc32c:int8
+3134039419
+-- SELECT 1
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+

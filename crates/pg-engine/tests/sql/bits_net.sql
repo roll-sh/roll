@@ -1,0 +1,33 @@
+-- bit strings (varbit.c)
+SELECT B'1010' | B'0101', B'1100' & B'1010', B'1100' # B'1010', ~ B'1100', B'1010'::bit(4) >> 1, B'1010' << 2, B'1010' >> -1;
+SELECT B'1010' || B'11', B'10'::varbit || B'1'::bit(1), pg_typeof(B'10' || B'1');
+SELECT length(B'10101'), bit_length(B'10101'), octet_length(B'101010101'), bit_count(B'1011001');
+SELECT position(B'101' IN B'0010100'), substring(B'1101011' FROM 2 FOR 3), substring(B'1101011' FROM 3), overlay(B'11111' PLACING B'00' FROM 2), overlay(B'11111' PLACING B'00' FROM 2 FOR 3);
+SELECT get_bit(B'1010', 2), set_bit(B'1010', 1, 1), set_bit(B'1010'::varbit, 0, 0);
+SELECT B'1010' | B'01';
+SELECT B'1010' & B'01';
+SELECT B'1010' # B'01';
+SELECT get_bit(B'1010', 4);
+SELECT set_bit(B'1010', 0, 2);
+SELECT 5::bit(4), 5::bit(2), (-1)::bit(8), B'101'::int4, B'1111111111111111111111111111111111111111'::int8, 300::bit(12)::int;
+SELECT B'1010' = B'1010'::varbit, B'101' < B'11', B'10' < B'100', bitcat(B'1', B'0'), bitand(B'11', B'01'), bitnot(B'01');
+SELECT B'10'::bit(4), B'1111'::bit(2), B'10'::varbit(4), X'1F', X'1F'::bit(8)::int;
+SELECT B'1111'::varbit(2);
+SELECT B'12';
+SELECT '01x'::bit(3);
+-- network (network.c)
+SELECT host('192.168.1.5/24'::inet), masklen('192.168.1.5/24'::inet), netmask('192.168.1.5/24'::inet), hostmask('192.168.1.5/24'::inet);
+SELECT network('192.168.1.5/24'::inet), broadcast('192.168.1.5/24'::inet), family('::1'::inet), family('1.2.3.4'), text('10.1.0.0/16'::cidr), text('1.2.3.4'::inet);
+SELECT abbrev('10.1.0.0/16'::cidr), abbrev('10.1.0.0/16'::inet), abbrev('10.1.0.0/32'::cidr), set_masklen('192.168.1.5/24'::inet, 16), set_masklen('192.168.1.0/24'::cidr, 16);
+SELECT inet_same_family('1.2.3.4', '::1'), inet_merge('192.168.1.5/24', '192.168.2.5/24'), inet_merge('10.0.0.1', '10.0.0.2');
+SELECT '192.168.1.5'::inet << '192.168.0.0/16', '192.168.0.0/16'::inet <<= '192.168.0.0/16', '192.168.0.0/16'::inet >> '192.168.1.5', '192.168.0.0/16'::inet >>= '192.168.1.0/24', '192.168.1.0/24'::inet && '192.168.0.0/16';
+SELECT ~ '192.168.1.5'::inet, '192.168.1.5'::inet & '0.0.255.255', '192.168.1.5'::inet | '0.0.0.255', '192.168.1.5'::inet + 300, 300 + '192.168.1.5'::inet, '192.168.1.5'::inet - 10, '192.168.1.5'::inet - '192.168.1.1'::inet;
+SELECT '::ffff:1.2.3.4'::inet, '2001:db8::1/64'::inet, network('2001:db8::1/64'::inet), broadcast('2001:db8::1/64'::inet), hostmask('2001:db8::/64'::inet), '2001:db8::1'::inet + 1;
+SELECT '255.255.255.255'::inet + 1;
+SELECT '1.2.3.4'::inet - '::1'::inet;
+SELECT set_masklen('1.2.3.4'::inet, 33);
+SELECT '1.2.3.4'::inet & '::1'::inet;
+SELECT inet '1.2.3.4/24' < inet '1.2.3.5/24', inet '1.2.3.4/24' < inet '1.2.3.4/25', inet '::1' > inet '1.2.3.4', cidr '10.0.0.0/8' = inet '10.0.0.0/8';
+SELECT trunc('12:34:56:78:90:ab'::macaddr), ~ '12:34:56:78:90:ab'::macaddr, '12:34:56:78:90:ab'::macaddr & 'ff:ff:ff:00:00:00', '12:34:56:78:90:ab'::macaddr | '00:00:00:00:00:01';
+SELECT '12:34:56:78:90:ab'::macaddr8, macaddr8_set7bit('00:34:56:ab:cd:ef'::macaddr8), '12:34:56:78:90:ab'::macaddr::macaddr8, '12:34:56:ff:fe:78:90:ab'::macaddr8::macaddr;
+SELECT inet_client_addr() IS NULL OR true, host(inet_server_addr()) IS NULL OR true;

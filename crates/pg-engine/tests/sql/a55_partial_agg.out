@@ -1,0 +1,122 @@
+> CREATE TABLE a55_big (g int, k int, pad text) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a55_big SELECT g, g % 7, md5(g::text) FROM generate_series(1, 200000) g
+-- INSERT 0 200000
+
+> VACUUM ANALYZE a55_big
+-- VACUUM
+
+> EXPLAIN SELECT k, count(*) FROM a55_big WHERE g % 100 = 0 GROUP BY k ORDER BY k
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=4661.76..4667.72 rows=7 width=12)
+  Group Key: k
+  ->  Gather Merge  (cost=4661.76..4667.59 rows=12 width=12)
+        Workers Planned: 1
+        ->  Partial GroupAggregate  (cost=3661.75..3666.23 rows=7 width=12)
+              Group Key: k
+              ->  Sort  (cost=3661.75..3663.22 rows=588 width=4)
+                    Sort Key: k
+                    ->  Parallel Seq Scan on a55_big  (cost=0.00..3634.71 rows=588 width=4)
+                          Filter: ((g % 100) = 0)
+-- EXPLAIN
+
+> EXPLAIN SELECT k, count(*) FROM a55_big WHERE g % 100 = 0 GROUP BY k
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=4661.76..4667.72 rows=7 width=12)
+  Group Key: k
+  ->  Gather Merge  (cost=4661.76..4667.59 rows=12 width=12)
+        Workers Planned: 1
+        ->  Partial GroupAggregate  (cost=3661.75..3666.23 rows=7 width=12)
+              Group Key: k
+              ->  Sort  (cost=3661.75..3663.22 rows=588 width=4)
+                    Sort Key: k
+                    ->  Parallel Seq Scan on a55_big  (cost=0.00..3634.71 rows=588 width=4)
+                          Filter: ((g % 100) = 0)
+-- EXPLAIN
+
+> EXPLAIN SELECT k, count(*) FROM a55_big WHERE g % 100 = 0 AND pad > 'a' GROUP BY k ORDER BY k
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=4937.30..4940.49 rows=7 width=12)
+  Group Key: k
+  ->  Gather Merge  (cost=4937.30..4940.36 rows=12 width=12)
+        Workers Planned: 1
+        ->  Partial GroupAggregate  (cost=3937.29..3939.00 rows=7 width=12)
+              Group Key: k
+              ->  Sort  (cost=3937.29..3937.84 rows=218 width=4)
+                    Sort Key: k
+                    ->  Parallel Seq Scan on a55_big  (cost=0.00..3928.82 rows=218 width=4)
+                          Filter: ((pad > 'a'::text) AND ((g % 100) = 0))
+-- EXPLAIN
+
+> EXPLAIN SELECT k, count(*), sum(g) FROM a55_big GROUP BY k ORDER BY k
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=4929.00..4930.53 rows=7 width=20)
+  Group Key: k
+  ->  Gather Merge  (cost=4929.00..4930.37 rows=12 width=20)
+        Workers Planned: 1
+        ->  Sort  (cost=3928.99..3929.01 rows=7 width=20)
+              Sort Key: k
+              ->  Partial HashAggregate  (cost=3928.82..3928.89 rows=7 width=20)
+                    Group Key: k
+                    ->  Parallel Seq Scan on a55_big  (cost=0.00..3046.47 rows=117647 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT k, count(*), sum(g) FROM a55_big GROUP BY k
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=4929.00..4930.53 rows=7 width=20)
+  Group Key: k
+  ->  Gather Merge  (cost=4929.00..4930.37 rows=12 width=20)
+        Workers Planned: 1
+        ->  Sort  (cost=3928.99..3929.01 rows=7 width=20)
+              Sort Key: k
+              ->  Partial HashAggregate  (cost=3928.82..3928.89 rows=7 width=20)
+                    Group Key: k
+                    ->  Parallel Seq Scan on a55_big  (cost=0.00..3046.47 rows=117647 width=8)
+-- EXPLAIN
+
+> SET max_parallel_workers_per_gather = 4
+-- SET
+
+> EXPLAIN SELECT k, count(*) FROM a55_big WHERE g % 100 = 0 GROUP BY k ORDER BY k
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=4661.76..4667.72 rows=7 width=12)
+  Group Key: k
+  ->  Gather Merge  (cost=4661.76..4667.59 rows=12 width=12)
+        Workers Planned: 1
+        ->  Partial GroupAggregate  (cost=3661.75..3666.23 rows=7 width=12)
+              Group Key: k
+              ->  Sort  (cost=3661.75..3663.22 rows=588 width=4)
+                    Sort Key: k
+                    ->  Parallel Seq Scan on a55_big  (cost=0.00..3634.71 rows=588 width=4)
+                          Filter: ((g % 100) = 0)
+-- EXPLAIN
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> SELECT k, count(*) FROM a55_big WHERE g % 100 = 0 GROUP BY k ORDER BY k
+k:int4 | count:int8
+0 | 285
+1 | 286
+2 | 286
+3 | 286
+4 | 286
+5 | 285
+6 | 286
+-- SELECT 7
+
+> SELECT k, count(*), sum(g) FROM a55_big GROUP BY k ORDER BY k
+k:int4 | count:int8 | sum:int8
+0 | 28571 | 2857157142
+1 | 28572 | 2857185714
+2 | 28572 | 2857214286
+3 | 28572 | 2857242858
+4 | 28571 | 2857071429
+5 | 28571 | 2857100000
+6 | 28571 | 2857128571
+-- SELECT 7
+
+> DROP TABLE a55_big
+-- DROP TABLE
+

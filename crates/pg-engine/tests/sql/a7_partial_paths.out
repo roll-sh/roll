@@ -1,0 +1,245 @@
+> CREATE TABLE a7_t (a int, b int, c int)
+-- CREATE TABLE
+
+> INSERT INTO a7_t SELECT mod(i, 10), mod(i, 10), i FROM generate_series(1, 10000) s(i)
+-- INSERT 0 10000
+
+> CREATE INDEX ON a7_t (a)
+-- CREATE INDEX
+
+> ANALYZE a7_t
+-- ANALYZE
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL min_parallel_table_scan_size = '1kB'
+-- SET
+
+> SET LOCAL min_parallel_index_scan_size = '1kB'
+-- SET
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 2
+-- SET
+
+> SET LOCAL enable_incremental_sort = off
+-- SET
+
+> EXPLAIN SELECT a, b, sum(c) FROM a7_t GROUP BY 1, 2 ORDER BY 1, 2, 3 LIMIT 1
+QUERY PLAN:text
+Limit  (cost=132.22..132.22 rows=1 width=16)
+  ->  Sort  (cost=132.22..132.47 rows=100 width=16)
+        Sort Key: a, b, (sum(c))
+        ->  Finalize HashAggregate  (cost=130.72..131.72 rows=100 width=16)
+              Group Key: a, b
+              ->  Gather  (cost=127.92..128.92 rows=240 width=16)
+                    Workers Planned: 2
+                    ->  Partial HashAggregate  (cost=127.92..128.92 rows=100 width=16)
+                          Group Key: a, b
+                          ->  Parallel Seq Scan on a7_t  (cost=0.00..96.67 rows=4167 width=12)
+-- EXPLAIN
+
+> SET LOCAL enable_incremental_sort = on
+-- SET
+
+> EXPLAIN SELECT a, b, sum(c) FROM a7_t GROUP BY 1, 2 ORDER BY 1, 2, 3 LIMIT 1
+QUERY PLAN:text
+Limit  (cost=61.00..68.11 rows=1 width=16)
+  ->  Incremental Sort  (cost=61.00..772.70 rows=100 width=16)
+        Sort Key: a, b, (sum(c))
+        Presorted Key: a, b
+        ->  GroupAggregate  (cost=53.84..768.20 rows=100 width=16)
+              Group Key: a, b
+              ->  Gather Merge  (cost=53.84..692.20 rows=10000 width=12)
+                    Workers Planned: 2
+                    ->  Incremental Sort  (cost=53.82..587.93 rows=4167 width=12)
+                          Sort Key: a, b
+                          Presorted Key: a
+                          ->  Parallel Index Scan using a7_t_a_idx on a7_t  (cost=0.29..354.32 rows=4167 width=12)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, b, sum(c) FROM a7_t GROUP BY 1, 2 ORDER BY 1, 2, 3
+QUERY PLAN:text
+Sort  (cost=135.04..135.29 rows=100 width=16)
+  Sort Key: a, b, (sum(c))
+  ->  Finalize HashAggregate  (cost=130.72..131.72 rows=100 width=16)
+        Group Key: a, b
+        ->  Gather  (cost=127.92..128.92 rows=240 width=16)
+              Workers Planned: 2
+              ->  Partial HashAggregate  (cost=127.92..128.92 rows=100 width=16)
+                    Group Key: a, b
+                    ->  Parallel Seq Scan on a7_t  (cost=0.00..96.67 rows=4167 width=12)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, b, sum(c) FROM a7_t GROUP BY 1, 2 ORDER BY 1, 2, 3 LIMIT 50
+QUERY PLAN:text
+Limit  (cost=135.04..135.17 rows=50 width=16)
+  ->  Sort  (cost=135.04..135.29 rows=100 width=16)
+        Sort Key: a, b, (sum(c))
+        ->  Finalize HashAggregate  (cost=130.72..131.72 rows=100 width=16)
+              Group Key: a, b
+              ->  Gather  (cost=127.92..128.92 rows=240 width=16)
+                    Workers Planned: 2
+                    ->  Partial HashAggregate  (cost=127.92..128.92 rows=100 width=16)
+                          Group Key: a, b
+                          ->  Parallel Seq Scan on a7_t  (cost=0.00..96.67 rows=4167 width=12)
+-- EXPLAIN
+
+> SELECT a, b, sum(c) FROM a7_t GROUP BY 1, 2 ORDER BY 1, 2, 3 LIMIT 3
+a:int4 | b:int4 | sum:int8
+0 | 0 | 5005000
+1 | 1 | 4996000
+2 | 2 | 4997000
+-- SELECT 3
+
+> SET LOCAL enable_hashagg = off
+-- SET
+
+> EXPLAIN SELECT * FROM a7_t UNION SELECT * FROM a7_t ORDER BY 1, 3
+QUERY PLAN:text
+Incremental Sort  (cost=700.68..2192.18 rows=20000 width=12)
+  Sort Key: a7_t.a, a7_t.c
+  Presorted Key: a7_t.a
+  ->  Unique  (cost=694.46..1273.80 rows=20000 width=12)
+        ->  Merge Append  (cost=694.46..1123.80 rows=20000 width=12)
+              Sort Key: a7_t.a, a7_t.b, a7_t.c
+              ->  Gather Merge  (cost=347.23..461.89 rows=10000 width=12)
+                    Workers Planned: 2
+                    ->  Sort  (cost=347.20..357.62 rows=4167 width=12)
+                          Sort Key: a7_t.a, a7_t.b, a7_t.c
+                          ->  Parallel Seq Scan on a7_t  (cost=0.00..96.67 rows=4167 width=12)
+              ->  Gather Merge  (cost=347.23..461.89 rows=10000 width=12)
+                    Workers Planned: 2
+                    ->  Sort  (cost=347.20..357.62 rows=4167 width=12)
+                          Sort Key: a7_t_1.a, a7_t_1.b, a7_t_1.c
+                          ->  Parallel Seq Scan on a7_t a7_t_1  (cost=0.00..96.67 rows=4167 width=12)
+-- EXPLAIN
+
+> SELECT * FROM (SELECT * FROM a7_t UNION SELECT * FROM a7_t ORDER BY 1, 3) s LIMIT 3
+a:int4 | b:int4 | c:int4
+0 | 0 | 10
+0 | 0 | 20
+0 | 0 | 30
+-- SELECT 3
+
+> EXPLAIN SELECT DISTINCT a, b FROM a7_t
+QUERY PLAN:text
+Unique  (cost=347.23..382.18 rows=100 width=8)
+  ->  Gather Merge  (cost=347.23..380.98 rows=240 width=8)
+        Workers Planned: 2
+        ->  Unique  (cost=347.20..378.46 rows=100 width=8)
+              ->  Sort  (cost=347.20..357.62 rows=4167 width=8)
+                    Sort Key: a, b
+                    ->  Parallel Seq Scan on a7_t  (cost=0.00..96.67 rows=4167 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, b, sum(c) FROM a7_t GROUP BY 1, 2
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=347.23..395.20 rows=100 width=16)
+  Group Key: a, b
+  ->  Gather Merge  (cost=347.23..392.40 rows=240 width=16)
+        Workers Planned: 2
+        ->  Partial GroupAggregate  (cost=347.20..389.87 rows=100 width=16)
+              Group Key: a, b
+              ->  Sort  (cost=347.20..357.62 rows=4167 width=12)
+                    Sort Key: a, b
+                    ->  Parallel Seq Scan on a7_t  (cost=0.00..96.67 rows=4167 width=12)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, sum(c) FROM a7_t GROUP BY 1
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=0.31..375.75 rows=10 width=12)
+  Group Key: a
+  ->  Gather Merge  (cost=0.31..375.53 rows=24 width=12)
+        Workers Planned: 2
+        ->  Partial GroupAggregate  (cost=0.29..375.25 rows=10 width=12)
+              Group Key: a
+              ->  Parallel Index Scan using a7_t_a_idx on a7_t  (cost=0.29..354.32 rows=4167 width=8)
+-- EXPLAIN
+
+> SELECT a, sum(c) FROM a7_t GROUP BY 1 ORDER BY 1 LIMIT 3
+a:int4 | sum:int8
+0 | 5005000
+1 | 4996000
+2 | 4997000
+-- SELECT 3
+
+> EXPLAIN SELECT a, c FROM a7_t ORDER BY a, c LIMIT 1
+QUERY PLAN:text
+Limit  (cost=37.80..37.84 rows=1 width=8)
+  ->  Gather Merge  (cost=37.80..531.72 rows=10001 width=8)
+        Workers Planned: 2
+        ->  Incremental Sort  (cost=37.77..427.44 rows=4167 width=8)
+              Sort Key: a, c
+              Presorted Key: a
+              ->  Parallel Index Scan using a7_t_a_idx on a7_t  (cost=0.29..354.32 rows=4167 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, c FROM a7_t ORDER BY a, c LIMIT 5000
+QUERY PLAN:text
+Limit  (cost=53.84..373.02 rows=5000 width=8)
+  ->  Gather Merge  (cost=53.84..692.20 rows=10000 width=8)
+        Workers Planned: 2
+        ->  Incremental Sort  (cost=53.82..587.93 rows=4167 width=8)
+              Sort Key: a, c
+              Presorted Key: a
+              ->  Parallel Index Scan using a7_t_a_idx on a7_t  (cost=0.29..354.32 rows=4167 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, c FROM a7_t ORDER BY a LIMIT 10
+QUERY PLAN:text
+Limit  (cost=0.29..0.70 rows=10 width=8)
+  ->  Index Scan using a7_t_a_idx on a7_t  (cost=0.29..412.65 rows=10000 width=8)
+-- EXPLAIN
+
+> SET LOCAL enable_hashagg = on
+-- SET
+
+> SET LOCAL enable_seqscan = off
+-- SET
+
+> EXPLAIN SELECT a, c FROM a7_t ORDER BY a, c
+QUERY PLAN:text
+Gather Merge  (cost=53.84..692.20 rows=10000 width=8)
+  Workers Planned: 2
+  ->  Incremental Sort  (cost=53.82..587.93 rows=4167 width=8)
+        Sort Key: a, c
+        Presorted Key: a
+        ->  Parallel Index Scan using a7_t_a_idx on a7_t  (cost=0.29..354.32 rows=4167 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, c FROM a7_t ORDER BY a, c LIMIT 10
+QUERY PLAN:text
+Limit  (cost=44.72..45.27 rows=10 width=8)
+  ->  Gather Merge  (cost=44.72..600.93 rows=10001 width=8)
+        Workers Planned: 2
+        ->  Incremental Sort  (cost=44.69..496.65 rows=4167 width=8)
+              Sort Key: a, c
+              Presorted Key: a
+              ->  Parallel Index Scan using a7_t_a_idx on a7_t  (cost=0.29..354.32 rows=4167 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT a, c FROM a7_t ORDER BY a
+QUERY PLAN:text
+Index Scan using a7_t_a_idx on a7_t  (cost=0.29..412.65 rows=10000 width=8)
+-- EXPLAIN
+
+> SELECT a, c FROM a7_t ORDER BY a, c LIMIT 3
+a:int4 | c:int4
+0 | 10
+0 | 20
+0 | 30
+-- SELECT 3
+
+> COMMIT
+-- COMMIT
+
+> DROP TABLE a7_t
+-- DROP TABLE
+

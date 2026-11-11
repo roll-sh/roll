@@ -1,0 +1,239 @@
+{
+  "invocations": 24,
+  "candidate_source": "8b33053bf42d9c993d92e38d75a73131c1cea26f",
+  "runtime": {
+    "at_utc": "2026-11-02T01:25:29.026761+00:00",
+    "source": "8b33053bf42d9c993d92e38d75a73131c1cea26f",
+    "production_tree": "cb125cca86a2b7abcae272bbea71b5e069e75538",
+    "git_status": "",
+    "load": "3.34 4.48 3.62 1/2747 4100720",
+    "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+    "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "engines": {
+      "baseline": {
+        "pid": 3995749,
+        "port": 53210,
+        "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+        "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+        "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/baseline-data --listen 127.0.0.1:53210 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+        "affinity": [
+          28,
+          29,
+          30,
+          31
+        ],
+        "thread_affinities": [
+          [
+            28,
+            29,
+            30,
+            31
+          ]
+        ],
+        "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-915af586.scope\n"
+      },
+      "candidate": {
+        "pid": 4030004,
+        "port": 53211,
+        "exe": "/home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/candidate-bin/roll-engine",
+        "sha256": "fd84ff22765c8fe1803f115440309407ec81a18b32b6002919e36124eb91f83c",
+        "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/candidate-data --listen 127.0.0.1:53211 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+        "affinity": [
+          28,
+          29,
+          30,
+          31
+        ],
+        "thread_affinities": [
+          [
+            28,
+            29,
+            30,
+            31
+          ]
+        ],
+        "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-915af586.scope\n"
+      }
+    },
+    "psql_helper": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+    "prior_observation": "runtime.json"
+  },
+  "cases": {
+    "point_select-1": {
+      "baseline": {
+        "samples": 5,
+        "tps": {
+          "median": 6805.0,
+          "min": 6747.0,
+          "max": 6872.0
+        },
+        "p50_ms": {
+          "median": 0.135,
+          "min": 0.133,
+          "max": 0.137
+        },
+        "p95_ms": {
+          "median": 0.204,
+          "min": 0.193,
+          "max": 0.214
+        },
+        "p99_ms": {
+          "median": 0.333,
+          "min": 0.33,
+          "max": 0.337
+        },
+        "server_cpu_us_per_op": {
+          "median": 111.96990625091846,
+          "min": 110.15395361019752,
+          "max": 112.04647853924594
+        },
+        "client_cpu_us_per_op": {
+          "median": 38.44089229067834,
+          "min": 37.69637943835442,
+          "max": 39.483667299027566
+        },
+        "peak_mem_mb": {
+          "median": 110.0,
+          "min": 110.0,
+          "max": 111.4
+        }
+      },
+      "candidate": {
+        "samples": 5,
+        "tps": {
+          "median": 6748.0,
+          "min": 6729.0,
+          "max": 6828.0
+        },
+        "p50_ms": {
+          "median": 0.135,
+          "min": 0.134,
+          "max": 0.137
+        },
+        "p95_ms": {
+          "median": 0.205,
+          "min": 0.185,
+          "max": 0.22
+        },
+        "p99_ms": {
+          "median": 0.337,
+          "min": 0.332,
+          "max": 0.344
+        },
+        "server_cpu_us_per_op": {
+          "median": 111.5853116386588,
+          "min": 110.56277183065608,
+          "max": 112.77692753450877
+        },
+        "client_cpu_us_per_op": {
+          "median": 39.277320919850666,
+          "min": 38.75720122424475,
+          "max": 39.57106135124302
+        },
+        "peak_mem_mb": {
+          "median": 114.7,
+          "min": 113.4,
+          "max": 115.7
+        }
+      },
+      "throughput_change_pct": -0.8376193975018369,
+      "cpu_change_pct": -0.3434803378309592,
+      "gain_exceeds_both_spreads": false,
+      "paired_throughput_changes_pct": [
+        0.9163464380727238,
+        -1.1168258633357797,
+        -2.0663562281722947,
+        -1.7615373416800084,
+        0.9189269304876291
+      ]
+    },
+    "range_scan_100-8": {
+      "baseline": {
+        "samples": 5,
+        "tps": {
+          "median": 8863.0,
+          "min": 8777.0,
+          "max": 8884.0
+        },
+        "p50_ms": {
+          "median": 0.852,
+          "min": 0.849,
+          "max": 0.859
+        },
+        "p95_ms": {
+          "median": 1.519,
+          "min": 1.507,
+          "max": 1.538
+        },
+        "p99_ms": {
+          "median": 2.264,
+          "min": 2.238,
+          "max": 2.28
+        },
+        "server_cpu_us_per_op": {
+          "median": 445.0807751710761,
+          "min": 443.75668223510223,
+          "max": 448.06215680466676
+        },
+        "client_cpu_us_per_op": {
+          "median": 95.02042771946834,
+          "min": 93.3397434444621,
+          "max": 95.7655448973546
+        },
+        "peak_mem_mb": {
+          "median": 112.3,
+          "min": 112.2,
+          "max": 113.9
+        }
+      },
+      "candidate": {
+        "samples": 5,
+        "tps": {
+          "median": 8992.0,
+          "min": 8861.0,
+          "max": 9016.0
+        },
+        "p50_ms": {
+          "median": 0.84,
+          "min": 0.838,
+          "max": 0.852
+        },
+        "p95_ms": {
+          "median": 1.473,
+          "min": 1.471,
+          "max": 1.501
+        },
+        "p99_ms": {
+          "median": 2.257,
+          "min": 2.21,
+          "max": 2.269
+        },
+        "server_cpu_us_per_op": {
+          "median": 438.8725190415303,
+          "min": 437.5083218676491,
+          "max": 445.1390142625021
+        },
+        "client_cpu_us_per_op": {
+          "median": 94.34662304535874,
+          "min": 94.21809283303908,
+          "max": 94.82660453150392
+        },
+        "peak_mem_mb": {
+          "median": 115.8,
+          "min": 115.7,
+          "max": 117.1
+        }
+      },
+      "throughput_change_pct": 1.455489112038813,
+      "cpu_change_pct": -1.3948605457423935,
+      "gain_exceeds_both_spreads": false,
+      "paired_throughput_changes_pct": [
+        0.7203962179198609,
+        -0.09020182658698861,
+        1.7262777840460375,
+        2.6660590178876564,
+        1.903898458748876
+      ]
+    }
+  }
+}

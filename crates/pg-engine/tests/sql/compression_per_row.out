@@ -1,0 +1,63 @@
+> CREATE TABLE cpr_t(f1 text COMPRESSION lz4)
+-- CREATE TABLE
+
+> INSERT INTO cpr_t VALUES (repeat('123456789', 1004))
+-- INSERT 0 1
+
+> ALTER TABLE cpr_t ALTER COLUMN f1 SET COMPRESSION pglz
+-- ALTER TABLE
+
+> INSERT INTO cpr_t VALUES (repeat('123456789', 1004))
+-- INSERT 0 1
+
+> SELECT xmin::text::int - (select min(xmin::text::int) from cpr_t), pg_column_compression(f1) FROM cpr_t
+?column?:int4 | pg_column_compression:text
+0 | lz4
+2 | pglz
+-- SELECT 2
+
+> CREATE TABLE cpr_p(f1 text COMPRESSION lz4) partition by hash (f1)
+-- CREATE TABLE
+
+> CREATE TABLE cpr_p1 partition of cpr_p for values with (modulus 1, remainder 0)
+-- CREATE TABLE
+
+> INSERT INTO cpr_p VALUES (repeat('123456789', 1004))
+-- INSERT 0 1
+
+> ALTER TABLE cpr_p1 ALTER COLUMN f1 SET COMPRESSION pglz
+-- ALTER TABLE
+
+> INSERT INTO cpr_p VALUES (repeat('123456789', 1004))
+-- INSERT 0 1
+
+> SELECT pg_column_compression(f1) FROM cpr_p1
+pg_column_compression:text
+lz4
+pglz
+-- SELECT 2
+
+> create table cpr_copy (f1 text compression pglz)
+-- CREATE TABLE
+
+> insert into cpr_copy select f1 from cpr_t
+-- INSERT 0 2
+
+> select pg_column_compression(f1) from cpr_copy
+pg_column_compression:text
+lz4
+pglz
+-- SELECT 2
+
+> update cpr_t set f1 = f1
+-- UPDATE 2
+
+> select pg_column_compression(f1) from cpr_t
+pg_column_compression:text
+lz4
+pglz
+-- SELECT 2
+
+> drop table cpr_t, cpr_p, cpr_copy
+-- DROP TABLE
+

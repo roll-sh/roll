@@ -1,0 +1,142 @@
+> create table lk (a int primary key, b text, c int check (c > 0), d int)
+-- CREATE TABLE
+
+> create index lk_b on lk (b)
+-- CREATE INDEX
+
+> create index lk_e on lk (lower(b)) where d > 0
+-- CREATE INDEX
+
+> create unique index lk_cd on lk (c, d) include (b)
+-- CREATE INDEX
+
+> create index lk_h on lk using hash (d)
+-- CREATE INDEX
+
+> alter table lk add constraint lk_x exclude using btree (d with =)
+-- ALTER TABLE
+
+> comment on column lk.b is 'bee'
+-- COMMENT
+
+> comment on constraint lk_c_check on lk is 'positive'
+-- COMMENT
+
+> comment on index lk_b is 'b index'
+-- COMMENT
+
+> comment on table lk is 'the table'
+-- COMMENT
+
+> create table lk2 (like lk including all)
+-- CREATE TABLE
+
+> select indexname, indexdef from pg_indexes where tablename = 'lk2' order by 1
+indexname:name | indexdef:text
+lk2_b_idx | CREATE INDEX lk2_b_idx ON public.lk2 USING btree (b)
+lk2_c_d_b_idx | CREATE UNIQUE INDEX lk2_c_d_b_idx ON public.lk2 USING btree (c, d) INCLUDE (b)
+lk2_d_excl | CREATE INDEX lk2_d_excl ON public.lk2 USING btree (d)
+lk2_d_idx | CREATE INDEX lk2_d_idx ON public.lk2 USING hash (d)
+lk2_lower_idx | CREATE INDEX lk2_lower_idx ON public.lk2 USING btree (lower(b)) WHERE (d > 0)
+lk2_pkey | CREATE UNIQUE INDEX lk2_pkey ON public.lk2 USING btree (a)
+-- SELECT 6
+
+> select conname, contype from pg_constraint where conrelid = 'lk2'::regclass order by 1
+conname:name | contype:char
+lk2_d_excl | x
+lk2_pkey | p
+lk_a_not_null | n
+lk_c_check | c
+-- SELECT 4
+
+> select col_description('lk2'::regclass, 2), obj_description('lk2'::regclass, 'pg_class')
+col_description:text | obj_description:text
+bee | NULL
+-- SELECT 1
+
+> select c.relname, obj_description(c.oid, 'pg_class') from pg_index i join pg_class c on c.oid = i.indexrelid where i.indrelid = 'lk2'::regclass order by 1
+relname:name | obj_description:text
+lk2_b_idx | b index
+lk2_c_d_b_idx | NULL
+lk2_d_excl | NULL
+lk2_d_idx | NULL
+lk2_lower_idx | NULL
+lk2_pkey | NULL
+-- SELECT 6
+
+> select conname, obj_description(oid, 'pg_constraint') from pg_constraint where conrelid = 'lk2'::regclass order by 1
+conname:name | obj_description:text
+lk2_d_excl | NULL
+lk2_pkey | NULL
+lk_a_not_null | NULL
+lk_c_check | positive
+-- SELECT 4
+
+> create table lk3 (like lk including indexes)
+-- CREATE TABLE
+
+> select indexname from pg_indexes where tablename = 'lk3' order by 1
+indexname:name
+lk3_b_idx
+lk3_c_d_b_idx
+lk3_d_excl
+lk3_d_idx
+lk3_lower_idx
+lk3_pkey
+-- SELECT 6
+
+> select conname, contype from pg_constraint where conrelid = 'lk3'::regclass order by 1
+conname:name | contype:char
+lk3_d_excl | x
+lk3_pkey | p
+lk_a_not_null | n
+-- SELECT 3
+
+> create table lk4 (like lk including comments)
+-- CREATE TABLE
+
+> select col_description('lk4'::regclass, 2)
+col_description:text
+bee
+-- SELECT 1
+
+> select conname, obj_description(oid, 'pg_constraint') from pg_constraint where conrelid = 'lk4'::regclass order by 1
+conname:name | obj_description:text
+lk_a_not_null | NULL
+-- SELECT 1
+
+> create table lk5 (like lk including constraints including comments)
+-- CREATE TABLE
+
+> select conname, obj_description(oid, 'pg_constraint') from pg_constraint where conrelid = 'lk5'::regclass order by 1
+conname:name | obj_description:text
+lk_a_not_null | NULL
+lk_c_check | positive
+-- SELECT 2
+
+> create table lk6 (x int, like lk including all excluding indexes, y int)
+-- CREATE TABLE
+
+> select attname from pg_attribute where attrelid = 'lk6'::regclass and attnum > 0 order by attnum
+attname:name
+x
+a
+b
+c
+d
+y
+-- SELECT 6
+
+> select indexname from pg_indexes where tablename = 'lk6' order by 1
+indexname:name
+-- SELECT 0
+
+> create table lk7 (like lk including all, b text)
+ERROR 42701: column "b" specified more than once
+
+> create table lk8 (b text, like lk)
+ERROR 42701: column "b" specified more than once
+
+> drop table lk, lk2, lk3, lk4, lk5, lk6
+-- DROP TABLE
+

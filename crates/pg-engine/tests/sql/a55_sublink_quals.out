@@ -1,0 +1,114 @@
+> create table a55_t (a int, b int)
+-- CREATE TABLE
+
+> create table a55_u (x int, y int)
+-- CREATE TABLE
+
+> create table a55_v (z int)
+-- CREATE TABLE
+
+> insert into a55_t select g, g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> insert into a55_t values (null, 1)
+-- INSERT 0 1
+
+> insert into a55_u select g, g % 10 from generate_series(1, 50) g
+-- INSERT 0 50
+
+> insert into a55_u values (null, 3), (7, null)
+-- INSERT 0 2
+
+> insert into a55_v values (1), (2), (null)
+-- INSERT 0 3
+
+> analyze a55_t, a55_u, a55_v
+-- ANALYZE
+
+> explain (costs off) select * from a55_t where a in (select x from a55_u where y > (select min(z) from a55_v where z < x))
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a55_t.a = a55_u.x)
+  ->  Seq Scan on a55_t
+  ->  Hash
+        ->  Seq Scan on a55_u
+              Filter: (y > (SubPlan 1))
+              SubPlan 1
+                ->  Aggregate
+                      ->  Seq Scan on a55_v
+                            Filter: (z < a55_u.x)
+-- EXPLAIN
+
+> select count(*) from a55_t where a in (select x from a55_u where y > (select min(z) from a55_v where z < x))
+count:int8
+40
+-- SELECT 1
+
+> explain (costs off) select * from a55_t where a in (select x from a55_u where y not in (select z from a55_v where z is not null))
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a55_t.a = a55_u.x)
+  ->  Seq Scan on a55_t
+  ->  Hash
+        ->  Seq Scan on a55_u
+              Filter: (NOT (ANY (y = (hashed SubPlan 1).col1)))
+              SubPlan 1
+                ->  Seq Scan on a55_v
+                      Filter: (z IS NOT NULL)
+-- EXPLAIN
+
+> select count(*) from a55_t where a in (select x from a55_u where y not in (select z from a55_v where z is not null))
+count:int8
+40
+-- SELECT 1
+
+> explain (costs off) select * from a55_t where a not in (select x from a55_u where y not in (select z from a55_v where z is not null))
+QUERY PLAN:text
+Seq Scan on a55_t
+  Filter: (NOT (ANY (a = (hashed SubPlan 2).col1)))
+  SubPlan 2
+    ->  Seq Scan on a55_u
+          Filter: (NOT (ANY (y = (hashed SubPlan 1).col1)))
+          SubPlan 1
+            ->  Seq Scan on a55_v
+                  Filter: (z IS NOT NULL)
+-- EXPLAIN
+
+> explain (costs off) select * from a55_t where exists (select 1 from a55_u where x = a and y not in (select z from a55_v where z is not null))
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a55_t.a = a55_u.x)
+  ->  Seq Scan on a55_t
+  ->  Hash
+        ->  Seq Scan on a55_u
+              Filter: (NOT (ANY (y = (hashed SubPlan 1).col1)))
+              SubPlan 1
+                ->  Seq Scan on a55_v
+                      Filter: (z IS NOT NULL)
+-- EXPLAIN
+
+> select count(*) from a55_t where exists (select 1 from a55_u where x = a and y not in (select z from a55_v where z is not null))
+count:int8
+40
+-- SELECT 1
+
+> explain (costs off) select * from a55_t where a in (select x from a55_u where y in (select z from a55_v) or y = 5)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a55_t.a = a55_u.x)
+  ->  Seq Scan on a55_t
+  ->  Hash
+        ->  Seq Scan on a55_u
+              Filter: ((ANY (y = (hashed SubPlan 1).col1)) OR (y = 5))
+              SubPlan 1
+                ->  Seq Scan on a55_v
+-- EXPLAIN
+
+> select count(*) from a55_t where a in (select x from a55_u where y in (select z from a55_v) or y = 5)
+count:int8
+15
+-- SELECT 1
+
+> drop table a55_t, a55_u, a55_v
+-- DROP TABLE
+

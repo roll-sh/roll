@@ -1,0 +1,314 @@
+> CREATE TABLE a20_t (i int, d date)
+-- CREATE TABLE
+
+> CREATE TABLE a20_s (k int, v text)
+-- CREATE TABLE
+
+> INSERT INTO a20_s VALUES (1, 'one'), (2, 'two')
+-- INSERT 0 2
+
+> SELECT 'lit'
+?column?:text
+lit
+-- SELECT 1
+
+> SELECT NULL
+?column?:text
+NULL
+-- SELECT 1
+
+> SELECT 'a' x, 1 y, NULL z
+x:text | y:int4 | z:text
+a | 1 | NULL
+-- SELECT 1
+
+> SELECT pg_typeof('a'), pg_typeof(x) FROM (SELECT 'a' x) s
+pg_typeof:regtype | pg_typeof:regtype
+unknown | text
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 'lit'
+QUERY PLAN:text
+Result
+  Output: 'lit'::text
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT NULL, 'a' x, 1
+QUERY PLAN:text
+Result
+  Output: NULL::text, 'a'::text, 1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 'a' COLLATE "C"
+QUERY PLAN:text
+Result
+  Output: 'a'::text COLLATE "C"
+-- EXPLAIN
+
+> SELECT 'a', k FROM a20_s ORDER BY 1, 2
+?column?:text | k:int4
+a | 1
+a | 2
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT DISTINCT 'a', k FROM a20_s
+QUERY PLAN:text
+HashAggregate
+  Output: ('a'::text), k
+  Group Key: a20_s.k
+  ->  Seq Scan on public.a20_s
+        Output: 'a'::text, k
+-- EXPLAIN
+
+> SELECT 'a' x, count(*) FROM a20_s GROUP BY 1
+x:text | count:int8
+a | 2
+-- SELECT 1
+
+> SELECT pg_typeof(x) FROM (SELECT 'a' x FROM a20_s GROUP BY 1) s
+pg_typeof:regtype
+text
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 'a', generate_series(1, 2)
+QUERY PLAN:text
+ProjectSet
+  Output: 'a'::text, generate_series(1, 2)
+  ->  Result
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT (SELECT 'x')
+QUERY PLAN:text
+Result
+  Output: (InitPlan 1).col1
+  InitPlan 1
+    ->  Result
+          Output: 'x'::text
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT 'x' b OFFSET 0) s
+QUERY PLAN:text
+Result
+  Output: 'x'::text
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT b || 'y' FROM (SELECT 'x' b OFFSET 0) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: (s.b || 'y'::text)
+  ->  Result
+        Output: 'x'::text
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT s.k, q.c FROM a20_s s, (SELECT 'c' c OFFSET 0) q
+QUERY PLAN:text
+Nested Loop
+  Output: s.k, ('c'::text)
+  ->  Result
+        Output: 'c'::text
+  ->  Seq Scan on public.a20_s s
+        Output: s.k, s.v
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH c AS MATERIALIZED (SELECT 1 a, 'x' b) SELECT * FROM c
+QUERY PLAN:text
+CTE Scan on c
+  Output: c.a, c.b
+  CTE c
+    ->  Result
+          Output: 1, 'x'::text
+-- EXPLAIN
+
+> WITH c AS (SELECT 1 a, 'x' b) SELECT pg_typeof(b) FROM c
+pg_typeof:regtype
+text
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 'a' UNION SELECT 'b'
+QUERY PLAN:text
+Unique
+  Output: ('a'::text)
+  ->  Sort
+        Output: ('a'::text)
+        Sort Key: ('a'::text)
+        ->  Append
+              ->  Result
+                    Output: 'a'::text
+              ->  Result
+                    Output: 'b'::text
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 'a', 1 UNION ALL SELECT 'b', 2
+QUERY PLAN:text
+Append
+  ->  Result
+        Output: 'a'::text, 1
+  ->  Result
+        Output: 'b'::text, 2
+-- EXPLAIN
+
+> SELECT '1' UNION ALL SELECT 2
+?column?:int4
+1
+2
+-- SELECT 2
+
+> SELECT x, pg_typeof(x) FROM (SELECT 1 UNION SELECT '2') s(x) ORDER BY 1
+x:int4 | pg_typeof:regtype
+1 | integer
+2 | integer
+-- SELECT 2
+
+> SELECT 'a' UNION SELECT 'a' ORDER BY 1
+?column?:text
+a
+-- SELECT 1
+
+> VALUES ('a'), ('b')
+column1:text
+a
+b
+-- SELECT 2
+
+> SELECT pg_typeof(x) FROM (VALUES ('a')) v(x)
+pg_typeof:regtype
+text
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT x FROM (VALUES ('a'), ('b')) v(x)
+QUERY PLAN:text
+Values Scan on "*VALUES*"
+  Output: "*VALUES*".column1
+-- EXPLAIN
+
+> INSERT INTO a20_t SELECT '1', '2020-01-01'
+-- INSERT 0 1
+
+> INSERT INTO a20_t SELECT '2', '2020-01-02' UNION ALL SELECT '3', NULL
+ERROR 42804: column "i" is of type integer but expression is of type text (at 26)
+HINT: You will need to rewrite or cast the expression.
+
+> EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO a20_t SELECT '1', '2020-01-01'
+QUERY PLAN:text
+Insert on public.a20_t
+  ->  Result
+        Output: 1, '2020-01-01'::date
+-- EXPLAIN
+
+> INSERT INTO a20_t SELECT * FROM (SELECT '4', '2020-01-04') s
+ERROR 42804: column "i" is of type integer but expression is of type text (at 26)
+HINT: You will need to rewrite or cast the expression.
+
+> INSERT INTO a20_t SELECT '5' ORDER BY 1
+ERROR 42804: column "i" is of type integer but expression is of type text (at 26)
+HINT: You will need to rewrite or cast the expression.
+
+> INSERT INTO a20_t SELECT DISTINCT '5'
+ERROR 42804: column "i" is of type integer but expression is of type text (at 35)
+HINT: You will need to rewrite or cast the expression.
+
+> WITH c AS (SELECT '6' x) INSERT INTO a20_t SELECT x FROM c
+ERROR 42804: column "i" is of type integer but expression is of type text (at 51)
+HINT: You will need to rewrite or cast the expression.
+
+> SELECT * FROM a20_t ORDER BY i
+i:int4 | d:date
+1 | 2020-01-01
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO a20_t VALUES (7, NULL) RETURNING 'r', i
+QUERY PLAN:text
+Insert on public.a20_t
+  Output: 'r'::text, a20_t.i
+  ->  Result
+        Output: 7, NULL::date
+-- EXPLAIN
+
+> CREATE TABLE a20_ctas AS SELECT 'x' a, NULL b, 1 c
+-- SELECT 1
+
+> SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute
+> WHERE attrelid = 'a20_ctas'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | format_type:text
+a | text
+b | text
+c | integer
+-- SELECT 3
+
+> CREATE VIEW a20_v AS SELECT 'x' a, NULL b, k FROM a20_s
+-- CREATE VIEW
+
+> SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute
+> WHERE attrelid = 'a20_v'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | format_type:text
+a | text
+b | text
+k | integer
+-- SELECT 3
+
+> SELECT pg_get_viewdef('a20_v'::regclass)
+pg_get_viewdef:text
+ SELECT 'x'::text AS a,
+    NULL::text AS b,
+    k
+   FROM a20_s;
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a20_v
+QUERY PLAN:text
+Seq Scan on public.a20_s
+  Output: 'x'::text, NULL::text, a20_s.k
+-- EXPLAIN
+
+> CREATE VIEW a20_vu AS SELECT 'x' a UNION SELECT 'y'
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('a20_vu'::regclass)
+pg_get_viewdef:text
+ SELECT 'x'::text AS a
+UNION
+ SELECT 'y'::text AS a;
+-- SELECT 1
+
+> PREPARE a20_p AS SELECT $1
+-- PREPARE
+
+> SELECT parameter_types, result_types FROM pg_prepared_statements WHERE name = 'a20_p'
+parameter_types:2211 | result_types:2211
+{text} | {text}
+-- SELECT 1
+
+> EXECUTE a20_p('z')
+?column?:text
+z
+-- SELECT 1
+
+> DEALLOCATE a20_p
+-- DEALLOCATE
+
+> CREATE FUNCTION a20_f() RETURNS varchar LANGUAGE sql AS $$ SELECT 'f' $$
+-- CREATE FUNCTION
+
+> SELECT a20_f(), pg_typeof(a20_f())
+a20_f:varchar | pg_typeof:regtype
+f | character varying
+-- SELECT 1
+
+> CREATE FUNCTION a20_g() RETURNS int LANGUAGE sql AS $$ SELECT '1' $$
+ERROR 42P13: return type mismatch in function declared to return integer
+DETAIL: Actual return type is text.
+CONTEXT: SQL function "a20_g"
+
+> DROP VIEW a20_vu
+-- DROP VIEW
+
+> DROP VIEW a20_v
+-- DROP VIEW
+
+> DROP FUNCTION a20_f()
+-- DROP FUNCTION
+
+> DROP TABLE a20_ctas, a20_t, a20_s
+-- DROP TABLE
+

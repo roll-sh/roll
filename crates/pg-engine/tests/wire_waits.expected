@@ -1,0 +1,137 @@
+row lock / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while updating tuple (…) in relation "t"); then ok; after the hold: ok
+row lock / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while updating tuple (…) in relation "t"); then ok; after the hold: ok
+row lock / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while updating tuple (…) in relation "t"); then ok; after the hold: ok
+row lock / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while updating tuple (…) in relation "t"); then ok; after the hold: ok
+row lock / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while updating tuple (…) in relation "t"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+row lock / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while updating tuple (…) in relation "t"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+row lock / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while updating tuple (…) in relation "t"); then ok; after the hold: ok
+row lock / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while updating tuple (…) in relation "t"); then ok; after the hold: ok
+row lock (FOR SHARE) / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while locking tuple (…) in relation "t"); then ok; after the hold: ok
+row lock (FOR SHARE) / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while locking tuple (…) in relation "t"); then ok; after the hold: ok
+row lock (FOR SHARE) / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "t"); then ok; after the hold: ok
+row lock (FOR SHARE) / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "t"); then ok; after the hold: ok
+row lock (FOR SHARE) / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "t"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+row lock (FOR SHARE) / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "t"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+row lock (FOR SHARE) / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while locking tuple (…) in relation "t"); then ok; after the hold: ok
+row lock (FOR SHARE) / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while locking tuple (…) in relation "t"); then ok; after the hold: ok
+unique key / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then ok; after the hold: ok
+unique key / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then ok; after the hold: ok
+unique key / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then ok; after the hold: ok
+unique key / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then ok; after the hold: ok
+unique key / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+unique key / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+unique key / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then ok; after the hold: ok
+unique key / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while inserting index tuple (…) in relation "u_pkey"); then ok; after the hold: ok
+delete / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while deleting tuple (…) in relation "t"); then ok; after the hold: ok
+delete / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while deleting tuple (…) in relation "t"); then ok; after the hold: ok
+delete / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while deleting tuple (…) in relation "t"); then ok; after the hold: ok
+delete / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while deleting tuple (…) in relation "t"); then ok; after the hold: ok
+delete / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while deleting tuple (…) in relation "t"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+delete / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while deleting tuple (…) in relation "t"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+delete / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while deleting tuple (…) in relation "t"); then ok; after the hold: ok
+delete / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while deleting tuple (…) in relation "t"); then ok; after the hold: ok
+exclusion constraint / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then ok; after the hold: ok
+exclusion constraint / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then ok; after the hold: ok
+exclusion constraint / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then ok; after the hold: ok
+exclusion constraint / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then ok; after the hold: ok
+exclusion constraint / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+exclusion constraint / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+exclusion constraint / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then ok; after the hold: ok
+exclusion constraint / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while checking exclusion constraint on tuple (…) in relation "ex"); then ok; after the hold: ok
+ON CONFLICT DO NOTHING / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO NOTHING / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO NOTHING / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO NOTHING / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO NOTHING / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+ON CONFLICT DO NOTHING / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+ON CONFLICT DO NOTHING / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO NOTHING / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO UPDATE / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO UPDATE / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO UPDATE / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO UPDATE / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO UPDATE / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+ON CONFLICT DO UPDATE / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while inserting index tuple (…) in relation "u"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+ON CONFLICT DO UPDATE / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+ON CONFLICT DO UPDATE / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while inserting index tuple (…) in relation "u"); then ok; after the hold: ok
+foreign key check / StatementTimeout / Simple: 57014 canceling statement due to statement timeout (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then ok; after the hold: ok
+foreign key check / StatementTimeout / Extended: 57014 canceling statement due to statement timeout (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then ok; after the hold: ok
+foreign key check / LockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then ok; after the hold: ok
+foreign key check / LockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then ok; after the hold: ok
+foreign key check / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+foreign key check / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+foreign key check / Cancel / Simple: 57014 canceling statement due to user request (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then ok; after the hold: ok
+foreign key check / Cancel / Extended: 57014 canceling statement due to user request (CONTEXT: while locking tuple (…) in relation "parent" | SQL statement "SELECT 1 FROM ONLY "public"."parent" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x"); then ok; after the hold: ok
+relation lock / StatementTimeout / Simple: 57014 canceling statement due to statement timeout; then ok; after the hold: ok
+relation lock / StatementTimeout / Extended: 57014 canceling statement due to statement timeout; then ok; after the hold: ok
+relation lock / LockTimeout / Simple: 55P03 canceling statement due to lock timeout; then ok; after the hold: ok
+relation lock / LockTimeout / Extended: 55P03 canceling statement due to lock timeout; then ok; after the hold: ok
+relation lock / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+relation lock / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+relation lock / Cancel / Simple: 57014 canceling statement due to user request; then ok; after the hold: ok
+relation lock / Cancel / Extended: 57014 canceling statement due to user request; then ok; after the hold: ok
+advisory lock / StatementTimeout / Simple: 57014 canceling statement due to statement timeout; then ok; after the hold: ok
+advisory lock / StatementTimeout / Extended: 57014 canceling statement due to statement timeout; then ok; after the hold: ok
+advisory lock / LockTimeout / Simple: 55P03 canceling statement due to lock timeout; then ok; after the hold: ok
+advisory lock / LockTimeout / Extended: 55P03 canceling statement due to lock timeout; then ok; after the hold: ok
+advisory lock / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+advisory lock / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+advisory lock / Cancel / Simple: 57014 canceling statement due to user request; then ok; after the hold: ok
+advisory lock / Cancel / Extended: 57014 canceling statement due to user request; then ok; after the hold: ok
+advisory xact lock / StatementTimeout / Simple: 57014 canceling statement due to statement timeout; then ok; after the hold: ok
+advisory xact lock / StatementTimeout / Extended: 57014 canceling statement due to statement timeout; then ok; after the hold: ok
+advisory xact lock / LockTimeout / Simple: 55P03 canceling statement due to lock timeout; then ok; after the hold: ok
+advisory xact lock / LockTimeout / Extended: 55P03 canceling statement due to lock timeout; then ok; after the hold: ok
+advisory xact lock / LocalLockTimeout / Simple: 55P03 canceling statement due to lock timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+advisory xact lock / LocalLockTimeout / Extended: 55P03 canceling statement due to lock timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+advisory xact lock / Cancel / Simple: 57014 canceling statement due to user request; then ok; after the hold: ok
+advisory xact lock / Cancel / Extended: 57014 canceling statement due to user request; then ok; after the hold: ok
+safe snapshot / StatementTimeout / Simple: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+safe snapshot / StatementTimeout / Extended: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+safe snapshot / LockTimeout / Simple: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+safe snapshot / LockTimeout / Extended: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+safe snapshot / LocalLockTimeout / Simple: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+safe snapshot / LocalLockTimeout / Extended: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+safe snapshot / Cancel / Simple: 57014 canceling statement due to user request; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+safe snapshot / Cancel / Extended: 57014 canceling statement due to user request; then 25P02 current transaction is aborted, commands ignored until end of transaction block; after the hold: ok
+pg_sleep / StatementTimeout / Simple: 57014 canceling statement due to statement timeout; then ok
+pg_sleep / StatementTimeout / Extended: 57014 canceling statement due to statement timeout; then ok
+pg_sleep / LockTimeout / Simple: 57014 canceling statement due to statement timeout; then ok
+pg_sleep / LockTimeout / Extended: 57014 canceling statement due to statement timeout; then ok
+pg_sleep / LocalLockTimeout / Simple: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block
+pg_sleep / LocalLockTimeout / Extended: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block
+pg_sleep / Cancel / Simple: 57014 canceling statement due to user request; then ok
+pg_sleep / Cancel / Extended: 57014 canceling statement due to user request; then ok
+long scan / StatementTimeout / Simple: 57014 canceling statement due to statement timeout; then ok
+long scan / StatementTimeout / Extended: 57014 canceling statement due to statement timeout; then ok
+long scan / LockTimeout / Simple: 57014 canceling statement due to statement timeout; then ok
+long scan / LockTimeout / Extended: 57014 canceling statement due to statement timeout; then ok
+long scan / LocalLockTimeout / Simple: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block
+long scan / LocalLockTimeout / Extended: 57014 canceling statement due to statement timeout; then 25P02 current transaction is aborted, commands ignored until end of transaction block
+long scan / Cancel / Simple: 57014 canceling statement due to user request; then ok
+long scan / Cancel / Extended: 57014 canceling statement due to user request; then ok
+portal / StatementTimeout: first Execute 1 row; second 57014 canceling statement due to statement timeout (CONTEXT: while locking tuple (…) in relation "t"); then ok
+portal / LockTimeout: first Execute 1 row; second 55P03 canceling statement due to lock timeout (CONTEXT: while locking tuple (…) in relation "t"); then ok
+portal / Cancel: first Execute 1 row; second 57014 canceling statement due to user request (CONTEXT: while locking tuple (…) in relation "t"); then ok
+cancel while idle in a block: then simple ok; then extended ok
+idle_in_transaction in a block: ok, ok, ok; then connection closed; connection: FATAL 25P03 terminating connection due to idle-in-transaction timeout
+idle_in_transaction outside a block: ok, ok; then ok; connection: closed cleanly
+idle_in_transaction in a failed block: ok, ok, 22012 division by zero; then connection closed; connection: FATAL 25P03 terminating connection due to idle-in-transaction timeout
+transaction_timeout idle in a block: ok, ok, ok; then connection closed; connection: FATAL 25P04 terminating connection due to transaction timeout
+transaction_timeout while running: ok, 25P04 terminating connection due to transaction timeout; then connection closed; connection: client error: connection closed
+transaction_timeout while running, extended: ok, 25P04 terminating connection due to transaction timeout; then connection closed; connection: client error: connection closed
+transaction_timeout in a lock wait: ok, 25P04 terminating connection due to transaction timeout (CONTEXT: while updating tuple (…) in relation "t"); then connection closed; connection: client error: connection closed
+transaction_timeout = statement_timeout: ok, ok, 25P04 terminating connection due to transaction timeout; then connection closed; connection: client error: connection closed
+statement_timeout < transaction_timeout: ok, ok, 57014 canceling statement due to statement timeout, ok; then ok; connection: closed cleanly
+transaction_timeout set in a block: ok, ok, ok; then connection closed; connection: FATAL 25P04 terminating connection due to transaction timeout
+idle_session outside a block: ok, ok; then connection closed; connection: FATAL 57P05 terminating connection due to idle-session timeout
+idle_session in a block: ok, ok, ok; then ok; connection: closed cleanly
+deadlock (rows): victim ERROR 40P01 deadlock detected (DETAIL: Process N waits for ShareLock on transaction N; blocked by process N. | Process N waits for ShareLock on transaction N; blocked by process N.) (HINT: See server log for query details.) (CONTEXT: while updating tuple (…) in relation "t"); the other ok
+deadlock (relations): victim ERROR 40P01 deadlock detected (DETAIL: Process N waits for ExclusiveLock on relation N of database N; blocked by process N. | Process N waits for ExclusiveLock on relation N of database N; blocked by process N.) (HINT: See server log for query details.); the other ok
+deadlock (advisory): victim ERROR 40P01 deadlock detected (DETAIL: Process N waits for ExclusiveLock on advisory lock [N,N,N,N]; blocked by process N. | Process N waits for ExclusiveLock on advisory lock [N,N,N,N]; blocked by process N.) (HINT: See server log for query details.); the other ok
+cancel a lock wait: pg_cancel_backend ok; the session: ERROR 57014 canceling statement due to user request (CONTEXT: while updating tuple (…) in relation "t"); then ok; connection: closed cleanly
+cancel a sleep: pg_cancel_backend ok; the session: ERROR 57014 canceling statement due to user request; then ok; connection: closed cleanly
+cancel an idle session: pg_cancel_backend ok; the session: idle; then ok; connection: closed cleanly
+terminate a lock wait: pg_terminate_backend ok; the session: FATAL 57P01 terminating connection due to administrator command (CONTEXT: while updating tuple (…) in relation "t"); then connection closed; connection: connection closed
+terminate a sleep: pg_terminate_backend ok; the session: FATAL 57P01 terminating connection due to administrator command; then connection closed; connection: connection closed
+terminate an idle session: pg_terminate_backend ok; the session: idle; then connection closed; connection: FATAL 57P01 terminating connection due to administrator command

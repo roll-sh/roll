@@ -1,0 +1,337 @@
+> create table pkl_a (id int primary key, v text) with (fillfactor = 70, autovacuum_enabled = off)
+-- CREATE TABLE
+
+> insert into pkl_a values (5, 'a'), (1, 'b'), (3, 'c'), (2, 'd'), (4, 'e')
+-- INSERT 0 5
+
+> update pkl_a set id = 0 where id = 2
+-- UPDATE 1
+
+> select ctid, * from pkl_a
+ctid:27 | id:int4 | v:text
+(0,1) | 5 | a
+(0,2) | 1 | b
+(0,3) | 3 | c
+(0,5) | 4 | e
+(0,6) | 0 | d
+-- SELECT 5
+
+> select relname, reloptions from pg_class where relname in ('pkl_a', 'pkl_a_pkey') order by 1
+relname:name | reloptions:text[]
+pkl_a | {fillfactor=70,autovacuum_enabled=off}
+pkl_a_pkey | NULL
+-- SELECT 2
+
+> alter table pkl_a set (fillfactor = 50, toast_tuple_target = 200)
+-- ALTER TABLE
+
+> alter table pkl_a reset (autovacuum_enabled)
+-- ALTER TABLE
+
+> select ctid, * from pkl_a
+ctid:27 | id:int4 | v:text
+(0,1) | 5 | a
+(0,2) | 1 | b
+(0,3) | 3 | c
+(0,5) | 4 | e
+(0,6) | 0 | d
+-- SELECT 5
+
+> select reloptions from pg_class where relname = 'pkl_a'
+reloptions:text[]
+{fillfactor=50,toast_tuple_target=200}
+-- SELECT 1
+
+> insert into pkl_a values (9, 'i'), (7, 'g')
+-- INSERT 0 2
+
+> update pkl_a set v = 'b2' where id = 1
+-- UPDATE 1
+
+> select ctid, * from pkl_a
+ctid:27 | id:int4 | v:text
+(0,1) | 5 | a
+(0,3) | 3 | c
+(0,5) | 4 | e
+(0,6) | 0 | d
+(0,7) | 9 | i
+(0,8) | 7 | g
+(0,9) | 1 | b2
+-- SELECT 7
+
+> alter table pkl_a set (pk_clustered = true)
+ERROR 22023: unrecognized parameter "pk_clustered"
+
+> alter table pkl_a set (roll_pk = on)
+ERROR 22023: unrecognized parameter "roll_pk"
+
+> alter table pkl_a set (fillfactor = 5)
+ERROR 22023: value 5 out of bounds for option "fillfactor"
+DETAIL: Valid values are between "10" and "100".
+
+> alter table pkl_a set (autovacuum_enabled = maybe)
+ERROR 22023: invalid value for boolean option "autovacuum_enabled": maybe
+
+> create table pkl_bad (id int primary key) with (clustered = true)
+ERROR 22023: unrecognized parameter "clustered"
+
+> create table pkl_p (k int primary key, v text) partition by range (k) with (fillfactor = 50)
+ERROR 42809: cannot specify storage parameters for a partitioned table
+HINT: Specify storage parameters for its leaf partitions instead.
+
+> create table pkl_p (k int primary key, v text) partition by range (k)
+-- CREATE TABLE
+
+> alter table pkl_p set (fillfactor = 50)
+ERROR 42809: cannot specify storage parameters for a partitioned table
+HINT: Specify storage parameters for its leaf partitions instead.
+
+> alter table pkl_p set (parallel_workers = 2)
+ERROR 42809: cannot specify storage parameters for a partitioned table
+HINT: Specify storage parameters for its leaf partitions instead.
+
+> alter table pkl_p reset (fillfactor)
+-- ALTER TABLE
+
+> create table pkl_p1 partition of pkl_p for values from (0) to (10) with (fillfactor = 60)
+-- CREATE TABLE
+
+> create table pkl_p2 partition of pkl_p for values from (10) to (100)
+-- CREATE TABLE
+
+> insert into pkl_p values (15, 'a'), (5, 'b'), (1, 'c'), (12, 'd'), (11, 'e')
+-- INSERT 0 5
+
+> update pkl_p set k = 50 where k = 1
+-- UPDATE 1
+
+> update pkl_p set v = 'x' where k = 12
+-- UPDATE 1
+
+> select tableoid::regclass, ctid, * from pkl_p
+tableoid:regclass | ctid:27 | k:int4 | v:text
+pkl_p1 | (0,1) | 5 | b
+pkl_p2 | (0,1) | 15 | a
+pkl_p2 | (0,3) | 11 | e
+pkl_p2 | (0,4) | 50 | c
+pkl_p2 | (0,5) | 12 | x
+-- SELECT 5
+
+> select relname, reloptions from pg_class where relname like 'pkl_p%' and relkind in ('r', 'p') order by 1
+relname:name | reloptions:text[]
+pkl_p | NULL
+pkl_p1 | {fillfactor=60}
+pkl_p2 | NULL
+-- SELECT 3
+
+> alter table pkl_p2 set (fillfactor = 40)
+-- ALTER TABLE
+
+> insert into pkl_p values (13, 'f')
+-- INSERT 0 1
+
+> select tableoid::regclass, ctid, * from pkl_p
+tableoid:regclass | ctid:27 | k:int4 | v:text
+pkl_p1 | (0,1) | 5 | b
+pkl_p2 | (0,1) | 15 | a
+pkl_p2 | (0,3) | 11 | e
+pkl_p2 | (0,4) | 50 | c
+pkl_p2 | (0,5) | 12 | x
+pkl_p2 | (0,6) | 13 | f
+-- SELECT 6
+
+> create table pkl_p3 (k int not null, v text) with (fillfactor = 80)
+-- CREATE TABLE
+
+> insert into pkl_p3 values (150, 'z'), (120, 'y'), (130, 'x')
+-- INSERT 0 3
+
+> alter table pkl_p attach partition pkl_p3 for values from (100) to (200)
+-- ALTER TABLE
+
+> insert into pkl_p values (120, 'dup')
+ERROR 23505: duplicate key value violates unique constraint "pkl_p3_pkey"
+DETAIL: Key (k)=(120) already exists.
+OBJECTS: schema=public table=pkl_p3 constraint=pkl_p3_pkey
+
+> select ctid, * from pkl_p3
+ctid:27 | k:int4 | v:text
+(0,1) | 150 | z
+(0,2) | 120 | y
+(0,3) | 130 | x
+-- SELECT 3
+
+> alter table pkl_p detach partition pkl_p3
+-- ALTER TABLE
+
+> insert into pkl_p3 values (110, 'w')
+-- INSERT 0 1
+
+> select ctid, * from pkl_p3
+ctid:27 | k:int4 | v:text
+(0,1) | 150 | z
+(0,2) | 120 | y
+(0,3) | 130 | x
+(0,5) | 110 | w
+-- SELECT 4
+
+> create table pkl_g (a int, b text) with (fillfactor = 90)
+-- CREATE TABLE
+
+> insert into pkl_g values (3, 'c'), (1, 'a'), (2, 'b')
+-- INSERT 0 3
+
+> alter table pkl_g add primary key (a), set (fillfactor = 85)
+-- ALTER TABLE
+
+> update pkl_g set a = 4 where a = 1
+-- UPDATE 1
+
+> select ctid, * from pkl_g
+ctid:27 | a:int4 | b:text
+(0,1) | 3 | c
+(0,3) | 2 | b
+(0,4) | 4 | a
+-- SELECT 3
+
+> alter table pkl_g drop constraint pkl_g_pkey
+-- ALTER TABLE
+
+> insert into pkl_g values (4, 'dup')
+-- INSERT 0 1
+
+> select ctid, * from pkl_g
+ctid:27 | a:int4 | b:text
+(0,1) | 3 | c
+(0,3) | 2 | b
+(0,4) | 4 | a
+(0,5) | 4 | dup
+-- SELECT 4
+
+> select reloptions from pg_class where relname = 'pkl_g'
+reloptions:text[]
+{fillfactor=85}
+-- SELECT 1
+
+> create table pkl_ip (id int primary key, v text) with (fillfactor = 70)
+-- CREATE TABLE
+
+> create table pkl_ic (extra int) inherits (pkl_ip)
+-- CREATE TABLE
+
+> alter table pkl_ic add primary key (id)
+-- ALTER TABLE
+
+> insert into pkl_ip values (2, 'p2'), (1, 'p1')
+-- INSERT 0 2
+
+> insert into pkl_ic values (4, 'c4', 1), (3, 'c3', 2)
+-- INSERT 0 2
+
+> update pkl_ip set v = v || '!' where id in (1, 3)
+-- UPDATE 2
+
+> select tableoid::regclass, ctid, * from pkl_ip
+tableoid:regclass | ctid:27 | id:int4 | v:text
+pkl_ip | (0,1) | 2 | p2
+pkl_ip | (0,3) | 1 | p1!
+pkl_ic | (0,1) | 4 | c4
+pkl_ic | (0,3) | 3 | c3!
+-- SELECT 4
+
+> select relname, reloptions from pg_class where relname in ('pkl_ip', 'pkl_ic') order by 1
+relname:name | reloptions:text[]
+pkl_ic | NULL
+pkl_ip | {fillfactor=70}
+-- SELECT 2
+
+> create table pkl_like (like pkl_a including all)
+-- CREATE TABLE
+
+> select reloptions from pg_class where relname = 'pkl_like'
+reloptions:text[]
+NULL
+-- SELECT 1
+
+> create table pkl_ctas with (fillfactor = 60) as select * from pkl_a
+-- SELECT 7
+
+> alter table pkl_ctas add primary key (id)
+-- ALTER TABLE
+
+> update pkl_ctas set id = 10 where id = 0
+-- UPDATE 1
+
+> select ctid, * from pkl_ctas
+ctid:27 | id:int4 | v:text
+(0,1) | 5 | a
+(0,2) | 3 | c
+(0,3) | 4 | e
+(0,5) | 9 | i
+(0,6) | 7 | g
+(0,7) | 1 | b2
+(0,8) | 10 | d
+-- SELECT 7
+
+> select reloptions from pg_class where relname = 'pkl_ctas'
+reloptions:text[]
+{fillfactor=60}
+-- SELECT 1
+
+> create index pkl_a_v on pkl_a (v) with (fillfactor = 70)
+-- CREATE INDEX
+
+> alter index pkl_a_pkey set (fillfactor = 60)
+-- ALTER INDEX
+
+> select relname, reloptions from pg_class where relname in ('pkl_a_v', 'pkl_a_pkey') order by 1
+relname:name | reloptions:text[]
+pkl_a_pkey | {fillfactor=60}
+pkl_a_v | {fillfactor=70}
+-- SELECT 2
+
+> set enable_seqscan = off
+-- SET
+
+> set enable_bitmapscan = off
+-- SET
+
+> select ctid, * from pkl_a where id = 9
+ctid:27 | id:int4 | v:text
+(0,7) | 9 | i
+-- SELECT 1
+
+> select id from pkl_a where v = 'g'
+id:int4
+7
+-- SELECT 1
+
+> select id from pkl_a where id between 1 and 7 order by id
+id:int4
+1
+3
+4
+5
+7
+-- SELECT 5
+
+> reset enable_seqscan
+-- RESET
+
+> reset enable_bitmapscan
+-- RESET
+
+> vacuum full pkl_a
+-- VACUUM
+
+> select ctid, * from pkl_a
+ctid:27 | id:int4 | v:text
+(0,1) | 5 | a
+(0,2) | 3 | c
+(0,3) | 4 | e
+(0,4) | 0 | d
+(0,5) | 9 | i
+(0,6) | 7 | g
+(0,7) | 1 | b2
+-- SELECT 7
+

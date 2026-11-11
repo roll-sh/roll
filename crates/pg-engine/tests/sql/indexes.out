@@ -1,0 +1,202 @@
+> CREATE TABLE ix (id int PRIMARY KEY, email text, a int, b int, data jsonb)
+-- CREATE TABLE
+
+> INSERT INTO ix SELECT g, 'u' || g || '@x.com', g % 10, g % 3, jsonb_build_object('k', g) FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> CREATE INDEX ON ix (a)
+-- CREATE INDEX
+
+> CREATE INDEX ix_ab ON ix (a, b DESC)
+-- CREATE INDEX
+
+> CREATE UNIQUE INDEX ix_email ON ix (lower(email))
+-- CREATE INDEX
+
+> CREATE INDEX ix_part ON ix (b) WHERE a = 0
+-- CREATE INDEX
+
+> CREATE INDEX ix_ab ON ix (b)
+ERROR 42P07: relation "ix_ab" already exists
+
+> CREATE INDEX IF NOT EXISTS ix_ab ON ix (b)
+NOTICE 42P07: relation "ix_ab" already exists, skipping
+-- CREATE INDEX
+
+> SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'ix' ORDER BY indexname
+indexname:name | indexdef:text
+ix_a_idx | CREATE INDEX ix_a_idx ON public.ix USING btree (a)
+ix_ab | CREATE INDEX ix_ab ON public.ix USING btree (a, b DESC)
+ix_email | CREATE UNIQUE INDEX ix_email ON public.ix USING btree (lower(email))
+ix_part | CREATE INDEX ix_part ON public.ix USING btree (b) WHERE (a = 0)
+ix_pkey | CREATE UNIQUE INDEX ix_pkey ON public.ix USING btree (id)
+-- SELECT 5
+
+> SELECT count(*) FROM ix WHERE a = 3
+count:int8
+20
+-- SELECT 1
+
+> SELECT count(*) FROM ix WHERE a = 3 AND b = 1
+count:int8
+7
+-- SELECT 1
+
+> SELECT id FROM ix WHERE lower(email) = 'u5@x.com'
+id:int4
+5
+-- SELECT 1
+
+> SELECT count(*) FROM ix WHERE a = 0 AND b = 2
+count:int8
+7
+-- SELECT 1
+
+> SELECT id FROM ix WHERE a IN (1, 2) AND id < 15 ORDER BY id
+id:int4
+1
+2
+11
+12
+-- SELECT 4
+
+> SELECT id FROM ix WHERE id BETWEEN 10 AND 13 ORDER BY id
+id:int4
+10
+11
+12
+13
+-- SELECT 4
+
+> SELECT id FROM ix WHERE id > 195 ORDER BY id DESC
+id:int4
+200
+199
+198
+197
+196
+-- SELECT 5
+
+> INSERT INTO ix (id, email) VALUES (500, 'U5@X.COM')
+ERROR 23505: duplicate key value violates unique constraint "ix_email"
+DETAIL: Key (lower(email))=(u5@x.com) already exists.
+OBJECTS: schema=public table=ix constraint=ix_email
+
+> CREATE UNIQUE INDEX ix_a_unique ON ix (a)
+ERROR 23505: could not create unique index "ix_a_unique"
+DETAIL: Key (a)=(1) is duplicated.
+OBJECTS: schema=public table=ix constraint=ix_a_unique
+
+> CREATE INDEX ix_bad ON ix (nosuch)
+ERROR 42703: column "nosuch" does not exist
+
+> CREATE INDEX ix_vol ON ix (random())
+ERROR 42P17: functions in index expression must be marked IMMUTABLE
+
+> CREATE INDEX ix_json ON ix USING gin (data)
+-- CREATE INDEX
+
+> CREATE INDEX ix_hash ON ix USING hash (email)
+-- CREATE INDEX
+
+> CREATE INDEX ix_bad_am ON ix USING nosuch (a)
+ERROR 42704: access method "nosuch" does not exist
+
+> UPDATE ix SET a = 42 WHERE id = 7
+-- UPDATE 1
+
+> SELECT id FROM ix WHERE a = 42
+id:int4
+7
+-- SELECT 1
+
+> DELETE FROM ix WHERE a = 42
+-- DELETE 1
+
+> SELECT count(*) FROM ix WHERE a = 42
+count:int8
+0
+-- SELECT 1
+
+> DROP INDEX ix_ab
+-- DROP INDEX
+
+> DROP INDEX ix_pkey
+ERROR 2BP01: cannot drop index ix_pkey because constraint ix_pkey on table ix requires it
+HINT: You can drop constraint ix_pkey on table ix instead.
+
+> DROP INDEX nosuch
+ERROR 42704: index "nosuch" does not exist
+
+> DROP INDEX IF EXISTS nosuch
+NOTICE 00000: index "nosuch" does not exist, skipping
+-- DROP INDEX
+
+> ALTER INDEX ix_part RENAME TO ix_partial
+-- ALTER INDEX
+
+> SELECT indexname FROM pg_indexes WHERE tablename = 'ix' ORDER BY indexname
+indexname:name
+ix_a_idx
+ix_email
+ix_hash
+ix_json
+ix_partial
+ix_pkey
+-- SELECT 6
+
+> CREATE TABLE nulls (a int, b int)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX ON nulls (a)
+-- CREATE INDEX
+
+> INSERT INTO nulls VALUES (NULL, 1), (NULL, 2)
+-- INSERT 0 2
+
+> CREATE UNIQUE INDEX nn ON nulls (b) NULLS NOT DISTINCT
+-- CREATE INDEX
+
+> INSERT INTO nulls VALUES (1, NULL), (2, NULL)
+ERROR 23505: duplicate key value violates unique constraint "nn"
+DETAIL: Key (b)=(null) already exists.
+OBJECTS: schema=public table=nulls constraint=nn
+
+> SELECT count(*) FROM nulls
+count:int8
+2
+-- SELECT 1
+
+> CREATE TABLE desc_t (x int)
+-- CREATE TABLE
+
+> INSERT INTO desc_t VALUES (3), (1), (NULL), (2)
+-- INSERT 0 4
+
+> CREATE INDEX ON desc_t (x DESC NULLS LAST)
+-- CREATE INDEX
+
+> SELECT x FROM desc_t ORDER BY x DESC NULLS LAST
+x:int4
+3
+2
+1
+NULL
+-- SELECT 4
+
+> SELECT x FROM desc_t ORDER BY x
+x:int4
+1
+2
+3
+NULL
+-- SELECT 4
+
+> SELECT x FROM desc_t ORDER BY x NULLS FIRST
+x:int4
+NULL
+1
+2
+3
+-- SELECT 4
+

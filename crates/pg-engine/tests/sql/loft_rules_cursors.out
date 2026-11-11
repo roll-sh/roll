@@ -1,0 +1,242 @@
+> create table a1 (i int)
+-- CREATE TABLE
+
+> create table a3 (i int)
+-- CREATE TABLE
+
+> create rule a3_ins as on insert to a3 do instead insert into a1 values (new.i)
+-- CREATE RULE
+
+> create view a3_view as select * from a3
+-- CREATE VIEW
+
+> insert into a3_view values (5)
+-- INSERT 0 1
+
+> select * from a1
+i:int4
+5
+-- SELECT 1
+
+> select * from a3
+i:int4
+-- SELECT 0
+
+> create table tt (f1 serial, data text)
+-- CREATE TABLE
+
+> create table tt_log (f1 int, data text)
+-- CREATE TABLE
+
+> create function ins_tt(a text, b text) returns setof int as 'insert into tt(data) values($1),($2) returning f1' language sql
+-- CREATE FUNCTION
+
+> create rule tt_r as on insert to tt do also insert into tt_log values(new.*)
+-- CREATE RULE
+
+> select ins_tt('x','y') limit 1
+ins_tt:int4
+1
+-- SELECT 1
+
+> select * from tt
+f1:int4 | data:text
+1 | x
+2 | y
+-- SELECT 2
+
+> select * from tt_log
+f1:int4 | data:text
+3 | x
+4 | y
+-- SELECT 2
+
+> create table bug (i int)
+-- CREATE TABLE
+
+> create table bug2 (i int)
+-- CREATE TABLE
+
+> insert into bug values (1)
+-- INSERT 0 1
+
+> create rule bug_ins as on insert to bug do instead insert into bug2 select new.i
+-- CREATE RULE
+
+> with t1 as (delete from bug returning *) insert into bug select * from t1
+ERROR 0A000: INSERT ... SELECT rule actions are not supported for queries having data-modifying statements in WITH
+
+> create table gr (a int, b int generated always as (a * 2) stored)
+-- CREATE TABLE
+
+> create table gr_log (op text, old_b int, new_b int)
+-- CREATE TABLE
+
+> create rule gr_upd as on update to gr do also insert into gr_log values ('UPD', old.b, new.b)
+-- CREATE RULE
+
+> create rule gr_ins as on insert to gr do also insert into gr_log values ('INS', null, new.b)
+-- CREATE RULE
+
+> insert into gr (a) values (1)
+-- INSERT 0 1
+
+> update gr set a = 10
+-- UPDATE 1
+
+> select * from gr_log
+op:text | old_b:int4 | new_b:int4
+INS | NULL | 2
+UPD | 2 | 20
+-- SELECT 2
+
+> create table uctest (f1 int, f2 text)
+-- CREATE TABLE
+
+> insert into uctest values (1, 'one'), (2, 'two'), (3, 'three')
+-- INSERT 0 3
+
+> create table ucchild () inherits (uctest)
+-- CREATE TABLE
+
+> insert into ucchild values (100, 'hundred')
+-- INSERT 0 1
+
+> begin
+-- BEGIN
+
+> declare c1 cursor for select * from uctest for update
+-- DECLARE CURSOR
+
+> fetch 1 from c1
+f1:int4 | f2:text
+1 | one
+-- FETCH 1
+
+> update uctest set f1 = f1 + 10 where current of c1
+-- UPDATE 1
+
+> fetch 1 from c1
+f1:int4 | f2:text
+2 | two
+-- FETCH 1
+
+> update uctest set f1 = f1 + 10 where current of c1
+-- UPDATE 1
+
+> commit
+-- COMMIT
+
+> select * from uctest order by 1
+f1:int4 | f2:text
+3 | three
+11 | one
+12 | two
+100 | hundred
+-- SELECT 4
+
+> declare cx cursor with hold for select * from uctest
+-- DECLARE CURSOR
+
+> delete from uctest where current of cx
+ERROR 24000: cursor "cx" is held from a previous transaction
+
+> close cx
+-- CLOSE CURSOR
+
+> begin
+-- BEGIN
+
+> declare c2 cursor for select * from bug2 for share
+-- DECLARE CURSOR
+
+> delete from uctest where current of c2
+ERROR 24000: cursor "c2" does not have a FOR UPDATE/SHARE reference to table "uctest"
+
+> rollback
+-- ROLLBACK
+
+> create function dc(text) returns void as $$ declare c cursor for select f2 from uctest where f2 like $1 order by 1; $$ language sql
+-- CREATE FUNCTION
+
+> begin
+-- BEGIN
+
+> select dc('t%')
+dc:void
+NULL
+-- SELECT 1
+
+> fetch all from c
+f2:text
+three
+two
+-- FETCH 2
+
+> rollback
+-- ROLLBACK
+
+> create table curs (a int)
+-- CREATE TABLE
+
+> insert into curs values (1)
+-- INSERT 0 1
+
+> begin isolation level serializable
+-- BEGIN
+
+> declare c3 no scroll cursor for select * from curs for update
+-- DECLARE CURSOR
+
+> update curs set a = 2
+-- UPDATE 1
+
+> fetch all from c3
+a:int4
+-- FETCH 0
+
+> commit
+-- COMMIT
+
+> CREATE TABLE gtest_rule (a int, b int GENERATED ALWAYS AS (a * 2) STORED)
+-- CREATE TABLE
+
+> insert into gtest_rule values (20)
+-- INSERT 0 1
+
+> CREATE RULE gtest_rule_qual AS ON UPDATE TO gtest_rule WHERE NEW.b > 100 DO INSTEAD NOTHING
+-- CREATE RULE
+
+> UPDATE gtest_rule SET a = 100
+-- UPDATE 0
+
+> SELECT * FROM gtest_rule
+a:int4 | b:int4
+20 | 40
+-- SELECT 1
+
+> UPDATE gtest_rule SET a = 30
+-- UPDATE 1
+
+> SELECT * FROM gtest_rule
+a:int4 | b:int4
+30 | 60
+-- SELECT 1
+
+> CREATE TABLE gtest_rv (a int, b int GENERATED ALWAYS AS (a * 2))
+-- CREATE TABLE
+
+> insert into gtest_rv values (20)
+-- INSERT 0 1
+
+> CREATE RULE gtest_rv_qual AS ON UPDATE TO gtest_rv WHERE NEW.b > 100 DO INSTEAD NOTHING
+-- CREATE RULE
+
+> UPDATE gtest_rv SET a = 100
+-- UPDATE 0
+
+> SELECT * FROM gtest_rv
+a:int4 | b:int4
+20 | 40
+-- SELECT 1
+

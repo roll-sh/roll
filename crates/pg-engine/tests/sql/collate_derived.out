@@ -1,0 +1,455 @@
+> create table cdv_c(n text collate "C", m text collate "POSIX", d text)
+-- CREATE TABLE
+
+> insert into cdv_c values ('é','é','é')
+-- INSERT 0 1
+
+> select x < 'a' from (select n as x from cdv_c union all select m from cdv_c) s
+?column?:bool
+f
+f
+-- SELECT 2
+
+> select x < x from (select n as x from cdv_c union all select m from cdv_c) s
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select pg_collation_for(x) from (select n as x from cdv_c union all select m from cdv_c) s
+pg_collation_for:text
+NULL
+NULL
+-- SELECT 2
+
+> select upper(x) from (select n as x from cdv_c union all select m from cdv_c) s
+ERROR 42P22: could not determine which collation to use for upper() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select x from (select n as x from cdv_c union all select m from cdv_c) s order by 1
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select x from (select n as x from cdv_c intersect select m from cdv_c) s
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 58)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select pg_collation_for(x), upper(x) from (select n as x from cdv_c union all select d from cdv_c) s
+pg_collation_for:text | upper:text
+"C" | é
+"C" | é
+-- SELECT 2
+
+> select pg_collation_for(x), upper(x) from (select n || 'a' as x from cdv_c) s
+pg_collation_for:text | upper:text
+"C" | éA
+-- SELECT 1
+
+> select pg_collation_for(x), upper(x) from (select n || m as x from cdv_c) s
+ERROR 42P22: could not determine which collation to use for upper() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select pg_collation_for(x) from (select n collate "POSIX" as x, n from cdv_c) s where x < n
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> with w as (select n from cdv_c) select pg_collation_for(n), upper(n) from w
+pg_collation_for:text | upper:text
+"C" | é
+-- SELECT 1
+
+> with recursive w(x) as (select n from cdv_c union all select x from w where false) select pg_collation_for(x) from w
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> with recursive w(x) as (select n from cdv_c union all select m from w, cdv_c where false) select pg_collation_for(x) from w
+ERROR 42P21: recursive query "w" column 1 has collation "C" in non-recursive term but collation "(null)" overall (at 32)
+HINT: Use the COLLATE clause to set the collation of the non-recursive term.
+
+> select pg_collation_for(column1) from (values ('a' collate "C"), ('b')) v
+pg_collation_for:text
+"C"
+"C"
+-- SELECT 2
+
+> select pg_collation_for(column1) from cdv_c, lateral (values ('a'::text), (n)) v
+pg_collation_for:text
+"C"
+"C"
+-- SELECT 2
+
+> select pg_collation_for(x) from (select n as x from cdv_c union all select m from cdv_c union all select 'z') s
+pg_collation_for:text
+"default"
+"default"
+"default"
+-- SELECT 3
+
+> select x from (select n as x from cdv_c union all select m from cdv_c) s order by x
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select pg_collation_for(x) from (select n as x from cdv_c union all select m collate "C" from cdv_c) s
+pg_collation_for:text
+"C"
+"C"
+-- SELECT 2
+
+> select (select n from cdv_c) || m from cdv_c
+?column?:text
+éé
+-- SELECT 1
+
+> select pg_collation_for(y) from (select x as y from (select m as x from cdv_c) a) b
+pg_collation_for:text
+"POSIX"
+-- SELECT 1
+
+> select pg_collation_for(n) from (select * from cdv_c) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(s.n) from cdv_c s join cdv_c t using (n)
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(n) from cdv_c s join cdv_c t using (n)
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x) from cdv_c s join lateral (select s.m as x) l on true
+pg_collation_for:text
+"POSIX"
+-- SELECT 1
+
+> select pg_collation_for(u) from unnest(array['a' collate "C"]) u
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(n) from cdv_c s full join cdv_c t using (n)
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x) from (select n as x from cdv_c union select n from cdv_c) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x) from (select n as x from cdv_c union select 'a' collate "POSIX" from cdv_c) s
+pg_collation_for:text
+"POSIX"
+"POSIX"
+-- SELECT 2
+
+> select pg_collation_for(x) from (select max(n) as x from cdv_c group by m) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x) from (select n as x from cdv_c order by 1 limit 1) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x) from (select distinct n as x from cdv_c) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(r) from (select row_number() over () || n as r from cdv_c) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x), pg_collation_for(y) from (select a.x, b.x as y from (select n as x from cdv_c) a, (select m as x from cdv_c) b) s
+pg_collation_for:text | pg_collation_for:text
+"C" | "POSIX"
+-- SELECT 1
+
+> select n < m from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n = m from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select upper(n || m) from cdv_c
+ERROR 42P22: could not determine which collation to use for upper() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n || m from cdv_c order by 1
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 13)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select pg_collation_for(n || m) from cdv_c
+pg_collation_for:text
+NULL
+-- SELECT 1
+
+> select n from cdv_c where n < m and false
+n:text
+-- SELECT 0
+
+> select pg_collation_for(n||m) from cdv_c
+pg_collation_for:text
+NULL
+-- SELECT 1
+
+> select n like m from cdv_c
+ERROR 42P22: could not determine which collation to use for LIKE
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n ilike m from cdv_c
+ERROR 42P22: could not determine which collation to use for ILIKE
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n ~ m from cdv_c
+ERROR 42P22: could not determine which collation to use for regular expression
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select max(n || m) from cdv_c
+max:text
+éé
+-- SELECT 1
+
+> select n || m from cdv_c group by 1
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 13)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select distinct n || m from cdv_c
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 22)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select length(n || m) from cdv_c
+length:int4
+2
+-- SELECT 1
+
+> select position(n in m) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n in (m) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select coalesce(n, m) from cdv_c
+coalesce:text
+é
+-- SELECT 1
+
+> select case when n = 'é' then 1 end from cdv_c
+case:int4
+1
+-- SELECT 1
+
+> select greatest(n, m) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n <> m from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select replace(n, m, 'x') from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select strpos(n, m) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select starts_with(n, m) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select lower(n || m), initcap(n || m) from cdv_c
+ERROR 42P22: could not determine which collation to use for lower() function
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n = any(array[m]) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select nullif(n, m) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n is distinct from m from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select (n, 1) = (m, 1) from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select array[n] = array[m] from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n::name = m::name from cdv_c
+ERROR 42P22: could not determine which collation to use for string comparison
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> select n || m from cdv_c order by 1
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 13)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select n || m as q from cdv_c order by q
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 13)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select n || m from cdv_c order by n || m
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 13)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select n || m from cdv_c group by 1
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 13)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select distinct n || m from cdv_c
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 22)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select distinct m || 'x' || n from cdv_c
+ERROR 42P21: collation mismatch between implicit collations "POSIX" and "C" (at 29)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select x from (select n as x from cdv_c union select m from cdv_c) s
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 54)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select x from (select n as x from cdv_c union select 'a' || m from cdv_c) s
+ERROR 42P21: collation mismatch between implicit collations "C" and "POSIX" (at 61)
+HINT: You can choose the collation by applying the COLLATE clause to one or both expressions.
+
+> select x from (select 'a' collate "C" as x union select 'b' collate "POSIX") s
+ERROR 42P21: collation mismatch between explicit collations "C" and "POSIX" (at 61)
+
+> select x from (select 1 as y, 'a' collate "C" as x union select 2, 'b' collate "POSIX") s
+ERROR 42P21: collation mismatch between explicit collations "C" and "POSIX" (at 72)
+
+> with recursive w(x) as (select n from cdv_c union all select m from w, cdv_c where false) select pg_collation_for(x) from w
+ERROR 42P21: recursive query "w" column 1 has collation "C" in non-recursive term but collation "(null)" overall (at 32)
+HINT: Use the COLLATE clause to set the collation of the non-recursive term.
+
+> with recursive w(x) as (select 'a'::text union all select m from w, cdv_c where false) select pg_collation_for(x) from w
+ERROR 42P21: recursive query "w" column 1 has collation "default" in non-recursive term but collation "POSIX" overall (at 32)
+HINT: Use the COLLATE clause to set the collation of the non-recursive term.
+
+> create view cdv_v as select n || m as e from cdv_c
+ERROR 42P22: could not determine which collation to use for view column "e"
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> create view cdv_v as select n || 'q' as a, n collate "POSIX" as b, upper(m) as c, m from cdv_c
+-- CREATE VIEW
+
+> select pg_collation_for(a), pg_collation_for(b), pg_collation_for(c), upper(a) from cdv_v
+pg_collation_for:text | pg_collation_for:text | pg_collation_for:text | upper:text
+"C" | "POSIX" | "POSIX" | éQ
+-- SELECT 1
+
+> select attname, attcollation::regcollation from pg_attribute where attrelid='cdv_v'::regclass and attnum>0 order by attnum
+attname:name | attcollation:4191
+a | "C"
+b | "POSIX"
+c | "POSIX"
+m | "POSIX"
+-- SELECT 4
+
+> create or replace view cdv_v as select n || 'q' as a, n as b, upper(m) as c, m from cdv_c
+ERROR 42P16: cannot change collation of view column "b" from "POSIX" to "C"
+
+> create or replace view cdv_v as select n || 'q' as a, n collate "POSIX" as b, upper(m) as c, m collate "C" from cdv_c
+ERROR 42P16: cannot change collation of view column "m" from "POSIX" to "C"
+
+> create table cdv_ct as select n || m as e from cdv_c
+ERROR 42P22: no collation was derived for column "e" with collatable type text
+HINT: Use the COLLATE clause to set the collation explicitly.
+
+> create table cdv_ct as select n || 'x' as e, m, upper(d) as u from cdv_c
+-- SELECT 1
+
+> select attname, attcollation::regcollation from pg_attribute where attrelid='cdv_ct'::regclass and attnum>0 order by attnum
+attname:name | attcollation:4191
+e | "C"
+m | "POSIX"
+u | "default"
+-- SELECT 3
+
+> create materialized view cdv_mv as select n || 'x' as e, m from cdv_c
+-- SELECT 1
+
+> select attname, attcollation::regcollation from pg_attribute where attrelid='cdv_mv'::regclass and attnum>0 order by attnum
+attname:name | attcollation:4191
+e | "C"
+m | "POSIX"
+-- SELECT 2
+
+> select pg_collation_for(e), upper(e) from cdv_mv
+pg_collation_for:text | upper:text
+"C" | éX
+-- SELECT 1
+
+> select upper(x) from (select relname as x from pg_class where relname = 'cdv_c') s
+upper:text
+CDV_C
+-- SELECT 1
+
+> select pg_collation_for(x) from (select relname as x from pg_class where relname = 'cdv_c') s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x), x from (select relname::text as x from pg_class where relname = 'cdv_c') s
+pg_collation_for:text | x:text
+"C" | cdv_c
+-- SELECT 1
+
+> select pg_collation_for(r) from (select max(n) as r from cdv_c) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(r) from (select string_agg(n, ',') as r from cdv_c) s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(r) from (select first_value(m) over () as r from cdv_c) s
+pg_collation_for:text
+"POSIX"
+-- SELECT 1
+
+> select (select pg_collation_for(x) from (select s.m as x) q) from cdv_c s
+pg_collation_for:text
+"POSIX"
+-- SELECT 1
+
+> select (select pg_collation_for(s.n)) from cdv_c s
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> select pg_collation_for(x) from (select n as x from cdv_c) s1 natural join (select n as x from cdv_c) s2
+pg_collation_for:text
+"C"
+-- SELECT 1
+
+> drop materialized view cdv_mv
+-- DROP MATERIALIZED VIEW
+
+> drop table cdv_ct
+-- DROP TABLE
+
+> drop view cdv_v
+-- DROP VIEW
+
+> drop table cdv_c
+-- DROP TABLE
+

@@ -1,0 +1,83 @@
+> CREATE TABLE a (x int)
+-- CREATE TABLE
+
+> CREATE TABLE c (z int)
+-- CREATE TABLE
+
+> CREATE TABLE w0 (a bool, b int, d text)
+-- CREATE TABLE
+
+> CREATE TABLE w1 (c int)
+-- CREATE TABLE
+
+> INSERT INTO a VALUES (1), (2)
+-- INSERT 0 2
+
+> INSERT INTO c VALUES (1), (3)
+-- INSERT 0 2
+
+> INSERT INTO w0 VALUES (false, 6, ' x'), (NULL, 6, NULL)
+-- INSERT 0 2
+
+> INSERT INTO w1 VALUES (1)
+-- INSERT 0 1
+
+> SELECT * FROM c LEFT JOIN (a a1 JOIN a a2 ON (SELECT c.z = 1)) ON a1.x = c.z
+ERROR 42P01: invalid reference to FROM-clause entry for table "c" (at 54)
+DETAIL: There is an entry for table "c", but it cannot be referenced from this part of the query.
+
+> SELECT * FROM c JOIN (a a1 JOIN a a2 ON c.z = a1.x) ON true
+ERROR 42P01: invalid reference to FROM-clause entry for table "c" (at 41)
+DETAIL: There is an entry for table "c", but it cannot be referenced from this part of the query.
+
+> EXPLAIN (COSTS OFF) SELECT * FROM w0 x WHERE EXISTS (SELECT count(*) FROM (SELECT 1 FROM w1 t2 WHERE int4range(x.b, 5) @> x.b) s1 WHERE x.a)
+QUERY PLAN:text
+Seq Scan on w0 x
+  Filter: EXISTS(SubPlan 1)
+  SubPlan 1
+    ->  Aggregate
+          ->  Result
+                One-Time Filter: ((int4range(x.b, 5) @> x.b) AND x.a)
+                ->  Seq Scan on w1 t2
+-- EXPLAIN
+
+> SELECT * FROM w0 x WHERE EXISTS (SELECT count(*) FROM (SELECT 1 FROM w1 t2 WHERE int4range(x.b, length(x.d) % 4) @> x.b) s1 WHERE x.a)
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> EXPLAIN (COSTS OFF) SELECT 1 FROM w1 WHERE (SELECT true) AND now() > '2000-01-01'
+QUERY PLAN:text
+Result
+  One-Time Filter: ((InitPlan 1).col1 AND (now() > '2000-01-01 00:00:00+00'::timestamp with time zone))
+  InitPlan 1
+    ->  Result
+  ->  Seq Scan on w1
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT 1 FROM w1 WHERE now() > '2000-01-01' AND (SELECT true)
+QUERY PLAN:text
+Result
+  One-Time Filter: ((now() > '2000-01-01 00:00:00+00'::timestamp with time zone) AND (InitPlan 1).col1)
+  InitPlan 1
+    ->  Result
+  ->  Seq Scan on w1
+-- EXPLAIN
+
+> CREATE VIEW v1 AS SELECT (32767::int2 + 4::int2) AS c0, 1 AS c1 FROM (VALUES (1), (2)) s1(v0)
+-- CREATE VIEW
+
+> BEGIN
+-- BEGIN
+
+> DECLARE a45c CURSOR FOR SELECT 1 AS c0, s2.o AS c2 FROM (v1 t1 LEFT JOIN unnest('{NULL,3}'::int4[]) WITH ORDINALITY s2 (u, o) ON false) WHERE NULL
+-- DECLARE CURSOR
+
+> FETCH ALL FROM a45c
+c0:int4 | c2:int8
+-- FETCH 0
+
+> COMMIT
+-- COMMIT
+
+> DROP VIEW v1
+-- DROP VIEW
+

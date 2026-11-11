@@ -1,0 +1,106 @@
+> CREATE TABLE a75b2t (id int PRIMARY KEY, c int2)
+-- CREATE TABLE
+
+> CREATE TABLE a75b2u (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO a75b2u VALUES (19)
+-- INSERT 0 1
+
+> CREATE FUNCTION a75b2f(p int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN IF ('1'::jsonb - 'a') ?| ARRAY['a'] THEN RETURN p; END IF; RETURN 0; END $$
+-- CREATE FUNCTION
+
+> SELECT g, a75b2f(g) NOT IN (SELECT c FROM a75b2t), a75b2f(g) IN (SELECT c FROM a75b2t), a75b2f(g) > ALL (SELECT c FROM a75b2t) FROM generate_series(1, 2) g
+g:int4 | ?column?:bool | ?column?:bool | ?column?:bool
+1 | t | f | t
+2 | t | f | t
+-- SELECT 2
+
+> DELETE FROM a75b2u x WHERE EXISTS (SELECT 1 FROM generate_series(1, 2) s1(g) WHERE a75b2f(s1.g) NOT IN (SELECT t4.c FROM a75b2t t4))
+-- DELETE 1
+
+> SELECT count(*) FROM a75b2u
+count:int8
+0
+-- SELECT 1
+
+> INSERT INTO a75b2t VALUES (1, 1)
+-- INSERT 0 1
+
+> SELECT a75b2f(1) NOT IN (SELECT c FROM a75b2t)
+ERROR 22023: cannot delete from scalar
+CONTEXT: PL/pgSQL expression "('1'::jsonb - 'a') ?| ARRAY['a']"
+CONTEXT: PL/pgSQL function a75b2f(integer) line 1 at IF
+
+> CREATE VIEW a75b2v0 AS SELECT 1 AS c0 FROM (VALUES (0.001, 1)) s1 (v0, v1) WHERE (NULL -|- int4range(length('a%'), 1)) GROUP BY s1.v1
+-- CREATE VIEW
+
+> CREATE VIEW a75b2v1 AS SELECT 1 AS c0 FROM a75b2v0 t1 WHERE false
+-- CREATE VIEW
+
+> SELECT count(*) FROM a75b2v1
+count:int8
+0
+-- SELECT 1
+
+> SELECT (SELECT count(*) FILTER (WHERE NULL) FROM a75b2v1)
+count:int8
+0
+-- SELECT 1
+
+> INSERT INTO a75b2u VALUES (12) ON CONFLICT (id) DO UPDATE SET id = (SELECT count(*) FROM a75b2v1)
+-- INSERT 0 1
+
+> SELECT * FROM a75b2u ORDER BY 1
+id:int4
+12
+-- SELECT 1
+
+> CREATE VIEW a75b2w0 AS SELECT t1.id AS c0 FROM a75b2t t1 WHERE isempty(int4range(('{"a": 2.50}'::jsonb ->> 'a')::int, NULL))
+-- CREATE VIEW
+
+> CREATE VIEW a75b2w1 AS SELECT max(1) AS c2 FROM (generate_series(1, 6) s1(g) LEFT JOIN a75b2w0 t2 ON true)
+-- CREATE VIEW
+
+> UPDATE a75b2t x SET c = (SELECT x.c FROM a75b2w1 t1 WHERE NULL) RETURNING *
+id:int4 | c:int2
+1 | NULL
+-- UPDATE 1
+
+> SELECT count(*) FROM a75b2v0, a75b2t WHERE false
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> SELECT 1 FROM a75b2t a FULL JOIN a75b2u b ON 'a' = 'a' COLLATE "und-x-icu"
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT EXISTS (SELECT 1 FROM a75b2t a FULL JOIN a75b2u b ON 'a' = 'a' COLLATE "und-x-icu")
+exists:bool
+t
+-- SELECT 1
+
+> SELECT COALESCE(true, EXISTS (SELECT 1 FROM a75b2t a FULL JOIN a75b2u b ON 'a' < 'B' COLLATE "en-x-icu"))
+coalesce:bool
+t
+-- SELECT 1
+
+> SELECT 'a' < 'B' COLLATE "en-x-icu", 'a' < 'B' COLLATE "C", upper('é' COLLATE "C"), upper('é' COLLATE "en-x-icu")
+?column?:bool | ?column?:bool | upper:text | upper:text
+t | f | é | É
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a75b2t WHERE 'a' < 'B' COLLATE "en-x-icu"
+QUERY PLAN:text
+Seq Scan on a75b2t
+-- EXPLAIN
+
+> DROP VIEW a75b2v1, a75b2v0, a75b2w1, a75b2w0
+-- DROP VIEW
+
+> DROP FUNCTION a75b2f
+-- DROP FUNCTION
+
+> DROP TABLE a75b2t, a75b2u
+-- DROP TABLE
+

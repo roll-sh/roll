@@ -1,0 +1,182 @@
+> CREATE SEQUENCE s1
+-- CREATE SEQUENCE
+
+> SELECT nextval('s1'), nextval('s1'), currval('s1')
+nextval:int8 | nextval:int8 | currval:int8
+1 | 2 | 2
+-- SELECT 1
+
+> SELECT last_value, is_called FROM s1
+last_value:int8 | is_called:bool
+2 | t
+-- SELECT 1
+
+> SELECT setval('s1', 100)
+setval:int8
+100
+-- SELECT 1
+
+> SELECT nextval('s1')
+nextval:int8
+101
+-- SELECT 1
+
+> SELECT setval('s1', 5, false)
+setval:int8
+5
+-- SELECT 1
+
+> SELECT nextval('s1')
+nextval:int8
+5
+-- SELECT 1
+
+> CREATE SEQUENCE s1
+ERROR 42P07: relation "s1" already exists
+
+> CREATE SEQUENCE IF NOT EXISTS s1
+NOTICE 42P07: relation "s1" already exists, skipping
+-- CREATE SEQUENCE
+
+> CREATE SEQUENCE s2 START 10 INCREMENT BY -2 MINVALUE 0 MAXVALUE 10
+-- CREATE SEQUENCE
+
+> SELECT nextval('s2'), nextval('s2'), nextval('s2')
+nextval:int8 | nextval:int8 | nextval:int8
+10 | 8 | 6
+-- SELECT 1
+
+> CREATE SEQUENCE s3 MAXVALUE 2
+-- CREATE SEQUENCE
+
+> SELECT nextval('s3'), nextval('s3')
+nextval:int8 | nextval:int8
+1 | 2
+-- SELECT 1
+
+> SELECT nextval('s3')
+ERROR 2200H: nextval: reached maximum value of sequence "s3" (2)
+
+> CREATE SEQUENCE s4 MAXVALUE 2 CYCLE
+-- CREATE SEQUENCE
+
+> SELECT nextval('s4'), nextval('s4'), nextval('s4')
+nextval:int8 | nextval:int8 | nextval:int8
+1 | 2 | 1
+-- SELECT 1
+
+> CREATE SEQUENCE s5 AS smallint
+-- CREATE SEQUENCE
+
+> SELECT seqtypid::regtype, seqmax, seqmin, seqstart, seqincrement, seqcycle FROM pg_sequence WHERE seqrelid = 's5'::regclass
+seqtypid:regtype | seqmax:int8 | seqmin:int8 | seqstart:int8 | seqincrement:int8 | seqcycle:bool
+smallint | 32767 | 1 | 1 | 1 | f
+-- SELECT 1
+
+> CREATE SEQUENCE bad1 INCREMENT 0
+ERROR 22023: INCREMENT must not be zero
+
+> CREATE SEQUENCE bad2 MINVALUE 10 MAXVALUE 5
+ERROR 22023: MINVALUE (10) must be less than MAXVALUE (5)
+
+> CREATE SEQUENCE bad3 START 100 MAXVALUE 10
+ERROR 22023: START value (100) cannot be greater than MAXVALUE (10)
+
+> CREATE SEQUENCE bad4 AS text
+ERROR 22023: sequence type must be smallint, integer, or bigint
+
+> CREATE SEQUENCE bad5 AS smallint MAXVALUE 100000
+ERROR 22023: MAXVALUE (100000) is out of range for sequence data type smallint
+
+> ALTER SEQUENCE s1 RESTART
+-- ALTER SEQUENCE
+
+> SELECT nextval('s1')
+nextval:int8
+1
+-- SELECT 1
+
+> ALTER SEQUENCE s1 RESTART WITH 50 INCREMENT BY 10
+-- ALTER SEQUENCE
+
+> SELECT nextval('s1'), nextval('s1')
+nextval:int8 | nextval:int8
+50 | 60
+-- SELECT 1
+
+> ALTER SEQUENCE nosuch RESTART
+ERROR 42P01: relation "nosuch" does not exist
+
+> ALTER SEQUENCE IF EXISTS nosuch RESTART
+NOTICE 00000: relation "nosuch" does not exist, skipping
+-- ALTER SEQUENCE
+
+> SELECT currval('s5')
+ERROR 55000: currval of sequence "s5" is not yet defined in this session
+
+> SELECT nextval('nosuch')
+ERROR 42P01: relation "nosuch" does not exist (at 16)
+
+> CREATE TABLE owner_t (id int)
+-- CREATE TABLE
+
+> CREATE SEQUENCE owned OWNED BY owner_t.id
+-- CREATE SEQUENCE
+
+> DROP TABLE owner_t
+-- DROP TABLE
+
+> SELECT nextval('owned')
+ERROR 42P01: relation "owned" does not exist (at 16)
+
+> CREATE TABLE ser (id serial PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO ser (v) VALUES ('a'), ('b')
+-- INSERT 0 2
+
+> SELECT pg_get_serial_sequence('ser', 'id')
+pg_get_serial_sequence:text
+public.ser_id_seq
+-- SELECT 1
+
+> SELECT * FROM ser ORDER BY id
+id:int4 | v:text
+1 | a
+2 | b
+-- SELECT 2
+
+> DROP SEQUENCE ser_id_seq
+ERROR 2BP01: cannot drop sequence ser_id_seq because other objects depend on it
+DETAIL: default value for column id of table ser depends on sequence ser_id_seq
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP SEQUENCE ser_id_seq CASCADE
+NOTICE 00000: drop cascades to default value for column id of table ser
+-- DROP SEQUENCE
+
+> INSERT INTO ser (v) VALUES ('c')
+ERROR 23502: null value in column "id" of relation "ser" violates not-null constraint
+DETAIL: Failing row contains (null, c).
+OBJECTS: schema=public table=ser column=id
+
+> DROP SEQUENCE s1, s2
+-- DROP SEQUENCE
+
+> DROP SEQUENCE IF EXISTS s1
+NOTICE 00000: sequence "s1" does not exist, skipping
+-- DROP SEQUENCE
+
+> SELECT relname FROM pg_class WHERE relkind = 'S' ORDER BY 1
+relname:name
+s3
+s4
+s5
+-- SELECT 3
+
+> ALTER SEQUENCE s3 RENAME TO s3_renamed
+-- ALTER SEQUENCE
+
+> SELECT nextval('s3_renamed')
+ERROR 2200H: nextval: reached maximum value of sequence "s3_renamed" (2)
+

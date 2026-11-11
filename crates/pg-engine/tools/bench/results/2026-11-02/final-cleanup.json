@@ -1,0 +1,24 @@
+{
+  "at_utc": "2026-11-02T00:47:38.402519+00:00",
+  "listeners": {
+    "53100": "",
+    "53110": "",
+    "53111": "",
+    "53112": "",
+    "52807": ""
+  },
+  "containers": [
+    {
+      "name": "t3-d4020b98-perf-profiler",
+      "running": false,
+      "memory_limit_bytes": 536870912
+    },
+    {
+      "name": "t3-d4020b98-perf-pg",
+      "running": false,
+      "memory_limit_bytes": 8589934592
+    }
+  ],
+  "regression_containers_removed": true,
+  "saved_data_retained": true
+}

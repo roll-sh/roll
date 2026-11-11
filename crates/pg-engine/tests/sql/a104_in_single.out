@@ -1,0 +1,75 @@
+> CREATE DOMAIN a104_dint AS int CHECK (VALUE > -10)
+-- CREATE DOMAIN
+
+> CREATE TABLE a104_is (id int, d a104_dint, t text, n numeric)
+-- CREATE TABLE
+
+> INSERT INTO a104_is VALUES (1, 1, 'a', 1.5), (2, NULL, NULL, NULL), (3, 3, 'b', 2)
+-- INSERT 0 3
+
+> SELECT id FROM a104_is WHERE ARRAY[d] IN ('{1}'::int4[])
+ERROR 42883: operator does not exist: a104_dint[] = integer[] (at 39)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT id FROM a104_is WHERE ARRAY[d] = '{1}'::int4[]
+ERROR 42883: operator does not exist: a104_dint[] = integer[] (at 39)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT id FROM a104_is WHERE ARRAY[d] IN ('{1}'::int4[], '{3}'::int4[])
+ERROR 42883: operator does not exist: a104_dint[] = integer[] (at 39)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT id FROM a104_is WHERE d IN (1) ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM a104_is WHERE d NOT IN (1) ORDER BY id
+id:int4
+3
+-- SELECT 1
+
+> SELECT id FROM a104_is WHERE t IN ('a') ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM a104_is WHERE n IN (2) ORDER BY id
+id:int4
+3
+-- SELECT 1
+
+> SELECT id FROM a104_is WHERE NULL IN (1) ORDER BY id
+id:int4
+-- SELECT 0
+
+> SELECT id, id IN (n), t NOT IN ('b') FROM a104_is ORDER BY id
+id:int4 | ?column?:bool | ?column?:bool
+1 | f | t
+2 | NULL | NULL
+3 | f | f
+-- SELECT 3
+
+> SELECT id FROM a104_is WHERE t IN (1)
+ERROR 42883: operator does not exist: text = integer (at 32)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> CREATE VIEW a104_isv AS SELECT id FROM a104_is WHERE d IN (1) AND t NOT IN ('x')
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('a104_isv'::regclass)
+pg_get_viewdef:text
+ SELECT id
+   FROM a104_is
+  WHERE (((d)::integer = 1) AND (t <> 'x'::text));
+-- SELECT 1
+
+> DROP VIEW a104_isv
+-- DROP VIEW
+
+> DROP TABLE a104_is
+-- DROP TABLE
+
+> DROP DOMAIN a104_dint
+-- DROP DOMAIN
+

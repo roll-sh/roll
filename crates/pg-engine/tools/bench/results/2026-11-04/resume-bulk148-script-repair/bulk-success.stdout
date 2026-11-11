@@ -1,0 +1,14 @@
+pg-1	pg	copy_in	wall 0.026	cpu 0.000	instr -	wrote 0
+pg-1	pg	create_index	wall 0.019	cpu 0.000	instr -	wrote 0
+pg-1	pg	create_unique_index	wall 0.028	cpu 0.000	instr -	wrote 0
+pg-1	pg	copy_out	wall 0.019	cpu 0.000	instr -	wrote 0
+pg-1	pg	insert_select	wall 0.019	cpu 0.000	instr -	wrote 0
+pg-1	pg	update_half	wall 0.019	cpu 0.000	instr -	wrote 0
+pg-1	pg	delete_quarter	wall 0.017	cpu 0.000	instr -	wrote 0
+pg-1	pg	vacuum	wall 0.014	cpu 0.000	instr -	wrote 0
+pg-1	FAKE_SQL_OK
+pg-1	pg	analyze	wall 0.027	cpu 0.000	instr -	wrote 0
+pg-1	pg	count_after	wall 0.014	cpu 0.000	instr -	wrote 0
+pg-1	pg	truncate	wall 0.020	cpu 0.000	instr -	wrote 0
+pg-1	pg	drop_table	wall 0.027	cpu 0.000	instr -	wrote 0
+pg-1	pg	peak_mb 1	disk_before_drop 0	disk_end 0

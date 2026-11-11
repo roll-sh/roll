@@ -1,0 +1,283 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.13s
+     Running tests/pg_regress.rs (target/release/deps/pg_regress-fd39d3793202ae64)
+
+running 1 test
+Note: switching to '724edf9bde9d356724ad384a2e196edc3c9f80f7'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+SET client_min_messages = warning;
+DROP DATABASE IF EXISTS "regression_sol_combined" WITH (FORCE);
+CREATE DATABASE "regression_sol_combined" TEMPLATE=template0 ENCODING='UTF8' LOCALE='C';
+ALTER DATABASE "regression_sol_combined" SET lc_messages TO 'C';
+ALTER DATABASE "regression_sol_combined" SET lc_monetary TO 'C';
+ALTER DATABASE "regression_sol_combined" SET lc_numeric TO 'C';
+ALTER DATABASE "regression_sol_combined" SET lc_time TO 'C';
+ALTER DATABASE "regression_sol_combined" SET bytea_output TO 'hex';
+ALTER DATABASE "regression_sol_combined" SET timezone_abbreviations TO 'Default';
+
+SET client_min_messages = warning;
+DROP DATABASE IF EXISTS "regression_sol_combined" WITH (FORCE);
+CREATE DATABASE "regression_sol_combined" TEMPLATE=template0 ENCODING='UTF8' LOCALE='C';
+ALTER DATABASE "regression_sol_combined" SET lc_messages TO 'C';
+ALTER DATABASE "regression_sol_combined" SET lc_monetary TO 'C';
+ALTER DATABASE "regression_sol_combined" SET lc_numeric TO 'C';
+ALTER DATABASE "regression_sol_combined" SET lc_time TO 'C';
+ALTER DATABASE "regression_sol_combined" SET bytea_output TO 'hex';
+ALTER DATABASE "regression_sol_combined" SET timezone_abbreviations TO 'Default';
+
+test_setup                   ref ok    0.4s  engine ok    0.6s
+boolean                      ref ok    0.3s  engine ok    0.4s
+char                         ref ok    0.2s  engine ok    0.3s
+name                         ref ok    0.2s  engine ok    0.3s
+varchar                      ref ok    0.2s  engine ok    0.3s
+text                         ref ok    0.2s  engine ok    0.3s
+int2                         ref ok    0.2s  engine ok    0.3s
+int4                         ref ok    0.2s  engine ok    0.4s
+int8                         ref ok    0.2s  engine ok    0.4s
+oid                          ref ok    0.2s  engine ok    0.3s
+float4                       ref ok    0.2s  engine ok    0.3s
+float8                       ref ok    0.2s  engine ok    0.4s
+bit                          ref ok    0.3s  engine ok    0.4s
+numeric                      ref ok    0.4s  engine ok    0.7s
+txid                         ref ok    0.2s  engine ok    0.3s
+uuid                         ref ok    0.2s  engine ok    0.3s
+enum                         ref ok    0.2s  engine ok    0.4s
+money                        ref ok    0.2s  engine ok    0.3s
+rangetypes                   ref ok    0.4s  engine ok    0.9s
+pg_lsn                       ref ok    0.2s  engine ok    0.3s
+regproc                      ref ok    0.2s  engine ok    0.4s
+strings                      ref ok    0.3s  engine ok    0.4s
+md5                          ref ok    0.2s  engine ok    0.3s
+numerology                   ref ok    0.2s  engine ok    0.3s
+point                        ref ok    0.3s  engine ok    0.4s
+lseg                         ref ok    0.2s  engine ok    0.3s
+line                         ref ok    0.2s  engine ok    0.3s
+box                          ref ok    0.3s  engine ok    0.6s
+path                         ref ok    0.1s  engine ok    0.3s
+polygon                      ref ok    0.3s  engine ok    0.8s
+circle                       ref ok    0.2s  engine ok    0.3s
+date                         ref ok    0.2s  engine ok    0.4s
+time                         ref ok    0.2s  engine ok    0.3s
+timetz                       ref ok    0.2s  engine ok    0.3s
+timestamp                    ref ok    0.5s  engine ok    0.7s
+timestamptz                  ref ok    0.6s  engine ok    0.8s
+interval                     ref ok    0.3s  engine ok    0.4s
+inet                         ref ok    0.2s  engine ok    0.4s
+macaddr                      ref ok    0.2s  engine ok    0.3s
+macaddr8                     ref ok    0.2s  engine ok    0.3s
+multirangetypes              ref ok    0.4s  engine ok    0.8s
+geometry                     ref ok    0.4s  engine ok    0.5s
+horology                     ref ok    0.4s  engine ok    0.4s
+tstypes                      ref ok    0.2s  engine ok    0.4s
+regex                        ref ok    0.4s  engine ok    0.8s
+type_sanity                  ref ok    0.3s  engine ok    0.5s
+opr_sanity                   ref ok    0.4s  engine ok   15.5s
+misc_sanity                  ref ok    0.2s  engine ok    0.3s
+comments                     ref ok    0.1s  engine ok    0.3s
+expressions                  ref ok    0.2s  engine ok    0.4s
+unicode                      ref ok    0.2s  engine ok    0.3s
+xid                          ref ok    0.2s  engine ok    0.4s
+mvcc                         ref ok    0.2s  engine ok    0.3s
+database                     ref ok    0.4s  engine ok    0.5s
+stats_import                 ref ok    0.3s  engine ok    0.5s
+encoding                     ref ok    0.2s  engine ok    0.3s
+euc_kr                       ref ok    0.2s  engine ok    0.3s
+copy                         ref ok    0.3s  engine ok    0.5s
+copyselect                   ref ok    0.2s  engine ok    0.4s
+copydml                      ref ok    0.2s  engine ok    0.3s
+copyencoding                 ref ok    0.2s  engine ok    0.3s
+insert                       ref ok    0.6s  engine ok    1.0s
+test pg_regress has been running for over 60 seconds
+insert_conflict              ref ok    0.3s  engine ok    0.6s
+create_function_c            ref ok    0.2s  engine ok    0.3s
+create_misc                  ref ok    0.2s  engine ok    0.4s
+create_operator              ref ok    0.2s  engine ok    0.3s
+create_procedure             ref ok    0.2s  engine ok    0.5s
+create_table                 ref ok    0.7s  engine ok    0.9s
+create_type                  ref ok    0.2s  engine ok    0.4s
+create_schema                ref ok    0.2s  engine ok    0.4s
+create_index                 ref ok    0.8s  engine ok    1.9s
+create_index_spgist          ref ok    0.4s  engine ok    1.3s
+create_view                  ref ok    0.5s  engine ok    1.1s
+index_including              ref ok    0.3s  engine ok    0.5s
+index_including_gist         ref ok    0.4s  engine ok    0.5s
+create_aggregate             ref ok    0.2s  engine ok    0.4s
+create_function_sql          ref ok    0.3s  engine ok    0.8s
+create_cast                  ref ok    0.2s  engine ok    0.4s
+constraints                  ref ok    0.6s  engine ok    1.5s
+triggers                     ref ok    1.1s  engine ok    1.4s
+select                       ref ok    0.2s  engine ok    0.5s
+inherit                      ref ok    1.2s  engine ok    2.0s
+typed_table                  ref ok    0.2s  engine ok    0.4s
+vacuum                       ref ok    0.6s  engine ok    0.9s
+drop_if_exists               ref ok    0.2s  engine ok    0.5s
+updatable_views              ref ok    0.8s  engine ok    1.3s
+roleattributes               ref ok    0.2s  engine ok    0.4s
+create_am                    ref ok    0.2s  engine ok    0.5s
+hash_func                    ref ok    0.2s  engine ok    0.4s
+errors                       ref ok    0.2s  engine ok    0.3s
+infinite_recurse             ref ok    0.5s  engine ok    0.6s
+sanity_check                 ref ok    0.2s  engine ok    0.5s
+select_into                  ref ok    0.3s  engine ok    0.5s
+select_distinct              ref ok    0.3s  engine ok    0.4s
+select_distinct_on           ref ok    0.2s  engine ok    0.3s
+select_implicit              ref ok    0.2s  engine ok    0.3s
+select_having                ref ok    0.2s  engine ok    0.3s
+subselect                    ref ok    0.4s  engine ok    0.9s
+union                        ref ok    0.3s  engine ok    0.6s
+case                         ref ok    0.2s  engine ok    0.4s
+join                         ref ok    1.1s  engine ok    1.6s
+aggregates                   ref ok    0.8s  engine ok    1.3s
+transactions                 ref ok    0.3s  engine ok    0.4s
+random                       ref ok    0.2s  engine ok    0.4s
+portals                      ref ok    0.2s  engine ok    0.4s
+arrays                       ref ok    0.4s  engine ok    0.6s
+btree_index                  ref ok    0.8s  engine ok    1.7s
+hash_index                   ref ok    0.5s  engine ok    1.0s
+update                       ref ok    0.5s  engine ok    0.7s
+delete                       ref ok    0.2s  engine ok    0.3s
+namespace                    ref ok    0.2s  engine ok    0.4s
+prepared_xacts               ref ok    0.1s  engine ok    0.3s
+brin                         ref ok    0.5s  engine ok    0.9s
+gin                          ref ok    0.7s  engine ok    1.2s
+gist                         ref ok    0.6s  engine ok    0.9s
+spgist                       ref ok    0.4s  engine ok    7.4s
+privileges                   ref ok    1.2s  engine ok    3.9s
+init_privs                   ref ok    0.2s  engine ok    0.3s
+security_label               ref ok    0.2s  engine ok    0.4s
+collate                      ref ok    0.3s  engine ok    0.5s
+matview                      ref ok    0.5s  engine ok    1.0s
+lock                         ref ok    0.2s  engine ok    0.5s
+replica_identity             ref ok    0.3s  engine ok    0.6s
+rowsecurity                  ref ok    0.7s  engine ok    2.5s
+object_address               ref ok    0.2s  engine ok    0.5s
+tablesample                  ref ok    0.2s  engine ok    0.5s
+groupingsets                 ref ok    0.8s  engine ok    0.8s
+drop_operator                ref ok    0.2s  engine ok    0.4s
+password                     ref ok    0.3s  engine ok    0.4s
+identity                     ref ok    0.5s  engine ok    0.9s
+generated_stored             ref ok    0.7s  engine ok    1.5s
+join_hash                    ref ok    4.8s  engine ok    1.6s
+brin_bloom                   ref ok    0.2s  engine ok    0.5s
+brin_multi                   ref ok    0.4s  engine ok    0.9s
+create_table_like            ref ok    0.5s  engine ok    1.0s
+alter_generic                ref ok    0.3s  engine ok    1.0s
+alter_operator               ref ok    0.2s  engine ok    0.5s
+misc                         ref ok    0.6s  engine ok    0.5s
+async                        ref ok    0.2s  engine ok    0.3s
+dbsize                       ref ok    0.2s  engine ok    0.3s
+merge                        ref ok    0.4s  engine ok    1.4s
+misc_functions               ref ok    0.2s  engine ok    0.4s
+sysviews                     ref ok    0.2s  engine ok    0.4s
+tsrf                         ref ok    0.2s  engine ok    0.4s
+tid                          ref ok    0.2s  engine ok    0.4s
+tidscan                      ref ok    0.2s  engine ok    0.5s
+tidrangescan                 ref ok    0.2s  engine ok    0.4s
+collate.utf8                 ref ok    0.2s  engine ok    0.4s
+collate.icu.utf8             ref ok    0.7s  engine ok    1.0s
+incremental_sort             ref ok    0.3s  engine ok    0.5s
+create_role                  ref ok    0.2s  engine ok    0.9s
+without_overlaps             ref ok    0.9s  engine ok    1.5s
+generated_virtual            ref ok    0.6s  engine ok    1.4s
+rules                        ref ok    0.7s  engine ok    1.0s
+psql                         ref ok    0.6s  engine ok    1.7s
+psql_crosstab                ref ok    0.2s  engine ok    0.3s
+psql_pipeline                ref ok    0.2s  engine ok    0.4s
+amutils                      ref ok    0.2s  engine ok    0.4s
+stats_ext                    ref ok    1.3s  engine ok    3.3s
+collate.linux.utf8           ref ok    0.2s  engine ok    0.3s
+collate.windows.win1252: no sql file
+select_parallel              ref ok    3.3s  engine ok    5.5s
+write_parallel               ref ok    0.3s  engine ok    0.4s
+vacuum_parallel              ref ok    0.3s  engine ok    0.6s
+maintain_every               ref ok    0.2s  engine ok    0.4s
+publication                  ref ok    2.0s  engine ok    2.3s
+subscription                 ref ok    0.2s  engine ok    0.6s
+select_views                 ref ok    0.2s  engine ok    0.5s
+portals_p2                   ref ok    0.2s  engine ok    0.3s
+foreign_key                  ref ok    1.5s  engine ok    2.5s
+cluster                      ref ok    0.5s  engine ok    0.9s
+dependency                   ref ok    0.2s  engine ok    0.8s
+guc                          ref ok    0.2s  engine ok    0.5s
+bitmapops                    ref ok    0.3s  engine ok    0.9s
+combocid                     ref ok    0.2s  engine ok    0.3s
+tsearch                      ref ok    0.5s  engine ok    0.9s
+tsdicts                      ref ok    0.2s  engine ok    0.4s
+foreign_data                 ref ok    0.6s  engine ok    2.6s
+window                       ref ok    0.4s  engine ok    0.8s
+xmlmap                       ref ok    0.2s  engine ok    0.5s
+functional_deps              ref ok    0.2s  engine ok    0.4s
+advisory_lock                ref ok    0.2s  engine ok    0.3s
+indirect_toast               ref ok    0.3s  engine ok    0.5s
+equivclass                   ref ok    0.2s  engine ok    0.6s
+json                         ref ok    0.3s  engine ok    0.6s
+jsonb                        ref ok    0.5s  engine ok    1.1s
+json_encoding                ref ok    0.2s  engine ok    0.3s
+jsonpath                     ref ok    0.2s  engine ok    0.3s
+jsonpath_encoding            ref ok    0.2s  engine ok    0.3s
+jsonb_jsonpath               ref ok    0.3s  engine ok    0.5s
+sqljson                      ref ok    0.3s  engine ok    0.6s
+sqljson_queryfuncs           ref ok    0.3s  engine ok    0.6s
+sqljson_jsontable            ref ok    0.2s  engine ok    0.5s
+plancache                    ref ok    0.2s  engine ok    0.6s
+limit                        ref ok    0.3s  engine ok    0.5s
+plpgsql                      ref ok    0.7s  engine ok    2.7s
+copy2                        ref ok    0.3s  engine ok    0.6s
+temp                         ref ok    0.4s  engine ok    1.3s
+domain                       ref ok    0.4s  engine ok    1.8s
+rangefuncs                   ref ok    0.4s  engine ok    1.3s
+prepare                      ref ok    0.2s  engine ok    0.3s
+conversion                   ref ok    0.2s  engine ok    0.5s
+truncate                     ref ok    0.3s  engine ok    0.6s
+alter_table                  ref ok    1.8s  engine ok    6.8s
+sequence                     ref ok    0.3s  engine ok    1.2s
+polymorphism                 ref ok    0.3s  engine ok    1.6s
+rowtypes                     ref ok    0.3s  engine ok    0.6s
+returning                    ref ok    0.3s  engine ok    0.7s
+largeobject                  ref ok    0.3s  engine ok    0.5s
+with                         ref ok    0.4s  engine ok    0.8s
+xml                          ref ok    1.6s  engine ok    0.5s
+partition_join               ref ok    0.9s  engine ok    3.3s
+partition_prune              ref ok    1.5s  engine ok    2.5s
+reloptions                   ref ok    0.2s  engine ok    0.4s
+hash_part                    ref ok    0.2s  engine ok    0.4s
+indexing                     ref ok    1.0s  engine ok    3.8s
+partition_aggregate          ref ok    0.8s  engine ok    1.4s
+partition_info               ref ok    0.3s  engine ok    0.6s
+tuplesort                    ref ok    0.7s  engine ok    2.0s
+explain                      ref ok    0.2s  engine ok    0.4s
+memoize                      ref ok    0.3s  engine ok    0.8s
+stats                        ref ok    1.0s  engine ok    1.6s
+predicate                    ref ok    0.2s  engine ok    0.4s
+numa                         ref ok    0.2s  engine ok    0.3s
+compression                  ref ok    0.3s  engine ok    0.9s
+compression_pglz             ref ok    0.1s  engine ok    0.3s
+oidjoins                     ref ok    0.3s  engine ok    0.8s
+event_trigger                ref ok    0.4s  engine ok    1.9s
+event_trigger_login          ref ok    0.2s  engine ok    0.4s
+fast_default                 ref ok    0.4s  engine ok    1.7s
+tablespace                   ref ok    0.6s  engine ok    1.8s
+kill: (3370087): No such process
+pg_regress: ## Changes against the baseline run
+
+Baseline: `/home/meszmate/.cache/pg-engine-perf-20261101/final-regress-7f35a185-release/report/results.tsv` (full run of commit `7f35a185`, release build, 2026-11-01 23:04 UTC, reference `t3-d4020b98-regref-perf-7f35a185-release`). This run: commit `5b32046d`, release build. Newly differing units: 0; newly matching: 0.
+
+pg_regress: 51148/51150 units match (100.0%), report in /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-regress-5b32046d-release/report/REPORT.md
+test pg_regress ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 290.76s
+

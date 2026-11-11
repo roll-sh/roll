@@ -1,0 +1,697 @@
+> CREATE EXTENSION xml2
+-- CREATE EXTENSION
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="doc/b|doc/a"/></xsl:template><xsl:template match="*"><xsl:value-of select="name()"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+aba
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="1"/></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r xsl:use-attribute-sets="s" x="lre"/></xsl:template><xsl:attribute-set name="s"><xsl:attribute name="x">set</xsl:attribute><xsl:attribute name="y">set</xsl:attribute></xsl:attribute-set><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r x="lre" y="set"/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r xsl:use-attribute-sets="s"/></xsl:template><xsl:attribute-set name="s"><xsl:attribute name="a">1</xsl:attribute></xsl:attribute-set><xsl:attribute-set name="s"><xsl:attribute name="b">2</xsl:attribute><xsl:attribute name="a">3</xsl:attribute></xsl:attribute-set><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r a="3" b="2"/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+xyzw
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="b">[B]</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+x[B]w
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:call-template name="t"><xsl:with-param name="b" select="'B'"/></xsl:call-template></xsl:template><xsl:template name="t"><xsl:param name="a" select="'A'"/><xsl:param name="b" select="'b'"/><xsl:param name="c">C<x/></xsl:param><xsl:value-of select="concat($a,$b,$c)"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+ABC
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:call-template name="t"><xsl:with-param name="z" select="1"/></xsl:call-template></xsl:template><xsl:template name="t">ok</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+ok
+-- SELECT 1
+
+> SELECT xslt_process($q$<r><e/></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:if test="0">0</xsl:if><xsl:if test="1">1</xsl:if><xsl:if test="''">e</xsl:if><xsl:if test="'0'">s0</xsl:if><xsl:if test="0 div 0">nan</xsl:if><xsl:if test="r/e">node</xsl:if><xsl:if test="r/z">none</xsl:if><xsl:if test="string(r/e)">str</xsl:if></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1s0node
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:variable name="e"></xsl:variable><xsl:variable name="f"><x/></xsl:variable><xsl:if test="$e">E</xsl:if><xsl:if test="$f">F</xsl:if><xsl:if test="string($f)">S</xsl:if></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+F
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc xmlns:q="urn:q" q:at="1" plain="2"><q:e>t<!--c--><?pi d?></q:e><f xmlns="urn:d"><g/></f></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><xsl:for-each select="//*"><xsl:copy/></xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<doc xmlns:q="urn:q"/><q:e xmlns:q="urn:q"/><f xmlns="urn:d"/><g xmlns="urn:d"/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:variable name="v"><x a="1">t</x><!--c-->s</xsl:variable><xsl:template match="/"><r><xsl:copy-of select="$v"/>|<xsl:copy-of select="$v"/></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r><x a="1">t</x>s|<x a="1">t</x>s</r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a n="dyn"/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><xsl:element name="{a/@n}-{1+1}"><xsl:attribute name="{concat('at','tr')}">v</xsl:attribute></xsl:element></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<dyn-2 attr="v"/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r xmlns="urn:d"><xsl:element name="e" namespace=""/><xsl:element name="f"/></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r xmlns="urn:d"><e xmlns=""/><f/></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r xmlns:p="urn:old"><xsl:attribute name="p:x" namespace="urn:new">1</xsl:attribute></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r xmlns:p="urn:old" xmlns:p_1="urn:new" p_1:x="1"/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r><c/><xsl:attribute name="x">1</xsl:attribute></r></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r><xsl:attribute name="xml:lang">en</xsl:attribute></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r xml:lang="en"/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><xsl:comment> hello <xsl:value-of select="1+1"/> </xsl:comment><r/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<!-- hello 2-->
+<r/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a><b></a>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/">ok</xsl:template></xsl:stylesheet>$q$)
+ERROR 2200M: error parsing XML document
+DETAIL: line 1: Opening and ending tag mismatch: b line 1 and a
+DETAIL: <a><b></a>
+DETAIL:           ^
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/">$q$)
+ERROR 2200M: error parsing stylesheet as XML document
+DETAIL: line 1: Premature end of data in tag template line 1
+DETAIL: ="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/">
+DETAIL:                                                                                ^
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:choose><xsl:when>x</xsl:when></xsl:choose></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to parse stylesheet
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:with-param name="p" select="1"/>x</xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to parse stylesheet
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r x="{1 +}"/></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to parse stylesheet
+DETAIL: Invalid expression
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:exsl="http://exslt.org/common" extension-element-prefixes="exsl"><xsl:output method="text"/><xsl:template match="/"><exsl:document href="/tmp/a98_out.txt">data</exsl:document>done</xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:exsl="http://exslt.org/common"><xsl:output method="text"/><xsl:template match="/"><xsl:variable name="v"><i>3</i><i>1</i><i>2</i></xsl:variable><xsl:for-each select="exsl:node-set($v)/i"><xsl:sort data-type="number"/><xsl:value-of select="."/></xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+DETAIL: Unregistered function
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:libxslt="http://xmlsoft.org/XSLT/namespace" exclude-result-prefixes="libxslt"><xsl:variable name="v"><i>3</i><i>1</i><i>2</i></xsl:variable><xsl:template match="i"><n><xsl:value-of select=". * 2"/></n></xsl:template><xsl:template match="/"><r><xsl:apply-templates select="libxslt:node-set($v)/i"/></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r><n>6</n><n>2</n><n>4</n></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="format-number(1234.5, '#,##0.00')"/>|<xsl:value-of select="format-number(0.5, '0.###')"/>|<xsl:value-of select="format-number(0.5, '#.##')"/>|<xsl:value-of select="format-number(12, '000')"/>|<xsl:value-of select="format-number(-12.345, '#.0')"/>|<xsl:value-of select="format-number(1234567.891, '#,###.##')"/>|<xsl:value-of select="format-number(0, '#')"/>|<xsl:value-of select="format-number(0, '0.0')"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1,234.50|0.5|0.5|012|-12.3|1,234,567.89|0|0.0
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="format-number(-5, '0;(0)')"/>|<xsl:value-of select="format-number(5, '0;(0)')"/>|<xsl:value-of select="format-number(-5, '0;-0')"/>|<xsl:value-of select="format-number(-0.4, '0')"/>|<xsl:value-of select="format-number(-0.6, '0')"/>|<xsl:value-of select="format-number(-0, '0.0')"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+(5)|5|-5|-0|-1|0.0
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="format-number(0.5, '0')"/>|<xsl:value-of select="format-number(1.5, '0')"/>|<xsl:value-of select="format-number(2.5, '0')"/>|<xsl:value-of select="format-number(0.125, '0.00')"/>|<xsl:value-of select="format-number(0.135, '0.00')"/>|<xsl:value-of select="format-number(1.005, '0.00')"/>|<xsl:value-of select="format-number(-2.5, '0')"/>|<xsl:value-of select="format-number(2.675, '0.00')"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1|2|3|0.13|0.14|1.00|-3|2.67
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="format-number(123456789, '#,##,###')"/>|<xsl:value-of select="format-number(1234, '#,#')"/>|<xsl:value-of select="format-number(1234, '#,##0,')"/>|<xsl:value-of select="format-number(1234.5678, '0.0#')"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+123,456,789|1,2,3,4|1234|1234.57
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:decimal-format name="eu" decimal-separator="," grouping-separator="." /><xsl:decimal-format NaN="nan!" infinity="INF" minus-sign="~"/><xsl:template match="/"><xsl:value-of select="format-number(1234.5, '#.##0,00', 'eu')"/>|<xsl:value-of select="format-number(0 div 0, '0')"/>|<xsl:value-of select="format-number(-1 div 0, '0')"/>|<xsl:value-of select="format-number(-3, '0')"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1.234,50|nan!|~INF|~3
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="format-number(1, '0', 'nope')"/></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+DETAIL: Stack usage error
+
+> SELECT xslt_process($q$<r><a k="2"/><b n="1"/><b n="2"/></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="r/a"><xsl:value-of select="count(../b[@n = current()/@k])"/>|<xsl:value-of select="count(../b[@n = ./@k])"/></xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1|0
+-- SELECT 1
+
+> SELECT xslt_process($q$<!DOCTYPE doc [<!NOTATION gif SYSTEM "image/gif"><!ENTITY pic SYSTEM "pic.gif" NDATA gif>]><doc/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/">[<xsl:value-of select="unparsed-entity-uri('pic')"/>][<xsl:value-of select="unparsed-entity-uri('none')"/>]</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+[pic.gif][]
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:frobnicate><xsl:fallback>FB</xsl:fallback></xsl:frobnicate></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+FB
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="1"><xsl:fallback>FB</xsl:fallback></xsl:value-of>|<xsl:fallback>top</xsl:fallback></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1|
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="html"/><xsl:template match="/"><html><head><title>T</title></head><body><br/><hr/><img src="a.png"/><p></p><input type="checkbox" checked="checked"/><area/><col/><meta name="x" content="y"/><link rel="s"/><base href="/"/><param name="n"/></body></html></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>T</title>
+</head>
+<body>
+<br><hr>
+<img src="a.png"><p></p>
+<input type="checkbox" checked><area>
+<col>
+<meta name="x" content="y">
+<link rel="s">
+<base href="/">
+<param name="n">
+</body>
+</html>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="html"/><xsl:template match="/"><html><body><a href="a b/é?x=1&amp;y=2">l</a><img src="x y.png"/><form action="é"/><a name="a b é">n</a></body></html></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<html><body>
+<a href="a%20b/%C3%A9?x=1&amp;y=2">l</a><img src="x%20y.png"><form action="%C3%A9"></form>
+<a name="a%20b%20%C3%A9">n</a>
+</body></html>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="html"/><xsl:template match="/"><html><body>x</body></html></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<html><body>x</body></html>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><html xmlns="http://www.w3.org/1999/xhtml"><body><br/></body></html></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body><br/></body></html>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="html" doctype-system="about:legacy-compat"/><xsl:template match="/"><html><body/></html></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<!DOCTYPE html>
+<html><body></body></html>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="html"/><xsl:template match="/"><HTML><HEAD><TITLE>t</TITLE></HEAD><BODY><BR/><P/><SCRIPT>a&lt;b</SCRIPT></BODY></HTML></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<HTML>
+<HEAD>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<TITLE>t</TITLE>
+</HEAD>
+<BODY>
+<BR><P></P>
+<SCRIPT>a<b</SCRIPT>
+</BODY>
+</HTML>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<r><p id="1" c="x">a</p><p id="2" c="y">b</p><p id="3" c="x">c</p><q ref="1 3"/><q ref="2"/></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="key('c','x')"><xsl:value-of select="."/></xsl:for-each></xsl:template><xsl:key name="c" match="p" use="@c"/><xsl:key name="i" match="p" use="@id"/><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+ac
+-- SELECT 1
+
+> SELECT xslt_process($q$<r><p id="1" c="x">a</p><p id="2" c="y">b</p><p id="3" c="x">c</p><q ref="1 3"/><q ref="2"/></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="key('tok','3')"><xsl:value-of select="name()"/></xsl:for-each>|<xsl:value-of select="count(key('w','b'))"/></xsl:template><xsl:key name="tok" match="q" use="@ref"/><xsl:key name="w" match="p" use="(.|@c)"/><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+|1
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="doc/a" mode="x"/>|<xsl:apply-templates select="doc/a" mode="y"/>|<xsl:apply-templates select="doc/a"/></xsl:template><xsl:template match="a" mode="x">X</xsl:template><xsl:template match="a" mode="y">Y</xsl:template><xsl:template match="a">-</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+XX|YY|--
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:p="urn:p"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="doc/a" mode="q:m" xmlns:q="urn:p"/></xsl:template><xsl:template match="a" mode="p:m">PM</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+PMPM
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/">before<xsl:message>note <xsl:value-of select="1+1"/></xsl:message>after</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+beforeafter
+-- SELECT 1
+
+> SELECT xslt_process($q$<r><i>1</i><i>stop</i><i>3</i></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="r/i"><xsl:if test=". = 'stop'"><xsl:message terminate="yes">bad item</xsl:message></xsl:if><xsl:value-of select="."/></xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:p="urn:p"><xsl:template match="/"><r xmlns:u="urn:u"><u:x/></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r xmlns:u="urn:u" xmlns:p="urn:p"><u:x/></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns="urn:d" xmlns:p="urn:p" exclude-result-prefixes="#default p"><xsl:template match="/"><r><x/></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r xmlns="urn:d"><x/></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" exclude-result-prefixes="nope"><xsl:template match="/"><r/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r xmlns="urn:d"><x xmlns=""><y/></x></r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r xmlns="urn:d"><x xmlns=""><y/></x></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><p:r xmlns:p="urn:one"><xsl:element name="p:x" namespace="urn:two"/></p:r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<p:r xmlns:p="urn:one"><p:x xmlns:p="urn:two"/></p:r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r xmlns:xsl2="http://www.w3.org/1999/XSL/Transform"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r/>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><s><t>a</t><t>b</t><u/><t>c</t></s><s><t>d</t><s><t>e</t></s></s></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="//t"><xsl:number/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1,2,3,1,1,
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><s><t>a</t><t>b</t><u/><t>c</t></s><s><t>d</t><s><t>e</t></s></s></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="//t|//u"><xsl:number level="any"/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1,2,1,3,4,5,
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><s><t>a</t><t>b</t><u/><t>c</t></s><s><t>d</t><s><t>e</t></s></s></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="//t|//u"><xsl:number count="t|u"/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1,2,3,4,1,1,
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:number value="2.5"/>|<xsl:number value="3.5"/>|<xsl:number value="-2"/>|<xsl:number value="0 div 0"/>|<xsl:number value="1 div 0"/>|<xsl:number value="'x'"/>|<xsl:number value="1e10"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+3|4|0|NaN|Infinity|NaN|10000000000
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:number value="3" format="(1)"/>|<xsl:number value="3" format="[a]"/>|<xsl:number value="3" format="#1."/>|<xsl:number value="3" format="x"/>|<xsl:number value="3" format=""/>|<xsl:number value="3" format="١"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+(3)|[c]|#3.|3|3|٣
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><s><t>a</t><t>b</t><u/><t>c</t></s><s><t>d</t><s><t>e</t></s></s></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:variable name="f" select="'I'"/><xsl:for-each select="//t"><xsl:number format="{$f}"/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+I,II,III,I,I,
+-- SELECT 1
+
+> SELECT xslt_process($q$<r a="1"><x>t</x><y/><z>é &amp; ü</z></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><xsl:copy-of select="."/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r a="1"><x>t</x><y/><z>é &amp; ü</z></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<r a="1"><x>t</x><y/><z>é &amp; ü</z></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output encoding="UTF-8"/><xsl:template match="/"><xsl:copy-of select="."/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0" encoding="UTF-8"?>
+<r a="1"><x>t</x><y/><z>é &amp; ü</z></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<r>é 日</r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text" encoding="ISO-8859-1"/><xsl:template match="/"><xsl:value-of select="r"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+� &#26085;
+-- SELECT 1
+
+> SELECT xslt_process($q$<r a="1"><x>t</x><y/><z>é &amp; ü</z></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output media-type="application/x-foo"/><xsl:template match="/"><xsl:copy-of select="."/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r a="1"><x>t</x><y/><z>é &amp; ü</z></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/">just text &amp; more</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+just text &amp; more
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<r>
+>   <x> a </x>
+>   <y/>
+> </r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output indent="yes"/><xsl:template match="/"><xsl:copy-of select="."/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r>
+  <x> a </x>
+  <y/>
+</r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="concat($p,'|',$v,'|',$q)"/></xsl:template><xsl:param name="p" select="'pdef'"/><xsl:variable name="v" select="'vdef'"/><xsl:param name="q">qdef</xsl:param><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+pdef|vdef|qdef
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="$v"/></xsl:template><xsl:variable name="v" select="concat('[',$p,']')"/><xsl:param name="p" select="'d'"/><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$, $q$p='given'$q$)
+xslt_process:text
+[given]
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:param name="a" select="'A'"/><xsl:param name="b" select="'B'"/><xsl:template match="/">[<xsl:value-of select="$a"/>][<xsl:value-of select="$b"/>]</xsl:template></xsl:stylesheet>$q$, $q$a='x',b='y'$q$)
+xslt_process:text
+[x][y]
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:param name="a" select="'A'"/><xsl:param name="b" select="'B'"/><xsl:template match="/">[<xsl:value-of select="$a"/>][<xsl:value-of select="$b"/>]</xsl:template></xsl:stylesheet>$q$, $q$='x'$q$)
+xslt_process:text
+[A][B]
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:param name="a" select="'A'"/><xsl:param name="b" select="'B'"/><xsl:template match="/">[<xsl:value-of select="$a"/>][<xsl:value-of select="$b"/>]</xsl:template></xsl:stylesheet>$q$, $q$a='x y'$q$)
+xslt_process:text
+[x y][B]
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:param name="a" select="'A'"/><xsl:param name="b" select="'B'"/><xsl:template match="/">[<xsl:value-of select="$a"/>][<xsl:value-of select="$b"/>]</xsl:template></xsl:stylesheet>$q$, $q$a=nope()$q$)
+ERROR 10608: failed to apply stylesheet
+DETAIL: Unregistered function
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:variable name="a" select="'var'"/><xsl:template match="/"><xsl:value-of select="$a"/></xsl:template></xsl:stylesheet>$q$, $q$a='param'$q$)
+xslt_process:text
+var
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:p="urn:x"><xsl:output method="text"/><xsl:param name="p:n" select="'dflt'"/><xsl:template match="/"><xsl:value-of select="$p:n"/></xsl:template></xsl:stylesheet>$q$, $q$p:n='prefixed'$q$)
+xslt_process:text
+prefixed
+-- SELECT 1
+
+> SELECT xslt_process($q$<cfg><db host="h" password="secret"/><app debug="1" password="x"/></cfg>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="@*|node()"><xsl:copy><xsl:apply-templates select="@*|node()"/></xsl:copy></xsl:template><xsl:template match="@password"/></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<cfg><db host="h"/><app debug="1"/></cfg>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<l>a, b,,c ,d</l>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template name="tok"><xsl:param name="s"/><xsl:param name="sep" select="','"/><xsl:if test="string-length($s) &gt; 0"><xsl:variable name="h" select="substring-before(concat($s, $sep), $sep)"/><f><xsl:value-of select="normalize-space($h)"/></f><xsl:call-template name="tok"><xsl:with-param name="s" select="substring-after($s, $sep)"/><xsl:with-param name="sep" select="$sep"/></xsl:call-template></xsl:if></xsl:template><xsl:template match="l"><row><xsl:call-template name="tok"><xsl:with-param name="s" select="."/></xsl:call-template></row></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<row><f>a</f><f>b</f><f/><f>c</f><f>d</f></row>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<table xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+> 
+> <row>
+>   <id>1</id>
+>   <name>alpha</name>
+>   <v>2.5</v>
+> </row>
+> 
+> <row>
+>   <id>2</id>
+>   <name>beta &amp; co</name>
+>   <v xsi:nil="true"/>
+> </row>
+> 
+> <row>
+>   <id>3</id>
+>   <name>gamma</name>
+>   <v>-1</v>
+> </row>
+> 
+> </table>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/table"><xsl:for-each select="row[1]/*"><xsl:value-of select="name()"/><xsl:if test="position() != last()">,</xsl:if></xsl:for-each><xsl:text>&#10;</xsl:text><xsl:for-each select="row"><xsl:for-each select="*"><xsl:value-of select="."/><xsl:if test="position() != last()">,</xsl:if></xsl:for-each><xsl:text>&#10;</xsl:text></xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+id,name,v
+1,alpha,2.5
+2,beta & co,
+3,gamma,-1
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:call-template name="r"><xsl:with-param name="n" select="1 div 0"/></xsl:call-template></xsl:template><xsl:template name="r"><xsl:param name="n"/><xsl:if test="$n &gt; 0"><xsl:if test="$n mod 100 = 0"><xsl:value-of select="$n"/>,</xsl:if><xsl:call-template name="r"><xsl:with-param name="n" select="$n - 1"/></xsl:call-template></xsl:if></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:variable name="v"><i>3</i><i>1</i><i>2</i></xsl:variable><xsl:value-of select="string-length($v)"/>|<xsl:value-of select="substring($v,2)"/>|<xsl:value-of select="translate($v,'123','abc')"/>|<xsl:value-of select="$v * 1"/>|<xsl:value-of select="contains($v, '12')"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+3|12|cab|312|true
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:variable name="v"><i>3</i><i>1</i><i>2</i></xsl:variable><xsl:value-of select="$v[1]"/></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+DETAIL: Invalid type
+
+> SELECT xslt_process($q$<doc><t>Title</t><i>1</i><i>2</i></doc>$q$, $q$<html xsl:version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><head><title><xsl:value-of select="doc/t"/></title></head><body><xsl:for-each select="doc/i"><p><xsl:value-of select="."/></p></xsl:for-each></body></html>$q$)
+xslt_process:text
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Title</title>
+</head>
+<body>
+<p>1</p>
+<p>2</p>
+</body>
+</html>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc/>$q$, $q$<out xsl:version="1.0" xsl:exclude-result-prefixes="p" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:p="urn:p"><x/></out>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<out xmlns:p="urn:p"><x/></out>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<l><i n="10" s="b">x1</i><i n="9" s="a">x2</i><i n="NaN" s="B">x3</i><i n="1" s="A">x4</i><i n="10" s="b">x5</i><i s="c">x6</i></l>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="l/i"><xsl:sort select="@s"/><xsl:value-of select="."/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+x4,x3,x2,x1,x5,x6,
+-- SELECT 1
+
+> SELECT xslt_process($q$<l><i n="10" s="b">x1</i><i n="9" s="a">x2</i><i n="NaN" s="B">x3</i><i n="1" s="A">x4</i><i n="10" s="b">x5</i><i s="c">x6</i></l>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="l/i"><xsl:sort select="@s" case-order="lower-first"/><xsl:value-of select="."/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+x4,x3,x2,x1,x5,x6,
+-- SELECT 1
+
+> SELECT xslt_process($q$<l><i n="10" s="b">x1</i><i n="9" s="a">x2</i><i n="NaN" s="B">x3</i><i n="1" s="A">x4</i><i n="10" s="b">x5</i><i s="c">x6</i></l>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="l/i"><xsl:sort select="@n"/><xsl:value-of select="."/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+x6,x4,x1,x5,x2,x3,
+-- SELECT 1
+
+> SELECT xslt_process($q$<l><i n="10" s="b">x1</i><i n="9" s="a">x2</i><i n="NaN" s="B">x3</i><i n="1" s="A">x4</i><i n="10" s="b">x5</i><i s="c">x6</i></l>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:variable name="o" select="'descending'"/><xsl:for-each select="l/i"><xsl:sort select="@n" data-type="{concat('num','ber')}" order="{$o}"/><xsl:value-of select="."/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+x1,x5,x2,x4,x3,x6,
+-- SELECT 1
+
+> SELECT xslt_process($q$<l><i>é</i><i>e</i><i>z</i><i> a</i><i>Z</i><i>10</i><i>9</i><i></i></l>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="l/i"><xsl:sort select="."/><xsl:value-of select="."/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+, a,10,9,Z,e,z,é,
+-- SELECT 1
+
+> SELECT xslt_process($q$<l><i>b</i><i>a</i></l>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="l/i"><xsl:sort select="." data-type="bogus"/><xsl:value-of select="."/>,</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+a,b,
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc>
+>   <a>  <b> x </b>  </a>
+>   <p:c xmlns:p="urn:p">  <d/>  </p:c>
+>   <e xml:space="preserve">  <f/>  </e>
+> </doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="count(//text())"/>:<xsl:for-each select="//text()">[<xsl:value-of select="translate(.,'&#10; ','n_')"/>]</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+11:[n__][__][_x_][__][n__][__][__][n__][__][__][n]
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc>
+>   <a>  <b> x </b>  </a>
+>   <p:c xmlns:p="urn:p">  <d/>  </p:c>
+>   <e xml:space="preserve">  <f/>  </e>
+> </doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:strip-space elements="*"/><xsl:template match="/"><xsl:value-of select="count(//e//text())"/>:<xsl:for-each select="//e//text()">[<xsl:value-of select="translate(.,'&#10; ','n_')"/>]</xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+0:
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="*">[*<xsl:apply-templates select="*"/>]</xsl:template><xsl:template match="a">A</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+[*A[*[*]]A]
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="//@id"/></xsl:template><xsl:template match="@id">I</xsl:template><xsl:template match="@*">S</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+III
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="doc/a"/></xsl:template><xsl:template match="a[1]">A1</xsl:template><xsl:template match="a">A</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+A1A
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="doc/*"/></xsl:template><xsl:template match="a" priority="0.4">A4</xsl:template><xsl:template match="a" priority="0.3">A3</xsl:template><xsl:template match="doc/a">DA</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+DAyzDA
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="//a"/></xsl:template><xsl:template match="/doc/a">ABS</xsl:template><xsl:template match="a">A</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+ABSABS
+-- SELECT 1
+
+> SELECT xslt_process($q$<doc><a id="1">x</a><b id="2">y<c>z</c></b><!--cm--><?pi data?><a id="3">w</a></doc>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:apply-templates select="doc/*"/></xsl:template><xsl:template match="*[not(self::a)]">X</xsl:template><xsl:template match="*">.</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+.X.
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="1.0"/>|<xsl:value-of select="0.5"/>|<xsl:value-of select="-0.5"/>|<xsl:value-of select="1 div 3"/>|<xsl:value-of select="2 div 3"/>|<xsl:value-of select="0.1 + 0.2"/>|<xsl:value-of select="100000000000000000000"/>|<xsl:value-of select="1 div 0"/>|</xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1|0.5|-0.5|0.333333333333333|0.666666666666667|0.3|1e+20|Infinity|
+-- SELECT 1
+
+> SELECT xslt_process($q$<r><i>1</i><i>2</i></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="//i[2] | //i[1]"/>|<xsl:value-of select="//nothing"/>|<xsl:value-of select="/"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+1||12
+-- SELECT 1
+
+> SELECT xslt_process($q$<a>t</a>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="concat($a,$b,$c)"/></xsl:template><xsl:variable name="a" select="concat($b,'A')"/><xsl:variable name="c" select="'C'"/><xsl:variable name="b" select="$c"/><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+CACC
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/">[<xsl:value-of select="$v"/>][<xsl:value-of select="string-length($v)"/>][<xsl:value-of select="boolean($v)"/>]</xsl:template><xsl:variable name="v"/><xsl:template match="zz"></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+[][0][false]
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><r>
+>   <a>  </a>
+>   <b> x </b>
+> </r></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+<?xml version="1.0"?>
+<r><a/><b> x </b></r>
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<r>
+> 	<x>a</x>
+> 
+> 	<y>b</y>
+> </r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/></xsl:stylesheet>$q$)
+xslt_process:text
+
+	a
+
+	b
+
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="substring('12345', 1.5, 2.6)"/>|<xsl:value-of select="substring('12345', 0, 3)"/>|<xsl:value-of select="substring('12345', 0 div 0, 3)"/>|<xsl:value-of select="substring('12345', 1, 0 div 0)"/>|<xsl:value-of select="substring('12345', -42, 1 div 0)"/>|<xsl:value-of select="substring('12345', -1 div 0, 1 div 0)"/>|<xsl:value-of select="substring('12345', 2)"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+234|12|||12345||2345
+-- SELECT 1
+
+> SELECT xslt_process($q$<a>héllo 日本 𝄞</a>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="string-length(a)"/>|<xsl:value-of select="substring(a, 7, 2)"/>|<xsl:value-of select="translate(a, 'é𝄞', 'eG')"/>|<xsl:value-of select="string-length('𝄞')"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+10|日本|hello 日本 G|1
+-- SELECT 1
+
+> SELECT xslt_process($q$<r><a><b/><c><d/></c></a><e/></r>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:for-each select="//c"><xsl:for-each select="ancestor-or-self::*|following::*|preceding::*|descendant::*"><xsl:value-of select="name()"/></xsl:for-each>|<xsl:value-of select="count(following-sibling::node())"/><xsl:value-of select="count(preceding-sibling::*)"/><xsl:value-of select="name(parent::*)"/><xsl:value-of select="count(self::c)"/><xsl:value-of select="count(self::node()/..)"/></xsl:for-each></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+rabcde|01a11
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="'1' = 1"/>|<xsl:value-of select="' 1 ' = 1"/>|<xsl:value-of select="'a' = 0 div 0"/>|<xsl:value-of select="'2' &gt; '10'"/>|<xsl:value-of select="'b' &gt; 'a'"/>|<xsl:value-of select="1 = '1.0'"/>|<xsl:value-of select="true() = 2"/>|<xsl:value-of select="false() = 0"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+true|true|false|false|false|true|true|true
+-- SELECT 1
+
+> SELECT xslt_process($q$<r a="1" b="2" xmlns:p="urn:p" p:c="3"/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:p="urn:p"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="count(r/@*)"/>|<xsl:value-of select="count(r/attribute::*)"/>|<xsl:value-of select="count(r/@p:*)"/>|<xsl:value-of select="r/@p:c"/>|<xsl:value-of select="name(r/@*[3])"/>|<xsl:value-of select="count(r/namespace::*)"/></xsl:template></xsl:stylesheet>$q$)
+xslt_process:text
+3|3|1|3|p:c|2
+-- SELECT 1
+
+> SELECT xslt_process($q$<a/>$q$, $q$<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="count('a')"/></xsl:template></xsl:stylesheet>$q$)
+ERROR 10608: failed to apply stylesheet
+DETAIL: Invalid type
+
+> CREATE TABLE a98_xt (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO a98_xt VALUES (1, '<doc><int>1</int><int>2</int></doc>')
+-- INSERT 0 1
+
+> SELECT xpath_table('id', 't', 'a98_xt', '/doc/int', 'true')
+ERROR 0A000: materialize mode required, but it is not allowed in this context
+
+> SELECT xpath_table('id', 't', 'a98_xt', '/doc/int', 'false') FROM a98_xt WHERE false
+xpath_table:record
+-- SELECT 0
+
+> SELECT * FROM xpath_table('id', 't', 'a98_xt', '/doc/int', 'true') AS t(id int, v int)
+id:int4 | v:int4
+1 | 1
+1 | 2
+-- SELECT 2
+
+> DROP TABLE a98_xt
+-- DROP TABLE
+
+> DROP EXTENSION xml2
+-- DROP EXTENSION
+

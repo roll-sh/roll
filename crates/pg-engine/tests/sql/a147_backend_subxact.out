@@ -1,0 +1,25 @@
+> SELECT * FROM pg_stat_get_backend_subxact(NULL)
+subxact_count:int4 | subxact_overflowed:bool
+NULL | NULL
+-- SELECT 1
+
+> SELECT pg_stat_get_backend_subxact(0)
+pg_stat_get_backend_subxact:record
+(,)
+-- SELECT 1
+
+> SELECT * FROM pg_stat_get_backend_subxact(-1)
+subxact_count:int4 | subxact_overflowed:bool
+NULL | NULL
+-- SELECT 1
+
+> SELECT * FROM pg_stat_get_backend_wal(-1)
+wal_records:int8 | wal_fpi:int8 | wal_bytes:numeric | wal_buffers_full:int8 | stats_reset:timestamptz
+NULL | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT count(*) FROM pg_stat_get_backend_io(-1)
+count:int8
+0
+-- SELECT 1
+

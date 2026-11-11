@@ -1,0 +1,195 @@
+> SELECT name, default_version, installed_version, comment FROM pg_available_extensions WHERE name IN ('uuid-ossp', 'pgcrypto', 'plpgsql') ORDER BY 1
+name:name | default_version:text | installed_version:text | comment:text
+pgcrypto | 1.4 | NULL | cryptographic functions
+plpgsql | 1.0 | 1.0 | PL/pgSQL procedural language
+uuid-ossp | 1.1 | NULL | generate universally unique identifiers (UUIDs)
+-- SELECT 3
+
+> SELECT name, version, installed, superuser, trusted, relocatable, schema, requires, comment FROM pg_available_extension_versions WHERE name IN ('uuid-ossp', 'plpgsql') ORDER BY 1, 2
+name:name | version:text | installed:bool | superuser:bool | trusted:bool | relocatable:bool | schema:name | requires:name[] | comment:text
+plpgsql | 1.0 | t | t | t | f | pg_catalog | NULL | PL/pgSQL procedural language
+uuid-ossp | 1.1 | f | t | t | t | NULL | NULL | generate universally unique identifiers (UUIDs)
+-- SELECT 2
+
+> CREATE EXTENSION "uuid-ossp"
+-- CREATE EXTENSION
+
+> SELECT extname, extowner::regrole, extnamespace::regnamespace, extrelocatable, extversion, extconfig, extcondition FROM pg_extension ORDER BY 1
+extname:name | extowner:4096 | extnamespace:4089 | extrelocatable:bool | extversion:text | extconfig:oid[] | extcondition:text[]
+plpgsql | postgres | pg_catalog | f | 1.0 | NULL | NULL
+uuid-ossp | postgres | public | t | 1.1 | NULL | NULL
+-- SELECT 2
+
+> SELECT name, installed_version FROM pg_available_extensions WHERE name = 'uuid-ossp'
+name:name | installed_version:text
+uuid-ossp | 1.1
+-- SELECT 1
+
+> SELECT p.proname, p.prolang, p.prosrc, p.probin, p.provolatile, p.proisstrict, p.proparallel, p.pronamespace::regnamespace FROM pg_proc p JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid WHERE d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e' ORDER BY p.proname
+proname:name | prolang:oid | prosrc:text | probin:text | provolatile:char | proisstrict:bool | proparallel:char | pronamespace:4089
+plpgsql_call_handler | 13 | plpgsql_call_handler | $libdir/plpgsql | v | f | u | pg_catalog
+plpgsql_inline_handler | 13 | plpgsql_inline_handler | $libdir/plpgsql | v | t | u | pg_catalog
+plpgsql_validator | 13 | plpgsql_validator | $libdir/plpgsql | v | t | u | pg_catalog
+uuid_generate_v1 | 13 | uuid_generate_v1 | $libdir/uuid-ossp | v | t | s | public
+uuid_generate_v1mc | 13 | uuid_generate_v1mc | $libdir/uuid-ossp | v | t | s | public
+uuid_generate_v3 | 13 | uuid_generate_v3 | $libdir/uuid-ossp | i | t | s | public
+uuid_generate_v4 | 13 | uuid_generate_v4 | $libdir/uuid-ossp | v | t | s | public
+uuid_generate_v5 | 13 | uuid_generate_v5 | $libdir/uuid-ossp | i | t | s | public
+uuid_nil | 13 | uuid_nil | $libdir/uuid-ossp | i | t | s | public
+uuid_ns_dns | 13 | uuid_ns_dns | $libdir/uuid-ossp | i | t | s | public
+uuid_ns_oid | 13 | uuid_ns_oid | $libdir/uuid-ossp | i | t | s | public
+uuid_ns_url | 13 | uuid_ns_url | $libdir/uuid-ossp | i | t | s | public
+uuid_ns_x500 | 13 | uuid_ns_x500 | $libdir/uuid-ossp | i | t | s | public
+-- SELECT 13
+
+> SELECT pg_describe_object(classid, objid, objsubid) AS obj, pg_describe_object(refclassid, refobjid, refobjsubid) AS ref, deptype FROM pg_depend WHERE refclassid = 'pg_extension'::regclass OR classid = 'pg_extension'::regclass ORDER BY 1, 2
+obj:text | ref:text | deptype:char
+extension uuid-ossp | schema public | n
+function plpgsql_call_handler() | extension plpgsql | e
+function plpgsql_inline_handler(internal) | extension plpgsql | e
+function plpgsql_validator(oid) | extension plpgsql | e
+function uuid_generate_v1() | extension uuid-ossp | e
+function uuid_generate_v1mc() | extension uuid-ossp | e
+function uuid_generate_v3(uuid,text) | extension uuid-ossp | e
+function uuid_generate_v4() | extension uuid-ossp | e
+function uuid_generate_v5(uuid,text) | extension uuid-ossp | e
+function uuid_nil() | extension uuid-ossp | e
+function uuid_ns_dns() | extension uuid-ossp | e
+function uuid_ns_oid() | extension uuid-ossp | e
+function uuid_ns_url() | extension uuid-ossp | e
+function uuid_ns_x500() | extension uuid-ossp | e
+language plpgsql | extension plpgsql | e
+-- SELECT 15
+
+> SELECT obj_description(oid, 'pg_extension') FROM pg_extension WHERE extname = 'uuid-ossp'
+obj_description:text
+generate universally unique identifiers (UUIDs)
+-- SELECT 1
+
+> SELECT uuid_generate_v3(uuid_ns_dns(), 'www.widgets.com'), uuid_generate_v5(uuid_ns_url(), 'x')
+uuid_generate_v3:uuid | uuid_generate_v5:uuid
+3d813cbb-47fb-32ba-91df-831e1593ac29 | 4cd605e7-afa2-5360-b5b9-c5e9fb5c76f4
+-- SELECT 1
+
+> DROP FUNCTION uuid_nil()
+ERROR 2BP01: cannot drop function uuid_nil() because extension uuid-ossp requires it
+HINT: You can drop extension uuid-ossp instead.
+
+> CREATE EXTENSION "uuid-ossp"
+ERROR 42710: extension "uuid-ossp" already exists
+
+> CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
+NOTICE 42710: extension "uuid-ossp" already exists, skipping
+-- CREATE EXTENSION
+
+> ALTER EXTENSION "uuid-ossp" UPDATE
+NOTICE 00000: version "1.1" of extension "uuid-ossp" is already installed
+-- ALTER EXTENSION
+
+> ALTER EXTENSION "uuid-ossp" UPDATE TO '1.0'
+ERROR 22023: extension "uuid-ossp" has no update path from version "1.1" to version "1.0"
+
+> ALTER EXTENSION "uuid-ossp" UPDATE TO '2.0'
+ERROR 22023: extension "uuid-ossp" has no update path from version "1.1" to version "2.0"
+
+> CREATE TABLE a39_ext_t (u uuid DEFAULT uuid_generate_v4())
+-- CREATE TABLE
+
+> DROP EXTENSION "uuid-ossp"
+ERROR 2BP01: cannot drop extension uuid-ossp because other objects depend on it
+DETAIL: default value for column u of table a39_ext_t depends on function uuid_generate_v4()
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE a39_ext_t
+-- DROP TABLE
+
+> DROP EXTENSION "uuid-ossp"
+-- DROP EXTENSION
+
+> SELECT count(*) FROM pg_proc WHERE proname LIKE 'uuid_generate%'
+count:int8
+0
+-- SELECT 1
+
+> CREATE EXTENSION "uuid-ossp" VERSION '1.0'
+ERROR 22023: extension "uuid-ossp" has no installation script nor update path for version "1.0"
+
+> CREATE EXTENSION a39_nosuchext
+ERROR 0A000: extension "a39_nosuchext" is not available
+HINT: The extension must first be installed on the system where PostgreSQL is running.
+
+> CREATE EXTENSION "uuid-ossp" SCHEMA a39_nosuch
+ERROR 3F000: schema "a39_nosuch" does not exist
+
+> CREATE SCHEMA a39_ext_s
+-- CREATE SCHEMA
+
+> CREATE EXTENSION "uuid-ossp" SCHEMA a39_ext_s
+-- CREATE EXTENSION
+
+> SELECT extnamespace::regnamespace FROM pg_extension WHERE extname = 'uuid-ossp'
+extnamespace:4089
+a39_ext_s
+-- SELECT 1
+
+> SELECT a39_ext_s.uuid_nil()
+uuid_nil:uuid
+00000000-0000-0000-0000-000000000000
+-- SELECT 1
+
+> DROP SCHEMA a39_ext_s
+ERROR 2BP01: cannot drop schema a39_ext_s because other objects depend on it
+DETAIL: extension uuid-ossp depends on schema a39_ext_s
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP SCHEMA a39_ext_s CASCADE
+NOTICE 00000: drop cascades to extension uuid-ossp
+-- DROP SCHEMA
+
+> CREATE EXTENSION "uuid-ossp" VERSION '1.1' CASCADE
+-- CREATE EXTENSION
+
+> CREATE FUNCTION a39_ext_f() RETURNS uuid AS '$libdir/uuid-ossp', 'nosuchsym' LANGUAGE C
+ERROR 42883: could not find function "nosuchsym" in file "/usr/local/lib/postgresql/uuid-ossp.so"
+
+> CREATE FUNCTION a39_ext_f() RETURNS uuid AS '$libdir/uuid-ossp', 'uuid_nil' LANGUAGE C
+-- CREATE FUNCTION
+
+> SELECT a39_ext_f()
+a39_ext_f:uuid
+00000000-0000-0000-0000-000000000000
+-- SELECT 1
+
+> SELECT prosrc, probin, prolang FROM pg_proc WHERE proname = 'a39_ext_f'
+prosrc:text | probin:text | prolang:oid
+uuid_nil | $libdir/uuid-ossp | 13
+-- SELECT 1
+
+> ALTER EXTENSION "uuid-ossp" ADD FUNCTION a39_ext_f()
+-- ALTER EXTENSION
+
+> SELECT pg_describe_object(classid, objid, objsubid), deptype FROM pg_depend WHERE refclassid = 'pg_extension'::regclass AND objid = 'a39_ext_f'::regproc
+pg_describe_object:text | deptype:char
+function a39_ext_f() | e
+-- SELECT 1
+
+> ALTER EXTENSION "uuid-ossp" ADD FUNCTION a39_ext_f()
+ERROR 55000: function a39_ext_f() is already a member of extension "uuid-ossp"
+
+> ALTER EXTENSION "uuid-ossp" DROP FUNCTION a39_ext_f()
+-- ALTER EXTENSION
+
+> ALTER EXTENSION "uuid-ossp" DROP FUNCTION a39_ext_f()
+ERROR 55000: function a39_ext_f() is not a member of extension "uuid-ossp"
+
+> DROP EXTENSION "uuid-ossp"
+-- DROP EXTENSION
+
+> SELECT a39_ext_f()
+a39_ext_f:uuid
+00000000-0000-0000-0000-000000000000
+-- SELECT 1
+
+> DROP FUNCTION a39_ext_f()
+-- DROP FUNCTION
+

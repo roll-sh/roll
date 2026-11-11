@@ -1,0 +1,142 @@
+> CREATE TABLE gcu_t (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO gcu_t VALUES (0, 5)
+-- INSERT 0 1
+
+> CREATE VIEW gcu_v AS SELECT 1 / a AS x, b AS y FROM gcu_t
+-- CREATE VIEW
+
+> SELECT y FROM gcu_v
+y:int4
+5
+-- SELECT 1
+
+> SELECT count(*) FROM gcu_v
+count:int8
+1
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t OFFSET 0) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t GROUP BY a, b) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t ORDER BY b) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t LIMIT 5) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t FOR UPDATE) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y, (SELECT 1 / a) AS z FROM gcu_t) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t UNION ALL SELECT 1, 2) s ORDER BY y
+y:int4
+2
+5
+-- SELECT 2
+
+> SELECT y FROM (SELECT DISTINCT ON (b) 1 / a AS x, b AS y FROM gcu_t) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT s.y FROM gcu_t JOIN LATERAL (SELECT 1 / gcu_t.a AS x, gcu_t.b AS y OFFSET 0) s ON true
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t) s WHERE y > 0 ORDER BY y
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT sum(1 / a) AS x, b AS y FROM gcu_t GROUP BY b) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT sum(1 / a) AS x, 5 AS y FROM gcu_t) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT sum(1 / a) AS x, count(*) AS y FROM gcu_t) s
+y:int8
+1
+-- SELECT 1
+
+> SELECT y FROM (SELECT sum(1 / a) FILTER (WHERE b > 0) AS x, max(b) AS y FROM gcu_t) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT g, y FROM (SELECT grouping(b) AS g, sum(1 / a) AS x, b AS y FROM gcu_t
+>   GROUP BY GROUPING SETS ((b), ())) s ORDER BY g
+g:int4 | y:int4
+0 | 5
+1 | NULL
+-- SELECT 2
+
+> SELECT y FROM (SELECT json_object_agg(NULL::text, 1) AS x, b AS y FROM gcu_t GROUP BY b) s
+y:int4
+5
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, row_number() OVER () AS y FROM gcu_t) s
+y:int8
+1
+-- SELECT 1
+
+> SELECT y FROM (SELECT 1 / a AS x, generate_series(1, 2) AS y FROM gcu_t) s
+y:int4
+1
+2
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT y FROM gcu_v
+QUERY PLAN:text
+Seq Scan on public.gcu_t
+  Output: gcu_t.b
+-- EXPLAIN
+
+> SELECT y FROM (SELECT DISTINCT 1 / a AS x, b AS y FROM gcu_t) s
+ERROR 22012: division by zero
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t UNION SELECT 1, 2) s
+ERROR 22012: division by zero
+
+> SELECT y FROM (SELECT 1 / a AS x, b AS y FROM gcu_t ORDER BY 1 / a) s
+ERROR 22012: division by zero
+
+> SELECT y FROM (SELECT generate_series(1, 2) / a AS x, b AS y FROM gcu_t) s
+ERROR 22012: division by zero
+
+> WITH w AS MATERIALIZED (SELECT 1 / a AS x, b AS y FROM gcu_t) SELECT y FROM w
+ERROR 22012: division by zero
+
+> SELECT y FROM (SELECT 1 / (a + (0 * random())::int) AS x, b AS y FROM gcu_t) s
+ERROR 22012: division by zero
+

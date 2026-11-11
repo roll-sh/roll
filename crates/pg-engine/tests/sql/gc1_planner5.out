@@ -1,0 +1,162 @@
+> CREATE TABLE gc5_t (a int, b int, c text)
+-- CREATE TABLE
+
+> INSERT INTO gc5_t SELECT i, i % 100, 'x' || i FROM generate_series(1, 5000) i
+-- INSERT 0 5000
+
+> CREATE INDEX gc5_t_a ON gc5_t (a)
+-- CREATE INDEX
+
+> CREATE INDEX gc5_t_ba ON gc5_t (b, a)
+-- CREATE INDEX
+
+> ANALYZE gc5_t
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT min(a) FROM gc5_t
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan using gc5_t_a on gc5_t
+                Index Cond: (a IS NOT NULL)
+-- EXPLAIN
+
+> SELECT min(a) FROM gc5_t
+min:int4
+1
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT max(a) FROM gc5_t WHERE a < 42
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan Backward using gc5_t_a on gc5_t
+                Index Cond: ((a IS NOT NULL) AND (a < 42))
+-- EXPLAIN
+
+> SELECT max(a) FROM gc5_t WHERE a < 42
+max:int4
+41
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT max(a) FROM gc5_t WHERE b = 33
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan Backward using gc5_t_ba on gc5_t
+                Index Cond: ((b = 33) AND (a IS NOT NULL))
+-- EXPLAIN
+
+> SELECT max(a) FROM gc5_t WHERE b = 33
+max:int4
+4933
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT min(a), max(a) FROM gc5_t
+QUERY PLAN:text
+Result
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan using gc5_t_a on gc5_t
+                Index Cond: (a IS NOT NULL)
+  InitPlan 2
+    ->  Limit
+          ->  Index Only Scan Backward using gc5_t_a on gc5_t gc5_t_1
+                Index Cond: (a IS NOT NULL)
+-- EXPLAIN
+
+> SELECT min(a), max(a) FROM gc5_t
+min:int4 | max:int4
+1 | 5000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT max(a) FROM gc5_t ORDER BY max(a) + 1
+QUERY PLAN:text
+Sort
+  Sort Key: (((InitPlan 1).col1 + 1))
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan Backward using gc5_t_a on gc5_t
+                Index Cond: (a IS NOT NULL)
+  ->  Result
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT max(b) FROM gc5_t
+QUERY PLAN:text
+HashAggregate
+  Group Key: (InitPlan 1).col1
+  InitPlan 1
+    ->  Limit
+          ->  Index Only Scan Backward using gc5_t_ba on gc5_t
+                Index Cond: (b IS NOT NULL)
+  ->  Result
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT max(a) FROM gc5_t
+QUERY PLAN:text
+Result
+  Output: (InitPlan 1).col1
+  InitPlan 1
+    ->  Limit
+          Output: gc5_t.a
+          ->  Index Only Scan Backward using gc5_t_a on public.gc5_t
+                Output: gc5_t.a
+                Index Cond: (gc5_t.a IS NOT NULL)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT max(c) FROM gc5_t
+QUERY PLAN:text
+Aggregate
+  ->  Seq Scan on gc5_t
+-- EXPLAIN
+
+> CREATE TABLE gc5_r (f1 int, f2 text, f3 int DEFAULT 42, f4 bigint DEFAULT 99)
+-- CREATE TABLE
+
+> INSERT INTO gc5_r VALUES (1, 'one'), (5, 'five')
+-- INSERT 0 2
+
+> EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO gc5_r VALUES (4) RETURNING old.f1, new.*, new.f3, *
+QUERY PLAN:text
+Insert on public.gc5_r
+  Output: old.f1, new.f1, new.f2, new.f3, new.f4, new.f3, gc5_r.f1, gc5_r.f2, gc5_r.f3, gc5_r.f4
+  ->  Result
+        Output: 4, NULL::text, 42, '99'::bigint
+-- EXPLAIN
+
+> INSERT INTO gc5_r VALUES (4) RETURNING old.f1, new.*, new.f3, *
+f1:int4 | f1:int4 | f2:text | f3:int4 | f4:int8 | f3:int4 | f1:int4 | f2:text | f3:int4 | f4:int8
+NULL | 4 | NULL | 42 | 99 | 42 | 4 | NULL | 42 | 99
+-- INSERT 0 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE gc5_r SET f4 = 100 WHERE f1 = 5 RETURNING old.*, old, new.f4, old.f4::text || '->' || new.f4::text AS change
+QUERY PLAN:text
+Update on public.gc5_r
+  Output: old.f1, old.f2, old.f3, old.f4, old.*, new.f4, (((old.f4)::text || '->'::text) || (new.f4)::text)
+  ->  Seq Scan on public.gc5_r
+        Output: '100'::bigint, ctid
+        Filter: (gc5_r.f1 = 5)
+-- EXPLAIN
+
+> UPDATE gc5_r SET f4 = 100 WHERE f1 = 5 RETURNING old.*, old, new.f4, old.f4::text || '->' || new.f4::text AS change
+f1:int4 | f2:text | f3:int4 | f4:int8 | old:user | f4:int8 | change:text
+5 | five | 42 | 99 | (5,five,42,99) | 100 | 99->100
+-- UPDATE 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) DELETE FROM gc5_r WHERE f1 = 1 RETURNING old.f2, new.f2
+QUERY PLAN:text
+Delete on public.gc5_r
+  Output: old.f2, new.f2
+  ->  Seq Scan on public.gc5_r
+        Output: ctid
+        Filter: (gc5_r.f1 = 1)
+-- EXPLAIN
+
+> DELETE FROM gc5_r WHERE f1 = 1 RETURNING old.f2, new.f2
+f2:text | f2:text
+one | NULL
+-- DELETE 1
+

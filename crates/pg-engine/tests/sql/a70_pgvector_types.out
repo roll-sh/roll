@@ -1,0 +1,201 @@
+> CREATE EXTENSION vector
+-- CREATE EXTENSION
+
+> SELECT extversion FROM pg_extension WHERE extname = 'vector'
+extversion:text
+0.8.7
+-- SELECT 1
+
+> SELECT pg_describe_object(classid, objid, objsubid) || ' ' || deptype::text
+> FROM pg_depend WHERE refobjid = (SELECT oid FROM pg_extension WHERE extname = 'vector')
+>   AND classid = 'pg_type'::regclass ORDER BY 1
+?column?:text
+type halfvec e
+type halfvec[] e
+type sparsevec e
+type sparsevec[] e
+type vector e
+type vector[] e
+-- SELECT 6
+
+> SELECT count(*) FROM pg_depend WHERE refobjid = (SELECT oid FROM pg_extension WHERE extname = 'vector')
+count:int8
+237
+-- SELECT 1
+
+> SELECT oprname, oprleft::regtype, oprright::regtype FROM pg_operator WHERE oprname IN ('<~>', '<%>') ORDER BY 1
+oprname:name | oprleft:regtype | oprright:regtype
+<%> | bit | bit
+<~> | bit | bit
+-- SELECT 2
+
+> CREATE TABLE a70_tv (a vector(3), b halfvec(4)[], c sparsevec(5), d vector)
+-- CREATE TABLE
+
+> SELECT attname, format_type(atttypid, atttypmod), atttypmod FROM pg_attribute
+> WHERE attrelid = 'a70_tv'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | format_type:text | atttypmod:int4
+a | vector(3) | 3
+b | halfvec(4)[] | 4
+c | sparsevec(5) | 5
+d | vector | -1
+-- SELECT 4
+
+> INSERT INTO a70_tv (a) VALUES ('[1,2,3]')
+-- INSERT 0 1
+
+> INSERT INTO a70_tv (a) VALUES ('[1,2]')
+ERROR 22000: expected 3 dimensions, not 2
+
+> INSERT INTO a70_tv (a) VALUES ('[1,2,3]'::vector(2))
+ERROR 22000: expected 2 dimensions, not 3
+
+> INSERT INTO a70_tv (b) VALUES ('{"[1,2,3,4]","[1,2]"}')
+ERROR 22000: expected 4 dimensions, not 2
+
+> INSERT INTO a70_tv (c) VALUES ('{1:1}/5'), ('{1:1}/4')
+ERROR 22000: expected 5 dimensions, not 4
+
+> INSERT INTO a70_tv (d) VALUES ('[1]'), ('[1,2,3,4,5]')
+-- INSERT 0 2
+
+> UPDATE a70_tv SET a = '[4,5]' WHERE a IS NOT NULL
+ERROR 22000: expected 3 dimensions, not 2
+
+> SELECT '[1,2,3]'::vector(3), '[1,2,3]'::vector(2)
+ERROR 22000: expected 2 dimensions, not 3
+
+> SELECT '[1,2,3]'::vector('a')
+ERROR 22P02: invalid input syntax for type integer: "a" (at 19)
+
+> SELECT '[1,2,3]'::vector(0)
+ERROR 22023: dimensions for type vector must be at least 1 (at 19)
+
+> SELECT '[1,2,3]'::vector(16001)
+ERROR 22023: dimensions for type vector cannot exceed 16000 (at 19)
+
+> SELECT '[1,2,3]'::vector(3, 4)
+ERROR 22023: invalid type modifier (at 19)
+
+> SELECT ARRAY['[1,2,3]'::vector]::vector(2)[]
+ERROR 22000: expected 2 dimensions, not 3
+
+> SELECT pg_typeof('[1,2]'::vector(2)), '[1,2]'::vector::text::vector(2)
+pg_typeof:regtype | vector:user
+vector | [1,2]
+-- SELECT 1
+
+> CREATE VIEW a70_tvv AS SELECT a::vector(3) AS a3, c FROM a70_tv
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('a70_tvv'::regclass)
+pg_get_viewdef:text
+ SELECT a AS a3,
+    c
+   FROM a70_tv;
+-- SELECT 1
+
+> SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'a70_tvv'::regclass ORDER BY attnum
+format_type:text
+vector(3)
+sparsevec(5)
+-- SELECT 2
+
+> SELECT * FROM a70_tv ORDER BY d NULLS LAST, c
+a:user | b:user | c:user | d:user
+NULL | NULL | NULL | [1]
+NULL | NULL | NULL | [1,2,3,4,5]
+[1,2,3] | NULL | NULL | NULL
+-- SELECT 3
+
+> SELECT '[1,2,3]'::vector <-> '[3,1,2]', '[1,2,3]'::vector <#> '[3,1,2]', '[1,2,3]'::vector <=> '[3,1,2]', '[1,2,3]'::vector <+> '[3,1,2]'
+?column?:float8 | ?column?:float8 | ?column?:float8 | ?column?:float8
+2.449489742783178 | -11 | 0.2142857142857143 | 4
+-- SELECT 1
+
+> SELECT avg(v), sum(v) FROM (VALUES ('[1,2,3]'::vector), ('[4,5,6]'), (NULL)) t(v)
+avg:user | sum:user
+[2.5,3.5,4.5] | [5,7,9]
+-- SELECT 1
+
+> SELECT '{1,2,3}'::real[]::vector, '[1,2,3]'::vector::real[], '[1.5,2.5]'::vector::halfvec, '[1,0,2]'::vector::sparsevec
+vector:user | float4:float4[] | halfvec:user | sparsevec:user
+[1,2,3] | {1,2,3} | [1.5,2.5] | {1:1,3:2}/3
+-- SELECT 1
+
+> SELECT binary_quantize('[1,-2,3]'::vector), '101'::bit <~> '011', '101'::bit <%> '011'
+ERROR 22000: different bit lengths 1 and 3
+
+> SELECT amname, amtype, amhandler FROM pg_am WHERE amname IN ('ivfflat', 'hnsw') ORDER BY 1
+amname:name | amtype:char | amhandler:regproc
+hnsw | i | hnswhandler
+ivfflat | i | ivfflathandler
+-- SELECT 2
+
+> SELECT amname, p, pg_indexam_has_property(a.oid, p) FROM pg_am a,
+>   unnest(array['can_order', 'can_unique', 'can_multi_col', 'can_exclude', 'can_include']) p
+> WHERE amname IN ('ivfflat', 'hnsw') ORDER BY 1, 2
+amname:name | p:text | pg_indexam_has_property:bool
+hnsw | can_exclude | t
+hnsw | can_include | f
+hnsw | can_multi_col | f
+hnsw | can_order | f
+hnsw | can_unique | f
+ivfflat | can_exclude | t
+ivfflat | can_include | f
+ivfflat | can_multi_col | f
+ivfflat | can_order | f
+ivfflat | can_unique | f
+-- SELECT 10
+
+> SELECT opcname, amname, opcdefault FROM pg_opclass c JOIN pg_am a ON a.oid = c.opcmethod
+> WHERE amname IN ('ivfflat', 'hnsw') ORDER BY 2, 1
+opcname:name | amname:name | opcdefault:bool
+bit_hamming_ops | hnsw | f
+bit_jaccard_ops | hnsw | f
+halfvec_cosine_ops | hnsw | f
+halfvec_ip_ops | hnsw | f
+halfvec_l1_ops | hnsw | f
+halfvec_l2_ops | hnsw | f
+sparsevec_cosine_ops | hnsw | f
+sparsevec_ip_ops | hnsw | f
+sparsevec_l1_ops | hnsw | f
+sparsevec_l2_ops | hnsw | f
+vector_cosine_ops | hnsw | f
+vector_ip_ops | hnsw | f
+vector_l1_ops | hnsw | f
+vector_l2_ops | hnsw | f
+bit_hamming_ops | ivfflat | f
+halfvec_cosine_ops | ivfflat | f
+halfvec_ip_ops | ivfflat | f
+halfvec_l2_ops | ivfflat | f
+vector_cosine_ops | ivfflat | f
+vector_ip_ops | ivfflat | f
+vector_l2_ops | ivfflat | t
+-- SELECT 21
+
+> SHOW hnsw.ef_search
+hnsw.ef_search:text
+40
+-- SHOW
+
+> SET ivfflat.probes = 0
+ERROR 22023: 0 is outside the valid range for parameter "ivfflat.probes" (1 .. 32768)
+
+> SET hnsw.iterative_scan = strict_order
+-- SET
+
+> SHOW hnsw.iterative_scan
+hnsw.iterative_scan:text
+strict_order
+-- SHOW
+
+> DROP VIEW a70_tvv
+-- DROP VIEW
+
+> DROP TABLE a70_tv
+-- DROP TABLE
+
+> DROP EXTENSION vector
+-- DROP EXTENSION
+

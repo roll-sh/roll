@@ -1,0 +1,95 @@
+> CREATE EXTENSION IF NOT EXISTS pgstattuple
+-- CREATE EXTENSION
+
+> CREATE TABLE a126_vf (id int PRIMARY KEY, a int, t text)
+-- CREATE TABLE
+
+> CREATE INDEX a126_vf_a ON a126_vf (a, id)
+-- CREATE INDEX
+
+> INSERT INTO a126_vf SELECT g, g % 17, repeat('t', g % 50) FROM generate_series(1, 4000) g
+-- INSERT 0 4000
+
+> DELETE FROM a126_vf WHERE id BETWEEN 1000 AND 1600 AND id % 4 <> 0
+-- DELETE 450
+
+> UPDATE a126_vf SET t = t || 'u' WHERE id % 13 = 0
+-- UPDATE 271
+
+> UPDATE a126_vf SET a = a + 100 WHERE id % 31 = 0
+-- UPDATE 114
+
+> UPDATE a126_vf SET t = 'hot' WHERE id % 37 = 0
+-- UPDATE 96
+
+> DELETE FROM a126_vf WHERE id % 41 = 0
+-- DELETE 85
+
+> VACUUM a126_vf
+-- VACUUM
+
+> INSERT INTO a126_vf SELECT g, 1, 'again' FROM generate_series(6001, 6200) g
+-- INSERT 0 200
+
+> SELECT count(*) FROM a126_vf
+count:int8
+3665
+-- SELECT 1
+
+> SELECT tuple_count, tuple_len, dead_tuple_count FROM pgstattuple('a126_vf')
+tuple_count:int8 | tuple_len:int8 | dead_tuple_count:int8
+3665 | 204896 | 0
+-- SELECT 1
+
+> VACUUM FULL a126_vf
+-- VACUUM
+
+> SELECT tuple_count, tuple_len, dead_tuple_count, free_space FROM pgstattuple('a126_vf')
+tuple_count:int8 | tuple_len:int8 | dead_tuple_count:int8 | free_space:int8
+3665 | 204896 | 0 | 4284
+-- SELECT 1
+
+> SELECT pg_relation_size('a126_vf') / 8192 AS pages
+pages:int8
+29
+-- SELECT 1
+
+> SELECT count(*), count(DISTINCT ctid) FROM a126_vf
+count:int8 | count:int8
+3665 | 3665
+-- SELECT 1
+
+> CREATE TABLE a126_vf2 (id int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> INSERT INTO a126_vf2 SELECT g, 0 FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> UPDATE a126_vf2 SET v = 1 WHERE id % 2 = 0
+-- UPDATE 100
+
+> DELETE FROM a126_vf2 WHERE id % 2 = 0
+-- DELETE 100
+
+> VACUUM a126_vf2
+-- VACUUM
+
+> INSERT INTO a126_vf2 SELECT g, 2 FROM generate_series(1001, 1100) g
+-- INSERT 0 100
+
+> VACUUM FULL a126_vf2
+-- VACUUM
+
+> SELECT tuple_count, dead_tuple_count FROM pgstattuple('a126_vf2')
+tuple_count:int8 | dead_tuple_count:int8
+200 | 0
+-- SELECT 1
+
+> SELECT count(*), count(DISTINCT ctid) FROM a126_vf2
+count:int8 | count:int8
+200 | 200
+-- SELECT 1
+
+> DROP TABLE a126_vf, a126_vf2
+-- DROP TABLE
+

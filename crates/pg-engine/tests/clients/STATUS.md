@@ -1,0 +1,565 @@
+# Client libraries against the engine
+
+The engine's wire protocol, catalogs and SQL as real drivers and ORMs see them: each client's
+own test suite, run once against the engine and once against PostgreSQL 18.6 (the same image as
+`roll-engine-ref`, default settings), and compared test by test. Only differences count: a test
+that fails on PostgreSQL too (no SSL, no replication, no max_prepared_transactions, a missing
+contrib module in the image) is the environment's.
+
+## Running
+
+```sh
+# PostgreSQL 18.6 on 127.0.0.1:55838 (see run.sh's header), the engine on 127.0.0.1:55839:
+roll-engine --data /some/dir --listen 127.0.0.1:55839 --password pw --no-sync --allow-server-programs
+sg docker -c 'tests/clients/run.sh psycopg3 pg'
+sg docker -c 'tests/clients/run.sh psycopg3 engine'
+tests/clients/run.sh psycopg3 compare          # the tests whose outcome differs
+python3 -I tests/clients/failures.py ~/.cache/pg-clients/results/psycopg3-engine.d \
+  ~/.cache/pg-clients/results/psycopg3-pg.txt  # the engine's failures, grouped by message
+python3 -I tests/clients/gofail.py <x>.d/pgx.gojson <pg results>   # the same for go test -json
+python3 -I tests/clients/wire.py probe.py      # raw protocol transcripts of both servers, diffed
+```
+
+- `suites/<name>.sh` runs in a container on the host network (`# image:`), from a pinned source
+  tarball (`# src:`); `suites/<name>.setup.sql` makes the databases and roles it needs, through
+  the pinned psql. Results land in `$CLIENTS_CACHE/results` (default `~/.cache/pg-clients`).
+- Keep at most two suites running at once; each container gets `--cpus=4` (`CLIENTS_CPUS`).
+- A suite's first run downloads its toolchain's packages into the cache (pip, Go modules,
+  Gradle, NuGet, npm/yarn); later runs are offline-fast.
+- Round 18 added tokiopg, sqlx, prisma, activerecord (a first argument starting with `test/`
+  is a file glob: `test/cases/adapters/postgresql/**/*_test.rb` is what ran against the engine),
+  hibernate (a package subset; assertions off for org.postgresql), typeorm, drizzle and rubypg
+  (its spec helper, which runs initdb / pg_ctl, is replaced by one pointing at the server).
+  Their caches are large: about 9 GB in all (cargo's target, Gradle).
+
+## Where it stands
+
+Pass / fail per suite (tests that ran; skips aside), each suite against a fresh engine. "Round 17"
+is the engine after agent 38's work; "round 18" the engine of round 18, agent 51 (its first
+batch, 0a8ec4ee; the suites marked * after its second, 73e8d070). PostgreSQL's counts are this
+round's runs against a private reference (pgx's pgxpool package stops at TestPoolBeforeClose
+there, so fewer of its tests ran than in round 17). "Round 19" counts are round 19, agent 66's
+runs (debug build, a private reference; both sides run again), Hibernate's over all of
+hibernate-core (its failures on PostgreSQL there are the environment's).
+
+| suite | version | PostgreSQL | engine, round 17 | engine, round 18 | differences left |
+|---|---|---:|---:|---:|---|
+| psycopg 3 (tests/, binary impl) | 3.2.9 | 4924 / 9 | 4907 / 26 | 4915 / 18; round 19 (agent 81): 4924 / 9 | 0 |
+| psycopg2 (tests/) | 2.9.10 | 711 / 2 | 710 / 3 | 711 / 2 | 0 |
+| asyncpg (tests/) | 0.30.0 | 262 / 5 | 253 / 14 | 258 / 9 *; round 19 (agent 81): 259 / 8 | 2: introspection timing (a debug build), executemany timing (see below) |
+| pgx (root, pgconn, pgtype, pgxpool, stdlib) | 5.7.5 | 1197 / 4 | 1207 / 7 | 1213 / 7 *; round 19 (agent 81): 1217 / 3 | 0 |
+| lib/pq | 1.10.9 | 232 / 0 | 230 / 2 | 232 / 0 * | 0 |
+| node-postgres (pg integration) | 8.16.0 | 146 / 3 | 146 / 3 | 145 / 4 *; round 19 (agent 81): 145 / 4 | 1: gh-issues/1105 (5000 inserts in 5 s, a debug build) |
+| postgres.js | 3.4.7 | 194 / 62 | 194 / 62 | 194 / 62 | 0 |
+| pgjdbc (jdbc2/3/4/42, core) | 42.7.7 | 8221 / 0 | 8214 / 7 | 8218 / 3 *; round 19: 8221 / 0 | 0 (catalog DML, LIKE ending in its escape: round 19, agent 66) |
+| Npgsql (Npgsql.Tests) | 9.0.3 | 1914 / 2 | 1908 / 16 | 1917 / 2 (round 19, agents 53 and 66) | 0 |
+| SQLAlchemy (dialect/postgresql, sql) | 2.0.41 | 15801 / 2 | 15755 / 48 | 15801 / 2 * | 0 |
+| Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16; round 19: 3792 / 16 | 0 (a file_fdw `program` table: round 19, agent 81) |
+| tokio-postgres (tests, postgres, derive) | 0.7.18 | 221 / 0 | | 212 / 9 *; round 19: 221 / 0 | 0 |
+| sqlx (9 postgres targets) | 0.9.0 | 333 / 0 | | 318 / 15 *; round 19: 333 / 0 | 0 |
+| Prisma (push, pull, migrate, client) | 7.10.1 | 47 / 0 | | 47 / 0 * | 0 (bit(n) lengths in `db pull`, fixed) |
+| ActiveRecord (Rails, PostgreSQL adapter tests) | 8.1.4 | 10159 / 1; adapters: 776 / 1 | | 748 / 28; round 19: 769 / 8; agent 81: 771 / 6 | 5: postgres_fdw's loopback (4), a cancel (see below) |
+| Hibernate (hibernate-core subset; round 19: all of hibernate-core) | 7.4.14 | 3088 / 0; round 19: 12774 / 858 | | 3080 / 8; round 19: 12772 / 860 | 2: see below |
+| TypeORM (postgres) | 1.1.2 | 3059 / 11 | | 2977 / 56; round 19: 3058 / 12 | 1: xml2 (custom extension installation) |
+| Drizzle (pg integration) | 0.45.4 | 852 / 0 | | 849 / 3; round 19: 852 / 0 | 0 |
+| ruby-pg (spec/, helper patched to a running server) | 1.7.0 | 1076 / 26 | | 1072 / 30; round 19: 1076 / 26 (agent 81 too) | 0 (rows stream since round 19, agent 65) |
+
+Round 4 (round 19, agent 81) added these suites. Counts are before agent 81's fixes (the
+engine of 29a81105, a debug build); "engine-only" lists the causes, all fixed below unless
+marked open.
+
+| suite | version | PostgreSQL | engine | engine-only |
+|---|---|---:|---:|---|
+| GORM (tests/, simple and extended protocol) | 1.31.2, driver/postgres 1.6.3 | 31988 / 2 | 31988 / 2 | 0 |
+| sqlc (Postgres examples, managed-db replay) | 1.31.1 | 1628 / 130 | 1619 / 139 | 9: keys before columns, sequence attnotnull, ON CONFLICT at Parse |
+| Diesel (CI's Postgres job) | 2.3.14 | 1009 / 19 | 1005 / 24 | 5: startup name truncation, DROP DATABASE wait, read-only row locks |
+| SeaORM (tests, migration) | 2.0.4 | 238 / 0 | 238 / 0 | 0 |
+| Postgrex | 0.22.4 | 398 / 6 | 392 / 12 | 6: DML portal re-run, `bit '101'`, binary timestamptz range, 128 MB bytea, 2 timing |
+| Ecto SQL (pg integration) | 3.14.0 | 480 / 15 | 478 / 17 | 2: PREPARE ... AS parameters, DISTINCT ON a sub-select |
+| Sequelize (unit, integration) | 6.37.8 | 3202 / 26 | 3202 / 26 | 0 |
+| Knex (integration, pg) | 3.3.0 | 523 / 0 | 523 / 0 | 0 |
+| Kysely (node tests, postgres) | 0.29.7 | 745 / 0 | 734 / 3 | 3 (11 not run): concurrent CREATE TABLE OIDs |
+| MikroORM (postgresql files) | 7.2.5 | 1414 / 67 | 1400 / 70 | 3: keys before columns, FK check cost, GROUP BY + LIMIT order (open) |
+| Laravel (Integration/Database, pgsql) | 13.38.0 | 886 / 5 | 886 / 5 | 0 |
+| Doctrine DBAL (pdo_pgsql) | 4.5.0 | 3558 / 4 | 3557 / 5 | 1: superuser DML renumbering pg_class.oid (open) |
+| Spring JDBC / Flyway / Liquibase (driver program) | Boot 4.1.2, Flyway 13.11.1, Liquibase 5.0.4 | 271 / 0 | 226 / 2 | 2 (+43 ids): pg_sequence_last_value, oidvectortypes |
+| jOOQ (codegen + DSL program) | 3.21.9 | 141 / 0 | 140 / 0 (11 ids) | domain is_nullable, _pg_truetypid, int2vector::int[] |
+| r2dbc-postgresql | 1.1.3 | 1251 / 21 | 1251 / 21 | 0 |
+| EF Core (EFCore.PG.FunctionalTests) | efcore.pg 10.0.3 | 27410 / 0 | 23851 / 3559 | N'...' literals (2490), oidvectortypes (1066), a LATERAL "outer reference" (4, fixed in round 22, agent 91) |
+| Dapper | 2.1.89 | 153 / 170 | 153 / 170 | 0 |
+| Alembic | 1.20.1 | 2152 / 1 | 2144 / 9 | 8: jsonb subscripts deparsed as #> |
+| SQLModel + Alembic autogenerate (driver program) | 0.0.48, asyncpg 0.32.0 | 74 / 0 | 74 / 0 | 0 |
+| psycopg_pool (tests/pool, slow ones too) | 3.2.9 | 311 / 0 | 311 / 0 | 0 |
+| pgAdmin 4 / DBeaver metadata queries (replayed) | 9.18 / 26.2.3 | 856 ids | 814 same | catalog values (proargdefaults, relhasrules, FK operator arrays, ...) |
+
+After agent 81's fixes (the engine of 04d7b203 plus b68f2d65, debug build; engine side re-run,
+PostgreSQL's counts as above): GORM, SeaORM, Sequelize, Knex, Laravel, r2dbc, Dapper,
+SQLModel, psycopg_pool 0 (unchanged); Kysely 745 / 0, Diesel 1010 / 19, Ecto 480 / 15,
+Alembic 2152 / 1, jOOQ 141 / 0: 0 differences; sqlc 1626 / 132 after b68f2d65: 1 (Describe of
+an INSERT whose ON CONFLICT has no arbiter fixed; select_sequence still generates a nullable
+`last_value`, though RowDescription, sqlc's column query and attnotnull now match the
+reference at the SQL and wire level: not found yet);
+Postgrex 396 / 8: 2, timing (see below); EF Core 27400 / 10 (from 3,559); MikroORM 1415 / 66:
+1; DBAL: 1; Spring / Flyway / Liquibase 269 / 2; the metadata replay: 32 queries, cosmetic.
+Left, and why:
+- EF Core (6) and MikroORM (1): queries with LIMIT and no ORDER BY over GROUP BY
+  (`Delete_Where_predicate_with_GroupBy_aggregate`, `Take_on_top_level_...outer_apply`,
+  `SelectMany_with_nested_navigations_...`, populate-where-infer). The reference's autovacuum
+  has ANALYZEd the freshly loaded tables (830 rows, 89 groups), so it plans Group over an
+  index-only scan and returns groups in key order; the engine never analyzes on its own, plans
+  from defaults (240 rows, 200 groups) a HashAggregate, and returns other rows. Open: an
+  autovacuum-like analyze of changed tables (`n_mod_since_analyze` past
+  autovacuum_analyze_threshold + scale_factor * reltuples) would close it.
+  Round 22 (agent 99): the engine has autovacuum now (HANDOFF "Autovacuum"), and a LIMIT over
+  a grouping of one scan takes the cheapest fractional path as PostgreSQL does (the second
+  half of the cause: on a reproduction of the shape, 830 rows / 89 groups, PostgreSQL chose
+  the index's grouping even before analyzing). Plans and rows of that reproduction match;
+  the suites themselves weren't re-run (EF Core and MikroORM need their full runs, whose
+  timing decides when the reference's autovacuum ran).
+- EF Core (4): "outer reference without an outer row" in a LEFT JOIN LATERAL over a derived
+  table with an OR qual (`SelectMany_with_predicate_and_DefaultIfEmpty_...`): fixed in round
+  22 (agent 91, regress STATUS.md round 22; golden `a91_planner_fixes`): the pulled-up LATERAL
+  subquery's clause over the lateral reference stayed in a scan under a FROM subquery's
+  projection that reorders columns. The 292 DefaultIfEmpty tests: 290 pass, the 2 left are
+  SelectMany4's LIMIT without ORDER BY (above).
+- Spring (2): Flyway's three concurrent migrates. Concurrent `CREATE SCHEMA IF NOT EXISTS` /
+  `CREATE TABLE IF NOT EXISTS` of one name don't wait for the other transaction: PostgreSQL's
+  second blocks on the first's uncommitted catalog row, then fails with a unique violation
+  (pg_namespace_nspname_index); the engine's second creates its own and the commits merge
+  (`txn/catmerge.rs`), so a second Flyway sees no history row and runs V1 again. The clean
+  check after it fails from what that left. A catalog-concurrency item (name locks held to
+  commit). The engine side is fixed since round 21 (agent 92, `Ddl::reserve_names`, spec
+  `roll-concurrent-create`): the second CREATE waits and fails as PostgreSQL's does; the suite
+  wasn't re-run.
+- DBAL (1): `UPDATE pg_class SET oid = ...` by a superuser (renumbering a relation): refused.
+- Metadata replay (32 queries): pg_stat counters (always 0), pg_node_tree columns holding SQL
+  text, aclexplode orders without ORDER BY; clients read them through pg_get_expr, which
+  matches.
+Slow paths the suites showed (debug build unless said): Postgrex's type bootstrap query 140 ms
+-> 55 ms (regproc output looked names up by scanning ~3,000 built-ins; PostgreSQL 5 ms); its
+first run in a session (per-session catalog caches, `Catalog::rel_rowtype`'s debug assertion)
+~360 ms; numerics of 100,000 digits print ~100x slower than PostgreSQL's (a binary big
+integer converted to decimal, quadratic; PostgreSQL keeps base-10000 digits); jOOQ's codegen
+catalog queries 13 s vs 2.3 s; EF Core's suite 31 min vs 7 min.
+
+## Round 7 (round 24, agent 133)
+
+Release engines (line tables, frame pointers for the profiles), private references of the
+pinned image: one default (`-c max_connections=500`), one with `pg_stat_statements` (track =
+all, track_planning on) for per-statement times on both sides. Server CPU is the engine
+process's (utime + stime) and the reference container's cgroup; each run against a fresh
+engine, the two engines' runs interleaved. BENCH.md "Application CPU" has the profiles, the
+causes by owner and the reproducers.
+
+New suites (`suites/apps.py` style, one id per step, hashed answers; both run twice on
+PostgreSQL with the same ids):
+
+| suite | what runs | ids | differences | engine CPU | PostgreSQL CPU |
+|---|---|---:|---|---:|---:|
+| Gitea 28.2.0 (release binary, `golang` image for its git) | xorm migrations and sync (~120 tables), users, orgs, teams, repositories with files and branches, labels, milestones, issues, comments, reactions, the database issue indexer, a pull request reviewed and merged, releases, stars, webhooks, admin lists, errors, deletes | 209 | 0 | 4.2 s | 3.2 s |
+| Supabase Auth 2.197.0 (GoTrue release binary) | 75 migrations as `supabase_auth_admin` into its own `auth` schema, sign-ups, password logins, refresh-token rotation and reuse, the user record and metadata, TOTP enrolment, admin create / list / pages / update / ban / delete, error answers, the auth tables after | 67 | 0 (1 fixed) | 1.2 s | 2.2 s |
+
+Fixed (golden `a133_client_round7`):
+- Supabase Auth's `auth.users.phone_change` (`varchar(15) DEFAULT ''`, later `ALTER COLUMN
+  ... TYPE text`) showed `''::text` as its default; PostgreSQL keeps the cooked default and
+  coerces it implicitly, so it still shows `''::character varying` (`'z'::bpchar` for a
+  char(n) made text, `'q'::text` for a text made varchar). A changed column's default is
+  now kept as it showed under the old type, and must convert from that type ("default for
+  column ... cannot be cast automatically", as for `varchar DEFAULT '7'` made int).
+- `'t'::regclass` after DBAL's renumbering (`UPDATE pg_class SET oid`) gives the oid
+  pg_class shows, and the new oid prints as the table's name, the old one as a number
+  (round 6's left item).
+- pg_stat_activity.query keeps track_activity_query_size - 1 bytes, cut at a character
+  boundary, as pgstat_report_activity does: pgAdmin's dashboard (`servers/sql/stats.sql`)
+  showed the engine's whole statement. Wire test `activity_query_clipped_to_track_activity_query_size`.
+- The metadata replay masks the client address:port column (it changed between runs).
+
+The pgAdmin / DBeaver replay, both servers fresh: 831 of 856 the same, 25 differ, every one
+cosmetic and of round 4's kinds: pg_node_tree columns holding SQL text (10: typdefaultbin,
+conbin, indexprs / indpred, relpartbound, proargdefaults, ev_action, tgqual: what clients
+read through pg_get_expr / pg_get_*def, which match), pg_statio block counters (5: the
+engine has no buffer pool to count), and array_agg / aclexplode element orders and row
+orders without ORDER BY (10: acl.sql of schemas, tables, views, mviews, foreign tables and
+the catalog; DBeaver's dependency lists; pgAdmin's catalog_object nodes and properties). Oids
+are PostgreSQL's statement by statement (a trace of the setup, `max(oid)` after each
+statement on both servers: every statement allocates as many). Matching the node trees would
+mean storing PostgreSQL's node text for every expression in the catalog: not worth its cost
+for clients that all deparse.
+
+Re-measured (base: branch head 177b53e9; release, fresh engines, two interleaved runs each):
+
+| suite | engine before | engine after | PostgreSQL |
+|---|---:|---:|---:|
+| Kysely | 10.2, 10.1 s (pgss: 11.2, 12.0) | 9.2, 9.7 s (pgss: 9.3, 9.5) | 7.6 s (pgss) |
+| Grafana | 5.0, 4.8 s (pgss: 6.2, 5.6) | 4.0, 4.3 s (pgss: 4.7, 4.3) | 4.1 s (pgss), 3.5 s (round 6) |
+| Keycloak | 17.5, 18.2 s (pgss: 21.4, 20.8) | 17.4, 16.6 s (pgss: 18.2, 18.4) | 6.9-9.5 s (pgss), 6.3 s (round 6) |
+| Metabase | 37.9 s | 36.2 s (peak 174 MB) | 13.2 s |
+| EF Core | 919 s, peak 763 MB | 935 s (pgss), peak 841 MB | 172 s (pgss) |
+
+All five with 0 differences (EF Core: the 4 LIMIT-without-ORDER-BY-over-GROUP-BY tests, as
+in round 6). EF Core's gap is four Northwind queries (about 530 s of the engine's 805 s of
+statement time; PostgreSQL runs each in under 0.5 s), see BENCH.md.
+
+Postgrex's "terminate backend during query": a client race, not matched (HANDOFF.md,
+Decisions: "A CancelRequest's connection closes when the backend has acted").
+
+## Round 6 (round 23, agent 122)
+
+Release engine, a private reference of the pinned image (`-c max_connections=500`).
+
+Timing differences of round 5, found at the protocol level (logging proxy between client and
+server, raw-protocol probes against both servers):
+- asyncpg `test_executemany_timeout` (and `..._server_failure_during_writes`): the timeout's
+  CancelRequest lands about 0.5 s in, at the end of the 5th `pg_sleep(0.1)`. The engine's
+  pg_sleep polled every 20 ms and returned at its end without looking again, so a cancel in
+  the last interval was left for the next message read, which discards it (as PostgreSQL does
+  for a cancel that comes while it waits for input): all 128 rows committed. pg_sleep now
+  waits on a latch the cancel wakes. 3 runs of `-k executemany` and the full suite: 0
+  differences (262 / 5 on both).
+- Postgrex "active client timeout": on its deadline Postgrex sends a CancelRequest, waits for
+  that connection to close, then closes its own. PostgreSQL's cancel connection closes after
+  the signal, and the backend's ErrorResponse is out first; the engine closed it at once and
+  the error came up to 20 ms later, after the client's close: the client saw `closed` in
+  recv_bind, retried the checkout against its stopped pool and exited `killed`. A
+  CancelRequest's connection now closes once the backend has acted on it. Passes.
+- Postgrex "terminate backend during query": passes alone (3 of 3) and failed in a full run:
+  the test process is linked to the pool, which stops when the disconnect's own cancel request
+  returns; PostgreSQL's takes a fork and an exit (~5 ms), the engine's is immediate, so the
+  pool's exit can beat the task's FATAL reply. A client race, not a wire difference.
+- Knex's cancel with the pool exhausted: passes (523 / 0 on both).
+
+New suites: applications whose own database is the server, driven over HTTP
+(`suites/apps.py`: one id per step, `<step>#<hash>` of the normalized answer; ids, uuids,
+timestamps and other volatile fields dropped; the migrated schema one id per table). Server
+CPU over the whole run (the engine process; PostgreSQL's container):
+
+| suite | what runs | ids | differences | engine CPU | PostgreSQL CPU |
+|---|---|---:|---|---:|---:|
+| Grafana 13.3.0 | ~730 migrations, its API's objects, a PostgreSQL datasource (metadata queries, macros, errors) | 170 | 0 | 5.0 s | 3.5 s |
+| Metabase 0.64.3 | Liquibase migrations, sync + fingerprints + field values, native and MBQL queries, X-ray | 236 | 0 (1 fixed) | 40.9 s | 27.8 s |
+| Hasura 2.51.3 | hdb_catalog, tracking, relationships, permissions, event trigger, introspection, queries, mutations | 47 | 0 (2 fixed) | 1.1 s | 0.8 s |
+| Keycloak 26.8.1 | Liquibase, realms, clients, roles, groups, users, logins, sessions, events, export | 56 | 0 | 17.4 s | 6.3 s |
+| Directus 12.6.0 | migrations, collections / fields / relations made through its API (DDL), items, aggregates, errors | 47 | 0 | 2.0 s | 2.1 s |
+
+Fixed (golden `a122_client_round6`):
+- Hasura's computed fields and tracked functions: a FROM subquery's whole row passed from a
+  sub-select (`article_words("_root.base")`) failed "cannot cast type record to articles": an
+  upper level's whole row is now a ROW() of its lifted columns. coerce_record_to_complex's
+  column errors ("Cannot cast type text to integer in column 1.") too.
+- Metabase's schema: `varchar(254) DEFAULT NULL` keeps its default (`NULL::character
+  varying`), as a column with a type modifier does in PostgreSQL.
+- Doctrine DBAL `testListTableColumnsOidConflictWithNonTableObject`: the renumbering is
+  held (`Catalog::rel_oid_edits`, HANDOFF): DBAL 3558 / 4 on both, 0 differences.
+Normalized in the drivers (not the server): Metabase's t-digest quartiles (it fills them in
+its own order; the rows come in the same order from both servers), its search_index__<random>
+table, Grafana's starred uids, Keycloak's parentId, Directus's uuid-ordered update results.
+
+Re-measured: Kysely 10.2 s engine vs 7.4 s PostgreSQL (round 5: 10.8 vs 7.6; 745 / 0, 0
+differences), after round 21's planning-cost batches (agent 111); agents 115's and 116's
+catalog-regeneration and planner work wasn't upstream yet. The engine also takes more CPU
+than PostgreSQL for Metabase (sync and fingerprint queries over a catalog Liquibase grew),
+Grafana and Keycloak (start-up migrations: DDL per statement); not profiled yet.
+EF Core with max_connections = 500 on the reference (no "too many clients"): 27410 / 0 on
+PostgreSQL, 27406 / 4 on the engine (the 4 LIMIT-without-ORDER-BY-over-GROUP-BY tests, agent
+116's item). Server CPU 635.7 s on the engine against 186.5 s on PostgreSQL (engine peak RSS
+1.7 GB): the largest gap of any suite, not profiled yet.
+Re-run, round 4's items: Hibernate PackagedEntityManagerTest (testOverriddenPar included) 14 /
+0 on both; the pgAdmin / DBeaver metadata replay, both servers fresh: 831 of 856 same, 25
+differ (was 32), all of round 4's kinds: pg_node_tree columns holding SQL text (typdefaultbin,
+indexprs / indpred, tgqual, polqual), pg_stat counters, aclexplode orders without ORDER BY.
+
+## Round 5 (round 22, agent 100)
+
+Release builds on both sides now (the engine `--release`, frame pointers on for perf),
+PostgreSQL the pinned image. Times are the server's CPU seconds over the whole suite (the
+engine process; for PostgreSQL every process of its container, exited backends included),
+a fairer measure than wall time on a loaded machine; PostgreSQL's wall times include each
+suite's first download.
+
+| suite | PostgreSQL CPU | engine CPU | engine wall | differences |
+|---|---:|---:|---:|---|
+| psycopg2 | 17.3 s | 9.4 s | 39.5 s | 0 (2 PG-only failures: notice order) |
+| lib/pq | 5.2 s | 0.6 s | 12.7 s | 0 |
+| pgx | 97.4 s | 45.0 s (34.7 s alone) | 59.7 s | 0 (PostgreSQL's pgxpool hangs 30 min, as in round 18); peak memory below |
+| node-postgres | 5.7 s | 2.2 s | 27.9 s | 0 (gh-issues/1105 passes in a release build) |
+| postgres.js | 2.2 s | 1.0 s | 19.8 s | 0 |
+| tokio-postgres | 6.1 s | 1.4 s | 16.3 s | 0 |
+| sqlx | 8.6 s | 2.2 s | 43.1 s | 0 |
+| GORM | 22.6 s | 21.5 s | 134.4 s | 0 |
+| Knex | 9.5 s | 6.2 s | 19.6 s | 1: a cancel with the pool exhausted (timing) |
+| Kysely | 7.6 s | 10.8 s | 16.6 s | 0 |
+| Sequelize | 138.4 s | 91.1 s | 142.9 s | 0 (an id with the run's timestamp) |
+| Laravel | 70.8 s | 44.6 s | 86.6 s | 0 |
+| asyncpg | 19.1 s | 14.0 s | 73.7 s | 1: test_executemany_timeout (timing) |
+| psycopg 3 | 59.2 s | 13.1 s | 84.1 s | 0 |
+| Drizzle | 97.3 s | 13.3 s | 34.3 s | 0 |
+| Prisma | 3.2 s | 1.9 s | 21.8 s | 0 |
+| Ecto SQL | 5.2 s | 3.2 s | 31.3 s | 0 |
+| Postgrex | 12.5 s | 6.0 s | 27.3 s | 2: an active-client timeout and a terminate during a query (timing; the wire transcript of a terminate matches) |
+| SeaORM | 34.4 s | 7.2 s | 48.3 s | 0 |
+| Diesel | 172.2 s | 47.3 s | 162.5 s | 0 |
+| jOOQ (statements' own time, log_min_duration_statement) | 1.17 s | 2.0 s | | 0 |
+| sqlc | | | 67 s | 0 (was 1: its analysis cache, below) |
+| Doctrine DBAL | | | 36 s | 1: renumbering pg_class.oid (open) |
+| PostgREST v16.5 (new) | 2.7 s | 1.0 s | 2.6 s | 0 (8 before the fixes below) |
+| PgBouncer 1.24.1 (new) | 0.7 s | 1.6 s | 4.0 s | 0 |
+
+New suites:
+- `postgrest`: PostgREST's static binary over its own fixture (postgrest.setup.sql): its schema
+  cache queries at startup, then 116 HTTP requests over a Unix socket (filters, embedding
+  through one-to-many, many-to-many, self and composite keys, computed columns, counts,
+  aggregates, the OpenAPI document, RPC, inserts, upserts, updates, deletes, errors), one id
+  per request with a hash of status, headers and body.
+- `pgbouncer`: PgBouncer 1.24.1 (Debian trixie's package, unpacked without root) in front of
+  the server: SCRAM through auth_query (pg_shadow read as postgres), transaction pooling with
+  protocol-level prepared statements re-prepared on other server connections, session pooling
+  with DISCARD ALL, statement pooling, COPY, cancels and statement timeouts through it,
+  server-side cursors, LISTEN / NOTIFY, eight clients over two server connections.
+
+Fixed (goldens `a100_client_round5`, `a100_client_round5b`):
+- Numerics are kept in decimal digits (`types/decint.rs`): output, input and scaling are
+  linear (100,000 digits: 46x faster than before, 3x PostgreSQL's), sums and divisions of
+  small values faster than both (HANDOFF has the numbers).
+- jOOQ's codegen: information_schema views run from PostgreSQL's definitions are kept per
+  catalog version (`parameters` was regenerated, 60-100 ms, for every routine), and the
+  planner compares expressions and counts join widths with less work. Its statements: 2.8 s
+  -> 2.0 s (PostgreSQL 1.17 s); left: catalog joins (pgjdbc's DatabaseMetaData) plan 2-3x
+  slower than PostgreSQL's, with no single hot spot.
+- sqlc's select_sequence: not the engine. sqlc caches a managed database's analysis of each
+  query (SQLCCACHE, keyed by its version, config, schema and query, not by server), so a run
+  replayed the answer an older engine gave. The suite now starts each run with an empty
+  cache: 1628 / 130 on both, 0 differences.
+- PostgREST: computed columns (`"api"."authors"."book_count"`, functional notation over a
+  schema-qualified relation) failed; "column authors.x does not exist" named the schema too;
+  an RPC call's UPDATE in a read-only transaction failed with "cannot execute this statement"
+  only when it changed a row, PostgreSQL's ExecCheckXactReadOnly refuses it before it runs
+  ("cannot execute UPDATE in a read-only transaction", a function's statements too); a
+  column definition list's domain (`json_to_record(..) AS _(isbn api.isbn)`) was checked
+  only where the column was read, so an INSERT took a sequence value before failing; a
+  FROM-clause function's rows went up before its later rows failed (PostgreSQL makes them all
+  first); an index scan returned a row updated in place (HOT) after its equal-keyed
+  neighbours, where the btree has it at its chain's root.
+- pgx TestStmtCacheInvalidationConn / Tx (a regression of round 4's "Describe of what fails
+  when planned describes its analysis"): after `ALTER TABLE ... DROP COLUMN` a cached
+  statement's Bind (three result formats) failed with "bind message has 3 result formats but
+  query has 2 columns"; PostgreSQL revalidates the plan first and fails with "cached plan
+  must not change result type", on which pgx drops the statement. Describe now passes that
+  error on (wire test `cached_plan_result_change_before_result_formats`).
+
+Memory and the gaps left:
+- pgx's peak was the engine's 3.5 GB (its whole run; PostgreSQL's container 3.5 GB over all
+  suites): TestConnExec*MaxNumberOfParams, a VALUES of 65,535 parameters. Parse formatted the
+  whole parse tree as text twice to find its `$n` (`session::param_numbers` now scans the
+  text as it is written) and copied the tree twice (now moved): 970 MB -> 700 MB, 1.3 s
+  (PostgreSQL 0.4 s). What is left is libpg_query's protobuf of the tree and its decoding
+  (`sql::parse::parse_live`, 40% of the time): the parser's interface, not the engine.
+- Kysely (the one suite where the engine used more CPU): its introspection query (five
+  catalogs joined, run 385 times between DDL statements) takes 5 ms against PostgreSQL's
+  2.2 ms: 3 ms planning the join and the catalogs' rows regenerated after each DDL.
+- EF Core: PostgreSQL's run this round hit "too many clients already" (10,340 times: the
+  reference had connections left from earlier suites); its timing comparison wasn't redone.
+
+Left from round 4 and why:
+- Doctrine DBAL `testListTableColumnsOidConflictWithNonTableObject`: `UPDATE pg_attribute SET
+  attrelid = <a function's oid>` then `UPDATE pg_class SET oid = ...`. The engine's
+  pg_attribute rows are its tables' columns, so moving them to an oid no relation has is a
+  state it can't hold; renumbering a relation would have to move every row that names it.
+  Open (the test only checks the column list read before the renumbering).
+- Metadata replay, Hibernate testOverriddenPar: not re-run this round.
+
+## Differences left, and why
+
+Contrib types (agent 39; binary send / receive and IS DISTINCT FROM since round 19, agent 53):
+postgres_fdw (ActiveRecord; native since round 19, agent 59); xml2 isn't implemented (TypeORM's
+custom extension installation test installs tablefunc and xml2).
+
+Locking and timeouts (agent 34): statement_timeout and pg_cancel_backend don't end a row-lock
+wait, SET LOCAL lock_timeout doesn't stop an UPDATE waiting on a row (ActiveRecord, Hibernate),
+idle_in_transaction_session_timeout isn't enforced, serializable write skew in ActiveRecord's
+two cases. (Round 20, agent 73: the lock waits end over the simple and the extended
+protocol since round 17's lock manager, now checked by `tests/wire_waits.rs` for every kind
+of wait against PostgreSQL's transcript; idle_in_transaction_session_timeout,
+transaction_timeout and idle_session_timeout are enforced; a safe-snapshot wait's
+statement_timeout and extended-protocol cancel, and a cancel arriving while idle, are fixed.
+psycopg 3's, asyncpg's and pgx's cancel, timeout, interrupt, deadlock and notification tests
+(`-k` / `-run` on those words: 42, 31 and 110 tests) pass on both servers, no difference.)
+
+Engine, open:
+- (Fixed in round 21, agent 78: Hibernate BulkManipulationTest.testUpdateWithWhereExistsSubquery,
+  "column #32 out of range". The plan, not the protocol: with the class's rows (three
+  Humans, no ANALYZE) psql gets it too. The EXISTS is a semi join of `Human` alone with its
+  sub-select, the other two tables joined above it, and their index scans took the class
+  member `Human_friends.human1` from the semi join's right side, which the engine's semi join
+  doesn't return (`joinpath.rs` `semi_hidden`). The class's 54 tests pass; wire test
+  `semi_join_right_side_not_a_parameter`, golden `a78_semi_param`.)
+- Hibernate PackagedEntityManagerTest.testOverriddenPar: `select nextval('Bug_SEQ')` finds no
+  bug_seq (the persistence unit's schema export); not looked at.
+- ActiveRecord ForeignTableTest (4): postgres_fdw's server has only `dbname` (a loopback
+  through libpq's default socket) and its user mapping no password. The reference image trusts
+  local socket connections; the engine, started with `--password`, asks for one ("fe_sendauth:
+  no password supplied"), with `--allow-outbound local` too. Since round 20 (agent 80) the
+  engine takes pg_hba.conf rules (`--hba-file`, `--hba`), and its connections to itself
+  through libpq's default socket are `local` ones: started with `--hba "local all all
+  trust" --hba "host all all all scram-sha-256"` (the reference image's policy) it trusts
+  them as the reference does; postgres_fdw's password_required rule for non-superusers
+  stays.
+- ActiveRecord PostgresqlTransactionTest#test_raises_QueryCanceled_when_canceling_statement_
+  due_to_user_request: a cancel while the statement waits on a row lock (agent 56's item).
+- ActiveRecord: ALTER TABLE ... DISABLE / ENABLE TRIGGER ALL is about 1.4 ms a table in a debug
+  build (PostgreSQL: 0.1 ms; fixture loading); schema introspection is slower.
+- asyncpg's introspection tests: its type introspection query on a large catalog is slower
+  than the test's 250 ms bound. node-postgres 1105 is timing (a debug build).
+
+Fixed in round 19, agent 81, client suites round 4: server programs. `roll-engine
+--allow-server-programs` (`EngineOptions::server_programs`, off by default; HANDOFF
+"Decisions") runs COPY ... FROM / TO PROGRAM and file_fdw's `program` as PostgreSQL does,
+through the shell, with its errors for a failing program (`src/server_programs.rs`). The
+harness's engine runs with it: Django's inspectdb test_foreign_data_wrapper (`SELECT * ...
+LIMIT 1` from a `program 'echo 1,2,3,4'` table) passes (inspectdb 27 / 0 on both).
+
+Fixed in round 19, agent 81, third batch (wire tests `portals_hold_returning_rows_and_run_once`,
+`binary_datetime_input_in_range`, `utility_statements_describe_their_analyzed_parameters`,
+`startup_names_cut_to_namedatalen`, `big_bytea_values_go_out_in_linear_time`, and the helpers'
+goldens):
+- Portals follow PortalRun (Postgrex): a RETURNING statement (or a WITH that writes) runs to
+  its end on the first Execute and hands out its held rows, PortalSuspended at the row count,
+  `INSERT 0 0` once done; it never runs again (it ran twice, inserting the rows twice). Left:
+  three edge cases (a Bind that fails in planning, a failed portal made in a savepoint, a
+  portal re-executed after its COMMIT in one pipeline) give 55000 where PG gives 34000 /
+  EmptyQueryResponse.
+- Binary date / timestamp / timestamptz input out of range is 22008 (IS_VALID_TIMESTAMP).
+- A utility statement describes only the parameters its analysis types (PREPARE ... AS: 0;
+  Ecto); startup database and user names are cut to 63 bytes (Diesel).
+- Big bytea values: a custom plan's cost no longer renders constants (`plan_cost`), bytea's
+  text output is one buffer: 128 MB echoed in binary 58.8 s -> 0.49 s (PG 0.47 s).
+- Concurrent CREATE TABLEs with foreign keys made duplicate trigger oids, then DROP panicked
+  (Kysely): an FK's oids are one `alloc_oids` block. DROP / RENAME DATABASE and CREATE
+  DATABASE ... TEMPLATE wait up to 5 s for exiting sessions (CountOtherDBBackends; Diesel).
+- Catalog values (pgAdmin, DBeaver, Alembic, sqlc): sequences' attnotnull, jsonb / hstore
+  subscripts deparsed as subscripts, proargdefaults, a materialized view's relhasrules, FK
+  conpfeqop / conppeqop / conffeqop, pg_get_indexdef past the last column, the WAL replay
+  functions; and a wrong result: `a[1]` and `a[2]` were one expression to ORDER BY / GROUP BY
+  (their debug text left out the subscript).
+- A foreign key's check looked for its parent with a scan: the primary key's index
+  (`pkey_index`) wasn't among the indexes it tried. MikroORM's 2,000 checked rows took 46 s
+  (debug build), now 0.29 s; ON DELETE's scans of the referencing side use it too.
+
+Fixed in round 19, agent 81, second batch (golden `a81_client_round4`):
+- Literal types: `N'VINET'`, `char 'x'`, `bit '101'`, `'x'::pg_catalog.bpchar` have no length
+  (ConstCharacter / ConstBit); they were char(1) / bit(1), cutting values to one character
+  (EF Core's Northwind, 2,490 tests; Postgrex). The grammar gives `char` / `bit` in a column
+  or cast their length 1 itself.
+- CREATE TABLE's table constraints are resolved once every column is known (MikroORM, sqlc:
+  `PRIMARY KEY (a, b)` before `a`), in their place among the columns' own.
+- A range over an extension type with a default btree class (citext; asyncpg), and ADD
+  PRIMARY KEY USING INDEX on such a column: the catalog's default class, not only built-in
+  ones; pg_range.rngsubopc shows it.
+- information_schema.columns.is_nullable is NO for a NOT NULL domain's column (jOOQ);
+  information_schema._pg_truetypid / _pg_truetypmod (pg_attribute, pg_type);
+  int2vector::int[] (element-wise, jOOQ's indoption); pg_sequence_last_value (Liquibase);
+  oidvectortypes (Flyway's clean, EF Core's database cleaner: 1,066 tests); sequence
+  functions on another relation give PG 18's "cannot open relation" with
+  errdetail_relkind_not_supported (pg_sequence_parameters "cache lookup failed",
+  pg_get_sequence_data NULLs).
+- SELECT DISTINCT ON a sub-select matches the same sub-select in ORDER BY (Ecto); SELECT FOR
+  UPDATE / SHARE in a read-only transaction fails as ExecCheckXactReadOnly does (Diesel); ON
+  CONFLICT's arbiter inference waits for planning, so PREPARE / Parse of an INSERT with no
+  matching constraint succeeds and EXECUTE fails (sqlc), its result columns still described.
+- asyncpg's introspection: the introspection query takes 98 ms in a release build (the
+  test's bound is 250 ms); in a debug build 1.2 s, mostly `Catalog::rel_rowtype`'s O(n)
+  debug_assert while pg_type's rows are made for 1,000 tables. Its recursive term now plans
+  as PostgreSQL's: `ti.oid = any(tt.attrtypoids)` is an index (or BitmapOr arm) condition
+  parameterized by the outer array, estimated for 10 elements (scalararraysel), and a strict
+  operator's `x = ANY (a)` implies `a IS NOT NULL` (the arms' filters go).
+
+Fixed in round 19, agent 66, client suites round 3 (golden `a66_client_round3`, wire test
+`startup_notice_empty_arrays_and_catalog_dml`; file_fdw and server encodings are below and in
+HANDOFF):
+- DML on pg_description by a superuser (pgjdbc DatabaseMetaDataTest's setUp moves a function's
+  comment onto a table): UPDATE / INSERT / DELETE, its unique index and NOT NULL errors, over
+  the extended protocol and PREPARE too. A comment now has a classoid of its own when DML puts
+  it under another catalog than its object's (`Catalog::class_comments`, a new header field:
+  stored catalogs load as before). `UPDATE pg_class SET relname` to the name it has (pgjdbc's
+  updatable result set writes every column back); a real rename stays refused.
+- tokio-postgres: GUC_IS_NAME values (application_name, ...) are truncated to 63 bytes with
+  their NOTICE, at startup too; pg_database's rows in Postgres's heap order (postgres,
+  template1, template0, then the databases made since).
+- sqlx: an empty array received in binary has no dimensions (array_recv); a parameter Parse
+  declares as a domain array keeps that type as a column (`$2` of `positive_int[]`), in
+  custom plans too; a check constraint's error names its routine ExecConstraints (the routine
+  of a known message followed by a name is found).
+- Drizzle: `INSERT ... SELECT id, $1 FROM u ... ORDER BY / LIMIT` types `$1` as its column.
+- Hibernate: unnest() of an array of a one-field composite in FROM gives the field.
+- TypeORM: btree_gist's gist_text_ops is varchar's default class (the binary-coercible default
+  class, a preferred type's winning a tie); information_schema.columns gives an extension type
+  as USER-DEFINED in its schema, a renamed enum by its name now, a row type's schema
+  (pg_statistic_ext_data.stxdexpr), and a column's collation; a FROM subquery's own FOR UPDATE
+  over its outer join's nullable side errors.
+- ActiveRecord's check_all_foreign_keys_valid! (PostgreSQLReferentialIntegrityTest, 2): a DO
+  block's EXECUTE of `UPDATE pg_catalog.pg_constraint SET convalidated = false ...; ALTER TABLE
+  ... VALIDATE CONSTRAINT ...`: a superuser's UPDATE of pg_constraint.convalidated, in
+  PL/pgSQL too.
+- Django: a GROUP BY key that is a sub-select over a join, named by its ordinal (two bindings of
+  the sub-select differ in their joins' `bound` ids only).
+- pgjdbc: `relname LIKE 'a\'` (a pattern ending in its escape character) fails only when
+  matching reaches it, and a pg_class scan reads only the names the pattern's fixed prefix
+  selects, as the index scan EXPLAIN shows does; a debug build's pg_class row-count check
+  skips a catalog another session's DDL replaced meanwhile (TypeCacheDLLStressTest).
+
+Fixed in round 19, agent 65 (wire tests `rows_stream_as_the_executor_makes_them`,
+`cancel_while_rows_stream`; session test `query_each_streams_rows_to_a_callback`): a SELECT's
+rows and COPY TO's data go to the client as the executor makes them (`session/sink.rs`,
+`server.rs` `WireSink`). The first row arrives while the statement runs, notices come in order
+with the rows, the rows made before an error go ahead of it, and memory stays bounded for any
+result. ruby-pg now matches PostgreSQL (its single-row-mode and COPY TO tests pass).
+Six suites ran again against the round 19 engine (debug build) and a private reference:
+- ruby-pg: 0 differences.
+- psycopg 3: the 9 hstore ones. Its two `test_copy_out_error_with_copy_not_finished` tests
+  found that a cancel didn't stop data streaming from a node that doesn't check for
+  interrupts; each streamed row now checks.
+- asyncpg: the 4 above, plus `test_executemany_server_failure_during_writes`, which is
+  timing-dependent. On this loaded machine it fails two runs in three against both the old
+  and the new engine: whether the error reaches the client before it has written all 128
+  rows.
+- pgx: the 4 hstore ones.
+- node-postgres: 1105, timing.
+- pgjdbc: the 3 above, plus TypeCacheDLLStressTest (see "Engine, open").
+
+Fixed in round 19, agent 66: databases in other encodings than UTF8 (Npgsql
+Non_UTF8_Encoding: a SQL_ASCII database written in WIN1252 and read back, then a UTF8 client's
+"invalid byte sequence"): CREATE DATABASE ... ENCODING, server_encoding, client_encoding
+conversions as PostgreSQL's (HANDOFF "Server encodings"); `tests/locale/encodings.sql`.
+With agent 53's extension types on the wire, Npgsql's suite now fails only where PostgreSQL's
+does (Serialization and one more). Cancel_while_reading_from_long_running_query failed in one
+of three engine runs before agent 65's streamed rows (it reads rows while a later row's
+pg_sleep(100) runs).
+
+Fixed in round 18, agent 51 (each with a golden, `a51_exists_param_join` / `a51_client_catalog`,
+or a wire test, `notices_copy_lines_and_portal_rows_as_they_come` /
+`described_types_startup_options_and_copy_not_null`):
+- Django's three "outer reference without an outer row" queries (and a wrong result, queries
+  test_combining_does_not_mutate): EXISTS over a join its own planning had made a nested loop
+  over a parameterized index path was pulled up with the path's parameter left in the inner
+  scan. Since 530923f (it took any nested loop with parameters for a LATERAL join; round 17
+  agent 38 saw it from the rebase onto 6dd2469, which came after it). Such a join is now taken
+  back to the one written (`sublink::unparameterized`); plans are Postgres's.
+- Notices go to the client as they are raised (PL/pgSQL RAISE in a long statement too).
+- COPY FROM STDIN reads lines / tuples as they come: a bad line or a NULL in a NOT NULL column
+  fails the COPY while the client is still sending (pgx).
+- A portal's SELECT runs only as far as each Execute's row count (and MOVE / FETCH on it).
+- ParameterDescription: an INSERT a DO INSTEAD NOTHING rule drops (lib/pq TestIssue186), a
+  parameter assigned to a domain column (tokio-postgres domain); RowDescription: EXPLAIN
+  (FORMAT JSON / XML), NULL::anyarray; EXPLAIN EXECUTE of a prepared utility statement (sqlx).
+- Startup: explicit parameters win over `options`' -c (lib/pq TestRuntimeParameters).
+- Catalog: makeArrayTypeName's `_name_1` (pgjdbc), pg_table_is_visible of information_schema
+  and pg_type_is_visible of row types (SQLAlchemy), pg_get_keywords (pgjdbc / Hibernate),
+  pg_get_serial_sequence of a (materialized) view's column (SQLAlchemy), information_schema's
+  bit lengths (Prisma), a default naming the same CREATE TABLE's serial sequence and
+  ARRAY[...]::oidvector / int2vector (ActiveRecord, tokio-postgres).
+- Limits: "target lists can have at most 1664 entries", ROW expressions (Npgsql); the largest
+  numerics in binary (pgx TestNumericCodec panicked).
+
+## Not run
+
+- ActiveRecord's full suite against the engine (about 6 hours: fixture loading, see above);
+  only its PostgreSQL adapter tests ran there.

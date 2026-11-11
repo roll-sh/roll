@@ -1,0 +1,219 @@
+> CREATE TABLE ms_t (a int PRIMARY KEY, b text)
+-- CREATE TABLE
+
+> CREATE TABLE ms_s (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO ms_t VALUES (1, 't1'), (2, 't2'), (3, 't3')
+-- INSERT 0 3
+
+> INSERT INTO ms_s VALUES (1, 's1'), (2, 's2'), (4, 's4'), (5, 's5')
+-- INSERT 0 4
+
+> CREATE FUNCTION ms_tf() RETURNS trigger LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE '% % % % old=% new=%', tg_name, tg_when, tg_op, tg_level,
+>     CASE WHEN tg_op IN ('UPDATE', 'DELETE') AND tg_level = 'ROW' THEN old::text END,
+>     CASE WHEN tg_op IN ('UPDATE', 'INSERT') AND tg_level = 'ROW' THEN new::text END;
+>   IF tg_when = 'BEFORE' AND tg_op = 'DELETE' THEN RETURN old; END IF;
+>   RETURN new;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION ms_snoop(x anyelement) RETURNS bool LANGUAGE plpgsql AS $$
+> BEGIN RAISE NOTICE 'snoop %', x; RETURN true; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER b_row BEFORE INSERT OR UPDATE OR DELETE ON ms_t FOR EACH ROW EXECUTE FUNCTION ms_tf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER a_row AFTER INSERT OR UPDATE OR DELETE ON ms_t FOR EACH ROW EXECUTE FUNCTION ms_tf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER b_st BEFORE INSERT OR UPDATE OR DELETE ON ms_t FOR EACH STATEMENT EXECUTE FUNCTION ms_tf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER a_st AFTER INSERT OR UPDATE OR DELETE ON ms_t FOR EACH STATEMENT EXECUTE FUNCTION ms_tf()
+-- CREATE TRIGGER
+
+> MERGE INTO ms_t t USING (SELECT * FROM ms_s ORDER BY a) s ON t.a = s.a
+>   WHEN MATCHED AND ms_snoop(t.b) AND s.a = 1 THEN UPDATE SET b = s.b
+>   WHEN MATCHED AND ms_snoop(s.b) THEN DELETE
+>   WHEN NOT MATCHED AND ms_snoop(s.a) THEN INSERT VALUES (s.a, s.b)
+>   RETURNING merge_action(), t.*
+NOTICE 00000: b_st BEFORE INSERT STATEMENT old=<NULL> new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: b_st BEFORE UPDATE STATEMENT old=<NULL> new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: b_st BEFORE DELETE STATEMENT old=<NULL> new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: snoop t1
+CONTEXT: PL/pgSQL function ms_snoop(anyelement) line 2 at RAISE
+NOTICE 00000: b_row BEFORE UPDATE ROW old=(1,t1) new=(1,s1)
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: snoop t2
+CONTEXT: PL/pgSQL function ms_snoop(anyelement) line 2 at RAISE
+NOTICE 00000: snoop s2
+CONTEXT: PL/pgSQL function ms_snoop(anyelement) line 2 at RAISE
+NOTICE 00000: b_row BEFORE DELETE ROW old=(2,t2) new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: snoop 4
+CONTEXT: PL/pgSQL function ms_snoop(anyelement) line 2 at RAISE
+NOTICE 00000: b_row BEFORE INSERT ROW old=<NULL> new=(4,s4)
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: snoop 5
+CONTEXT: PL/pgSQL function ms_snoop(anyelement) line 2 at RAISE
+NOTICE 00000: b_row BEFORE INSERT ROW old=<NULL> new=(5,s5)
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: a_row AFTER UPDATE ROW old=(1,t1) new=(1,s1)
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: a_row AFTER DELETE ROW old=(2,t2) new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: a_row AFTER INSERT ROW old=<NULL> new=(4,s4)
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: a_row AFTER INSERT ROW old=<NULL> new=(5,s5)
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: a_st AFTER DELETE STATEMENT old=<NULL> new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: a_st AFTER UPDATE STATEMENT old=<NULL> new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: a_st AFTER INSERT STATEMENT old=<NULL> new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+merge_action:text | a:int4 | b:text
+UPDATE | 1 | s1
+DELETE | 2 | t2
+INSERT | 4 | s4
+INSERT | 5 | s5
+-- MERGE 4
+
+> SELECT * FROM ms_t ORDER BY a
+a:int4 | b:text
+1 | s1
+3 | t3
+4 | s4
+5 | s5
+-- SELECT 4
+
+> MERGE INTO ms_t t USING (VALUES (1, 'x'), (1, 'y')) s(a, b) ON t.a = s.a
+>   WHEN MATCHED THEN UPDATE SET b = s.b
+NOTICE 00000: b_st BEFORE UPDATE STATEMENT old=<NULL> new=<NULL>
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+NOTICE 00000: b_row BEFORE UPDATE ROW old=(1,s1) new=(1,x)
+CONTEXT: PL/pgSQL function ms_tf() line 3 at RAISE
+ERROR 21000: MERGE command cannot affect row a second time
+HINT: Ensure that not more than one source row matches any one target row.
+
+> SELECT * FROM ms_t ORDER BY a
+a:int4 | b:text
+1 | s1
+3 | t3
+4 | s4
+5 | s5
+-- SELECT 4
+
+> DROP TRIGGER b_row ON ms_t
+-- DROP TRIGGER
+
+> DROP TRIGGER a_row ON ms_t
+-- DROP TRIGGER
+
+> DROP TRIGGER b_st ON ms_t
+-- DROP TRIGGER
+
+> DROP TRIGGER a_st ON ms_t
+-- DROP TRIGGER
+
+> CREATE FUNCTION ms_count() RETURNS bigint LANGUAGE sql VOLATILE AS 'SELECT count(*) FROM ms_t'
+-- CREATE FUNCTION
+
+> MERGE INTO ms_t t USING (SELECT g AS a, ms_count() AS n FROM generate_series(6, 8) g) s ON t.a = s.a
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.a, 'n=' || s.n)
+>   RETURNING t.*
+a:int4 | b:text
+6 | n=4
+7 | n=5
+8 | n=6
+-- MERGE 3
+
+> CREATE TABLE ms_pt (tid int, balance float, val text) PARTITION BY LIST (tid)
+-- CREATE TABLE
+
+> CREATE TABLE ms_p1 PARTITION OF ms_pt FOR VALUES IN (1, 4)
+-- CREATE TABLE
+
+> CREATE TABLE ms_p2 PARTITION OF ms_pt FOR VALUES IN (2, 5, 6)
+-- CREATE TABLE
+
+> CREATE TABLE ms_p4 PARTITION OF ms_pt DEFAULT
+-- CREATE TABLE
+
+> CREATE TABLE ms_src (sid int, delta float)
+-- CREATE TABLE
+
+> INSERT INTO ms_src SELECT id, id * 10 FROM generate_series(1, 6) AS id
+-- INSERT 0 6
+
+> INSERT INTO ms_pt SELECT id, id * 100, 'initial' FROM generate_series(1, 7, 2) AS id
+-- INSERT 0 4
+
+> BEGIN
+-- BEGIN
+
+> CREATE FUNCTION ms_null() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER del_trig BEFORE DELETE ON ms_pt FOR EACH ROW EXECUTE PROCEDURE ms_null()
+-- CREATE TRIGGER
+
+> DO $$ DECLARE result integer; BEGIN
+> MERGE INTO ms_pt t USING ms_src s ON t.tid = s.sid
+>   WHEN MATCHED THEN UPDATE SET tid = tid + 1, balance = balance + delta, val = val || ' updated by merge'
+>   WHEN NOT MATCHED THEN INSERT VALUES (sid, delta, 'inserted by merge')
+>   WHEN NOT MATCHED BY SOURCE THEN UPDATE SET val = val || ' not matched by source';
+> GET DIAGNOSTICS result := ROW_COUNT; RAISE NOTICE 'ROW_COUNT = %', result; END; $$
+NOTICE 00000: ROW_COUNT = 5
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+-- DO
+
+> SELECT * FROM ms_pt ORDER BY tid, val
+tid:int4 | balance:float8 | val:text
+1 | 100 | initial
+2 | 20 | inserted by merge
+3 | 300 | initial
+4 | 40 | inserted by merge
+6 | 550 | initial updated by merge
+6 | 60 | inserted by merge
+7 | 700 | initial not matched by source
+-- SELECT 7
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> CREATE FUNCTION ms_null() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER ins_trig BEFORE INSERT ON ms_pt FOR EACH ROW EXECUTE PROCEDURE ms_null()
+-- CREATE TRIGGER
+
+> DO $$ DECLARE result integer; BEGIN
+> MERGE INTO ms_pt t USING ms_src s ON t.tid = s.sid
+>   WHEN MATCHED THEN UPDATE SET tid = tid + 1, balance = balance + delta, val = val || ' updated by merge'
+>   WHEN NOT MATCHED THEN INSERT VALUES (sid, delta, 'inserted by merge')
+>   WHEN NOT MATCHED BY SOURCE THEN UPDATE SET val = val || ' not matched by source';
+> GET DIAGNOSTICS result := ROW_COUNT; RAISE NOTICE 'ROW_COUNT = %', result; END; $$
+NOTICE 00000: ROW_COUNT = 2
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+-- DO
+
+> SELECT * FROM ms_pt ORDER BY tid, val
+tid:int4 | balance:float8 | val:text
+6 | 550 | initial updated by merge
+7 | 700 | initial not matched by source
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+

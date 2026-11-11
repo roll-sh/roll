@@ -1,0 +1,288 @@
+> CREATE TABLE t (a int, b int, s text, n numeric)
+-- CREATE TABLE
+
+> INSERT INTO t VALUES (1, 10, 'x', 1.5), (2, 20, 'y', 'NaN')
+-- INSERT 0 2
+
+> CREATE TABLE e (a int)
+-- CREATE TABLE
+
+> CREATE TABLE d (a int, b int DEFAULT 1/0, c varchar(2) DEFAULT 'abc')
+-- CREATE TABLE
+
+> CREATE FUNCTION f0(x int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT x / 0'
+-- CREATE FUNCTION
+
+> CREATE VIEW v AS SELECT a, 1/0 AS z FROM t
+-- CREATE VIEW
+
+> SELECT 1 FROM (SELECT 1/0 AS c FROM t) s
+?column?:int4
+1
+1
+-- SELECT 2
+
+> SELECT 1 FROM (SELECT 1/0 AS c FROM t OFFSET 0) s
+?column?:int4
+1
+1
+-- SELECT 2
+
+> SELECT 1 FROM (SELECT 1/0 AS c, a FROM t GROUP BY a) s
+?column?:int4
+1
+1
+-- SELECT 2
+
+> SELECT s.a FROM (SELECT a, 1/0 AS c FROM t) s ORDER BY 1
+a:int4
+1
+2
+-- SELECT 2
+
+> SELECT a FROM v ORDER BY 1
+a:int4
+1
+2
+-- SELECT 2
+
+> SELECT z FROM v
+ERROR 22012: division by zero
+
+> SELECT 1 FROM (SELECT DISTINCT 1/0 AS c FROM t) s
+ERROR 22012: division by zero
+
+> SELECT 1 FROM (SELECT 1/0 AS c FROM t ORDER BY 1) s
+ERROR 22012: division by zero
+
+> SELECT 1 FROM (SELECT 1/0 AS c FROM t LIMIT 1) s
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT 1 FROM (SELECT 'NaN'::numeric::int AS c FROM t) s
+?column?:int4
+1
+1
+-- SELECT 2
+
+> SELECT 1 FROM (SELECT f0(1) AS c FROM t) s
+?column?:int4
+1
+1
+-- SELECT 2
+
+> SELECT 1 FROM (SELECT 1/0 AS c) s WHERE s.c > 0
+ERROR 22012: division by zero
+
+> SELECT t.a FROM t LEFT JOIN (SELECT a, 1/0 AS z FROM e) s ON s.a = t.a ORDER BY 1
+a:int4
+1
+2
+-- SELECT 2
+
+> SELECT 1 FROM (VALUES (1/0)) v(c)
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT count(*) FROM (SELECT a, 1/0 AS c FROM t) s
+count:int8
+2
+-- SELECT 1
+
+> SELECT count(c) FROM (SELECT a, 1/0 AS c FROM t) s
+ERROR 22012: division by zero
+
+> WITH w AS (SELECT 1/0) SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> WITH w AS (SELECT 1/0 AS c) SELECT 1 FROM w
+?column?:int4
+1
+-- SELECT 1
+
+> WITH w AS MATERIALIZED (SELECT 1/0 AS c) SELECT 1 FROM w
+ERROR 22012: division by zero
+
+> WITH w1 AS (SELECT 1/0 AS x), w6 AS (SELECT 1 FROM w1) SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> WITH w1 AS MATERIALIZED (SELECT 1/0 AS x), w6 AS (SELECT x FROM w1) SELECT 1
+ERROR 22012: division by zero
+
+> WITH w1 AS MATERIALIZED (SELECT * FROM e WHERE a <= 1/0), w6 AS (SELECT 1 FROM w1 HAVING false) SELECT 1
+ERROR 22012: division by zero
+
+> SELECT a FROM t WHERE false AND 1/0 = 1
+a:int4
+-- SELECT 0
+
+> SELECT a FROM t WHERE 1/0 = 1 AND false
+ERROR 22012: division by zero
+
+> SELECT a FROM t WHERE true OR 1/0 = 1 ORDER BY 1
+a:int4
+1
+2
+-- SELECT 2
+
+> SELECT a FROM t WHERE 1/0 = 1 OR true
+ERROR 22012: division by zero
+
+> SELECT false AND 1/0 = 1
+?column?:bool
+f
+-- SELECT 1
+
+> SELECT 1/0 = 1 AND false
+ERROR 22012: division by zero
+
+> SELECT COALESCE(1, 1/0)
+coalesce:int4
+1
+-- SELECT 1
+
+> SELECT COALESCE(NULL, 1/0)
+ERROR 22012: division by zero
+
+> SELECT CASE WHEN false THEN 1/0 ELSE 1 END
+case:int4
+1
+-- SELECT 1
+
+> SELECT CASE WHEN true THEN 1 ELSE 1/0 END
+case:int4
+1
+-- SELECT 1
+
+> SELECT CASE WHEN a > 0 THEN 1/0 ELSE 1 END FROM e
+ERROR 22012: division by zero
+
+> SELECT CASE 1 WHEN 2 THEN 1/0 ELSE 3 END
+case:int4
+3
+-- SELECT 1
+
+> SELECT int4pl(NULL, 1/0)
+ERROR 22012: division by zero
+
+> SELECT a FROM t WHERE f0(1) = 1 AND false
+ERROR 22012: division by zero
+CONTEXT: SQL function "f0" statement 1
+
+> SELECT 1 FROM t GROUP BY a HAVING false AND 1/0 = 1
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM t GROUP BY a HAVING 1/0 = 1 AND false
+ERROR 22012: division by zero
+
+> SELECT 1 FROM t JOIN e ON false AND 1/0 = 1
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM t JOIN e ON 1/0 = 1 AND false
+ERROR 22012: division by zero
+
+> SELECT 1/0 FROM t WHERE false
+ERROR 22012: division by zero
+
+> SELECT 1/0 FROM e
+ERROR 22012: division by zero
+
+> SELECT 1/0 FROM t LIMIT 0
+ERROR 22012: division by zero
+
+> SELECT a FROM t ORDER BY 1/0
+ERROR 22012: division by zero
+
+> SELECT 'NaN'::numeric::int FROM e
+ERROR 0A000: cannot convert NaN to integer
+
+> SELECT f0(1) FROM e
+ERROR 22012: division by zero
+CONTEXT: SQL function "f0" statement 1
+
+> SELECT 1 FROM e LIMIT 1/0
+ERROR 22012: division by zero
+
+> SELECT a FROM t WHERE EXISTS (SELECT 1/0 FROM e)
+a:int4
+-- SELECT 0
+
+> SELECT 1 WHERE EXISTS (SELECT jsonb_array_length('1'))
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT EXISTS (SELECT 1/0 FROM e GROUP BY a)
+exists:bool
+f
+-- SELECT 1
+
+> SELECT EXISTS (SELECT 1/0 FROM e HAVING count(*) > 0)
+ERROR 22012: division by zero
+
+> SELECT EXISTS (SELECT 1/0, count(*) FROM e)
+ERROR 22012: division by zero
+
+> INSERT INTO d (a, b, c) VALUES (1, 2, 'ab')
+-- INSERT 0 1
+
+> INSERT INTO d (a) VALUES (1)
+ERROR 22012: division by zero
+
+> INSERT INTO d (a) SELECT 1 WHERE false
+ERROR 22012: division by zero
+
+> INSERT INTO d (a, b) SELECT 1, 2 WHERE false
+ERROR 22001: value too long for type character varying(2)
+
+> UPDATE d SET b = 1/0 WHERE false
+ERROR 22012: division by zero
+
+> DELETE FROM e WHERE false AND 1/0 = 1
+-- DELETE 0
+
+> DELETE FROM e WHERE 1/0 = 1
+ERROR 22012: division by zero
+
+> SELECT 'a'::int, 1/0 FROM t WHERE 1/0 = 1
+ERROR 22P02: invalid input syntax for type integer: "a" (at 8)
+
+> SELECT 1/0 AS x, 2/0 AS y
+ERROR 22012: division by zero
+
+> EXPLAIN (COSTS OFF) SELECT 1 FROM (SELECT 1/0 AS c FROM t) s
+QUERY PLAN:text
+Seq Scan on t
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a FROM t WHERE false AND 1/0 = 1
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT 1/0 FROM t
+ERROR 22012: division by zero
+
+> EXPLAIN (COSTS OFF) WITH w1 AS MATERIALIZED (SELECT * FROM e WHERE a <= 1), w6 AS (SELECT 1 FROM w1) SELECT 1
+QUERY PLAN:text
+Result
+  CTE w1
+    ->  Seq Scan on e
+          Filter: (a <= 1)
+-- EXPLAIN
+
+> DROP VIEW v
+-- DROP VIEW
+
+> DROP FUNCTION f0(int)
+-- DROP FUNCTION
+

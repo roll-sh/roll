@@ -1,0 +1,746 @@
+> create table gxk_t0 (a int, b text)
+-- CREATE TABLE
+
+> create function gxk_f1() returns int language plpgsql as $$
+> begin
+>   x := 1;
+>   return 1;
+> end $$
+ERROR 42601: "x" is not a known variable (at 69)
+
+> create function gxk_f2() returns int language plpgsql as $$
+> declare y int;
+> begin
+>   select 1 into x;
+>   return 1;
+> end $$
+ERROR 42601: "x" is not a known variable (at 98)
+
+> create function gxk_f3() returns int language plpgsql as $$
+> declare y int; y text;
+> begin
+>   return 1;
+> end $$
+ERROR 42601: duplicate declaration at or near "y" (at 76)
+
+> create function gxk_f4() returns int language plpgsql as $$
+> begin
+>   continue;
+>   return 1;
+> end $$
+ERROR 42601: CONTINUE cannot be used outside a loop (at 69)
+
+> create function gxk_f5() returns int language plpgsql as $$
+> begin
+>   exit;
+> end $$
+ERROR 42601: EXIT cannot be used outside a loop, unless it has a label (at 69)
+
+> create function gxk_f6() returns int language plpgsql as $$
+> begin
+>   loop exit foo; end loop;
+> end $$
+ERROR 42601: there is no label "foo" attached to any block or loop enclosing this statement (at 79)
+
+> create function gxk_f7() returns int language plpgsql as $$
+> begin
+>   raise notice 'a % b %', 1;
+> end $$
+ERROR 42601: too few parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "gxk_f7" near line 3
+
+> create function gxk_f8() returns int language plpgsql as $$
+> begin
+>   raise notice 'a', 1;
+> end $$
+ERROR 42601: too many parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "gxk_f8" near line 3
+
+> create function gxk_f9() returns int language plpgsql as $$
+> begin
+>   raise notice 'a' using foo = 1;
+> end $$
+ERROR 42601: unrecognized RAISE statement option at or near "foo" (at 92)
+
+> create function gxk_f10() returns setof int language plpgsql as $$
+> begin
+>   return 1;
+> end $$
+ERROR 42804: RETURN cannot have a parameter in function returning set (at 83)
+HINT: Use RETURN NEXT or RETURN QUERY.
+
+> create function gxk_f11() returns int language plpgsql as $$
+> begin
+>   selec 1;
+> end $$
+ERROR 42601: syntax error at or near "selec" (at 70)
+
+> create function gxk_f12() returns int language plpgsql as $$
+> begin
+>   select from from gxk_t0;
+> end $$
+ERROR 42601: syntax error at or near "from" (at 82)
+
+> create function gxk_f13() returns int language plpgsql as $$
+> begin
+>   if 1 = then null; end if;
+> end $$
+ERROR 42601: syntax error at end of input (at 76)
+
+> create function gxk_f14() returns int language plpgsql as $$
+> declare c cursor (p int) for select p;
+> begin
+>   open c;
+> end $$
+ERROR 42601: cursor "c" has arguments (at 115)
+
+> create function gxk_f15() returns int language plpgsql as $$
+> declare c cursor for select 1;
+> begin
+>   open c(1);
+> end $$
+ERROR 42601: cursor "c" has no arguments (at 107)
+
+> create function gxk_f16() returns int language plpgsql as $$
+> declare c cursor (p int, q int) for select p;
+> begin
+>   open c(1);
+> end $$
+ERROR 42601: not enough arguments for cursor "c" (at 124)
+
+> create function gxk_f17() returns int language plpgsql as $$
+> declare x constant int := 1;
+> begin
+>   x := 2;
+> end $$
+ERROR 22005: variable "x" is declared CONSTANT (at 99)
+
+> create function gxk_f18() returns int language plpgsql as $$
+> declare x int;
+> begin
+>   for x, y in select 1, 2 loop end loop;
+> end $$
+ERROR 42601: "y" is not a known variable (at 92)
+
+> create function gxk_f19() returns int language plpgsql as $$
+> begin
+>   foo.bar := 1;
+> end $$
+ERROR 42601: "foo.bar" is not a known variable (at 70)
+
+> create function gxk_f20() returns int language plpgsql as $$
+> begin
+>   return
+> end $$
+ERROR 42601: syntax error at or near "end" (at 77)
+
+> create function gxk_f21() returns int language plpgsql as $$
+> begin
+>   perform from;
+> end $$
+ERROR 42601: syntax error at end of input (at 82)
+
+> create function gxk_f22() returns int language plpgsql as $$
+> begin
+>   get diagnostics x = row_count;
+> end $$
+ERROR 42601: "x" is not a known variable (at 86)
+
+> create function gxk_f23() returns int language plpgsql as $$
+> declare x int;
+> begin
+>   get diagnostics x = foo;
+> end $$
+ERROR 42601: unrecognized GET DIAGNOSTICS item at or near "foo" (at 105)
+
+> create function gxk_f24() returns int language plpgsql as $$
+> declare x int;
+> begin
+>   get stacked diagnostics x = row_count;
+> end $$
+ERROR 42601: diagnostics item ROW_COUNT is not allowed in GET STACKED DIAGNOSTICS (at 85)
+
+> create function gxk_f25() returns int language plpgsql as $$
+> declare x int;
+> begin
+>   fetch c into x;
+> end $$
+ERROR 42601: missing "FROM or IN" at end of SQL expression (at 99)
+
+> create function gxk_f26() returns int language plpgsql as $$
+> declare x int;
+> begin
+>   open x for select 1;
+> end $$
+ERROR 42804: variable "x" must be of type cursor or refcursor (at 90)
+
+> create function gxk_f27() returns int language plpgsql as $$
+> declare x int;
+> begin
+>   while x loop
+> end $$
+ERROR 42601: syntax error at end of input (at 102)
+
+> create function gxk_f28() returns int language plpgsql as $$
+> <<lbl>>
+> declare x int;
+> begin
+>   begin continue lbl; end;
+> end $$
+ERROR 42601: block label "lbl" cannot be used in CONTINUE (at 108)
+
+> create function gxk_f29() returns int language plpgsql as $$
+> declare x int not null;
+> begin
+> end $$
+ERROR 22004: variable "x" must have a default value, since it's declared NOT NULL (at 76)
+
+> create function gxk_f30() returns int language plpgsql as $$
+> declare x int;
+> begin
+>   for i in reverse select 1 loop end loop;
+> end $$
+ERROR 42601: cannot specify REVERSE in query FOR loop (at 94)
+
+> do $$ begin x := 1; end $$
+ERROR 42601: "x" is not a known variable (at 13)
+
+> do $$ declare a int; a int; begin end $$
+ERROR 42601: duplicate declaration at or near "a" (at 22)
+
+> do $$ begin raise notice '%'; end $$
+ERROR 42601: too few parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "inline_code_block" near line 1
+
+> do $$ begin selec 1; end $$
+ERROR 42601: syntax error at or near "selec" (at 13)
+
+> create function gxk_r1() returns int language plpgsql as $$
+> begin
+>   if true then return 1
+>   end if;
+> end; $$
+ERROR 42601: syntax error at or near "if" (at 97)
+
+> create function gxk_r3() returns setof int language plpgsql as $$
+> begin
+>   return next;
+> end $$
+ERROR 42601: missing expression at or near ";" (at 86)
+
+> create function gxk_r4(out x int) returns int language plpgsql as $$
+> begin
+>   return next 1;
+> end $$
+ERROR 42804: cannot use RETURN NEXT in a non-SETOF function (at 78)
+
+> create function gxk_r5(out x int) returns setof int language plpgsql as $$
+> begin
+>   return next 1;
+> end $$
+ERROR 42804: RETURN NEXT cannot have a parameter in function with OUT parameters (at 96)
+
+> create function gxk_r6() returns void language plpgsql as $$
+> begin
+>   return query select 1;
+> end $$
+ERROR 42804: cannot use RETURN QUERY in a non-SETOF function (at 70)
+
+> create procedure gxk_p1() language plpgsql as $$
+> begin
+>   return 1;
+> end $$
+ERROR 42601: RETURN cannot have a parameter in a procedure (at 65)
+
+> create procedure gxk_p2(out x int) language plpgsql as $$
+> begin
+>   return 1;
+> end $$
+ERROR 42804: RETURN cannot have a parameter in function with OUT parameters (at 74)
+
+> create function gxk_dd1() returns int language plpgsql as $$
+> declare
+>   a int;
+>   b a%type;
+>   c gxk_t0%rowtype;
+>   d gxk_t0.a%type;
+>   e nosuch%type;
+> begin
+>   return 1;
+> end $$
+ERROR 42704: variable "nosuch" does not exist
+CONTEXT: compilation of PL/pgSQL function "gxk_dd1" near line 7
+
+> create function gxk_dd2() returns int language plpgsql as $$
+> declare
+>   c nosuch%rowtype;
+> begin
+>   return 1;
+> end $$
+ERROR 42P01: relation "nosuch" does not exist
+CONTEXT: compilation of PL/pgSQL function "gxk_dd2" near line 3
+
+> create function gxk_dd3() returns int language plpgsql as $$
+> declare
+>   c gxk_t0.zz%type;
+> begin
+>   return 1;
+> end $$
+ERROR 42703: column "zz" of relation "gxk_t0" does not exist
+CONTEXT: compilation of PL/pgSQL function "gxk_dd3" near line 3
+
+> create function gxk_dd4() returns int language plpgsql as $$
+> declare
+>   c int collate "C";
+> begin
+>   return 1;
+> end $$
+ERROR 42804: collations are not supported by type integer (at 78)
+
+> create function gxk_dd5() returns int language plpgsql as $$
+> declare
+>   c text collate "nosuch";
+> begin
+>   return 1;
+> end $$
+ERROR 42704: collation "nosuch" for encoding "UTF8" does not exist
+CONTEXT: compilation of PL/pgSQL function "gxk_dd5" near line 3
+
+> create function gxk_dd6() returns int language plpgsql as $$
+> declare
+>   c nosuchtype;
+> begin
+>   return 1;
+> end $$
+ERROR 42704: type "nosuchtype" does not exist (at 74)
+
+> create function gxk_dd7() returns int language plpgsql as $$
+> declare
+>   c int[;
+> begin
+>   return 1;
+> end $$
+ERROR 42601: syntax error at end of input (at 78)
+CONTEXT: invalid type name "int["
+
+> create function gxk_dd8() returns int language plpgsql as $$
+> declare
+>   c;
+> begin
+>   return 1;
+> end $$
+ERROR 42601: missing data type declaration at or near ";" (at 73)
+
+> create function gxk_dd9() returns int language plpgsql as $$
+> declare
+>   c anyelement;
+> begin
+>   return 1;
+> end $$
+ERROR 0A000: variable "c" has pseudo-type anyelement
+CONTEXT: compilation of PL/pgSQL function "gxk_dd9" near line 3
+
+> create function gxk_dd10() returns int language plpgsql as $$
+> declare
+>   c alias for nosuch;
+> begin
+>   return 1;
+> end $$
+ERROR 42704: variable "nosuch" does not exist (at 85)
+
+> create function gxk_dd11(int) returns int language plpgsql as $$
+> declare
+>   c alias for $1;
+>   <<lbl>>
+> begin
+>   return 1;
+> end $$
+ERROR 42601: block label must be placed before DECLARE, not after (at 94)
+
+> create function gxk_dd12() returns int language plpgsql as $$
+> declare
+>   c int := ;
+> begin
+>   return 1;
+> end $$
+ERROR 42601: missing expression at or near ";" (at 82)
+
+> create function gxk_l1() returns int language plpgsql as $$
+> <<a>>
+> begin
+>   return 1;
+> end b $$
+ERROR 42601: end label "b" differs from block's label "a" (at 89)
+
+> create function gxk_l2() returns int language plpgsql as $$
+> begin
+>   return 1;
+> end b $$
+ERROR 42601: end label "b" specified for unlabeled block (at 83)
+
+> create function gxk_l3() returns int language plpgsql as $$
+> begin
+>   <<x>> loop exit; end loop y;
+>   return 1;
+> end $$
+ERROR 42601: end label "y" differs from block's label "x" (at 95)
+
+> create function gxk_l4() returns int language plpgsql as $$
+> begin
+>   <<x>> loop continue gxk_l4; end loop;
+>   return 1;
+> end $$
+ERROR 42601: block label "gxk_l4" cannot be used in CONTINUE (at 89)
+
+> create function gxk_l5() returns int language plpgsql as $$
+> begin
+>   <<x>> x := 1;
+> end $$
+ERROR 42601: syntax error at or near "x" (at 75)
+
+> create function gxk_cc1() returns int language plpgsql as $$
+> declare c cursor (p int, q int) for select p;
+> begin
+>   open c(p := 1, p := 2);
+> end $$
+ERROR 42601: value for parameter "p" of cursor "c" specified more than once (at 131)
+
+> create function gxk_cc2() returns int language plpgsql as $$
+> declare c cursor (p int, q int) for select p;
+> begin
+>   open c(z := 1, p := 2);
+> end $$
+ERROR 42601: cursor "c" has no argument named "z" (at 123)
+
+> create function gxk_cc3() returns int language plpgsql as $$
+> declare c cursor (p int) for select p;
+> begin
+>   open c(1, 2);
+> end $$
+ERROR 42601: too many arguments for cursor "c" (at 117)
+
+> create function gxk_cc4() returns int language plpgsql as $$
+> declare c cursor (p int) for select p; r record;
+> begin
+>   for r in c loop end loop;
+> end $$
+ERROR 42601: cursor "c" has arguments (at 130)
+
+> create function gxk_cc5() returns int language plpgsql as $$
+> declare c refcursor; r record;
+> begin
+>   for r in c loop end loop;
+> end $$
+ERROR 42601: cursor FOR loop must use a bound cursor variable (at 110)
+
+> create function gxk_cc6() returns int language plpgsql as $$
+> declare c refcursor;
+> begin
+>   open c scroll select 1;
+> end $$
+ERROR 42601: syntax error, expected "FOR" at or near "select" (at 105)
+
+> create function gxk_cc7() returns int language plpgsql as $$
+> declare c refcursor; x int;
+> begin
+>   fetch all from c into x;
+> end $$
+ERROR 0A000: FETCH statement cannot return multiple rows (at 98)
+
+> create function gxk_cc8() returns int language plpgsql as $$
+> declare c refcursor; x int;
+> begin
+>   fetch c into strict x;
+> end $$
+ERROR 42601: syntax error at or near "strict" (at 111)
+
+> create function gxk_cc9() returns int language plpgsql as $$
+> declare c refcursor; x int;
+> begin
+>   move forward 2 c;
+> end $$
+ERROR 42601: missing "FROM or IN" at end of SQL expression (at 114)
+
+> create function gxk_e1() returns int language plpgsql as $$
+> begin
+>   return 1;
+> exception when nosuch then null;
+> end $$
+ERROR 42704: unrecognized exception condition "nosuch"
+CONTEXT: compilation of PL/pgSQL function "gxk_e1" near line 4
+
+> create function gxk_e2() returns int language plpgsql as $$
+> begin
+>   return 1;
+> exception when sqlstate '2201' then null;
+> end $$
+ERROR 42601: invalid SQLSTATE code at or near "'2201'" (at 103)
+
+> create function gxk_e3() returns int language plpgsql as $$
+> begin
+>   return 1;
+> exception when others then sqlstate := 'x';
+> end $$
+ERROR 22005: variable "sqlstate" is declared CONSTANT (at 106)
+
+> create function gxk_x1() returns int language plpgsql as $$
+> declare x int; y int;
+> begin
+>   execute 'select 1' into x into y;
+> end $$
+ERROR 42601: syntax error at or near "into" (at 117)
+
+> create function gxk_x2() returns int language plpgsql as $$
+> declare x int; y int;
+> begin
+>   select 1 into x into y;
+> end $$
+ERROR 42601: INTO specified more than once at or near "into" (at 107)
+
+> create function gxk_x3() returns int language plpgsql as $$
+> declare x int; r record;
+> begin
+>   select 1 into x, r;
+> end $$
+ERROR 42601: "r" is not a scalar variable (at 111)
+
+> create function gxk_x4() returns int language plpgsql as $$
+> declare x int; r record;
+> begin
+>   select 1 into r, x;
+> end $$
+ERROR 42601: record variable cannot be part of multiple-item INTO list (at 109)
+
+> create function gxk_x5() returns int language plpgsql as $$
+> begin
+>   raise exception;
+> end $$
+ERROR 42601: syntax error at or near ";" (at 84)
+
+> create function gxk_x6() returns int language plpgsql as $$
+> begin
+>   raise nosuch_condition;
+> end $$
+ERROR 42704: unrecognized exception condition "nosuch_condition"
+CONTEXT: compilation of PL/pgSQL function "gxk_x6" near line 3
+
+> create function gxk_x7() returns int language plpgsql as $$
+> begin
+>   raise sqlstate '123';
+> end $$
+ERROR 42601: invalid SQLSTATE code at or near "'123'" (at 84)
+
+> create function gxk_x8() returns int language plpgsql as $$
+> begin
+>   raise notice 'x' using message := 1, hint 2;
+> end $$
+ERROR 42601: syntax error, expected "=" at or near "2" (at 111)
+
+> create function gxk_x9() returns int language plpgsql as $$
+> begin
+>   assert 1 +;
+> end $$
+ERROR 42601: syntax error at end of input (at 79)
+
+> create function gxk_y1() returns int language plpgsql as $$
+> #option dump
+> #variable_conflict use_column
+> #print_strict_params on
+> begin
+>   return 1;
+> end $$
+-- CREATE FUNCTION
+
+> create function gxk_y2() returns int language plpgsql as $$
+> #print_strict_params maybe
+> begin
+>   return 1;
+> end $$
+ERROR XX000: unrecognized print_strict_params option maybe
+CONTEXT: compilation of PL/pgSQL function "gxk_y2" near line 1
+
+> create function gxk_y3() returns int language plpgsql as $$
+> #foo bar
+> begin
+>   return 1;
+> end $$
+ERROR 42601: syntax error at or near "foo" (at 62)
+
+> create function gxk_z1() returns int language plpgsql as $$
+> begin
+>   perform 'abc;
+> end $$
+ERROR 42601: unterminated quoted string at or near "'abc;
+end " (at 77)
+
+> create function gxk_z2() returns int language plpgsql as $$
+> begin
+>   /* unterminated
+> end $$
+ERROR 42601: unterminated /* comment at or near "/* unterminated
+end " (at 69)
+
+> create function gxk_z3() returns int language plpgsql as $$
+> begin
+>   return 123abc;
+> end $$
+ERROR 42601: trailing junk after numeric literal at or near "123abc" (at 76)
+
+> create function gxk_z4() returns int language plpgsql as $$
+> begin
+>   for i in 1..10 loop
+>     foreach x in array array[1] loop end loop;
+>   end loop;
+> end $$
+ERROR 42601: loop variable of FOREACH must be a known variable or list of variables (at 101)
+
+> create function gxk_z5() returns int language plpgsql as $$
+> declare r record;
+> begin
+>   for r, x in select 1 loop end loop;
+> end $$
+ERROR 42601: syntax error at or near "," (at 92)
+
+> create function gxk_z6() returns int language plpgsql as $$
+> begin
+>   for i in 1, 2 .. 3 loop end loop;
+> end $$
+-- CREATE FUNCTION
+
+> create function gxk_z7() returns int language plpgsql as $$
+> begin
+>   case when 1 then null; end;
+> end $$
+ERROR 42601: syntax error at or near ";" (at 95)
+
+> create function gxk_z8() returns int language plpgsql as $$
+> begin
+>   table gxk_t0;
+> end $$
+ERROR 42601: syntax error at or near "table" (at 69)
+
+> create function gxk_z9() returns int language plpgsql as $$
+> begin
+>   update gxk_t0 set a = 1 where;
+> end $$
+ERROR 42601: syntax error at end of input (at 98)
+
+> set check_function_bodies = off
+-- SET
+
+> create function gxk_g1() returns int language plpgsql as $$
+> begin
+>   if 1 then
+>     raise notice '% %', 1;
+>   end if;
+>   return 1;
+> end $$
+-- CREATE FUNCTION
+
+> select gxk_g1()
+ERROR 42601: too few parameters specified for RAISE
+CONTEXT: compilation of PL/pgSQL function "gxk_g1" near line 4
+
+> create function gxk_g2() returns int language plpgsql as $$
+> declare x nosuchtype;
+> begin
+>   return 1;
+> end $$
+-- CREATE FUNCTION
+
+> select gxk_g2()
+ERROR 42704: type "nosuchtype" does not exist
+QUERY: 
+declare x nosuchtype;
+begin
+  return 1;
+end  (at 12)
+CONTEXT: compilation of PL/pgSQL function "gxk_g2" near line 2
+
+> create function gxk_g3() returns int language plpgsql as $$
+> begin
+>   selec 1;
+>   return 1;
+> end $$
+-- CREATE FUNCTION
+
+> select gxk_g3()
+ERROR 42601: syntax error at or near "selec"
+QUERY: selec 1 (at 1)
+CONTEXT: PL/pgSQL function gxk_g3() line 3 at SQL statement
+
+> create function gxk_g4() returns int language plpgsql as $$
+> begin
+>   x := 1;
+>   return 1;
+> end $$
+-- CREATE FUNCTION
+
+> select gxk_g4()
+ERROR 42601: "x" is not a known variable
+QUERY: 
+begin
+  x := 1;
+  return 1;
+end  (at 10)
+CONTEXT: compilation of PL/pgSQL function "gxk_g4" near line 1
+
+> do $$ begin x := 1; end $$
+ERROR 42601: "x" is not a known variable (at 13)
+
+> do $$ begin selec 1; end $$
+ERROR 42601: syntax error at or near "selec"
+QUERY: selec 1 (at 1)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at SQL statement
+
+> reset check_function_bodies
+-- RESET
+
+> do $$ begin perform 1 +; end $$
+ERROR 42601: syntax error at end of input (at 24)
+
+> create function gxk_h1() returns nosuch as $$ begin end $$ language plpgsql
+ERROR 42704: type "nosuch" does not exist
+
+> create function gxk_h2() returns setof nosuch as $$ begin end $$ language plpgsql
+ERROR 42704: type "nosuch" does not exist
+
+> create function gxk_h3(x nosuch) returns int as $$ begin end $$ language plpgsql
+ERROR 42704: type nosuch does not exist (at 26)
+
+> create function gxk_h4() returns table (x nosuch) as $$ begin end $$ language plpgsql
+ERROR 42704: type nosuch does not exist (at 43)
+
+> create function gxk_h5(x nosuch[]) returns int as $$ begin end $$ language plpgsql
+ERROR 42704: type nosuch[] does not exist (at 26)
+
+> create function gxk_h6(x public.nosuch) returns int as $$ begin end $$ language plpgsql
+ERROR 42704: type public.nosuch does not exist (at 26)
+
+> create function gxk_h7(x anyelement) returns anyrange as $$ begin end $$ language plpgsql
+ERROR 42P13: cannot determine result data type
+DETAIL: A result of type anyrange requires at least one input of type anyrange or anymultirange.
+
+> create function gxk_h8(x int) returns anyelement as $$ begin end $$ language plpgsql
+ERROR 42P13: cannot determine result data type
+DETAIL: A result of type anyelement requires at least one input of type anyelement, anyarray, anynonarray, anyenum, anyrange, or anymultirange.
+
+> create function gxk_h9(x anycompatible) returns anycompatiblerange as $$ begin end $$ language plpgsql
+ERROR 42P13: cannot determine result data type
+DETAIL: A result of type anycompatiblerange requires at least one input of type anycompatiblerange or anycompatiblemultirange.
+
+> create function gxk_h10(x anyrange) returns anymultirange as $$ select null $$ language sql
+-- CREATE FUNCTION
+
+> create function gxk_h11(x int, out y anyelement) as $$ select null $$ language sql
+ERROR 42P13: cannot determine result data type
+DETAIL: A result of type anyelement requires at least one input of type anyelement, anyarray, anynonarray, anyenum, anyrange, or anymultirange.
+
+> create function gxk_h12(x anyelement, out y anyrange) as $$ select null $$ language sql
+ERROR 42P13: cannot determine result data type
+DETAIL: A result of type anyrange requires at least one input of type anyrange or anymultirange.
+
+> create function gxk_h13(x anycompatible, out y anycompatiblemultirange) as $$ select null $$ language sql
+ERROR 42P13: cannot determine result data type
+DETAIL: A result of type anycompatiblemultirange requires at least one input of type anycompatiblerange or anycompatiblemultirange.
+

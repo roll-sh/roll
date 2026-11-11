@@ -1,0 +1,138 @@
+> CREATE TABLE a143_m1 AS SELECT g AS u, g % 20 AS t FROM generate_series(0, 9999) g
+-- SELECT 10000
+
+> CREATE TABLE a143_m2 (k int, v int)
+-- CREATE TABLE
+
+> INSERT INTO a143_m2 SELECT g % 30, g FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> INSERT INTO a143_m2 VALUES (NULL, 1), (NULL, 2)
+-- INSERT 0 2
+
+> ANALYZE a143_m1, a143_m2
+-- ANALYZE
+
+> CREATE FUNCTION a143_explain(q text) RETURNS SETOF text LANGUAGE plpgsql AS $$
+> DECLARE ln text;
+> BEGIN
+>   FOR ln IN EXECUTE format('EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF) %s', q) LOOP
+>     ln := regexp_replace(ln, 'Memory: \d+kB', 'Memory: NkB');
+>     ln := regexp_replace(ln, 'Sort Method: \S+', 'Sort Method: S');
+>     RETURN NEXT ln;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> SET enable_indexscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> SET max_parallel_workers_per_gather = 0
+-- SET
+
+> SELECT a143_explain('SELECT count(*), avg(a.u) FROM a143_m1 a JOIN a143_m1 b ON a.u = b.t WHERE b.u < 1000')
+a143_explain:text
+                    Filter: (u < 1000)
+                    Rows Removed by Filter: 9000
+              ->  Seq Scan on a143_m1 a (actual rows=10000.00 loops=1)
+              ->  Seq Scan on a143_m1 b (actual rows=1000.00 loops=1)
+              Sort Key: a.u
+              Sort Key: b.t
+              Sort Method: S  Memory: NkB
+              Sort Method: S  Memory: NkB
+        ->  Sort (actual rows=1000.00 loops=1)
+        ->  Sort (actual rows=21.00 loops=1)
+        Merge Cond: (a.u = b.t)
+  ->  Merge Join (actual rows=1000.00 loops=1)
+Aggregate (actual rows=1.00 loops=1)
+-- SELECT 13
+
+> SELECT count(*), avg(a.u) FROM a143_m1 a JOIN a143_m1 b ON a.u = b.t WHERE b.u < 1000
+count:int8 | avg:numeric
+1000 | 9.5000000000000000
+-- SELECT 1
+
+> SELECT a143_explain('SELECT count(*) FROM a143_m1 a WHERE a.u IN (SELECT k FROM a143_m2)')
+a143_explain:text
+                    ->  Seq Scan on a143_m2 (actual rows=302.00 loops=1)
+                    Batches: 1  Memory Usage: 32kB
+                    Group Key: a143_m2.k
+              ->  HashAggregate (actual rows=31.00 loops=1)
+              ->  Seq Scan on a143_m1 a (actual rows=10000.00 loops=1)
+              Sort Key: a.u
+              Sort Key: a143_m2.k
+              Sort Method: S  Memory: NkB
+              Sort Method: S  Memory: NkB
+        ->  Sort (actual rows=31.00 loops=1)
+        ->  Sort (actual rows=31.00 loops=1)
+        Merge Cond: (a.u = a143_m2.k)
+  ->  Merge Join (actual rows=30.00 loops=1)
+Aggregate (actual rows=1.00 loops=1)
+-- SELECT 14
+
+> SELECT count(*) FROM a143_m1 a WHERE a.u IN (SELECT k FROM a143_m2)
+count:int8
+30
+-- SELECT 1
+
+> SELECT count(*) FROM a143_m2 x JOIN (SELECT t FROM a143_m1 WHERE u < 500) y ON x.k = y.t
+count:int8
+5000
+-- SELECT 1
+
+> SELECT count(*) FROM a143_m1 a LEFT JOIN a143_m2 b ON a.u = b.k
+count:int8
+10270
+-- SELECT 1
+
+> SELECT a.u, b.v FROM a143_m1 a JOIN a143_m2 b ON a.u = b.k ORDER BY a.u DESC, b.v LIMIT 3
+u:int4 | v:int4
+29 | 29
+29 | 59
+29 | 89
+-- SELECT 3
+
+> SELECT sum(a.u), count(*) FROM
+>   (SELECT u FROM a143_m1 ORDER BY u DESC NULLS FIRST) a JOIN
+>   (SELECT k FROM a143_m2 ORDER BY k DESC NULLS FIRST) b ON a.u = b.k
+sum:int8 | count:int8
+4350 | 300
+-- SELECT 1
+
+> SELECT sum(a.u), count(*) FROM
+>   (SELECT u FROM a143_m1 ORDER BY u DESC NULLS LAST) a JOIN
+>   (SELECT k FROM a143_m2 ORDER BY k DESC NULLS LAST) b ON a.u = b.k
+sum:int8 | count:int8
+4350 | 300
+-- SELECT 1
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> RESET enable_indexscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> DROP FUNCTION a143_explain(text)
+-- DROP FUNCTION
+
+> DROP TABLE a143_m1, a143_m2
+-- DROP TABLE
+

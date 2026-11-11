@@ -1,0 +1,197 @@
+> CREATE TABLE a20_t1 (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE a20_t2 (x int, y int)
+-- CREATE TABLE
+
+> INSERT INTO a20_t1 SELECT i, i FROM generate_series(1, 100) i
+-- INSERT 0 100
+
+> INSERT INTO a20_t2 SELECT i % 10, i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> ANALYZE a20_t1
+-- ANALYZE
+
+> ANALYZE a20_t2
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a20_t1 WHERE a IN (SELECT x FROM a20_t2) FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: a20_t1.a, a20_t1.b, a20_t1.ctid, a20_t2.ctid
+  ->  Hash Join
+        Output: a20_t1.a, a20_t1.b, a20_t1.ctid, a20_t2.ctid
+        Inner Unique: true
+        Hash Cond: (a20_t1.a = a20_t2.x)
+        ->  Seq Scan on public.a20_t1
+              Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+        ->  Hash
+              Output: a20_t2.ctid, a20_t2.x
+              ->  HashAggregate
+                    Output: a20_t2.ctid, a20_t2.x
+                    Group Key: a20_t2.x
+                    ->  Seq Scan on public.a20_t2
+                          Output: a20_t2.ctid, a20_t2.x
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a20_t1 WHERE a IN (SELECT x FROM a20_t2) FOR UPDATE OF a20_t1
+QUERY PLAN:text
+LockRows
+  Output: a20_t1.a, a20_t1.b, a20_t1.ctid, a20_t2.ctid
+  ->  Hash Join
+        Output: a20_t1.a, a20_t1.b, a20_t1.ctid, a20_t2.ctid
+        Inner Unique: true
+        Hash Cond: (a20_t1.a = a20_t2.x)
+        ->  Seq Scan on public.a20_t1
+              Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+        ->  Hash
+              Output: a20_t2.ctid, a20_t2.x
+              ->  HashAggregate
+                    Output: a20_t2.ctid, a20_t2.x
+                    Group Key: a20_t2.x
+                    ->  Seq Scan on public.a20_t2
+                          Output: a20_t2.ctid, a20_t2.x
+-- EXPLAIN
+
+> SELECT * FROM a20_t1 WHERE a IN (SELECT x FROM a20_t2) ORDER BY a FOR UPDATE
+a:int4 | b:int4
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+-- SELECT 9
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT * FROM a20_t1 LIMIT 2) s FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: s.a, s.b, s.*
+  ->  Subquery Scan on s
+        Output: s.a, s.b, s.*
+        ->  Limit
+              Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+              ->  LockRows
+                    Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+                    ->  Seq Scan on public.a20_t1
+                          Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT * FROM a20_t1 ORDER BY a DESC LIMIT 1) s FOR UPDATE
+QUERY PLAN:text
+LockRows
+  Output: s.a, s.b, s.*
+  ->  Subquery Scan on s
+        Output: s.a, s.b, s.*
+        ->  Limit
+              Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+              ->  LockRows
+                    Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+                    ->  Sort
+                          Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+                          Sort Key: a20_t1.a DESC
+                          ->  Seq Scan on public.a20_t1
+                                Output: a20_t1.a, a20_t1.b, a20_t1.ctid
+-- EXPLAIN
+
+> SELECT * FROM (SELECT * FROM a20_t1 ORDER BY a DESC LIMIT 1) s FOR UPDATE
+a:int4 | b:int4
+100 | 100
+-- SELECT 1
+
+> CREATE TABLE a20_m AS SELECT i AS k, (i || ' v')::text v FROM generate_series(1, 16, 3) i
+-- SELECT 6
+
+> CREATE TABLE a20_src AS SELECT i AS k, i AS w FROM generate_series(1, 1000) i
+-- SELECT 1000
+
+> ANALYZE a20_m
+-- ANALYZE
+
+> ANALYZE a20_src
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> DELETE FROM a20_m RETURNING (SELECT max(w) FROM a20_src s2 WHERE s2.k = a20_m.k)
+QUERY PLAN:text
+Delete on a20_m
+  ->  Seq Scan on a20_m
+  SubPlan 1
+    ->  Aggregate
+          ->  Seq Scan on a20_src s2
+                Filter: (k = a20_m.k)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> INSERT INTO a20_m VALUES (1, 'a') RETURNING (SELECT max(w) FROM a20_src s2 WHERE s2.k = a20_m.k)
+QUERY PLAN:text
+Insert on a20_m
+  ->  Result
+  SubPlan 1
+    ->  Aggregate
+          ->  Seq Scan on a20_src s2
+                Filter: (k = a20_m.k)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> UPDATE a20_m SET v = 'z' RETURNING (SELECT max(w) FROM a20_src s2 WHERE s2.k = a20_m.k)
+QUERY PLAN:text
+Update on a20_m
+  ->  Seq Scan on a20_m
+  SubPlan 1
+    ->  Aggregate
+          ->  Seq Scan on a20_src s2
+                Filter: (k = a20_m.k)
+-- EXPLAIN
+
+> EXPLAIN UPDATE a20_m SET v = (SELECT max(w)::text FROM a20_src s2 WHERE s2.k = a20_m.k)
+QUERY PLAN:text
+Update on a20_m  (cost=0.00..124.17 rows=0 width=0)
+  ->  Seq Scan on a20_m  (cost=0.00..124.17 rows=6 width=38)
+        SubPlan 1
+          ->  Aggregate  (cost=20.50..20.52 rows=1 width=32)
+                ->  Seq Scan on a20_src s2  (cost=0.00..20.50 rows=1 width=4)
+                      Filter: (k = a20_m.k)
+-- EXPLAIN
+
+> EXPLAIN UPDATE a20_m SET v = (SELECT max(w)::text FROM a20_src s2 WHERE s2.k = a20_m.k)
+> WHERE k > 3
+QUERY PLAN:text
+Update on a20_m  (cost=0.00..103.66 rows=0 width=0)
+  ->  Seq Scan on a20_m  (cost=0.00..103.66 rows=5 width=38)
+        Filter: (k > 3)
+        SubPlan 1
+          ->  Aggregate  (cost=20.50..20.52 rows=1 width=32)
+                ->  Seq Scan on a20_src s2  (cost=0.00..20.50 rows=1 width=4)
+                      Filter: (k = a20_m.k)
+-- EXPLAIN
+
+> EXPLAIN UPDATE a20_m SET v = k::text
+QUERY PLAN:text
+Update on a20_m  (cost=0.00..1.09 rows=0 width=0)
+  ->  Seq Scan on a20_m  (cost=0.00..1.09 rows=6 width=38)
+-- EXPLAIN
+
+> EXPLAIN UPDATE a20_m SET v = upper(v)
+QUERY PLAN:text
+Update on a20_m  (cost=0.00..1.07 rows=0 width=0)
+  ->  Seq Scan on a20_m  (cost=0.00..1.07 rows=6 width=38)
+-- EXPLAIN
+
+> EXPLAIN UPDATE a20_m SET k = k + 1, v = v || 'x'
+QUERY PLAN:text
+Update on a20_m  (cost=0.00..1.09 rows=0 width=0)
+  ->  Seq Scan on a20_m  (cost=0.00..1.09 rows=6 width=42)
+-- EXPLAIN
+
+> DROP TABLE a20_t1, a20_t2, a20_m, a20_src
+-- DROP TABLE
+

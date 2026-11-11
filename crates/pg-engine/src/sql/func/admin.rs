@@ -1,0 +1,912 @@
+//! Server administration functions (Postgres's genfile.c, misc.c, pgstatfuncs.c resets):
+//! configuration reload, log files, statistics resets and server file access. There is no
+//! server log or data directory to reach here: log and directory listings are empty, and
+//! reading server files is refused (as COPY to or from a file is) unless the server allows
+//! them in a directory of its own (`crate::server_files`).
+
+use super::{FnCtx, Registry, SrfIter, text_arg};
+use crate::error::{Error, Result, code};
+use crate::session::warning;
+use crate::types::{DataType, Value};
+
+fn arg_types(a: &[Value], c: &FnCtx) -> Vec<DataType> {
+    (0..a.len()).map(|i| c.arg_type(i)).collect()
+}
+
+fn restore_relation_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::session::ddl::stats_import::restore_relation_stats(c.exec, a, &arg_types(a, c))
+        .map(Value::Bool)
+}
+
+fn restore_attribute_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::session::ddl::stats_import::restore_attribute_stats(c.exec, a, &arg_types(a, c))
+        .map(Value::Bool)
+}
+
+fn clear_relation_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::session::ddl::stats_import::clear_relation_stats(c.exec, &a[0], &a[1])?;
+    Ok(Value::Null)
+}
+
+fn clear_attribute_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::session::ddl::stats_import::clear_attribute_stats(c.exec, a)?;
+    Ok(Value::Null)
+}
+
+/// pg_reload_conf: SIGHUP to the postmaster, which reads the configuration files again; every
+/// session takes the new values before its next message (`Session::poll_config`).
+fn pg_reload_conf(_: &[Value], c: &FnCtx) -> Result<Value> {
+    if let Some(conf) = c.exec.sess.cluster.server_config() {
+        let logs = conf.reload();
+        let files = conf.loaded();
+        for m in logs {
+            crate::log::postmaster(Some(&files), crate::error::Severity::Log, &m);
+        }
+        crate::log::collector::reload(&c.exec.sess.cluster.command_line(), &files);
+    }
+    Ok(Value::Bool(true))
+}
+
+/// pg_rotate_logfile: the collector opens new files (a warning without one).
+fn pg_rotate_logfile(_: &[Value], c: &FnCtx) -> Result<Value> {
+    if crate::log::collector::rotate() {
+        return Ok(Value::Bool(true));
+    }
+    c.exec.notice(warning(
+        code::WARNING,
+        "rotation not possible because log collection not active",
+    ));
+    Ok(Value::Bool(false))
+}
+
+/// pg_current_logfile([format]): current_logfiles' entry (NULL without the collector).
+fn pg_current_logfile(a: &[Value], _: &FnCtx) -> Result<Value> {
+    let kind = match a.first().filter(|v| !v.is_null()).map(text_arg) {
+        None => None,
+        Some("stderr") => Some(crate::log::Kind::Stderr),
+        Some("csvlog") => Some(crate::log::Kind::Csv),
+        Some("jsonlog") => Some(crate::log::Kind::Json),
+        Some(other) => {
+            return Err(Error::new(
+                code::INVALID_PARAMETER_VALUE,
+                format!("log format \"{other}\" is not supported"),
+            )
+            .hint("The supported log formats are \"stderr\", \"csvlog\", and \"jsonlog\"."));
+        }
+    };
+    Ok(crate::log::collector::current_file(kind).map_or(Value::Null, Value::text))
+}
+
+fn pg_log_backend_memory_contexts(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let pid = a[0].as_i64().unwrap_or(0) as i32;
+    if c.exec.sess.cluster.activity().iter().any(|b| b.pid == pid)
+        || super::monitor::is_aux_process(pid as i64)
+    {
+        return Ok(Value::Bool(true));
+    }
+    c.exec.notice(warning(
+        code::WARNING,
+        format!("PID {pid} is not a PostgreSQL server process"),
+    ));
+    Ok(Value::Bool(false))
+}
+
+/// pg_stat_force_next_flush: the backend's next report flushes its counts however recent
+/// its last flush was.
+fn stat_force_next_flush(_: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::exec::pgstat::force_next_flush(c.exec.sess);
+    Ok(Value::Null)
+}
+
+fn pg_stat_reset_shared(a: &[Value], c: &FnCtx) -> Result<Value> {
+    const ALL: [&str; 7] = [
+        "archiver",
+        "bgwriter",
+        "checkpointer",
+        "io",
+        "recovery_prefetch",
+        "slru",
+        "wal",
+    ];
+    if let Some(v) = a.first().filter(|v| !v.is_null()) {
+        let t = text_arg(v);
+        if !ALL.contains(&t) {
+            return Err(Error::new(code::INVALID_PARAMETER_VALUE, format!("unrecognized reset target: \"{t}\""))
+                .hint("Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"recovery_prefetch\", \"slru\", or \"wal\"."));
+        }
+        reset_target(t, c);
+    } else {
+        for t in ALL {
+            reset_target(t, c);
+        }
+    }
+    Ok(Value::Null)
+}
+
+/// The SLRUs pg_stat_slru lists.
+pub(crate) const SLRUS: [&str; 8] = [
+    "commit_timestamp",
+    "multixact_member",
+    "multixact_offset",
+    "notify",
+    "serializable",
+    "subtransaction",
+    "transaction",
+    "other",
+];
+
+fn reset_target(t: &str, c: &FnCtx) {
+    if t == "slru" {
+        for s in SLRUS {
+            crate::exec::pgstat::reset_shared(c.exec, &format!("slru:{s}"));
+        }
+    } else {
+        crate::exec::pgstat::reset_shared(c.exec, t);
+        // (The bgwriter's and checkpointer's reset together.)
+        if t == "bgwriter" {
+            crate::exec::pgstat::reset_shared(c.exec, "checkpointer");
+        }
+    }
+}
+
+/// pg_stat_reset_slru(target): one SLRU (an unknown name counts as "other"), or all.
+fn pg_stat_reset_slru(a: &[Value], c: &FnCtx) -> Result<Value> {
+    match a.first().filter(|v| !v.is_null()) {
+        Some(v) => {
+            let t = text_arg(v);
+            let name = if SLRUS.contains(&t) { t } else { "other" };
+            crate::exec::pgstat::reset_shared(c.exec, &format!("slru:{name}"));
+        }
+        None => reset_target("slru", c),
+    }
+    Ok(Value::Null)
+}
+
+fn pg_stat_reset(_: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::exec::pgstat::reset_db(c.exec);
+    Ok(Value::Null)
+}
+
+fn pg_stat_reset_single_table_counters(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let oid = match &a[0] {
+        Value::Oid(o) => *o,
+        v => v.as_i64().unwrap_or(0) as u32,
+    };
+    let shared = crate::exec::pgstat::is_shared(oid);
+    crate::exec::pgstat::reset_table(c.exec, oid, shared);
+    Ok(Value::Null)
+}
+
+fn pg_stat_reset_single_function_counters(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let oid = match &a[0] {
+        Value::Oid(o) => *o,
+        v => v.as_i64().unwrap_or(0) as u32,
+    };
+    crate::exec::pgstat::reset_function(c.exec, oid);
+    Ok(Value::Null)
+}
+
+fn no_slot(name: &str) -> Error {
+    Error::new(
+        code::UNDEFINED_OBJECT,
+        format!("replication slot \"{name}\" does not exist"),
+    )
+}
+
+fn pg_stat_have_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let kind = text_arg(&a[0]);
+    let (db, obj) = (
+        a[1].as_i64().unwrap_or(0) as u32,
+        a[2].as_i64().unwrap_or(0),
+    );
+    Ok(Value::Bool(match kind {
+        // Fixed-numbered statistics always exist.
+        "archiver" | "bgwriter" | "checkpointer" | "io" | "slru" | "wal" => true,
+        "database" => obj == 0 && (db == 0 || db == c.exec.sess.database_oid()),
+        // (Every relation and function has an entry from its creation to its drop: those
+        // in the committed catalog or this transaction's.)
+        "relation" | "function" if db == c.exec.sess.database_oid() => {
+            let o = obj as u32;
+            let has = |cat: &crate::catalog::Catalog| {
+                if kind == "function" {
+                    cat.functions.contains_key(&o)
+                } else {
+                    cat.tables.contains_key(&o)
+                        || cat.indexes.contains_key(&o)
+                        || cat.views.get(&o).is_some_and(|v| v.materialized)
+                }
+            };
+            has(&c.exec.sess.db.catalog()) || has(&c.exec.catalog())
+        }
+        "relation" | "function" | "replslot" | "subscription" | "backend" => false,
+        _ => {
+            return Err(Error::new(
+                code::INVALID_PARAMETER_VALUE,
+                format!("invalid statistics kind: \"{kind}\""),
+            ));
+        }
+    }))
+}
+
+/// Server files aren't reachable unless the server allows them (`--allow-server-files`): the
+/// error is the one Postgres gives a role without EXECUTE on the function (granted only to
+/// the bootstrap superuser).
+fn server_files(what: &str) -> Error {
+    Error::new(
+        code::INSUFFICIENT_PRIVILEGE,
+        format!("permission denied for function {what}"),
+    )
+}
+
+/// convert_and_check_filename: the name as messages show it (canonicalized) and where it
+/// is, inside the server's files directory.
+fn checked_file(c: &FnCtx, what: &str, name: &Value) -> Result<(String, std::path::PathBuf)> {
+    let Some(sf) = c.exec.sess.cluster.server_files() else {
+        return Err(server_files(what));
+    };
+    let name = text_arg(name);
+    Ok((crate::server_files::canonicalize_path(name), sf.resolve(name)?))
+}
+
+/// pg_read_file_common's argument check, which comes before the file is opened.
+fn read_length_check(a: &[Value]) -> Result<()> {
+    if a.get(2).and_then(Value::as_i64).is_some_and(|n| n < 0) {
+        return Err(Error::new(
+            code::INVALID_PARAMETER_VALUE,
+            "requested length cannot be negative",
+        ));
+    }
+    Ok(())
+}
+
+/// read_binary_file: `len` bytes from `offset` (from the end if negative), all of the rest
+/// without `len`; None for a missing file with `missing_ok`.
+fn read_server_file(a: &[Value], c: &FnCtx, what: &str) -> Result<Option<Vec<u8>>> {
+    use std::io::{Read, Seek, SeekFrom};
+    read_length_check(a)?;
+    let (name, path) = checked_file(c, what, &a[0])?;
+    let (offset, len, missing_ok) = match a.len() {
+        2 => (0, None, a[1].as_bool() == Some(true)),
+        3 | 4 => (
+            a[1].as_i64().unwrap_or(0),
+            a[2].as_i64(),
+            a.get(3).and_then(Value::as_bool) == Some(true),
+        ),
+        _ => (0, None, false),
+    };
+    // MaxAllocSize - VARHDRSZ.
+    const MAX_LEN: i64 = 0x3fff_ffff - 4;
+    if len.is_some_and(|n| n > MAX_LEN) {
+        return Err(Error::new(
+            code::INVALID_PARAMETER_VALUE,
+            "requested length too large",
+        ));
+    }
+    let mut f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if missing_ok && crate::server_files::is_enoent(&e) => return Ok(None),
+        Err(e) => {
+            return Err(crate::server_files::file_error(
+                &e,
+                &format!("could not open file \"{name}\" for reading"),
+            ));
+        }
+    };
+    let pos = if offset >= 0 {
+        SeekFrom::Start(offset as u64)
+    } else {
+        SeekFrom::End(offset)
+    };
+    f.seek(pos).map_err(|e| {
+        crate::server_files::file_error(&e, &format!("could not seek in file \"{name}\""))
+    })?;
+    let mut buf = Vec::new();
+    let read = match len {
+        Some(n) => f.take(n as u64).read_to_end(&mut buf),
+        None => f.take(MAX_LEN as u64 + 1).read_to_end(&mut buf),
+    };
+    read.map_err(|e| crate::server_files::file_error(&e, &format!("could not read file \"{name}\"")))?;
+    if len.is_none() && buf.len() as i64 > MAX_LEN {
+        return Err(Error::new(code::PROGRAM_LIMIT_EXCEEDED, "file length too large"));
+    }
+    Ok(Some(buf))
+}
+
+fn pg_read_file(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let Some(b) = read_server_file(a, c, "pg_read_file")? else {
+        return Ok(Value::Null);
+    };
+    // read_text_file: the contents must be valid in the database encoding.
+    let enc = crate::types::collation::database_encoding();
+    crate::types::mbconv::verify(enc, &b)?;
+    Ok(Value::text(crate::types::mbconv::server::decode(enc, &b)?))
+}
+
+fn pg_read_binary_file(a: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(match read_server_file(a, c, "pg_read_binary_file")? {
+        Some(b) => Value::bytea(b),
+        None => Value::Null,
+    })
+}
+
+/// time_t_to_timestamptz.
+fn time_t(secs: i64) -> Value {
+    Value::Timestamptz((secs - 946_684_800) * 1_000_000)
+}
+
+fn pg_stat_file(a: &[Value], c: &FnCtx) -> Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let missing_ok = a.get(1).and_then(Value::as_bool) == Some(true);
+    let (name, path) = checked_file(c, "pg_stat_file", &a[0])?;
+    let m = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) if missing_ok && crate::server_files::is_enoent(&e) => return Ok(Value::Null),
+        Err(e) => {
+            return Err(crate::server_files::file_error(
+                &e,
+                &format!("could not stat file \"{name}\""),
+            ));
+        }
+    };
+    // Unix has the status change time, no creation time.
+    Ok(Value::Record(std::sync::Arc::new(vec![
+        Value::Int8(m.size() as i64),
+        time_t(m.atime()),
+        time_t(m.mtime()),
+        time_t(m.ctime()),
+        Value::Null,
+        Value::Bool(m.is_dir()),
+    ])))
+}
+
+fn pg_ls_dir(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let (name, path) = checked_file(c, "pg_ls_dir", &a[0])?;
+    let missing_ok = a.get(1).and_then(Value::as_bool) == Some(true);
+    let include_dot_dirs = a.get(2).and_then(Value::as_bool) == Some(true);
+    let dir_error = |e: std::io::Error| {
+        crate::server_files::file_error(&e, &format!("could not open directory \"{name}\""))
+    };
+    let entries = match std::fs::read_dir(&path) {
+        Ok(d) => d,
+        Err(e) if missing_ok && crate::server_files::is_enoent(&e) => {
+            return Ok(Box::new(std::iter::empty()));
+        }
+        Err(e) => return Err(dir_error(e)),
+    };
+    // readdir's "." and ".." (std leaves them out).
+    let mut out = Vec::new();
+    if include_dot_dirs {
+        out.push(Ok(vec![Value::text(".")]));
+        out.push(Ok(vec![Value::text("..")]));
+    }
+    for e in entries {
+        let e = e.map_err(|e| {
+            crate::server_files::file_error(&e, &format!("could not read directory \"{name}\""))
+        })?;
+        out.push(Ok(vec![Value::text(e.file_name().to_string_lossy().into_owned())]));
+    }
+    Ok(Box::new(out.into_iter()))
+}
+
+/// pg_ls_tmpdir & co.: no files.
+fn ls_empty(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    Ok(Box::new(std::iter::empty()))
+}
+
+/// pg_ls_logdir: the logging collector's directory (pg_ls_dir_files: regular files, hidden
+/// ones left out); without the collector the server log goes to stderr and there is no log
+/// directory, as in a fresh cluster.
+fn ls_logdir(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let name = c.exec.sess.settings.borrow().get_str("log_directory").unwrap_or("log").to_string();
+    let open_error = || format!("could not open directory \"{name}\"");
+    let Some(dir) = crate::log::collector::log_dir() else {
+        return Err(crate::error::Error::new(
+            crate::error::code::UNDEFINED_FILE,
+            format!("{}: No such file or directory", open_error()),
+        ));
+    };
+    let entries = std::fs::read_dir(&dir).map_err(|e| crate::server_files::file_error(&e, &open_error()))?;
+    let mut rows = Vec::new();
+    for e in entries.flatten() {
+        let fname = e.file_name().to_string_lossy().into_owned();
+        let Ok(m) = e.metadata() else { continue };
+        if fname.starts_with('.') || !m.is_file() {
+            continue;
+        }
+        let modified = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_micros() as i64 - 946_684_800_000_000);
+        rows.push(Ok(vec![Value::text(fname), Value::Int8(m.len() as i64), Value::Timestamptz(modified)]));
+    }
+    Ok(Box::new(rows.into_iter()))
+}
+
+/// WAL geometry: the segment size (wal_segment_size) and the one timeline there is.
+const WAL_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+const SEGMENTS_PER_ID: u64 = 0x1_0000_0000 / WAL_SEGMENT_SIZE;
+
+/// XLogFileName: timeline, then the segment as two 32-bit halves.
+fn wal_file_name(tli: u32, segno: u64) -> String {
+    format!(
+        "{tli:08X}{:08X}{:08X}",
+        segno / SEGMENTS_PER_ID,
+        segno % SEGMENTS_PER_ID
+    )
+}
+
+fn lsn_arg(v: &Value) -> u64 {
+    match v {
+        Value::PgLsn(l) => *l,
+        v => v.as_i64().unwrap_or(0) as u64,
+    }
+}
+
+/// pg_ls_waldir: the segment the server writes now (pg_walfile_name of
+/// pg_current_wal_lsn).
+fn pg_ls_waldir(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let now = Value::Timestamptz(c.exec.stmt_time());
+    let lsn = crate::exec::pgstat::wal_lsn(&c.exec.sess.db);
+    Ok(Box::new(std::iter::once(Ok(vec![
+        Value::text(wal_file_name(1, lsn.saturating_sub(1) / WAL_SEGMENT_SIZE)),
+        Value::Int8(WAL_SEGMENT_SIZE as i64),
+        now,
+    ]))))
+}
+
+/// pg_walfile_name(lsn): the segment holding the byte before `lsn` (XLByteToPrevSeg).
+fn pg_walfile_name(a: &[Value], _: &FnCtx) -> Result<Value> {
+    let lsn = lsn_arg(&a[0]);
+    Ok(Value::text(wal_file_name(1, lsn.saturating_sub(1) / WAL_SEGMENT_SIZE)))
+}
+
+/// pg_walfile_name_offset(lsn): the segment holding `lsn`, and its offset there.
+fn pg_walfile_name_offset(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    let lsn = lsn_arg(&a[0]);
+    Ok(Box::new(std::iter::once(Ok(vec![
+        Value::text(wal_file_name(1, lsn / WAL_SEGMENT_SIZE)),
+        Value::Int4((lsn % WAL_SEGMENT_SIZE) as i32),
+    ]))))
+}
+
+/// pg_split_walfile_name(name): its segment number and timeline.
+fn pg_split_walfile_name(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    let name = text_arg(&a[0]);
+    let bad = || {
+        Error::new(
+            code::INVALID_PARAMETER_VALUE,
+            format!("invalid WAL file name \"{name}\""),
+        )
+    };
+    let fname = name.rsplit('/').next().unwrap_or(name);
+    if fname.len() != 24 || !fname.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    let part = |i: usize| u64::from_str_radix(&fname[i..i + 8], 16).map_err(|_| bad());
+    let (tli, log, seg) = (part(0)?, part(8)?, part(16)?);
+    if seg >= SEGMENTS_PER_ID {
+        return Err(bad());
+    }
+    let segno = log * SEGMENTS_PER_ID + seg;
+    Ok(Box::new(std::iter::once(Ok(vec![
+        Value::numeric(crate::types::numeric::Numeric::from_i64(segno as i64)),
+        Value::Int8(tli as i64),
+    ]))))
+}
+
+/// The last checkpoint: its record's and redo's positions and its time (the one the
+/// cluster started from until there is another: at its WAL's start, the server's start).
+fn last_checkpoint(c: &FnCtx) -> (u64, u64, i64) {
+    let f = crate::exec::pgstat::fixed(&c.exec.sess.db);
+    let f = f.lock();
+    f.checkpoint.unwrap_or_else(|| {
+        let at = f.lsn_base.max(crate::exec::pgstat::INITDB_LSN);
+        (at, at, c.exec.sess.cluster.start_time())
+    })
+}
+
+/// pg_control_*: the control file's fields, for this server. (It is written at each
+/// checkpoint.) Each returns one composite value of its OUT columns, not a set (proretset is
+/// false): `VALUES (pg_control_system())` and the other places sets aren't allowed take it.
+fn pg_control_system(_: &[Value], c: &FnCtx) -> Result<Value> {
+    record(vec![
+        Value::Int4(1800),
+        Value::Int4(202506291),
+        Value::Int8(7_000_000_000_000_000_001),
+        Value::Timestamptz(last_checkpoint(c).2),
+    ])
+}
+
+fn pg_control_checkpoint(_: &[Value], c: &FnCtx) -> Result<Value> {
+    let (ckpt, redo, time) = last_checkpoint(c);
+    let xids = c.exec.sess.db.xids();
+    let next_oid = c.exec.catalog().oids.as_ref().map_or(16384, |g| g.peek());
+    record(vec![
+        Value::PgLsn(ckpt),
+        Value::PgLsn(redo),
+        Value::text(wal_file_name(1, redo / WAL_SEGMENT_SIZE)),
+        Value::Int4(1),
+        Value::Int4(1),
+        Value::Bool(true),
+        Value::text(format!("0:{}", xids.next())),
+        Value::Oid(next_oid),
+        Value::Oid(1),
+        Value::Oid(0),
+        Value::Oid(xids.oldest() as u32),
+        Value::Oid(1),
+        Value::Oid(xids.horizon() as u32),
+        Value::Oid(1),
+        Value::Oid(1),
+        Value::Oid(0),
+        Value::Oid(0),
+        Value::Timestamptz(time),
+    ])
+}
+
+fn pg_control_init(_: &[Value], _: &FnCtx) -> Result<Value> {
+    record(vec![
+        Value::Int4(8),
+        Value::Int4(8192),
+        Value::Int4(131072),
+        Value::Int4(8192),
+        Value::Int4(WAL_SEGMENT_SIZE as i32),
+        Value::Int4(64),
+        Value::Int4(32),
+        Value::Int4(1996),
+        Value::Int4(2048),
+        Value::Bool(true),
+        Value::Int4(1),
+        Value::Bool(true),
+    ])
+}
+
+fn pg_control_recovery(_: &[Value], _: &FnCtx) -> Result<Value> {
+    record(vec![
+        Value::PgLsn(0),
+        Value::Int4(0),
+        Value::PgLsn(0),
+        Value::PgLsn(0),
+        Value::Bool(false),
+    ])
+}
+
+fn record(fields: Vec<Value>) -> Result<Value> {
+    Ok(Value::Record(std::sync::Arc::new(fields)))
+}
+
+/// A built-in function's OUT columns (pg_proc's) as its composite result type.
+fn out_row(oid: u32) -> DataType {
+    let sig = crate::catalog::system::builtin_proc_sigs().iter().find(|s| s.oid == oid);
+    let cols = sig.map_or(&[][..], |s| &s.out[..]);
+    DataType::row(cols.iter().map(|(n, t)| (n.clone(), DataType::from_oid(*t).unwrap_or(DataType::Unknown))).collect())
+}
+
+/// gist_translate_cmptype_common(cmptype): the GiST strategy number of a CompareType.
+fn gist_translate_cmptype_common(a: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(Value::Int2(match a[0].as_i64().unwrap_or(0) {
+        1 => 20,
+        2 => 21,
+        3 => 18,
+        4 => 23,
+        5 => 22,
+        7 => 3,
+        8 => 8,
+        _ => 0,
+    }))
+}
+
+/// pg_timezone_names(): the rows of the view of the same name.
+fn pg_timezone_names(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let rows = crate::catalog::system::rows(crate::catalog::system::SysTable::PgTimezoneNames, c.exec)?;
+    Ok(Box::new(rows.into_iter().map(Ok)))
+}
+
+/// pg_tablespace_databases(spc): the databases with objects there (every database has
+/// some in pg_default).
+fn pg_tablespace_databases(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    if a[0].as_i64() != Some(1663) {
+        return Ok(Box::new(std::iter::empty()));
+    }
+    let rows = crate::catalog::system::rows(crate::catalog::system::SysTable::PgDatabase, c.exec)?;
+    Ok(Box::new(
+        rows.into_iter()
+            .filter_map(|r| r.first().cloned())
+            .map(|o| Ok(vec![o]))
+            .collect::<Vec<_>>()
+            .into_iter(),
+    ))
+}
+
+/// pg_show_all_settings(): the rows of pg_settings (the view over it).
+fn pg_show_all_settings(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let rows = crate::catalog::system::rows(crate::catalog::system::SysTable::PgSettings, c.exec)?;
+    Ok(Box::new(rows.into_iter().map(Ok)))
+}
+
+/// pg_column_toast_chunk_id(value): the chunk_id of the value's out-of-line copy, when it
+/// was read from a table storing it in its TOAST table.
+fn pg_column_toast_chunk_id(a: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(crate::exec::sizing::toast_chunk_id(&a[0], c.exec).map_or(Value::Null, Value::Oid))
+}
+
+/// The rows of a TOAST table (`pg_toast.pg_toast_<table>`, read directly): its table's
+/// out-of-line values, chunked.
+pub(crate) fn toast_table_rows(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let oid = match &a[0] {
+        Value::Oid(o) => *o,
+        v => v.as_i64().unwrap_or(0) as u32,
+    };
+    let cat = c.exec.catalog();
+    let Some((t, _)) = cat.toast_owner(oid) else {
+        return Ok(Box::new(std::iter::empty()));
+    };
+    let rows = crate::exec::sizing::toast_chunks(t, c.exec)?;
+    Ok(Box::new(rows.into_iter().map(|(id, seq, data)| {
+        Ok(vec![
+            Value::Oid(id),
+            Value::Int4(seq),
+            Value::Bytea(data.into()),
+        ])
+    })))
+}
+
+fn pg_ls_tmpdir_in(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    let oid = a[0].as_i64().unwrap_or(0) as u32;
+    if !matches!(oid, 1663 | 1664) {
+        return Err(Error::new(
+            code::UNDEFINED_OBJECT,
+            format!("tablespace with OID {oid} does not exist"),
+        ));
+    }
+    Ok(Box::new(std::iter::empty()))
+}
+
+/// pg_ls_replslotdir: a slot's directory holds no files here (its state is in the slots
+/// file, and the change stream in the database's store).
+fn pg_ls_replslotdir(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let name = text_arg(&a[0]);
+    match c.exec.sess.db.repl().and_then(|r| r.slots.get(name)) {
+        Some(_) => Ok(Box::new(std::iter::empty())),
+        None => Err(no_slot(name)),
+    }
+}
+
+pub fn register(r: &mut Registry) {
+    use DataType::*;
+    r.func("pg_reload_conf", vec![], Bool, pg_reload_conf)
+        .volatile();
+    r.func("pg_rotate_logfile", vec![], Bool, pg_rotate_logfile)
+        .volatile();
+    r.func("pg_current_logfile", vec![], Text, pg_current_logfile)
+        .volatile()
+        .non_strict();
+    r.func("pg_current_logfile", vec![Text], Text, pg_current_logfile)
+        .volatile()
+        .non_strict();
+    r.func(
+        "pg_log_backend_memory_contexts",
+        vec![Int4],
+        Bool,
+        pg_log_backend_memory_contexts,
+    )
+    .volatile();
+    r.func("pg_stat_reset", vec![], Void, pg_stat_reset)
+        .volatile()
+        .non_strict();
+    // Statistics import (relation_stats.c, attribute_stats.c).
+    r.func(
+        "pg_restore_relation_stats",
+        vec![DataType::array_of(Any)],
+        Bool,
+        restore_relation_stats,
+    )
+    .variadic()
+    .volatile()
+    .non_strict()
+    .names(&["kwargs"]);
+    r.func(
+        "pg_restore_attribute_stats",
+        vec![DataType::array_of(Any)],
+        Bool,
+        restore_attribute_stats,
+    )
+    .variadic()
+    .volatile()
+    .non_strict()
+    .names(&["kwargs"]);
+    r.func(
+        "pg_clear_relation_stats",
+        vec![Text, Text],
+        Void,
+        clear_relation_stats,
+    )
+    .volatile()
+    .non_strict()
+    .names(&["schemaname", "relname"]);
+    r.func(
+        "pg_clear_attribute_stats",
+        vec![Text, Text, Text, Bool],
+        Void,
+        clear_attribute_stats,
+    )
+    .volatile()
+    .non_strict()
+    .names(&["schemaname", "relname", "attname", "inherited"]);
+    // Built without libnuma.
+    r.func("pg_numa_available", vec![], DataType::Bool, |_, _| Ok(Value::Bool(false)));
+    r.func("pg_trigger_depth", vec![], Int4, |_, _| {
+        Ok(Value::Int4(crate::plpgsql::trigger_depth()))
+    })
+    .volatile();
+    // Statistics are flushed when each transaction ends: nothing waits longer.
+    r.func("pg_stat_force_next_flush", vec![], Void, stat_force_next_flush)
+        .volatile()
+        .non_strict();
+    r.func(
+        "pg_stat_reset_shared",
+        vec![Text],
+        Void,
+        pg_stat_reset_shared,
+    )
+    .volatile()
+    .non_strict()
+    .names(&["target"])
+    .min_args(0)
+    .defaults(vec![Value::Null]);
+    r.func("pg_stat_reset_slru", vec![Text], Void, pg_stat_reset_slru)
+        .volatile()
+        .non_strict()
+        .names(&["target"])
+        .min_args(0)
+        .defaults(vec![Value::Null]);
+    r.func(
+        "pg_stat_reset_single_table_counters",
+        vec![Oid],
+        Void,
+        pg_stat_reset_single_table_counters,
+    )
+    .volatile();
+    r.func(
+        "pg_stat_reset_single_function_counters",
+        vec![Oid],
+        Void,
+        pg_stat_reset_single_function_counters,
+    )
+    .volatile();
+    r.func(
+        "pg_stat_reset_subscription_stats",
+        vec![Oid],
+        Void,
+        super::pubsub::reset_subscription_stats,
+    )
+    .volatile()
+    .non_strict();
+    r.func("pg_stat_reset_backend_stats", vec![Int4], Void, |a, c| {
+        if a[0].as_i64() == Some(c.exec.sess.pid as i64) {
+            crate::exec::pgstat::reset_backend(c.exec);
+        }
+        Ok(Value::Null)
+    })
+        .volatile();
+    r.func(
+        "pg_stat_have_stats",
+        vec![Text, Oid, Int8],
+        Bool,
+        pg_stat_have_stats,
+    )
+    .volatile();
+    r.func("pg_read_file", vec![Text], Text, pg_read_file)
+        .volatile();
+    r.func("pg_read_file", vec![Text, Bool], Text, pg_read_file)
+        .volatile();
+    r.func("pg_read_file", vec![Text, Int8, Int8], Text, pg_read_file)
+        .volatile();
+    r.func(
+        "pg_read_file",
+        vec![Text, Int8, Int8, Bool],
+        Text,
+        pg_read_file,
+    )
+    .volatile();
+    r.func(
+        "pg_read_binary_file",
+        vec![Text],
+        Bytea,
+        pg_read_binary_file,
+    )
+    .volatile();
+    r.func(
+        "pg_read_binary_file",
+        vec![Text, Bool],
+        Bytea,
+        pg_read_binary_file,
+    )
+    .volatile();
+    r.func(
+        "pg_read_binary_file",
+        vec![Text, Int8, Int8],
+        Bytea,
+        pg_read_binary_file,
+    )
+    .volatile();
+    r.func(
+        "pg_read_binary_file",
+        vec![Text, Int8, Int8, Bool],
+        Bytea,
+        pg_read_binary_file,
+    )
+    .volatile();
+    let stat_cols = || {
+        vec![
+            ("size", Int8),
+            ("access", Timestamptz(-1)),
+            ("modification", Timestamptz(-1)),
+            ("change", Timestamptz(-1)),
+            ("creation", Timestamptz(-1)),
+            ("isdir", Bool),
+        ]
+    };
+    let stat_ret = || {
+        DataType::row(
+            stat_cols()
+                .into_iter()
+                .map(|(n, t)| (n.to_string(), t))
+                .collect(),
+        )
+    };
+    r.func("pg_stat_file", vec![Text], stat_ret(), pg_stat_file)
+        .volatile()
+        .names(&["filename"]);
+    r.func("pg_stat_file", vec![Text, Bool], stat_ret(), pg_stat_file)
+        .volatile()
+        .names(&["filename", "missing_ok"]);
+    r.srf("pg_ls_dir", vec![Text], Text, pg_ls_dir).volatile();
+    r.srf("pg_ls_dir", vec![Text, Bool, Bool], Text, pg_ls_dir)
+        .volatile();
+    let ls_cols = || {
+        vec![
+            ("name", Text),
+            ("size", Int8),
+            ("modification", Timestamptz(-1)),
+        ]
+    };
+    r.srf_cols("pg_ls_waldir", vec![], ls_cols(), pg_ls_waldir).volatile();
+    r.from_pg(2851, Some(pg_walfile_name), None);
+    r.from_pg(2850, None, Some(pg_walfile_name_offset));
+    r.from_pg(6213, None, Some(pg_split_walfile_name));
+    for (oid, name, imp) in [
+        (3441, "pg_control_system", pg_control_system as super::FnImpl),
+        (3442, "pg_control_checkpoint", pg_control_checkpoint),
+        (3443, "pg_control_recovery", pg_control_recovery),
+        (3444, "pg_control_init", pg_control_init),
+    ] {
+        r.func(name, vec![], out_row(oid), imp).volatile();
+    }
+    r.from_pg(6347, Some(gist_translate_cmptype_common), None);
+    r.from_pg(6316, Some(pg_column_toast_chunk_id), None);
+    r.from_pg(2856, None, Some(pg_timezone_names));
+    r.from_pg(2084, None, Some(pg_show_all_settings));
+    r.from_pg(2556, None, Some(pg_tablespace_databases));
+    r.srf_cols("pg_ls_logdir", vec![], ls_cols(), ls_logdir).volatile();
+    for name in [
+        "pg_ls_tmpdir",
+        "pg_ls_archive_statusdir",
+        "pg_ls_summariesdir",
+        "pg_ls_logicalsnapdir",
+        "pg_ls_logicalmapdir",
+    ] {
+        r.srf_cols(name, vec![], ls_cols(), ls_empty).volatile();
+    }
+    r.srf_cols("pg_ls_tmpdir", vec![Oid], ls_cols(), pg_ls_tmpdir_in)
+        .volatile()
+        .names(&["tablespace"]);
+    r.srf_cols(
+        "pg_ls_replslotdir",
+        vec![Text],
+        ls_cols(),
+        pg_ls_replslotdir,
+    )
+    .volatile()
+    .names(&["slot_name"]);
+}

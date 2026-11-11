@@ -1,0 +1,345 @@
+> CREATE TABLE gc1_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO gc1_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> VACUUM gc1_i8
+-- VACUUM
+
+> CREATE TABLE gc1_t (unique1 int, ten int, fivethous int)
+-- CREATE TABLE
+
+> INSERT INTO gc1_t SELECT g, g % 10, g % 5000 FROM generate_series(0, 9999) g
+-- INSERT 0 10000
+
+> ANALYZE gc1_t
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN (SELECT q1 + 1 AS x, q2 FROM gc1_i8 t2) ss ON t1.q2 = ss.q2
+QUERY PLAN:text
+Hash Left Join
+  Output: t1.q1, (t2.q1 + 1)
+  Hash Cond: (t1.q2 = t2.q2)
+  ->  Seq Scan on public.gc1_i8 t1
+        Output: t1.q1, t1.q2
+  ->  Hash
+        Output: t2.q1, t2.q2
+        ->  Seq Scan on public.gc1_i8 t2
+              Output: t2.q1, t2.q2
+-- EXPLAIN
+
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN (SELECT q1 + 1 AS x, q2 FROM gc1_i8 t2) ss ON t1.q2 = ss.q2
+> ORDER BY 1, 2
+q1:int8 | x:int8
+123 | 124
+123 | 124
+123 | 4567890123456790
+4567890123456789 | 124
+4567890123456789 | 4567890123456790
+4567890123456789 | 4567890123456790
+4567890123456789 | 4567890123456790
+-- SELECT 7
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN (SELECT coalesce(q1, 0) AS x, q2 FROM gc1_i8 t2) ss ON t1.q2 = ss.q2
+QUERY PLAN:text
+Hash Left Join
+  Output: t1.q1, (COALESCE(t2.q1, '0'::bigint))
+  Hash Cond: (t1.q2 = t2.q2)
+  ->  Seq Scan on public.gc1_i8 t1
+        Output: t1.q1, t1.q2
+  ->  Hash
+        Output: t2.q2, (COALESCE(t2.q1, '0'::bigint))
+        ->  Seq Scan on public.gc1_i8 t2
+              Output: t2.q2, COALESCE(t2.q1, '0'::bigint)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN (SELECT 1 AS x, q2 FROM gc1_i8 t2) ss ON t1.q2 = ss.q2
+QUERY PLAN:text
+Hash Left Join
+  Output: t1.q1, (1)
+  Hash Cond: (t1.q2 = t2.q2)
+  ->  Seq Scan on public.gc1_i8 t1
+        Output: t1.q1, t1.q2
+  ->  Hash
+        Output: t2.q2, (1)
+        ->  Seq Scan on public.gc1_i8 t2
+              Output: t2.q2, 1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN LATERAL (SELECT t1.q1 + 1 AS x, q2 FROM gc1_i8 t2) ss ON t1.q2 = ss.q2
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: t1.q1, ((t1.q1 + 1))
+  ->  Seq Scan on public.gc1_i8 t1
+        Output: t1.q1, t1.q2
+  ->  Seq Scan on public.gc1_i8 t2
+        Output: t2.q2, (t1.q1 + 1)
+        Filter: (t1.q2 = t2.q2)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN LATERAL (SELECT t1.q1 + t2.q1 AS x, q2 FROM gc1_i8 t2) ss ON t1.q2 = ss.q2
+QUERY PLAN:text
+Hash Left Join
+  Output: t1.q1, (t1.q1 + t2.q1)
+  Hash Cond: (t1.q2 = t2.q2)
+  ->  Seq Scan on public.gc1_i8 t1
+        Output: t1.q1, t1.q2
+  ->  Hash
+        Output: t2.q1, t2.q2
+        ->  Seq Scan on public.gc1_i8 t2
+              Output: t2.q1, t2.q2
+-- EXPLAIN
+
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN LATERAL (SELECT t1.q1 + t2.q1 AS x, q2 FROM gc1_i8 t2) ss ON t1.q2 = ss.q2
+> ORDER BY 1, 2
+q1:int8 | x:int8
+123 | 246
+123 | 246
+123 | 4567890123456912
+4567890123456789 | 4567890123456912
+4567890123456789 | 9135780246913578
+4567890123456789 | 9135780246913578
+4567890123456789 | 9135780246913578
+-- SELECT 7
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM gc1_i8 t1 LEFT JOIN LATERAL (SELECT * FROM gc1_i8 t2 WHERE t2.q1 = t1.q2) ss ON true
+QUERY PLAN:text
+Hash Left Join
+  Output: t1.q1, t1.q2, t2.q1, t2.q2
+  Hash Cond: (t1.q2 = t2.q1)
+  ->  Seq Scan on public.gc1_i8 t1
+        Output: t1.q1, t1.q2
+  ->  Hash
+        Output: t2.q1, t2.q2
+        ->  Seq Scan on public.gc1_i8 t2
+              Output: t2.q1, t2.q2
+-- EXPLAIN
+
+> SELECT * FROM gc1_i8 t1 LEFT JOIN LATERAL (SELECT * FROM gc1_i8 t2 WHERE t2.q1 = t1.q2) ss ON true
+> ORDER BY 1, 2, 3, 4
+q1:int8 | q2:int8 | q1:int8 | q2:int8
+123 | 456 | NULL | NULL
+123 | 4567890123456789 | 4567890123456789 | -4567890123456789
+123 | 4567890123456789 | 4567890123456789 | 123
+123 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | NULL | NULL
+4567890123456789 | 123 | 123 | 456
+4567890123456789 | 123 | 123 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789 | -4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789 | 123
+4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+-- SELECT 10
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.ten, sum(x) FROM gc1_t t1 LEFT JOIN LATERAL (
+>   SELECT t1.ten + t2.ten AS x, t2.fivethous FROM gc1_t t2) ss ON t1.unique1 = ss.fivethous
+> GROUP BY t1.ten ORDER BY t1.ten
+QUERY PLAN:text
+Sort
+  Output: t1.ten, (sum((t1.ten + t2.ten)))
+  Sort Key: t1.ten
+  ->  HashAggregate
+        Output: t1.ten, sum((t1.ten + t2.ten))
+        Group Key: t1.ten
+        ->  Hash Right Join
+              Output: t1.ten, t2.ten
+              Hash Cond: (t2.fivethous = t1.unique1)
+              ->  Seq Scan on public.gc1_t t2
+                    Output: t2.unique1, t2.ten, t2.fivethous
+              ->  Hash
+                    Output: t1.ten, t1.unique1
+                    ->  Seq Scan on public.gc1_t t1
+                          Output: t1.ten, t1.unique1
+-- EXPLAIN
+
+> SELECT t1.ten, sum(x) FROM gc1_t t1 LEFT JOIN LATERAL (
+>   SELECT t1.ten + t2.ten AS x, t2.fivethous FROM gc1_t t2) ss ON t1.unique1 = ss.fivethous
+> GROUP BY t1.ten ORDER BY t1.ten
+ten:int4 | sum:int8
+0 | 0
+1 | 2000
+2 | 4000
+3 | 6000
+4 | 8000
+5 | 10000
+6 | 12000
+7 | 14000
+8 | 16000
+9 | 18000
+-- SELECT 10
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN
+>   (gc1_i8 t2 LEFT JOIN LATERAL (SELECT t2.q1 + 1 AS x, * FROM gc1_i8 t3) t3 ON t2.q2 = t3.q2)
+>   ON t1.q2 = t2.q2
+> ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Output: t1.q1, ((t2.q1 + 1))
+  Sort Key: t1.q1, ((t2.q1 + 1))
+  ->  Hash Right Join
+        Output: t1.q1, ((t2.q1 + 1))
+        Hash Cond: (t2.q2 = t1.q2)
+        ->  Nested Loop Left Join
+              Output: t2.q2, ((t2.q1 + 1))
+              ->  Seq Scan on public.gc1_i8 t2
+                    Output: t2.q1, t2.q2
+              ->  Seq Scan on public.gc1_i8 t3
+                    Output: t3.q2, (t2.q1 + 1)
+                    Filter: (t2.q2 = t3.q2)
+        ->  Hash
+              Output: t1.q1, t1.q2
+              ->  Seq Scan on public.gc1_i8 t1
+                    Output: t1.q1, t1.q2
+-- EXPLAIN
+
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN
+>   (gc1_i8 t2 LEFT JOIN LATERAL (SELECT t2.q1 + 1 AS x, * FROM gc1_i8 t3) t3 ON t2.q2 = t3.q2)
+>   ON t1.q2 = t2.q2
+> ORDER BY 1, 2
+q1:int8 | x:int8
+123 | 124
+123 | 124
+123 | 124
+123 | 4567890123456790
+123 | 4567890123456790
+4567890123456789 | 124
+4567890123456789 | 124
+4567890123456789 | 4567890123456790
+4567890123456789 | 4567890123456790
+4567890123456789 | 4567890123456790
+4567890123456789 | 4567890123456790
+-- SELECT 11
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.q1, x FROM gc1_i8 t1 LEFT JOIN
+>   (gc1_i8 t2 INNER JOIN LATERAL (SELECT t2.q1 + 1 AS x, * FROM gc1_i8 t3) t3 ON t2.q2 = t3.q2)
+>   ON t1.q2 = t2.q2
+> ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Output: t1.q1, ((t2.q1 + 1))
+  Sort Key: t1.q1, ((t2.q1 + 1))
+  ->  Hash Right Join
+        Output: t1.q1, (t2.q1 + 1)
+        Hash Cond: (t2.q2 = t1.q2)
+        ->  Hash Join
+              Output: t2.q1, t2.q2
+              Hash Cond: (t2.q2 = t3.q2)
+              ->  Seq Scan on public.gc1_i8 t2
+                    Output: t2.q1, t2.q2
+              ->  Hash
+                    Output: t3.q2
+                    ->  Seq Scan on public.gc1_i8 t3
+                          Output: t3.q2
+        ->  Hash
+              Output: t1.q1, t1.q2
+              ->  Seq Scan on public.gc1_i8 t1
+                    Output: t1.q1, t1.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ss2.* FROM gc1_i8 t1 LEFT JOIN
+>   (gc1_i8 t2 LEFT JOIN (SELECT coalesce(q1) AS x, * FROM gc1_i8 t3) ss1 ON t2.q1 = ss1.q2
+>    LEFT JOIN LATERAL (SELECT ss1.x AS y, * FROM gc1_i8 t4) ss2 ON t2.q2 = ss2.q1)
+>   ON t1.q2 = ss2.q1
+> ORDER BY 1, 2, 3
+QUERY PLAN:text
+Sort
+  Output: ((COALESCE(t3.q1))), t4.q1, t4.q2
+  Sort Key: ((COALESCE(t3.q1))), t4.q1, t4.q2
+  ->  Hash Right Join
+        Output: ((COALESCE(t3.q1))), t4.q1, t4.q2
+        Hash Cond: (t4.q1 = t1.q2)
+        ->  Nested Loop
+              Output: t4.q1, t4.q2, ((COALESCE(t3.q1)))
+              Join Filter: (t2.q2 = t4.q1)
+              ->  Hash Left Join
+                    Output: t2.q2, (COALESCE(t3.q1))
+                    Hash Cond: (t2.q1 = t3.q2)
+                    ->  Seq Scan on public.gc1_i8 t2
+                          Output: t2.q1, t2.q2
+                    ->  Hash
+                          Output: t3.q2, (COALESCE(t3.q1))
+                          ->  Seq Scan on public.gc1_i8 t3
+                                Output: t3.q2, COALESCE(t3.q1)
+              ->  Seq Scan on public.gc1_i8 t4
+                    Output: t4.q1, t4.q2, (COALESCE(t3.q1))
+        ->  Hash
+              Output: t1.q2
+              ->  Seq Scan on public.gc1_i8 t1
+                    Output: t1.q2
+-- EXPLAIN
+
+> SELECT ss2.* FROM gc1_i8 t1 LEFT JOIN
+>   (gc1_i8 t2 LEFT JOIN (SELECT coalesce(q1) AS x, * FROM gc1_i8 t3) ss1 ON t2.q1 = ss1.q2
+>    LEFT JOIN LATERAL (SELECT ss1.x AS y, * FROM gc1_i8 t4) ss2 ON t2.q2 = ss2.q1)
+>   ON t1.q2 = ss2.q1
+> ORDER BY 1, 2, 3
+y:int8 | q1:int8 | q2:int8
+123 | 123 | 456
+123 | 123 | 4567890123456789
+123 | 4567890123456789 | -4567890123456789
+123 | 4567890123456789 | -4567890123456789
+123 | 4567890123456789 | 123
+123 | 4567890123456789 | 123
+123 | 4567890123456789 | 4567890123456789
+123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 456
+4567890123456789 | 123 | 4567890123456789
+4567890123456789 | 4567890123456789 | -4567890123456789
+4567890123456789 | 4567890123456789 | -4567890123456789
+4567890123456789 | 4567890123456789 | -4567890123456789
+4567890123456789 | 4567890123456789 | -4567890123456789
+4567890123456789 | 4567890123456789 | 123
+4567890123456789 | 4567890123456789 | 123
+4567890123456789 | 4567890123456789 | 123
+4567890123456789 | 4567890123456789 | 123
+4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789
+NULL | NULL | NULL
+NULL | NULL | NULL
+-- SELECT 24
+
+> CREATE DOMAIN gc1_free AS int
+-- CREATE DOMAIN
+
+> CREATE DOMAIN gc1_pos AS int CHECK (VALUE >= 0)
+-- CREATE DOMAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT unique1::gc1_free AS x FROM gc1_t) s WHERE x = 1
+QUERY PLAN:text
+Seq Scan on gc1_t
+  Filter: (unique1 = 1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT unique1::gc1_pos AS x FROM gc1_t) s WHERE x = 1
+QUERY PLAN:text
+Seq Scan on gc1_t
+  Filter: (((unique1)::gc1_pos)::integer = 1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT relname::information_schema.sql_identifier AS tname, * FROM
+>   (SELECT * FROM pg_class c) ss1) ss2 WHERE tname = 'gc1_t'
+QUERY PLAN:text
+Index Scan using pg_class_relname_nsp_index on pg_class c
+  Index Cond: (relname = 'gc1_t'::name)
+-- EXPLAIN
+
+> SELECT tname FROM (SELECT relname::information_schema.sql_identifier AS tname, * FROM
+>   (SELECT * FROM pg_class c) ss1) ss2 WHERE tname = 'gc1_t'
+tname:name
+gc1_t
+-- SELECT 1
+

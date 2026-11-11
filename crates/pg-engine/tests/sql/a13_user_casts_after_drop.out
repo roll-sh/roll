@@ -1,0 +1,50 @@
+> CREATE TYPE t1 AS (a int)
+-- CREATE TYPE
+
+> CREATE TYPE t2 AS (a int)
+-- CREATE TYPE
+
+> CREATE FUNCTION t1_t2(t1) RETURNS t2 LANGUAGE sql AS 'SELECT ROW($1.a)::t2'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION sf(t2, int) RETURNS t2 LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE CAST (t1 AS t2) WITH FUNCTION t1_t2(t1) AS IMPLICIT
+-- CREATE CAST
+
+> SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> CREATE AGGREGATE ag1(int) (sfunc = sf, stype = t1)
+ERROR 42804: function sf(t2, integer) requires run-time type coercion
+
+> DROP CAST (t1 AS t2)
+-- DROP CAST
+
+> CREATE AGGREGATE ag2(int) (sfunc = sf, stype = t1)
+ERROR 42883: function sf(t1, integer) does not exist
+
+> BEGIN
+-- BEGIN
+
+> CREATE CAST (t1 AS t2) WITH FUNCTION t1_t2(t1) AS IMPLICIT
+-- CREATE CAST
+
+> SELECT 2
+?column?:int4
+2
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE AGGREGATE ag3(int) (sfunc = sf, stype = t1)
+ERROR 42883: function sf(t1, integer) does not exist
+
+> SELECT aggfnoid::regproc FROM pg_aggregate WHERE aggfnoid::regproc::text LIKE 'ag%' ORDER BY 1
+aggfnoid:regproc
+-- SELECT 0
+

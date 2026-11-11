@@ -1,0 +1,137 @@
+> ALTER DATABASE a37_nosuchdb SET work_mem = '1MB'
+ERROR 3D000: database "a37_nosuchdb" does not exist
+
+> SELECT pg_tablespace_size('pg_default') > 0, pg_tablespace_size('pg_global') >= 0,
+>   pg_tablespace_size(1663) > 0
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+-- SELECT 1
+
+> SELECT pg_tablespace_size(12345)
+ERROR 42704: tablespace with OID 12345 does not exist
+
+> SELECT pg_tablespace_size('a37_nosuch')
+ERROR 42704: tablespace "a37_nosuch" does not exist
+
+> SELECT pg_database_size(current_database()) > 0,
+>   pg_database_size((SELECT oid FROM pg_database WHERE datname = current_database())) > 0,
+>   true
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+-- SELECT 1
+
+> SELECT pg_database_size(12345)
+ERROR 42704: database with OID 12345 does not exist
+
+> SELECT pg_database_size('a37_nosuchdb')
+ERROR 3D000: database "a37_nosuchdb" does not exist
+
+> SELECT format_type(0, NULL), format_type(0, -1), format_type(99999, NULL)
+format_type:text | format_type:text | format_type:text
+- | - | ???
+-- SELECT 1
+
+> CREATE DOMAIN a37_pair AS int[] CHECK (VALUE[1] < VALUE[2])
+-- CREATE DOMAIN
+
+> SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE contypid = 'a37_pair'::regtype
+pg_get_constraintdef:text
+CHECK (((VALUE)[1] < (VALUE)[2]))
+-- SELECT 1
+
+> DROP DOMAIN a37_pair
+-- DROP DOMAIN
+
+> CREATE TYPE a37_ar AS RANGE (subtype = int4[])
+-- CREATE TYPE
+
+> SELECT proname, pg_get_function_arguments(p.oid), pg_get_function_identity_arguments(p.oid),
+>   pg_get_function_result(p.oid) FROM pg_proc p WHERE proname IN ('a37_ar', 'a37_armultirange')
+>   ORDER BY 1, 2
+proname:name | pg_get_function_arguments:text | pg_get_function_identity_arguments:text | pg_get_function_result:text
+a37_ar | integer[], integer[] | integer[], integer[] | a37_ar
+a37_ar | integer[], integer[], text | integer[], integer[], text | a37_ar
+-- SELECT 2
+
+> DROP TYPE a37_ar
+-- DROP TYPE
+
+> CREATE TABLE a37_sl (sl_name char(10), sl_avail int)
+-- CREATE TABLE
+
+> CREATE VIEW a37_slv AS SELECT * FROM a37_sl
+-- CREATE VIEW
+
+> CREATE TABLE a37_ok (ok_name char(10), ok_quant int)
+-- CREATE TABLE
+
+> CREATE RULE a37_r1 AS ON INSERT TO a37_ok DO INSTEAD
+>   UPDATE a37_slv SET sl_avail = sl_avail + new.ok_quant WHERE sl_name = new.ok_name
+-- CREATE RULE
+
+> CREATE TABLE a37_t3 (id3a int, data text)
+-- CREATE TABLE
+
+> CREATE RULE a37_r3 AS ON INSERT TO a37_t3
+>   WHERE (EXISTS (SELECT 1 FROM a37_t3 WHERE a37_t3.id3a = new.id3a))
+>   DO INSTEAD UPDATE a37_t3 SET data = new.data WHERE a37_t3.id3a = new.id3a
+-- CREATE RULE
+
+> SELECT rulename, pg_get_ruledef(oid) FROM pg_rewrite WHERE rulename LIKE 'a37_r%' ORDER BY 1
+rulename:name | pg_get_ruledef:text
+a37_r1 | CREATE RULE a37_r1 AS
+    ON INSERT TO public.a37_ok DO INSTEAD  UPDATE a37_slv SET sl_avail = (a37_slv.sl_avail + new.ok_quant)
+  WHERE (a37_slv.sl_name = new.ok_name);
+a37_r3 | CREATE RULE a37_r3 AS
+    ON INSERT TO public.a37_t3
+   WHERE (EXISTS ( SELECT 1
+           FROM a37_t3 a37_t3_1
+          WHERE (a37_t3_1.id3a = new.id3a))) DO INSTEAD  UPDATE a37_t3 SET data = new.data
+  WHERE (a37_t3.id3a = new.id3a);
+-- SELECT 2
+
+> SELECT rulename, pg_get_ruledef(oid, true) FROM pg_rewrite WHERE rulename LIKE 'a37_r%' ORDER BY 1
+rulename:name | pg_get_ruledef:text
+a37_r1 | CREATE RULE a37_r1 AS
+    ON INSERT TO a37_ok DO INSTEAD  UPDATE a37_slv SET sl_avail = a37_slv.sl_avail + new.ok_quant
+  WHERE a37_slv.sl_name = new.ok_name;
+a37_r3 | CREATE RULE a37_r3 AS
+    ON INSERT TO a37_t3
+   WHERE (EXISTS ( SELECT 1
+           FROM a37_t3 a37_t3_1
+          WHERE a37_t3_1.id3a = new.id3a)) DO INSTEAD  UPDATE a37_t3 SET data = new.data
+  WHERE a37_t3.id3a = new.id3a;
+-- SELECT 2
+
+> DROP TABLE a37_ok, a37_t3
+-- DROP TABLE
+
+> DROP VIEW a37_slv
+-- DROP VIEW
+
+> DROP TABLE a37_sl
+-- DROP TABLE
+
+> CREATE DOMAIN a37_cd AS text COLLATE "POSIX"
+-- CREATE DOMAIN
+
+> CREATE TABLE a37_dc (c information_schema.character_data, y information_schema.yes_or_no,
+>   d a37_cd, e a37_cd COLLATE "C", n information_schema.cardinal_number)
+-- CREATE TABLE
+
+> SELECT attname, attcollation::regcollation FROM pg_attribute
+>   WHERE attrelid = 'a37_dc'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attcollation:4191
+c | "C"
+y | "C"
+d | "POSIX"
+e | "C"
+n | -
+-- SELECT 5
+
+> DROP TABLE a37_dc
+-- DROP TABLE
+
+> DROP DOMAIN a37_cd
+-- DROP DOMAIN
+

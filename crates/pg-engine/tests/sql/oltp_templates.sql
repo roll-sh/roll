@@ -1,0 +1,96 @@
+-- Simple queries that differ only in their literals (a plan kept per template, run with the
+-- literals' values): results, errors and plans as each query plans alone.
+CREATE TABLE tq (id int PRIMARY KEY, k int8 UNIQUE, v int NOT NULL DEFAULT 0, n numeric, s text, c int);
+CREATE INDEX ON tq (c);
+INSERT INTO tq SELECT g, g * 10, 0, g / 2.0, 'r' || g, g % 3 FROM generate_series(1, 20) g;
+UPDATE tq SET v = v + 5 WHERE id = 1;
+UPDATE tq SET v = v + 6 WHERE id = 2;
+UPDATE tq SET v = v + -7 WHERE id = 3;
+UPDATE tq SET v = v - 8 WHERE id = 4;
+UPDATE tq SET v = v * 2 WHERE id = 1;
+UPDATE tq SET v = 9 WHERE id = 30;
+SELECT v FROM tq WHERE id = 1;
+SELECT v FROM tq WHERE id = 2;
+SELECT v FROM tq WHERE id = 3;
+SELECT v FROM tq WHERE id = 4;
+SELECT v, s FROM tq WHERE id = 99;
+SELECT id FROM tq WHERE k = 30;
+SELECT id FROM tq WHERE k = 40;
+SELECT id FROM tq WHERE k = 3000000000;
+SELECT id FROM tq WHERE k = 3000000001;
+SELECT id FROM tq WHERE k = 5.5;
+SELECT id FROM tq WHERE k = 6.5;
+SELECT n FROM tq WHERE id = -1;
+SELECT n FROM tq WHERE id = -2;
+-- Non-unique column, strings: plans for these texts only.
+SELECT count(*) FROM tq WHERE c = 1;
+SELECT count(*) FROM tq WHERE c = 2;
+SELECT id FROM tq WHERE s = 'r5';
+SELECT id FROM tq WHERE s = 'r6';
+SELECT id FROM tq WHERE id = 5 AND s = 'r5';
+SELECT id FROM tq WHERE id = 6 AND s = 'r5';
+SELECT id FROM tq WHERE id = 6 AND s = 'r6';
+-- Errors when run.
+UPDATE tq SET v = v + 2147483000 WHERE id = 1;
+UPDATE tq SET v = v + 2147483001 WHERE id = 1;
+UPDATE tq SET v = v + 2147483002 WHERE id = 99;
+UPDATE tq SET c = 1 / 0 WHERE id = 1;
+UPDATE tq SET c = 2 / 0 WHERE id = 99;
+INSERT INTO tq (id, k, v) VALUES (21, 210, 1);
+INSERT INTO tq (id, k, v) VALUES (22, 220, 2);
+INSERT INTO tq (id, k, v) VALUES (22, 230, 3);
+INSERT INTO tq (id, k, v) VALUES (23, 240, 4);
+SELECT id, k, v FROM tq WHERE id > 20 ORDER BY id;
+DELETE FROM tq WHERE id = 23;
+DELETE FROM tq WHERE id = 22;
+DELETE FROM tq WHERE id = 99;
+-- The table grows: planned again as it grows.
+INSERT INTO tq SELECT g, g * 10, 0, 0, 's', 0 FROM generate_series(100, 3000) g;
+SELECT v FROM tq WHERE id = 1;
+SELECT v FROM tq WHERE id = 2;
+UPDATE tq SET v = v + 1 WHERE id = 2500;
+UPDATE tq SET v = v + 1 WHERE id = 2600;
+SELECT v FROM tq WHERE id = 2500;
+-- Settings, search_path and DDL in between.
+SET enable_indexscan = off;
+SELECT v FROM tq WHERE id = 3;
+SELECT v FROM tq WHERE id = 4;
+EXPLAIN (COSTS OFF) SELECT v FROM tq WHERE id = 4;
+RESET enable_indexscan;
+EXPLAIN (COSTS OFF) SELECT v FROM tq WHERE id = 4;
+CREATE SCHEMA tqs;
+CREATE TABLE tqs.tq (id int PRIMARY KEY, v int);
+INSERT INTO tqs.tq VALUES (3, 333), (4, 444);
+SET search_path = tqs, public;
+SELECT v FROM tq WHERE id = 3;
+SELECT v FROM tq WHERE id = 4;
+RESET search_path;
+SELECT v FROM tq WHERE id = 3;
+ALTER TABLE tq DROP CONSTRAINT tq_pkey;
+SELECT v FROM tq WHERE id = 3;
+SELECT v FROM tq WHERE id = 4;
+EXPLAIN (COSTS OFF) SELECT v FROM tq WHERE id = 4;
+ALTER TABLE tq ADD PRIMARY KEY (id);
+SELECT v FROM tq WHERE id = 3;
+SELECT v FROM tq WHERE id = 4;
+-- Row security and rules keep no plan.
+ALTER TABLE tq ENABLE ROW LEVEL SECURITY;
+SELECT v FROM tq WHERE id = 3;
+SELECT v FROM tq WHERE id = 4;
+ALTER TABLE tq DISABLE ROW LEVEL SECURITY;
+CREATE RULE tq_r AS ON UPDATE TO tq WHERE new.v < 0 DO INSTEAD NOTHING;
+UPDATE tq SET v = v - 1000 WHERE id = 3;
+UPDATE tq SET v = v - 1001 WHERE id = 4;
+SELECT id, v FROM tq WHERE id IN (3, 4) ORDER BY id;
+DROP RULE tq_r ON tq;
+-- In a transaction block, with a savepoint.
+BEGIN;
+UPDATE tq SET v = v + 1 WHERE id = 5;
+SAVEPOINT a;
+UPDATE tq SET v = v + 1 WHERE id = 6;
+ROLLBACK TO a;
+UPDATE tq SET v = v + 1 WHERE id = 7;
+COMMIT;
+SELECT id, v FROM tq WHERE id BETWEEN 5 AND 7 ORDER BY id;
+DROP SCHEMA tqs CASCADE;
+DROP TABLE tq;

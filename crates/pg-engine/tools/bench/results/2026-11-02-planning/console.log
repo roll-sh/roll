@@ -1,0 +1,10 @@
+Diagnostic artifacts: /home/meszmate/.cache/pg-engine-perf-20261102/planning-diagnostic/run-20261102T014736Z-248764
+Cleanup recorded; fixtures/results retained at /home/meszmate/.cache/pg-engine-perf-20261102/planning-diagnostic/run-20261102T014736Z-248764
+Traceback (most recent call last):
+  File "/home/meszmate/.cache/pg-engine-perf-20261102/planning-diagnostic/diagnose.py", line 453, in <module>
+    main()
+    ~~~~^^
+  File "/home/meszmate/.cache/pg-engine-perf-20261102/planning-diagnostic/diagnose.py", line 346, in main
+    s.bind(('127.0.0.1', port))  # fail instead of disturbing an occupant
+    ~~~~~~^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 98] Address already in use

@@ -1,0 +1,91 @@
+> CREATE TABLE fac_p (id int PRIMARY KEY, k text UNIQUE)
+-- CREATE TABLE
+
+> CREATE TABLE fac_c (pid int NOT NULL REFERENCES fac_p ON DELETE SET NULL ON UPDATE CASCADE)
+-- CREATE TABLE
+
+> INSERT INTO fac_p VALUES (1, 'a'), (2, 'b')
+-- INSERT 0 2
+
+> INSERT INTO fac_c VALUES (1)
+-- INSERT 0 1
+
+> DELETE FROM fac_p WHERE id = 1
+ERROR 23502: null value in column "pid" of relation "fac_c" violates not-null constraint
+DETAIL: Failing row contains (null).
+CONTEXT: SQL statement "UPDATE ONLY "public"."fac_c" SET "pid" = NULL WHERE $1 OPERATOR(pg_catalog.=) "pid""
+OBJECTS: schema=public table=fac_c column=pid
+
+> CREATE TABLE fac_c2 (pid bigint CHECK (pid < 100) REFERENCES fac_p ON UPDATE CASCADE ON DELETE CASCADE, k varchar REFERENCES fac_p (k) ON UPDATE SET DEFAULT)
+-- CREATE TABLE
+
+> INSERT INTO fac_c2 VALUES (2, 'b')
+-- INSERT 0 1
+
+> UPDATE fac_p SET id = 200 WHERE id = 2
+ERROR 23514: new row for relation "fac_c2" violates check constraint "fac_c2_pid_check"
+DETAIL: Failing row contains (200, b).
+CONTEXT: SQL statement "UPDATE ONLY "public"."fac_c2" SET "pid" = $1 WHERE $2 OPERATOR(pg_catalog.=) "pid""
+OBJECTS: schema=public table=fac_c2 constraint=fac_c2_pid_check
+
+> CREATE FUNCTION fac_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE '% on %', TG_OP, TG_TABLE_NAME; RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER fac_t AFTER UPDATE OR DELETE ON fac_c2 FOR EACH ROW EXECUTE FUNCTION fac_note()
+-- CREATE TRIGGER
+
+> UPDATE fac_p SET k = 'z' WHERE id = 2
+NOTICE 00000: UPDATE on fac_c2
+CONTEXT: PL/pgSQL function fac_note() line 1 at RAISE
+-- UPDATE 1
+
+> UPDATE fac_p SET id = 3 WHERE id = 2
+NOTICE 00000: UPDATE on fac_c2
+CONTEXT: PL/pgSQL function fac_note() line 1 at RAISE
+-- UPDATE 1
+
+> DELETE FROM fac_p WHERE id = 3
+NOTICE 00000: DELETE on fac_c2
+CONTEXT: PL/pgSQL function fac_note() line 1 at RAISE
+-- DELETE 1
+
+> CREATE TABLE fac_m (a int, b int, PRIMARY KEY (a, b))
+-- CREATE TABLE
+
+> CREATE TABLE fac_mc (x int, y int, FOREIGN KEY (x, y) REFERENCES fac_m ON DELETE CASCADE ON UPDATE CASCADE) PARTITION BY RANGE (x)
+-- CREATE TABLE
+
+> CREATE TABLE fac_mc1 PARTITION OF fac_mc FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TRIGGER fac_mt AFTER UPDATE OR DELETE ON fac_mc1 FOR EACH ROW EXECUTE FUNCTION fac_note()
+-- CREATE TRIGGER
+
+> INSERT INTO fac_m VALUES (1, 1)
+-- INSERT 0 1
+
+> INSERT INTO fac_mc VALUES (1, 1)
+-- INSERT 0 1
+
+> UPDATE fac_m SET b = 2
+NOTICE 00000: UPDATE on fac_mc1
+CONTEXT: PL/pgSQL function fac_note() line 1 at RAISE
+-- UPDATE 1
+
+> UPDATE fac_m SET a = 20
+ERROR 23514: no partition of relation "fac_mc" found for row
+DETAIL: Partition key of the failing row contains (x) = (20).
+CONTEXT: SQL statement "UPDATE "public"."fac_mc" SET "x" = $1, "y" = $2 WHERE $3 OPERATOR(pg_catalog.=) "x" AND $4 OPERATOR(pg_catalog.=) "y""
+OBJECTS: schema=public table=fac_mc
+
+> DELETE FROM fac_m
+NOTICE 00000: DELETE on fac_mc1
+CONTEXT: PL/pgSQL function fac_note() line 1 at RAISE
+-- DELETE 1
+
+> DROP TABLE fac_c, fac_c2, fac_mc, fac_m, fac_p
+-- DROP TABLE
+
+> DROP FUNCTION fac_note()
+-- DROP FUNCTION
+

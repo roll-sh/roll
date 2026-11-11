@@ -1,0 +1,187 @@
+> CREATE DOMAIN ad_d AS int
+-- CREATE DOMAIN
+
+> CREATE TABLE ad_dt (a ad_d, b int)
+-- CREATE TABLE
+
+> INSERT INTO ad_dt VALUES (NULL, 1), (-1, 2)
+-- INSERT 0 2
+
+> ALTER DOMAIN ad_d SET DEFAULT 5
+-- ALTER DOMAIN
+
+> INSERT INTO ad_dt (b) VALUES (3)
+-- INSERT 0 1
+
+> SELECT * FROM ad_dt ORDER BY b
+a:int4 | b:int4
+NULL | 1
+-1 | 2
+5 | 3
+-- SELECT 3
+
+> SELECT typdefault, typnotnull FROM pg_type WHERE typname = 'ad_d'
+typdefault:text | typnotnull:bool
+5 | f
+-- SELECT 1
+
+> ALTER DOMAIN ad_d DROP DEFAULT
+-- ALTER DOMAIN
+
+> INSERT INTO ad_dt (b) VALUES (4)
+-- INSERT 0 1
+
+> ALTER DOMAIN ad_d SET NOT NULL
+ERROR 23502: column "a" of table "ad_dt" contains null values
+OBJECTS: schema=public table=ad_dt column=a
+
+> DELETE FROM ad_dt WHERE a IS NULL
+-- DELETE 2
+
+> ALTER DOMAIN ad_d SET NOT NULL
+-- ALTER DOMAIN
+
+> SELECT typnotnull FROM pg_type WHERE typname = 'ad_d'
+typnotnull:bool
+t
+-- SELECT 1
+
+> INSERT INTO ad_dt VALUES (NULL, 5)
+ERROR 23502: domain ad_d does not allow null values
+OBJECTS: schema=public datatype=ad_d
+
+> SELECT conname, contype, convalidated FROM pg_constraint WHERE contypid = 'ad_d'::regtype ORDER BY 1
+conname:name | contype:char | convalidated:bool
+ad_d_not_null | n | t
+-- SELECT 1
+
+> ALTER DOMAIN ad_d DROP NOT NULL
+-- ALTER DOMAIN
+
+> ALTER DOMAIN ad_d ADD CONSTRAINT ad_pos CHECK (VALUE > 0)
+ERROR 23514: column "a" of table "ad_dt" contains values that violate the new constraint
+OBJECTS: schema=public table=ad_dt column=a
+
+> ALTER DOMAIN ad_d ADD CONSTRAINT ad_pos CHECK (VALUE > 0) NOT VALID
+-- ALTER DOMAIN
+
+> SELECT conname, contype, convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE contypid = 'ad_d'::regtype ORDER BY 1
+conname:name | contype:char | convalidated:bool | pg_get_constraintdef:text
+ad_pos | c | f | CHECK ((VALUE > 0)) NOT VALID
+-- SELECT 1
+
+> INSERT INTO ad_dt VALUES (-5, 6)
+ERROR 23514: value for domain ad_d violates check constraint "ad_pos"
+OBJECTS: schema=public datatype=ad_d constraint=ad_pos
+
+> ALTER DOMAIN ad_d VALIDATE CONSTRAINT ad_pos
+ERROR 23514: column "a" of table "ad_dt" contains values that violate the new constraint
+OBJECTS: schema=public table=ad_dt column=a
+
+> UPDATE ad_dt SET a = 1 WHERE a < 0
+-- UPDATE 1
+
+> ALTER DOMAIN ad_d VALIDATE CONSTRAINT ad_pos
+-- ALTER DOMAIN
+
+> ALTER DOMAIN ad_d ADD CONSTRAINT ad_pos CHECK (VALUE > 1)
+ERROR 42710: constraint "ad_pos" for domain "ad_d" already exists
+
+> ALTER DOMAIN ad_d RENAME CONSTRAINT ad_pos TO ad_pos2
+-- ALTER DOMAIN
+
+> ALTER DOMAIN ad_d DROP CONSTRAINT ad_nope
+ERROR 42704: constraint "ad_nope" of domain "ad_d" does not exist
+
+> ALTER DOMAIN ad_d DROP CONSTRAINT IF EXISTS ad_nope
+NOTICE 00000: constraint "ad_nope" of domain "ad_d" does not exist, skipping
+-- ALTER DOMAIN
+
+> ALTER DOMAIN ad_d ADD CHECK (VALUE < 100)
+-- ALTER DOMAIN
+
+> ALTER DOMAIN ad_d ADD CONSTRAINT ad_nn NOT NULL
+-- ALTER DOMAIN
+
+> SELECT conname, contype, convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE contypid = 'ad_d'::regtype ORDER BY 1
+conname:name | contype:char | convalidated:bool | pg_get_constraintdef:text
+ad_d_check | c | t | CHECK ((VALUE < 100))
+ad_nn | n | t | NOT NULL
+ad_pos2 | c | t | CHECK ((VALUE > 0))
+-- SELECT 3
+
+> ALTER DOMAIN ad_d DROP CONSTRAINT ad_pos2
+-- ALTER DOMAIN
+
+> ALTER DOMAIN ad_d VALIDATE CONSTRAINT ad_nope
+ERROR 42704: constraint "ad_nope" of domain "ad_d" does not exist
+
+> ALTER DOMAIN ad_d ADD CONSTRAINT ad_u UNIQUE (VALUE)
+ERROR 42601: syntax error at or near "UNIQUE" (at 39)
+
+> ALTER DOMAIN ad_d ADD CONSTRAINT ad_b CHECK (VALUE > 1000)
+ERROR 23514: column "a" of table "ad_dt" contains values that violate the new constraint
+OBJECTS: schema=public table=ad_dt column=a
+
+> ALTER DOMAIN ad_d RENAME TO ad_d2
+-- ALTER DOMAIN
+
+> ALTER DOMAIN ad_d2 OWNER TO CURRENT_USER
+-- ALTER DOMAIN
+
+> ALTER DOMAIN nope SET DEFAULT 1
+ERROR 42704: type "nope" does not exist
+
+> ALTER DOMAIN int4 SET DEFAULT 1
+ERROR 42809: integer is not a domain
+
+> DROP TABLE ad_dt
+-- DROP TABLE
+
+> DROP DOMAIN ad_d2
+-- DROP DOMAIN
+
+> CREATE DOMAIN ad_n AS text CONSTRAINT ad_n_nn NOT NULL CHECK (length(VALUE) > 1)
+-- CREATE DOMAIN
+
+> SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint WHERE contypid = 'ad_n'::regtype ORDER BY 1
+conname:name | contype:char | pg_get_constraintdef:text
+ad_n_check | c | CHECK ((length(VALUE) > 1))
+ad_n_nn | n | NOT NULL
+-- SELECT 2
+
+> SELECT 'x'::ad_n
+ERROR 23514: value for domain ad_n violates check constraint "ad_n_check"
+OBJECTS: schema=public datatype=ad_n constraint=ad_n_check
+
+> SELECT NULL::ad_n
+ERROR 23502: domain ad_n does not allow null values
+OBJECTS: schema=public datatype=ad_n
+
+> ALTER DOMAIN ad_n DROP CONSTRAINT ad_n_nn
+-- ALTER DOMAIN
+
+> SELECT NULL::ad_n
+ad_n:text
+NULL
+-- SELECT 1
+
+> ALTER DOMAIN ad_n RENAME CONSTRAINT ad_n_check TO ad_len
+-- ALTER DOMAIN
+
+> SELECT conname FROM pg_constraint WHERE contypid = 'ad_n'::regtype ORDER BY 1
+conname:name
+ad_len
+-- SELECT 1
+
+> ALTER DOMAIN ad_n RENAME CONSTRAINT nope TO x
+ERROR 42704: constraint "nope" for domain ad_n does not exist
+
+> SELECT typdefault, typnotnull FROM pg_type WHERE typname = 'ad_n'
+typdefault:text | typnotnull:bool
+NULL | f
+-- SELECT 1
+
+> DROP DOMAIN ad_n
+-- DROP DOMAIN
+

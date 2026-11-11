@@ -1,0 +1,102 @@
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555432d4a50223f3e3c613ec6fccbdcb8eca5c6a5ada5b9a5c83c2f613e NULL
+result:text
+<a>日本語テキスト</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2253686966745f4a4953223f3e3c613e93fa967b8cea3c2f613e NULL
+result:text
+<a>日本語</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d22534a4953223f3e3c6120623d22835c223e955c3c2f613e NULL
+result:text
+<a b="ソ">表</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2277696e646f77732d393332223f3e3c613e87403c2f613e NULL
+result:text
+<a>①</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555432d4b52223f3e3c613ec7d1b1b9beee3c2f613e NULL
+result:text
+<a>한국어</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d22554843223f3e3c613e8c63b9e6b0a2c7cf3c2f613e NULL
+result:text
+<a>똠방각하</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224a4f484142223f3e3c613ed0653c2f613e NULL
+ERROR 22021: invalid byte sequence for encoding "JOHAB": 0xd0 0x65
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555432d434e223f3e3c613ed6d0cec43c2f613e NULL
+result:text
+<a>中文</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2247424b223f3e3c613ed6d0cec481403c2f613e NULL
+result:text
+<a>中文丂</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2247423138303330223f3e3c613ed6d0cec49439fc36a8a63c2f613e NULL
+result:text
+<a>中文😀é</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2242696735223f3e3c613ea4a4a4e53c2f613e NULL
+result:text
+<a>中文</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555432d5457223f3e3c613ec4a18ea2a1a13c2f613e NULL
+result:text
+<a>一乂</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555435f4a49535f32303034223f3e3c613ea4f7a4ab3c2f613e NULL
+result:text
+<a>か゚か</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2253484946545f4a49535f32303034223f3e3c613e82f53c2f613e NULL
+result:text
+<a>か゚</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224b4f49382d55223f3e3c613ebd3c2f613e NULL
+result:text
+<a>Ґ</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2257494e31323538223f3e3c613ee33c2f613e NULL
+result:text
+<a>ă</a>
+-- FASTPATH
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555432d4a50223f3e3c613ea43c2f613e NULL
+ERROR 22021: invalid byte sequence for encoding "EUC_JP": 0xa4 0x3c
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555432d4a50223f3e3c613ea9a13c2f613e NULL
+ERROR 22P05: character with byte sequence 0xa9 0xa1 in encoding "EUC_JP" has no equivalent in encoding "UTF8"
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2253686966745f4a4953223f3e3c613eff3c2f613e NULL
+ERROR 22021: invalid byte sequence for encoding "SJIS": 0xff 0x3c
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2247423138303330223f3e3c613e81303c2f613e NULL
+ERROR 22021: invalid byte sequence for encoding "GB18030": 0x81 0x30 0x3c 0x2f
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2247423138303330223f3e3c613e8431a5303c2f613e NULL
+ERROR 22P05: character with byte sequence 0x84 0x31 0xa5 0x30 in encoding "GB18030" has no equivalent in encoding "UTF8"
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2242696735223f3e3c613ec87e3c2f613e NULL
+ERROR 22P05: character with byte sequence 0xc8 0x7e in encoding "BIG5" has no equivalent in encoding "UTF8"
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224555432d4b52223f3e3c613eb03c2f613e NULL
+ERROR 22021: invalid byte sequence for encoding "EUC_KR": 0xb0 0x3c
+
+> \fcall xmlconcat2(xml,xml) x:3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d224d554c455f494e5445524e414c223f3e3c613e92b0a13c2f613e NULL
+ERROR 42883: default conversion function for encoding "MULE_INTERNAL" to "UTF8" does not exist
+

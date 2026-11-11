@@ -1,0 +1,101 @@
+{
+  "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "profile": "release",
+  "gates": {
+    "build": "0",
+    "test": "0",
+    "clippy": "0",
+    "pg-unit": "0"
+  },
+  "crate_tests": {
+    "passed": 430,
+    "failed": 0,
+    "ignored": 18,
+    "completed_targets": 60
+  },
+  "regression": {
+    "baseline_source": "7f35a185",
+    "files": 230,
+    "units": 51150,
+    "matched": 51148,
+    "panics": 0,
+    "non_ok_engine_statuses": 0,
+    "added_differences": 0,
+    "hunks_byte_identical": true,
+    "differing_units": {
+      "join": "368:wrong EXPLAIN",
+      "partition_prune": "410:wrong result"
+    }
+  },
+  "hunk_sha256": {
+    "join.diff": "7b49aa146d880fef2ecf912473019b5203677a17ed12d0a33c628d750581a9ac",
+    "partition_prune.diff": "3767438870d7e391d51ba7e4d3193fddfff042d70a0a7495ea8ebf50ecc0c65b"
+  },
+  "clippy_summaries": [
+    "warning: `pg-engine` (lib) generated 11 warnings (run `cargo clippy --fix --lib -p pg-engine -- ` to apply 8 suggestions)",
+    "warning: `pg-engine` (lib test) generated 14 warnings (11 duplicates) (run `cargo clippy --fix --lib -p pg-engine --tests -- ` to apply 3 suggestions)",
+    "warning: `pg-engine` (test \"difftest\") generated 1 warning (run `cargo clippy --fix --test \"difftest\" -p pg-engine -- ` to apply 1 suggestion)",
+    "warning: `pg-engine` (example \"bench\") generated 1 warning (run `cargo clippy --fix --example \"bench\" -p pg-engine -- ` to apply 1 suggestion)"
+  ],
+  "pg_unit_tail": [
+    "",
+    "running 0 tests",
+    "",
+    "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "",
+    "     Running unittests src/main.rs (target/debug/deps/rolld-a6f5c88189841da0)",
+    "",
+    "running 0 tests",
+    "",
+    "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "",
+    "postgres: all green"
+  ],
+  "measured_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "rust_tree_matches_measured_source": true,
+  "measurement_audit": {
+    "borrows-vs-baseline": {
+      "invocations": 60,
+      "checked_operations_including_warmup": 2722288,
+      "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+      "source_at_start": "89e863fce5c92ca95c581d7daa578ddf80c9a83e"
+    },
+    "checked-baseline-vs-pg": {
+      "invocations": 96,
+      "checked_operations_including_warmup": 7787719,
+      "client_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+      "source_at_start": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0"
+    },
+    "final-dirty-vs-baseline": {
+      "invocations": 24,
+      "checked_operations_including_warmup": 1486636,
+      "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+      "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+    },
+    "final-vs-pg": {
+      "invocations": 60,
+      "checked_operations_including_warmup": 5742293,
+      "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+      "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+    },
+    "histogram-vs-baseline": {
+      "invocations": 60,
+      "checked_operations_including_warmup": 2736901,
+      "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+      "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+    },
+    "point-control-vs-baseline": {
+      "invocations": 12,
+      "checked_operations_including_warmup": 4101470,
+      "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+      "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+    },
+    "restarted-dirty-vs-baseline": {
+      "invocations": 12,
+      "checked_operations_including_warmup": 283225,
+      "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+      "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+    }
+  },
+  "docker_recovery_e2e": "Waived; retained parent baseline12passed/4WALHTTPtimeouts; PostgreSQL units passed"
+}

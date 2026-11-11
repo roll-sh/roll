@@ -1,0 +1,77 @@
+-- KNN index scans over GiST box, circle, polygon, btree_gist and pg_trgm indexes read
+-- nearest-first (agent 139): the rows, their distances and order (no equal distances
+-- here: PostgreSQL's order among them follows its insertion-built trees), with NULLs,
+-- index conditions, the transaction's own writes and later commits.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE TABLE a139_kb (id int PRIMARY KEY, b box);
+INSERT INTO a139_kb SELECT i, box(point(i % 97, i % 89), point(i % 97 + (i % 5), i % 89 + (i % 3))) FROM generate_series(1, 2000) i;
+INSERT INTO a139_kb VALUES (3001, NULL);
+CREATE INDEX ON a139_kb USING gist (b);
+CREATE TABLE a139_kc (id int PRIMARY KEY, c circle);
+INSERT INTO a139_kc SELECT i, circle(point(i % 101, (i * 7) % 103), (i % 4) + 0.5) FROM generate_series(1, 2000) i;
+CREATE INDEX ON a139_kc USING gist (c);
+CREATE TABLE a139_kp (id int PRIMARY KEY, p polygon);
+INSERT INTO a139_kp SELECT i, polygon(box(point(i % 101, (i * 3) % 107), point(i % 101 + 1.5, (i * 3) % 107 + 0.7))) FROM generate_series(1, 2000) i;
+CREATE INDEX ON a139_kp USING gist (p);
+CREATE TABLE a139_ki (id int PRIMARY KEY, a int4, f float8, part int);
+INSERT INTO a139_ki SELECT i, (i * 7919) % 100003, ((i * 7919) % 100003) / 7.0, i % 3 FROM generate_series(1, 3000) i;
+INSERT INTO a139_ki VALUES (4001, NULL, NULL, 0);
+CREATE INDEX ON a139_ki USING gist (a);
+CREATE INDEX ON a139_ki USING gist (f);
+CREATE TABLE a139_kj AS SELECT * FROM a139_ki;
+CREATE INDEX ON a139_kj USING gist (part, a);
+CREATE TABLE a139_kt (id int PRIMARY KEY, t text);
+INSERT INTO a139_kt SELECT i, md5(i::text) FROM generate_series(1, 3000) i;
+INSERT INTO a139_kt VALUES (4001, NULL), (4002, '');
+CREATE INDEX ON a139_kt USING gist (t gist_trgm_ops);
+ANALYZE a139_kb, a139_kc, a139_kp, a139_ki, a139_kj, a139_kt;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM a139_kb ORDER BY b <-> point(10.3, 20.7) LIMIT 5;
+SELECT id, round((b <-> point(10.3, 20.7))::numeric, 6) FROM a139_kb ORDER BY b <-> point(10.3, 20.7) LIMIT 3;
+SELECT id, round((b <-> point(130.37, 140.91))::numeric, 6) FROM a139_kb ORDER BY b <-> point(130.37, 140.91) LIMIT 6;
+SELECT id FROM a139_kb WHERE b && box(point(0, 0), point(30, 30)) ORDER BY b <-> point(55.5, 5.25) LIMIT 4;
+SELECT count(*), count(DISTINCT id) FROM (SELECT id FROM a139_kb ORDER BY b <-> point(10.3, 20.7) LIMIT 3000) s;
+SELECT id, b <-> point(1, 1) FROM a139_kb ORDER BY b <-> point(1, 1) OFFSET 1998 LIMIT 5;
+EXPLAIN (COSTS OFF) SELECT id FROM a139_kc ORDER BY c <-> point(50.2, 60.1) LIMIT 5;
+SELECT id, round((c <-> point(130.37, 140.91))::numeric, 6) FROM a139_kc ORDER BY c <-> point(130.37, 140.91) LIMIT 6;
+EXPLAIN (COSTS OFF) SELECT id FROM a139_kp ORDER BY p <-> point(50.2, 60.1) LIMIT 5;
+SELECT id, round((p <-> point(130.37, 140.91))::numeric, 6) FROM a139_kp ORDER BY p <-> point(130.37, 140.91) LIMIT 6;
+EXPLAIN (COSTS OFF) SELECT id FROM a139_ki ORDER BY a <-> 50000 LIMIT 5;
+SELECT id, a <-> 50000 FROM a139_ki ORDER BY a <-> 50000 LIMIT 6;
+SELECT id, f <-> 5000.25 FROM a139_ki ORDER BY f <-> 5000.25 LIMIT 6;
+SELECT id, a <-> -5 FROM a139_ki WHERE a > 1000 ORDER BY a <-> -5 LIMIT 4;
+SELECT id, a <-> 77777 FROM a139_kj WHERE part = 2 ORDER BY a <-> 77777 LIMIT 4;
+SELECT id, a FROM a139_ki ORDER BY a <-> 50000 OFFSET 2998 LIMIT 5;
+EXPLAIN (COSTS OFF) SELECT id FROM a139_kt ORDER BY t <-> 'c4ca4238a0b' LIMIT 5;
+SELECT id, t, round((t <-> 'c4ca4238a0b')::numeric, 5) FROM a139_kt ORDER BY t <-> 'c4ca4238a0b' LIMIT 3;
+SELECT id, round((t <->> 'a87ff')::numeric, 5) FROM a139_kt ORDER BY t <->> 'a87ff' LIMIT 1;
+-- The transaction's own writes, then later commits.
+BEGIN;
+UPDATE a139_kb SET b = box(point(10.3, 20.7), point(10.4, 20.8)) WHERE id = 1500;
+DELETE FROM a139_kb WHERE id = 107;
+INSERT INTO a139_kb VALUES (5000, box(point(10.31, 20.71), point(10.32, 20.72)));
+SELECT id, round((b <-> point(10.3, 20.7))::numeric, 6) FROM a139_kb ORDER BY b <-> point(10.3, 20.7) LIMIT 4;
+ROLLBACK;
+SELECT id, round((b <-> point(10.3, 20.7))::numeric, 6) FROM a139_kb ORDER BY b <-> point(10.3, 20.7) LIMIT 3;
+UPDATE a139_ki SET a = 50001 WHERE id = 17;
+SELECT id, a <-> 50000 FROM a139_ki ORDER BY a <-> 50000 LIMIT 4;
+DELETE FROM a139_ki WHERE id = 17;
+UPDATE a139_kt SET t = 'c4ca4238a0bxyz' WHERE id = 2;
+SELECT id, a <-> 50000 FROM a139_ki ORDER BY a <-> 50000 LIMIT 3;
+SELECT id, round((t <-> 'c4ca4238a0b')::numeric, 5) FROM a139_kt ORDER BY t <-> 'c4ca4238a0b' LIMIT 3;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT id FROM a139_kc ORDER BY c <-> point(130.37, 140.91) LIMIT 2;
+COMMIT;
+-- A point_ops scan with <@ circle / polygon under a LIMIT, searched as rows are asked for.
+CREATE TABLE a139_pt (id int PRIMARY KEY, p point);
+INSERT INTO a139_pt SELECT i, point((i % 300) * 1.0, (i / 300) * 0.001) FROM generate_series(1, 3000) i;
+CREATE INDEX ON a139_pt USING gist (p);
+ANALYZE a139_pt;
+SELECT id FROM a139_pt WHERE p <@ circle '((10,0),5)' LIMIT 4;
+SELECT id FROM a139_pt WHERE p <@ circle '((10,0),5)' ORDER BY p <-> point(10.4, 0) LIMIT 4;
+SELECT id FROM a139_pt WHERE p <@ polygon '((0,0),(20,0.002),(20,0))' LIMIT 4;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE a139_kb, a139_kc, a139_kp, a139_ki, a139_kj, a139_kt, a139_pt;

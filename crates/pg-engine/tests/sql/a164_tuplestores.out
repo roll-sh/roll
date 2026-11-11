@@ -1,0 +1,440 @@
+> create table a164w (g int, p int, q int, s text)
+-- CREATE TABLE
+
+> insert into a164w select g, g % 10, g % 7, md5(g::text) from generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> analyze a164w
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select row_number() over (partition by p order by g) rn, sum(g) over (partition by p order by g) cs from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select rank() over (partition by p order by q) rn from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY q ROWS UNBOUNDED PRECEDING)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, q
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select sum(g) over (partition by p order by q) cs from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY q)
+  Storage: Memory  Maximum Storage: 28kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, q
+        Sort Method: quicksort  Memory: 1394kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select ntile(3) over (partition by p order by g) rn from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g ROWS UNBOUNDED PRECEDING)
+  Storage: Memory  Maximum Storage: 79kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select percent_rank() over (partition by p order by g) rn from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g ROWS UNBOUNDED PRECEDING)
+  Storage: Memory  Maximum Storage: 79kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select sum(g) over (partition by p) rn from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p)
+  Storage: Memory  Maximum Storage: 79kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select first_value(s) over (partition by p order by g) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g)
+  Storage: Memory  Maximum Storage: 157kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 2019kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select last_value(s) over (partition by p order by q) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY q)
+  Storage: Memory  Maximum Storage: 37kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, q
+        Sort Method: quicksort  Memory: 2019kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select nth_value(g, 3) over (partition by p order by g) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g)
+  Storage: Memory  Maximum Storage: 79kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select lag(g) over (partition by p order by g) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select lead(g, 5) over (partition by p order by g) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select sum(g) over (partition by p order by g rows between 3 preceding and 2 following) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g ROWS BETWEEN '3'::bigint PRECEDING AND '2'::bigint FOLLOWING)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select count(*) over (partition by p order by q range between current row and unbounded following) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY q RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  Storage: Memory  Maximum Storage: 79kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, q
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select sum(g) over (partition by p order by g rows between 5 preceding and current row exclude current row) v from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g ROWS BETWEEN '5'::bigint PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 1237kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select row_number() over (order by g) rn from a164w
+QUERY PLAN:text
+WindowAgg (actual rows=20000.00 loops=1)
+  Window: w1 AS (ORDER BY g ROWS UNBOUNDED PRECEDING)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=20000.00 loops=1)
+        Sort Key: g
+        Sort Method: quicksort  Memory: 769kB
+        ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select count(*) over () rn from a164w where g <= 3000
+QUERY PLAN:text
+WindowAgg (actual rows=3000.00 loops=1)
+  Window: w1 AS ()
+  Storage: Memory  Maximum Storage: 103kB
+  ->  Seq Scan on a164w (actual rows=3000.00 loops=1)
+        Filter: (g <= 3000)
+        Rows Removed by Filter: 17000
+-- EXPLAIN
+
+> create table a164v (g int, p int, s text)
+-- CREATE TABLE
+
+> insert into a164v select g, g % 2, md5(g::text) from generate_series(1, 4000) g
+-- INSERT 0 4000
+
+> analyze a164v
+-- ANALYZE
+
+> set work_mem = '64kB'
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select ntile(3) over (partition by p order by g) rn from a164v
+QUERY PLAN:text
+WindowAgg (actual rows=4000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g ROWS UNBOUNDED PRECEDING)
+  Storage: Disk  Maximum Storage: 65kB
+  ->  Sort (actual rows=4000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: external merge  Disk: 88kB
+        ->  Seq Scan on a164v (actual rows=4000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select row_number() over (partition by p order by g) rn, sum(g) over (partition by p order by g) cs from a164v
+QUERY PLAN:text
+WindowAgg (actual rows=4000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g)
+  Storage: Memory  Maximum Storage: 17kB
+  ->  Sort (actual rows=4000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: external merge  Disk: 88kB
+        ->  Seq Scan on a164v (actual rows=4000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select count(*) over () rn from a164v where g <= 3000
+QUERY PLAN:text
+WindowAgg (actual rows=3000.00 loops=1)
+  Window: w1 AS ()
+  Storage: Disk  Maximum Storage: 65kB
+  ->  Seq Scan on a164v (actual rows=3000.00 loops=1)
+        Filter: (g <= 3000)
+        Rows Removed by Filter: 1000
+-- EXPLAIN
+
+> select sum(rn), count(*) from (select ntile(3) over (partition by p order by g) rn from a164v) x
+sum:int8 | count:int8
+7998 | 4000
+-- SELECT 1
+
+> set work_mem = '256kB'
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select ntile(3) over (partition by p order by g) rn from a164v
+QUERY PLAN:text
+WindowAgg (actual rows=4000.00 loops=1)
+  Window: w1 AS (PARTITION BY p ORDER BY g ROWS UNBOUNDED PRECEDING)
+  Storage: Memory  Maximum Storage: 79kB
+  ->  Sort (actual rows=4000.00 loops=1)
+        Sort Key: p, g
+        Sort Method: quicksort  Memory: 190kB
+        ->  Seq Scan on a164v (actual rows=4000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select count(*) over () rn from a164v where g <= 3000
+QUERY PLAN:text
+WindowAgg (actual rows=3000.00 loops=1)
+  Window: w1 AS ()
+  Storage: Memory  Maximum Storage: 103kB
+  ->  Seq Scan on a164v (actual rows=3000.00 loops=1)
+        Filter: (g <= 3000)
+        Rows Removed by Filter: 1000
+-- EXPLAIN
+
+> reset work_mem
+-- RESET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> with c as materialized (select * from a164w) select count(*) from c a, c b where a.g = b.g and a.g < 10
+QUERY PLAN:text
+Aggregate (actual rows=1.00 loops=1)
+  CTE c
+    ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+  ->  Hash Join (actual rows=9.00 loops=1)
+        Hash Cond: (b.g = a.g)
+        ->  CTE Scan on c b (actual rows=20000.00 loops=1)
+              Storage: Memory  Maximum Storage: 1663kB
+        ->  Hash (actual rows=9.00 loops=1)
+              Buckets: 1024  Batches: 1  Memory Usage: 9kB
+              ->  CTE Scan on c a (actual rows=9.00 loops=1)
+                    Filter: (g < 10)
+                    Rows Removed by Filter: 19991
+                    Storage: Memory  Maximum Storage: 1663kB
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> with c as materialized (select g, s from a164w where g <= 500) select count(*) from c a join c b on a.g = b.g + 1
+QUERY PLAN:text
+Aggregate (actual rows=1.00 loops=1)
+  CTE c
+    ->  Seq Scan on a164w (actual rows=500.00 loops=1)
+          Filter: (g <= 500)
+          Rows Removed by Filter: 19500
+  ->  Hash Join (actual rows=499.00 loops=1)
+        Hash Cond: ((b.g + 1) = a.g)
+        ->  CTE Scan on c b (actual rows=500.00 loops=1)
+              Storage: Memory  Maximum Storage: 48kB
+        ->  Hash (actual rows=500.00 loops=1)
+              Buckets: 1024  Batches: 1  Memory Usage: 26kB
+              ->  CTE Scan on c a (actual rows=500.00 loops=1)
+                    Storage: Memory  Maximum Storage: 48kB
+-- EXPLAIN
+
+> set work_mem = '64kB'
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> with c as materialized (select * from a164w) select count(*) from c a, c b where a.g = b.g and a.g < 10
+QUERY PLAN:text
+Aggregate (actual rows=1.00 loops=1)
+  CTE c
+    ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+  ->  Hash Join (actual rows=9.00 loops=1)
+        Hash Cond: (b.g = a.g)
+        ->  CTE Scan on c b (actual rows=20000.00 loops=1)
+              Storage: Disk  Maximum Storage: 1075kB
+        ->  Hash (actual rows=9.00 loops=1)
+              Buckets: 1024  Batches: 1  Memory Usage: 9kB
+              ->  CTE Scan on c a (actual rows=9.00 loops=1)
+                    Filter: (g < 10)
+                    Rows Removed by Filter: 19991
+                    Storage: Disk  Maximum Storage: 1075kB
+-- EXPLAIN
+
+> with c as materialized (select g, s from a164w) select count(*), sum(g), md5(string_agg(s, ',')) from c
+count:int8 | sum:int8 | md5:text
+20000 | 200010000 | 5fe1e74db1d372b977d29493b1f68863
+-- SELECT 1
+
+> with c as materialized (select g, s from a164w) select a.g, a.s from c a, c b where a.g = b.g + 19990 order by a.g
+g:int4 | s:text
+19991 | 46bcb8f7477c1c33cf6dd9dd5c8045a3
+19992 | 2459e63c0cc08d3717f1e159de44586e
+19993 | 12a84ab992bdd63f5303e6dd60cc10e8
+19994 | bfb9e0ac9da156b7efe0d5ac723fbcb5
+19995 | 3769d93a219d1162bd4ae48dd988c01e
+19996 | b37ffe9e8f67937ea21dc01fd2c41a39
+19997 | 4372e2ba2d04ea409b6d4a391641f938
+19998 | 5f4f7141b65a730b4efb0e0d51f63e94
+19999 | 64ce463c6856e0e3867dea50033e8a29
+20000 | d9798cdf31c02d86b8b81cc119d94836
+-- SELECT 10
+
+> with c as materialized (select g, s from a164w) select (select count(*) from c), count(*), min(s) from c where g > 10000
+count:int8 | count:int8 | min:text
+20000 | 10000 | 0006aabe0ba47a35c0b0bf6596f85159
+-- SELECT 1
+
+> with c as materialized (select g, s from a164w) select g, s from c limit 3
+g:int4 | s:text
+1 | c4ca4238a0b923820dcc509a6f75849b
+2 | c81e728d9d4c2f636f067f89cc14862c
+3 | eccbc87e4b5ce2fe28308fd9f2a7baf3
+-- SELECT 3
+
+> set work_mem = '1MB'
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> with c as materialized (select * from a164w) select count(*) from c a, c b where a.g = b.g and a.g < 10
+QUERY PLAN:text
+Aggregate (actual rows=1.00 loops=1)
+  CTE c
+    ->  Seq Scan on a164w (actual rows=20000.00 loops=1)
+  ->  Hash Join (actual rows=9.00 loops=1)
+        Hash Cond: (b.g = a.g)
+        ->  CTE Scan on c b (actual rows=20000.00 loops=1)
+              Storage: Disk  Maximum Storage: 1075kB
+        ->  Hash (actual rows=9.00 loops=1)
+              Buckets: 1024  Batches: 1  Memory Usage: 9kB
+              ->  CTE Scan on c a (actual rows=9.00 loops=1)
+                    Filter: (g < 10)
+                    Rows Removed by Filter: 19991
+                    Storage: Disk  Maximum Storage: 1075kB
+-- EXPLAIN
+
+> reset work_mem
+-- RESET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> with recursive r(n, s) as (select g, s from a164w where g <= 2000 union all select n + 2000, s from r where n < 16000) select count(*) from r
+QUERY PLAN:text
+Aggregate (actual rows=1.00 loops=1)
+  CTE r
+    ->  Recursive Union (actual rows=17999.00 loops=1)
+          Storage: Memory  Maximum Storage: 283kB
+          ->  Seq Scan on a164w (actual rows=2000.00 loops=1)
+                Filter: (g <= 2000)
+                Rows Removed by Filter: 18000
+          ->  WorkTable Scan on r r_1 (actual rows=1777.67 loops=9)
+                Filter: (n < 16000)
+                Rows Removed by Filter: 222
+  ->  CTE Scan on r (actual rows=17999.00 loops=1)
+        Storage: Memory  Maximum Storage: 1381kB
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> with recursive r(n) as (select 1 union select n % 500 + 1 from r) select count(*) from r
+QUERY PLAN:text
+Aggregate (actual rows=1.00 loops=1)
+  CTE r
+    ->  Recursive Union (actual rows=500.00 loops=1)
+          Storage: Memory  Maximum Storage: 33kB
+          ->  Result (actual rows=1.00 loops=1)
+          ->  WorkTable Scan on r r_1 (actual rows=1.00 loops=500)
+  ->  CTE Scan on r (actual rows=500.00 loops=1)
+        Storage: Memory  Maximum Storage: 32kB
+-- EXPLAIN
+
+> set work_mem = '64kB'
+-- SET
+
+> with recursive r(n, s) as (select g, s from a164w where g <= 2000 union all select n + 2000, s from r where n < 16000) select count(*), sum(n), md5(string_agg(s, ',')) from r
+count:int8 | sum:int8 | md5:text
+17999 | 161991000 | 9f49ee5f8c59a41089c758645c569de6
+-- SELECT 1
+
+> reset work_mem
+-- RESET
+
+> drop table a164w, a164v
+-- DROP TABLE
+

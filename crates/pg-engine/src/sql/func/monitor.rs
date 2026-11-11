@@ -1,0 +1,1202 @@
+//! What the statistics and monitoring views are built from: pg_stat_get_activity, the
+//! cumulative statistics counters (nothing is counted, so they read as a fresh server's),
+//! server files and shared memory (none to show), wait events and time zone abbreviations;
+//! and information_schema's helper functions.
+
+use super::{FnCtx, FnImpl, Registry, SrfIter, text, text_arg};
+use crate::catalog::system::builtin_proc_sigs;
+use crate::error::Result;
+use crate::types::{DataType, Value};
+use std::sync::Arc;
+
+/// information_schema's functions: callable only qualified, or with it on the search path.
+pub const INFORMATION_SCHEMA_FUNCS: &[&str] = &[
+    "_pg_expandarray",
+    "_pg_index_position",
+    "_pg_truetypid",
+    "_pg_truetypmod",
+    "_pg_char_max_length",
+    "_pg_char_octet_length",
+    "_pg_numeric_precision",
+    "_pg_numeric_precision_radix",
+    "_pg_numeric_scale",
+    "_pg_datetime_precision",
+    "_pg_interval_type",
+];
+
+/// pg_read_all_stats.
+const READ_ALL_STATS: u32 = 3375;
+
+/// The server's auxiliary processes as pg_stat_activity lists them (after the client
+/// backends): pid, backend_type, wait event, and whether it runs as the bootstrap superuser.
+pub(crate) const AUX_PROCESSES: [(i32, &str, &str, bool); 8] = [
+    (34, "autovacuum launcher", "AutovacuumMain", false),
+    (35, "logical replication launcher", "LogicalLauncherMain", true),
+    (27, "io worker", "IoWorkerMain", false),
+    (28, "io worker", "IoWorkerMain", false),
+    (29, "io worker", "IoWorkerMain", false),
+    (30, "checkpointer", "CheckpointerMain", false),
+    (31, "background writer", "BgwriterMain", false),
+    (33, "walwriter", "WalWriterMain", false),
+];
+
+/// Is `pid` one of the auxiliary processes?
+pub(crate) fn is_aux_process(pid: i64) -> bool {
+    AUX_PROCESSES.iter().any(|a| a.0 as i64 == pid)
+}
+
+/// Is `pid` one of the launchers, which (unlike the other auxiliary processes) are in the
+/// process array, so pg_signal_backend finds them (as a superuser's)?
+pub(crate) fn is_launcher_process(pid: i64) -> bool {
+    AUX_PROCESSES
+        .iter()
+        .any(|a| a.0 as i64 == pid && a.1.ends_with("launcher"))
+}
+
+fn ty(o: u32) -> DataType {
+    DataType::from_oid(o).unwrap_or(DataType::Unknown)
+}
+
+/// A counter's value before anything was counted: 0, or NULL for what isn't a number
+/// (times of last events, reset times, names).
+fn zero(t: &DataType, c: &FnCtx) -> Value {
+    match t {
+        DataType::Int2
+        | DataType::Int4
+        | DataType::Int8
+        | DataType::Float4
+        | DataType::Float8
+        | DataType::Numeric(_) => {
+            crate::types::text::parse_value("0", t, c.exec.fmt()).unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    }
+}
+
+fn counter(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(zero(c.ret, c))
+}
+
+/// A statistic of something that has no entry (functions are only counted when tracked).
+fn no_stat(_: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(Value::Null)
+}
+
+fn no_rows(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    Ok(Box::new(std::iter::empty()))
+}
+
+/// pg_get_shmem_allocations: the cluster's shared structures (`Cluster::shared_memory`) as
+/// one segment's named allocations, each at the cache-line-aligned offset after the one
+/// before (ShmemAllocRaw's CACHELINEALIGN), then the unused rest (none: the engine has no
+/// fixed segment).
+fn shmem_allocations(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let mut off = 0i64;
+    let mut out = Vec::new();
+    for (name, size) in c.exec.sess.cluster.shared_memory() {
+        let allocated = (size + 127) / 128 * 128;
+        out.push(vec![text(name), Value::Int8(off), Value::Int8(size), Value::Int8(allocated)]);
+        off += allocated;
+    }
+    out.push(vec![Value::Null, Value::Int8(off), Value::Int8(0), Value::Int8(0)]);
+    rows(out)
+}
+
+/// pg_stat_get_subscription(subid): the running apply and table synchronization workers
+/// (of every subscription when NULL).
+fn subscription(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let Some(w) = c.exec.sess.cluster.logical_workers() else {
+        return no_rows(a, c);
+    };
+    let want = match a.first() {
+        Some(Value::Oid(o)) => Some(*o),
+        _ => None,
+    };
+    let lsn = |l: u64| if l == 0 { Value::Null } else { Value::PgLsn(l) };
+    let ts = |t: Option<i64>| t.map_or(Value::Null, Value::Timestamptz);
+    let mut v: Vec<_> = w.stats().into_iter().filter(|s| want.is_none_or(|o| o == s.subid)).collect();
+    // (In LogicalRepCtx->workers order; for one subscription only its first worker.)
+    v.sort_by_key(|s| s.slot);
+    if want.is_some() {
+        v.truncate(1);
+    }
+    rows(v
+        .into_iter()
+        .map(|s| {
+            vec![
+                Value::Oid(s.subid),
+                s.relid.map_or(Value::Null, Value::Oid),
+                Value::Int4(s.pid),
+                s.leader_pid.map_or(Value::Null, Value::Int4),
+                lsn(s.received_lsn),
+                ts(s.last_send),
+                ts(s.last_receipt),
+                lsn(s.latest_end_lsn),
+                ts(s.latest_end_time),
+                Value::Text(s.worker_type.into()),
+            ]
+        })
+        .collect())
+}
+
+fn rows(v: Vec<Vec<Value>>) -> Result<SrfIter> {
+    Ok(Box::new(v.into_iter().map(Ok)))
+}
+
+/// One row of zeros of function `oid`'s OUT columns, with column `col` the reset time
+/// of `target`.
+fn reset_row(oid: u32, col: usize, target: &str, c: &FnCtx) -> Vec<Value> {
+    let sig = builtin_proc_sigs()
+        .iter()
+        .find(|s| s.oid == oid)
+        .expect("built-in function");
+    let mut row: Vec<Value> = sig.out.iter().map(|(_, t)| zero(&ty(*t), c)).collect();
+    row[col] = crate::exec::pgstat::reset_time(c.exec, target)
+        .map_or(Value::Null, Value::Timestamptz);
+    row
+}
+
+fn archiver(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    rows(vec![reset_row(3195, 6, "archiver", c)])
+}
+fn wal(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let mut row = reset_row(1136, 4, "wal", c);
+    let (records, bytes) = crate::exec::pgstat::with_shared(c.exec, |s| (s.wal_records, s.wal_bytes));
+    row[0] = Value::Int8(records);
+    row[2] = crate::types::text::parse_value(&bytes.to_string(), &DataType::Numeric(-1), c.exec.fmt())
+        .unwrap_or(Value::Null);
+    rows(vec![row])
+}
+fn recovery_prefetch(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    rows(vec![reset_row(6248, 0, "recovery_prefetch", c)])
+}
+/// PID lookup precedes the backend-status read for backend I/O and WAL statistics.
+fn backend_cumulative_snapshot(a: &[Value], c: &FnCtx) {
+    let Some(pid) = a.first().and_then(|v| v.as_i64()) else { return };
+    let auxiliary = AUX_PROCESSES.iter().find(|p| i64::from(p.0) == pid);
+    if pid == i64::from(c.exec.sess.pid) || auxiliary.is_some()
+        || c.exec.sess.cluster.activity().iter().any(|b| i64::from(b.pid) == pid)
+    {
+        drop(backend_status(c));
+        if auxiliary.is_none_or(|p| matches!(p.1, "walwriter" | "logical replication launcher")) {
+            crate::exec::pgstat::prepare_snapshot(c.exec);
+        }
+    }
+}
+
+/// pg_stat_get_backend_wal(pid): this backend's WAL (no row for any other).
+fn backend_wal(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    backend_cumulative_snapshot(a, c);
+    if a.first().and_then(|v| v.as_i64()) != Some(c.exec.sess.pid as i64) {
+        return rows(vec![vec![Value::Null; 5]]);
+    }
+    let sig = builtin_proc_sigs()
+        .iter()
+        .find(|s| s.oid == 6313)
+        .expect("built-in function");
+    let mut row: Vec<Value> = sig.out.iter().map(|(_, t)| zero(&ty(*t), c)).collect();
+    let (records, bytes) = c.exec.sess.pgstat.borrow().wal;
+    row[0] = Value::Int8(records);
+    row[2] = crate::types::text::parse_value(&bytes.to_string(), &DataType::Numeric(-1), c.exec.fmt())
+        .unwrap_or(Value::Null);
+    row[4] = Value::Null;
+    rows(vec![row])
+}
+/// No WAL receiver: one row of NULLs (the view keeps rows with a pid).
+fn wal_receiver(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    rows(vec![vec![Value::Null; 15]])
+}
+
+fn slru(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let z = zero(&DataType::Int8, c);
+    let zeroed = crate::exec::pgstat::fetch_slru(c.exec);
+    rows(
+        super::admin::SLRUS
+            .iter()
+            .map(|n| {
+                let reset = crate::exec::pgstat::reset_time(c.exec, &format!("slru:{n}"))
+                    .map_or(Value::Null, Value::Timestamptz);
+                let mut counts = vec![z.clone(); 7];
+                if let Some(v) = zeroed.get(*n) {
+                    counts[0] = Value::Int8(*v);
+                }
+                [vec![text(*n)], counts, vec![reset]].concat()
+            })
+            .collect(),
+    )
+}
+
+/// pg_stat_io: a row per backend type, object and context Postgres tracks, with 0 for what
+/// it counts there and NULL for what it doesn't.
+fn io(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let counts = crate::exec::pgstat::with_shared(c.exec, |s| s.io.clone());
+    let reset = crate::exec::pgstat::reset_time(c.exec, "io");
+    rows(io_rows(&counts, reset, None, c))
+}
+
+/// pg_stat_io's rows over these counts (of one backend's, with its pid first).
+fn io_rows(
+    counts: &crate::exec::fasthash::HashMap<crate::exec::pgstat::IoKey, i64>,
+    reset: Option<i64>,
+    pid: Option<i32>,
+    c: &FnCtx,
+) -> Vec<Vec<Value>> {
+    let types = [
+        20, 1700, 701, 20, 1700, 701, 20, 701, 20, 1700, 701, 20, 20, 20, 20, 701,
+    ];
+    // The operation each count column is, and the bytes columns after them.
+    let ops: [Option<&str>; 16] = [
+        Some("reads"),
+        None,
+        None,
+        Some("writes"),
+        None,
+        None,
+        Some("writebacks"),
+        None,
+        Some("extends"),
+        None,
+        None,
+        Some("hits"),
+        Some("evictions"),
+        Some("reuses"),
+        Some("fsyncs"),
+        None,
+    ];
+    include_str!("data/stat_io.tsv")
+        .lines()
+        .filter(|l| pid.is_none() || l.starts_with("client backend\t"))
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let mut row = vec![text(f[0]), text(f[1]), text(f[2])];
+            let count = |op: &str| {
+                counts
+                    .iter()
+                    .filter(|((b, o, x, k), _)| *b == f[0] && *o == f[1] && *x == f[2] && *k == op)
+                    .map(|(_, n)| *n)
+                    .sum::<i64>()
+            };
+            for (i, (t, has)) in types.iter().zip(&f[3..]).enumerate() {
+                if *has != "t" {
+                    row.push(Value::Null);
+                    continue;
+                }
+                let n = match ops[i] {
+                    Some(op) => count(op),
+                    // read_bytes, write_bytes, extend_bytes: the blocks', 8kB each.
+                    None if matches!(i, 1 | 4 | 9) => count(ops[i - 1].unwrap()) * 8192,
+                    None => 0,
+                };
+                row.push(if n == 0 {
+                    zero(&ty(*t), c)
+                } else {
+                    crate::types::text::parse_value(&n.to_string(), &ty(*t), c.exec.fmt())
+                        .unwrap_or(Value::Null)
+                });
+            }
+            row.push(reset.map_or(Value::Null, Value::Timestamptz));
+            row
+        })
+        .collect()
+}
+
+/// pg_stat_get_backend_io(pid): this backend's I/O (no rows for any other).
+fn backend_io(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    backend_cumulative_snapshot(a, c);
+    let pid = a.first().and_then(|v| v.as_i64());
+    if pid != Some(c.exec.sess.pid as i64) {
+        return rows(Vec::new());
+    }
+    crate::exec::pgstat::flush_io(c.exec.sess);
+    let counts = c.exec.sess.pgstat.borrow().io.clone();
+    rows(io_rows(&counts, None, Some(c.exec.sess.pid), c))
+}
+
+/// pg_prepared_xact(): the cluster's prepared transactions (transaction, gid, prepared,
+/// ownerid, dbid), in the registry's order.
+fn prepared_xact(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    rows(
+        c.exec
+            .sess
+            .db
+            .twophase()
+            .list()
+            .into_iter()
+            .map(|p| {
+                vec![
+                    Value::Oid(p.xid as u32),
+                    Value::text(p.gid),
+                    Value::Timestamptz(p.prepared_at),
+                    Value::Oid(p.owner),
+                    Value::Oid(p.db),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// pg_stat_get_activity(pid): the backends (all for NULL), with what only their own role,
+/// its members and pg_read_all_stats may see hidden from others.
+fn activity(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    rows(activity_rows(a.first().and_then(|v| v.as_i64()), c))
+}
+
+/// pg_stat_get_activity's rows (of backend `want`, or all).
+fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
+    numbered_activity_rows(want, c).into_iter().map(|r| r.1).collect()
+}
+
+/// Copy raw backend metadata once, independent of stats_fetch_consistency. Filtering and
+/// privilege masking happen after this shared snapshot, never while constructing it.
+pub(super) fn backend_status<'a>(c: &'a FnCtx<'_>) -> std::cell::Ref<'a, Vec<crate::exec::pgstat::BackendStatus>> {
+    if c.exec.sess.pgstat.borrow().backends.is_none() {
+        let cat = c.exec.catalog();
+        let dbs = c.exec.sess.cluster.databases();
+        let mut backends = Vec::new();
+        for mut b in c.exec.sess.cluster.activity() {
+            let mut query_id = None;
+            if b.pid == c.exec.sess.pid {
+                let t = c.exec.txn.borrow();
+                b.xact_start = Some(c.exec.txn_time());
+                b.backend_xid = t.xid_if_assigned();
+                b.backend_xmin = t.snapshot_xmin();
+                b.backend_subxacts = t.subxact_status();
+                let settings = c.exec.sess.settings.borrow();
+                let on = |n: &str, v: &[&str]| settings.show(n).is_ok_and(|s| v.contains(&s.as_str()));
+                let auto = c.exec.sess.cluster.statements().is_some() && on("compute_query_id", &["auto"]);
+                if (auto || on("compute_query_id", &["on", "regress"])) && on("track_activities", &["on"]) {
+                    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                    for byte in b.query.bytes() {
+                        h = (h ^ byte as u64).wrapping_mul(0x0100_0000_01b3);
+                    }
+                    query_id = Some(h as i64);
+                }
+            }
+            backends.push(crate::exec::pgstat::BackendStatus {
+                dbid: dbs.iter().find(|d| d.1 == b.database).map(|d| d.0),
+                userid: cat.role_by_name(&b.user).map(|r| r.oid),
+                query_id,
+                progress: b.progress.as_ref().and_then(|p| p.read()),
+                activity: b,
+            });
+        }
+        c.exec.sess.pgstat.borrow_mut().backends = Some(backends);
+    }
+    std::cell::Ref::map(c.exec.sess.pgstat.borrow(), |p| p.backends.as_ref().unwrap())
+}
+
+/// `activity_rows` with each backend's proc array slot number, in their order (the order
+/// of PostgreSQL's backend status array).
+fn numbered_activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<(i32, Vec<Value>)> {
+    let cat = c.exec.catalog();
+    let me = c.exec.current_user();
+    let dbo = c.exec.db_owner();
+    let all_stats = cat.has_privs_of_role(me, READ_ALL_STATS, dbo);
+    let waits = lock_waits(c);
+    let mut out = Vec::new();
+    let live = c.exec.sess.cluster.activity();
+    for status in backend_status(c).iter() {
+        let b = &status.activity;
+        if want.is_some_and(|p| p != b.pid as i64) {
+            continue;
+        }
+        let role = status.userid;
+        let mut row = vec![Value::Null; 31];
+        row[0] = status.dbid.map_or(Value::Null, Value::Oid);
+        row[1] = Value::Int4(b.pid);
+        row[2] = role.map_or(Value::Null, Value::Oid);
+        row[3] = text(b.application_name.as_str());
+        // PostgreSQL exposes transaction IDs even when query text is masked.
+        row[15] = b.backend_xid.map_or(Value::Null, |x| Value::Oid(x as u32));
+        row[16] = b.backend_xmin.map_or(Value::Null, |x| Value::Oid(x as u32));
+        if all_stats || role.is_some_and(|r| cat.has_privs_of_role(me, r, dbo)) {
+            row[4] = text(b.state.as_str());
+            row[5] = text(b.query.as_str());
+            let me_now = b.pid == c.exec.sess.pid;
+            // PGPROC wait events and parallel leaders stay live even when the activity
+            // text/state and transaction fields come from LocalPgBackendStatus.
+            let current = live.iter().find(|a| a.pid == b.pid);
+            let wait = current.and_then(|a| {
+                if a.state.starts_with("idle") {
+                    Some(("Client", "ClientRead"))
+                } else {
+                    waits.get(&a.pid).map(|t| ("Lock", *t)).or(a.wait)
+                }
+            });
+            if let Some((t, e)) = wait.filter(|_| !me_now) {
+                row[6] = text(t);
+                row[7] = text(e);
+            }
+            row[8] = b.xact_start.map_or(Value::Null, Value::Timestamptz);
+            row[9] = b.query_start.map_or(Value::Null, Value::Timestamptz);
+            row[10] = Value::Timestamptz(b.backend_start);
+            row[11] = b.state_change.or(b.query_start).map_or(Value::Null, Value::Timestamptz);
+            match &b.client_addr {
+                Some(s) => {
+                    row[12] = crate::types::text::parse_inet(s, false).unwrap_or(Value::Null);
+                    row[14] = Value::Int4(b.client_port.map_or(0, i32::from));
+                }
+                None => row[14] = Value::Int4(-1),
+            }
+            row[17] = text(b.backend_type.unwrap_or("client backend"));
+            row[29] = current.and_then(|a| a.leader_pid).map_or(Value::Null, Value::Int4);
+            if b.backend_type.is_some() {
+                // (No client: address, host name and port are null.)
+                row[14] = Value::Null;
+            }
+            row[30] = status.query_id.map_or(Value::Null, Value::Int8);
+            row[18] = Value::Bool(false);
+            row[25] = Value::Bool(false);
+            row[27] = Value::Bool(false);
+            row[28] = Value::Bool(false);
+        } else {
+            row[5] = text("<insufficient privilege>");
+        }
+        out.push((b.proc_number.unwrap_or(i32::MAX), row));
+    }
+    // The auxiliary processes: no database, client or query. (The launchers in their slots
+    // among the backends', the others' after them.)
+    let started = c.exec.sess.cluster.start_time();
+    let launchers = c.exec.sess.cluster.launcher_procs();
+    let procs = c.exec.sess.cluster.procs();
+    for (k, (pid, kind, event, superuser)) in AUX_PROCESSES.iter().enumerate() {
+        if want.is_some_and(|p| p != *pid as i64) {
+            continue;
+        }
+        let role = superuser.then_some(10u32);
+        let mut row = vec![Value::Null; 31];
+        row[1] = Value::Int4(*pid);
+        row[2] = role.map_or(Value::Null, Value::Oid);
+        row[3] = text("");
+        if all_stats || role.is_some_and(|r| cat.has_privs_of_role(me, r, dbo)) || cat.is_superuser(me) {
+            row[5] = text("");
+            row[6] = text("Activity");
+            row[7] = text(*event);
+            row[10] = Value::Timestamptz(started + 1000 * (k as i64 + 1));
+            row[17] = text(*kind);
+            row[18] = Value::Bool(false);
+            row[25] = Value::Bool(false);
+            row[27] = Value::Bool(false);
+            row[28] = Value::Bool(false);
+        } else {
+            row[5] = text("<insufficient privilege>");
+        }
+        let number = match k {
+            0 => launchers.0,
+            1 => launchers.1,
+            _ => procs.aux_number(k as i32 - 2),
+        };
+        out.push((number, row));
+    }
+    out.sort_by_key(|r| r.0);
+    out
+}
+
+/// The backends waiting for a heavyweight lock (in any open database), with the waited
+/// lock's type (pg_stat_activity's wait_event for wait_event_type Lock).
+fn lock_waits(c: &FnCtx) -> std::collections::HashMap<i32, &'static str> {
+    use crate::txn::locks::Tag;
+    let sess = &c.exec.sess;
+    let dbs = std::iter::once(sess.db.clone())
+        .chain(sess.cluster.opened_databases().into_iter().filter(|d| !Arc::ptr_eq(d, &sess.db)));
+    let mut out = std::collections::HashMap::new();
+    for db in dbs {
+        for l in db.locks.snapshot().into_iter().filter(|l| !l.granted) {
+            let Some(pid) = l.pid else { continue };
+            let kind = match l.tag {
+                Tag::Relation { .. } => "relation",
+                Tag::Tuple { .. } => "tuple",
+                Tag::Transaction { xid, .. } if xid != 0 => "transactionid",
+                Tag::Transaction { .. } => "virtualxid",
+                Tag::SpecToken { .. } => "spectoken",
+                Tag::Object { .. } => "object",
+                Tag::Advisory(_) => "advisory",
+                Tag::ApplyTransaction { .. } => "applytransaction",
+                Tag::Other(_) => "transactionid",
+            };
+            out.insert(pid, kind);
+        }
+    }
+    out
+}
+
+/// Column `col` of pg_stat_get_activity for backend `a[0]` (pg_stat_get_backend_idset's
+/// numbering); text columns hidden from the caller read "<insufficient privilege>".
+fn backend_col(a: &[Value], c: &FnCtx, col: usize) -> Result<Value> {
+    let Some(i) = a.first().and_then(|v| v.as_i64()) else {
+        return Ok(Value::Null);
+    };
+    let all = numbered_activity_rows(None, c);
+    let Some((_, row)) = all.iter().find(|r| r.0 as i64 == i) else {
+        return Ok(if col == 5 {
+            text("<backend information not available>")
+        } else {
+            Value::Null
+        });
+    };
+    // (No command reported yet, as an auxiliary process has none.)
+    if col == 5 && matches!(&row[col], Value::Text(t) if t.is_empty()) {
+        return Ok(text("<command string not enabled>"));
+    }
+    Ok(row[col].clone())
+}
+
+macro_rules! backend_fns {
+    ($($name:ident = $col:expr),* $(,)?) => {
+        $(fn $name(a: &[Value], c: &FnCtx) -> Result<Value> {
+            backend_col(a, c, $col)
+        })*
+    };
+}
+
+backend_fns!(
+    backend_dbid = 0,
+    backend_pid = 1,
+    backend_userid = 2,
+    backend_activity = 5,
+    backend_wait_event_type = 6,
+    backend_wait_event = 7,
+    backend_xact_start = 8,
+    backend_activity_start = 9,
+    backend_start = 10,
+    backend_client_addr = 12,
+    backend_client_port = 14
+);
+
+/// pg_stat_get_backend_subxact(bid): a backend's cached subtransaction ids (PGPROC keeps 64,
+/// then marks the cache overflowed); NULLs for no such backend.
+fn backend_subxact(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let Some(bid) = a.first().and_then(|v| v.as_i64()) else {
+        return rows(vec![vec![Value::Null, Value::Null]]);
+    };
+    let status = backend_status(c);
+    let subxacts = status.iter().find(|s| s.activity.proc_number.map(i64::from) == Some(bid))
+        .map(|s| s.activity.backend_subxacts);
+    // Auxiliary entries have no transaction but participate in the same backend idset.
+    let subxacts = subxacts.or_else(|| {
+        let sess = c.exec.sess;
+        let launchers = sess.cluster.launcher_procs();
+        let procs = sess.cluster.procs();
+        (bid == i64::from(launchers.0) || bid == i64::from(launchers.1)
+            || (0..6).any(|i| bid == i64::from(procs.aux_number(i))))
+            .then_some((0, false))
+    });
+    rows(vec![match subxacts {
+        Some((n, overflowed)) => vec![Value::Int4(n as i32), Value::Bool(overflowed)],
+        None => vec![Value::Null, Value::Null],
+    }])
+}
+
+/// pg_stat_get_backend_idset: the backends' ids, their proc array slot numbers.
+fn backend_idset(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    rows(numbered_activity_rows(None, c).into_iter().map(|r| vec![Value::Int4(r.0)]).collect())
+}
+
+fn wait_events(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    rows(
+        include_str!("data/wait_events.tsv")
+            .lines()
+            .map(|l| l.split('\t').map(text).collect())
+            .collect(),
+    )
+}
+
+fn pg_config(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    rows(
+        include_str!("data/pg_config.tsv")
+            .lines()
+            .map(|l| l.split('\t').map(text).collect())
+            .collect(),
+    )
+}
+
+fn abbrev_row(f: &[&str], c: &FnCtx) -> Vec<Value> {
+    let off = crate::types::text::parse_value(f[1], &DataType::Interval(-1), c.exec.fmt())
+        .unwrap_or(Value::Null);
+    vec![text(f[0]), off, Value::Bool(f[2] == "t")]
+}
+
+/// The abbreviations the timezone_abbreviations file (Default) defines.
+fn tz_abbrevs(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    rows(
+        include_str!("data/tz_abbrevs.tsv")
+            .lines()
+            .map(|l| abbrev_row(&l.split('\t').collect::<Vec<_>>(), c))
+            .collect(),
+    )
+}
+
+/// pg_timezone_abbrevs_zone: the abbreviations the session's time zone has ever used (its
+/// tzfile's, in order), each with its meaning at the transaction's start (or nearest to it).
+/// (The pg_timezone_abbrevs view leaves out the abbreviations file's entries for these.)
+fn tz_abbrevs_zone(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let fmt = c.exec.fmt();
+    let tz = &fmt.tz.0;
+    // Transaction start, in Unix seconds.
+    let now = c.exec.txn_time().div_euclid(1_000_000) + 946_684_800;
+    let mut out = Vec::new();
+    for abbrev in crate::types::tz::zone_abbrevs(tz) {
+        if abbrev.is_empty() || abbrev.starts_with(['+', '-']) {
+            continue;
+        }
+        let Some((off, dst)) = crate::types::tz::pg_interpret_timezone_abbrev(&abbrev, now, tz)
+        else {
+            continue;
+        };
+        out.push(vec![
+            text(abbrev),
+            Value::Interval(crate::types::value::Interval::new(0, 0, off * 1_000_000)),
+            Value::Bool(dst),
+        ]);
+    }
+    rows(out)
+}
+
+/// The extensions that can be installed, at their one version.
+fn extension_versions(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    rows(
+        crate::ext::available_version_rows()
+            .into_iter()
+            .map(|(n, v, superuser, trusted, relocatable, schema, requires, comment)| {
+                vec![
+                    text(n),
+                    text(v),
+                    Value::Bool(superuser),
+                    Value::Bool(trusted),
+                    Value::Bool(relocatable),
+                    schema.map_or(Value::Null, |s| Value::Text(Arc::from(s))),
+                    if requires.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+                            DataType::Name,
+                            requires.into_iter().map(|r| Value::Text(Arc::from(r))).collect(),
+                        )))
+                    },
+                    text(comment),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// pg_show_all_file_settings (pg_file_settings): the configuration files as they are now,
+/// evaluated as a reload would; the postmaster parameters they'd change become
+/// pending_restart for this session (ProcessConfigFile sets GUC_PENDING_RESTART).
+fn file_settings(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let Some(conf) = c.exec.sess.cluster.server_config() else {
+        return rows(Vec::new());
+    };
+    let (out, pending) = conf.file_settings();
+    c.exec.sess.settings.borrow_mut().mark_pending_restart(&pending);
+    let opt = |v: &Option<String>| v.as_deref().map_or(Value::Null, text);
+    rows(
+        out.into_iter()
+            .map(|r| {
+                vec![
+                    text(r.item.file),
+                    Value::Int4(r.item.line as i32),
+                    Value::Int4(r.seqno),
+                    opt(&r.item.name),
+                    opt(&r.item.value),
+                    Value::Bool(r.applied),
+                    r.item.error.map_or(Value::Null, text),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// pg_hba_file_rules: the one rule the server applies, to every connection: SCRAM when the
+/// session authenticated with a password, trust otherwise.
+fn hba_file_rules(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let file = c.exec.sess.settings.borrow().get_raw("hba_file").unwrap_or_default();
+    if let Some(hba) = c.exec.sess.cluster.server_config().and_then(|s| s.hba_file_now()) {
+        let list = |v: &[String]| {
+            Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+                DataType::Text,
+                v.iter().map(|s| text(s.as_str())).collect(),
+            )))
+        };
+        let opt = |v: &Option<String>| v.as_deref().map_or(Value::Null, text);
+        let mut n = 0;
+        return rows(
+            hba.lines
+                .iter()
+                .map(|l| {
+                    let ok = l.error.is_none();
+                    if ok {
+                        n += 1;
+                    }
+                    let when = |v: Value| if ok { v } else { Value::Null };
+                    vec![
+                        when(Value::Int4(n)),
+                        text(file.as_str()),
+                        Value::Int4(l.line as i32),
+                        when(text(l.conn_type.as_str())),
+                        when(list(&l.databases)),
+                        when(list(&l.users)),
+                        opt(&l.address),
+                        opt(&l.netmask),
+                        when(text(l.method.as_str())),
+                        if l.options.is_empty() { Value::Null } else { list(&l.options) },
+                        opt(&l.error),
+                    ]
+                })
+                .collect(),
+        );
+    }
+    let scram = c
+        .exec
+        .sess
+        .system_user
+        .as_deref()
+        .is_some_and(|u| u.starts_with("scram-sha-256:"));
+    let all = || {
+        Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+            DataType::Text,
+            vec![text("all")],
+        )))
+    };
+    rows(vec![vec![
+        Value::Int4(1),
+        text(file),
+        Value::Int4(1),
+        text("host"),
+        all(),
+        all(),
+        text("all"),
+        Value::Null,
+        text(if scram { "scram-sha-256" } else { "trust" }),
+        Value::Null,
+        Value::Null,
+    ]])
+}
+
+/// pg_ident_file_mappings: the operator's pg_ident.conf (`--ident-file`), as it is now.
+fn ident_file_mappings(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let file = c.exec.sess.settings.borrow().get_raw("ident_file").unwrap_or_default();
+    let lines = c.exec.sess.cluster.server_config().map(|s| s.ident_file_now()).unwrap_or_default();
+    let mut n = 0;
+    rows(
+        lines
+            .iter()
+            .map(|l| {
+                let ok = l.error.is_none();
+                if ok {
+                    n += 1;
+                }
+                let when = |v: &str| if ok { text(v) } else { Value::Null };
+                vec![
+                    if ok { Value::Int4(n) } else { Value::Null },
+                    text(file.as_str()),
+                    Value::Int4(l.line as i32),
+                    when(&l.map),
+                    when(&l.sys),
+                    when(&l.pg),
+                    l.error.as_deref().map_or(Value::Null, text),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// pg_get_backend_memory_contexts: the backend's memory context tree as Postgres lays it out
+/// (the long-lived contexts, and a tuplesort's under each portal still sorting), sizes as an
+/// idle backend's.
+fn memory_contexts(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    // (name, ident, type, parent index, total bytes, blocks, free bytes, free chunks)
+    let mut ctxs: Vec<(&str, Option<String>, &str, Option<usize>, i64, i64, i64, i64)> = vec![
+        ("TopMemoryContext", None, "AllocSet", None, 99136, 5, 6896, 13),
+        ("TopTransactionContext", None, "AllocSet", Some(0), 8192, 1, 7752, 0),
+        ("MessageContext", None, "AllocSet", Some(0), 16384, 2, 6016, 2),
+        ("CacheMemoryContext", None, "AllocSet", Some(0), 524288, 7, 189784, 0),
+        ("index info", Some("pg_class_oid_index".into()), "AllocSet", Some(3), 2048, 2, 704, 2),
+        ("index info", Some("pg_type_oid_index".into()), "AllocSet", Some(3), 2048, 2, 704, 2),
+        ("PortalContext", None, "AllocSet", Some(0), 1024, 1, 600, 0),
+    ];
+    for (name, cur) in c.exec.sess.cursors.borrow().iter() {
+        if !cur.lazy.as_ref().is_some_and(|l| l.sorting()) {
+            continue;
+        }
+        let portal = ctxs.len();
+        ctxs.push(("PortalContext", Some(name.clone()), "AllocSet", Some(0), 1024, 1, 592, 0));
+        ctxs.push(("ExecutorState", None, "AllocSet", Some(portal), 49272, 4, 15128, 3));
+        let main = ctxs.len();
+        ctxs.push(("TupleSort main", None, "AllocSet", Some(main - 1), 32832, 2, 15848, 0));
+        ctxs.push(("TupleSort sort", None, "AllocSet", Some(main), 8192, 1, 7952, 0));
+        ctxs.push(("Caller tuples", None, "Bump", Some(main + 1), 16384, 2, 5544, 0));
+    }
+    // Paths: the context ids (1-based positions) from the top down.
+    let mut paths: Vec<Vec<Value>> = Vec::with_capacity(ctxs.len());
+    for (i, x) in ctxs.iter().enumerate() {
+        let mut p = x.3.map(|parent| paths[parent].clone()).unwrap_or_default();
+        p.push(Value::Int4(i as i32 + 1));
+        paths.push(p);
+    }
+    rows(
+        ctxs.into_iter()
+            .zip(paths)
+            .map(|((name, ident, ty, _, total, blocks, free, chunks), path)| {
+                vec![
+                    text(name),
+                    ident.map_or(Value::Null, text),
+                    text(ty),
+                    Value::Int4(path.len() as i32),
+                    Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+                        DataType::Int4,
+                        path,
+                    ))),
+                    Value::Int8(total),
+                    Value::Int8(blocks),
+                    Value::Int8(free),
+                    Value::Int8(chunks),
+                    Value::Int8(total - free),
+                ]
+            })
+            .collect(),
+    )
+}
+
+fn getdatabaseencoding(_: &[Value], _: &FnCtx) -> Result<Value> {
+    let enc = crate::types::collation::database_encoding();
+    Ok(Value::Text(Arc::from(crate::types::mbconv::server::name(enc))))
+}
+
+/// pg_client_encoding(): client_encoding's (canonical) name.
+fn pg_client_encoding(_: &[Value], c: &FnCtx) -> Result<Value> {
+    let v = c.exec.sess.settings.borrow().show_value("client_encoding");
+    Ok(Value::Text(Arc::from(v.as_str())))
+}
+
+/// nameconcatoid: `name_oid`, with the name cut so it all fits in a name.
+fn nameconcatoid(a: &[Value], _: &FnCtx) -> Result<Value> {
+    let suffix = format!("_{}", a[1].as_i64().unwrap_or(0) as u32);
+    let mut name = text_arg(&a[0]).to_string();
+    while name.len() + suffix.len() > 63 {
+        name.pop();
+    }
+    Ok(Value::Text(Arc::from(format!("{name}{suffix}"))))
+}
+
+/// pg_mcv_list_items: an MCV list's items, values as text.
+fn mcv_list_items(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let Value::Bytea(b) = &a[0] else {
+        return rows(Vec::new());
+    };
+    let cat = c.exec.catalog();
+    let Some((types, items)) = crate::catalog::system::mcv_items(&cat, b) else {
+        return rows(Vec::new());
+    };
+    let fmt = c.exec.fmt();
+    let array = |elem: DataType, items: Vec<Value>| {
+        Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+            elem, items,
+        )))
+    };
+    rows(
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let values = it
+                    .values
+                    .iter()
+                    .zip(&types)
+                    .zip(&it.nulls)
+                    .map(|((v, ty), null)| {
+                        if *null {
+                            Value::Null
+                        } else {
+                            text(crate::types::text::format_value(v, ty, fmt))
+                        }
+                    })
+                    .collect();
+                vec![
+                    Value::Int4(i as i32),
+                    array(DataType::Text, values),
+                    array(
+                        DataType::Bool,
+                        it.nulls.iter().map(|n| Value::Bool(*n)).collect(),
+                    ),
+                    Value::Float8(it.frequency),
+                    Value::Float8(it.base_frequency),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// pg_options_to_table: `name=value` options as rows.
+fn options_to_table(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    let Value::Array(arr) = &a[0] else {
+        return rows(Vec::new());
+    };
+    rows(
+        arr.items
+            .iter()
+            .filter_map(|v| match v {
+                Value::Null => None,
+                v => {
+                    let s = text_arg(v);
+                    Some(match s.split_once('=') {
+                        Some((k, v)) => vec![text(k), text(v)],
+                        None => vec![text(s), Value::Null],
+                    })
+                }
+            })
+            .collect(),
+    )
+}
+
+// ── information_schema's helpers ──
+
+fn int_arg(v: &Value) -> i64 {
+    v.as_i64().unwrap_or(0)
+}
+
+fn int(v: Option<i64>) -> Value {
+    v.map_or(Value::Null, |n| Value::Int4(n as i32))
+}
+
+/// A column of a catalog row value (`t` is the catalog's row type oid).
+fn catalog_field(v: &Value, t: u32, col: &str) -> Value {
+    let Value::Record(fields) = v else { return Value::Null };
+    crate::catalog::system::SysTable::by_rowtype(t)
+        .and_then(|s| s.columns().iter().position(|(n, _)| n == col))
+        .and_then(|i| fields.get(i).cloned())
+        .unwrap_or(Value::Null)
+}
+
+/// _pg_truetypid: `CASE WHEN $2.typtype = 'd' THEN $2.typbasetype ELSE $1.atttypid END`.
+fn truetypid(a: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(if is_domain(&a[1]) { catalog_field(&a[1], 71, "typbasetype") } else { catalog_field(&a[0], 75, "atttypid") })
+}
+
+/// _pg_truetypmod: `CASE WHEN $2.typtype = 'd' THEN $2.typtypmod ELSE $1.atttypmod END`.
+fn truetypmod(a: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(if is_domain(&a[1]) { catalog_field(&a[1], 71, "typtypmod") } else { catalog_field(&a[0], 75, "atttypmod") })
+}
+
+fn is_domain(t: &Value) -> bool {
+    matches!(catalog_field(t, 71, "typtype"), Value::Char(c) if c == b'd')
+}
+
+fn char_max_length(a: &[Value], _: &FnCtx) -> Result<Value> {
+    let (t, m) = (int_arg(&a[0]), int_arg(&a[1]));
+    Ok(int(match t {
+        _ if m == -1 => None,
+        1042 | 1043 => Some(m - 4),
+        1560 | 1562 => Some(m),
+        _ => None,
+    }))
+}
+
+fn char_octet_length(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let (t, m) = (int_arg(&a[0]), int_arg(&a[1]));
+    if !matches!(t, 25 | 1042 | 1043) {
+        return Ok(Value::Null);
+    }
+    if m == -1 {
+        return Ok(Value::Int4(1 << 30));
+    }
+    // UTF8: up to 4 bytes a character.
+    Ok(match char_max_length(a, c)? {
+        Value::Int4(n) => Value::Int4(n * 4),
+        v => v,
+    })
+}
+
+fn numeric_precision(a: &[Value], _: &FnCtx) -> Result<Value> {
+    let (t, m) = (int_arg(&a[0]), int_arg(&a[1]));
+    Ok(int(match t {
+        21 => Some(16),
+        23 => Some(32),
+        20 => Some(64),
+        1700 if m == -1 => None,
+        1700 => Some(((m - 4) >> 16) & 65535),
+        700 => Some(24),
+        701 => Some(53),
+        _ => None,
+    }))
+}
+
+fn numeric_precision_radix(a: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(int(match int_arg(&a[0]) {
+        21 | 23 | 20 | 700 | 701 => Some(2),
+        1700 => Some(10),
+        _ => None,
+    }))
+}
+
+fn numeric_scale(a: &[Value], _: &FnCtx) -> Result<Value> {
+    let (t, m) = (int_arg(&a[0]), int_arg(&a[1]));
+    Ok(int(match t {
+        21 | 23 | 20 => Some(0),
+        1700 if m == -1 => None,
+        1700 => Some((m - 4) & 65535),
+        _ => None,
+    }))
+}
+
+fn datetime_precision(a: &[Value], _: &FnCtx) -> Result<Value> {
+    let (t, m) = (int_arg(&a[0]), int_arg(&a[1]));
+    Ok(int(match t {
+        1082 => Some(0),
+        1083 | 1114 | 1184 | 1266 => Some(if m < 0 { 6 } else { m }),
+        1186 => Some(if m < 0 || m & 65535 == 65535 {
+            6
+        } else {
+            m & 65535
+        }),
+        _ => None,
+    }))
+}
+
+/// The fields of an interval type (`DAY TO SECOND`), from format_type.
+fn interval_type(a: &[Value], c: &FnCtx) -> Result<Value> {
+    if int_arg(&a[0]) != 1186 {
+        return Ok(Value::Null);
+    }
+    let shown = crate::sql::func::system::format_type_oid(
+        1186,
+        int_arg(&a[1]) as i32,
+        &c.exec.catalog(),
+        &c.exec.search_path,
+    )
+    .unwrap_or_default();
+    // SIMILAR 'interval[()0-9]* #"%#"': what follows the type name and a space.
+    let rest = shown.strip_prefix("interval").unwrap_or("");
+    let rest = rest.trim_start_matches(|ch: char| ch == '(' || ch == ')' || ch.is_ascii_digit());
+    Ok(match rest.strip_prefix(' ') {
+        Some(fields) => Value::Text(Arc::from(fields.to_uppercase())),
+        None => Value::Null,
+    })
+}
+
+/// The position of column `attnum` in index `indexrelid`'s key.
+fn index_position(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let (ix, att) = (int_arg(&a[0]) as u32, int_arg(&a[1]));
+    let cat = c.exec.catalog();
+    let Some(i) = cat.indexes.get(&ix) else {
+        return Ok(Value::Null);
+    };
+    let cols = crate::catalog::system::index_cols(i);
+    Ok(int(cols
+        .iter()
+        .position(|x| *x == att)
+        .map(|p| p as i64 + 1)))
+}
+
+/// _pg_expandarray: each element with its position.
+fn expandarray(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    let items: Vec<Value> = match &a[0] {
+        Value::Array(arr) => arr.items.clone(),
+        _ => Vec::new(),
+    };
+    rows(
+        items
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| vec![v, Value::Int4(i as i32 + 1)])
+            .collect(),
+    )
+}
+
+pub fn register(r: &mut Registry) {
+    r.from_pg(1065, None, Some(prepared_xact));
+    // Built from what the backends report.
+    r.from_pg(2022, None, Some(activity));
+    r.from_pg(1936, None, Some(backend_idset));
+    r.from_pg(3195, None, Some(archiver));
+    r.from_pg(1136, None, Some(wal));
+    r.from_pg(6248, None, Some(recovery_prefetch));
+    r.from_pg(6313, None, Some(backend_wal));
+    r.from_pg(3317, None, Some(wal_receiver));
+    r.from_pg(2306, None, Some(slru));
+    r.from_pg(6214, None, Some(io));
+    r.from_pg(6386, None, Some(backend_io));
+    r.from_pg(3318, None, Some(super::system::pg_stat_get_progress_info));
+    r.from_pg(6118, None, Some(subscription));
+    r.from_pg(6107, None, Some(backend_subxact));
+    let backend: [(&str, FnImpl); 11] = [
+        ("dbid", backend_dbid),
+        ("pid", backend_pid),
+        ("userid", backend_userid),
+        ("activity", backend_activity),
+        ("wait_event_type", backend_wait_event_type),
+        ("wait_event", backend_wait_event),
+        ("xact_start", backend_xact_start),
+        ("activity_start", backend_activity_start),
+        ("start", backend_start),
+        ("client_addr", backend_client_addr),
+        ("client_port", backend_client_port),
+    ];
+    for s in builtin_proc_sigs() {
+        if let Some(f) = s
+            .name
+            .strip_prefix("pg_stat_get_backend_")
+            .and_then(|n| backend.iter().find(|b| b.0 == n))
+        {
+            r.from_pg(s.oid, Some(f.1), None);
+        }
+    }
+    // Every other statistics counter.
+    for s in builtin_proc_sigs() {
+        if s.name.starts_with("pg_stat_get_")
+            && !s.retset
+            && s.out.is_empty()
+            && !r.funcs.get(s.name).is_some_and(|v| {
+                v.iter()
+                    .any(|d| d.args.iter().map(|t| t.oid()).eq(s.args.iter().copied()))
+            })
+        {
+            let untracked = [
+                "pg_stat_get_function_",
+                "pg_stat_get_xact_function_",
+                "pg_stat_get_db_checksum_last_failure",
+            ]
+            .iter()
+            .any(|p| s.name.starts_with(p));
+            r.from_pg(s.oid, Some(if untracked { no_stat } else { counter }), None);
+        }
+    }
+    // Server files, shared memory and replication state: nothing to show.
+    r.from_pg(3329, None, Some(file_settings));
+    for oid in [6399, 4100] {
+        r.from_pg(oid, None, Some(no_rows));
+    }
+    r.from_pg(5052, None, Some(shmem_allocations));
+    r.from_pg(3400, None, Some(pg_config));
+    r.from_pg(2282, None, Some(memory_contexts));
+    r.from_pg(3401, None, Some(hba_file_rules));
+    r.from_pg(6250, None, Some(ident_file_mappings));
+    r.from_pg(6318, None, Some(wait_events));
+    r.from_pg(6401, None, Some(tz_abbrevs_zone));
+    r.from_pg(2599, None, Some(tz_abbrevs));
+    r.from_pg(3083, None, Some(extension_versions));
+    r.from_pg(1039, Some(getdatabaseencoding), None);
+    r.from_pg(810, Some(pg_client_encoding), None);
+    r.from_pg(266, Some(nameconcatoid), None);
+    r.from_pg(2289, None, Some(options_to_table));
+    r.from_pg(3427, None, Some(mcv_list_items));
+    // information_schema.
+    r.from_pg(13328, None, Some(expandarray));
+    r.from_pg(13329, Some(index_position), None);
+    // _pg_truetypid / _pg_truetypmod (pg_attribute, pg_type): their arguments are the
+    // catalogs' row types.
+    for (oid, imp) in [(13330, truetypid as FnImpl), (13331, truetypmod)] {
+        let d = r.from_pg(oid, Some(imp), None);
+        d.args = [75, 71]
+            .iter()
+            .map(|&t| crate::catalog::system::SysTable::by_rowtype(t).and_then(|s| s.row_type()).unwrap_or(DataType::Record))
+            .collect();
+    }
+    r.from_pg(13332, Some(char_max_length), None);
+    r.from_pg(13333, Some(char_octet_length), None);
+    r.from_pg(13335, Some(numeric_precision), None);
+    r.from_pg(13336, Some(numeric_precision_radix), None);
+    r.from_pg(13337, Some(numeric_scale), None);
+    r.from_pg(13338, Some(datetime_precision), None);
+    r.from_pg(13339, Some(interval_type), None);
+}

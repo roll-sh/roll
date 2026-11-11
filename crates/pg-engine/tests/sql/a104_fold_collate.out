@@ -1,0 +1,41 @@
+> CREATE COLLATION a104_ci2 (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE a104_e (id int PRIMARY KEY, a text COLLATE a104_ci2)
+-- CREATE TABLE
+
+> SELECT starts_with('é' COLLATE a104_ci2, 'a') FROM a104_e
+ERROR 0A000: nondeterministic collations are not supported for substring searches
+
+> SELECT 1 FROM a104_e WHERE starts_with('é' COLLATE a104_ci2, 'a') OR id = 1
+ERROR 0A000: nondeterministic collations are not supported for substring searches
+
+> SELECT 1 FROM a104_e WHERE starts_with(CASE WHEN true THEN 'é' ELSE a104_e.a END, 'a')
+ERROR 0A000: nondeterministic collations are not supported for substring searches
+
+> SELECT 1 FROM a104_e WHERE starts_with(left(CASE WHEN true THEN 'é' ELSE a104_e.a END, 0), 'a')
+ERROR 0A000: nondeterministic collations are not supported for substring searches
+
+> SELECT 1 FROM a104_e WHERE EXISTS (SELECT 1 FROM a104_e x WHERE starts_with(left(CASE WHEN true THEN 'é' ELSE x.a END, 0), 'a') GROUP BY x.id)
+ERROR 0A000: nondeterministic collations are not supported for substring searches
+
+> SELECT 1 FROM a104_e WHERE starts_with('é' COLLATE "C", 'a')
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM a104_e WHERE strpos('é' COLLATE a104_ci2, 'a') = 1
+?column?:int4
+-- SELECT 0
+
+> CREATE TABLE a104_m (id int PRIMARY KEY, c int)
+-- CREATE TABLE
+
+> MERGE INTO a104_m x USING (SELECT id FROM a104_e) s ON s.id = x.id WHEN MATCHED AND EXISTS (SELECT 1 FROM a104_e t WHERE starts_with(left(CASE WHEN true THEN 'é' ELSE t.a END, 0), 'a') GROUP BY t.id) THEN UPDATE SET c = 11 WHEN NOT MATCHED THEN INSERT VALUES (100, 1)
+ERROR 0A000: nondeterministic collations are not supported for substring searches
+
+> DROP TABLE a104_e, a104_m
+-- DROP TABLE
+
+> DROP COLLATION a104_ci2
+-- DROP COLLATION
+

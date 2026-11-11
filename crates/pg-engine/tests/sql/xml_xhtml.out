@@ -1,0 +1,307 @@
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html><head><title>t</title></head><body><p>a<br/>b</p><hr/><p/><div name="x"/><a name="n">l</a><img name="i" src="s"/><p lang="en">x</p><p xml:lang="de">y</p><input/><x:br xmlns:x="u"/></body></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>t</title>
+  </head>
+  <body>
+    <p>a<br />b</p>
+    <hr />
+    <p></p>
+    <div name="x" id="x"></div>
+    <a name="n" id="n">l</a>
+    <img name="i" src="s" id="i" />
+    <p lang="en" xml:lang="en">x</p>
+    <p xml:lang="de" lang="de">y</p>
+    <input />
+    <x:br xmlns:x="u"></x:br>
+  </body>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head></head><body><br/></body></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+</head>
+  <body>
+    <br />
+  </body>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html><head><meta http-equiv="content-type" content="x"/></head><body/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="content-type" content="x" />
+  </head>
+  <body></body>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html><head/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+</head>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html><head/></html>' as text indent)
+xmlserialize:text
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+</head>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "x"><html><body><br/><p/><![CDATA[x]]><area/></body></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <br />
+    <p></p>
+<![CDATA[x]]>
+    <area />
+  </body>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "x"><html><body><col/><base/></body></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "x">
+<html>
+  <body>
+    <col/>
+    <base/>
+  </body>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Frameset//EN" "x"><html><frame/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Frameset//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <frame />
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html SYSTEM "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html><br/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html SYSTEM "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <br />
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html SYSTEM "http://www.w3.org/TR/xhtml1/DTD/xhtml1-frameset.dtd"><html><br/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html SYSTEM "http://www.w3.org/TR/xhtml1/DTD/xhtml1-frameset.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <br />
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "x"><html><br/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "x">
+<html>
+  <br/>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML Basic 1.0//EN" "x"><html><br/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML Basic 1.0//EN" "x">
+<html>
+  <br/>
+</html>
+-- SELECT 1
+
+> select xmlserialize(content '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><br/><p/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <br />
+  <p></p>
+</html>
+
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><br/><p/></html>' as text)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><br/><p/></html>
+-- SELECT 1
+
+> select xpath('/', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><head/><br/><p/><a name="q"/></html>'::xml)
+xpath:143
+{"<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"x\">
+<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\" /></head><br /><p></p><a name=\"q\" id=\"q\"></a></html>
+"}
+-- SELECT 1
+
+> select xpath('/html/br', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><head/><br/><p/></html>'::xml)
+xpath:143
+{<br/>}
+-- SELECT 1
+
+> select xpath('/', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html xmlns="http://www.w3.org/1999/xhtml"><head><title>a</title></head><body><p>x<br/>y</p><p><br/></p></body></html>'::xml)
+xpath:143
+{"<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"x\">
+<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\" /><title>a</title></head><body><p>x<br />y</p><p><br /></p></body></html>
+"}
+-- SELECT 1
+
+> select xpath('/', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><head>x</head></html>'::xml)
+xpath:143
+{"<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"x\">
+<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\" />x</head></html>
+"}
+-- SELECT 1
+
+> select xpath('/', '<!DOCTYPE html SYSTEM "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html><head><meta http-equiv="Content-Type" content="q"/></head><br/></html>'::xml)
+xpath:143
+{"<!DOCTYPE html SYSTEM \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">
+<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta http-equiv=\"Content-Type\" content=\"q\" /></head><br /></html>
+"}
+-- SELECT 1
+
+> select xpath('//head', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><head/></html>'::xml)
+xpath:143
+{<head/>}
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><body><p><br/><span>x</span></p><p>x &amp; <b/></p></body></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <p>
+      <br />
+      <span>x</span>
+    </p>
+    <p>x &amp; <b></b></p>
+  </body>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html xmlns:h="http://www.w3.org/1999/xhtml"><h:br/><br xmlns="other"/><br xmlns="http://www.w3.org/1999/xhtml"/><!-- c --><?pi x?></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns:h="http://www.w3.org/1999/xhtml">
+  <h:br></h:br>
+  <br xmlns="other"></br>
+  <br xmlns="http://www.w3.org/1999/xhtml" />
+<!-- c -->
+<?pi x?>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x" [<!ENTITY e "v">]><html><p>&e;</p><form name="f" id="g"/><map name="m"/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x" [
+<!ENTITY e "v">
+]>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <p>v</p>
+  <form name="f" id="g"></form>
+  <map name="m" id="m"></map>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><head>t<meta http-equiv="x"/></head></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />t<meta http-equiv="x" /></head>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><body><head/></body><x:head xmlns:x="u"/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <head></head>
+  </body>
+  <x:head xmlns:x="u">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+</x:head>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><body><html><head/></html></body>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<body>
+  <html xmlns="http://www.w3.org/1999/xhtml">
+    <head></head>
+  </html>
+</body>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><head><meta xmlns:q="z" q:http-equiv="CONTENT-TYPE"/></head></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta xmlns:q="z" q:http-equiv="CONTENT-TYPE" />
+  </head>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><p name="a&amp;&lt;b" lang="x&quot;y"/><p xml:lang="a" lang="b"/><div xmlns:x="u" x:name="q"/><iframe name="i"/><span name="s"/></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <p name="a&amp;&lt;b" lang="x&quot;y" id="a&amp;&lt;b" xml:lang="x&quot;y"></p>
+  <p xml:lang="a" lang="b"></p>
+  <div xmlns:x="u" x:name="q"></div>
+  <iframe name="i" id="i"></iframe>
+  <span name="s"></span>
+</html>
+-- SELECT 1
+
+> select xmlserialize(document '<?xml version="1.0"?><!-- top --><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><?pi?><html/>' as text indent)
+xmlserialize:text
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- top -->
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<?pi?>
+<html xmlns="http://www.w3.org/1999/xhtml"></html>
+-- SELECT 1
+
+> select xmlserialize(document '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x"><html><body><div><div><div><link/><meta/><param/><basefont/><isindex/><col/></div></div></div></body></html>' as text indent)
+xmlserialize:text
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "x">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <div>
+      <div>
+        <div>
+          <link />
+          <meta />
+          <param />
+          <basefont />
+          <isindex />
+          <col />
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
+-- SELECT 1
+

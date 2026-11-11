@@ -1,0 +1,3119 @@
+{
+  "export_source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "evidence_root": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102",
+  "comparisons": {
+    "checked-baseline-vs-pg": {
+      "config": {
+        "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-client/bench",
+        "out": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-baseline-vs-pg",
+        "db": "perf_oltp20261102_clean_200000",
+        "rows": 200000,
+        "rounds": 5,
+        "seconds": 3,
+        "cases": {
+          "point_select": [
+            1,
+            8
+          ],
+          "point_select_simple": [
+            1,
+            8
+          ],
+          "range_scan_100": [
+            1,
+            8
+          ],
+          "secondary_lookup": [
+            1,
+            8
+          ]
+        },
+        "psql_container": "t3-d4020b98-perf-pg",
+        "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+        "targets": [
+          {
+            "name": "baseline",
+            "port": 53110,
+            "probe": {
+              "pid": 2028072
+            },
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "actual_executable_sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349"
+          },
+          {
+            "name": "postgres",
+            "port": 53100,
+            "probe": {
+              "cgroup": "/sys/fs/cgroup/system.slice/docker-0999a52ae0a37c31df9591a40951dd62fe654c1c6f942b3ed2ce5ac0b29fdca0.scope"
+            }
+          }
+        ],
+        "validation_version": "oltp-values-v1",
+        "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+        "ticks_per_second": 100,
+        "bench_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+        "source_commit": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0",
+        "load_at_start": "2.18 2.06 2.22 1/2841 2321198",
+        "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+        "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+      },
+      "summary": {
+        "point_select": {
+          "1": {
+            "postgres": {
+              "tps": {
+                "median": 9921.0,
+                "min": 9776.0,
+                "max": 10464.0
+              },
+              "p50_ms": {
+                "median": 0.093,
+                "min": 0.09,
+                "max": 0.093
+              },
+              "p95_ms": {
+                "median": 0.139,
+                "min": 0.136,
+                "max": 0.14
+              },
+              "p99_ms": {
+                "median": 0.194,
+                "min": 0.191,
+                "max": 0.21
+              },
+              "server_cpu_us_per_op": {
+                "median": 62.83266704740144,
+                "min": 60.037806159825145,
+                "max": 65.12140770432788
+              },
+              "client_cpu_us_per_op": {
+                "median": 40.328457945518814,
+                "min": 39.0341752396725,
+                "max": 40.590087641822954
+              },
+              "peak_mem_mb": {
+                "median": 110.9,
+                "min": 110.9,
+                "max": 112.0
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 6554.0,
+                "min": 6522.0,
+                "max": 6753.0
+              },
+              "p50_ms": {
+                "median": 0.137,
+                "min": 0.137,
+                "max": 0.139
+              },
+              "p95_ms": {
+                "median": 0.219,
+                "min": 0.192,
+                "max": 0.245
+              },
+              "p99_ms": {
+                "median": 0.358,
+                "min": 0.344,
+                "max": 0.372
+              },
+              "server_cpu_us_per_op": {
+                "median": 115.94792514239369,
+                "min": 113.51858249839368,
+                "max": 118.04384485665827
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.5924334049679,
+                "min": 39.02724445979861,
+                "max": 40.08543531326291
+              },
+              "peak_mem_mb": {
+                "median": 125.6,
+                "min": 125.6,
+                "max": 126.6
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "postgres": {
+              "tps": {
+                "median": 103911.0,
+                "min": 102565.0,
+                "max": 106132.0
+              },
+              "p50_ms": {
+                "median": 0.076,
+                "min": 0.076,
+                "max": 0.077
+              },
+              "p95_ms": {
+                "median": 0.114,
+                "min": 0.11,
+                "max": 0.116
+              },
+              "p99_ms": {
+                "median": 0.165,
+                "min": 0.158,
+                "max": 0.168
+              },
+              "server_cpu_us_per_op": {
+                "median": 34.20224244865083,
+                "min": 33.3836139303233,
+                "max": 34.52157375220507
+              },
+              "client_cpu_us_per_op": {
+                "median": 20.691183246073308,
+                "min": 20.335025906085722,
+                "max": 20.835179516446974
+              },
+              "peak_mem_mb": {
+                "median": 121.0,
+                "min": 121.0,
+                "max": 121.0
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 33527.0,
+                "min": 33396.0,
+                "max": 33793.0
+              },
+              "p50_ms": {
+                "median": 0.222,
+                "min": 0.221,
+                "max": 0.224
+              },
+              "p95_ms": {
+                "median": 0.38,
+                "min": 0.372,
+                "max": 0.387
+              },
+              "p99_ms": {
+                "median": 0.535,
+                "min": 0.514,
+                "max": 0.561
+              },
+              "server_cpu_us_per_op": {
+                "median": 117.16886627444708,
+                "min": 115.94202898550772,
+                "max": 117.64118938335625
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.73628943963364,
+                "min": 41.99331027667973,
+                "max": 42.88042306924768
+              },
+              "peak_mem_mb": {
+                "median": 127.4,
+                "min": 127.4,
+                "max": 128.8
+              },
+              "samples": 5
+            }
+          }
+        },
+        "point_select_simple": {
+          "1": {
+            "postgres": {
+              "tps": {
+                "median": 9244.0,
+                "min": 9051.0,
+                "max": 9621.0
+              },
+              "p50_ms": {
+                "median": 0.094,
+                "min": 0.092,
+                "max": 0.096
+              },
+              "p95_ms": {
+                "median": 0.174,
+                "min": 0.166,
+                "max": 0.183
+              },
+              "p99_ms": {
+                "median": 0.224,
+                "min": 0.213,
+                "max": 0.247
+              },
+              "server_cpu_us_per_op": {
+                "median": 72.48691231612297,
+                "min": 68.05956428224502,
+                "max": 73.54829325772289
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.20689655172404,
+                "min": 38.4778591793281,
+                "max": 40.31977022498715
+              },
+              "peak_mem_mb": {
+                "median": 110.9,
+                "min": 110.9,
+                "max": 110.9
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 6307.0,
+                "min": 6080.0,
+                "max": 6489.0
+              },
+              "p50_ms": {
+                "median": 0.143,
+                "min": 0.142,
+                "max": 0.148
+              },
+              "p95_ms": {
+                "median": 0.212,
+                "min": 0.204,
+                "max": 0.268
+              },
+              "p99_ms": {
+                "median": 0.357,
+                "min": 0.353,
+                "max": 0.393
+              },
+              "server_cpu_us_per_op": {
+                "median": 122.5956457408578,
+                "min": 118.6501617956753,
+                "max": 128.26837691169388
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.6997773312334,
+                "min": 39.27904925009215,
+                "max": 40.283725264484566
+              },
+              "peak_mem_mb": {
+                "median": 126.0,
+                "min": 125.8,
+                "max": 126.6
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "postgres": {
+              "tps": {
+                "median": 55688.0,
+                "min": 55278.0,
+                "max": 55918.0
+              },
+              "p50_ms": {
+                "median": 0.141,
+                "min": 0.14,
+                "max": 0.144
+              },
+              "p95_ms": {
+                "median": 0.213,
+                "min": 0.209,
+                "max": 0.215
+              },
+              "p99_ms": {
+                "median": 0.301,
+                "min": 0.294,
+                "max": 0.305
+              },
+              "server_cpu_us_per_op": {
+                "median": 64.44561236055604,
+                "min": 63.98469296626614,
+                "max": 64.46744853997124
+              },
+              "client_cpu_us_per_op": {
+                "median": 36.724328541847996,
+                "min": 36.16378333233907,
+                "max": 37.14620568938208
+              },
+              "peak_mem_mb": {
+                "median": 120.8,
+                "min": 120.8,
+                "max": 122.0
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 31785.0,
+                "min": 31632.0,
+                "max": 32332.0
+              },
+              "p50_ms": {
+                "median": 0.235,
+                "min": 0.23,
+                "max": 0.236
+              },
+              "p95_ms": {
+                "median": 0.407,
+                "min": 0.39,
+                "max": 0.408
+              },
+              "p99_ms": {
+                "median": 0.599,
+                "min": 0.577,
+                "max": 0.611
+              },
+              "server_cpu_us_per_op": {
+                "median": 123.91106079189854,
+                "min": 121.91728587181723,
+                "max": 124.59616740505305
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.8540742837374,
+                "min": 41.95770675702713,
+                "max": 43.78002612341214
+              },
+              "peak_mem_mb": {
+                "median": 127.4,
+                "min": 127.4,
+                "max": 127.4
+              },
+              "samples": 5
+            }
+          }
+        },
+        "range_scan_100": {
+          "1": {
+            "postgres": {
+              "tps": {
+                "median": 4114.0,
+                "min": 4078.0,
+                "max": 4157.0
+              },
+              "p50_ms": {
+                "median": 0.227,
+                "min": 0.226,
+                "max": 0.228
+              },
+              "p95_ms": {
+                "median": 0.342,
+                "min": 0.33,
+                "max": 0.355
+              },
+              "p99_ms": {
+                "median": 0.466,
+                "min": 0.452,
+                "max": 0.494
+              },
+              "server_cpu_us_per_op": {
+                "median": 157.04091056383672,
+                "min": 154.6183567134272,
+                "max": 159.2025171624716
+              },
+              "client_cpu_us_per_op": {
+                "median": 91.19588297268908,
+                "min": 90.9112273641848,
+                "max": 91.67134268537096
+              },
+              "peak_mem_mb": {
+                "median": 111.0,
+                "min": 111.0,
+                "max": 111.0
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 1896.0,
+                "min": 1884.0,
+                "max": 1921.0
+              },
+              "p50_ms": {
+                "median": 0.491,
+                "min": 0.487,
+                "max": 0.493
+              },
+              "p95_ms": {
+                "median": 0.666,
+                "min": 0.654,
+                "max": 0.715
+              },
+              "p99_ms": {
+                "median": 1.335,
+                "min": 1.078,
+                "max": 1.407
+              },
+              "server_cpu_us_per_op": {
+                "median": 440.71353620146584,
+                "min": 437.1205550737176,
+                "max": 442.57112750264116
+              },
+              "client_cpu_us_per_op": {
+                "median": 94.91639202081403,
+                "min": 94.52448408535,
+                "max": 96.77909444640764
+              },
+              "peak_mem_mb": {
+                "median": 126.6,
+                "min": 125.8,
+                "max": 126.6
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "postgres": {
+              "tps": {
+                "median": 37303.0,
+                "min": 35479.0,
+                "max": 37754.0
+              },
+              "p50_ms": {
+                "median": 0.201,
+                "min": 0.198,
+                "max": 0.211
+              },
+              "p95_ms": {
+                "median": 0.328,
+                "min": 0.324,
+                "max": 0.353
+              },
+              "p99_ms": {
+                "median": 0.437,
+                "min": 0.428,
+                "max": 0.48
+              },
+              "server_cpu_us_per_op": {
+                "median": 93.5920148660359,
+                "min": 92.65352363803272,
+                "max": 98.0606154539818
+              },
+              "client_cpu_us_per_op": {
+                "median": 61.23921453012051,
+                "min": 61.05362249761693,
+                "max": 63.299442033478115
+              },
+              "peak_mem_mb": {
+                "median": 121.5,
+                "min": 121.5,
+                "max": 121.5
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 8266.0,
+                "min": 8106.0,
+                "max": 8315.0
+              },
+              "p50_ms": {
+                "median": 0.917,
+                "min": 0.911,
+                "max": 0.928
+              },
+              "p95_ms": {
+                "median": 1.584,
+                "min": 1.564,
+                "max": 1.639
+              },
+              "p99_ms": {
+                "median": 2.378,
+                "min": 2.354,
+                "max": 2.536
+              },
+              "server_cpu_us_per_op": {
+                "median": 479.2229253153838,
+                "min": 474.89279846110554,
+                "max": 486.72202581599595
+              },
+              "client_cpu_us_per_op": {
+                "median": 98.583292563601,
+                "min": 98.35829976157183,
+                "max": 99.4124954915244
+              },
+              "peak_mem_mb": {
+                "median": 127.9,
+                "min": 127.9,
+                "max": 129.6
+              },
+              "samples": 5
+            }
+          }
+        },
+        "secondary_lookup": {
+          "1": {
+            "postgres": {
+              "tps": {
+                "median": 9411.0,
+                "min": 9258.0,
+                "max": 9862.0
+              },
+              "p50_ms": {
+                "median": 0.095,
+                "min": 0.093,
+                "max": 0.096
+              },
+              "p95_ms": {
+                "median": 0.156,
+                "min": 0.15,
+                "max": 0.157
+              },
+              "p99_ms": {
+                "median": 0.23,
+                "min": 0.211,
+                "max": 0.234
+              },
+              "server_cpu_us_per_op": {
+                "median": 68.80451181074503,
+                "min": 63.94812962524903,
+                "max": 69.57819567617675
+              },
+              "client_cpu_us_per_op": {
+                "median": 40.633751743374994,
+                "min": 40.203048758770144,
+                "max": 42.12480650851426
+              },
+              "peak_mem_mb": {
+                "median": 111.0,
+                "min": 111.0,
+                "max": 111.0
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 4892.0,
+                "min": 4826.0,
+                "max": 5095.0
+              },
+              "p50_ms": {
+                "median": 0.185,
+                "min": 0.18,
+                "max": 0.189
+              },
+              "p95_ms": {
+                "median": 0.286,
+                "min": 0.266,
+                "max": 0.312
+              },
+              "p99_ms": {
+                "median": 0.464,
+                "min": 0.461,
+                "max": 0.495
+              },
+              "server_cpu_us_per_op": {
+                "median": 166.2351819048915,
+                "min": 160.26689343887261,
+                "max": 169.1755282419587
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.110982422673864,
+                "min": 41.57473670438946,
+                "max": 42.5190521715385
+              },
+              "peak_mem_mb": {
+                "median": 127.1,
+                "min": 127.0,
+                "max": 128.8
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "postgres": {
+              "tps": {
+                "median": 85183.0,
+                "min": 83439.0,
+                "max": 86573.0
+              },
+              "p50_ms": {
+                "median": 0.092,
+                "min": 0.09,
+                "max": 0.093
+              },
+              "p95_ms": {
+                "median": 0.14,
+                "min": 0.135,
+                "max": 0.145
+              },
+              "p99_ms": {
+                "median": 0.209,
+                "min": 0.196,
+                "max": 0.216
+              },
+              "server_cpu_us_per_op": {
+                "median": 41.28148860933782,
+                "min": 40.892522537087025,
+                "max": 42.376450104427384
+              },
+              "client_cpu_us_per_op": {
+                "median": 24.890821189096044,
+                "min": 24.40548942060506,
+                "max": 25.398777220032578
+              },
+              "peak_mem_mb": {
+                "median": 121.4,
+                "min": 121.3,
+                "max": 122.1
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 23949.0,
+                "min": 23088.0,
+                "max": 24186.0
+              },
+              "p50_ms": {
+                "median": 0.319,
+                "min": 0.315,
+                "max": 0.33
+              },
+              "p95_ms": {
+                "median": 0.535,
+                "min": 0.516,
+                "max": 0.547
+              },
+              "p99_ms": {
+                "median": 0.819,
+                "min": 0.807,
+                "max": 0.87
+              },
+              "server_cpu_us_per_op": {
+                "median": 165.0155832591275,
+                "min": 162.83907586757948,
+                "max": 170.72185181978296
+              },
+              "client_cpu_us_per_op": {
+                "median": 44.23142765084127,
+                "min": 43.6096532724845,
+                "max": 45.257947194536115
+              },
+              "peak_mem_mb": {
+                "median": 127.6,
+                "min": 127.6,
+                "max": 128.5
+              },
+              "samples": 5
+            }
+          }
+        }
+      }
+    },
+    "borrows-vs-baseline": {
+      "config": {
+        "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+        "out": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/borrows-vs-baseline",
+        "db": "perf_oltp20261102_clean_200000",
+        "rows": 200000,
+        "rounds": 5,
+        "seconds": 3,
+        "cases": {
+          "point_select": [
+            1,
+            8
+          ],
+          "range_scan_100": [
+            1,
+            8
+          ],
+          "secondary_lookup": [
+            8
+          ]
+        },
+        "psql_container": "t3-d4020b98-perf-pg",
+        "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+        "targets": [
+          {
+            "name": "baseline",
+            "port": 53110,
+            "probe": {
+              "pid": 2424538
+            },
+            "source": "7f35a185",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "actual_executable_sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349"
+          },
+          {
+            "name": "borrows",
+            "port": 53111,
+            "probe": {
+              "pid": 2627691
+            },
+            "source": "37e71d81",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/borrows-bin/roll-engine",
+            "actual_executable_sha256": "5151fb51339693ff7f9375600347a93b6ad35bea2db28020a4c9abb285af5c6a"
+          }
+        ],
+        "validation_version": "oltp-values-v1",
+        "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+        "ticks_per_second": 100,
+        "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+        "source_commit": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+        "load_at_start": "3.03 3.40 3.37 1/2747 2630245",
+        "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+        "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+      },
+      "summary": {
+        "point_select": {
+          "1": {
+            "borrows": {
+              "tps": {
+                "median": 6839.0,
+                "min": 6638.0,
+                "max": 6997.0
+              },
+              "p50_ms": {
+                "median": 0.133,
+                "min": 0.133,
+                "max": 0.135
+              },
+              "p95_ms": {
+                "median": 0.201,
+                "min": 0.18,
+                "max": 0.228
+              },
+              "p99_ms": {
+                "median": 0.342,
+                "min": 0.331,
+                "max": 0.363
+              },
+              "server_cpu_us_per_op": {
+                "median": 110.14181977679249,
+                "min": 107.65493259657937,
+                "max": 113.97871058445487
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.91261051199877,
+                "min": 39.14027437530593,
+                "max": 40.52634143964129
+              },
+              "peak_mem_mb": {
+                "median": 104.9,
+                "min": 103.9,
+                "max": 105.7
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 6864.0,
+                "min": 6800.0,
+                "max": 7033.0
+              },
+              "p50_ms": {
+                "median": 0.134,
+                "min": 0.133,
+                "max": 0.136
+              },
+              "p95_ms": {
+                "median": 0.194,
+                "min": 0.171,
+                "max": 0.207
+              },
+              "p99_ms": {
+                "median": 0.33,
+                "min": 0.328,
+                "max": 0.334
+              },
+              "server_cpu_us_per_op": {
+                "median": 109.73537266326873,
+                "min": 107.57783991280083,
+                "max": 111.74279553028822
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.73215588965143,
+                "min": 38.546230036490826,
+                "max": 40.31226025734459
+              },
+              "peak_mem_mb": {
+                "median": 117.2,
+                "min": 117.1,
+                "max": 118.1
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "borrows": {
+              "tps": {
+                "median": 34014.0,
+                "min": 33975.0,
+                "max": 34349.0
+              },
+              "p50_ms": {
+                "median": 0.221,
+                "min": 0.218,
+                "max": 0.221
+              },
+              "p95_ms": {
+                "median": 0.363,
+                "min": 0.356,
+                "max": 0.366
+              },
+              "p99_ms": {
+                "median": 0.511,
+                "min": 0.491,
+                "max": 0.518
+              },
+              "server_cpu_us_per_op": {
+                "median": 115.50896443617118,
+                "min": 114.46864238249984,
+                "max": 115.73052441619846
+              },
+              "client_cpu_us_per_op": {
+                "median": 43.114865261551245,
+                "min": 42.62342510042125,
+                "max": 43.58060434872165
+              },
+              "peak_mem_mb": {
+                "median": 105.6,
+                "min": 105.6,
+                "max": 106.8
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 33783.0,
+                "min": 33498.0,
+                "max": 33942.0
+              },
+              "p50_ms": {
+                "median": 0.223,
+                "min": 0.222,
+                "max": 0.224
+              },
+              "p95_ms": {
+                "median": 0.367,
+                "min": 0.366,
+                "max": 0.375
+              },
+              "p99_ms": {
+                "median": 0.517,
+                "min": 0.501,
+                "max": 0.52
+              },
+              "server_cpu_us_per_op": {
+                "median": 116.48321300351128,
+                "min": 115.93889892405562,
+                "max": 116.96255408026262
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.824683394484566,
+                "min": 42.52110995076831,
+                "max": 43.53304815785834
+              },
+              "peak_mem_mb": {
+                "median": 118.8,
+                "min": 118.6,
+                "max": 119.8
+              },
+              "samples": 5
+            }
+          }
+        },
+        "range_scan_100": {
+          "1": {
+            "borrows": {
+              "tps": {
+                "median": 1948.0,
+                "min": 1938.0,
+                "max": 1976.0
+              },
+              "p50_ms": {
+                "median": 0.479,
+                "min": 0.479,
+                "max": 0.488
+              },
+              "p95_ms": {
+                "median": 0.648,
+                "min": 0.631,
+                "max": 0.663
+              },
+              "p99_ms": {
+                "median": 1.108,
+                "min": 0.988,
+                "max": 1.334
+              },
+              "server_cpu_us_per_op": {
+                "median": 427.71599657827204,
+                "min": 419.8988195615481,
+                "max": 430.6220095693797
+              },
+              "client_cpu_us_per_op": {
+                "median": 93.86844368013634,
+                "min": 91.7045454545454,
+                "max": 94.83305227655956
+              },
+              "peak_mem_mb": {
+                "median": 104.8,
+                "min": 104.4,
+                "max": 105.1
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 1933.0,
+                "min": 1882.0,
+                "max": 1959.0
+              },
+              "p50_ms": {
+                "median": 0.482,
+                "min": 0.479,
+                "max": 0.488
+              },
+              "p95_ms": {
+                "median": 0.654,
+                "min": 0.631,
+                "max": 0.804
+              },
+              "p99_ms": {
+                "median": 1.377,
+                "min": 1.122,
+                "max": 1.46
+              },
+              "server_cpu_us_per_op": {
+                "median": 432.68401999655566,
+                "min": 423.68555385400873,
+                "max": 444.56252213956617
+              },
+              "client_cpu_us_per_op": {
+                "median": 95.0131984916006,
+                "min": 93.9589725909318,
+                "max": 95.64151611760568
+              },
+              "peak_mem_mb": {
+                "median": 118.0,
+                "min": 117.3,
+                "max": 119.0
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "borrows": {
+              "tps": {
+                "median": 8457.0,
+                "min": 8438.0,
+                "max": 8513.0
+              },
+              "p50_ms": {
+                "median": 0.897,
+                "min": 0.896,
+                "max": 0.9
+              },
+              "p95_ms": {
+                "median": 1.504,
+                "min": 1.472,
+                "max": 1.521
+              },
+              "p99_ms": {
+                "median": 2.257,
+                "min": 2.191,
+                "max": 2.363
+              },
+              "server_cpu_us_per_op": {
+                "median": 466.8294988969427,
+                "min": 463.77832570153896,
+                "max": 469.12020217975027
+              },
+              "client_cpu_us_per_op": {
+                "median": 97.61080846360323,
+                "min": 96.13580681773719,
+                "max": 98.54924182593595
+              },
+              "peak_mem_mb": {
+                "median": 106.2,
+                "min": 106.1,
+                "max": 106.2
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 8414.0,
+                "min": 8371.0,
+                "max": 8485.0
+              },
+              "p50_ms": {
+                "median": 0.9,
+                "min": 0.894,
+                "max": 0.905
+              },
+              "p95_ms": {
+                "median": 1.523,
+                "min": 1.51,
+                "max": 1.544
+              },
+              "p99_ms": {
+                "median": 2.327,
+                "min": 2.318,
+                "max": 2.341
+              },
+              "server_cpu_us_per_op": {
+                "median": 468.91089108910904,
+                "min": 466.14828777882514,
+                "max": 472.8546409807365
+              },
+              "client_cpu_us_per_op": {
+                "median": 98.42767941827411,
+                "min": 96.9038415841586,
+                "max": 99.33470782280851
+              },
+              "peak_mem_mb": {
+                "median": 119.4,
+                "min": 119.2,
+                "max": 120.6
+              },
+              "samples": 5
+            }
+          }
+        },
+        "secondary_lookup": {
+          "8": {
+            "borrows": {
+              "tps": {
+                "median": 24541.0,
+                "min": 24398.0,
+                "max": 24748.0
+              },
+              "p50_ms": {
+                "median": 0.31,
+                "min": 0.308,
+                "max": 0.311
+              },
+              "p95_ms": {
+                "median": 0.517,
+                "min": 0.506,
+                "max": 0.528
+              },
+              "p99_ms": {
+                "median": 0.81,
+                "min": 0.786,
+                "max": 0.816
+              },
+              "server_cpu_us_per_op": {
+                "median": 160.91797935904393,
+                "min": 159.42263155060058,
+                "max": 161.4489427962628
+              },
+              "client_cpu_us_per_op": {
+                "median": 44.22857763359711,
+                "min": 43.91320205223105,
+                "max": 44.67496095222694
+              },
+              "peak_mem_mb": {
+                "median": 106.3,
+                "min": 105.9,
+                "max": 107.1
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 24448.0,
+                "min": 24359.0,
+                "max": 24666.0
+              },
+              "p50_ms": {
+                "median": 0.31,
+                "min": 0.309,
+                "max": 0.312
+              },
+              "p95_ms": {
+                "median": 0.516,
+                "min": 0.504,
+                "max": 0.52
+              },
+              "p99_ms": {
+                "median": 0.793,
+                "min": 0.784,
+                "max": 0.811
+              },
+              "server_cpu_us_per_op": {
+                "median": 161.45733983704383,
+                "min": 160.09402991123932,
+                "max": 162.09783322390012
+              },
+              "client_cpu_us_per_op": {
+                "median": 44.371304787546705,
+                "min": 43.549966900390565,
+                "max": 44.810624846717744
+              },
+              "peak_mem_mb": {
+                "median": 119.4,
+                "min": 119.1,
+                "max": 120.4
+              },
+              "samples": 5
+            }
+          }
+        }
+      }
+    },
+    "histogram-vs-baseline": {
+      "config": {
+        "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+        "out": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-vs-baseline",
+        "db": "perf_oltp20261102_clean_200000",
+        "rows": 200000,
+        "rounds": 5,
+        "seconds": 3,
+        "cases": {
+          "point_select": [
+            1,
+            8
+          ],
+          "range_scan_100": [
+            1,
+            8
+          ],
+          "secondary_lookup": [
+            8
+          ]
+        },
+        "psql_container": "t3-d4020b98-perf-pg",
+        "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+        "targets": [
+          {
+            "name": "baseline",
+            "port": 53110,
+            "probe": {
+              "pid": 2424538
+            },
+            "source": "7f35a185",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "actual_executable_sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349"
+          },
+          {
+            "name": "histogram",
+            "port": 53112,
+            "probe": {
+              "pid": 2925188
+            },
+            "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "actual_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+          }
+        ],
+        "runtime_provenance": "runtime-latest.json",
+        "validation_version": "oltp-values-v1",
+        "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+        "ticks_per_second": 100,
+        "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+        "source_commit": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "load_at_start": "2.05 3.03 3.39 1/2751 2929169",
+        "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+        "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+      },
+      "summary": {
+        "point_select": {
+          "1": {
+            "histogram": {
+              "tps": {
+                "median": 6784.0,
+                "min": 6582.0,
+                "max": 6819.0
+              },
+              "p50_ms": {
+                "median": 0.135,
+                "min": 0.134,
+                "max": 0.138
+              },
+              "p95_ms": {
+                "median": 0.206,
+                "min": 0.196,
+                "max": 0.247
+              },
+              "p99_ms": {
+                "median": 0.341,
+                "min": 0.334,
+                "max": 0.346
+              },
+              "server_cpu_us_per_op": {
+                "median": 111.03502250048894,
+                "min": 109.4872672173613,
+                "max": 115.95523823991118
+              },
+              "client_cpu_us_per_op": {
+                "median": 40.09686566408438,
+                "min": 39.999298140071495,
+                "max": 40.840070384671876
+              },
+              "peak_mem_mb": {
+                "median": 104.7,
+                "min": 103.6,
+                "max": 105.1
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 6939.0,
+                "min": 6514.0,
+                "max": 6962.0
+              },
+              "p50_ms": {
+                "median": 0.135,
+                "min": 0.133,
+                "max": 0.137
+              },
+              "p95_ms": {
+                "median": 0.195,
+                "min": 0.171,
+                "max": 0.253
+              },
+              "p99_ms": {
+                "median": 0.334,
+                "min": 0.327,
+                "max": 0.343
+              },
+              "server_cpu_us_per_op": {
+                "median": 108.67483722711518,
+                "min": 108.41928520029013,
+                "max": 117.68919817837646
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.97898776685044,
+                "min": 39.00986212179284,
+                "max": 40.034078698256344
+              },
+              "peak_mem_mb": {
+                "median": 121.6,
+                "min": 121.4,
+                "max": 122.5
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "histogram": {
+              "tps": {
+                "median": 34005.0,
+                "min": 33693.0,
+                "max": 34111.0
+              },
+              "p50_ms": {
+                "median": 0.221,
+                "min": 0.22,
+                "max": 0.223
+              },
+              "p95_ms": {
+                "median": 0.367,
+                "min": 0.361,
+                "max": 0.375
+              },
+              "p99_ms": {
+                "median": 0.52,
+                "min": 0.512,
+                "max": 0.544
+              },
+              "server_cpu_us_per_op": {
+                "median": 115.31947802762579,
+                "min": 114.97284413706869,
+                "max": 115.90304492726398
+              },
+              "client_cpu_us_per_op": {
+                "median": 43.12000945188898,
+                "min": 42.88540811940764,
+                "max": 43.529267496711796
+              },
+              "peak_mem_mb": {
+                "median": 105.3,
+                "min": 105.1,
+                "max": 106.4
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 34223.0,
+                "min": 34139.0,
+                "max": 34371.0
+              },
+              "p50_ms": {
+                "median": 0.22,
+                "min": 0.219,
+                "max": 0.221
+              },
+              "p95_ms": {
+                "median": 0.364,
+                "min": 0.353,
+                "max": 0.369
+              },
+              "p99_ms": {
+                "median": 0.512,
+                "min": 0.484,
+                "max": 0.514
+              },
+              "server_cpu_us_per_op": {
+                "median": 114.96490698647874,
+                "min": 114.16921508664619,
+                "max": 115.27799468998909
+              },
+              "client_cpu_us_per_op": {
+                "median": 43.13372336386737,
+                "min": 41.973244963298455,
+                "max": 43.348261118274955
+              },
+              "peak_mem_mb": {
+                "median": 123.1,
+                "min": 122.9,
+                "max": 124.5
+              },
+              "samples": 5
+            }
+          }
+        },
+        "range_scan_100": {
+          "1": {
+            "histogram": {
+              "tps": {
+                "median": 2022.0,
+                "min": 1983.0,
+                "max": 2056.0
+              },
+              "p50_ms": {
+                "median": 0.458,
+                "min": 0.456,
+                "max": 0.461
+              },
+              "p95_ms": {
+                "median": 0.65,
+                "min": 0.618,
+                "max": 0.73
+              },
+              "p99_ms": {
+                "median": 1.263,
+                "min": 1.112,
+                "max": 1.357
+              },
+              "server_cpu_us_per_op": {
+                "median": 408.7013843111434,
+                "min": 401.94489465153805,
+                "max": 415.1260504201679
+              },
+              "client_cpu_us_per_op": {
+                "median": 94.44759393539844,
+                "min": 93.78891257995669,
+                "max": 95.92462898115755
+              },
+              "peak_mem_mb": {
+                "median": 104.5,
+                "min": 104.4,
+                "max": 104.7
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 1924.0,
+                "min": 1907.0,
+                "max": 1938.0
+              },
+              "p50_ms": {
+                "median": 0.483,
+                "min": 0.482,
+                "max": 0.493
+              },
+              "p95_ms": {
+                "median": 0.663,
+                "min": 0.66,
+                "max": 0.675
+              },
+              "p99_ms": {
+                "median": 1.23,
+                "min": 1.141,
+                "max": 1.368
+              },
+              "server_cpu_us_per_op": {
+                "median": 433.1254331254331,
+                "min": 430.73742246726397,
+                "max": 439.8673415953986
+              },
+              "client_cpu_us_per_op": {
+                "median": 94.45103857566698,
+                "min": 93.76255158184254,
+                "max": 94.87439362439245
+              },
+              "peak_mem_mb": {
+                "median": 122.2,
+                "min": 122.1,
+                "max": 122.4
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "histogram": {
+              "tps": {
+                "median": 8829.0,
+                "min": 8643.0,
+                "max": 8836.0
+              },
+              "p50_ms": {
+                "median": 0.853,
+                "min": 0.851,
+                "max": 0.873
+              },
+              "p95_ms": {
+                "median": 1.516,
+                "min": 1.503,
+                "max": 1.577
+              },
+              "p99_ms": {
+                "median": 2.285,
+                "min": 2.264,
+                "max": 2.374
+              },
+              "server_cpu_us_per_op": {
+                "median": 446.1288984425085,
+                "min": 445.9872467267854,
+                "max": 455.33407872922857
+              },
+              "client_cpu_us_per_op": {
+                "median": 97.80664687512048,
+                "min": 96.19299701920556,
+                "max": 98.43532858936791
+              },
+              "peak_mem_mb": {
+                "median": 105.8,
+                "min": 105.8,
+                "max": 107.0
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 8419.0,
+                "min": 8312.0,
+                "max": 8499.0
+              },
+              "p50_ms": {
+                "median": 0.902,
+                "min": 0.889,
+                "max": 0.909
+              },
+              "p95_ms": {
+                "median": 1.557,
+                "min": 1.531,
+                "max": 1.567
+              },
+              "p99_ms": {
+                "median": 2.394,
+                "min": 2.347,
+                "max": 2.476
+              },
+              "server_cpu_us_per_op": {
+                "median": 469.38694740174765,
+                "min": 464.9521718676477,
+                "max": 476.2286538924097
+              },
+              "client_cpu_us_per_op": {
+                "median": 98.45040771522697,
+                "min": 97.51018199310498,
+                "max": 98.65631060276151
+              },
+              "peak_mem_mb": {
+                "median": 123.5,
+                "min": 123.5,
+                "max": 124.6
+              },
+              "samples": 5
+            }
+          }
+        },
+        "secondary_lookup": {
+          "8": {
+            "histogram": {
+              "tps": {
+                "median": 24559.0,
+                "min": 24529.0,
+                "max": 24643.0
+              },
+              "p50_ms": {
+                "median": 0.309,
+                "min": 0.308,
+                "max": 0.31
+              },
+              "p95_ms": {
+                "median": 0.516,
+                "min": 0.508,
+                "max": 0.523
+              },
+              "p99_ms": {
+                "median": 0.789,
+                "min": 0.78,
+                "max": 0.796
+              },
+              "server_cpu_us_per_op": {
+                "median": 160.4784585408097,
+                "min": 160.10818120351593,
+                "max": 160.84771090884396
+              },
+              "client_cpu_us_per_op": {
+                "median": 44.27175118323192,
+                "min": 43.93686403983548,
+                "max": 44.732869277320866
+              },
+              "peak_mem_mb": {
+                "median": 106.1,
+                "min": 106.0,
+                "max": 107.4
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 24568.0,
+                "min": 24425.0,
+                "max": 24743.0
+              },
+              "p50_ms": {
+                "median": 0.308,
+                "min": 0.307,
+                "max": 0.309
+              },
+              "p95_ms": {
+                "median": 0.515,
+                "min": 0.506,
+                "max": 0.525
+              },
+              "p99_ms": {
+                "median": 0.788,
+                "min": 0.782,
+                "max": 0.804
+              },
+              "server_cpu_us_per_op": {
+                "median": 160.72591145833363,
+                "min": 159.43336520205185,
+                "max": 160.98885356835825
+              },
+              "client_cpu_us_per_op": {
+                "median": 44.27795806794784,
+                "min": 43.45150860605055,
+                "max": 44.38045247395834
+              },
+              "peak_mem_mb": {
+                "median": 123.4,
+                "min": 123.3,
+                "max": 124.0
+              },
+              "samples": 5
+            }
+          }
+        }
+      },
+      "runtime_observation": {
+        "observed_at_utc": "2026-11-02T00:13:18.177670+00:00",
+        "git_head": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "git_status": "",
+        "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+        "nproc": 36,
+        "load": "2.14 3.06 3.40 1/2730 2927719",
+        "build_environment": {
+          "CARGO_BUILD_JOBS": "2",
+          "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only",
+          "TMPDIR": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/tmp"
+        },
+        "postgres": {
+          "name": "/t3-d4020b98-perf-pg",
+          "image_id": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+          "repo_digests": [
+            "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+          ],
+          "started_at": "2026-11-01T23:15:30.826641771Z",
+          "cpuset": "28-31",
+          "nano_cpus": 0,
+          "cpu_quota": 0,
+          "cpu_period": 0,
+          "memory_limit": 8589934592,
+          "network_mode": "host",
+          "executable_sha256": "51b088c1df230893fc90182ce286d5e7caa5020ce9c01158dab462e1ec4b619a",
+          "cgroup": {
+            "cpu.max": "max 100000",
+            "cpuset.cpus.effective": "28-31",
+            "memory.max": "8589934592"
+          },
+          "leader_affinity": [
+            28,
+            29,
+            30,
+            31
+          ]
+        },
+        "engines": {
+          "baseline": {
+            "pid": 2424538,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-baseline --listen 127.0.0.1:53110 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          },
+          "histogram": {
+            "pid": 2925188,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-histogram --listen 127.0.0.1:53112 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          }
+        },
+        "clients": {
+          "checked-client": {
+            "manifest": {
+              "source": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0",
+              "sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+              "binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-client/bench"
+            },
+            "observed_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b"
+          },
+          "final-client": {
+            "manifest": {
+              "source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+              "sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+              "build_log": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client-build-tests.log"
+            },
+            "observed_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28"
+          }
+        },
+        "ancillary_observed_scripts": {
+          "probe-plan-choice.py": {
+            "sha256": "99160fe0183c7cceaaeb26bc84a23b9bc09269ce3aca5395b8c3333441858769",
+            "mtime_utc": "2026-11-01T23:38:51.359947+00:00"
+          },
+          "check-live-negative.py": {
+            "sha256": "0a8ea7fa591f89ce56800e528281aeb89b72b0e3f5f550f38dbc815f283ec9ea",
+            "mtime_utc": "2026-11-01T23:36:44.973357+00:00"
+          },
+          "check-final-live-negative.py": {
+            "sha256": "2156fe0901fe93ad6a3c0d85529e97b075cefd50ad72549a2fb89cdcbc25e501",
+            "mtime_utc": "2026-11-01T23:54:50.813435+00:00"
+          }
+        }
+      },
+      "runtime_observation_sha256": "dbc806ff8d5747e5a016e5550f41d29ed22249a6a8802aa3b8907f0e1ed0a42f"
+    },
+    "final-vs-pg": {
+      "config": {
+        "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+        "out": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-vs-pg",
+        "db": "perf_oltp20261102_clean_200000",
+        "rows": 200000,
+        "rounds": 5,
+        "seconds": 3,
+        "cases": {
+          "point_select": [
+            1,
+            8
+          ],
+          "range_scan_100": [
+            1,
+            8
+          ],
+          "secondary_lookup": [
+            8
+          ]
+        },
+        "psql_container": "t3-d4020b98-perf-pg",
+        "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+        "targets": [
+          {
+            "name": "histogram",
+            "port": 53112,
+            "probe": {
+              "pid": 2925188
+            },
+            "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "actual_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+          },
+          {
+            "name": "postgres",
+            "port": 53100,
+            "probe": {
+              "cgroup": "/sys/fs/cgroup/system.slice/docker-0999a52ae0a37c31df9591a40951dd62fe654c1c6f942b3ed2ce5ac0b29fdca0.scope"
+            }
+          }
+        ],
+        "runtime_provenance": "runtime-2026-11-02T001318.177670_0000.json",
+        "runtime_provenance_sha256": "dbc806ff8d5747e5a016e5550f41d29ed22249a6a8802aa3b8907f0e1ed0a42f",
+        "validation_version": "oltp-values-v1",
+        "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+        "ticks_per_second": 100,
+        "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+        "source_commit": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "load_at_start": "3.37 4.37 3.93 1/2779 2992942",
+        "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+        "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+      },
+      "summary": {
+        "point_select": {
+          "1": {
+            "postgres": {
+              "tps": {
+                "median": 10008.0,
+                "min": 9653.0,
+                "max": 10246.0
+              },
+              "p50_ms": {
+                "median": 0.093,
+                "min": 0.089,
+                "max": 0.095
+              },
+              "p95_ms": {
+                "median": 0.139,
+                "min": 0.138,
+                "max": 0.14
+              },
+              "p99_ms": {
+                "median": 0.194,
+                "min": 0.182,
+                "max": 0.2
+              },
+              "server_cpu_us_per_op": {
+                "median": 63.03013753371819,
+                "min": 61.80626159403901,
+                "max": 66.59014808933749
+              },
+              "client_cpu_us_per_op": {
+                "median": 40.57078157780821,
+                "min": 38.832281569188694,
+                "max": 41.13400571408919
+              },
+              "peak_mem_mb": {
+                "median": 126.4,
+                "min": 126.4,
+                "max": 127.3
+              },
+              "samples": 5
+            },
+            "histogram": {
+              "tps": {
+                "median": 6781.0,
+                "min": 6559.0,
+                "max": 7062.0
+              },
+              "p50_ms": {
+                "median": 0.136,
+                "min": 0.133,
+                "max": 0.137
+              },
+              "p95_ms": {
+                "median": 0.199,
+                "min": 0.174,
+                "max": 0.243
+              },
+              "p99_ms": {
+                "median": 0.341,
+                "min": 0.327,
+                "max": 0.354
+              },
+              "server_cpu_us_per_op": {
+                "median": 112.06684689112669,
+                "min": 107.13105856812679,
+                "max": 116.35587622579969
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.9532041293338,
+                "min": 39.100618245315694,
+                "max": 40.632843859560154
+              },
+              "peak_mem_mb": {
+                "median": 103.9,
+                "min": 103.6,
+                "max": 104.7
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "postgres": {
+              "tps": {
+                "median": 104860.0,
+                "min": 104793.0,
+                "max": 105676.0
+              },
+              "p50_ms": {
+                "median": 0.077,
+                "min": 0.077,
+                "max": 0.077
+              },
+              "p95_ms": {
+                "median": 0.112,
+                "min": 0.111,
+                "max": 0.113
+              },
+              "p99_ms": {
+                "median": 0.16,
+                "min": 0.159,
+                "max": 0.169
+              },
+              "server_cpu_us_per_op": {
+                "median": 33.62977477735189,
+                "min": 33.36474913603901,
+                "max": 33.70554405921104
+              },
+              "client_cpu_us_per_op": {
+                "median": 20.69165538328534,
+                "min": 20.397147667936252,
+                "max": 20.71667455835667
+              },
+              "peak_mem_mb": {
+                "median": 136.6,
+                "min": 136.6,
+                "max": 136.6
+              },
+              "samples": 5
+            },
+            "histogram": {
+              "tps": {
+                "median": 33958.0,
+                "min": 33902.0,
+                "max": 34412.0
+              },
+              "p50_ms": {
+                "median": 0.221,
+                "min": 0.218,
+                "max": 0.222
+              },
+              "p95_ms": {
+                "median": 0.367,
+                "min": 0.364,
+                "max": 0.374
+              },
+              "p99_ms": {
+                "median": 0.511,
+                "min": 0.49,
+                "max": 0.526
+              },
+              "server_cpu_us_per_op": {
+                "median": 115.488195632089,
+                "min": 114.25915525688954,
+                "max": 115.70393923335119
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.948851015313146,
+                "min": 41.36997695450939,
+                "max": 43.47528901450467
+              },
+              "peak_mem_mb": {
+                "median": 105.3,
+                "min": 105.3,
+                "max": 105.6
+              },
+              "samples": 5
+            }
+          }
+        },
+        "range_scan_100": {
+          "1": {
+            "postgres": {
+              "tps": {
+                "median": 4185.0,
+                "min": 4091.0,
+                "max": 4215.0
+              },
+              "p50_ms": {
+                "median": 0.225,
+                "min": 0.224,
+                "max": 0.229
+              },
+              "p95_ms": {
+                "median": 0.329,
+                "min": 0.296,
+                "max": 0.361
+              },
+              "p99_ms": {
+                "median": 0.45,
+                "min": 0.391,
+                "max": 0.498
+              },
+              "server_cpu_us_per_op": {
+                "median": 155.0285329317611,
+                "min": 151.80716318785915,
+                "max": 160.82218783090528
+              },
+              "client_cpu_us_per_op": {
+                "median": 89.89383561643852,
+                "min": 88.49211381469362,
+                "max": 91.31918089816594
+              },
+              "peak_mem_mb": {
+                "median": 126.5,
+                "min": 126.5,
+                "max": 126.5
+              },
+              "samples": 5
+            },
+            "histogram": {
+              "tps": {
+                "median": 2012.0,
+                "min": 1995.0,
+                "max": 2071.0
+              },
+              "p50_ms": {
+                "median": 0.457,
+                "min": 0.455,
+                "max": 0.462
+              },
+              "p95_ms": {
+                "median": 0.641,
+                "min": 0.612,
+                "max": 0.694
+              },
+              "p99_ms": {
+                "median": 1.296,
+                "min": 1.037,
+                "max": 1.327
+              },
+              "server_cpu_us_per_op": {
+                "median": 410.86812458581204,
+                "min": 397.55351681957626,
+                "max": 412.6294687604456
+              },
+              "client_cpu_us_per_op": {
+                "median": 95.11917876815359,
+                "min": 93.58026101141829,
+                "max": 95.4279324055672
+              },
+              "peak_mem_mb": {
+                "median": 104.5,
+                "min": 104.5,
+                "max": 104.8
+              },
+              "samples": 5
+            }
+          },
+          "8": {
+            "postgres": {
+              "tps": {
+                "median": 37765.0,
+                "min": 37428.0,
+                "max": 38162.0
+              },
+              "p50_ms": {
+                "median": 0.2,
+                "min": 0.195,
+                "max": 0.204
+              },
+              "p95_ms": {
+                "median": 0.322,
+                "min": 0.319,
+                "max": 0.33
+              },
+              "p99_ms": {
+                "median": 0.428,
+                "min": 0.417,
+                "max": 0.449
+              },
+              "server_cpu_us_per_op": {
+                "median": 92.52311840395798,
+                "min": 91.3247345256394,
+                "max": 93.16470075046065
+              },
+              "client_cpu_us_per_op": {
+                "median": 60.87749381551548,
+                "min": 60.452502794467,
+                "max": 61.388218746383465
+              },
+              "peak_mem_mb": {
+                "median": 137.0,
+                "min": 137.0,
+                "max": 137.0
+              },
+              "samples": 5
+            },
+            "histogram": {
+              "tps": {
+                "median": 8786.0,
+                "min": 8766.0,
+                "max": 8969.0
+              },
+              "p50_ms": {
+                "median": 0.854,
+                "min": 0.846,
+                "max": 0.863
+              },
+              "p95_ms": {
+                "median": 1.507,
+                "min": 1.45,
+                "max": 1.545
+              },
+              "p99_ms": {
+                "median": 2.27,
+                "min": 2.227,
+                "max": 2.408
+              },
+              "server_cpu_us_per_op": {
+                "median": 447.1328883495153,
+                "min": 440.5810022660579,
+                "max": 450.83057741285427
+              },
+              "client_cpu_us_per_op": {
+                "median": 97.93721906460101,
+                "min": 96.99311970198067,
+                "max": 98.74724732325949
+              },
+              "peak_mem_mb": {
+                "median": 105.8,
+                "min": 105.8,
+                "max": 105.8
+              },
+              "samples": 5
+            }
+          }
+        },
+        "secondary_lookup": {
+          "8": {
+            "postgres": {
+              "tps": {
+                "median": 86304.0,
+                "min": 83641.0,
+                "max": 86704.0
+              },
+              "p50_ms": {
+                "median": 0.092,
+                "min": 0.091,
+                "max": 0.093
+              },
+              "p95_ms": {
+                "median": 0.138,
+                "min": 0.137,
+                "max": 0.141
+              },
+              "p99_ms": {
+                "median": 0.201,
+                "min": 0.197,
+                "max": 0.211
+              },
+              "server_cpu_us_per_op": {
+                "median": 40.945958326436454,
+                "min": 40.76661734468369,
+                "max": 41.89497122144552
+              },
+              "client_cpu_us_per_op": {
+                "median": 24.78676269627111,
+                "min": 24.612044812544436,
+                "max": 25.502240544900516
+              },
+              "peak_mem_mb": {
+                "median": 136.9,
+                "min": 136.9,
+                "max": 136.9
+              },
+              "samples": 5
+            },
+            "histogram": {
+              "tps": {
+                "median": 24670.0,
+                "min": 24514.0,
+                "max": 24854.0
+              },
+              "p50_ms": {
+                "median": 0.309,
+                "min": 0.306,
+                "max": 0.31
+              },
+              "p95_ms": {
+                "median": 0.511,
+                "min": 0.499,
+                "max": 0.517
+              },
+              "p99_ms": {
+                "median": 0.785,
+                "min": 0.775,
+                "max": 0.789
+              },
+              "server_cpu_us_per_op": {
+                "median": 160.07024179386767,
+                "min": 158.666183010224,
+                "max": 160.67641781306062
+              },
+              "client_cpu_us_per_op": {
+                "median": 44.72118551042802,
+                "min": 43.57411363239425,
+                "max": 44.972058724944816
+              },
+              "peak_mem_mb": {
+                "median": 106.1,
+                "min": 105.7,
+                "max": 106.2
+              },
+              "samples": 5
+            }
+          }
+        }
+      },
+      "runtime_observation": {
+        "observed_at_utc": "2026-11-02T00:13:18.177670+00:00",
+        "git_head": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "git_status": "",
+        "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+        "nproc": 36,
+        "load": "2.14 3.06 3.40 1/2730 2927719",
+        "build_environment": {
+          "CARGO_BUILD_JOBS": "2",
+          "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only",
+          "TMPDIR": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/tmp"
+        },
+        "postgres": {
+          "name": "/t3-d4020b98-perf-pg",
+          "image_id": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+          "repo_digests": [
+            "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+          ],
+          "started_at": "2026-11-01T23:15:30.826641771Z",
+          "cpuset": "28-31",
+          "nano_cpus": 0,
+          "cpu_quota": 0,
+          "cpu_period": 0,
+          "memory_limit": 8589934592,
+          "network_mode": "host",
+          "executable_sha256": "51b088c1df230893fc90182ce286d5e7caa5020ce9c01158dab462e1ec4b619a",
+          "cgroup": {
+            "cpu.max": "max 100000",
+            "cpuset.cpus.effective": "28-31",
+            "memory.max": "8589934592"
+          },
+          "leader_affinity": [
+            28,
+            29,
+            30,
+            31
+          ]
+        },
+        "engines": {
+          "baseline": {
+            "pid": 2424538,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-baseline --listen 127.0.0.1:53110 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          },
+          "histogram": {
+            "pid": 2925188,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-histogram --listen 127.0.0.1:53112 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          }
+        },
+        "clients": {
+          "checked-client": {
+            "manifest": {
+              "source": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0",
+              "sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+              "binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-client/bench"
+            },
+            "observed_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b"
+          },
+          "final-client": {
+            "manifest": {
+              "source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+              "sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+              "build_log": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client-build-tests.log"
+            },
+            "observed_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28"
+          }
+        },
+        "ancillary_observed_scripts": {
+          "probe-plan-choice.py": {
+            "sha256": "99160fe0183c7cceaaeb26bc84a23b9bc09269ce3aca5395b8c3333441858769",
+            "mtime_utc": "2026-11-01T23:38:51.359947+00:00"
+          },
+          "check-live-negative.py": {
+            "sha256": "0a8ea7fa591f89ce56800e528281aeb89b72b0e3f5f550f38dbc815f283ec9ea",
+            "mtime_utc": "2026-11-01T23:36:44.973357+00:00"
+          },
+          "check-final-live-negative.py": {
+            "sha256": "2156fe0901fe93ad6a3c0d85529e97b075cefd50ad72549a2fb89cdcbc25e501",
+            "mtime_utc": "2026-11-01T23:54:50.813435+00:00"
+          }
+        }
+      },
+      "runtime_observation_sha256": "dbc806ff8d5747e5a016e5550f41d29ed22249a6a8802aa3b8907f0e1ed0a42f"
+    },
+    "final-dirty-vs-baseline": {
+      "config": {
+        "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+        "out": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-dirty-vs-baseline",
+        "db": "perf_oltp_200000",
+        "rows": 200000,
+        "rounds": 5,
+        "seconds": 3,
+        "cases": {
+          "point_select": [
+            8
+          ],
+          "range_scan_100": [
+            8
+          ]
+        },
+        "psql_container": "t3-d4020b98-perf-pg",
+        "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+        "targets": [
+          {
+            "name": "baseline",
+            "port": 53110,
+            "probe": {
+              "pid": 2424538
+            },
+            "source": "7f35a185",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "actual_executable_sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349"
+          },
+          {
+            "name": "histogram",
+            "port": 53112,
+            "probe": {
+              "pid": 2925188
+            },
+            "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "actual_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+          }
+        ],
+        "runtime_provenance": "runtime-2026-11-02T001318.177670_0000.json",
+        "runtime_provenance_sha256": "dbc806ff8d5747e5a016e5550f41d29ed22249a6a8802aa3b8907f0e1ed0a42f",
+        "validation_version": "oltp-values-v1",
+        "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+        "ticks_per_second": 100,
+        "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+        "source_commit": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "load_at_start": "7.51 5.83 4.56 2/2791 3042106",
+        "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+        "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+      },
+      "summary": {
+        "point_select": {
+          "8": {
+            "histogram": {
+              "tps": {
+                "median": 33684.0,
+                "min": 33226.0,
+                "max": 33925.0
+              },
+              "p50_ms": {
+                "median": 0.223,
+                "min": 0.221,
+                "max": 0.224
+              },
+              "p95_ms": {
+                "median": 0.381,
+                "min": 0.358,
+                "max": 0.388
+              },
+              "p99_ms": {
+                "median": 0.542,
+                "min": 0.486,
+                "max": 0.573
+              },
+              "server_cpu_us_per_op": {
+                "median": 116.92088551249383,
+                "min": 115.59842071146649,
+                "max": 118.08340016038464
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.56617882919007,
+                "min": 41.73498084368054,
+                "max": 43.900233750417364
+              },
+              "peak_mem_mb": {
+                "median": 148.9,
+                "min": 148.0,
+                "max": 165.5
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 33453.0,
+                "min": 32314.0,
+                "max": 33767.0
+              },
+              "p50_ms": {
+                "median": 0.225,
+                "min": 0.223,
+                "max": 0.228
+              },
+              "p95_ms": {
+                "median": 0.383,
+                "min": 0.37,
+                "max": 0.393
+              },
+              "p99_ms": {
+                "median": 0.545,
+                "min": 0.492,
+                "max": 0.592
+              },
+              "server_cpu_us_per_op": {
+                "median": 117.54041696964823,
+                "min": 116.6347615006605,
+                "max": 120.76024296424549
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.60545573536415,
+                "min": 42.184189817812324,
+                "max": 43.11968384282925
+              },
+              "peak_mem_mb": {
+                "median": 116.4,
+                "min": 116.3,
+                "max": 117.6
+              },
+              "samples": 5
+            }
+          }
+        },
+        "range_scan_100": {
+          "8": {
+            "histogram": {
+              "tps": {
+                "median": 8066.0,
+                "min": 7979.0,
+                "max": 8100.0
+              },
+              "p50_ms": {
+                "median": 0.943,
+                "min": 0.94,
+                "max": 0.954
+              },
+              "p95_ms": {
+                "median": 1.579,
+                "min": 1.559,
+                "max": 1.595
+              },
+              "p99_ms": {
+                "median": 2.431,
+                "min": 2.355,
+                "max": 2.467
+              },
+              "server_cpu_us_per_op": {
+                "median": 491.55272832417603,
+                "min": 489.0790177285997,
+                "max": 497.9339705329918
+              },
+              "client_cpu_us_per_op": {
+                "median": 98.55061494796593,
+                "min": 97.85212237572526,
+                "max": 99.49940104919656
+              },
+              "peak_mem_mb": {
+                "median": 149.0,
+                "min": 115.3,
+                "max": 165.6
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 7679.0,
+                "min": 7671.0,
+                "max": 7756.0
+              },
+              "p50_ms": {
+                "median": 0.991,
+                "min": 0.985,
+                "max": 0.994
+              },
+              "p95_ms": {
+                "median": 1.651,
+                "min": 1.617,
+                "max": 1.671
+              },
+              "p99_ms": {
+                "median": 2.517,
+                "min": 2.496,
+                "max": 2.602
+              },
+              "server_cpu_us_per_op": {
+                "median": 516.919334520659,
+                "min": 512.567132116007,
+                "max": 518.1167281405919
+              },
+              "client_cpu_us_per_op": {
+                "median": 99.64494577006475,
+                "min": 99.0586678238232,
+                "max": 100.05985930689228
+              },
+              "peak_mem_mb": {
+                "median": 117.0,
+                "min": 116.9,
+                "max": 118.2
+              },
+              "samples": 5
+            }
+          }
+        }
+      },
+      "runtime_observation": {
+        "observed_at_utc": "2026-11-02T00:13:18.177670+00:00",
+        "git_head": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "git_status": "",
+        "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+        "nproc": 36,
+        "load": "2.14 3.06 3.40 1/2730 2927719",
+        "build_environment": {
+          "CARGO_BUILD_JOBS": "2",
+          "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only",
+          "TMPDIR": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/tmp"
+        },
+        "postgres": {
+          "name": "/t3-d4020b98-perf-pg",
+          "image_id": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+          "repo_digests": [
+            "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+          ],
+          "started_at": "2026-11-01T23:15:30.826641771Z",
+          "cpuset": "28-31",
+          "nano_cpus": 0,
+          "cpu_quota": 0,
+          "cpu_period": 0,
+          "memory_limit": 8589934592,
+          "network_mode": "host",
+          "executable_sha256": "51b088c1df230893fc90182ce286d5e7caa5020ce9c01158dab462e1ec4b619a",
+          "cgroup": {
+            "cpu.max": "max 100000",
+            "cpuset.cpus.effective": "28-31",
+            "memory.max": "8589934592"
+          },
+          "leader_affinity": [
+            28,
+            29,
+            30,
+            31
+          ]
+        },
+        "engines": {
+          "baseline": {
+            "pid": 2424538,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-baseline --listen 127.0.0.1:53110 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          },
+          "histogram": {
+            "pid": 2925188,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-histogram --listen 127.0.0.1:53112 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          }
+        },
+        "clients": {
+          "checked-client": {
+            "manifest": {
+              "source": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0",
+              "sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+              "binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-client/bench"
+            },
+            "observed_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b"
+          },
+          "final-client": {
+            "manifest": {
+              "source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+              "sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+              "build_log": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client-build-tests.log"
+            },
+            "observed_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28"
+          }
+        },
+        "ancillary_observed_scripts": {
+          "probe-plan-choice.py": {
+            "sha256": "99160fe0183c7cceaaeb26bc84a23b9bc09269ce3aca5395b8c3333441858769",
+            "mtime_utc": "2026-11-01T23:38:51.359947+00:00"
+          },
+          "check-live-negative.py": {
+            "sha256": "0a8ea7fa591f89ce56800e528281aeb89b72b0e3f5f550f38dbc815f283ec9ea",
+            "mtime_utc": "2026-11-01T23:36:44.973357+00:00"
+          },
+          "check-final-live-negative.py": {
+            "sha256": "2156fe0901fe93ad6a3c0d85529e97b075cefd50ad72549a2fb89cdcbc25e501",
+            "mtime_utc": "2026-11-01T23:54:50.813435+00:00"
+          }
+        }
+      },
+      "runtime_observation_sha256": "dbc806ff8d5747e5a016e5550f41d29ed22249a6a8802aa3b8907f0e1ed0a42f"
+    },
+    "point-control-vs-baseline": {
+      "config": {
+        "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+        "out": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/point-control-vs-baseline",
+        "db": "perf_oltp20261102_clean_200000",
+        "rows": 200000,
+        "rounds": 5,
+        "seconds": 10,
+        "cases": {
+          "point_select": [
+            8
+          ]
+        },
+        "psql_container": "t3-d4020b98-perf-pg",
+        "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+        "targets": [
+          {
+            "name": "baseline",
+            "port": 53110,
+            "probe": {
+              "pid": 2424538
+            },
+            "source": "7f35a185",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "actual_executable_sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349"
+          },
+          {
+            "name": "histogram",
+            "port": 53112,
+            "probe": {
+              "pid": 2925188
+            },
+            "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "actual_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+          }
+        ],
+        "runtime_provenance": "runtime-latest.json",
+        "validation_version": "oltp-values-v1",
+        "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+        "ticks_per_second": 100,
+        "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+        "source_commit": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "load_at_start": "8.67 6.79 5.04 1/2752 3067102",
+        "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+        "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+      },
+      "summary": {
+        "point_select": {
+          "8": {
+            "histogram": {
+              "tps": {
+                "median": 34366.0,
+                "min": 34029.0,
+                "max": 34461.0
+              },
+              "p50_ms": {
+                "median": 0.219,
+                "min": 0.218,
+                "max": 0.222
+              },
+              "p95_ms": {
+                "median": 0.362,
+                "min": 0.356,
+                "max": 0.365
+              },
+              "p99_ms": {
+                "median": 0.494,
+                "min": 0.483,
+                "max": 0.5
+              },
+              "server_cpu_us_per_op": {
+                "median": 114.31048578319692,
+                "min": 113.8836500797911,
+                "max": 115.03135081770682
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.06172882608454,
+                "min": 41.180116059770754,
+                "max": 42.537753201191705
+              },
+              "peak_mem_mb": {
+                "median": 122.9,
+                "min": 122.6,
+                "max": 160.0
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 34087.0,
+                "min": 33778.0,
+                "max": 34193.0
+              },
+              "p50_ms": {
+                "median": 0.222,
+                "min": 0.219,
+                "max": 0.222
+              },
+              "p95_ms": {
+                "median": 0.365,
+                "min": 0.361,
+                "max": 0.371
+              },
+              "p99_ms": {
+                "median": 0.496,
+                "min": 0.488,
+                "max": 0.515
+              },
+              "server_cpu_us_per_op": {
+                "median": 115.39127144520683,
+                "min": 114.68070983909035,
+                "max": 115.97446075427784
+              },
+              "client_cpu_us_per_op": {
+                "median": 42.02405330444327,
+                "min": 41.35024401084233,
+                "max": 42.47062946702215
+              },
+              "peak_mem_mb": {
+                "median": 126.0,
+                "min": 124.5,
+                "max": 174.5
+              },
+              "samples": 5
+            }
+          }
+        }
+      },
+      "runtime_observation": {
+        "observed_at_utc": "2026-11-02T00:13:18.177670+00:00",
+        "git_head": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "git_status": "",
+        "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+        "nproc": 36,
+        "load": "2.14 3.06 3.40 1/2730 2927719",
+        "build_environment": {
+          "CARGO_BUILD_JOBS": "2",
+          "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only",
+          "TMPDIR": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/tmp"
+        },
+        "postgres": {
+          "name": "/t3-d4020b98-perf-pg",
+          "image_id": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+          "repo_digests": [
+            "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+          ],
+          "started_at": "2026-11-01T23:15:30.826641771Z",
+          "cpuset": "28-31",
+          "nano_cpus": 0,
+          "cpu_quota": 0,
+          "cpu_period": 0,
+          "memory_limit": 8589934592,
+          "network_mode": "host",
+          "executable_sha256": "51b088c1df230893fc90182ce286d5e7caa5020ce9c01158dab462e1ec4b619a",
+          "cgroup": {
+            "cpu.max": "max 100000",
+            "cpuset.cpus.effective": "28-31",
+            "memory.max": "8589934592"
+          },
+          "leader_affinity": [
+            28,
+            29,
+            30,
+            31
+          ]
+        },
+        "engines": {
+          "baseline": {
+            "pid": 2424538,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-baseline --listen 127.0.0.1:53110 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          },
+          "histogram": {
+            "pid": 2925188,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-histogram --listen 127.0.0.1:53112 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          }
+        },
+        "clients": {
+          "checked-client": {
+            "manifest": {
+              "source": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0",
+              "sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+              "binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-client/bench"
+            },
+            "observed_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b"
+          },
+          "final-client": {
+            "manifest": {
+              "source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+              "sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+              "build_log": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client-build-tests.log"
+            },
+            "observed_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28"
+          }
+        },
+        "ancillary_observed_scripts": {
+          "probe-plan-choice.py": {
+            "sha256": "99160fe0183c7cceaaeb26bc84a23b9bc09269ce3aca5395b8c3333441858769",
+            "mtime_utc": "2026-11-01T23:38:51.359947+00:00"
+          },
+          "check-live-negative.py": {
+            "sha256": "0a8ea7fa591f89ce56800e528281aeb89b72b0e3f5f550f38dbc815f283ec9ea",
+            "mtime_utc": "2026-11-01T23:36:44.973357+00:00"
+          },
+          "check-final-live-negative.py": {
+            "sha256": "2156fe0901fe93ad6a3c0d85529e97b075cefd50ad72549a2fb89cdcbc25e501",
+            "mtime_utc": "2026-11-01T23:54:50.813435+00:00"
+          }
+        }
+      },
+      "runtime_observation_sha256": "dbc806ff8d5747e5a016e5550f41d29ed22249a6a8802aa3b8907f0e1ed0a42f"
+    },
+    "restarted-dirty-vs-baseline": {
+      "config": {
+        "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+        "out": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/restarted-dirty-vs-baseline",
+        "db": "perf_oltp_200000",
+        "rows": 200000,
+        "rounds": 5,
+        "seconds": 3,
+        "cases": {
+          "range_scan_100": [
+            8
+          ]
+        },
+        "psql_container": "t3-d4020b98-perf-pg",
+        "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+        "targets": [
+          {
+            "name": "baseline",
+            "port": 53110,
+            "probe": {
+              "pid": 3136957
+            },
+            "source": "7f35a185",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "actual_executable_sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349"
+          },
+          {
+            "name": "histogram",
+            "port": 53112,
+            "probe": {
+              "pid": 3137300
+            },
+            "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+            "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "actual_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+          }
+        ],
+        "runtime_provenance": "runtime-before-memory-control.json",
+        "validation_version": "oltp-values-v1",
+        "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+        "ticks_per_second": 100,
+        "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+        "source_commit": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "load_at_start": "1.51 3.27 4.20 1/2783 3340738",
+        "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+        "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+      },
+      "summary": {
+        "range_scan_100": {
+          "8": {
+            "histogram": {
+              "tps": {
+                "median": 7957.0,
+                "min": 7910.0,
+                "max": 8063.0
+              },
+              "p50_ms": {
+                "median": 0.956,
+                "min": 0.948,
+                "max": 0.961
+              },
+              "p95_ms": {
+                "median": 1.595,
+                "min": 1.558,
+                "max": 1.644
+              },
+              "p99_ms": {
+                "median": 2.496,
+                "min": 2.418,
+                "max": 2.618
+              },
+              "server_cpu_us_per_op": {
+                "median": 499.18338288873076,
+                "min": 492.18943714356556,
+                "max": 502.12730106575685
+              },
+              "client_cpu_us_per_op": {
+                "median": 98.73836680717409,
+                "min": 97.68353696417485,
+                "max": 99.45086145161972
+              },
+              "peak_mem_mb": {
+                "median": 103.1,
+                "min": 102.0,
+                "max": 103.4
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 7748.0,
+                "min": 7731.0,
+                "max": 7782.0
+              },
+              "p50_ms": {
+                "median": 0.985,
+                "min": 0.984,
+                "max": 0.986
+              },
+              "p95_ms": {
+                "median": 1.623,
+                "min": 1.612,
+                "max": 1.644
+              },
+              "p99_ms": {
+                "median": 2.494,
+                "min": 2.478,
+                "max": 2.558
+              },
+              "server_cpu_us_per_op": {
+                "median": 513.0745702838925,
+                "min": 510.3176641835771,
+                "max": 515.0640058618163
+              },
+              "client_cpu_us_per_op": {
+                "median": 98.78873906862533,
+                "min": 98.55027800525838,
+                "max": 99.73816251391385
+              },
+              "peak_mem_mb": {
+                "median": 101.8,
+                "min": 101.1,
+                "max": 102.7
+              },
+              "samples": 5
+            }
+          }
+        }
+      },
+      "runtime_observation": {
+        "observed_at_utc": "2026-11-02T00:38:23.959454+00:00",
+        "git_head": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+        "git_status": "",
+        "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+        "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+        "nproc": 36,
+        "load": "1.56 3.31 4.22 1/2764 3339315",
+        "build_environment": {
+          "CARGO_BUILD_JOBS": "2",
+          "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+          "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only",
+          "TMPDIR": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/tmp"
+        },
+        "postgres": {
+          "name": "/t3-d4020b98-perf-pg",
+          "image_id": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+          "repo_digests": [
+            "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+          ],
+          "started_at": "2026-11-01T23:15:30.826641771Z",
+          "cpuset": "28-31",
+          "nano_cpus": 0,
+          "cpu_quota": 0,
+          "cpu_period": 0,
+          "memory_limit": 8589934592,
+          "network_mode": "host",
+          "executable_sha256": "51b088c1df230893fc90182ce286d5e7caa5020ce9c01158dab462e1ec4b619a",
+          "cgroup": {
+            "cpu.max": "max 100000",
+            "cpuset.cpus.effective": "28-31",
+            "memory.max": "8589934592"
+          },
+          "leader_affinity": [
+            28,
+            29,
+            30,
+            31
+          ]
+        },
+        "engines": {
+          "baseline": {
+            "pid": 3136957,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine",
+            "sha256": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/baseline-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-baseline --listen 127.0.0.1:53110 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          },
+          "histogram": {
+            "pid": 3137300,
+            "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+            "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+            "command": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/engine-histogram --listen 127.0.0.1:53112 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+            "affinity": [
+              28,
+              29,
+              30,
+              31
+            ],
+            "thread_affinities": [
+              [
+                28,
+                29,
+                30,
+                31
+              ]
+            ]
+          }
+        },
+        "clients": {
+          "checked-client": {
+            "manifest": {
+              "source": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0",
+              "sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+              "binary": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/checked-client/bench"
+            },
+            "observed_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b"
+          },
+          "final-client": {
+            "manifest": {
+              "source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+              "sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+              "build_log": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client-build-tests.log"
+            },
+            "observed_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28"
+          }
+        },
+        "ancillary_observed_scripts": {
+          "probe-plan-choice.py": {
+            "sha256": "99160fe0183c7cceaaeb26bc84a23b9bc09269ce3aca5395b8c3333441858769",
+            "mtime_utc": "2026-11-01T23:38:51.359947+00:00"
+          },
+          "check-live-negative.py": {
+            "sha256": "0a8ea7fa591f89ce56800e528281aeb89b72b0e3f5f550f38dbc815f283ec9ea",
+            "mtime_utc": "2026-11-01T23:36:44.973357+00:00"
+          },
+          "check-final-live-negative.py": {
+            "sha256": "2156fe0901fe93ad6a3c0d85529e97b075cefd50ad72549a2fb89cdcbc25e501",
+            "mtime_utc": "2026-11-01T23:54:50.813435+00:00"
+          }
+        }
+      },
+      "runtime_observation_sha256": "cf24c1b5d7af7147f03ab6492280656ef95b6e8a748db8525b3465d7596cb4b6"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+> CREATE EXTENSION IF NOT EXISTS pgstattuple
+-- CREATE EXTENSION
+
+> CREATE TABLE pe (id int PRIMARY KEY) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO pe SELECT generate_series(1, 200000)
+-- INSERT 0 200000
+
+> DELETE FROM pe WHERE id BETWEEN 103945 AND 104310
+-- DELETE 366
+
+> VACUUM pe
+-- VACUUM
+
+> SELECT tree_level, internal_pages, leaf_pages, empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation
+>   FROM pgstatindex('pe_pkey')
+tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8 | avg_leaf_density:float8 | leaf_fragmentation:float8
+2 | 3 | 547 | 0 | 0 | 89.95 | 0
+-- SELECT 1
+
+> DELETE FROM pe WHERE id BETWEEN 100000 AND 103944
+-- DELETE 3945
+
+> VACUUM pe
+-- VACUUM
+
+> SELECT tree_level, internal_pages, leaf_pages, empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation
+>   FROM pgstatindex('pe_pkey')
+tree_level:int4 | internal_pages:int8 | leaf_pages:int8 | empty_pages:int8 | deleted_pages:int8 | avg_leaf_density:float8 | leaf_fragmentation:float8
+2 | 3 | 537 | 0 | 10 | 89.65 | 0
+-- SELECT 1
+
+> SELECT pg_relation_size('pe_pkey') / 8192 AS pages
+pages:int8
+551
+-- SELECT 1
+
+> DROP TABLE pe
+-- DROP TABLE
+

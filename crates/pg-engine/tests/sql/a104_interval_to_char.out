@@ -1,0 +1,50 @@
+> SELECT iv, to_char(iv, 'YYYY MM DD'), to_char(iv, 'HH24:MI:SS.US'), to_char(iv, 'FMDD "days"'), to_char(iv, 'DDD')
+> FROM (VALUES (interval '178000000 years'), (interval '-178000000 years'), (interval '2147483647 days'),
+>              (interval '-2147483648 days'), (interval '2147483647 mons'), (interval '1 year -1 sec'),
+>              (interval '-2147483648 mons -2147483648 days')) v(iv)
+iv:interval | to_char:text | to_char:text | to_char:text | to_char:text
+-178000000 years | -178000000 00 00 | 00:00:00.000000 | 0 days | 344509440
+-178956970 years -8 mons -2147483648 days | -178956970 -08 -2147483648 | 00:00:00.000000 | -2147483648 days | -2147483648
+-2147483648 days | 0000 00 -2147483648 | 00:00:00.000000 | -2147483648 days | -2147483648
+1 year -00:00:01 | 0001 00 00 | 00:00:-01.000000 | 0 days | 360
+178000000 years | 178000000 00 00 | 00:00:00.000000 | 0 days | -344509440
+178956970 years 7 mons | 178956970 07 00 | 00:00:00.000000 | 0 days | -30
+2147483647 days | 0000 00 2147483647 | 00:00:00.000000 | 2147483647 days | 2147483647
+-- SELECT 7
+
+> SELECT to_char(interval '178000000 years', f) FROM unnest(ARRAY['Y,YYY', 'YYY', 'CC', 'IYYY', 'SSSS', 'HH12 AM']) f
+to_char:text
+0
+000
+12 AM
+177999999
+178000,000
+1780000
+-- SELECT 6
+
+> SELECT to_char(interval '178000000 years', 'Q')
+to_char:text
+
+-- SELECT 1
+
+> SELECT to_char(interval '178000000 years', 'WW')
+to_char:text
+-49215633
+-- SELECT 1
+
+> SELECT to_char(interval '178000000 years', 'J')
+to_char:text
+590376588
+-- SELECT 1
+
+> SELECT to_char(interval '-178000000 years -2147483648 days -2562047788 hours', f) FROM unnest(ARRAY['YYYY', 'DDD', 'HH24', 'SSSS', 'MI', 'US', 'CC']) f
+to_char:text
+-1780000
+-178000000
+-1802974208
+-2562047788
+-9223372036800
+00
+000000
+-- SELECT 7
+

@@ -1,0 +1,436 @@
+> create table rm1 (a int, b text)
+-- CREATE TABLE
+
+> create table rm2 (x int, y text)
+-- CREATE TABLE
+
+> create table rm3 (p int, q int)
+-- CREATE TABLE
+
+> insert into rm1 select g, 'b' || g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> insert into rm2 select g, 'y' || g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> insert into rm3 select g, g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> analyze rm1, rm2, rm3
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select * from (select a, b from rm1 offset 0) s, rm2 where s.a = rm2.x for update of s
+QUERY PLAN:text
+LockRows
+  Output: s.a, s.b, rm2.x, rm2.y, s.*, rm2.ctid
+  ->  Hash Join
+        Output: s.a, s.b, rm2.x, rm2.y, s.*, rm2.ctid
+        Hash Cond: (s.a = rm2.x)
+        ->  Subquery Scan on s
+              Output: s.a, s.b, s.*
+              ->  LockRows
+                    Output: rm1.a, rm1.b, rm1.ctid
+                    ->  Seq Scan on public.rm1
+                          Output: rm1.a, rm1.b, rm1.ctid
+        ->  Hash
+              Output: rm2.x, rm2.y, rm2.ctid
+              ->  Seq Scan on public.rm2
+                    Output: rm2.x, rm2.y, rm2.ctid
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from rm2, (select a, b from rm1 offset 0) s where s.a = rm2.x for update of s
+QUERY PLAN:text
+LockRows
+  Output: rm2.x, rm2.y, s.a, s.b, rm2.ctid, s.*
+  ->  Hash Join
+        Output: rm2.x, rm2.y, s.a, s.b, rm2.ctid, s.*
+        Hash Cond: (s.a = rm2.x)
+        ->  Subquery Scan on s
+              Output: s.a, s.b, s.*
+              ->  LockRows
+                    Output: rm1.a, rm1.b, rm1.ctid
+                    ->  Seq Scan on public.rm1
+                          Output: rm1.a, rm1.b, rm1.ctid
+        ->  Hash
+              Output: rm2.x, rm2.y, rm2.ctid
+              ->  Seq Scan on public.rm2
+                    Output: rm2.x, rm2.y, rm2.ctid
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from (select a, b from rm1 offset 0) s, rm2, rm3 where s.a = rm2.x and rm3.p = rm2.x for update of rm3
+QUERY PLAN:text
+LockRows
+  Output: s.a, s.b, rm2.x, rm2.y, rm3.p, rm3.q, rm3.ctid, s.*, rm2.ctid
+  ->  Hash Join
+        Output: s.a, s.b, rm2.x, rm2.y, rm3.p, rm3.q, rm3.ctid, s.*, rm2.ctid
+        Hash Cond: (s.a = rm3.p)
+        ->  Hash Join
+              Output: s.a, s.b, s.*, rm2.x, rm2.y, rm2.ctid
+              Hash Cond: (s.a = rm2.x)
+              ->  Subquery Scan on s
+                    Output: s.a, s.b, s.*
+                    ->  Seq Scan on public.rm1
+                          Output: rm1.a, rm1.b
+              ->  Hash
+                    Output: rm2.x, rm2.y, rm2.ctid
+                    ->  Seq Scan on public.rm2
+                          Output: rm2.x, rm2.y, rm2.ctid
+        ->  Hash
+              Output: rm3.p, rm3.q, rm3.ctid
+              ->  Seq Scan on public.rm3
+                    Output: rm3.p, rm3.q, rm3.ctid
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from rm2, (values (1), (2)) v(c), generate_series(1, 3) g where v.c = rm2.x and g < rm2.x for update of rm2
+QUERY PLAN:text
+LockRows
+  Output: rm2.x, rm2.y, "*VALUES*".column1, g.g, rm2.ctid, g.*, "*VALUES*".*
+  ->  Nested Loop
+        Output: rm2.x, rm2.y, "*VALUES*".column1, g.g, rm2.ctid, g.*, "*VALUES*".*
+        Join Filter: (g.g < rm2.x)
+        ->  Function Scan on pg_catalog.generate_series g
+              Output: g.g, g.*
+              Function Call: generate_series(1, 3)
+        ->  Materialize
+              Output: rm2.x, rm2.y, rm2.ctid, "*VALUES*".column1, "*VALUES*".*
+              ->  Hash Join
+                    Output: rm2.x, rm2.y, rm2.ctid, "*VALUES*".column1, "*VALUES*".*
+                    Hash Cond: (rm2.x = "*VALUES*".column1)
+                    ->  Seq Scan on public.rm2
+                          Output: rm2.x, rm2.y, rm2.ctid
+                    ->  Hash
+                          Output: "*VALUES*".column1, "*VALUES*".*
+                          ->  Values Scan on "*VALUES*"
+                                Output: "*VALUES*".column1, "*VALUES*".*
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> with c as materialized (select * from rm3) select * from rm2, c, rm1 where c.p = rm2.x and rm1.b = rm2.y for update of rm1
+QUERY PLAN:text
+LockRows
+  Output: rm2.x, rm2.y, c.p, c.q, rm1.a, rm1.b, rm1.ctid, rm2.ctid, c.*
+  CTE c
+    ->  Seq Scan on public.rm3
+          Output: rm3.p, rm3.q
+  ->  Hash Join
+        Output: rm2.x, rm2.y, c.p, c.q, rm1.a, rm1.b, rm1.ctid, rm2.ctid, c.*
+        Hash Cond: (rm2.y = rm1.b)
+        ->  Hash Join
+              Output: rm2.x, rm2.y, rm2.ctid, c.p, c.q, c.*
+              Hash Cond: (rm2.x = c.p)
+              ->  Seq Scan on public.rm2
+                    Output: rm2.x, rm2.y, rm2.ctid
+              ->  Hash
+                    Output: c.p, c.q, c.*
+                    ->  CTE Scan on c
+                          Output: c.p, c.q, c.*
+        ->  Hash
+              Output: rm1.a, rm1.b, rm1.ctid
+              ->  Seq Scan on public.rm1
+                    Output: rm1.a, rm1.b, rm1.ctid
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from rm3, rm2, rm1 where rm3.p = rm2.x and rm1.a = rm2.x for update of rm1, rm3
+QUERY PLAN:text
+LockRows
+  Output: rm3.p, rm3.q, rm2.x, rm2.y, rm1.a, rm1.b, rm1.ctid, rm3.ctid, rm2.ctid
+  ->  Hash Join
+        Output: rm3.p, rm3.q, rm2.x, rm2.y, rm1.a, rm1.b, rm1.ctid, rm3.ctid, rm2.ctid
+        Hash Cond: (rm3.p = rm1.a)
+        ->  Hash Join
+              Output: rm3.p, rm3.q, rm3.ctid, rm2.x, rm2.y, rm2.ctid
+              Hash Cond: (rm3.p = rm2.x)
+              ->  Seq Scan on public.rm3
+                    Output: rm3.p, rm3.q, rm3.ctid
+              ->  Hash
+                    Output: rm2.x, rm2.y, rm2.ctid
+                    ->  Seq Scan on public.rm2
+                          Output: rm2.x, rm2.y, rm2.ctid
+        ->  Hash
+              Output: rm1.a, rm1.b, rm1.ctid
+              ->  Seq Scan on public.rm1
+                    Output: rm1.a, rm1.b, rm1.ctid
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from rm3, rm2, rm1 where rm3.p = rm2.x and rm1.a = rm2.x for update of rm1 for share of rm3
+QUERY PLAN:text
+LockRows
+  Output: rm3.p, rm3.q, rm2.x, rm2.y, rm1.a, rm1.b, rm1.ctid, rm3.ctid, rm2.ctid
+  ->  Hash Join
+        Output: rm3.p, rm3.q, rm2.x, rm2.y, rm1.a, rm1.b, rm1.ctid, rm3.ctid, rm2.ctid
+        Hash Cond: (rm3.p = rm1.a)
+        ->  Hash Join
+              Output: rm3.p, rm3.q, rm3.ctid, rm2.x, rm2.y, rm2.ctid
+              Hash Cond: (rm3.p = rm2.x)
+              ->  Seq Scan on public.rm3
+                    Output: rm3.p, rm3.q, rm3.ctid
+              ->  Hash
+                    Output: rm2.x, rm2.y, rm2.ctid
+                    ->  Seq Scan on public.rm2
+                          Output: rm2.x, rm2.y, rm2.ctid
+        ->  Hash
+              Output: rm1.a, rm1.b, rm1.ctid
+              ->  Seq Scan on public.rm1
+                    Output: rm1.a, rm1.b, rm1.ctid
+-- EXPLAIN
+
+> select * from rm3, rm2, rm1 where rm3.p = rm2.x and rm1.a = rm2.x and rm1.a < 3 order by 1 for update of rm1 for share of rm3
+p:int4 | q:int4 | x:int4 | y:text | a:int4 | b:text
+1 | 1 | 1 | y1 | 1 | b1
+2 | 2 | 2 | y2 | 2 | b2
+-- SELECT 2
+
+> select * from rm3, rm1 where rm3.p = rm1.a and rm1.a < 3 order by 1 for share of rm1 for update of rm1, rm3 skip locked
+p:int4 | q:int4 | a:int4 | b:text
+1 | 1 | 1 | b1
+2 | 2 | 2 | b2
+-- SELECT 2
+
+> explain (verbose, costs off)
+> update rm1 set b = 'z' from rm3, (select x from rm2 offset 0) s where s.x = rm1.a and rm3.p = rm1.a and rm3.q < 3
+QUERY PLAN:text
+Update on public.rm1
+  ->  Hash Join
+        Output: 'z'::text, rm1.ctid, rm3.ctid, s.*
+        Hash Cond: (s.x = rm1.a)
+        ->  Subquery Scan on s
+              Output: s.*, s.x
+              ->  Seq Scan on public.rm2
+                    Output: rm2.x
+        ->  Hash
+              Output: rm1.ctid, rm1.a, rm3.ctid, rm3.p
+              ->  Hash Join
+                    Output: rm1.ctid, rm1.a, rm3.ctid, rm3.p
+                    Hash Cond: (rm1.a = rm3.p)
+                    ->  Seq Scan on public.rm1
+                          Output: rm1.ctid, rm1.a
+                    ->  Hash
+                          Output: rm3.ctid, rm3.p
+                          ->  Seq Scan on public.rm3
+                                Output: rm3.ctid, rm3.p
+                                Filter: (rm3.q < 3)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> update rm1 set b = 'z' from (values (1), (2)) v(c), rm3 where v.c = rm1.a and rm3.p < rm1.a
+QUERY PLAN:text
+Update on public.rm1
+  ->  Nested Loop
+        Output: 'z'::text, rm1.ctid, rm3.ctid, "*VALUES*".*
+        Join Filter: (rm3.p < rm1.a)
+        ->  Seq Scan on public.rm3
+              Output: rm3.ctid, rm3.p
+        ->  Materialize
+              Output: rm1.ctid, rm1.a, "*VALUES*".*
+              ->  Hash Join
+                    Output: rm1.ctid, rm1.a, "*VALUES*".*
+                    Hash Cond: (rm1.a = "*VALUES*".column1)
+                    ->  Seq Scan on public.rm1
+                          Output: rm1.ctid, rm1.a
+                    ->  Hash
+                          Output: "*VALUES*".*, "*VALUES*".column1
+                          ->  Values Scan on "*VALUES*"
+                                Output: "*VALUES*".*, "*VALUES*".column1
+-- EXPLAIN
+
+> explain select * from (select x from rm2 offset 0) s, rm1 where s.x = rm1.a for update of rm1
+QUERY PLAN:text
+LockRows  (cost=1.23..2.66 rows=10 width=45)
+  ->  Hash Join  (cost=1.23..2.56 rows=10 width=45)
+        Hash Cond: (s.x = rm1.a)
+        ->  Subquery Scan on s  (cost=0.00..1.20 rows=10 width=32)
+              ->  Seq Scan on rm2  (cost=0.00..1.10 rows=10 width=4)
+        ->  Hash  (cost=1.10..1.10 rows=10 width=13)
+              ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=13)
+-- EXPLAIN
+
+> explain select * from (select x from rm2 for update) s, rm1 where s.x = rm1.a
+QUERY PLAN:text
+Hash Join  (cost=1.23..2.66 rows=10 width=11)
+  Hash Cond: (s.x = rm1.a)
+  ->  Subquery Scan on s  (cost=0.00..1.30 rows=10 width=4)
+        ->  LockRows  (cost=0.00..1.20 rows=10 width=10)
+              ->  Seq Scan on rm2  (cost=0.00..1.10 rows=10 width=10)
+  ->  Hash  (cost=1.10..1.10 rows=10 width=7)
+        ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=7)
+-- EXPLAIN
+
+> explain select * from (select x from rm2 offset 0 for update) s, rm1 where s.x = rm1.a
+QUERY PLAN:text
+Hash Join  (cost=1.23..2.66 rows=10 width=11)
+  Hash Cond: (s.x = rm1.a)
+  ->  Subquery Scan on s  (cost=0.00..1.30 rows=10 width=4)
+        ->  LockRows  (cost=0.00..1.20 rows=10 width=10)
+              ->  Seq Scan on rm2  (cost=0.00..1.10 rows=10 width=10)
+  ->  Hash  (cost=1.10..1.10 rows=10 width=7)
+        ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=7)
+-- EXPLAIN
+
+> explain select * from (select x, y from rm2 offset 0) s, rm1 where s.x = rm1.a for update of s
+QUERY PLAN:text
+LockRows  (cost=1.23..2.76 rows=10 width=51)
+  ->  Hash Join  (cost=1.23..2.66 rows=10 width=51)
+        Hash Cond: (s.x = rm1.a)
+        ->  Subquery Scan on s  (cost=0.00..1.30 rows=10 width=38)
+              ->  LockRows  (cost=0.00..1.20 rows=10 width=13)
+                    ->  Seq Scan on rm2  (cost=0.00..1.10 rows=10 width=13)
+        ->  Hash  (cost=1.10..1.10 rows=10 width=13)
+              ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=13)
+-- EXPLAIN
+
+> explain update rm1 set b = 'z' from (select x from rm2 offset 0) s where s.x = rm1.a
+QUERY PLAN:text
+Update on rm1  (cost=1.23..2.56 rows=0 width=0)
+  ->  Hash Join  (cost=1.23..2.56 rows=10 width=66)
+        Hash Cond: (s.x = rm1.a)
+        ->  Subquery Scan on s  (cost=0.00..1.20 rows=10 width=32)
+              ->  Seq Scan on rm2  (cost=0.00..1.10 rows=10 width=4)
+        ->  Hash  (cost=1.10..1.10 rows=10 width=10)
+              ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=10)
+-- EXPLAIN
+
+> explain update rm1 set b = b || 'z' from rm3 where rm3.p = rm1.a
+QUERY PLAN:text
+Update on rm1  (cost=1.23..2.49 rows=0 width=0)
+  ->  Hash Join  (cost=1.23..2.49 rows=10 width=44)
+        Hash Cond: (rm1.a = rm3.p)
+        ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=13)
+        ->  Hash  (cost=1.10..1.10 rows=10 width=10)
+              ->  Seq Scan on rm3  (cost=0.00..1.10 rows=10 width=10)
+-- EXPLAIN
+
+> explain update rm1 set b = rm3.q::text from rm3 where rm3.p = rm1.a
+QUERY PLAN:text
+Update on rm1  (cost=1.23..2.51 rows=0 width=0)
+  ->  Hash Join  (cost=1.23..2.51 rows=10 width=44)
+        Hash Cond: (rm1.a = rm3.p)
+        ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=10)
+        ->  Hash  (cost=1.10..1.10 rows=10 width=14)
+              ->  Seq Scan on rm3  (cost=0.00..1.10 rows=10 width=14)
+-- EXPLAIN
+
+> explain delete from rm1 using rm3 where rm3.p = rm1.a
+QUERY PLAN:text
+Delete on rm1  (cost=1.23..2.46 rows=0 width=0)
+  ->  Hash Join  (cost=1.23..2.46 rows=10 width=12)
+        Hash Cond: (rm1.a = rm3.p)
+        ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=10)
+        ->  Hash  (cost=1.10..1.10 rows=10 width=10)
+              ->  Seq Scan on rm3  (cost=0.00..1.10 rows=10 width=10)
+-- EXPLAIN
+
+> explain update rm1 set a = a + 1 from (values (1), (2)) v(c) where v.c = rm1.a
+QUERY PLAN:text
+Update on rm1  (cost=0.05..1.21 rows=0 width=0)
+  ->  Hash Join  (cost=0.05..1.21 rows=2 width=38)
+        Hash Cond: (rm1.a = "*VALUES*".column1)
+        ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=10)
+        ->  Hash  (cost=0.03..0.03 rows=2 width=32)
+              ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2 width=32)
+-- EXPLAIN
+
+> explain update rm1 set a = a + 1 from (select * from rm3 limit 5) s where s.p = rm1.a
+QUERY PLAN:text
+Update on rm1  (cost=0.66..1.86 rows=0 width=0)
+  ->  Hash Join  (cost=0.66..1.86 rows=5 width=42)
+        Hash Cond: (rm1.a = s.p)
+        ->  Seq Scan on rm1  (cost=0.00..1.10 rows=10 width=10)
+        ->  Hash  (cost=0.60..0.60 rows=5 width=36)
+              ->  Subquery Scan on s  (cost=0.00..0.60 rows=5 width=36)
+                    ->  Limit  (cost=0.00..0.55 rows=5 width=8)
+                          ->  Seq Scan on rm3  (cost=0.00..1.10 rows=10 width=8)
+-- EXPLAIN
+
+> begin
+-- BEGIN
+
+> update rm1 set b = 'z' from (select x from rm2 offset 0) s, rm3 where s.x = rm1.a and rm3.p = rm1.a and rm1.a < 3 returning rm1.*, s
+a:int4 | b:text | s:record
+1 | z | (1)
+2 | z | (2)
+-- UPDATE 2
+
+> rollback
+-- ROLLBACK
+
+> explain (verbose, costs off) select 'a'::text, a from rm1 order by a
+QUERY PLAN:text
+Sort
+  Output: 'a'::text, a
+  Sort Key: rm1.a
+  ->  Seq Scan on public.rm1
+        Output: 'a'::text, a
+-- EXPLAIN
+
+> explain (verbose, costs off) select 1, a from rm1 order by 2
+QUERY PLAN:text
+Sort
+  Output: 1, a
+  Sort Key: rm1.a
+  ->  Seq Scan on public.rm1
+        Output: 1, a
+-- EXPLAIN
+
+> explain (verbose, costs off) select 'a', count(*) from rm1 group by 1
+QUERY PLAN:text
+GroupAggregate
+  Output: 'a'::text, count(*)
+  ->  Seq Scan on public.rm1
+        Output: a, b
+-- EXPLAIN
+
+> explain (verbose, costs off) select count(*) from rm1 group by 1 + 1
+QUERY PLAN:text
+GroupAggregate
+  Output: count(*), 2
+  ->  Seq Scan on public.rm1
+        Output: a, b
+-- EXPLAIN
+
+> select 'a', count(*) from rm1 group by 1
+?column?:text | count:int8
+a | 10
+-- SELECT 1
+
+> select count(*) from rm1 where a < 0 group by 1 + 1
+count:int8
+-- SELECT 0
+
+> explain (verbose, costs off) select b || 'y' from (select 'x' b) s
+QUERY PLAN:text
+Result
+  Output: 'xy'::text
+-- EXPLAIN
+
+> explain (verbose, costs off) select a + b from (values (1, 2)) t(a, b)
+QUERY PLAN:text
+Result
+  Output: 3
+-- EXPLAIN
+
+> explain (verbose, costs off) select s.b + rm1.a from (select 2 b) s, rm1 where rm1.a > s.b
+QUERY PLAN:text
+Seq Scan on public.rm1
+  Output: (2 + rm1.a)
+  Filter: (rm1.a > 2)
+-- EXPLAIN
+
+> select b || 'y' from (select 'x' b) s
+?column?:text
+xy
+-- SELECT 1
+
+> select a + b from (values (1, 2)) t(a, b)
+?column?:int4
+3
+-- SELECT 1
+
+> drop table rm1, rm2, rm3
+-- DROP TABLE
+

@@ -1,0 +1,711 @@
+//! SELECT ... FOR UPDATE / SHARE: the rows a query level returns are locked once, at the
+//! level's top (grouping_planner's LockRows, under its LIMIT), after its joins and quals,
+//! not as its scans read them. Every table of the level gets a row mark
+//! (preprocess_rowmarks): the locked ones take their lock, the others are ROW_MARK_REFERENCE,
+//! re-read only to recheck a row a concurrent update changed (EvalPlanQual). Each scan of the
+//! level returns its row's storage key (its ctid) up the plan for it.
+
+use crate::catalog::Table;
+use crate::sql::expr::Expr;
+use crate::sql::plan::{JoinKind, LockMark, Plan, RowMark, ScanPlan, SortKey, Wait};
+use crate::types::DataType;
+use std::sync::Arc;
+
+/// One row mark while the keys go up.
+struct Key {
+    /// The key's position in the row.
+    col: usize,
+    /// The tables it covers (an inheritance tree's members).
+    tables: Vec<Arc<Table>>,
+    lock: Option<(RowMark, Wait)>,
+    /// The relation's place in the range table (its first member's).
+    rti: usize,
+    /// A locked relation's place in the level's locks (`ScanPlan::lock_order`).
+    order: u32,
+}
+
+/// A plan with its relations' keys added: the plan, its old output positions' new ones, and
+/// the keys (in the level's order: left to right).
+type Keyed = (Plan, Vec<usize>, Vec<Key>);
+
+thread_local! {
+    /// Planning a query level whose only lock is one pushed down from the level above
+    /// (no hasForUpdate): its row marks are that level's (pulled up) or locked when that
+    /// level plans it as a subquery apart, not here.
+    pub(crate) static PUSHED_LEVEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Planning a query level with a locking clause of its own (hasForUpdate): it has row
+    /// marks however its locks went (into FROM subqueries planned apart, whose whole rows it
+    /// then marks), so it gets a LockRows (grouping_planner's `if (parse->rowMarks)`).
+    pub(crate) static OWN_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The level's plan with a LockRows at its top (below its LIMITs) when its scans have row
+/// marks and the plan's shape lets the keys go up; else as it is (each locked scan then
+/// locks the rows it returns).
+pub(super) fn hoist(plan: &mut Plan) {
+    hoist_with(plan, OWN_LOCK.get());
+}
+
+fn hoist_with(plan: &mut Plan, own: bool) {
+    if PUSHED_LEVEL.get() {
+        return;
+    }
+    // (A subquery planned apart, locked by its own clause or one pushed into it, is a level
+    // of its own: its LockRows at its top, under the Subquery Scan.)
+    // (Only down to such a subquery: the nodes on the way are made the plan's own.)
+    fn wants(p: &Plan) -> bool {
+        match p {
+            Plan::Barrier { input, .. } => has_marks(input) || wants(input),
+            Plan::LockRows { .. } => false,
+            _ => crate::sql::explain::plan_inputs(p).into_iter().any(|c| wants(c)),
+        }
+    }
+    fn apart(p: &mut Plan) {
+        match p {
+            Plan::Barrier { input, .. } => hoist_with(Arc::make_mut(input), false),
+            _ => {
+                for c in crate::sql::explain::plan_inputs_mut(p) {
+                    if wants(c) {
+                        apart(Arc::make_mut(c));
+                    }
+                }
+            }
+        }
+    }
+    if wants(plan) {
+        apart(plan);
+    }
+    hoist_level(plan, own);
+}
+
+/// `own`: the level has a locking clause of its own (`OWN_LOCK`).
+fn hoist_level(plan: &mut Plan, own: bool) {
+    if let Plan::Limit { input, .. } = plan {
+        return hoist_level(Arc::make_mut(input), own);
+    }
+    // (The projection dropping the resjunk columns the level carries, its sort keys, isn't
+    // a plan node: the LockRows below it returns them too.)
+    if let Plan::Project { input, exprs } = plan
+        && exprs.len() < crate::sql::binder::plan_width(input)
+        && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+    {
+        return hoist_level(Arc::make_mut(input), own);
+    }
+    // (A level locking only FROM subqueries planned apart, which lock their own rows: its
+    // LockRows locks nothing, its marks those subqueries' whole rows and its tables' ctids,
+    // preprocess_rowmarks's ROW_MARK_COPY / ROW_MARK_REFERENCE.)
+    let copies = own && {
+        let (mut semi, mut copies) = (Vec::new(), Vec::new());
+        crate::sql::explain::lock_level_marks(plan, false, &mut semi, &mut copies);
+        copies.iter().any(|(_, c)| matches!(c, Plan::Barrier { .. }))
+    };
+    if !has_marks(plan) && !copies {
+        return;
+    }
+    let Some((keyed, map, keys)) = key(plan) else {
+        return;
+    };
+    if keys.iter().all(|k| k.lock.is_none()) && !copies {
+        return;
+    }
+    let w = crate::sql::binder::plan_width(plan);
+    // The row marks' columns as preprocess_rowmarks orders them (the target list's resjunk
+    // ctids): the locked relations' in the order the locking clauses name them (the
+    // query's own, then a pulled-up subquery's, whose rowMarks pull_up_simple_subquery
+    // appends), then the others' in range table order.
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by_key(|&j| {
+        let k = &keys[j];
+        let locked = k.lock.map(|_| (k.rti >> 40, k.order));
+        (k.lock.is_none(), locked, k.rti)
+    });
+    // (The level's columns, then the keys in that order.)
+    let out: Vec<usize> = (0..w)
+        .map(|i| map.get(i).copied().unwrap_or(i))
+        .chain(order.iter().map(|&j| keys[j].col))
+        .collect();
+    let n = crate::sql::binder::plan_width(&keyed);
+    let input = if n == out.len() && out.iter().enumerate().all(|(i, c)| *c == i) {
+        keyed
+    } else if let Plan::Project { input, exprs } = keyed {
+        // (The projection computing the level's target list computes them so.)
+        Plan::Project {
+            input,
+            exprs: out.iter().map(|&c| exprs[c].clone()).collect(),
+        }
+    } else {
+        let types = super::analyzejoins::col_types(&keyed);
+        Plan::Project {
+            input: Arc::new(keyed),
+            exprs: out
+                .iter()
+                .map(|&c| Expr::Col(c, types.get(c).cloned().unwrap_or(DataType::Unknown)))
+                .collect(),
+        }
+    };
+    let marks = keys
+        .into_iter()
+        .enumerate()
+        .map(|(j, k)| LockMark {
+            col: w + order.iter().position(|&o| o == j).unwrap_or(j),
+            tables: k.tables,
+            lock: k.lock,
+            rti: crate::sql::plan::Rti(k.rti),
+        })
+        .collect();
+    *plan = Plan::LockRows {
+        input: Arc::new(input),
+        marks: Arc::new(marks),
+        width: w,
+    };
+}
+
+/// The range table indexes of the scans whose rows a row mark will re-read by key
+/// (ROW_MARK_REFERENCE, preprocess_rowmarks): an UPDATE / DELETE / MERGE's relations other
+/// than its target, and a locking level's relations it doesn't lock. They return their ctid,
+/// so no index-only scan reads them.
+pub(super) fn referenced(plan: &Plan) -> std::collections::HashSet<usize> {
+    // (A level's scans, not a subquery's planned apart.)
+    fn level(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Scan(s) => {
+                if !s.with_key && s.mark.is_none() && s.rti.0 != 0 {
+                    out.insert(s.rti.0);
+                }
+            }
+            Plan::Barrier { .. } | Plan::With { .. } | Plan::CteScan { .. } | Plan::LockRows { .. } => {}
+            p => crate::sql::explain::plan_inputs(p).into_iter().for_each(|c| level(c, out)),
+        }
+    }
+    fn go(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Update(u) => level(&u.source, out),
+            Plan::Delete(d) => level(&d.source, out),
+            Plan::Merge(m) => level(&m.source, out),
+            Plan::With { ctes, body, .. } => {
+                ctes.iter().for_each(|(_, c)| go(c, out));
+                go(body, out);
+            }
+            Plan::Append { inputs, inh: None, .. } => inputs.iter().for_each(|i| go(i, out)),
+            Plan::Limit { input, .. } | Plan::Project { input, .. } | Plan::Context { input, .. } => go(input, out),
+            p if has_marks(p) => level(p, out),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    go(plan, &mut out);
+    out
+}
+
+/// The range table indexes of the level's sources of no table's rows that get a whole-row
+/// mark (ROW_MARK_COPY, preprocess_rowmarks): a FROM subquery planned apart, a function,
+/// VALUES, a CTE, of an UPDATE / DELETE / MERGE (not a subquery holding the target: a view
+/// written through) or a locking level (not on a semi join's inner side). Their whole row
+/// goes up the plan (preprocess_targetlist), so the paths count its width
+/// (set_rel_width) and a subquery's scan of it is no trivial one.
+pub(super) fn copied(plan: &Plan) -> std::collections::HashSet<usize> {
+    fn level(p: &Plan, dml: bool, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Barrier { rti, alias, .. } => {
+                let holds_target = dml && crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_key(c));
+                if rti.0 != 0 && !alias.is_empty() && !holds_target {
+                    out.insert(rti.0);
+                }
+            }
+            Plan::FunctionScan { rti, .. } | Plan::Values { rti, .. } | Plan::CteScan { rti, .. } => {
+                if rti.0 != 0 {
+                    out.insert(rti.0);
+                }
+            }
+            Plan::Scan(_) | Plan::LockRows { .. } => {}
+            // (A data-modifying statement's pulled-up sublinks' relations are in its join
+            // tree, get_relids_in_jointree: marked too.)
+            Plan::Join { kind: JoinKind::Semi | JoinKind::Anti, left, .. } if !dml => level(left, dml, out),
+            p => crate::sql::explain::plan_inputs(p).into_iter().for_each(|c| level(c, dml, out)),
+        }
+    }
+    fn has_key(p: &Plan) -> bool {
+        match p {
+            Plan::Scan(s) => s.with_key,
+            p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_key(c)),
+        }
+    }
+    fn go(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Update(u) if !matches!(&*u.source, Plan::Scan(_)) => level(&u.source, true, out),
+            Plan::Delete(d) if !matches!(&*d.source, Plan::Scan(_)) => level(&d.source, true, out),
+            Plan::Merge(m) => level(&m.source, true, out),
+            Plan::With { ctes, body, .. } => {
+                ctes.iter().for_each(|(_, c)| go(c, out));
+                go(body, out);
+            }
+            Plan::Append { inputs, inh: None, .. } => inputs.iter().for_each(|i| go(i, out)),
+            Plan::Limit { input, .. } | Plan::Project { input, .. } | Plan::Context { input, .. } => go(input, out),
+            p if !PUSHED_LEVEL.get() && (OWN_LOCK.get() || has_marks(p)) => level(p, false, out),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    go(plan, &mut out);
+    out
+}
+
+/// Whether a scan of this query level (not of a subquery planned apart) has a row mark.
+fn has_marks(p: &Plan) -> bool {
+    match p {
+        Plan::Scan(s) => s.mark.is_some(),
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::With { body: input, .. } => has_marks(input),
+        Plan::Join { left, right, .. } => has_marks(left) || has_marks(right),
+        Plan::Foreign(f) => f.outer.is_some() && f.scans.iter().any(|s| has_marks(s)),
+        Plan::Append { inputs, inh: Some(_), .. } => inputs.iter().any(|i| has_marks(i)),
+        _ => false,
+    }
+}
+
+/// The level's table scans whose keys a LockRows reads, grouped by row mark (an inheritance
+/// tree's members together), in the order `hoist` put their keys: what EvalPlanQual
+/// substitutes its test rows into.
+pub fn level_scans(p: &Plan) -> Vec<Vec<&ScanPlan>> {
+    fn go<'p>(p: &'p Plan, out: &mut Vec<Vec<&'p ScanPlan>>) {
+        match p {
+            Plan::Scan(s) => {
+                if s.with_key && !s.sys {
+                    out.push(vec![s]);
+                }
+            }
+            Plan::Filter { input, .. }
+            | Plan::Project { input, .. }
+            | Plan::ProjectSet { input, .. }
+            | Plan::Sort { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Context { input, .. }
+            | Plan::With { body: input, .. } => go(input, out),
+            Plan::Join {
+                kind, left, right, ..
+            } => {
+                go(left, out);
+                if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                    go(right, out);
+                }
+            }
+            Plan::Append { inputs, inh: Some(_), .. } => {
+                let mut members = Vec::new();
+                for i in inputs {
+                    let mut one = Vec::new();
+                    go(i, &mut one);
+                    members.extend(one.into_iter().flatten());
+                }
+                if !members.is_empty() {
+                    out.push(members);
+                }
+            }
+            // (A foreign join's marks are its bases' copies, in their order; a recheck runs
+            // its outer plan, whose scans take them.)
+            Plan::Foreign(f) => {
+                if let Some(o) = &f.outer {
+                    let mut inner = Vec::new();
+                    go(o, &mut inner);
+                    for s in &f.scans {
+                        if let Plan::Scan(b) = &**s
+                            && let Some(g) = inner.iter().find(|g| g.iter().any(|x| x.rti == b.rti))
+                        {
+                            out.push(g.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    go(p, &mut out);
+    out
+}
+
+fn ident(n: usize) -> Vec<usize> {
+    (0..n).collect()
+}
+
+fn remap(e: &Expr, map: &[usize]) -> Expr {
+    e.clone().remap_cols(&|c| map.get(c).copied().unwrap_or(c))
+}
+
+fn remap_keys(keys: &[SortKey], map: &[usize]) -> Vec<SortKey> {
+    keys.iter()
+        .map(|k| SortKey {
+            expr: remap(&k.expr, map),
+            ..k.clone()
+        })
+        .collect()
+}
+
+/// `p` with every table scan of the level returning its row's key: None when some node's
+/// shape isn't one the keys can go up through.
+fn key(p: &Plan) -> Option<Keyed> {
+    let w = crate::sql::binder::plan_width(p);
+    Some(match p {
+        Plan::Scan(s) => {
+            if s.with_key || s.sys || s.current_of.is_some() || s.limit.is_some() {
+                return None;
+            }
+            let mut s = s.clone();
+            s.with_key = true;
+            // (A foreign table's rows are locked by its remote query's locking clause
+            // (postgres_fdw's deparseLockingClause): its scan keeps the lock too. Its row mark
+            // is a copy of the whole row (ROW_MARK_COPY: no wrapper here chooses another), the
+            // key column `exec::scan::copy_key`'s, which EvalPlanQual returns again.)
+            let lock = if s.table.foreign.is_some() {
+                let mut f = s.fdw.as_deref().cloned().unwrap_or_default();
+                f.copy_mark = true;
+                s.fdw = Some(Arc::new(f));
+                s.mark
+            } else {
+                s.mark.take()
+            };
+            let n = s.table.columns.len();
+            let key = Key {
+                col: n,
+                tables: vec![s.table.clone()],
+                lock,
+                rti: s.rti.0,
+                order: s.lock_order,
+            };
+            (Plan::Scan(s), ident(n), vec![key])
+        }
+        // Sources of no table's rows (a subquery planned apart, a function, VALUES, a CTE):
+        // nothing to lock or re-read.
+        Plan::One
+        | Plan::Empty { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::PlCall { .. }
+        | Plan::SysScan { .. }
+        | Plan::Barrier { .. }
+        | Plan::CteScan { .. }
+        | Plan::WorkScan { .. }
+        | Plan::EnrScan { .. } => (p.clone(), ident(w), Vec::new()),
+        // A semi join's inner side unique-ified (create_unique_path; no DISTINCT of the level
+        // itself takes a lock): like a semi join's inner side, its relations' reference marks
+        // are nothing to lock (Postgres's HashAggregate carries their ctids through
+        // ungrouped, for EvalPlanQual), so the level's rows are locked above the join.
+        Plan::Distinct { input, on: None, .. } if !has_marks(input) => (p.clone(), ident(w), Vec::new()),
+        Plan::Filter { input, pred } => {
+            let (i, map, keys) = key(input)?;
+            let pred = remap(pred, &map);
+            (Plan::Filter { input: Arc::new(i), pred }, map, keys)
+        }
+        Plan::Context {
+            input,
+            frame,
+            perms,
+            volatile,
+            scan,
+            ..
+        } => {
+            let (i, map, keys) = key(input)?;
+            (
+                // (Its rows now carry marks a plan bound again wouldn't: always this one.)
+                Plan::Context {
+                    input: Arc::new(i),
+                    frame: frame.clone(),
+                    perms: perms.clone(),
+                    volatile: *volatile,
+                    scan: *scan,
+                    custom: None,
+                },
+                map,
+                keys,
+            )
+        }
+        Plan::Project { input, exprs } => {
+            let (i, map, keys) = key(input)?;
+            let mut out: Vec<Expr> = exprs.iter().map(|e| remap(e, &map)).collect();
+            let n = out.len();
+            let mut nkeys = Vec::with_capacity(keys.len());
+            for k in keys {
+                out.push(Expr::Col(k.col, DataType::Bytea));
+                nkeys.push(Key { col: out.len() - 1, ..k });
+            }
+            (
+                Plan::Project {
+                    input: Arc::new(i),
+                    exprs: out,
+                },
+                ident(n),
+                nkeys,
+            )
+        }
+        Plan::ProjectSet { input, exprs, srfs } => {
+            let (i, map, keys) = key(input)?;
+            let mut out: Vec<Expr> = exprs.iter().map(|e| remap(e, &map)).collect();
+            let srfs = srfs
+                .iter()
+                .map(|c| {
+                    let mut c = c.clone();
+                    c.args = c.args.iter().map(|a| remap(a, &map)).collect();
+                    c
+                })
+                .collect();
+            let n = out.len();
+            let mut nkeys = Vec::with_capacity(keys.len());
+            for k in keys {
+                out.push(Expr::Col(k.col, DataType::Bytea));
+                nkeys.push(Key { col: out.len() - 1, ..k });
+            }
+            (
+                Plan::ProjectSet {
+                    input: Arc::new(i),
+                    exprs: out,
+                    srfs,
+                },
+                ident(n),
+                nkeys,
+            )
+        }
+        Plan::Sort { input, keys: sk } => {
+            let (i, map, keys) = key(input)?;
+            (
+                Plan::Sort {
+                    input: Arc::new(i),
+                    keys: remap_keys(sk, &map),
+                },
+                map,
+                keys,
+            )
+        }
+        Plan::Limit {
+            input,
+            limit,
+            offset,
+            with_ties,
+        } => {
+            let (i, map, keys) = key(input)?;
+            (
+                Plan::Limit {
+                    input: Arc::new(i),
+                    limit: limit.clone(),
+                    offset: offset.clone(),
+                    with_ties: with_ties.as_ref().map(|k| remap_keys(k, &map)),
+                },
+                map,
+                keys,
+            )
+        }
+        Plan::With { ctes, body, names } => {
+            let (b, map, keys) = key(body)?;
+            (
+                Plan::With {
+                    ctes: ctes.clone(),
+                    body: Arc::new(b),
+                    names: names.clone(),
+                },
+                map,
+                keys,
+            )
+        }
+        // An inheritance tree's scans: one row mark, each member keyed alike (a key names
+        // its own table).
+        Plan::Append {
+            inputs,
+            inh: inh @ Some(_),
+            ..
+        } => {
+            let mut out = Vec::with_capacity(inputs.len());
+            let mut first: Option<(Vec<usize>, Key)> = None;
+            for i in inputs {
+                let (p, map, mut keys) = key(i)?;
+                if keys.len() != 1 {
+                    return None;
+                }
+                let k = keys.pop().unwrap();
+                match &mut first {
+                    Some((m, f)) if *m != map || f.col != k.col || f.lock != k.lock => return None,
+                    Some((_, f)) => {
+                        f.tables.extend(k.tables);
+                        f.rti = f.rti.min(k.rti);
+                    }
+                    None => first = Some((map, k)),
+                }
+                out.push(Arc::new(p));
+            }
+            let (map, k) = first?;
+            (
+                Plan::Append {
+                    inputs: out,
+                    inh: inh.clone(),
+                    alias: None,
+                    pw: None,
+                },
+                map,
+                vec![k],
+            )
+        }
+        Plan::Join {
+            kind,
+            left,
+            right,
+            cond,
+            hash,
+            params,
+            nleft,
+            nright,
+            meta,
+        } => {
+            let semi = matches!(kind, JoinKind::Semi | JoinKind::Anti);
+            let (l, lmap, lkeys) = key(left)?;
+            // (A semi / anti join returns no row of its inner side.)
+            let (r, rmap, rkeys) = if semi {
+                let n = crate::sql::binder::plan_width(right);
+                ((**right).clone(), ident(n), Vec::new())
+            } else {
+                key(right)?
+            };
+            let wl = crate::sql::binder::plan_width(&l);
+            let wr = crate::sql::binder::plan_width(&r);
+            let (nl, nr) = (*nleft, *nright);
+            let comb: Vec<usize> = (0..nl + nr)
+                .map(|c| {
+                    if c < nl {
+                        lmap.get(c).copied().unwrap_or(c)
+                    } else {
+                        wl + rmap.get(c - nl).copied().unwrap_or(c - nl)
+                    }
+                })
+                .collect();
+            let cond = cond.as_ref().map(|e| remap(e, &comb));
+            let hash = hash.as_ref().map(|(a, b)| {
+                (
+                    a.iter().map(|e| remap(e, &lmap)).collect(),
+                    b.iter().map(|e| remap(e, &rmap)).collect(),
+                )
+            });
+            let params = params.iter().map(|e| remap(e, &lmap)).collect();
+            let mut meta = meta.clone();
+            meta.kept = meta.kept.iter().map(|c| comb.get(*c).copied().unwrap_or(*c)).collect();
+            meta.pushed = meta.pushed.iter().map(|c| comb.get(*c).copied().unwrap_or(*c)).collect();
+            if let Some(m) = &mut meta.memoize {
+                m.keys = m.keys.iter().map(|e| remap(e, &lmap)).collect();
+            }
+            let map: Vec<usize> = comb[..nl + if semi { 0 } else { nr }].to_vec();
+            let mut keys = lkeys;
+            keys.extend(rkeys.into_iter().map(|k| Key { col: wl + k.col, ..k }));
+            (
+                Plan::Join {
+                    kind: *kind,
+                    left: Arc::new(l),
+                    right: Arc::new(r),
+                    cond,
+                    hash,
+                    params,
+                    nleft: wl,
+                    nright: wr,
+                    meta,
+                },
+                map,
+                keys,
+            )
+        }
+        // A foreign join with an outer plan (a level locking local relations too): every
+        // base's whole row comes back as its mark's copy (ROW_MARK_COPY), placed by the
+        // wrapper; the outer plan returns them alike, for EvalPlanQual.
+        Plan::Foreign(f) if f.outer.is_some() => return key_foreign(f),
+        _ => return None,
+    })
+}
+
+#[inline(never)]
+fn key_foreign(f: &crate::sql::plan::ForeignRel) -> Option<Keyed> {
+    use crate::sql::plan::FDW_MARK_COL;
+    let (private, out) = f.private.0.with_copy_marks(f)?;
+    let (op, omap, okeys) = key(f.outer.as_deref()?)?;
+    let types = super::analyzejoins::col_types(&op);
+    let base = |k: usize| match f.scans.get(k).map(|s| &**s) {
+        Some(Plan::Scan(s)) => Some(s),
+        _ => None,
+    };
+    let mut keys = Vec::with_capacity(f.scans.len());
+    let mut exprs = Vec::with_capacity(out.len());
+    for (j, &g) in out.iter().enumerate() {
+        if let Some(k) = g.checked_sub(FDW_MARK_COL).filter(|&k| k < f.scans.len()) {
+            let s = base(k)?;
+            let ok = okeys.iter().find(|x| x.rti == s.rti.0)?;
+            exprs.push(Expr::Col(ok.col, DataType::Bytea));
+            keys.push(Key {
+                col: j,
+                tables: vec![s.table.clone()],
+                lock: s.mark,
+                rti: s.rti.0,
+                order: s.lock_order,
+            });
+        } else {
+            let i = omap[f.out.iter().position(|&x| x == g)?];
+            exprs.push(Expr::Col(i, types.get(i).cloned().unwrap_or(DataType::Unknown)));
+        }
+    }
+    let map = f.out.iter().map(|g| out.iter().position(|x| x == g).unwrap_or(0)).collect();
+    let mut fr = f.clone();
+    fr.private = crate::sql::plan::FdwPrivate(private);
+    fr.out = out;
+    fr.outer = Some(Arc::new(Plan::Project { input: Arc::new(op), exprs }));
+    Some((Plan::Foreign(Box::new(fr)), map, keys))
+}
+
+/// The lock of the first locked scan of the level under `p` (through its joins, appends and
+/// FROM subqueries; not a semi or anti join's inner side, a sub-select's).
+fn first_mark(p: &Plan) -> Option<RowMark> {
+    match p {
+        Plan::Scan(s) => s.mark.map(|m| m.0),
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::With { body: input, .. } => first_mark(input),
+        Plan::Join { kind, left, right, .. } => first_mark(left).or_else(|| {
+            if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                None
+            } else {
+                first_mark(right)
+            }
+        }),
+        Plan::Append { inputs, .. } => inputs.iter().find_map(|i| first_mark(i)),
+        _ => None,
+    }
+}
+
+/// make_outerjoininfo: the lock of a locked relation on the nullable side of one of the
+/// level's outer joins (the plan as reduce_outer_joins leaves it), lower joins first.
+pub(super) fn nullable_mark(p: &Plan) -> Option<RowMark> {
+    match p {
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::With { body: input, .. } => nullable_mark(input),
+        Plan::Join { kind, left, right, .. } => {
+            let inner = !matches!(kind, JoinKind::Semi | JoinKind::Anti);
+            if let Some(m) = nullable_mark(left).or_else(|| inner.then(|| nullable_mark(right)).flatten()) {
+                return Some(m);
+            }
+            match kind {
+                JoinKind::Left => first_mark(right),
+                JoinKind::Right => first_mark(left),
+                JoinKind::Full => first_mark(left).or_else(|| first_mark(right)),
+                _ => None,
+            }
+        }
+        Plan::Append { inputs, .. } => inputs.iter().find_map(|i| nullable_mark(i)),
+        _ => None,
+    }
+}

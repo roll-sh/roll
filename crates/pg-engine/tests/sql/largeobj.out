@@ -1,0 +1,1022 @@
+> DROP ROLE IF EXISTS glo_a, glo_b
+NOTICE 00000: role "glo_a" does not exist, skipping
+NOTICE 00000: role "glo_b" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE glo_a
+-- CREATE ROLE
+
+> CREATE ROLE glo_b
+-- CREATE ROLE
+
+> SELECT lo_create(0) > 0
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT lo_creat(-1) > 0
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT lo_create(70001)
+lo_create:oid
+70001
+-- SELECT 1
+
+> SELECT lo_create(70001)
+ERROR 23505: duplicate key value violates unique constraint "pg_largeobject_metadata_oid_index"
+DETAIL: Key (oid)=(70001) already exists.
+OBJECTS: schema=pg_catalog table=pg_largeobject_metadata constraint=pg_largeobject_metadata_oid_index
+
+> SELECT lo_from_bytea(70002, '\x68656c6c6f20776f726c64')
+lo_from_bytea:oid
+70002
+-- SELECT 1
+
+> SELECT lo_get(70002)
+lo_get:bytea
+\x68656c6c6f20776f726c64
+-- SELECT 1
+
+> SELECT lo_get(70002, 6, 3), lo_get(70002, 6, 100), lo_get(70002, 100, 3), lo_get(70002, 0, 0)
+lo_get:bytea | lo_get:bytea | lo_get:bytea | lo_get:bytea
+\x776f72 | \x776f726c64 | \x | \x
+-- SELECT 1
+
+> SELECT lo_get(70002, 2, -1)
+ERROR 22023: requested length cannot be negative
+
+> SELECT lo_get(70099)
+ERROR 42704: large object 70099 does not exist
+
+> SELECT lo_put(70002, 20, '\x2121')
+lo_put:void
+
+-- SELECT 1
+
+> SELECT lo_get(70002)
+lo_get:bytea
+\x68656c6c6f20776f726c640000000000000000002121
+-- SELECT 1
+
+> SELECT length(lo_get(70002))
+length:int4
+22
+-- SELECT 1
+
+> SELECT lo_put(70002, 0, '\x48')
+lo_put:void
+
+-- SELECT 1
+
+> SELECT encode(lo_get(70002), 'escape')
+encode:text
+Hello world\000\000\000\000\000\000\000\000\000!!
+-- SELECT 1
+
+> SELECT lo_unlink(70099)
+ERROR 42704: large object 70099 does not exist
+
+> SELECT oid, pg_get_userbyid(lomowner), lomacl FROM pg_largeobject_metadata WHERE oid >= 70000 ORDER BY oid
+oid:oid | pg_get_userbyid:name | lomacl:1034
+70001 | postgres | NULL
+70002 | postgres | NULL
+-- SELECT 2
+
+> SELECT loid, pageno, length(data) FROM pg_largeobject WHERE loid >= 70000 ORDER BY 1, 2
+loid:oid | pageno:int4 | length:int4
+70002 | 0 | 22
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_open(70002, x'40000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> SELECT loread(0, 5)
+loread:bytea
+\x48656c6c6f
+-- SELECT 1
+
+> SELECT lo_tell(0), lo_tell64(0)
+lo_tell:int4 | lo_tell64:int8
+5 | 5
+-- SELECT 1
+
+> SELECT lo_lseek(0, 3, 1), loread(0, 4)
+lo_lseek:int4 | loread:bytea
+8 | \x726c6400
+-- SELECT 1
+
+> SELECT lo_lseek(0, -2, 2), loread(0, 100)
+lo_lseek:int4 | loread:bytea
+20 | \x2121
+-- SELECT 1
+
+> SELECT lo_lseek64(0, 0, 0), loread(0, -1)
+lo_lseek64:int8 | loread:bytea
+0 | \x
+-- SELECT 1
+
+> SAVEPOINT a
+-- SAVEPOINT
+
+> SELECT lo_lseek(0, 0, 3)
+ERROR 22023: invalid whence setting: 3
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_lseek(0, -100, 1)
+ERROR 22023: invalid large object seek target: -100
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_lseek64(0, 4398046511104, 0)
+ERROR 22023: invalid large object seek target: 4398046511104
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_lseek64(0, 4398046509056, 0), lo_tell64(0)
+lo_lseek64:int8 | lo_tell64:int8
+4398046509056 | 4398046509056
+-- SELECT 1
+
+> SELECT lo_tell(0)
+ERROR 22003: lo_tell result out of range for large-object descriptor 0
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_lseek64(0, 3000000000, 0)
+lo_lseek64:int8
+3000000000
+-- SELECT 1
+
+> SELECT lo_lseek(0, 0, 1)
+ERROR 22003: lo_lseek result out of range for large-object descriptor 0
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_tell(0)
+ERROR 22003: lo_tell result out of range for large-object descriptor 0
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_open(70002, x'40000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> SELECT lowrite(0, '\x01')
+ERROR 55000: large object descriptor 0 was not opened for writing
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_open(70002, x'60000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> SELECT lo_open(70001, x'20000'::int)
+lo_open:int4
+1
+-- SELECT 1
+
+> SELECT lowrite(1, repeat('ab', 3000)::bytea)
+lowrite:int4
+6000
+-- SELECT 1
+
+> SELECT lo_tell(1)
+lo_tell:int4
+6000
+-- SELECT 1
+
+> SELECT lo_lseek(1, 5000, 0), lowrite(1, '\xffff')
+lo_lseek:int4 | lowrite:int4
+5000 | 2
+-- SELECT 1
+
+> SELECT lo_lseek(1, 0, 2)
+lo_lseek:int4
+6000
+-- SELECT 1
+
+> SELECT loread(1, 3)
+loread:bytea
+\x
+-- SELECT 1
+
+> SELECT lo_truncate(1, 4097)
+lo_truncate:int4
+0
+-- SELECT 1
+
+> SELECT lo_lseek64(1, 0, 2)
+lo_lseek64:int8
+4097
+-- SELECT 1
+
+> SELECT lo_close(1)
+lo_close:int4
+0
+-- SELECT 1
+
+> SAVEPOINT a
+-- SAVEPOINT
+
+> SELECT lo_close(1)
+ERROR 42704: invalid large-object descriptor: 1
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT loread(1, 3)
+ERROR 42704: invalid large-object descriptor: 1
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_close(0)
+lo_close:int4
+0
+-- SELECT 1
+
+> SELECT lo_open(70002, 0)
+ERROR 22023: invalid flags for opening a large object: 0
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_open(70099, x'40000'::int)
+ERROR 42704: large object 70099 does not exist
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_open(70001, x'40000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> SELECT lo_open(70002, x'40000'::int)
+lo_open:int4
+1
+-- SELECT 1
+
+> SELECT lo_open(70002, -1)
+lo_open:int4
+2
+-- SELECT 1
+
+> SELECT lo_unlink(70002)
+lo_unlink:int4
+1
+-- SELECT 1
+
+> SELECT loread(1, 1)
+ERROR 42704: invalid large-object descriptor: 1
+
+> SELECT loread(0, 1)
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_open(70001, 393216), lo_open(70001, x'40000'::int)
+lo_open:int4 | lo_open:int4
+0 | 1
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT loid, pageno, length(data) FROM pg_largeobject WHERE loid >= 70000 ORDER BY 1, 2
+loid:oid | pageno:int4 | length:int4
+70001 | 0 | 2048
+70001 | 1 | 2048
+70001 | 2 | 1
+70002 | 0 | 22
+-- SELECT 4
+
+> SELECT length(lo_get(70001)), md5(lo_get(70001))
+length:int4 | md5:text
+4097 | bdecc3b6bfde11fd6179def064063e32
+-- SELECT 1
+
+> SELECT lo_close(0)
+ERROR 42704: invalid large-object descriptor: 0
+
+> SELECT lo_from_bytea(70003, repeat('x', 5000)::bytea)
+lo_from_bytea:oid
+70003
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_open(70003, x'20000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> SELECT lo_truncate64(0, 6000)
+lo_truncate64:int4
+0
+-- SELECT 1
+
+> SELECT lo_lseek(0, 0, 2)
+lo_lseek:int4
+6000
+-- SELECT 1
+
+> SELECT lo_truncate(0, 2048)
+lo_truncate:int4
+0
+-- SELECT 1
+
+> SAVEPOINT a
+-- SAVEPOINT
+
+> SELECT lo_truncate(0, -1)
+ERROR 22023: invalid large object truncation target: -1
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_truncate64(0, 4398046511105)
+ERROR 22023: invalid large object truncation target: 4398046511105
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_lseek(0, 0, 2)
+lo_lseek:int4
+2048
+-- SELECT 1
+
+> SELECT lo_truncate(0, 4100)
+lo_truncate:int4
+0
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT loid, pageno, length(data) FROM pg_largeobject WHERE loid = 70003 ORDER BY 1, 2
+loid:oid | pageno:int4 | length:int4
+70003 | 0 | 2048
+70003 | 1 | 0
+70003 | 2 | 4
+-- SELECT 3
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_open(70003, x'20000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> SELECT lo_truncate(0, 0)
+lo_truncate:int4
+0
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT loid, pageno, length(data) FROM pg_largeobject WHERE loid = 70003 ORDER BY 1, 2
+loid:oid | pageno:int4 | length:int4
+70003 | 0 | 0
+-- SELECT 1
+
+> SELECT lo_get(70003)
+lo_get:bytea
+\x
+-- SELECT 1
+
+> SELECT lo_from_bytea(70004, '')
+lo_from_bytea:oid
+70004
+-- SELECT 1
+
+> SELECT lo_put(70004, 4096, '\x41')
+lo_put:void
+
+-- SELECT 1
+
+> SELECT loid, pageno, length(data) FROM pg_largeobject WHERE loid = 70004 ORDER BY 1, 2
+loid:oid | pageno:int4 | length:int4
+70004 | 2 | 1
+-- SELECT 1
+
+> SELECT length(lo_get(70004)), lo_get(70004, 4090, 10)
+length:int4 | lo_get:bytea
+4097 | \x00000000000041
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_create(70005)
+lo_create:oid
+70005
+-- SELECT 1
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> SELECT lo_open(70005, x'20000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> SELECT lowrite(0, '\x6162')
+lowrite:int4
+2
+-- SELECT 1
+
+> ROLLBACK TO s1
+-- ROLLBACK
+
+> SAVEPOINT s1b
+-- SAVEPOINT
+
+> SELECT loread(0, 1)
+ERROR 42704: invalid large-object descriptor: 0
+
+> ROLLBACK TO s1b
+-- ROLLBACK
+
+> SELECT lo_get(70005)
+lo_get:bytea
+\x
+-- SELECT 1
+
+> SAVEPOINT s2
+-- SAVEPOINT
+
+> SELECT lo_open(70005, x'20000'::int)
+lo_open:int4
+0
+-- SELECT 1
+
+> RELEASE s2
+-- RELEASE
+
+> SELECT lowrite(0, '\x7a')
+lowrite:int4
+1
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT lo_get(70005)
+lo_get:bytea
+\x7a
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_unlink(70005)
+lo_unlink:int4
+1
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT lo_get(70005)
+lo_get:bytea
+\x7a
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_create(70006)
+lo_create:oid
+70006
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT lo_get(70006)
+ERROR 42704: large object 70006 does not exist
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT lo_create(70007)
+ERROR 25006: cannot execute lo_create() in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT lo_open(70005, x'20000'::int)
+ERROR 25006: cannot execute lo_open(INV_WRITE) in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT lo_open(70005, x'40000'::int), loread(0, 10)
+lo_open:int4 | loread:bytea
+0 | \x7a
+-- SELECT 1
+
+> SELECT lo_get(70005)
+lo_get:bytea
+\x7a
+-- SELECT 1
+
+> SAVEPOINT a
+-- SAVEPOINT
+
+> SELECT lo_put(70005, 0, '\x00')
+ERROR 25006: cannot execute lo_put() in a read-only transaction
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_from_bytea(0, '\x00')
+ERROR 25006: cannot execute lo_from_bytea() in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT lo_unlink(70005)
+ERROR 25006: cannot execute lo_unlink() in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT lo_truncate(0, 0)
+ERROR 25006: cannot execute lo_truncate() in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ ONLY
+-- BEGIN
+
+> SELECT lowrite(0, '\x00')
+ERROR 25006: cannot execute lowrite() in a read-only transaction
+
+> ROLLBACK
+-- ROLLBACK
+
+> SET ROLE glo_a
+-- SET
+
+> SELECT lo_import('/etc/hostname')
+ERROR 42501: permission denied for function lo_import
+
+> SELECT lo_import('/etc/hostname', 70030)
+ERROR 42501: permission denied for function lo_import
+
+> SELECT lo_export(70005, '/tmp/x')
+ERROR 42501: permission denied for function lo_export
+
+> RESET ROLE
+-- RESET
+
+> SELECT has_largeobject_privilege(70005, 'SELECT'), has_largeobject_privilege('glo_a', 70005, 'SELECT'), has_largeobject_privilege('glo_a', 70005, 'UPDATE')
+has_largeobject_privilege:bool | has_largeobject_privilege:bool | has_largeobject_privilege:bool
+t | f | f
+-- SELECT 1
+
+> SELECT has_largeobject_privilege(70099, 'SELECT')
+has_largeobject_privilege:bool
+NULL
+-- SELECT 1
+
+> SELECT has_largeobject_privilege(70005, 'USAGE')
+ERROR 22023: unrecognized privilege type: "USAGE"
+
+> GRANT SELECT ON LARGE OBJECT 70005 TO glo_a
+-- GRANT
+
+> GRANT UPDATE ON LARGE OBJECT 70005, 70004 TO glo_b WITH GRANT OPTION
+-- GRANT
+
+> GRANT USAGE ON LARGE OBJECT 70005 TO glo_a
+ERROR 0LP01: invalid privilege type USAGE for large object
+
+> GRANT SELECT ON LARGE OBJECT 70099 TO glo_a
+ERROR 42704: large object 70099 does not exist
+
+> GRANT ALL ON LARGE OBJECT 70003 TO PUBLIC
+-- GRANT
+
+> SELECT oid, lomacl FROM pg_largeobject_metadata WHERE oid >= 70000 ORDER BY oid
+oid:oid | lomacl:1034
+70001 | NULL
+70002 | NULL
+70003 | {postgres=rw/postgres,=rw/postgres}
+70004 | {postgres=rw/postgres,glo_b=w*/postgres}
+70005 | {postgres=rw/postgres,glo_a=r/postgres,glo_b=w*/postgres}
+-- SELECT 5
+
+> SELECT has_largeobject_privilege('glo_a', 70005, 'SELECT'), has_largeobject_privilege('glo_a', 70005, 'UPDATE'), has_largeobject_privilege('glo_b', 70005, 'UPDATE WITH GRANT OPTION')
+has_largeobject_privilege:bool | has_largeobject_privilege:bool | has_largeobject_privilege:bool
+t | f | t
+-- SELECT 1
+
+> SET ROLE glo_a
+-- SET
+
+> SELECT lo_get(70005)
+lo_get:bytea
+\x7a
+-- SELECT 1
+
+> SELECT lo_get(70004)
+ERROR 42501: permission denied for large object 70004
+
+> SELECT lo_put(70005, 0, '\x00')
+ERROR 42501: permission denied for large object 70005
+
+> SELECT lo_unlink(70005)
+ERROR 42501: must be owner of large object 70005
+
+> SELECT lo_create(70010)
+lo_create:oid
+70010
+-- SELECT 1
+
+> SELECT lo_from_bytea(70011, '\x6869')
+lo_from_bytea:oid
+70011
+-- SELECT 1
+
+> SELECT pg_get_userbyid(lomowner) FROM pg_largeobject_metadata WHERE oid = 70010
+pg_get_userbyid:name
+glo_a
+-- SELECT 1
+
+> SELECT loid FROM pg_largeobject LIMIT 1
+ERROR 42501: permission denied for table pg_largeobject
+
+> BEGIN
+-- BEGIN
+
+> SELECT lo_open(70005, x'40000'::int), loread(0, 10)
+lo_open:int4 | loread:bytea
+0 | \x7a
+-- SELECT 1
+
+> SAVEPOINT a
+-- SAVEPOINT
+
+> SELECT lo_open(70005, x'20000'::int)
+ERROR 42501: permission denied for large object 70005
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> SELECT lo_open(70004, x'40000'::int)
+ERROR 42501: permission denied for large object 70004
+
+> ROLLBACK
+-- ROLLBACK
+
+> GRANT SELECT ON LARGE OBJECT 70005 TO glo_b
+WARNING 01007: no privileges were granted for "large object 70005"
+-- GRANT
+
+> GRANT SELECT ON LARGE OBJECT 70010 TO glo_b
+-- GRANT
+
+> ALTER LARGE OBJECT 70005 OWNER TO glo_a
+ERROR 42501: must be owner of large object 70005
+
+> COMMENT ON LARGE OBJECT 70005 IS 'nope'
+ERROR 42501: must be owner of large object 70005
+
+> COMMENT ON LARGE OBJECT 70010 IS 'mine'
+-- COMMENT
+
+> SET lo_compat_privileges = on
+ERROR 42501: permission denied to set parameter "lo_compat_privileges"
+
+> RESET ROLE
+-- RESET
+
+> GRANT UPDATE ON LARGE OBJECT 70005 TO glo_b WITH GRANT OPTION
+-- GRANT
+
+> SET ROLE glo_b
+-- SET
+
+> SELECT lo_put(70005, 0, '\x79')
+ERROR 42501: permission denied for large object 70005
+
+> GRANT UPDATE ON LARGE OBJECT 70005 TO glo_a
+-- GRANT
+
+> SELECT lo_put(70004, 0, '\x01')
+ERROR 42501: permission denied for large object 70004
+
+> RESET ROLE
+-- RESET
+
+> SET lo_compat_privileges = on
+-- SET
+
+> SHOW lo_compat_privileges
+lo_compat_privileges:text
+on
+-- SHOW
+
+> SET ROLE glo_a
+-- SET
+
+> SELECT lo_get(70004, 0, 1)
+lo_get:bytea
+\x00
+-- SELECT 1
+
+> SELECT lo_unlink(70004)
+lo_unlink:int4
+1
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> RESET lo_compat_privileges
+-- RESET
+
+> REVOKE UPDATE ON LARGE OBJECT 70005 FROM glo_b
+ERROR 2BP01: dependent privileges exist
+HINT: Use CASCADE to revoke them too.
+
+> REVOKE GRANT OPTION FOR UPDATE ON LARGE OBJECT 70004 FROM glo_b
+ERROR 42704: large object 70004 does not exist
+
+> SELECT oid, lomacl FROM pg_largeobject_metadata WHERE oid >= 70000 ORDER BY oid
+oid:oid | lomacl:1034
+70001 | NULL
+70002 | NULL
+70003 | {postgres=rw/postgres,=rw/postgres}
+70005 | {postgres=rw/postgres,glo_a=r/postgres,glo_b=w*/postgres,glo_a=w/glo_b}
+70010 | {glo_a=rw/glo_a,glo_b=r/glo_a}
+70011 | NULL
+-- SELECT 6
+
+> ALTER LARGE OBJECT 70005 OWNER TO glo_b
+-- ALTER LARGE OBJECT
+
+> ALTER LARGE OBJECT 70099 OWNER TO glo_b
+ERROR 42704: large object 70099 does not exist
+
+> ALTER LARGE OBJECT 70005 OWNER TO nobody
+ERROR 42704: role "nobody" does not exist
+
+> COMMENT ON LARGE OBJECT 70005 IS 'five'
+-- COMMENT
+
+> COMMENT ON LARGE OBJECT 70099 IS 'x'
+ERROR 42704: large object 70099 does not exist
+
+> SELECT oid as "ID", pg_catalog.pg_get_userbyid(lomowner) as "Owner", pg_catalog.obj_description(oid, 'pg_largeobject') as "Description"
+> FROM pg_catalog.pg_largeobject_metadata WHERE oid >= 70000 ORDER BY oid
+ID:oid | Owner:name | Description:text
+70001 | postgres | NULL
+70002 | postgres | NULL
+70003 | postgres | NULL
+70005 | glo_b | five
+70010 | glo_a | mine
+70011 | glo_a | NULL
+-- SELECT 6
+
+> SELECT objoid, classoid::regclass, objsubid, description FROM pg_description WHERE classoid = 'pg_largeobject'::regclass AND objoid >= 70000
+objoid:oid | classoid:regclass | objsubid:int4 | description:text
+70005 | pg_largeobject | 0 | five
+70010 | pg_largeobject | 0 | mine
+-- SELECT 2
+
+> SELECT classid::regclass, objid, objsubid, refclassid::regclass, pg_get_userbyid(refobjid), deptype FROM pg_shdepend WHERE classid = 'pg_largeobject'::regclass AND objid >= 70000 ORDER BY objid, deptype, 5
+classid:regclass | objid:oid | objsubid:int4 | refclassid:regclass | pg_get_userbyid:name | deptype:char
+pg_largeobject | 70005 | 0 | pg_authid | glo_a | a
+pg_largeobject | 70005 | 0 | pg_authid | glo_b | o
+pg_largeobject | 70010 | 0 | pg_authid | glo_b | a
+pg_largeobject | 70010 | 0 | pg_authid | glo_a | o
+pg_largeobject | 70011 | 0 | pg_authid | glo_a | o
+-- SELECT 5
+
+> SELECT pg_describe_object('pg_largeobject'::regclass, 70005, 0), pg_describe_object('pg_largeobject'::regclass, 70099, 0)
+pg_describe_object:text | pg_describe_object:text
+large object 70005 | NULL
+-- SELECT 1
+
+> SELECT * FROM pg_identify_object('pg_largeobject'::regclass, 70005, 0)
+type:text | schema:text | name:text | identity:text
+large object | NULL | NULL | 70005
+-- SELECT 1
+
+> SELECT * FROM pg_identify_object_as_address('pg_largeobject'::regclass, 70005, 0)
+type:text | object_names:text[] | object_args:text[]
+large object | {70005} | {}
+-- SELECT 1
+
+> SELECT classid::regclass, objid, objsubid FROM pg_get_object_address('large object', '{70005}', '{}')
+classid:regclass | objid:oid | objsubid:int4
+pg_largeobject | 70005 | 0
+-- SELECT 1
+
+> SELECT classid::regclass, objid, objsubid FROM pg_get_object_address('large object', '{70099}', '{}')
+ERROR 42704: large object 70099 does not exist
+
+> SELECT classid::regclass, objid, objsubid FROM pg_get_object_address('large object', '{abc}', '{}')
+ERROR 22P02: invalid input syntax for type oid: "abc"
+
+> SELECT has_largeobject_privilege('glo_b', 70005, 'UPDATE')
+has_largeobject_privilege:bool
+t
+-- SELECT 1
+
+> COMMENT ON LARGE OBJECT 70005 IS NULL
+-- COMMENT
+
+> SELECT count(*) FROM pg_description WHERE classoid = 'pg_largeobject'::regclass AND objoid >= 70000
+count:int8
+1
+-- SELECT 1
+
+> DROP ROLE glo_b
+ERROR 2BP01: role "glo_b" cannot be dropped because some objects depend on it
+DETAIL: owner of large object 70005
+DETAIL: privileges for large object 70010
+
+> DROP ROLE glo_a
+ERROR 2BP01: role "glo_a" cannot be dropped because some objects depend on it
+DETAIL: privileges for large object 70005
+DETAIL: owner of large object 70010
+DETAIL: owner of large object 70011
+
+> REASSIGN OWNED BY glo_b TO glo_a
+-- REASSIGN OWNED
+
+> SELECT oid, pg_get_userbyid(lomowner), lomacl FROM pg_largeobject_metadata WHERE oid >= 70000 ORDER BY oid
+oid:oid | pg_get_userbyid:name | lomacl:1034
+70001 | postgres | NULL
+70002 | postgres | NULL
+70003 | postgres | {postgres=rw/postgres,=rw/postgres}
+70005 | glo_a | {glo_a=rw*/glo_a}
+70010 | glo_a | {glo_a=rw/glo_a,glo_b=r/glo_a}
+70011 | glo_a | NULL
+-- SELECT 6
+
+> DROP OWNED BY glo_a
+-- DROP OWNED
+
+> SELECT oid, pg_get_userbyid(lomowner), lomacl FROM pg_largeobject_metadata WHERE oid >= 70000 ORDER BY oid
+oid:oid | pg_get_userbyid:name | lomacl:1034
+70001 | postgres | NULL
+70002 | postgres | NULL
+70003 | postgres | {postgres=rw/postgres,=rw/postgres}
+-- SELECT 3
+
+> SELECT count(*) FROM pg_largeobject WHERE loid IN (70005, 70010, 70011)
+count:int8
+0
+-- SELECT 1
+
+> ALTER DEFAULT PRIVILEGES GRANT SELECT ON LARGE OBJECTS TO glo_a
+-- ALTER DEFAULT PRIVILEGES
+
+> ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON LARGE OBJECTS TO glo_a
+ERROR 0LP01: cannot use IN SCHEMA clause when using GRANT/REVOKE ON LARGE OBJECTS
+
+> SELECT lo_create(70020)
+lo_create:oid
+70020
+-- SELECT 1
+
+> SELECT lomacl FROM pg_largeobject_metadata WHERE oid = 70020
+lomacl:1034
+{postgres=rw/postgres,glo_a=r/postgres}
+-- SELECT 1
+
+> SELECT defaclobjtype, defaclacl FROM pg_default_acl
+defaclobjtype:char | defaclacl:1034
+L | {postgres=rw/postgres,glo_a=r/postgres}
+-- SELECT 1
+
+> ALTER DEFAULT PRIVILEGES REVOKE SELECT ON LARGE OBJECTS FROM glo_a
+-- ALTER DEFAULT PRIVILEGES
+
+> SELECT count(*) FROM pg_default_acl
+count:int8
+0
+-- SELECT 1
+
+> SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 70000 ORDER BY oid
+lo_unlink:int4
+1
+1
+1
+1
+-- SELECT 4
+
+> SELECT lo_unlink(oid) FROM pg_largeobject_metadata
+lo_unlink:int4
+1
+1
+-- SELECT 2
+
+> SELECT count(*) FROM pg_largeobject_metadata
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM pg_largeobject
+count:int8
+0
+-- SELECT 1
+
+> SELECT relname, relkind, relnamespace::regnamespace FROM pg_class WHERE oid IN ('pg_largeobject'::regclass, 'pg_largeobject_metadata'::regclass) ORDER BY 1
+relname:name | relkind:char | relnamespace:4089
+pg_largeobject | r | pg_catalog
+pg_largeobject_metadata | r | pg_catalog
+-- SELECT 2
+
+> SELECT attname, atttypid::regtype FROM pg_attribute WHERE attrelid = 'pg_largeobject'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atttypid:regtype
+loid | oid
+pageno | integer
+data | bytea
+-- SELECT 3
+
+> SELECT attname, atttypid::regtype FROM pg_attribute WHERE attrelid = 'pg_largeobject_metadata'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atttypid:regtype
+oid | oid
+lomowner | oid
+lomacl | aclitem[]
+-- SELECT 3
+
+> SELECT proname, pronargs, provolatile, proisstrict, prorettype::regtype FROM pg_proc WHERE proname IN ('lo_open', 'lo_close', 'lo_creat', 'lo_create', 'lo_unlink', 'lo_lseek', 'lo_lseek64', 'lo_tell', 'lo_tell64', 'lo_truncate', 'lo_truncate64', 'loread', 'lowrite', 'lo_get', 'lo_put', 'lo_from_bytea', 'lo_import', 'lo_export') ORDER BY oid
+proname:name | pronargs:int2 | provolatile:char | proisstrict:bool | prorettype:regtype
+lo_create | 1 | v | t | oid
+lo_import | 1 | v | t | oid
+lo_export | 2 | v | t | integer
+lo_import | 2 | v | t | oid
+lo_open | 2 | v | t | integer
+lo_close | 1 | v | t | integer
+loread | 2 | v | t | bytea
+lowrite | 2 | v | t | integer
+lo_lseek | 3 | v | t | integer
+lo_creat | 1 | v | t | oid
+lo_tell | 1 | v | t | integer
+lo_unlink | 1 | v | t | integer
+lo_truncate | 2 | v | t | integer
+lo_lseek64 | 3 | v | t | bigint
+lo_tell64 | 1 | v | t | bigint
+lo_truncate64 | 2 | v | t | integer
+lo_from_bytea | 2 | v | t | oid
+lo_get | 1 | v | t | bytea
+lo_get | 3 | v | t | bytea
+lo_put | 3 | v | t | void
+-- SELECT 20
+
+> SELECT lo_create(NULL), lo_get(NULL), loread(NULL, 1)
+lo_create:oid | lo_get:bytea | loread:bytea
+NULL | NULL | NULL
+-- SELECT 1
+
+> DROP ROLE glo_a, glo_b
+-- DROP ROLE
+

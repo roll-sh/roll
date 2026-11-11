@@ -1,0 +1,146 @@
+> CREATE SCHEMA a37s
+-- CREATE SCHEMA
+
+> SET search_path = a37s, public
+-- SET
+
+> CREATE FUNCTION a37f(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE SEQUENCE a37seq
+-- CREATE SEQUENCE
+
+> CREATE TYPE a37e AS ENUM ('x', 'y')
+-- CREATE TYPE
+
+> CREATE DOMAIN a37d AS int CHECK (VALUE > a37f(0))
+-- CREATE DOMAIN
+
+> CREATE TABLE a37t (
+>   a int DEFAULT a37f(1) CHECK (a < a37f(100)),
+>   b int DEFAULT nextval('a37seq'),
+>   c a37e DEFAULT 'x',
+>   d regclass DEFAULT 'a37t',
+>   e bool GENERATED ALWAYS AS (tableoid = 'a37t'::regclass) VIRTUAL,
+>   f oid GENERATED ALWAYS AS (tableoid) VIRTUAL,
+>   g int GENERATED ALWAYS AS (a37f(a) + 1) STORED,
+>   h a37d
+> )
+-- CREATE TABLE
+
+> ALTER TABLE a37t ADD CONSTRAINT a37c CHECK (b > a37f(-1))
+-- ALTER TABLE
+
+> CREATE INDEX a37i ON a37t (a37f(a)) WHERE a37f(b) > 0
+-- CREATE INDEX
+
+> CREATE STATISTICS a37st ON (a37f(a)), b FROM a37t
+-- CREATE STATISTICS
+
+> ALTER TABLE a37t ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY a37p ON a37t USING (a37f(a) > 0) WITH CHECK (c = 'x'::a37e)
+-- CREATE POLICY
+
+> CREATE FUNCTION a37trf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a37tr BEFORE INSERT ON a37t FOR EACH ROW WHEN (NEW.a > a37f(0))
+>   EXECUTE FUNCTION a37trf()
+-- CREATE TRIGGER
+
+> SELECT adnum, pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'a37t'::regclass
+>   ORDER BY 1
+adnum:int2 | pg_get_expr:text
+1 | a37f(1)
+2 | nextval('a37seq'::regclass)
+3 | 'x'::a37e
+4 | 'a37t'::regclass
+5 | (tableoid = ('a37t'::regclass)::oid)
+6 | tableoid
+7 | (a37f(a) + 1)
+-- SELECT 7
+
+> SET search_path = ''
+-- SET
+
+> SELECT adnum, pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'a37s.a37t'::regclass
+>   ORDER BY 1
+adnum:int2 | pg_get_expr:text
+1 | a37s.a37f(1)
+2 | nextval('a37s.a37seq'::regclass)
+3 | 'x'::a37s.a37e
+4 | 'a37s.a37t'::regclass
+5 | (tableoid = ('a37s.a37t'::regclass)::oid)
+6 | tableoid
+7 | (a37s.a37f(a) + 1)
+-- SELECT 7
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+>   WHERE conrelid = 'a37s.a37t'::regclass OR contypid = 'a37s.a37d'::regtype ORDER BY 1
+conname:name | pg_get_constraintdef:text
+a37c | CHECK ((b > a37s.a37f('-1'::integer)))
+a37d_check | CHECK ((VALUE > a37s.a37f(0)))
+a37t_a_check | CHECK ((a < a37s.a37f(100)))
+-- SELECT 3
+
+> SELECT pg_get_indexdef('a37s.a37i'::regclass)
+pg_get_indexdef:text
+CREATE INDEX a37i ON a37s.a37t USING btree (a37s.a37f(a)) WHERE (a37s.a37f(b) > 0)
+-- SELECT 1
+
+> SELECT pg_get_statisticsobjdef(oid) FROM pg_statistic_ext WHERE stxname = 'a37st'
+pg_get_statisticsobjdef:text
+CREATE STATISTICS a37s.a37st ON b, a37s.a37f(a) FROM a37s.a37t
+-- SELECT 1
+
+> SELECT polname, pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck, polrelid)
+>   FROM pg_policy WHERE polname = 'a37p'
+polname:name | pg_get_expr:text | pg_get_expr:text
+a37p | (a37s.a37f(a) > 0) | (c = 'x'::a37s.a37e)
+-- SELECT 1
+
+> SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'a37tr'
+pg_get_triggerdef:text
+CREATE TRIGGER a37tr BEFORE INSERT ON a37s.a37t FOR EACH ROW WHEN ((new.a > a37s.a37f(0))) EXECUTE FUNCTION a37s.a37trf()
+-- SELECT 1
+
+> INSERT INTO a37s.a37t (h) VALUES (5)
+-- INSERT 0 1
+
+> SELECT a, b, c, d, e, f = 'a37s.a37t'::regclass AS f, g, h FROM a37s.a37t
+a:int4 | b:int4 | c:user | d:regclass | e:bool | f:bool | g:int4 | h:int4
+1 | 1 | x | a37s.a37t | t | t | 2 | 5
+-- SELECT 1
+
+> INSERT INTO a37s.a37t (a) VALUES (500)
+ERROR 23514: new row for relation "a37t" violates check constraint "a37t_a_check"
+DETAIL: Failing row contains (500, 2, x, a37s.a37t, virtual, virtual, 501, null).
+OBJECTS: schema=a37s table=a37t constraint=a37t_a_check
+
+> SET search_path = public
+-- SET
+
+> INSERT INTO a37s.a37t (a, h) VALUES (2, 3)
+-- INSERT 0 1
+
+> SELECT a, b, c, d, e, g, h FROM a37s.a37t ORDER BY a
+a:int4 | b:int4 | c:user | d:regclass | e:bool | g:int4 | h:int4
+1 | 1 | x | a37s.a37t | t | 2 | 5
+2 | 3 | x | a37s.a37t | t | 3 | 3
+-- SELECT 2
+
+> RESET search_path
+-- RESET
+
+> DROP SCHEMA a37s CASCADE
+NOTICE 00000: drop cascades to 6 other objects
+DETAIL: drop cascades to function a37s.a37f(integer)
+DETAIL: drop cascades to sequence a37s.a37seq
+DETAIL: drop cascades to type a37s.a37e
+DETAIL: drop cascades to type a37s.a37d
+DETAIL: drop cascades to table a37s.a37t
+DETAIL: drop cascades to function a37s.a37trf()
+-- DROP SCHEMA
+

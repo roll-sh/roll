@@ -1,0 +1,92 @@
+> CREATE TABLE p (a int, b text) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE TABLE p3 PARTITION OF p FOR VALUES FROM (20) TO (30)
+-- CREATE TABLE
+
+> PREPARE q(int) AS SELECT * FROM p WHERE a = $1
+-- PREPARE
+
+> EXPLAIN (COSTS OFF) EXECUTE q(5)
+QUERY PLAN:text
+Seq Scan on p1 p
+  Filter: (a = 5)
+-- EXPLAIN
+
+> SET plan_cache_mode = force_generic_plan
+-- SET
+
+> EXPLAIN (COSTS OFF) EXECUTE q(5)
+QUERY PLAN:text
+Append
+  Subplans Removed: 2
+  ->  Seq Scan on p1 p_1
+        Filter: (a = $1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = (SELECT 15)
+QUERY PLAN:text
+Append
+  InitPlan 1
+    ->  Result
+  ->  Seq Scan on p1 p_1
+        Filter: (a = (InitPlan 1).col1)
+  ->  Seq Scan on p2 p_2
+        Filter: (a = (InitPlan 1).col1)
+  ->  Seq Scan on p3 p_3
+        Filter: (a = (InitPlan 1).col1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, ANALYZE, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT * FROM p WHERE a = (SELECT 15)
+QUERY PLAN:text
+Append (actual rows=0.00 loops=1)
+  InitPlan 1
+    ->  Result (actual rows=1.00 loops=1)
+  ->  Seq Scan on p1 p_1 (never executed)
+        Filter: (a = (InitPlan 1).col1)
+  ->  Seq Scan on p2 p_2 (actual rows=0.00 loops=1)
+        Filter: (a = (InitPlan 1).col1)
+  ->  Seq Scan on p3 p_3 (never executed)
+        Filter: (a = (InitPlan 1).col1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a < length(current_user)
+QUERY PLAN:text
+Append
+  Subplans Removed: 2
+  ->  Seq Scan on p1 p_1
+        Filter: (a < length((CURRENT_USER)::text))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a = abs(-5)
+QUERY PLAN:text
+Seq Scan on p1 p
+  Filter: (a = 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM p WHERE a::numeric = 5
+QUERY PLAN:text
+Append
+  ->  Seq Scan on p1 p_1
+        Filter: ((a)::numeric = '5'::numeric)
+  ->  Seq Scan on p2 p_2
+        Filter: ((a)::numeric = '5'::numeric)
+  ->  Seq Scan on p3 p_3
+        Filter: ((a)::numeric = '5'::numeric)
+-- EXPLAIN
+
+> RESET plan_cache_mode
+-- RESET
+
+> DEALLOCATE q
+-- DEALLOCATE
+
+> DROP TABLE p
+-- DROP TABLE
+

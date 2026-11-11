@@ -1,0 +1,59 @@
+> create table ecd_t (thousand int, tenthous int, filler text)
+-- CREATE TABLE
+
+> insert into ecd_t select i % 1000, i, 'x' from generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> create index ecd_t_thous_tenthous on ecd_t (thousand, tenthous)
+-- CREATE INDEX
+
+> create table ecd_i (f1 int)
+-- CREATE TABLE
+
+> insert into ecd_i values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> analyze ecd_t, ecd_i
+-- ANALYZE
+
+> explain (costs off)
+> select a.f1, b.f1, t.thousand, t.tenthous from
+>   ecd_t t,
+>   (select sum(f1)+1 as f1 from ecd_i i4a) a,
+>   (select sum(f1) as f1 from ecd_i i4b) b
+> where b.f1 = t.thousand and a.f1 = b.f1 and (a.f1+b.f1+999) = t.tenthous
+QUERY PLAN:text
+Nested Loop
+  ->  Nested Loop
+        Join Filter: ((sum(i4b.f1)) = ((sum(i4a.f1) + 1)))
+        ->  Aggregate
+              ->  Seq Scan on ecd_i i4a
+        ->  Aggregate
+              ->  Seq Scan on ecd_i i4b
+  ->  Index Only Scan using ecd_t_thous_tenthous on ecd_t t
+        Index Cond: ((thousand = (sum(i4b.f1))) AND (tenthous = ((((sum(i4a.f1) + 1)) + (sum(i4b.f1))) + 999)))
+-- EXPLAIN
+
+> select a.f1, b.f1, t.thousand, t.tenthous from
+>   ecd_t t,
+>   (select sum(f1)+1 as f1 from ecd_i i4a) a,
+>   (select sum(f1) as f1 from ecd_i i4b) b
+> where b.f1 = t.thousand and a.f1 = b.f1 and (a.f1+b.f1+999) = t.tenthous
+f1:int8 | f1:int8 | thousand:int4 | tenthous:int4
+-- SELECT 0
+
+> update ecd_i set f1 = 1 where f1 = 0
+-- UPDATE 1
+
+> select a.f1, b.f1, t.thousand, t.tenthous from
+>   ecd_t t,
+>   (select max(f1) as f1 from ecd_i i4a where f1 between 0 and 5) a,
+>   (select max(f1) as f1 from ecd_i i4b where f1 between 0 and 5) b
+> where b.f1 = t.thousand and a.f1 = b.f1 and (a.f1+b.f1+999) = t.tenthous
+f1:int4 | f1:int4 | thousand:int4 | tenthous:int4
+1 | 1 | 1 | 1001
+-- SELECT 1
+
+> drop table ecd_t, ecd_i
+-- DROP TABLE
+

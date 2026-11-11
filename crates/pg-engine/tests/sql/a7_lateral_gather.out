@@ -1,0 +1,140 @@
+> CREATE TABLE a7_lg (unique1 int, stringu1 name, filler text)
+-- CREATE TABLE
+
+> INSERT INTO a7_lg SELECT (i * 7919) % 10000, 'AA' || i, repeat('x', 40)
+>   FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX a7_lg_unique1 ON a7_lg (unique1)
+-- CREATE INDEX
+
+> VACUUM ANALYZE a7_lg
+-- VACUUM
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT sub.unique1, stringu1
+>   FROM a7_lg, LATERAL (SELECT a7_lg.unique1 FROM generate_series(1, 3)) AS sub
+QUERY PLAN:text
+Nested Loop
+  Output: a7_lg.unique1, a7_lg.stringu1
+  ->  Function Scan on pg_catalog.generate_series
+        Output: generate_series.generate_series
+        Function Call: generate_series(1, 3)
+  ->  Materialize
+        Output: a7_lg.unique1, a7_lg.stringu1
+        ->  Seq Scan on public.a7_lg
+              Output: a7_lg.unique1, a7_lg.stringu1
+-- EXPLAIN
+
+> SELECT count(*), sum(sub.x) FROM a7_lg,
+>   LATERAL (SELECT a7_lg.unique1 + g AS x FROM generate_series(1, 3) g) AS sub
+count:int8 | sum:int8
+30000 | 150045000
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL jit = off
+-- SET
+
+> SET LOCAL enable_hashagg = off
+-- SET
+
+> SET LOCAL enable_seqscan = off
+-- SET
+
+> SET LOCAL enable_incremental_sort = off
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL min_parallel_index_scan_size = 0
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT sub.unique1, stringu1
+>   FROM a7_lg, LATERAL (SELECT a7_lg.unique1 FROM generate_series(1, 1000)) AS sub
+QUERY PLAN:text
+Unique
+  ->  Nested Loop
+        ->  Gather Merge
+              Workers Planned: 2
+              ->  Sort
+                    Sort Key: a7_lg.unique1, a7_lg.stringu1
+                    ->  Parallel Index Scan using a7_lg_unique1 on a7_lg
+        ->  Function Scan on generate_series
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT sub.unique1, stringu1
+>   FROM a7_lg, LATERAL (SELECT a7_lg.unique1 FROM generate_series(1, 1000)) AS sub
+>   ORDER BY 1, 2
+QUERY PLAN:text
+Nested Loop
+  ->  Gather Merge
+        Workers Planned: 2
+        ->  Sort
+              Sort Key: a7_lg.unique1, a7_lg.stringu1
+              ->  Parallel Index Scan using a7_lg_unique1 on a7_lg
+  ->  Function Scan on generate_series
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT sub.unique1, md5(stringu1)
+>   FROM a7_lg, LATERAL (SELECT a7_lg.unique1 FROM generate_series(1, 1000)) AS sub
+QUERY PLAN:text
+Unique
+  ->  Nested Loop
+        ->  Gather Merge
+              Workers Planned: 2
+              ->  Sort
+                    Sort Key: a7_lg.unique1, (md5((a7_lg.stringu1)::text)) COLLATE "C"
+                    ->  Parallel Index Scan using a7_lg_unique1 on a7_lg
+        ->  Function Scan on generate_series
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT sub.unique1, md5(stringu1)
+>   FROM a7_lg, LATERAL (SELECT a7_lg.unique1 FROM generate_series(1, 1000)) AS sub
+>   ORDER BY 1, 2
+QUERY PLAN:text
+Nested Loop
+  ->  Gather Merge
+        Workers Planned: 2
+        ->  Sort
+              Sort Key: a7_lg.unique1, (md5((a7_lg.stringu1)::text)) COLLATE "C"
+              ->  Parallel Index Scan using a7_lg_unique1 on a7_lg
+  ->  Function Scan on generate_series
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT sub.unique1, stringu1 || random()::text
+>   FROM a7_lg, LATERAL (SELECT a7_lg.unique1 FROM generate_series(1, 1000)) AS sub
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: a7_lg.unique1, (((a7_lg.stringu1)::text || (random())::text)) COLLATE "C"
+        ->  Gather
+              Workers Planned: 2
+              ->  Nested Loop
+                    ->  Parallel Index Scan using a7_lg_unique1 on a7_lg
+                    ->  Function Scan on generate_series
+-- EXPLAIN
+
+> SELECT DISTINCT sub.unique1, stringu1
+>   FROM a7_lg, LATERAL (SELECT a7_lg.unique1 FROM generate_series(1, 10)) AS sub
+>   ORDER BY 1 LIMIT 3
+unique1:int4 | stringu1:name
+0 | AA0
+1 | AA7679
+2 | AA5358
+-- SELECT 3
+
+> COMMIT
+-- COMMIT
+
+> DROP TABLE a7_lg
+-- DROP TABLE
+

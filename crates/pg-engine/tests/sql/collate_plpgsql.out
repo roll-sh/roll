@@ -1,0 +1,90 @@
+> create or replace function f(a text, b text) returns boolean language plpgsql as $$ begin return a < b; end $$
+-- CREATE FUNCTION
+
+> create or replace function g(a text) returns text language plpgsql as $$ declare l text := 'B'; begin return (select string_agg(x, ',' order by x) from (values (a), (l), ('b'), ('a')) v(x)); end $$
+-- CREATE FUNCTION
+
+> create or replace function h(a text) returns text language plpgsql as $$ declare l text collate "C" := 'B'; begin return (l < 'a')::text || (a < 'B')::text; end $$
+-- CREATE FUNCTION
+
+> create or replace function u(a text) returns text language plpgsql as $$ begin return upper(a) || lower(a) || initcap(a); end $$
+-- CREATE FUNCTION
+
+> create or replace function e(a text) returns boolean language plpgsql as $$ begin return a = 'abc'; end $$
+-- CREATE FUNCTION
+
+> create collation nd (provider=icu, locale='und-u-ks-level2', deterministic=false)
+-- CREATE COLLATION
+
+> create table t (x text collate "sv-x-icu")
+-- CREATE TABLE
+
+> insert into t values ('ä'),('z')
+-- INSERT 0 2
+
+> select f('a', 'B'), f('a' collate "C", 'B'), f('a' collate "en-x-icu", 'B')
+f:bool | f:bool | f:bool
+f | f | t
+-- SELECT 1
+
+> select g('A'), g('A' collate "C"), g('A' collate "en-x-icu")
+g:text | g:text | g:text
+A,B,a,b | A,B,a,b | a,A,b,B
+-- SELECT 1
+
+> select h('a'), h('a' collate "en-x-icu")
+h:text | h:text
+truefalse | truetrue
+-- SELECT 1
+
+> select u('ıstanbul' collate "tr-x-icu"), u('ıstanbul')
+u:text | u:text
+ISTANBULıstanbulIstanbul | ISTANBULıstanbulIstanbul
+-- SELECT 1
+
+> select e('ABC'), e('ABC' collate nd)
+e:bool | e:bool
+f | t
+-- SELECT 1
+
+> select x, f(x, 'z') from t order by x
+x:text | f:bool
+z | f
+ä | f
+-- SELECT 2
+
+> select f('a' collate "C", 'B' collate "en-x-icu")
+ERROR 42P21: collation mismatch between explicit collations "C" and "en-x-icu" (at 31)
+
+> create or replace function s(a text) returns text language plpgsql as $$ declare r text; begin select string_agg(x, ',' order by x) into r from (values (a), ('b'), ('B')) v(x); return r || (select min(y) from (values (a), ('Z')) w(y)); end $$
+-- CREATE FUNCTION
+
+> select s('a' collate "en-x-icu"), s('a')
+s:text | s:text
+a,b,Ba | B,a,bZ
+-- SELECT 1
+
+> create or replace function q(a text) returns text language plpgsql as $$ declare l text collate pg_catalog."C" := 'B'; begin return l < 'a'; end $$
+-- CREATE FUNCTION
+
+> select q('x' collate "en-x-icu")
+q:text
+true
+-- SELECT 1
+
+> select * from g('A' collate "en-x-icu")
+g:text
+a,A,b,B
+-- SELECT 1
+
+> create or replace function n(a int, b text) returns boolean language plpgsql as $$ begin return b < 'B'; end $$
+-- CREATE FUNCTION
+
+> select n(1, 'a' collate "en-x-icu"), n(1, 'a')
+n:bool | n:bool
+t | f
+-- SELECT 1
+
+> select * from f('a' collate "C", 'B' collate "en-x-icu")
+ERROR 42P21: collation mismatch between explicit collations "C" and "en-x-icu" (at 38)
+

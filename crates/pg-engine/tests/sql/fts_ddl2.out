@@ -1,0 +1,450 @@
+> CREATE ROLE fts_r1
+-- CREATE ROLE
+
+> CREATE ROLE fts_r2
+-- CREATE ROLE
+
+> CREATE SCHEMA fts_a
+-- CREATE SCHEMA
+
+> GRANT CREATE, USAGE ON SCHEMA fts_a TO fts_r1
+-- GRANT
+
+> SET ROLE fts_r1
+-- SET
+
+> CREATE TEXT SEARCH DICTIONARY fts_a.d1 (TEMPLATE = simple)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH CONFIGURATION fts_a.c1 (COPY = simple)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> CREATE TEXT SEARCH PARSER fts_a.p1 (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)
+ERROR 42501: must be superuser to create text search parsers
+
+> CREATE TEXT SEARCH TEMPLATE fts_a.t1 (LEXIZE = dsimple_lexize)
+ERROR 42501: must be superuser to create text search templates
+
+> CREATE TEXT SEARCH DICTIONARY public.d_no (TEMPLATE = simple)
+ERROR 42501: permission denied for schema public
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 (accept = false)
+-- ALTER TEXT SEARCH DICTIONARY
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE fts_r2
+-- SET
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 (accept = true)
+ERROR 42501: permission denied for schema fts_a
+
+> ALTER TEXT SEARCH CONFIGURATION fts_a.c1 DROP MAPPING FOR word
+ERROR 42501: permission denied for schema fts_a
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 RENAME TO d2
+ERROR 42501: permission denied for schema fts_a
+
+> COMMENT ON TEXT SEARCH DICTIONARY fts_a.d1 IS 'x'
+ERROR 42501: permission denied for schema fts_a
+
+> DROP TEXT SEARCH DICTIONARY fts_a.d1
+ERROR 42501: permission denied for schema fts_a
+
+> RESET ROLE
+-- RESET
+
+> GRANT USAGE ON SCHEMA fts_a TO fts_r2
+-- GRANT
+
+> SET ROLE fts_r2
+-- SET
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 (accept = true)
+ERROR 42501: must be owner of text search dictionary fts_a.d1
+
+> ALTER TEXT SEARCH CONFIGURATION fts_a.c1 DROP MAPPING FOR word
+ERROR 42501: must be owner of text search configuration fts_a.c1
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 RENAME TO d2
+ERROR 42501: must be owner of text search dictionary d1
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 SET SCHEMA public
+ERROR 42501: permission denied for schema public
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 OWNER TO fts_r2
+ERROR 42501: must be owner of text search dictionary d1
+
+> COMMENT ON TEXT SEARCH DICTIONARY fts_a.d1 IS 'x'
+ERROR 42501: must be owner of text search dictionary fts_a.d1
+
+> DROP TEXT SEARCH DICTIONARY fts_a.d1
+ERROR 42501: must be owner of text search dictionary fts_a.d1
+
+> COMMENT ON TEXT SEARCH PARSER pg_catalog.default IS 'x'
+ERROR 42501: must be superuser
+
+> ALTER TEXT SEARCH PARSER pg_catalog.default RENAME TO def2
+ERROR 42501: must be superuser to rename text search parser "default"
+
+> ALTER TEXT SEARCH TEMPLATE simple SET SCHEMA fts_a
+ERROR 42501: permission denied for schema fts_a
+
+> DROP TEXT SEARCH TEMPLATE simple
+ERROR 42501: must be superuser
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE fts_r1
+-- SET
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 OWNER TO fts_r2
+ERROR 42501: must be able to SET ROLE "fts_r2"
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 RENAME TO d1b
+-- ALTER TEXT SEARCH DICTIONARY
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1b RENAME TO d1
+-- ALTER TEXT SEARCH DICTIONARY
+
+> RESET ROLE
+-- RESET
+
+> SELECT dictname, dictowner::regrole FROM pg_ts_dict WHERE dictname = 'd1'
+dictname:name | dictowner:4096
+d1 | fts_r1
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d1 OWNER TO fts_r2
+-- ALTER TEXT SEARCH DICTIONARY
+
+> ALTER TEXT SEARCH CONFIGURATION fts_a.c1 OWNER TO fts_r2
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT dictowner::regrole FROM pg_ts_dict WHERE dictname = 'd1'
+dictowner:4096
+fts_r2
+-- SELECT 1
+
+> SELECT cfgowner::regrole FROM pg_ts_config WHERE cfgname = 'c1'
+cfgowner:4096
+fts_r2
+-- SELECT 1
+
+> DROP ROLE fts_r2
+ERROR 2BP01: role "fts_r2" cannot be dropped because some objects depend on it
+DETAIL: privileges for schema fts_a
+DETAIL: owner of text search dictionary fts_a.d1
+DETAIL: owner of text search configuration fts_a.c1
+
+> REASSIGN OWNED BY fts_r2 TO fts_r1
+-- REASSIGN OWNED
+
+> SELECT dictowner::regrole FROM pg_ts_dict WHERE dictname = 'd1'
+dictowner:4096
+fts_r1
+-- SELECT 1
+
+> DROP OWNED BY fts_r1
+-- DROP OWNED
+
+> SELECT count(*) FROM pg_ts_dict WHERE dictname = 'd1'
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM pg_ts_config WHERE cfgname = 'c1'
+count:int8
+0
+-- SELECT 1
+
+> CREATE TEXT SEARCH DICTIONARY fts_a.d3 (TEMPLATE = simple)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> CREATE TEXT SEARCH DICTIONARY fts_a.d4 (TEMPLATE = simple)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d3 RENAME TO d4
+ERROR 42710: text search dictionary "d4" already exists in schema "fts_a"
+
+> CREATE TEXT SEARCH DICTIONARY public.d4 (TEMPLATE = simple)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d4 SET SCHEMA public
+ERROR 42710: text search dictionary "d4" already exists in schema "public"
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d4 SET SCHEMA fts_a
+-- ALTER TEXT SEARCH DICTIONARY
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.d4 SET SCHEMA nosuch
+ERROR 3F000: schema "nosuch" does not exist
+
+> ALTER TEXT SEARCH DICTIONARY nosuch.d4 SET SCHEMA public
+ERROR 3F000: schema "nosuch" does not exist
+
+> ALTER TEXT SEARCH DICTIONARY fts_a.nosuch RENAME TO x
+ERROR 42704: text search dictionary "fts_a.nosuch" does not exist
+
+> DROP TEXT SEARCH DICTIONARY nosuch.d4
+ERROR 3F000: schema "nosuch" does not exist
+
+> DROP TEXT SEARCH DICTIONARY IF EXISTS nosuch.d4
+NOTICE 00000: schema "nosuch" does not exist, skipping
+-- DROP TEXT SEARCH DICTIONARY
+
+> DROP TEXT SEARCH CONFIGURATION IF EXISTS fts_a.nosuch
+NOTICE 00000: text search configuration "fts_a.nosuch" does not exist, skipping
+-- DROP TEXT SEARCH CONFIGURATION
+
+> SELECT 'nosuch.english'::regconfig
+ERROR 42704: text search configuration "nosuch.english" does not exist (at 8)
+
+> SELECT 'fts_a.d4'::regdictionary, 'd4'::regdictionary
+regdictionary:3769 | regdictionary:3769
+fts_a.d4 | d4
+-- SELECT 1
+
+> CREATE TEXT SEARCH CONFIGURATION fts_a.c2 (PARSER = pg_catalog.default)
+-- CREATE TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH CONFIGURATION fts_a.c2 ADD MAPPING FOR asciiword, asciiword, word WITH fts_a.d3, d4, simple
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT maptokentype, mapseqno, mapdict::regdictionary FROM pg_ts_config_map WHERE mapcfg = 'fts_a.c2'::regconfig ORDER BY 1, 2
+maptokentype:int4 | mapseqno:int4 | mapdict:3769
+1 | 1 | fts_a.d3
+1 | 2 | d4
+1 | 3 | simple
+2 | 1 | fts_a.d3
+2 | 2 | d4
+2 | 3 | simple
+-- SELECT 6
+
+> ALTER TEXT SEARCH CONFIGURATION fts_a.c2 ALTER MAPPING FOR asciiword REPLACE fts_a.d3 WITH english_stem
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH CONFIGURATION fts_a.c2 ALTER MAPPING REPLACE simple WITH english_stem
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT maptokentype, mapseqno, mapdict::regdictionary FROM pg_ts_config_map WHERE mapcfg = 'fts_a.c2'::regconfig ORDER BY 1, 2
+maptokentype:int4 | mapseqno:int4 | mapdict:3769
+1 | 1 | english_stem
+1 | 2 | d4
+1 | 3 | english_stem
+2 | 1 | fts_a.d3
+2 | 2 | d4
+2 | 3 | english_stem
+-- SELECT 6
+
+> SELECT classid::regclass, objid = 'fts_a.c2'::regconfig, refclassid::regclass, deptype FROM pg_depend WHERE objid = 'fts_a.c2'::regconfig ORDER BY refclassid, refobjid
+classid:regclass | ?column?:bool | refclassid:regclass | deptype:char
+pg_ts_config | t | pg_namespace | n
+pg_ts_config | t | pg_ts_dict | n
+pg_ts_config | t | pg_ts_dict | n
+pg_ts_config | t | pg_ts_dict | n
+-- SELECT 4
+
+> SELECT classid::regclass, refclassid::regclass, deptype FROM pg_depend WHERE objid = 'fts_a.d3'::regdictionary ORDER BY refclassid
+classid:regclass | refclassid:regclass | deptype:char
+pg_ts_dict | pg_namespace | n
+-- SELECT 1
+
+> SELECT pg_describe_object(classid, objid, objsubid), pg_describe_object(refclassid, refobjid, refobjsubid) FROM pg_depend WHERE classid IN ('pg_ts_dict'::regclass, 'pg_ts_config'::regclass, 'pg_ts_template'::regclass, 'pg_ts_parser'::regclass) AND objid >= 16384 ORDER BY 1, 2
+pg_describe_object:text | pg_describe_object:text
+text search configuration fts_a.c2 | schema fts_a
+text search configuration fts_a.c2 | text search dictionary d4
+text search configuration fts_a.c2 | text search dictionary english_stem
+text search configuration fts_a.c2 | text search dictionary fts_a.d3
+text search dictionary d4 | schema public
+text search dictionary fts_a.d3 | schema fts_a
+text search dictionary fts_a.d4 | schema fts_a
+-- SELECT 7
+
+> SELECT * FROM pg_identify_object_as_address('pg_ts_config'::regclass, 'fts_a.c2'::regconfig, 0)
+type:text | object_names:text[] | object_args:text[]
+text search configuration | {fts_a,c2} | {}
+-- SELECT 1
+
+> SELECT classid::regclass, objid = 'fts_a.d3'::regdictionary, objsubid FROM pg_get_object_address('text search dictionary', '{fts_a,d3}', '{}')
+classid:regclass | ?column?:bool | objsubid:int4
+pg_ts_dict | t | 0
+-- SELECT 1
+
+> SELECT pg_get_object_address('text search configuration', '{nosuch}', '{}')
+ERROR 42704: text search configuration "nosuch" does not exist
+
+> SELECT pg_describe_object('pg_ts_template'::regclass, oid, 0), pg_ts_template_is_visible(oid) FROM pg_ts_template ORDER BY oid
+pg_describe_object:text | pg_ts_template_is_visible:bool
+text search template simple | t
+text search template synonym | t
+text search template ispell | t
+text search template thesaurus | t
+text search template snowball | t
+-- SELECT 5
+
+> SELECT pg_describe_object('pg_ts_parser'::regclass, oid, 0), pg_ts_parser_is_visible(oid) FROM pg_ts_parser ORDER BY oid
+pg_describe_object:text | pg_ts_parser_is_visible:bool
+text search parser "default" | t
+-- SELECT 1
+
+> SELECT pg_ts_dict_is_visible(1), pg_ts_config_is_visible('fts_a.c2'::regconfig)
+pg_ts_dict_is_visible:bool | pg_ts_config_is_visible:bool
+NULL | f
+-- SELECT 1
+
+> CREATE TEXT SEARCH PARSER bad1 (START = prsd_nexttoken, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)
+ERROR 42883: function prsd_nexttoken(internal, integer) does not exist
+
+> CREATE TEXT SEARCH PARSER bad1 (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_end)
+ERROR 42P17: function prsd_end(internal) should return type internal
+
+> CREATE TEXT SEARCH PARSER bad1 (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype, bogus = x)
+ERROR 42601: text search parser parameter "bogus" not recognized
+
+> CREATE TEXT SEARCH PARSER bad1 (START = nosuch.prsd_start)
+ERROR 3F000: schema "nosuch" does not exist
+
+> CREATE TEXT SEARCH PARSER bad1 (START = prsd_start, GETTOKEN = prsd_nexttoken, LEXTYPES = prsd_lextype)
+ERROR 42P17: text search parser end method is required
+
+> CREATE TEXT SEARCH TEMPLATE bad2 (INIT = dsimple_init)
+ERROR 42P17: text search template lexize method is required
+
+> CREATE TEXT SEARCH TEMPLATE bad2 (LEXIZE = dsimple_init)
+ERROR 42883: function dsimple_init(internal, internal, internal, internal) does not exist
+
+> CREATE TEXT SEARCH TEMPLATE bad2 (LEXIZE = dsimple_lexize, foo = bar)
+ERROR 42601: text search template parameter "foo" not recognized
+
+> CREATE TEXT SEARCH DICTIONARY bad3 (TEMPLATE = simple, accept)
+ERROR 42601: accept requires a parameter
+
+> CREATE TEXT SEARCH DICTIONARY bad3 (TEMPLATE = snowball)
+ERROR 22023: missing Language parameter
+
+> CREATE TEXT SEARCH DICTIONARY bad3 (TEMPLATE = snowball, language = klingon)
+ERROR 42704: no Snowball stemmer available for language "klingon" and encoding "UTF8"
+
+> CREATE TEXT SEARCH DICTIONARY bad3 (TEMPLATE = synonym)
+ERROR 22023: missing Synonyms parameter
+
+> CREATE TEXT SEARCH DICTIONARY bad3 (TEMPLATE = thesaurus, dictfile = thesaurus_sample)
+ERROR 22023: missing Dictionary parameter
+
+> CREATE TEXT SEARCH DICTIONARY bad3 (TEMPLATE = simple, stopwords = 'english', stopwords = 'english')
+ERROR 22023: multiple StopWords parameters
+
+> CREATE TEXT SEARCH DICTIONARY q1 (TEMPLATE = simple, "StopWords" = english)
+ERROR 22023: unrecognized simple dictionary parameter: "StopWords"
+
+> CREATE TEXT SEARCH DICTIONARY q1 (TEMPLATE = simple, stopWORDS = 'eng''lish')
+ERROR 22023: invalid text search configuration file name "eng'lish"
+
+> CREATE TEXT SEARCH DICTIONARY q1 (TEMPLATE = simple, accept = 1.5)
+ERROR 42601: accept requires a Boolean value
+
+> CREATE TEXT SEARCH DICTIONARY q1 (TEMPLATE = simple, accept = on)
+-- CREATE TEXT SEARCH DICTIONARY
+
+> SELECT dictinitoption FROM pg_ts_dict WHERE dictname = 'q1'
+dictinitoption:text
+accept = 'on'
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY q1 (accept)
+-- ALTER TEXT SEARCH DICTIONARY
+
+> SELECT dictinitoption IS NULL FROM pg_ts_dict WHERE dictname = 'q1'
+?column?:bool
+t
+-- SELECT 1
+
+> ALTER TEXT SEARCH DICTIONARY q1 (accept = maybe)
+ERROR 42601: accept requires a Boolean value
+
+> BEGIN
+-- BEGIN
+
+> DROP TEXT SEARCH CONFIGURATION english
+-- DROP TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('english', 'cats')
+ERROR 42704: text search configuration "english" does not exist (at 20)
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT to_tsvector('english', 'cats')
+to_tsvector:3614
+'cat':1
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> DROP TEXT SEARCH DICTIONARY english_stem
+ERROR 2BP01: cannot drop text search dictionary english_stem because other objects depend on it
+DETAIL: text search configuration english depends on text search dictionary english_stem
+DETAIL: text search configuration hindi depends on text search dictionary english_stem
+DETAIL: text search configuration russian depends on text search dictionary english_stem
+DETAIL: text search configuration fts_a.c2 depends on text search dictionary english_stem
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TEXT SEARCH DICTIONARY english_stem CASCADE
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> SET default_text_search_config = 'fts_a.c2'
+-- SET
+
+> SELECT to_tsvector('Cats sat'), get_current_ts_config()
+to_tsvector:3614 | get_current_ts_config:3734
+'cat':1 'sat':2 | fts_a.c2
+-- SELECT 1
+
+> DROP TEXT SEARCH CONFIGURATION fts_a.c2
+-- DROP TEXT SEARCH CONFIGURATION
+
+> SELECT to_tsvector('Cats sat')
+ERROR 42704: text search configuration "fts_a.c2" does not exist
+
+> RESET default_text_search_config
+-- RESET
+
+> ALTER TEXT SEARCH CONFIGURATION english RENAME TO english2
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> SELECT 'english2'::regconfig::oid, to_tsvector('english2', 'cats')
+oid:oid | to_tsvector:3614
+13282 | 'cat':1
+-- SELECT 1
+
+> ALTER TEXT SEARCH CONFIGURATION english2 RENAME TO english
+-- ALTER TEXT SEARCH CONFIGURATION
+
+> ALTER TEXT SEARCH CONFIGURATION english ADD MAPPING FOR email WITH english_stem
+ERROR 23505: duplicate key value violates unique constraint "pg_ts_config_map_index"
+DETAIL: Key (mapcfg, maptokentype, mapseqno)=(13282, 4, 1) already exists.
+OBJECTS: schema=pg_catalog table=pg_ts_config_map constraint=pg_ts_config_map_index
+
+> SELECT count(*) FROM pg_ts_config_map WHERE mapcfg = 'english'::regconfig
+count:int8
+19
+-- SELECT 1
+
+> DROP SCHEMA fts_a CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to text search dictionary fts_a.d3
+DETAIL: drop cascades to text search dictionary fts_a.d4
+-- DROP SCHEMA
+
+> DROP ROLE fts_r1
+-- DROP ROLE
+
+> DROP ROLE fts_r2
+-- DROP ROLE
+

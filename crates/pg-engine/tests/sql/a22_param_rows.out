@@ -1,0 +1,85 @@
+> create table ppr_t (unique1 int, unique2 int, thousand int, tenthous int, filler text)
+-- CREATE TABLE
+
+> insert into ppr_t select i, (i * 7919) % 10000, i % 1000, i, repeat($$x$$, 200) from generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> create index ppr_t_unique1 on ppr_t (unique1)
+-- CREATE INDEX
+
+> create index ppr_t_unique2 on ppr_t (unique2)
+-- CREATE INDEX
+
+> create index ppr_t_thous_tenthous on ppr_t (thousand, tenthous)
+-- CREATE INDEX
+
+> create table ppr_i (f1 int)
+-- CREATE TABLE
+
+> insert into ppr_i values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> analyze ppr_t, ppr_i
+-- ANALYZE
+
+> explain (costs off)
+> select b.unique1 from
+>   ppr_t a join ppr_t b on a.unique1 = b.unique2
+>   left join ppr_t c on b.unique1 = 42 and c.thousand = a.thousand
+>   join ppr_i i1 on b.thousand = f1
+>   right join ppr_i i2 on i2.f1 = b.tenthous
+>   order by 1
+QUERY PLAN:text
+Sort
+  Sort Key: b.unique1
+  ->  Nested Loop Left Join
+        ->  Seq Scan on ppr_i i2
+        ->  Nested Loop Left Join
+              Join Filter: (b.unique1 = 42)
+              ->  Nested Loop
+                    ->  Nested Loop
+                          ->  Seq Scan on ppr_i i1
+                          ->  Index Scan using ppr_t_thous_tenthous on ppr_t b
+                                Index Cond: ((thousand = i1.f1) AND (tenthous = i2.f1))
+                    ->  Index Scan using ppr_t_unique1 on ppr_t a
+                          Index Cond: (unique1 = b.unique2)
+              ->  Index Only Scan using ppr_t_thous_tenthous on ppr_t c
+                    Index Cond: (thousand = a.thousand)
+-- EXPLAIN
+
+> select b.unique1 from
+>   ppr_t a join ppr_t b on a.unique1 = b.unique2
+>   left join ppr_t c on b.unique1 = 42 and c.thousand = a.thousand
+>   join ppr_i i1 on b.thousand = f1
+>   right join ppr_i i2 on i2.f1 = b.tenthous
+>   order by 1
+unique1:int4
+0
+NULL
+NULL
+NULL
+NULL
+-- SELECT 5
+
+> insert into ppr_i values (5), (7)
+-- INSERT 0 2
+
+> select b.unique1, b.tenthous from
+>   ppr_t a join ppr_t b on a.unique1 = b.unique2
+>   left join ppr_t c on b.unique1 = 42 and c.thousand = a.thousand
+>   join ppr_i i1 on b.thousand = f1
+>   right join ppr_i i2 on i2.f1 = b.tenthous
+>   order by 1, 2
+unique1:int4 | tenthous:int4
+0 | 0
+5 | 5
+7 | 7
+NULL | NULL
+NULL | NULL
+NULL | NULL
+NULL | NULL
+-- SELECT 7
+
+> drop table ppr_t, ppr_i
+-- DROP TABLE
+

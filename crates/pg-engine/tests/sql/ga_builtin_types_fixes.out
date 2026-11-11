@@ -1,0 +1,766 @@
+> SELECT '\101'::"char", '\377'::"char"::text, '\000'::"char"::text, 'a'::text::"char", '\377'::text::"char"
+char:char | text:text | text:text | char:char | char:char
+A | \377 |  | a | \377
+-- SELECT 1
+
+> SELECT position(B'' IN B'00001010'), position(B'' IN B''), position(B'1' IN B'')
+position:int4 | position:int4 | position:int4
+1 | 0 | 0
+-- SELECT 1
+
+> CREATE TABLE ga_bit_defaults (b1 bit(4) DEFAULT '1001', b2 bit(4) DEFAULT B'0101', b3 bit varying(5) DEFAULT '1001', b4 bit varying(5) DEFAULT B'0101')
+-- CREATE TABLE
+
+> SELECT a.attname, pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE d.adrelid = 'ga_bit_defaults'::regclass ORDER BY 1
+attname:name | pg_get_expr:text
+b1 | '1001'::"bit"
+b2 | '0101'::"bit"
+b3 | '1001'::bit varying
+b4 | '0101'::"bit"
+-- SELECT 4
+
+> CREATE VIEW ga_bit_view AS SELECT B'0101' AS a, '11'::"bit" AS c
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('ga_bit_view'::regclass)
+pg_get_viewdef:text
+ SELECT '0101'::"bit" AS a,
+    '11'::"bit" AS c;
+-- SELECT 1
+
+> SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'ga_bit_view'::regclass ORDER BY attnum
+format_type:text
+"bit"
+"bit"
+-- SELECT 2
+
+> DROP VIEW ga_bit_view
+-- DROP VIEW
+
+> DROP TABLE ga_bit_defaults
+-- DROP TABLE
+
+> SELECT '010'::xid, '0x10'::xid, '-1'::xid, ' 12 '::oid, '010'::oid, '-2147483648'::oid
+xid:28 | xid:28 | xid:28 | oid:oid | oid:oid | oid:oid
+8 | 16 | 4294967295 | 12 | 8 | 2147483648
+-- SELECT 1
+
+> SELECT '0x'::oid
+ERROR 22P02: invalid input syntax for type oid: "0x" (at 8)
+
+> SELECT '4294967296'::xid
+ERROR 22003: value "4294967296" is out of range for type xid (at 8)
+
+> SELECT '1 2'::cid
+ERROR 22P02: invalid input syntax for type cid: "1 2" (at 8)
+
+> SELECT ' 0/12345678'::pg_lsn
+ERROR 22P02: invalid input syntax for type pg_lsn: " 0/12345678" (at 8)
+
+> SELECT '0/12345678 '::pg_lsn
+ERROR 22P02: invalid input syntax for type pg_lsn: "0/12345678 " (at 8)
+
+> SELECT '123456789/1'::pg_lsn
+ERROR 22P02: invalid input syntax for type pg_lsn: "123456789/1" (at 8)
+
+> SELECT '(-1,0)'::tid, '(4294967295,65535)'::tid, '( 1 , 2 )'::tid, 'x(0,1)'::tid
+ERROR 22P02: invalid input syntax for type tid: "( 1 , 2 )" (at 50)
+
+> SELECT '(0,-1)'::tid
+ERROR 22P02: invalid input syntax for type tid: "(0,-1)" (at 8)
+
+> SELECT '(4294967296,1)'::tid
+ERROR 22P02: invalid input syntax for type tid: "(4294967296,1)" (at 8)
+
+> SELECT '(0,1) x'::tid
+tid:27
+(0,1)
+-- SELECT 1
+
+> SELECT regrole('foo.bar')
+ERROR 42602: invalid name syntax (at 16)
+
+> SELECT regnamespace('foo.bar')
+ERROR 42602: invalid name syntax (at 21)
+
+> SELECT 'no_such_catalog.schema.name'::regtype
+ERROR 0A000: cross-database references are not implemented: no_such_catalog.schema.name (at 8)
+
+> SELECT * FROM pg_input_error_info('no_such_catalog.schema.name', 'regtype')
+ERROR 0A000: cross-database references are not implemented: no_such_catalog.schema.name
+
+> PREPARE ga_p1 AS SELECT $1a
+ERROR 42601: trailing junk after parameter at or near "$1a" (at 25)
+
+> PREPARE ga_p1 AS SELECT $0_1
+ERROR 42601: trailing junk after parameter at or near "$0_1" (at 25)
+
+> SELECT '$1a', $$ $1a $$, "$1a" FROM (SELECT 1 AS "$1a") s
+?column?:text | ?column?:text | $1a:int4
+$1a |  $1a  | 1
+-- SELECT 1
+
+> SELECT int4in('5'), int4out(5), textout('a'), boolin('t'), tsvectorin(tsvectorout('b a'::tsvector)), numeric_out(1.50)
+int4in:int4 | int4out:2275 | textout:2275 | boolin:bool | tsvectorin:3614 | numeric_out:2275
+5 | 5 | a | t | 'a' 'b' | 1.50
+-- SELECT 1
+
+> SELECT '1 2'::oidvector = '1 2', '1 2'::oidvector <> '', '1 2'::oidvector < '3', '3'::oidvector < '1 2', '1 2'::int2vector = '1 2'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | f | t | t
+-- SELECT 1
+
+> SELECT count(*) > 0 FROM pg_proc WHERE proargtypes <> ''
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE TYPE ga_mood AS ENUM ('sad', 'ok', 'happy')
+-- CREATE TYPE
+
+> CREATE TYPE ga_pair AS (a int, b text)
+-- CREATE TYPE
+
+> CREATE TYPE ga_vb AS (a varbit, b text)
+-- CREATE TYPE
+
+> SELECT hash_range(int4range(1, 5)), hash_range_extended(int4range(1, 5), 0), hash_range_extended(int4range(1, 5), 1), hash_range('empty'::int4range), hash_range(numrange(1.5, NULL))
+hash_range:int4 | hash_range_extended:int8 | hash_range_extended:int8 | hash_range:int4 | hash_range:int4
+728650269 | 9082665408568119837 | -2177455977039666478 | 484847245 | -1378129350
+-- SELECT 1
+
+> SELECT hash_multirange(int4multirange(int4range(1, 5), int4range(7, 9))), hash_multirange_extended(int4multirange(int4range(1, 5)), 0), hash_multirange('{}'::int4multirange)
+hash_multirange:int4 | hash_multirange_extended:int8 | hash_multirange:int4
+-1306636527 | 9082665408568119868 | 1
+-- SELECT 1
+
+> SELECT hash_record(row(1, 'aaa')::ga_pair), hash_record_extended(row(1, 'aaa')::ga_pair, 0), hash_record_extended(row(NULL, 'b')::ga_pair, 7)
+hash_record:int4 | hash_record_extended:int8 | hash_record_extended:int8
+-688863489 | 6918574391927293695 | 3597992590022772544
+-- SELECT 1
+
+> SELECT hash_record(row('10', 'aaa')::ga_vb)
+ERROR 42883: could not identify a hash function for type bit varying
+
+> SELECT hash_record_extended(row('10', 'aaa')::ga_vb, 0)
+ERROR 42883: could not identify an extended hash function for type bit varying
+
+> SELECT hash_array('{101}'::varbit[])
+ERROR 42883: could not identify a hash function for type bit varying
+
+> SELECT hash_array_extended('{101}'::varbit[], 0)
+ERROR 42883: could not identify an extended hash function for type bit varying
+
+> SELECT v, hashenum(v)::bit(32) = hashenumextended(v, 0)::bit(32), hashenum(v)::bit(32) <> hashenumextended(v, 1)::bit(32) FROM unnest(enum_range(NULL::ga_mood)) v
+v:user | ?column?:bool | ?column?:bool
+happy | t | t
+ok | t | t
+sad | t | t
+-- SELECT 3
+
+> SELECT hash_aclitem(a)::bit(32) = hash_aclitem_extended(a, 0)::bit(32) FROM (SELECT relacl[1] a FROM pg_class WHERE relacl IS NOT NULL LIMIT 3) s
+?column?:bool
+t
+t
+t
+-- SELECT 3
+
+> DROP TYPE ga_vb
+-- DROP TYPE
+
+> DROP TYPE ga_pair
+-- DROP TYPE
+
+> BEGIN
+-- BEGIN
+
+> ALTER TYPE ga_mood ADD VALUE 'new'
+-- ALTER TYPE
+
+> SAVEPOINT x
+-- SAVEPOINT
+
+> SELECT 'new'::ga_mood
+ERROR 55P04: unsafe use of new value "new" of enum type ga_mood (at 8)
+HINT: New enum values must be committed before they can be used.
+
+> ROLLBACK TO x
+-- ROLLBACK
+
+> SELECT enum_first(NULL::ga_mood)
+enum_first:user
+sad
+-- SELECT 1
+
+> SELECT enum_last(NULL::ga_mood)
+ERROR 55P04: unsafe use of new value "new" of enum type ga_mood
+HINT: New enum values must be committed before they can be used.
+
+> ROLLBACK TO x
+-- ROLLBACK
+
+> SELECT enum_range(NULL::ga_mood)
+ERROR 55P04: unsafe use of new value "new" of enum type ga_mood
+HINT: New enum values must be committed before they can be used.
+
+> ROLLBACK TO x
+-- ROLLBACK
+
+> SELECT enum_range('ok'::ga_mood, 'happy'::ga_mood)
+enum_range:user
+{ok,happy}
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT 'new'::ga_mood, enum_last(NULL::ga_mood)
+ga_mood:user | enum_last:user
+new | new
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> ALTER TYPE ga_mood RENAME VALUE 'sad' TO 'blue'
+-- ALTER TYPE
+
+> SELECT 'blue'::ga_mood
+ga_mood:user
+blue
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> CREATE TYPE ga_fresh AS ENUM ('a')
+-- CREATE TYPE
+
+> ALTER TYPE ga_fresh ADD VALUE 'b'
+-- ALTER TYPE
+
+> SELECT 'b'::ga_fresh, enum_range(NULL::ga_fresh)
+ga_fresh:user | enum_range:user
+b | {a,b}
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TYPE ga_mood
+-- DROP TYPE
+
+> SELECT * FROM pg_split_walfile_name(NULL)
+segment_number:numeric | timeline_id:int8
+NULL | NULL
+-- SELECT 1
+
+> SELECT pg_split_walfile_name(NULL) IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT * FROM abs(NULL::int)
+abs:int4
+NULL
+-- SELECT 1
+
+> SELECT pg_replication_origin_create('regress_' || repeat('a', 505))
+ERROR 54000: replication origin name is too long
+DETAIL: Replication origin names must be no longer than 512 bytes.
+
+> SELECT repeat(U&'\00A7', 30)::json
+ERROR 22P02: invalid input syntax for type json
+DETAIL: Token "§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§" is invalid.
+CONTEXT: JSON data, line 1: ...§§§§§§§§§§§§§§§§§§§§§§§§
+
+> SELECT '[1, 2, €€x]'::jsonb
+ERROR 22P02: invalid input syntax for type json (at 8)
+DETAIL: Token "€€x" is invalid.
+CONTEXT: JSON data, line 1: [1, 2, €€x...
+
+> SET client_encoding TO latin1
+-- SET
+
+> SHOW client_encoding
+client_encoding:text
+LATIN1
+-- SHOW
+
+> SELECT 'abc'
+?column?:text
+abc
+-- SELECT 1
+
+> SET client_encoding TO 'euc-jp'
+-- SET
+
+> SHOW client_encoding
+client_encoding:text
+EUC_JP
+-- SHOW
+
+> RESET client_encoding
+-- RESET
+
+> SHOW client_encoding
+client_encoding:text
+UTF8
+-- SHOW
+
+> SET client_encoding TO no_such_encoding
+ERROR 22023: invalid value for parameter "client_encoding": "no_such_encoding"
+
+> SET timezone TO 'America/Los_Angeles'
+-- SET
+
+> SELECT * FROM pg_timezone_abbrevs_zone() ORDER BY 1
+abbrev:text | utc_offset:interval | is_dst:bool
+LMT | -07:52:58 | f
+PDT | -07:00:00 | t
+PPT | -07:00:00 | t
+PST | -08:00:00 | f
+PWT | -07:00:00 | t
+-- SELECT 5
+
+> SELECT * FROM pg_timezone_abbrevs WHERE abbrev IN ('LMT', 'PST', 'PWT') ORDER BY 1
+abbrev:text | utc_offset:interval | is_dst:bool
+LMT | -07:52:58 | f
+PST | -08:00:00 | f
+PWT | -07:00:00 | t
+-- SELECT 3
+
+> RESET timezone
+-- RESET
+
+> SELECT count(*) > 0 AS ok, count(*) FILTER (WHERE error IS NOT NULL) = 0 AS no_err FROM pg_hba_file_rules
+ok:bool | no_err:bool
+t | t
+-- SELECT 1
+
+> SELECT count(*) > 0 FROM pg_locks WHERE locktype = 'virtualxid' AND pid = pg_backend_pid()
+?column?:bool
+t
+-- SELECT 1
+
+> WITH c AS (SELECT * FROM pg_backend_memory_contexts) SELECT count(*) > 1 FROM c c1, c c2 WHERE c2.name = 'CacheMemoryContext' AND c1.path[c2.level] = c2.path[c2.level]
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT name, level FROM pg_backend_memory_contexts WHERE level = 1
+name:text | level:int4
+TopMemoryContext | 1
+-- SELECT 1
+
+> CREATE TABLE ga_tid_tab (a int)
+-- CREATE TABLE
+
+> SELECT currtid2('ga_tid_tab'::text, '(0,1)'::tid)
+ERROR 22023: tid (0, 1) is not valid for relation "ga_tid_tab"
+
+> INSERT INTO ga_tid_tab VALUES (1)
+-- INSERT 0 1
+
+> SELECT currtid2('ga_tid_tab'::text, '(0,1)'::tid)
+currtid2:27
+(0,1)
+-- SELECT 1
+
+> SELECT currtid2('ga_tid_tab'::text, '(0,0)'::tid)
+ERROR 22023: tid (0, 0) is not valid for relation "ga_tid_tab"
+
+> CREATE VIEW ga_tid_view AS SELECT ctid, a FROM ga_tid_tab
+-- CREATE VIEW
+
+> SELECT currtid2('ga_tid_view'::text, '(0,1)'::tid)
+currtid2:27
+(0,1)
+-- SELECT 1
+
+> CREATE VIEW ga_tid_view2 AS SELECT a FROM ga_tid_tab
+-- CREATE VIEW
+
+> SELECT currtid2('ga_tid_view2'::text, '(0,1)'::tid)
+ERROR 0A000: currtid cannot handle views with no CTID
+
+> CREATE INDEX ga_tid_ind ON ga_tid_tab (a)
+-- CREATE INDEX
+
+> SELECT currtid2('ga_tid_ind'::text, '(0,1)'::tid)
+ERROR 42809: cannot open relation "ga_tid_ind"
+DETAIL: This operation is not supported for indexes.
+
+> SELECT currtid2('ga_no_such'::text, '(0,1)'::tid)
+ERROR 42P01: relation "ga_no_such" does not exist
+
+> DROP VIEW ga_tid_view
+-- DROP VIEW
+
+> DROP VIEW ga_tid_view2
+-- DROP VIEW
+
+> INSERT INTO ga_tid_tab VALUES (2), (3)
+-- INSERT 0 2
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT ctid, * FROM ga_tid_tab WHERE ctid = '(0,2)'
+QUERY PLAN:text
+Tid Scan on ga_tid_tab
+  TID Cond: (ctid = '(0,2)'::tid)
+-- EXPLAIN
+
+> SELECT ctid, * FROM ga_tid_tab WHERE ctid = '(0,2)'
+ctid:27 | a:int4
+(0,2) | 2
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT ctid, * FROM ga_tid_tab WHERE ctid = '(0,3)' OR '(0,1)' = ctid
+QUERY PLAN:text
+Tid Scan on ga_tid_tab
+  TID Cond: ((ctid = '(0,3)'::tid) OR ('(0,1)'::tid = ctid))
+-- EXPLAIN
+
+> SELECT ctid, * FROM ga_tid_tab WHERE ctid = '(0,3)' OR '(0,1)' = ctid
+ctid:27 | a:int4
+(0,1) | 1
+(0,3) | 3
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT ctid, * FROM ga_tid_tab WHERE ctid = ANY (ARRAY['(0,1)', '(0,2)']::tid[]) AND a > 1
+QUERY PLAN:text
+Tid Scan on ga_tid_tab
+  TID Cond: (ctid = ANY ('{"(0,1)","(0,2)"}'::tid[]))
+  Filter: (a > 1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT ctid, * FROM ga_tid_tab WHERE (a = 3 AND ctid = '(0,3)') OR (ctid = '(0,1)' AND a = 1)
+QUERY PLAN:text
+Tid Scan on ga_tid_tab
+  TID Cond: ((ctid = '(0,3)'::tid) OR (ctid = '(0,1)'::tid))
+  Filter: (((a = 3) AND (ctid = '(0,3)'::tid)) OR ((ctid = '(0,1)'::tid) AND (a = 1)))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT ctid, * FROM ga_tid_tab WHERE ctid <> '(0,1)'
+QUERY PLAN:text
+Seq Scan on ga_tid_tab
+  Disabled: true
+  Filter: (ctid <> '(0,1)'::tid)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT ctid FROM ga_tid_tab WHERE ctid > '(0,1)' AND '(0,3)' >= ctid
+QUERY PLAN:text
+Tid Range Scan on ga_tid_tab
+  TID Cond: ((ctid > '(0,1)'::tid) AND ('(0,3)'::tid >= ctid))
+-- EXPLAIN
+
+> SELECT ctid FROM ga_tid_tab WHERE ctid > '(0,1)' AND '(0,3)' >= ctid
+ctid:27
+(0,2)
+(0,3)
+-- SELECT 2
+
+> SET enable_tidscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT ctid, * FROM ga_tid_tab WHERE ctid = '(0,2)'
+QUERY PLAN:text
+Seq Scan on ga_tid_tab
+  Disabled: true
+  Filter: (ctid = '(0,2)'::tid)
+-- EXPLAIN
+
+> RESET enable_tidscan
+-- RESET
+
+> RESET enable_seqscan
+-- RESET
+
+> BEGIN
+-- BEGIN
+
+> DECLARE ga_c CURSOR FOR SELECT ctid, * FROM ga_tid_tab
+-- DECLARE CURSOR
+
+> FETCH NEXT FROM ga_c
+ctid:27 | a:int4
+(0,1) | 1
+-- FETCH 1
+
+> UPDATE ga_tid_tab SET a = -a WHERE CURRENT OF ga_c RETURNING *
+a:int4
+-1
+-- UPDATE 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT a FROM ga_tid_tab ORDER BY a
+a:int4
+-1
+2
+3
+-- SELECT 3
+
+> DROP TABLE ga_tid_tab
+-- DROP TABLE
+
+> CREATE TABLE ga_inet (i inet)
+-- CREATE TABLE
+
+> INSERT INTO ga_inet VALUES ('192.168.1.5'), ('192.168.1.0/26'), ('10.0.0.1'), ('192.168.1.255')
+-- INSERT 0 4
+
+> CREATE INDEX ga_inet_idx ON ga_inet (i)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga_inet WHERE i << '192.168.1.0/24'::cidr
+QUERY PLAN:text
+Index Only Scan using ga_inet_idx on ga_inet
+  Index Cond: ((i > '192.168.1.0/24'::inet) AND (i <= '192.168.1.255'::inet))
+  Filter: (i << '192.168.1.0/24'::inet)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga_inet WHERE '192.168.1.0/24'::cidr >>= i
+QUERY PLAN:text
+Index Only Scan using ga_inet_idx on ga_inet
+  Index Cond: ((i >= '192.168.1.0/24'::inet) AND (i <= '192.168.1.255'::inet))
+  Filter: ('192.168.1.0/24'::inet >>= i)
+-- EXPLAIN
+
+> SELECT * FROM ga_inet WHERE i <<= '192.168.1.0/24'::cidr ORDER BY i
+i:inet
+192.168.1.0/26
+192.168.1.5
+192.168.1.255
+-- SELECT 3
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE ga_inet
+-- DROP TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT (i || '/' || j)::pg_lsn FROM generate_series(1, 2) i, generate_series(1, 2) j
+QUERY PLAN:text
+Nested Loop
+  Output: ((((i.i)::text || '/'::text) || (j.j)::text))::pg_lsn
+  ->  Function Scan on pg_catalog.generate_series i
+        Output: i.i
+        Function Call: generate_series(1, 2)
+  ->  Function Scan on pg_catalog.generate_series j
+        Output: j.j
+        Function Call: generate_series(1, 2)
+-- EXPLAIN
+
+> CREATE FUNCTION ga_int_eq(int, int) RETURNS bool LANGUAGE internal STRICT IMMUTABLE AS $$int4eq$$
+-- CREATE FUNCTION
+
+> EXPLAIN (COSTS OFF) SELECT * FROM generate_series(1, 10) g WHERE ga_int_eq(g, 4)
+QUERY PLAN:text
+Function Scan on generate_series g
+  Filter: ga_int_eq(g, 4)
+-- EXPLAIN
+
+> SELECT * FROM generate_series(1, 10) g WHERE ga_int_eq(g, 4)
+g:int4
+4
+-- SELECT 1
+
+> DROP FUNCTION ga_int_eq(int, int)
+-- DROP FUNCTION
+
+> EXPLAIN SELECT * FROM generate_series(1.0, 25.0, 2.0)
+QUERY PLAN:text
+Function Scan on generate_series  (cost=0.00..0.13 rows=13 width=32)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM generate_series(25.0, 1.0)
+QUERY PLAN:text
+Function Scan on generate_series  (cost=0.00..0.01 rows=1 width=32)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM generate_series('2024-02-01'::timestamp, '2024-03-01', '7 days')
+QUERY PLAN:text
+Function Scan on generate_series  (cost=0.00..0.05 rows=5 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM generate_series('2024-02-01'::timestamptz, '2024-03-01', '1 day', 'UTC')
+QUERY PLAN:text
+Function Scan on generate_series  (cost=0.00..0.30 rows=30 width=8)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE, FORMAT JSON) SELECT * FROM generate_series(1, 2) a JOIN generate_series(1, 2) b ON a = b
+QUERY PLAN:json
+[
+  {
+    "Plan": {
+      "Node Type": "Hash Join",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Join Type": "Inner",
+      "Disabled": false,
+      "Output": ["a.a", "b.b"],
+      "Inner Unique": false,
+      "Hash Cond": "(a.a = b.b)",
+      "Plans": [
+        {
+          "Node Type": "Function Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Function Name": "generate_series",
+          "Schema": "pg_catalog",
+          "Alias": "a",
+          "Disabled": false,
+          "Output": ["a.a"],
+          "Function Call": "generate_series(1, 2)"
+        },
+        {
+          "Node Type": "Hash",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["b.b"],
+          "Plans": [
+            {
+              "Node Type": "Function Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Function Name": "generate_series",
+              "Schema": "pg_catalog",
+              "Alias": "b",
+              "Disabled": false,
+              "Output": ["b.b"],
+              "Function Call": "generate_series(1, 2)"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
+-- EXPLAIN
+
+> CREATE TABLE ga_p1 (ff1 int)
+-- CREATE TABLE
+
+> CREATE TABLE ga_p2 (f1 text, f2 int)
+-- CREATE TABLE
+
+> CREATE FUNCTION ga_p2text(ga_p2) RETURNS text AS 'SELECT $1.f1' LANGUAGE sql
+-- CREATE FUNCTION
+
+> CREATE TABLE ga_c1 (f3 int) INHERITS (ga_p1, ga_p2)
+-- CREATE TABLE
+
+> INSERT INTO ga_c1 VALUES (123456789, 'hi', 42, 123455)
+-- INSERT 0 1
+
+> SELECT ga_p2text(ga_c1.*) FROM ga_c1
+ga_p2text:text
+hi
+-- SELECT 1
+
+> SELECT ga_p2text(c) FROM ga_c1 c
+ga_p2text:text
+hi
+-- SELECT 1
+
+> DROP TABLE ga_c1
+-- DROP TABLE
+
+> DROP FUNCTION ga_p2text(ga_p2)
+-- DROP FUNCTION
+
+> DROP TABLE ga_p1, ga_p2
+-- DROP TABLE
+
+> CREATE TYPE ga_person AS (id int, name text)
+-- CREATE TYPE
+
+> CREATE TABLE ga_persons OF ga_person
+-- CREATE TABLE
+
+> INSERT INTO ga_persons VALUES (1, 'test')
+-- INSERT 0 1
+
+> CREATE FUNCTION ga_namelen(ga_person) RETURNS int LANGUAGE sql AS $$ SELECT length($1.name) $$
+-- CREATE FUNCTION
+
+> SELECT id, ga_namelen(ga_persons) FROM ga_persons
+id:int4 | ga_namelen:int4
+1 | 4
+-- SELECT 1
+
+> DROP TABLE ga_persons
+-- DROP TABLE
+
+> DROP FUNCTION ga_namelen(ga_person)
+-- DROP FUNCTION
+
+> DROP TYPE ga_person
+-- DROP TYPE
+
+> CREATE TABLE ga_hobbies (name text, person text)
+-- CREATE TABLE
+
+> CREATE TABLE ga_equipment (name text, hobby text)
+-- CREATE TABLE
+
+> INSERT INTO ga_hobbies VALUES ('posthacking', 'mike'), ('basketball', 'joe')
+-- INSERT 0 2
+
+> INSERT INTO ga_equipment VALUES ('advil', 'posthacking'), ('hightops', 'basketball')
+-- INSERT 0 2
+
+> CREATE FUNCTION ga_hobbies_of(text) RETURNS SETOF ga_hobbies AS 'SELECT * FROM ga_hobbies WHERE person = $1' LANGUAGE sql
+-- CREATE FUNCTION
+
+> CREATE FUNCTION ga_equipment(ga_hobbies) RETURNS SETOF ga_equipment AS 'SELECT * FROM ga_equipment WHERE hobby = $1.name' LANGUAGE sql
+-- CREATE FUNCTION
+
+> SELECT name(ga_equipment(ga_hobbies_of('mike')))
+name:text
+advil
+-- SELECT 1
+
+> SELECT (ga_hobbies_of('joe')).ga_equipment.name
+name:text
+hightops
+-- SELECT 1
+
+> SELECT pg_typeof(ga_hobbies_of('joe'))
+pg_typeof:regtype
+ga_hobbies
+-- SELECT 1
+
+> DROP FUNCTION ga_equipment(ga_hobbies)
+-- DROP FUNCTION
+
+> DROP FUNCTION ga_hobbies_of(text)
+-- DROP FUNCTION
+
+> DROP TABLE ga_hobbies, ga_equipment
+-- DROP TABLE
+
+> SELECT slot_name, total_txns FROM pg_stat_get_replication_slot('ga_nonexistent')
+slot_name:text | total_txns:int8
+ga_nonexistent | 0
+-- SELECT 1
+
+> SELECT * FROM pg_stat_get_replication_slot(NULL)
+slot_name:text | spill_txns:int8 | spill_count:int8 | spill_bytes:int8 | stream_txns:int8 | stream_count:int8 | stream_bytes:int8 | total_txns:int8 | total_bytes:int8 | stats_reset:timestamptz
+NULL | NULL | NULL | NULL | NULL | NULL | NULL | NULL | NULL | NULL
+-- SELECT 1
+

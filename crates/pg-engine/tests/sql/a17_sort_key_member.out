@@ -1,0 +1,130 @@
+> SET enable_partitionwise_join TO true
+-- SET
+
+> CREATE TABLE a17_p1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a17_p1_1 PARTITION OF a17_p1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE a17_p1_3 PARTITION OF a17_p1 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> CREATE TABLE a17_p1_2 PARTITION OF a17_p1 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> INSERT INTO a17_p1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> CREATE INDEX a17_p1_1_a ON a17_p1_1 (a)
+-- CREATE INDEX
+
+> CREATE INDEX a17_p1_2_a ON a17_p1_2 (a)
+-- CREATE INDEX
+
+> CREATE INDEX a17_p1_3_a ON a17_p1_3 (a)
+-- CREATE INDEX
+
+> ANALYZE a17_p1
+-- ANALYZE
+
+> CREATE TABLE a17_p2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE a17_p2_1 PARTITION OF a17_p2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE a17_p2_2 PARTITION OF a17_p2 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> CREATE TABLE a17_p2_3 PARTITION OF a17_p2 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO a17_p2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> ANALYZE a17_p2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM a17_p1 t1, a17_p2 t2 WHERE t1.a = t2.a AND t1.a = t2.b ORDER BY t1.a, t2.b
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Merge Join
+              Merge Cond: (t1_1.a = t2_1.a)
+              ->  Index Scan using a17_p1_1_a on a17_p1_1 t1_1
+              ->  Sort
+                    Sort Key: t2_1.b
+                    ->  Seq Scan on a17_p2_1 t2_1
+                          Filter: (a = b)
+        ->  Hash Join
+              Hash Cond: (t1_2.a = t2_2.a)
+              ->  Seq Scan on a17_p1_2 t1_2
+              ->  Hash
+                    ->  Seq Scan on a17_p2_2 t2_2
+                          Filter: (a = b)
+        ->  Hash Join
+              Hash Cond: (t1_3.a = t2_3.a)
+              ->  Seq Scan on a17_p1_3 t1_3
+              ->  Hash
+                    ->  Seq Scan on a17_p2_3 t2_3
+                          Filter: (a = b)
+-- EXPLAIN
+
+> SELECT t1.a, t1.c, t2.b, t2.c FROM a17_p1 t1, a17_p2 t2 WHERE t1.a = t2.a AND t1.a = t2.b ORDER BY t1.a, t2.b
+a:int4 | c:varchar | b:int4 | c:varchar
+0 | 0000 | 0 | 0000
+6 | 0006 | 6 | 0006
+12 | 0012 | 12 | 0012
+18 | 0018 | 18 | 0018
+24 | 0024 | 24 | 0024
+-- SELECT 5
+
+> SET enable_partitionwise_join TO false
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM a17_p1 t1, a17_p2 t2 WHERE t1.a = t2.a AND t1.a = t2.b ORDER BY t1.a, t2.b
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (t1.a = t2.a)
+  ->  Append
+        ->  Index Scan using a17_p1_1_a on a17_p1_1 t1_1
+        ->  Index Scan using a17_p1_2_a on a17_p1_2 t1_2
+        ->  Index Scan using a17_p1_3_a on a17_p1_3 t1_3
+  ->  Sort
+        Sort Key: t2.b
+        ->  Append
+              ->  Seq Scan on a17_p2_1 t2_1
+                    Filter: (a = b)
+              ->  Seq Scan on a17_p2_2 t2_2
+                    Filter: (a = b)
+              ->  Seq Scan on a17_p2_3 t2_3
+                    Filter: (a = b)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.c FROM a17_p1 t1, a17_p2 t2 WHERE t1.a = t2.a AND t2.a = t2.b ORDER BY t1.a
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (t1.a = t2.a)
+  ->  Append
+        ->  Index Scan using a17_p1_1_a on a17_p1_1 t1_1
+        ->  Index Scan using a17_p1_2_a on a17_p1_2 t1_2
+        ->  Index Scan using a17_p1_3_a on a17_p1_3 t1_3
+  ->  Sort
+        Sort Key: t2.a
+        ->  Append
+              ->  Seq Scan on a17_p2_1 t2_1
+                    Filter: (a = b)
+              ->  Seq Scan on a17_p2_2 t2_2
+                    Filter: (a = b)
+              ->  Seq Scan on a17_p2_3 t2_3
+                    Filter: (a = b)
+-- EXPLAIN
+
+> DROP TABLE a17_p1, a17_p2
+-- DROP TABLE
+

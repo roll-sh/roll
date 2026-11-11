@@ -1,0 +1,2288 @@
+//! Pulling WHERE-clause sublinks up into joins (prepjointree.c's pull_up_sublinks):
+//! `EXISTS (…)` / `NOT EXISTS (…)` over a correlated single-table subquery become a semi /
+//! anti join with it (convert_EXISTS_sublink_to_join), `x op ANY (SELECT …)` over an
+//! uncorrelated one a semi join (convert_ANY_sublink_to_join). The join planner then picks
+//! how to run them.
+
+use super::optimize::{conjuncts, width};
+use crate::catalog::Catalog;
+use crate::sql::expr::{Expr, Subquery, SubqueryKind};
+use crate::sql::plan::{Access, JoinKind, Plan, ScanPlan, SortKey};
+use crate::types::Value;
+use std::sync::Arc;
+
+fn and_all(mut items: Vec<Expr>) -> Option<Expr> {
+    match items.len() {
+        0 => None,
+        1 => items.pop(),
+        _ => Some(Expr::And(items)),
+    }
+}
+
+/// `pred` (the WHERE clause over `plan`'s rows) with its top-level EXISTS / NOT EXISTS / ANY
+/// conjuncts turned into semi / anti joins over `plan`, in order; the rest of the clause.
+pub(super) fn pull_up(
+    cat: &Catalog,
+    ctx: &crate::exec::ExecCtx,
+    plan: Plan,
+    pred: Expr,
+    unplanned: &Unplanned,
+) -> (Plan, Option<Expr>) {
+    let mut parts = Vec::new();
+    conjuncts(pred, &mut parts);
+    // (The FROM subqueries' and sub-selects' join trees as bound: a sub-select's WHERE as
+    // written, `exists_join`.)
+    let bound = ctx.bound_trees.borrow().clone();
+    let bound = &bound[..];
+    let parts: Vec<Expr> = parts
+        .into_iter()
+        .map(|e| values_to_any(e, ctx))
+        .map(one_row_to_ops)
+        // (A test that became constant true goes.)
+        .filter(|e| !matches!(e, Expr::Const(Value::Bool(true), _)))
+        .collect();
+    // The clauses that stay restrictions of the FROM items go down to them first (the join
+    // planner distributes them there), below the semi / anti joins.
+    let pulls = |e: &Expr, plan: &Plan| -> bool {
+        let (sub, anti) = match e {
+            Expr::Subquery(s) => (s, false),
+            Expr::Not(x) => match &**x {
+                Expr::Subquery(s) if s.kind == SubqueryKind::Exists => (s, true),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        match sub.kind {
+            SubqueryKind::Exists => exists_join(cat, plan, sub, anti, bound).is_some(),
+            SubqueryKind::Any if !anti => any_join(cat, plan, sub, unplanned).is_some(),
+            _ => false,
+        }
+    };
+    let (subs, stay): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|e| pulls(e, &plan));
+    if subs.is_empty() {
+        return (plan, and_all(stay));
+    }
+    let mut plan = match and_all(stay) {
+        Some(f) if !has_sublink(&f) || matches!(plan, Plan::Scan(_)) => {
+            super::optimize::add_filter(cat, plan, f)
+        }
+        Some(f) => {
+            // (Kept above the joins.)
+            let (p, rest) = pull_up_parts(cat, plan, subs, unplanned, bound);
+            let mut r: Vec<Expr> = rest.into_iter().collect();
+            r.push(f);
+            return (p, and_all(r));
+        }
+        None => plan,
+    };
+    let (p, rest) = pull_up_parts(cat, plan, subs, unplanned, bound);
+    plan = p;
+    (plan, rest)
+}
+
+/// The EXISTS / IN conjuncts of `pred` turned into joins over `plan`; the rest.
+pub(super) fn pull_up_only(cat: &Catalog, plan: Plan, pred: Expr) -> (Plan, Option<Expr>) {
+    let mut parts = Vec::new();
+    conjuncts(pred, &mut parts);
+    pull_up_parts(cat, plan, parts, &Unplanned::new(), &[])
+}
+
+/// IN / ANY sub-selects' plans as bound, before their levels were planned, by subquery id
+/// (`Binder::unplanned_subs`).
+pub(super) type Unplanned = std::collections::HashMap<usize, Arc<Plan>>;
+
+/// The sublinks `parts` turned into joins over `plan`, in order; the ones that weren't.
+fn pull_up_parts(
+    cat: &Catalog,
+    plan: Plan,
+    parts: Vec<Expr>,
+    unplanned: &Unplanned,
+    bound: &[crate::sql::paths::BoundTree],
+) -> (Plan, Option<Expr>) {
+    let mut plan = plan;
+    let mut rest = Vec::new();
+    for p in parts {
+        let (sub, anti) = match &p {
+            Expr::Subquery(s) => (s, false),
+            Expr::Not(x) => match &**x {
+                Expr::Subquery(s) if s.kind == SubqueryKind::Exists => (s, true),
+                _ => {
+                    rest.push(p);
+                    continue;
+                }
+            },
+            _ => {
+                rest.push(p);
+                continue;
+            }
+        };
+        let joined = match sub.kind {
+            SubqueryKind::Exists => exists_join(cat, &plan, sub, anti, bound),
+            SubqueryKind::Any if !anti => any_join(cat, &plan, sub, unplanned),
+            _ => None,
+        }
+        .map(|j| reduce_unique(cat, j));
+        match joined {
+            Some(j) => plan = j,
+            None => rest.push(p),
+        }
+    }
+    (plan, and_all(rest))
+}
+
+/// The table scan a subquery reads, when it is just that: no sampling, locking, LIMIT or
+/// partitioned parent, nothing in its filter but plain expressions.
+fn plain_scan(p: &Plan) -> Option<&ScanPlan> {
+    let Plan::Scan(s) = p else { return None };
+    let subs = EXISTS_SUBLINKS.with(|c| c.get());
+    let ok = s.sample.is_none()
+        && s.current_of.is_none()
+        && s.mark.is_none()
+        && !s.with_key
+        && !s.sys
+        && s.table.partkey.is_none()
+        && s.filter.as_ref().is_none_or(|f| {
+            !deep_outer(f) && if subs { !has_aggregates(f) && shallow_sublinks(f) } else { !has_sublink(f) }
+        });
+    ok.then_some(&**s)
+}
+
+thread_local! {
+    /// An EXISTS's WHERE clause is being pulled up: its sub-selects go along (SubPlans of
+    /// the semi join's clause), when they read nothing further out than this query.
+    static EXISTS_SUBLINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(super) fn unsettled(out: &mut Vec<&'static str>) {
+    if EXISTS_SUBLINKS.get() {
+        out.push("sublink::EXISTS_SUBLINKS");
+    }
+}
+
+fn has_aggregates(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| found |= matches!(x, Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+    found
+}
+
+/// Its sub-selects read nothing past their own parameters (no reference two levels up from
+/// their own rows).
+fn shallow_sublinks(e: &Expr) -> bool {
+    fn plan_ok(p: &Plan) -> bool {
+        let mut exprs = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut exprs);
+        exprs.iter().all(|x| {
+            let mut ok = true;
+            x.walk(&mut |y| {
+                if let Expr::Outer(d, ..) = y
+                    && *d >= 2
+                {
+                    ok = false;
+                }
+            });
+            ok
+        }) && crate::sql::explain::plan_inputs(p).iter().all(|c| plan_ok(c))
+    }
+    let mut ok = true;
+    e.walk(&mut |x| {
+        if let Expr::Subquery(s) = x {
+            ok &= s.func.is_none() && plan_ok(&s.plan);
+        }
+    });
+    ok
+}
+
+fn has_sublink(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)) {
+            found = true
+        }
+    });
+    found
+}
+
+/// A reference to a query two or more levels up.
+fn deep_outer(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if let Expr::Outer(d, ..) = x
+            && *d != 1
+        {
+            found = true
+        }
+    });
+    found
+}
+
+fn reads_outer(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if let Expr::Outer(1, ..) = x {
+            found = true
+        }
+    });
+    found
+}
+
+/// A correlated sublink's quals as the join's (`corr`) and its right side's (`local`): for
+/// an anti join a variable-free one (an InitPlan's value) is the join's too, a join filter,
+/// as distribute_qual_to_rels places a pseudoconstant qual of an outer join's ON clause at
+/// its scope, not as a gating qual of the right side.
+fn joined_quals((mut corr, local): (Vec<Expr>, Vec<Expr>), anti: bool) -> (Vec<Expr>, Vec<Expr>) {
+    if corr.is_empty() || !anti {
+        return (corr, local);
+    }
+    let (free, local): (Vec<Expr>, Vec<Expr>) =
+        local.into_iter().partition(|e| e.columns().is_empty() && !e.has_outer_refs() && !crate::sql::explain::expr_volatile_deep(e));
+    corr.extend(free);
+    (corr, local)
+}
+
+/// The scan as the right side of the join: its own quals only, its path chosen again.
+fn rhs_scan(s: &ScanPlan, filter: Option<Expr>) -> Plan {
+    let mut s = s.clone();
+    s.filter = filter;
+    // (A LIMIT pushed into the scan went with the EXISTS's LIMIT.)
+    s.limit = None;
+    s.index = None;
+    s.reverse = false;
+    s.access = Access::Unplanned;
+    Plan::Scan(Box::new(s))
+}
+
+/// The subquery's one FROM item as a join's right side: a table scan, or the member scans
+/// of a table's inheritance / partition tree (each passing the parent's columns through).
+/// Its quals that read the outer query (over its row: the same for every member), the
+/// right side with its own quals only, its column types, and whether a member scan has a
+/// LIMIT pushed into it.
+fn sub_rel(p: &Plan, anti: bool) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bool)> {
+    let split = |s: &ScanPlan| {
+        let mut parts = Vec::new();
+        if let Some(f) = &s.filter {
+            conjuncts(f.clone(), &mut parts);
+        }
+        joined_quals(parts.into_iter().partition::<Vec<Expr>, _>(reads_outer), anti)
+    };
+    if let Some(s) = plain_scan(p) {
+        let (corr, local) = split(s);
+        let types = s.table.columns.iter().map(|c| c.ty.clone()).collect();
+        return Some((corr, rhs_scan(s, and_all(local)), types, s.limit.is_some()));
+    }
+    // A system catalog: the same.
+    if let Plan::SysScan { table, filter, alias, mark, .. } = p {
+        // (Its sub-selects go along as a table's do: an EF Core NOT EXISTS over pg_depend
+        // with an InitPlan for the classid.)
+        let subs = EXISTS_SUBLINKS.with(|c| c.get());
+        if filter.as_ref().is_some_and(|f| {
+            deep_outer(f) || if subs { has_aggregates(f) || !shallow_sublinks(f) } else { has_sublink(f) }
+        }) {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if let Some(f) = filter {
+            conjuncts(f.clone(), &mut parts);
+        }
+        let (corr, local) = joined_quals(parts.into_iter().partition(reads_outer), anti);
+        let types = table.columns().iter().map(|(_, t)| t.clone()).collect();
+        return Some((
+            corr,
+            Plan::SysScan {
+                table: *table,
+                filter: and_all(local),
+                path: None,
+                alias: alias.clone(),
+                mark: *mark,
+            },
+            types,
+            false,
+        ));
+    }
+    // A FROM subquery planned as a level of its own (DISTINCT): the correlated clauses the
+    // binder pushed down into it come back out over its outputs, the semi join's own
+    // (convert_EXISTS_sublink_to_join keeps the subquery an RTE, its WHERE the join's).
+    if let Plan::Barrier { input, secure: false, .. } = p
+        && EXISTS_SUBLINKS.with(|c| c.get())
+        && let Some((corr, inner)) = barrier_corr(input)
+        && !corr.is_empty()
+    {
+        let Plan::Barrier { alias, cols, secure, sorted, rti, .. } = p else { unreachable!() };
+        let types = vec![crate::types::DataType::Unknown; width(p)];
+        let rhs = Plan::Barrier {
+            input: Arc::new(inner),
+            alias: alias.clone(),
+            cols: cols.clone(),
+            secure: *secure,
+            path: None,
+            sorted: *sorted,
+            rti: *rti,
+            copies: Vec::new(),
+        };
+        return Some((corr, rhs, types, false));
+    }
+    // A materialized CTE's scan: uncorrelated rows of its own.
+    if let Plan::CteScan { ncols, .. } = p {
+        return Some((Vec::new(), p.clone(), vec![crate::types::DataType::Unknown; *ncols], false));
+    }
+    let Plan::Append {
+        inputs,
+        inh: inh @ Some(_),
+        ..
+    } = p
+    else {
+        return None;
+    };
+    let w = width(p);
+    let mut corr: Option<Vec<Expr>> = None;
+    let mut members = Vec::new();
+    let mut limited = false;
+    let mut types = Vec::new();
+    for m in inputs {
+        let (s, proj) = match &**m {
+            // (A member whose columns are the parent's in another order, a multiply
+            // inherited child's: its clauses mapped to the parent's columns.)
+            Plan::Project { input, exprs }
+                if exprs.len() == w && exprs.iter().all(|e| matches!(e, Expr::Col(..))) =>
+            {
+                (plain_scan(input)?, Some(exprs.clone()))
+            }
+            Plan::Scan(_) => (plain_scan(m)?, None),
+            _ => return None,
+        };
+        if s.table.columns.len() < w {
+            return None;
+        }
+        let (c, local) = split(s);
+        // (Over the parent's columns.)
+        let c: Vec<Expr> = match &proj {
+            Some(exprs) if exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i)) => {
+                let mut ok = true;
+                let mapped = c
+                    .into_iter()
+                    .map(|e| {
+                        e.transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(j, t) => match exprs.iter().position(|e| matches!(e, Expr::Col(k, _) if *k == j)) {
+                                    Some(i) => Expr::Col(i, t),
+                                    None => {
+                                        ok = false;
+                                        Expr::Col(j, t)
+                                    }
+                                },
+                                x => x,
+                            })
+                        })
+                        .unwrap()
+                    })
+                    .collect();
+                if !ok {
+                    return None;
+                }
+                mapped
+            }
+            _ => c,
+        };
+        match &corr {
+            None => corr = Some(c),
+            Some(prev) => {
+                if prev.len() != c.len() || prev.iter().zip(&c).any(|(a, b)| !a.same_as(b)) {
+                    return None;
+                }
+            }
+        }
+        limited |= s.limit.is_some();
+        if types.is_empty() {
+            types = match &proj {
+                Some(exprs) => exprs.iter().map(|e| e.ty()).collect(),
+                None => s.table.columns[..w].iter().map(|c| c.ty.clone()).collect(),
+            };
+        }
+        let scan = rhs_scan(s, and_all(local));
+        members.push(Arc::new(match proj {
+            Some(exprs) => Plan::Project {
+                input: Arc::new(scan),
+                exprs,
+            },
+            None => scan,
+        }));
+    }
+    let corr = corr?;
+    Some((
+        corr,
+        Plan::Append {
+            inputs: members,
+            inh: inh.clone(),
+            alias: None,
+            pw: None,
+        },
+        types,
+        limited,
+    ))
+}
+
+/// A subquery level's correlated clauses pushed into its scan (through a DISTINCT, sorts and
+/// projections of columns): the clauses over the level's outputs, and the level without
+/// them. None when something else in it reads the outer query, or a clause reads a column
+/// the level doesn't return.
+fn barrier_corr(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
+    match p {
+        Plan::Distinct { input, on: None, order, .. } => {
+            let (c, i) = barrier_corr(input)?;
+            Some((c, Plan::Distinct { input: Arc::new(i), on: None, order: *order, hashed: false }))
+        }
+        Plan::Sort { input, keys } if keys.iter().all(|k| !reads_outer(&k.expr)) => {
+            let (c, i) = barrier_corr(input)?;
+            Some((c, Plan::Sort { input: Arc::new(i), keys: keys.clone() }))
+        }
+        Plan::Project { input, exprs } if !exprs.iter().any(reads_outer) => {
+            let (c, i) = barrier_corr(input)?;
+            // (Over the projection's outputs: a column it returns as it is.)
+            let up: Option<Vec<Expr>> = c
+                .into_iter()
+                .map(|e| {
+                    let mut ok = true;
+                    let e = e
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(j, t) => match exprs.iter().position(|y| matches!(y, Expr::Col(k, _) if *k == j)) {
+                                    Some(pos) => Expr::Col(pos, t),
+                                    None => {
+                                        ok = false;
+                                        Expr::Col(j, t)
+                                    }
+                                },
+                                x => x,
+                            })
+                        })
+                        .ok()?;
+                    ok.then_some(e)
+                })
+                .collect();
+            Some((up?, Plan::Project { input: Arc::new(i), exprs: exprs.clone() }))
+        }
+        Plan::Scan(s) if s.sample.is_none() && s.current_of.is_none() => {
+            let mut parts = Vec::new();
+            if let Some(f) = &s.filter {
+                conjuncts(f.clone(), &mut parts);
+            }
+            if parts.iter().any(|e| has_sublink(e) || deep_outer(e)) {
+                return None;
+            }
+            let (corr, local): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(reads_outer);
+            Some((corr, rhs_scan(s, and_all(local))))
+        }
+        _ => None,
+    }
+}
+
+/// A subquery whose FROM list joins tables: its WHERE clauses that read the outer query
+/// (where the binder pushed them: filters, inner joins' conditions, the scans below inner
+/// joins and outer joins' preserved sides; over the subquery's row), and the rest of it.
+/// None when something else in it reads the outer query (PG keeps such a sublink), or it
+/// has nodes other than scans, filters and joins.
+fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
+    fn clean(e: &Expr) -> bool {
+        let mut ok = true;
+        e.walk(&mut |x| {
+            if matches!(
+                x,
+                Expr::Outer(..) | Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)
+            ) {
+                ok = false
+            }
+        });
+        ok
+    }
+    fn split(e: &Expr, off: usize, out: &mut Vec<Expr>) -> Option<Option<Expr>> {
+        let mut parts = Vec::new();
+        conjuncts(e.clone(), &mut parts);
+        let mut local = Vec::new();
+        for q in parts {
+            if clean(&q) || own_sublinks(&q) {
+                local.push(q);
+            } else if reads_outer(&q) && !has_sublink(&q) && !deep_outer(&q) && !q.is_volatile() {
+                out.push(q.shift_cols(off as isize));
+            } else {
+                return None;
+            }
+        }
+        Some(and_all(local))
+    }
+    // A qual whose sub-selects read only this level's rows (their parameters its columns,
+    // nothing of the query outside): it stays with the sub-select's relations, its SubPlan
+    // and all (TPC-H q20's `ps_availqty > (SELECT ... WHERE l_partkey = ps_partkey ...)`):
+    // convert_ANY_sublink_to_join only refuses Vars of the parent query.
+    fn own_sublinks(q: &Expr) -> bool {
+        let mut other = false;
+        q.walk(&mut |x| other |= matches!(x, Expr::Outer(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+        !other && has_sublink(q) && shallow_sublinks(q) && !crate::sql::explain::expr_volatile_deep(q)
+    }
+    // `pull`: whether the clauses here can move up to the semi join (else nothing here
+    // may read the outer query).
+    fn go(p: &Plan, off: usize, pull: bool, out: &mut Vec<Expr>) -> Option<Plan> {
+        match p {
+            Plan::Scan(_) => {
+                let s = plain_scan(p).filter(|s| s.limit.is_none())?;
+                let n = out.len();
+                let local = match &s.filter {
+                    Some(f) if pull => split(f, off, out)?,
+                    Some(f) => clean(f).then(|| Some(f.clone()))?,
+                    None => None,
+                };
+                Some(if out.len() > n {
+                    rhs_scan(s, local)
+                } else {
+                    Plan::Scan(Box::new(s.clone()))
+                })
+            }
+            Plan::SysScan { table, filter, alias, mark, .. } => {
+                let n = out.len();
+                let local = match filter {
+                    Some(f) if pull => split(f, off, out)?,
+                    Some(f) => clean(f).then(|| Some(f.clone()))?,
+                    None => None,
+                };
+                let _ = n;
+                Some(Plan::SysScan {
+                    table: *table,
+                    filter: local,
+                    path: None,
+                    alias: alias.clone(),
+                    mark: *mark,
+                })
+            }
+            Plan::Filter { input, pred } => {
+                let local = if pull {
+                    split(pred, off, out)?
+                } else {
+                    clean(pred).then(|| Some(pred.clone()))?
+                };
+                let input = go(input, off, pull, out)?;
+                Some(match local {
+                    Some(pred) => Plan::Filter {
+                        input: Arc::new(input),
+                        pred,
+                    },
+                    None => input,
+                })
+            }
+            // A nested loop over a parameterized path (an index scan reading the outer
+            // row's values): the plain join it was planned from, its clauses back in its
+            // condition, as pull_up_sublinks sees the subquery before any planning.
+            Plan::Join { params, .. } if !params.is_empty() && let Some(j) = unparameterized(p) => {
+                go(&j, off, pull, out)
+            }
+            // (A LATERAL join inside: its right side reads its own parameters, values of
+            // its left side, and nothing of the outer query; it goes as it is.)
+            Plan::Join {
+                kind,
+                left,
+                right,
+                cond,
+                hash,
+                params,
+                nleft,
+                nright,
+                meta,
+            } if params.is_empty()
+                || (matches!(kind, JoinKind::Inner | JoinKind::Left)
+                    && hash.is_none()
+                    && params.iter().all(clean)
+                    && lateral_clean(right, params.len())) =>
+            {
+                let lateral = !params.is_empty();
+                let inner = *kind == JoinKind::Inner;
+                let cond = match cond {
+                    Some(c) if pull && inner => split(c, off, out)?,
+                    Some(c) => clean(c).then(|| Some(c.clone()))?,
+                    None => None,
+                };
+                if let Some((l, r)) = hash
+                    && !l.iter().chain(r).all(clean)
+                {
+                    return None;
+                }
+                let (lp, rp) = match kind {
+                    JoinKind::Inner => (pull, pull),
+                    JoinKind::Left | JoinKind::Semi | JoinKind::Anti => (pull, false),
+                    JoinKind::Right => (false, pull),
+                    _ => (false, false),
+                };
+                let l = go(left, off, lp, out)?;
+                let r = if lateral { (**right).clone() } else { go(right, off + nleft, rp, out)? };
+                Some(Plan::Join {
+                    kind: *kind,
+                    left: Arc::new(l),
+                    right: Arc::new(r),
+                    cond,
+                    hash: hash.clone(),
+                    params: params.clone(),
+                    nleft: *nleft,
+                    nright: *nright,
+                    meta: meta.clone(),
+                })
+            }
+            // An inheritance / partition tree's member scans (`sub_rel`): its clauses
+            // reading the outer query move up with the rest.
+            Plan::Append { inh: Some(_), .. } => {
+                let (c, rhs, _, limited) = sub_rel(p, false)?;
+                if limited || (!c.is_empty() && !pull) {
+                    return None;
+                }
+                out.extend(c.into_iter().map(|e| e.shift_cols(off as isize)));
+                Some(rhs)
+            }
+            // A merge join input's sort (the subquery planned already): the pulled-up
+            // tree is planned again as one group, and an EXISTS needs no order.
+            Plan::Sort { input, .. } if pull => go(input, off, pull, out),
+            // A FROM subquery's projection reading nothing of the outer query (on a side
+            // the outer query's clauses can't come from).
+            Plan::Project { input, exprs } if !pull && exprs.iter().all(clean) => {
+                let mut none = Vec::new();
+                let input = go(input, off, false, &mut none)?;
+                Some(Plan::Project {
+                    input: Arc::new(input),
+                    exprs: exprs.clone(),
+                })
+            }
+            // Anything else (a FROM subquery planned already): as it is, when it reads
+            // nothing of the outer query.
+            _ if plan_clean(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+    if !matches!(p, Plan::Join { .. } | Plan::Filter { .. }) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let rest = go(p, 0, true, &mut out)?;
+    Some((out, rest))
+}
+
+/// A planned inner / left nested loop whose parameters feed a parameterized path of
+/// relation scans (and joins of them) on its inner side: the join as it was before
+/// planning, the inner scans' clauses reading the parameters (`Outer(1, k)`) moved back into
+/// the join's condition (over the join's row, each parameter its outer-side expression), the
+/// scans' paths to be chosen again. None for anything else (a LATERAL subquery's plan, a
+/// Memoize, a deeper parameterized join).
+fn unparameterized(p: &Plan) -> Option<Plan> {
+    let Plan::Join {
+        kind: kind @ (JoinKind::Inner | JoinKind::Left),
+        left,
+        right,
+        cond,
+        hash: None,
+        params,
+        nleft,
+        nright,
+        meta,
+    } = p
+    else {
+        return None;
+    };
+    let clean_param = |e: &Expr| {
+        let mut ok = true;
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_)));
+        ok && e.columns().iter().all(|&c| c < *nleft)
+    };
+    if !params.iter().all(clean_param) {
+        return None;
+    }
+    // The values of the query levels around the join (`Outer(d, ..)`, d > 1, inside the
+    // inner side's frame: `Rel::shallow_param`) one level nearer once it has no frame (in
+    // the second pass, after the first proved no parameter is left).
+    let shallowing = std::cell::Cell::new(false);
+    let shallow = |e: Expr| -> Option<Expr> {
+        e.transform(&mut |x| {
+            Ok(match x {
+                Expr::Outer(d, k, t) if d > 1 => Expr::Outer(d - 1, k, t),
+                x => x,
+            })
+        })
+        .ok()
+    };
+    // Over the join's row: the inner side's columns after the outer side's, each parameter
+    // its expression.
+    let lift = |e: &Expr, roff: usize| -> Option<Expr> {
+        e.clone()
+            .shift_cols((nleft + roff) as isize)
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Outer(1, k, _) if k < params.len() => params[k].clone(),
+                    Expr::Outer(d, k, t) if d > 1 => Expr::Outer(d - 1, k, t),
+                    x => x,
+                })
+            })
+            .ok()
+    };
+    // Whether a clause reads a parameter (None: a value it can't be lifted with, or a
+    // sub-select reading the levels around).
+    let reads_param = |e: &Expr| -> Option<bool> {
+        let (mut reads, mut ok) = (false, true);
+        e.walk(&mut |x| match x {
+            Expr::Outer(1, k, _) if *k < params.len() => reads = true,
+            Expr::Outer(1, ..) => ok = false,
+            _ => {}
+        });
+        ok &= !(deep_outer(e) && has_sublink(e));
+        ok.then_some(reads)
+    };
+    let split = |e: &Expr, roff: usize, moved: &mut Vec<Expr>| -> Option<Option<Expr>> {
+        let mut parts = Vec::new();
+        conjuncts(e.clone(), &mut parts);
+        let mut local = Vec::new();
+        for q in parts {
+            if reads_param(&q)? {
+                if q.is_volatile() || has_sublink(&q) {
+                    return None;
+                }
+                moved.push(lift(&q, roff)?);
+            } else {
+                local.push(if shallowing.get() { shallow(q)? } else { q });
+            }
+        }
+        Some(and_all(local))
+    };
+    type Split<'a> = &'a dyn Fn(&Expr, usize, &mut Vec<Expr>) -> Option<Option<Expr>>;
+    type Reads<'a> = &'a dyn Fn(&Expr) -> Option<bool>;
+    fn strip(p: &Plan, roff: usize, split: Split, reads_param: Reads, moved: &mut Vec<Expr>) -> Option<Plan> {
+        match p {
+            Plan::Scan(_) => {
+                let s = plain_scan(p).filter(|s| s.limit.is_none())?;
+                let n = moved.len();
+                let local = match &s.filter {
+                    Some(f) => split(f, roff, moved)?,
+                    None => None,
+                };
+                Some(if moved.len() > n {
+                    rhs_scan(s, local)
+                } else {
+                    p.clone()
+                })
+            }
+            // A catalog's scan (its path chosen again).
+            Plan::SysScan { table, filter, alias, mark, .. } => {
+                let local = match filter {
+                    Some(f) => split(f, roff, moved)?,
+                    None => None,
+                };
+                Some(Plan::SysScan {
+                    table: *table,
+                    filter: local,
+                    path: None,
+                    alias: alias.clone(),
+                    mark: *mark,
+                })
+            }
+            Plan::Filter { input, pred } => {
+                let local = split(pred, roff, moved)?;
+                let input = strip(input, roff, split, reads_param, moved)?;
+                Some(match local {
+                    Some(pred) => Plan::Filter {
+                        input: Arc::new(input),
+                        pred,
+                    },
+                    None => input,
+                })
+            }
+            Plan::Join {
+                kind,
+                left,
+                right,
+                cond,
+                hash,
+                params,
+                nleft,
+                nright,
+                meta,
+            } if params.is_empty() => {
+                if hash
+                    .iter()
+                    .flat_map(|(l, r)| l.iter().chain(r))
+                    .any(|e| reads_param(e) != Some(false))
+                {
+                    return None;
+                }
+                let cond = match cond {
+                    Some(c) if *kind == JoinKind::Inner => split(c, roff, moved)?,
+                    Some(c) => (!reads_param(c)?).then(|| Some(c.clone()))?,
+                    None => None,
+                };
+                let l = strip(left, roff, split, reads_param, moved)?;
+                let r = strip(right, roff + nleft, split, reads_param, moved)?;
+                Some(Plan::Join {
+                    kind: *kind,
+                    left: Arc::new(l),
+                    right: Arc::new(r),
+                    cond,
+                    hash: hash.clone(),
+                    params: Vec::new(),
+                    nleft: *nleft,
+                    nright: *nright,
+                    meta: meta.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+    let mut moved = Vec::new();
+    let r = strip(right, 0, &split, &reads_param, &mut moved)?;
+    // (Every parameter was read by a clause moved: nothing left on the inner side reads one.)
+    fn reads_any(p: &Plan, reads_param: Reads) -> bool {
+        let mut exprs = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut exprs);
+        exprs.iter().any(|e| reads_param(e) != Some(false))
+            || crate::sql::explain::plan_inputs(p).iter().any(|c| reads_any(c, reads_param))
+    }
+    if moved.is_empty() || reads_any(&r, &reads_param) {
+        return None;
+    }
+    // Then the inner side again, its values of the levels around one level nearer.
+    shallowing.set(true);
+    moved.clear();
+    let r = strip(right, 0, &split, &reads_param, &mut moved)?;
+    let mut parts: Vec<Expr> = Vec::new();
+    if let Some(c) = cond {
+        conjuncts(c.clone(), &mut parts);
+    }
+    parts.extend(moved);
+    Some(Plan::Join {
+        kind: *kind,
+        left: left.clone(),
+        right: Arc::new(r),
+        cond: and_all(parts),
+        hash: None,
+        params: Vec::new(),
+        nleft: *nleft,
+        nright: *nright,
+        meta: Box::new(crate::sql::plan::JoinMeta {
+            method: None,
+            memoize: None,
+            indexed: false,
+            ..(**meta).clone()
+        }),
+    })
+}
+
+/// A LATERAL item's plan of plain relational nodes reading only its `n` parameters
+/// (`Outer(1, k)`) of the query around it, through no deeper LATERAL join of its own.
+fn lateral_clean(p: &Plan, n: usize) -> bool {
+    if !matches!(
+        p,
+        Plan::Scan(_)
+            | Plan::Barrier { secure: false, .. }
+            | Plan::Filter { .. }
+            | Plan::Project { .. }
+            | Plan::Sort { .. }
+            | Plan::Join { .. }
+            | Plan::Agg { .. }
+            | Plan::Limit { .. }
+            | Plan::Distinct { .. }
+            | Plan::Append { .. }
+            | Plan::Values { .. }
+            | Plan::Empty { .. }
+            | Plan::One
+    ) || matches!(p, Plan::Join { params, .. } if !params.is_empty())
+        || matches!(p, Plan::Scan(s) if s.current_of.is_some())
+    {
+        return false;
+    }
+    let mut exprs = Vec::new();
+    crate::sql::explain::node_exprs(p, &mut exprs);
+    let ok = exprs.iter().all(|e| {
+        let mut ok = true;
+        e.walk(&mut |x| match x {
+            Expr::Outer(1, k, _) if *k < n => {}
+            Expr::Outer(..) | Expr::Subquery(_) | Expr::Srf(..) => ok = false,
+            _ => {}
+        });
+        ok
+    });
+    ok && crate::sql::explain::plan_inputs(p).iter().all(|c| lateral_clean(c, n))
+}
+
+/// `plan_clean` for a sub-select with a locking clause, its LockRows under the level's
+/// LIMIT, ORDER BY or select list (`IN (SELECT id ... LIMIT n FOR UPDATE SKIP LOCKED)`, a
+/// job queue's fetch): convert_ANY_sublink_to_join keeps it a subquery of its own, which
+/// locks the rows it returns as the SubPlan would.
+fn locked_clean(p: &Plan) -> bool {
+    match p {
+        Plan::LockRows { input, .. } => plan_clean(input),
+        Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::Project { input, .. } => {
+            let mut exprs = Vec::new();
+            crate::sql::explain::node_exprs(p, &mut exprs);
+            let clean = exprs.iter().all(|e| {
+                let mut ok = true;
+                e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_) | Expr::Srf(..)));
+                ok
+            });
+            clean && locked_clean(input)
+        }
+        _ => false,
+    }
+}
+
+/// A plan of plain relational nodes reading nothing of an outer query.
+fn plan_clean(p: &Plan) -> bool {
+    plan_clean_with(p, false)
+}
+
+/// `plan_clean`; with `srf`, set-returning select lists too (a subquery of its own, which
+/// convert_ANY_sublink_to_join takes whatever its select list: `IN (SELECT srf() UNION ALL
+/// VALUES (...))`).
+fn plan_clean_with(p: &Plan, srf: bool) -> bool {
+    if !matches!(
+        p,
+        Plan::Scan(_)
+            | Plan::SysScan { .. }
+            | Plan::Barrier { secure: false, .. }
+            | Plan::Filter { .. }
+            | Plan::Project { .. }
+            | Plan::Sort { .. }
+            | Plan::Join { .. }
+            | Plan::Agg { .. }
+            | Plan::Window { .. }
+            | Plan::Limit { .. }
+            | Plan::Distinct { .. }
+            | Plan::Append { .. }
+            | Plan::Values { .. }
+            | Plan::Empty { .. }
+            | Plan::One
+    ) && !(srf && matches!(p, Plan::ProjectSet { .. }))
+    {
+        return false;
+    }
+    let mut exprs = Vec::new();
+    crate::sql::explain::node_exprs(p, &mut exprs);
+    let clean = exprs.iter().all(|e| {
+        let mut ok = true;
+        e.walk(&mut |x| {
+            if matches!(x, Expr::Outer(..) | Expr::Subquery(_)) || (!srf && matches!(x, Expr::Srf(..))) {
+                ok = false
+            }
+        });
+        ok
+    });
+    clean && crate::sql::explain::plan_inputs(p).iter().all(|c| plan_clean_with(c, srf))
+}
+
+/// A VALUES list reading nothing of an outer query: its sub-selects (SubPlans of its
+/// own) uncorrelated too.
+fn values_clean(p: &Plan) -> bool {
+    let Plan::Values { rows, .. } = p else { return false };
+    rows.iter().flatten().all(|e| {
+        let mut ok = true;
+        e.walk(&mut |x| match x {
+            Expr::Outer(..) | Expr::Srf(..) => ok = false,
+            Expr::Subquery(s) if !s.params.is_empty() => ok = false,
+            _ => {}
+        });
+        ok
+    })
+}
+
+/// A VALUES list reading the outer query's values (one level up) and nothing worse: no
+/// set-returning or volatile calls; its sub-selects (SubPlans of the Values Scan) read
+/// nothing further out either.
+fn values_outer(p: &Plan) -> bool {
+    let Plan::Values { rows, .. } = p else { return false };
+    let mut outer = false;
+    let ok = rows.iter().flatten().all(|e| {
+        let mut ok = !crate::sql::explain::expr_volatile_deep(e);
+        e.walk(&mut |x| match x {
+            Expr::Outer(1, ..) => outer = true,
+            Expr::Outer(..) | Expr::Srf(..) => ok = false,
+            Expr::Subquery(s) => ok &= s.func.is_none(),
+            _ => {}
+        });
+        ok
+    });
+    ok && outer
+}
+
+/// convert_EXISTS_sublink_to_join.
+fn exists_join(
+    cat: &Catalog,
+    plan: &Plan,
+    sub: &Subquery,
+    anti: bool,
+    bound: &[crate::sql::paths::BoundTree],
+) -> Option<Plan> {
+    // simplify_EXISTS_query: the select list and a positive constant LIMIT don't matter.
+    let mut p: &Plan = &sub.plan;
+    let mut limited = false;
+    loop {
+        match p {
+            Plan::Project { input, exprs } if !exprs.iter().any(has_sublink) => p = input,
+            // (Its GROUP BY without aggregates, DISTINCT and ORDER BY go too.)
+            Plan::Agg {
+                input,
+                groups,
+                sets: None,
+                aggs,
+            } if aggs.is_empty() && !groups.iter().any(has_sublink) => p = input,
+            Plan::Distinct { input, .. } | Plan::Sort { input, .. } => p = input,
+            // (LIMIT NULL / ALL: no limit at all.)
+            Plan::Limit {
+                input,
+                limit: None,
+                offset: None,
+                with_ties: None,
+            } => p = input,
+            Plan::Limit {
+                input,
+                limit: Some(l),
+                offset: None,
+                with_ties: None,
+            } if {
+                // (Through the coercion to bigint of `LIMIT NULL`.)
+                let mut c = l;
+                while let Expr::Cast(x, ..) | Expr::Relabel(x, _) = c {
+                    c = x;
+                }
+                match c {
+                    Expr::Const(Value::Null, _) => true,
+                    Expr::Const(Value::Int8(n), _) => *n > 0,
+                    Expr::Const(Value::Int4(n), _) => *n > 0,
+                    _ => false,
+                }
+            } =>
+            {
+                limited = true;
+                p = input
+            }
+            _ => break,
+        }
+    }
+    // EXISTS over a semi / anti join whose right side doesn't read the left one (a NOT
+    // EXISTS in the subquery's WHERE that reads only the outer query): that sublink joins
+    // the outer query itself (pull_up_sublinks with the outer rels available), then the
+    // rest is an EXISTS of the left side.
+    if !anti
+        && let Plan::Join {
+            kind: k @ (JoinKind::Semi | JoinKind::Anti),
+            left,
+            right,
+            cond,
+            hash: None,
+            params,
+            nleft,
+            ..
+        } = p
+        && params.is_empty()
+        && cond.as_ref().is_none_or(|c| c.columns().iter().all(|&x| x >= *nleft))
+    {
+        let mut r = (**right).clone();
+        if let Some(c) = cond {
+            r = super::optimize::add_filter(cat, r, c.clone().shift_cols(-(*nleft as isize)));
+        }
+        let sub_r = Subquery {
+            plan: Arc::new(r),
+            ..sub.clone()
+        };
+        let sub_l = Subquery {
+            plan: left.clone(),
+            ..sub.clone()
+        };
+        let inner = exists_join(cat, plan, &sub_r, *k == JoinKind::Anti, &[])?;
+        // (The outer rows' columns are where they were: the inner join keeps them first.)
+        return exists_join(cat, &inner, &sub_l, false, &[]);
+    }
+    // A subquery that returns nothing: EXISTS is false (the semi join a dummy rel),
+    // NOT EXISTS true.
+    if let Plan::Empty { .. } = p
+        && !sub.params.is_empty()
+    {
+        if anti {
+            return Some(plan.clone());
+        }
+        let (cols, info) = match plan {
+            Plan::Scan(s) => {
+                let names = super::optimize::scan_names(s);
+                let rels = vec![Some(super::optimize::scan_refname(s)); names.len()];
+                (
+                    Some(Arc::new(names)),
+                    Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table: None, ..Default::default() })),
+                )
+            }
+            _ => (None, None),
+        };
+        return Some(Plan::Empty {
+            ncols: width(plan),
+            cols,
+            info,
+        });
+    }
+    let rel = {
+        let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
+        sub_rel(p, anti)
+    };
+    let (corr, rhs, _, scan_limited) = match rel {
+        Some(x) => x,
+        None => {
+            let (corr, rhs) = sub_join(p)?;
+            (corr, rhs, Vec::new(), false)
+        }
+    };
+    if scan_limited && !limited {
+        return None;
+    }
+    // Uncorrelated: it stays an InitPlan. (A sub-select's own volatility counts.)
+    if corr.is_empty() || corr.iter().any(crate::sql::explain::expr_volatile_deep) {
+        return None;
+    }
+    let nleft = width(plan);
+    // (The sub-select's equalities as written, its ON clauses' then its WHERE's.)
+    let written = sublink_written(&rhs, bound);
+    // An anti join's quals are the sub-select's WHERE as written (convert_EXISTS_sublink_
+    // to_join pulls up the subquery unplanned): no equivalence class takes the outer value
+    // in, so the clauses its level derived from a class with it (`t3.p = $1` of `t3.p =
+    // t2.x AND t2.x = $1`) are the written ones again, the right side's own a clause there.
+    let corr = match (&written, anti) {
+        (Some(w), false) => written_order(corr, w),
+        _ => corr,
+    };
+    let (corr, rhs) = match (&written, anti) {
+        (Some(w), true) => match anti_written(&corr, w, &rhs) {
+            Some((c, extra)) => {
+                let rhs = match and_all(extra) {
+                    Some(f) => super::optimize::add_filter(cat, rhs, f),
+                    None => rhs,
+                };
+                (c, rhs)
+            }
+            None => (corr, rhs),
+        },
+        _ => (corr, rhs),
+    };
+    let cond: Vec<Expr> = corr
+        .into_iter()
+        .map(|e| outer_to_params(e.shift_cols(nleft as isize), &sub.params))
+        .collect::<Option<_>>()?;
+    let nright = width(&rhs);
+    // (A semi join's clauses are equivalence classes: one equating an outer column with a
+    // column the subquery fixes to a constant fixes the outer one too, and goes.)
+    // (The sub-select's WHERE equalities as written: convert_EXISTS_sublink_to_join makes
+    // its WHERE the semi join's quals, which process_equivalence meets in that order, after
+    // the join tree's own ON clauses.)
+    let written = match written {
+        Some(w) if !anti && w.iter().any(|e| e.has_outer_refs()) => w
+            .into_iter()
+            .map(|e| outer_to_params(e.shift_cols(nleft as isize), &sub.params))
+            .collect::<Option<Vec<_>>>(),
+        _ => None,
+    };
+    let (left, rhs, cond) = if anti { (plan.clone(), rhs, cond) } else { semi_constants(cat, plan, rhs, cond, nleft) };
+    let mut j = super::optimize::join(
+        cat,
+        if anti { JoinKind::Anti } else { JoinKind::Semi },
+        left,
+        rhs,
+        and_all(cond),
+        Vec::new(),
+        nleft,
+        nright,
+    );
+    if let Some(w) = written
+        && let Plan::Join { kind: JoinKind::Semi, meta, right, .. } = &mut j
+    {
+        meta.ec_written = w;
+        let r = Arc::make_mut(right);
+        let r = match r {
+            Plan::Filter { input, .. } => Arc::make_mut(input),
+            r => r,
+        };
+        if let Plan::Join { meta: rm, .. } = r {
+            rm.ec_written.clear();
+        }
+    }
+    Some(j)
+}
+
+/// A sub-select's join tree's equalities as written (its ON clauses', then its WHERE's, the
+/// correlated ones too), from its level's tree before planning (`ExecCtx::bound_trees`,
+/// found by the planned join `rhs` is): over `rhs`'s row.
+fn sublink_written(rhs: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Vec<Expr>> {
+    let j = match rhs {
+        Plan::Filter { input, .. } => &**input,
+        j => j,
+    };
+    let Plan::Join { meta, .. } = j else { return None };
+    let b = bound.iter().find(|b| meta.bound != 0 && b.id == meta.bound)?;
+    // (The tree's row over the planned join's: the projections between them.)
+    let mut row: Vec<Expr> = (0..width(j)).map(|i| Expr::Col(i, crate::types::DataType::Unknown)).collect();
+    for g in b.glue.iter().rev() {
+        row = g
+            .iter()
+            .map(|e| {
+                e.clone()
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(i, t) => row.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            x => x,
+                        })
+                    })
+                    .unwrap_or_else(|_| e.clone())
+            })
+            .collect();
+    }
+    fn gather(p: &Plan, off: usize, out: &mut Vec<Expr>) {
+        match p {
+            Plan::Join { kind: JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full, left, right, nleft, meta, .. } => {
+                gather(left, off, out);
+                gather(right, off + nleft, out);
+                out.extend(meta.ec_written.iter().map(|e| e.clone().shift_cols(off as isize)));
+            }
+            Plan::Filter { input, .. } => gather(input, off, out),
+            _ => {}
+        }
+    }
+    let mut eqs = Vec::new();
+    gather(&b.tree, 0, &mut eqs);
+    let mut out = Vec::new();
+    for e in eqs {
+        let mut ok = true;
+        let e = e
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Col(c, t) => match row.get(c) {
+                        Some(Expr::Col(d, _)) => Expr::Col(*d, t),
+                        _ => {
+                            ok = false;
+                            Expr::Col(c, t)
+                        }
+                    },
+                    x => x,
+                })
+            })
+            .ok()?;
+        if !ok {
+            return None;
+        }
+        out.push(e);
+    }
+    Some(out)
+}
+
+/// The classes the written equalities make (process_equivalence's merging): their operands,
+/// and for each class the first equality (by position) of it.
+struct WrittenClasses {
+    nodes: Vec<Expr>,
+    parent: Vec<usize>,
+    first: Vec<usize>,
+}
+
+impl WrittenClasses {
+    fn new(written: &[Expr]) -> Option<WrittenClasses> {
+        let mut w = WrittenClasses { nodes: Vec::new(), parent: Vec::new(), first: Vec::new() };
+        for (k, e) in written.iter().enumerate() {
+            let (a, b) = eq_sides(e)?;
+            let (x, y) = (w.id(&a, k), w.id(&b, k));
+            let (rx, ry) = (w.root(x), w.root(y));
+            if rx != ry {
+                w.parent[rx] = ry;
+                w.first[ry] = w.first[ry].min(w.first[rx]);
+            }
+        }
+        Some(w)
+    }
+
+    fn id(&mut self, e: &Expr, k: usize) -> usize {
+        match self.nodes.iter().position(|n| n.same_as(e)) {
+            Some(i) => i,
+            None => {
+                self.nodes.push(e.clone());
+                self.parent.push(self.parent.len());
+                self.first.push(k);
+                self.parent.len() - 1
+            }
+        }
+    }
+
+    fn root(&mut self, mut i: usize) -> usize {
+        while self.parent[i] != i {
+            self.parent[i] = self.parent[self.parent[i]];
+            i = self.parent[i];
+        }
+        i
+    }
+
+    /// The class of an operand, if a written equality has it.
+    fn class(&mut self, e: &Expr) -> Option<usize> {
+        let i = self.nodes.iter().position(|n| n.same_as(e))?;
+        Some(self.root(i))
+    }
+}
+
+fn eq_sides(e: &Expr) -> Option<(Expr, Expr)> {
+    match e {
+        Expr::Call(d, a, _) if d.name == "=" && a.len() == 2 => Some((a[0].clone(), a[1].clone())),
+        _ => None,
+    }
+}
+
+/// A value of the enclosing query (what a correlated equality equates a column with).
+fn outer_value(e: &Expr) -> bool {
+    e.columns().is_empty() && e.has_outer_refs() && !e.is_volatile()
+}
+
+/// A correlated clause `col = <outer value>` (either way round): the column side and the
+/// outer side.
+fn corr_sides(e: &Expr) -> Option<(Expr, Expr)> {
+    let (a, b) = eq_sides(e)?;
+    match (outer_value(&a), outer_value(&b)) {
+        (false, true) if !a.columns().is_empty() => Some((a, b)),
+        (true, false) if !b.columns().is_empty() => Some((b, a)),
+        _ => None,
+    }
+}
+
+/// A semi join's clauses (`corr`, over the right side's row) in the order of the classes the
+/// sub-select's written equalities make (generate_join_implied_equalities walks
+/// root->eq_classes in the order process_equivalence made them); others after.
+fn written_order(corr: Vec<Expr>, written: &[Expr]) -> Vec<Expr> {
+    let Some(mut w) = WrittenClasses::new(written) else { return corr };
+    let mut ranked: Vec<(usize, Expr)> = corr
+        .into_iter()
+        .map(|c| {
+            let r = corr_sides(&c).and_then(|(col, _)| w.class(&col)).map_or(usize::MAX, |r| w.first[r]);
+            (r, c)
+        })
+        .collect();
+    ranked.sort_by_key(|x| x.0);
+    ranked.into_iter().map(|x| x.1).collect()
+}
+
+/// An anti join's clauses as the sub-select wrote them (`exists_join`): `corr` (over the
+/// right side's row, `col = <outer value>` each) when the written equalities connect each of
+/// them, the written ones reading the outer query, and the right side's own written
+/// equalities between columns `corr` had equated with the outer values (gone from `rhs`).
+fn anti_written(corr: &[Expr], written: &[Expr], rhs: &Plan) -> Option<(Vec<Expr>, Vec<Expr>)> {
+    if corr.is_empty() || !written.iter().any(|e| e.has_outer_refs()) {
+        return None;
+    }
+    let mut w = WrittenClasses::new(written)?;
+    let mut equated: Vec<Expr> = Vec::new();
+    for c in corr {
+        let (col, o) = corr_sides(c)?;
+        let (x, y) = (w.class(&col)?, w.class(&o)?);
+        if x != y {
+            return None;
+        }
+        equated.push(col);
+    }
+    let sides: Vec<(Expr, Expr)> = written.iter().map(eq_sides).collect::<Option<_>>()?;
+    // (The right side's clauses already there stay as they are.)
+    let mut have: Vec<(Expr, Expr)> = Vec::new();
+    fn joins_eqs(p: &Plan, off: usize, out: &mut Vec<(Expr, Expr)>) {
+        match p {
+            Plan::Join { left, right, cond, hash, nleft, .. } => {
+                let mut parts = Vec::new();
+                if let Some(c) = cond {
+                    conjuncts(c.clone(), &mut parts);
+                }
+                for q in parts {
+                    if let Expr::Call(d, a, _) = &q
+                        && d.name == "="
+                        && a.len() == 2
+                    {
+                        out.push((a[0].clone().shift_cols(off as isize), a[1].clone().shift_cols(off as isize)));
+                    }
+                }
+                if let Some((lk, rk)) = hash {
+                    for (a, b) in lk.iter().zip(rk) {
+                        out.push((a.clone().shift_cols(off as isize), b.clone().shift_cols((off + nleft) as isize)));
+                    }
+                }
+                joins_eqs(left, off, out);
+                joins_eqs(right, off + nleft, out);
+            }
+            Plan::Filter { input, .. } => joins_eqs(input, off, out),
+            _ => {}
+        }
+    }
+    joins_eqs(rhs, 0, &mut have);
+    let mut cond = Vec::new();
+    let mut extra = Vec::new();
+    for (w, (a, b)) in written.iter().zip(&sides) {
+        if w.has_outer_refs() {
+            cond.push(w.clone());
+        } else if equated.iter().any(|e| e.same_as(a))
+            && equated.iter().any(|e| e.same_as(b))
+            && !have.iter().any(|(x, y)| x.same_as(a) && y.same_as(b) || x.same_as(b) && y.same_as(a))
+        {
+            extra.push(w.clone());
+        }
+    }
+    Some((cond, extra))
+}
+
+/// generate_base_implied_equalities_const over a semi join: `l = r` where the right side's
+/// scan has `r = k` gives the left side `l = k`, and where the left side's scans have `l = k`
+/// the right side `r = k`: the join clause implied by the two.
+fn semi_constants(cat: &Catalog, left: &Plan, rhs: Plan, cond: Vec<Expr>, nleft: usize) -> (Plan, Plan, Vec<Expr>) {
+    let rfixed = match &rhs {
+        Plan::Scan(rs) => scan_constants(rs),
+        _ => Vec::new(),
+    };
+    let lfixed = plan_constants(left);
+    if rfixed.is_empty() && lfixed.is_empty() {
+        return (left.clone(), rhs, cond);
+    }
+    // `col op k` with the comparison `q` (`col = k` or `k = col`) as written.
+    let derive = |q: &Expr, col: Expr, k: &Expr| {
+        let Expr::Call(qd, qa, qt) = q else { unreachable!() };
+        if matches!(&qa[0], Expr::Col(..)) {
+            Expr::Call(qd.clone(), vec![col, k.clone()], qt.clone())
+        } else {
+            Expr::Call(qd.clone(), vec![k.clone(), col], qt.clone())
+        }
+    };
+    let mut keep = Vec::new();
+    let mut push_left = Vec::new();
+    let mut push_right = Vec::new();
+    for c in cond {
+        let pair = match &c {
+            Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 && d.coll.as_ref().is_none_or(|c| c.deterministic) => {
+                let side = |e: &Expr| match e {
+                    Expr::Col(i, t) => Some((*i, t.clone())),
+                    _ => None,
+                };
+                match (side(&args[0]), side(&args[1])) {
+                    (Some((l, lt)), Some((r, rt))) | (Some((r, rt)), Some((l, lt)))
+                        if l < nleft && r >= nleft && lt.without_typmod() == rt.without_typmod() =>
+                    {
+                        Some((l, lt, r - nleft, rt))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some((l, lt, r, rt)) = pair else {
+            keep.push(c);
+            continue;
+        };
+        if let Some((_, k, q)) = rfixed.iter().find(|(i, _, _)| *i == r) {
+            push_left.push(derive(q, Expr::Col(l, lt), k));
+        } else if let Some((_, k, q)) = lfixed.iter().find(|(i, _, _)| *i == l) {
+            push_right.push(derive(q, Expr::Col(r, rt), k));
+        } else {
+            keep.push(c);
+        }
+    }
+    let left = if push_left.is_empty() {
+        left.clone()
+    } else {
+        super::optimize::add_filter(cat, left.clone(), Expr::And(push_left))
+    };
+    let rhs = if push_right.is_empty() {
+        rhs
+    } else {
+        super::optimize::add_filter(cat, rhs, Expr::And(push_right))
+    };
+    (left, rhs, keep)
+}
+
+/// A scan's quals equating a column with a constant: (column, constant, the qual).
+fn scan_constants(s: &ScanPlan) -> Vec<(usize, Expr, Expr)> {
+    let mut fixed = Vec::new();
+    if let Some(f) = &s.filter {
+        let mut parts = Vec::new();
+        conjuncts(f.clone(), &mut parts);
+        for q in parts {
+            if let Expr::Call(d, args, _) = &q
+                && d.name == "="
+                && args.len() == 2
+                && !q.is_volatile()
+                && d.coll.as_ref().is_none_or(|c| c.deterministic)
+            {
+                for (a, b) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+                    if let Expr::Col(i, _) = a
+                        && matches!(b, Expr::Const(..))
+                    {
+                        fixed.push((*i, b.clone(), q.clone()));
+                    }
+                }
+            }
+        }
+    }
+    fixed
+}
+
+/// `scan_constants` of a plan's rows: a scan's, or an inheritance tree's that every member
+/// has (over the parent's columns).
+fn plan_constants(p: &Plan) -> Vec<(usize, Expr, Expr)> {
+    match p {
+        Plan::Scan(s) => scan_constants(s),
+        Plan::Append { inputs, inh: Some(_), .. } if !inputs.is_empty() => {
+            let mut common: Option<Vec<(usize, Expr, Expr)>> = None;
+            for m in inputs {
+                let mine: Vec<(usize, Expr, Expr)> = match &**m {
+                    Plan::Scan(s) => scan_constants(s),
+                    Plan::Project { input, exprs } => match &**input {
+                        Plan::Scan(s) => scan_constants(s)
+                            .into_iter()
+                            .filter_map(|(j, k, q)| {
+                                let i = exprs.iter().position(|e| matches!(e, Expr::Col(c, _) if *c == j))?;
+                                let q = q
+                                    .transform(&mut |x| {
+                                        Ok(match x {
+                                            Expr::Col(c, t) if c == j => Expr::Col(i, t),
+                                            x => x,
+                                        })
+                                    })
+                                    .ok()?;
+                                Some((i, k, q))
+                            })
+                            .collect(),
+                        _ => return Vec::new(),
+                    },
+                    _ => return Vec::new(),
+                };
+                common = Some(match common {
+                    None => mine,
+                    Some(c) => c
+                        .into_iter()
+                        .filter(|(i, k, _)| mine.iter().any(|(j, l, _)| i == j && k.same_as(l)))
+                        .collect(),
+                });
+            }
+            common.unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// A sub-select's plan (scans, filters, projections, sorts and limits over one table) with
+/// its references to the query it is in, `Outer(1, i)`, as the values `params` (of queries
+/// further up) they stand for; None when it has something else, or reads further out.
+fn params_in_place(p: &Plan, params: &[Expr]) -> Option<Plan> {
+    let fix = |e: &Expr| -> Option<Expr> {
+        let mut ok = true;
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(l, ..) if *l > 1) && !matches!(x, Expr::Subquery(_) | Expr::Srf(..)));
+        if !ok {
+            return None;
+        }
+        outer_to_params(e.clone(), params)
+    };
+    Some(match p {
+        Plan::Scan(s) => {
+            if s.sample.is_some() || s.current_of.is_some() {
+                return None;
+            }
+            let mut s = s.clone();
+            if let Some((_, b)) = &mut s.index {
+                b.eq = b.eq.iter().map(fix).collect::<Option<_>>()?;
+                if let Some(a) = &b.any {
+                    b.any = Some(fix(a)?);
+                }
+                for bound in [&mut b.lower, &mut b.upper] {
+                    if let Some((e, inc)) = bound {
+                        *bound = Some((fix(e)?, *inc));
+                    }
+                }
+            }
+            s.filter = match &s.filter {
+                Some(f) => Some(fix(f)?),
+                None => None,
+            };
+            s.written = s.written.iter().map(fix).collect::<Option<_>>()?;
+            s.phv_quals = s.phv_quals.iter().map(fix).collect::<Option<_>>()?;
+            Plan::Scan(s)
+        }
+        Plan::Filter { input, pred } => Plan::Filter {
+            input: Arc::new(params_in_place(input, params)?),
+            pred: fix(pred)?,
+        },
+        Plan::Project { input, exprs } => Plan::Project {
+            input: Arc::new(params_in_place(input, params)?),
+            exprs: exprs.iter().map(fix).collect::<Option<_>>()?,
+        },
+        Plan::Sort { input, keys } => Plan::Sort {
+            input: Arc::new(params_in_place(input, params)?),
+            keys: keys
+                .iter()
+                .map(|k| Some(SortKey { expr: fix(&k.expr)?, ..k.clone() }))
+                .collect::<Option<_>>()?,
+        },
+        Plan::Limit { input, limit, offset, with_ties: None } => Plan::Limit {
+            input: Arc::new(params_in_place(input, params)?),
+            limit: match limit {
+                Some(e) => Some(fix(e)?),
+                None => None,
+            },
+            offset: match offset {
+                Some(e) => Some(fix(e)?),
+                None => None,
+            },
+            with_ties: None,
+        },
+        _ => return None,
+    })
+}
+
+/// The subquery's references to this query: the expressions they stand for.
+fn outer_to_params(e: Expr, params: &[Expr]) -> Option<Expr> {
+    let mut ok = true;
+    let out = e
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Outer(1, i, t) => match params.get(i) {
+                    Some(p) => p.clone(),
+                    None => {
+                        ok = false;
+                        Expr::Outer(1, i, t)
+                    }
+                },
+                x => x,
+            })
+        })
+        .ok()?;
+    ok.then_some(out)
+}
+
+/// convert_ANY_sublink_to_join: `left op ANY (SELECT exprs FROM t WHERE …)`; the WHERE
+/// clauses reading this query's columns (a correlated one, as Postgres 18 pulls up) join
+/// along with the comparisons.
+fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -> Option<Plan> {
+    if sub.left.is_empty()
+        || sub.left.len() != sub.ops.len()
+        // (Several columns compare as rows: only `=` is a conjunction of joinable ones.)
+        || sub.left.len() > 1 && sub.ops.iter().any(|o| o.name != "=")
+        // (A sublink in the left operand stays a SubPlan of the join clause.)
+        || sub.left.iter().any(|l| {
+            let mut other = false;
+            l.walk(&mut |x| other |= matches!(x, Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+            l.columns().is_empty() || crate::sql::explain::expr_volatile_deep(l) || other
+        })
+    {
+        return None;
+    }
+    // A select list with a set-returning function (is_simple_subquery refuses it): an
+    // uncorrelated sub-select joins as a subquery of its own, its select list computed
+    // inside it.
+    if let Some(j) = any_join_srf(cat, plan, sub) {
+        return Some(j);
+    }
+    // A correlated sub-select that isn't a simple one (an aggregate's): convert_ANY_sublink_to_join
+    // makes it a LATERAL subquery ("ANY_subquery") the join reads.
+    if let Some(j) = any_join_lateral(cat, plan, sub) {
+        return Some(j);
+    }
+    // The select list (through the binder's casting projection) over one table scan.
+    let (mut exprs, p) = select_list(&sub.plan)?;
+    let mut lateral: Vec<Expr> = Vec::new();
+    // A join tree (is_simple_subquery): pulled up with the sub-select, its relations the
+    // semi join's right side (pull_up_simple_subquery over convert_ANY_sublink_to_join's
+    // subquery RTE), from the sub-select as bound (pull_up_sublinks comes before any
+    // planning: a partitioned join isn't joined partitionwise yet).
+    let tree = || {
+        if let Some(u) = unplanned.get(&sub.id)
+            && let Some((ex, up)) = select_list(u)
+            && let Some((corr, rhs)) = sub_join(up)
+        {
+            return Some((ex, corr, rhs));
+        }
+        let (corr, rhs) = sub_join(p)?;
+        Some((None, corr, rhs))
+    };
+    // (Its WHERE's own sub-selects go along: convert_ANY_sublink_to_join makes the
+    // sub-select a subquery of the query, pulled up with its quals, SubPlans and all; so
+    // over a join tree's scans (TPC-H q20).)
+    let tree = || {
+        let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
+        tree()
+    };
+    let rel = {
+        let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
+        sub_rel(p, false)
+    };
+    let (corr, rhs, types, scan_limited) = match rel {
+        Some(x) => x,
+        None if let Some((ex, corr, rhs)) = tree() => {
+            if ex.is_some() {
+                exprs = ex;
+            }
+            let types = crate::sql::paths::analyzejoins::col_types(&rhs);
+            (corr, rhs, types, false)
+        }
+        // Any other uncorrelated subquery joins as it is: a VALUES list pulled up
+        // (pull_up_simple_values), else a subquery of its own ("ANY_subquery").
+        None if sub.params.is_empty()
+            && (plan_clean_with(p, true) || locked_clean(p) || values_clean(p))
+            && !matches!(p, Plan::Empty { .. } | Plan::One) =>
+        {
+            let n = width(p);
+            let types = (0..n)
+                .map(|i| match p {
+                    Plan::Values { rows, .. } => rows[0][i].ty(),
+                    _ => sub
+                        .ops
+                        .get(i)
+                        .and_then(|o| o.args.get(1).cloned())
+                        .unwrap_or(crate::types::DataType::Unknown),
+                })
+                .collect();
+            let rhs = match p {
+                Plan::Values { .. } => p.clone(),
+                _ => Plan::Barrier {
+                    input: Arc::new(p.clone()),
+                    alias: "ANY_subquery".into(),
+                    cols: (1..=n).map(|i| sub.names.get(i - 1).cloned().unwrap_or_else(|| format!("column{i}"))).collect(),
+                    secure: false,
+                    path: None,
+                    // (Its ORDER BY's order is of no use to the semi join above:
+                    // truncate_useless_pathkeys.)
+                    sorted: matches!(p, Plan::Sort { .. }).then_some(0),
+                    rti: Default::default(),
+                    copies: Vec::new(),
+                },
+            };
+            (Vec::new(), rhs, types, false)
+        }
+        // A VALUES list reading the outer row: a LATERAL one (its values over the row as
+        // the join's parameters); reading only queries further up, their values in place.
+        None if !sub.params.is_empty() && values_outer(p) => {
+            let Plan::Values { rows, ncols, rti } = p else { unreachable!() };
+            let level_only = sub.params.iter().all(|e| e.columns().is_empty() && !e.is_volatile() && !has_sublink(e));
+            let rows = if level_only {
+                rows.iter()
+                    .map(|r| r.iter().map(|e| outer_to_params(e.clone(), &sub.params)).collect::<Option<Vec<_>>>())
+                    .collect::<Option<Vec<_>>>()?
+            } else {
+                lateral = sub.params.clone();
+                rows.clone()
+            };
+            let types = rows[0].iter().map(Expr::ty).collect();
+            (Vec::new(), Plan::Values { rows, ncols: *ncols, rti: *rti }, types, false)
+        }
+        // A sub-select that isn't a simple one (an OFFSET) reading only queries further up,
+        // none of this one's rows: convert_ANY_sublink_to_join takes it (only Vars of the
+        // parent query bar it), a subquery of its own ("ANY_subquery") with those values
+        // in place.
+        None if !sub.params.is_empty()
+            && sub.params.iter().all(|e| {
+                e.columns().is_empty() && !crate::sql::explain::expr_volatile_deep(e) && !has_sublink(e)
+            })
+            && !matches!(p, Plan::Empty { .. } | Plan::One) =>
+        {
+            let p = params_in_place(p, &sub.params)?;
+            let n = width(&p);
+            let types = (0..n)
+                .map(|i| {
+                    sub.ops
+                        .get(i)
+                        .and_then(|o| o.args.get(1).cloned())
+                        .unwrap_or(crate::types::DataType::Unknown)
+                })
+                .collect();
+            let sorted = matches!(p, Plan::Sort { .. }).then_some(0);
+            let rhs = Plan::Barrier {
+                input: Arc::new(p),
+                alias: "ANY_subquery".into(),
+                cols: (1..=n).map(|i| format!("column{i}")).collect(),
+                secure: false,
+                path: None,
+                sorted,
+                rti: Default::default(),
+                copies: Vec::new(),
+            };
+            (Vec::new(), rhs, types, false)
+        }
+        None => return None,
+    };
+    if scan_limited {
+        return None;
+    }
+    // The select list may read queries further up (their values reach this one as its
+    // own outer references), not this query's rows.
+    let exprs = match exprs {
+        Some(ex) if ex.iter().any(Expr::has_outer_refs) => {
+            let mut ok = true;
+            let ex: Vec<Expr> = ex
+                .into_iter()
+                .map(|e| {
+                    e.transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Outer(1, i, t) => match sub.params.get(i) {
+                                Some(v) if v.columns().is_empty() && !v.is_volatile() => v.clone(),
+                                _ => {
+                                    ok = false;
+                                    Expr::Outer(1, i, t)
+                                }
+                            },
+                            Expr::Outer(..) => {
+                                ok = false;
+                                x
+                            }
+                            x => x,
+                        })
+                    })
+                    .unwrap()
+                })
+                .collect();
+            if !ok {
+                return None;
+            }
+            Some(ex)
+        }
+        ex => ex,
+    };
+    if !corr.is_empty() && (sub.params.is_empty() || corr.iter().any(|e| e.is_volatile() || has_sublink(e))) {
+        return None;
+    }
+    let nleft = width(plan);
+    let nright = width(&rhs);
+    let corr: Vec<Expr> = corr
+        .into_iter()
+        .map(|e| outer_to_params(e.shift_cols(nleft as isize), &sub.params))
+        .collect::<Option<_>>()?;
+    let exprs = exprs.unwrap_or_else(|| {
+        types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                // (A CTE's column: the type its comparison operator takes.)
+                let t = match t {
+                    crate::types::DataType::Unknown => sub
+                        .ops
+                        .get(i)
+                        .and_then(|o| o.args.get(1).cloned())
+                        .unwrap_or(crate::types::DataType::Unknown),
+                    t => t.clone(),
+                };
+                Expr::Col(i, t)
+            })
+            .collect()
+    });
+    if exprs.len() != sub.left.len() {
+        return None;
+    }
+    // (The pulled-up subquery's own WHERE clauses come first: deconstruct_jointree
+    // distributes the semi join's right side before its qual.)
+    let cond: Vec<Expr> = corr
+        .into_iter()
+        .chain(sub.left.iter().zip(&exprs).zip(&sub.ops).map(|((l, r), op)| {
+            Expr::Call(
+                op.clone(),
+                vec![l.clone(), r.clone().shift_cols(nleft as isize)],
+                crate::types::DataType::Bool,
+            )
+        }))
+        .collect();
+    Some(super::optimize::join(
+        cat,
+        JoinKind::Semi,
+        plan.clone(),
+        rhs,
+        and_all(cond),
+        lateral,
+        nleft,
+        nright,
+    ))
+}
+
+/// A sub-select's select list (its projections composed, None without one) and the plan
+/// below it; None when the list has a sublink or a volatile call.
+fn select_list(plan: &Plan) -> Option<(Option<Vec<Expr>>, &Plan)> {
+    let mut exprs: Option<Vec<Expr>> = None;
+    let mut p: &Plan = plan;
+    while let Plan::Project { input, exprs: ex } = p {
+        if ex.iter().any(|e| has_sublink(e) || e.is_volatile()) {
+            return None;
+        }
+        exprs = Some(match exprs {
+            None => ex.clone(),
+            Some(outer) => outer
+                .into_iter()
+                .map(|e| {
+                    e.transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(i, t) => ex.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            x => x,
+                        })
+                    })
+                    .unwrap()
+                })
+                .collect(),
+        });
+        p = input;
+    }
+    Some((exprs, p))
+}
+
+/// `any_join` for an uncorrelated sub-select whose select list returns a set (a
+/// ProjectSet under its projections): the semi join's right side is the whole sub-select,
+/// a subquery scan ("ANY_subquery") named by its columns.
+fn any_join_srf(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
+    if !sub.params.is_empty() {
+        return None;
+    }
+    let mut p: &Plan = &sub.plan;
+    while let Plan::Project { input, exprs } = p {
+        if exprs.iter().any(|e| has_sublink(e) || e.is_volatile()) {
+            return None;
+        }
+        p = input;
+    }
+    let Plan::ProjectSet { input, exprs, srfs } = p else {
+        return None;
+    };
+    let mut ok = !exprs.iter().any(|e| e.is_volatile());
+    for e in exprs {
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_)));
+    }
+    for c in srfs {
+        for a in &c.args {
+            a.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_)));
+            ok &= !a.is_volatile();
+        }
+    }
+    if !ok || !plan_clean(input) {
+        return None;
+    }
+    let n = width(&sub.plan);
+    if n != sub.left.len() {
+        return None;
+    }
+    let cols = if sub.names.len() == n {
+        (*sub.names).clone()
+    } else {
+        (1..=n).map(|i| format!("column{i}")).collect()
+    };
+    let rhs = Plan::Barrier {
+        input: sub.plan.clone(),
+        alias: "ANY_subquery".into(),
+        cols,
+        secure: false,
+        path: None,
+        sorted: None,
+        rti: Default::default(),
+        copies: Vec::new(),
+    };
+    let nleft = width(plan);
+    let types: Vec<crate::types::DataType> = sub
+        .ops
+        .iter()
+        .map(|o| o.args.get(1).cloned().unwrap_or(crate::types::DataType::Unknown))
+        .collect();
+    let cond: Vec<Expr> = sub
+        .left
+        .iter()
+        .zip(&sub.ops)
+        .enumerate()
+        .map(|(i, (l, op))| {
+            Expr::Call(
+                op.clone(),
+                vec![l.clone(), Expr::Col(nleft + i, types[i].clone())],
+                crate::types::DataType::Bool,
+            )
+        })
+        .collect();
+    Some(super::optimize::join(cat, JoinKind::Semi, plan.clone(), rhs, and_all(cond), Vec::new(), nleft, n))
+}
+
+/// `any_join` for a correlated sub-select planned as a query level of its own (an
+/// aggregation, or the MIN / MAX InitPlan planning made of one): the join's right side is
+/// that subquery, LATERAL, its outer references the join's values. At most one row (no
+/// grouping): an inner join, as reduce_unique_semijoins makes it.
+fn any_join_lateral(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
+    if sub.params.is_empty() || sub.test_op.is_some() {
+        return None;
+    }
+    let mut p: &Plan = &sub.plan;
+    let mut minmax = false;
+    while let Plan::Project { input, exprs } = p {
+        if exprs.iter().any(crate::sql::explain::expr_volatile_deep) {
+            return None;
+        }
+        if exprs.iter().any(has_sublink) {
+            if !matches!(&**input, Plan::One) {
+                return None;
+            }
+            minmax = true;
+        }
+        p = input;
+    }
+    if !matches!(p, Plan::Agg { .. }) && !(minmax && matches!(p, Plan::One)) {
+        return None;
+    }
+    let one_row = minmax || matches!(p, Plan::Agg { groups, sets: None, .. } if groups.is_empty());
+    // (Its outer references read this level's rows only.)
+    let level_ok = sub.params.iter().all(|e| {
+        let mut ok = !e.is_volatile();
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Subquery(_) | Expr::Outer(..)));
+        ok && !e.columns().is_empty()
+    });
+    if !level_ok || crate::sql::explain::plan_volatile_deep(&sub.plan) {
+        return None;
+    }
+    let n = width(&sub.plan);
+    if n != sub.left.len() {
+        return None;
+    }
+    let cols = if sub.names.len() == n {
+        (*sub.names).clone()
+    } else {
+        (1..=n).map(|i| format!("column{i}")).collect()
+    };
+    let rhs = Plan::Barrier {
+        input: sub.plan.clone(),
+        alias: "ANY_subquery".into(),
+        cols,
+        secure: false,
+        path: None,
+        sorted: None,
+        rti: Default::default(),
+        copies: Vec::new(),
+    };
+    let nleft = width(plan);
+    let cond: Vec<Expr> = sub
+        .left
+        .iter()
+        .zip(&sub.ops)
+        .enumerate()
+        .map(|(i, (l, op))| {
+            let ty = op.args.get(1).cloned().unwrap_or(crate::types::DataType::Unknown);
+            Expr::Call(op.clone(), vec![l.clone(), Expr::Col(nleft + i, ty)], crate::types::DataType::Bool)
+        })
+        .collect();
+    let kind = if one_row { JoinKind::Inner } else { JoinKind::Semi };
+    Some(super::optimize::join(cat, kind, plan.clone(), rhs, and_all(cond), sub.params.clone(), nleft, n))
+}
+
+/// reduce_unique_semijoins: a semi join whose right side (one table) has a unique index
+/// every column of which the join's equalities (or its own `col = constant` quals) fix is
+/// an inner join. (Its right columns trail the row; nothing above reads them.)
+fn reduce_unique(cat: &Catalog, j: Plan) -> Plan {
+    let Plan::Join {
+        kind: JoinKind::Semi,
+        left,
+        right,
+        cond,
+        hash,
+        params,
+        nleft,
+        nright,
+        meta,
+    } = j
+    else {
+        return j;
+    };
+    let mut fixed: Vec<usize> = Vec::new();
+    if let (Some((_, rk)), Plan::Scan(s)) = (&hash, &*right) {
+        for e in rk {
+            if let Expr::Col(c, _) = e {
+                fixed.push(*c);
+            }
+        }
+        if let Some(f) = &s.filter {
+            let mut parts = Vec::new();
+            conjuncts(f.clone(), &mut parts);
+            for q in parts {
+                if let Expr::Call(d, args, _) = &q
+                    && d.name == "="
+                    && args.len() == 2
+                {
+                    for (a, b) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+                        if let Expr::Col(c, _) = a
+                            && super::optimize::pseudo_constant(b)
+                        {
+                            fixed.push(*c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let unique = match &*right {
+        Plan::Scan(s) if !fixed.is_empty() => {
+            let t = &s.table;
+            cat.table_indexes(t)
+                .iter()
+                .chain(t.pkey_index.and_then(|o| cat.index(o)))
+                .any(|ix| {
+                    (ix.unique || ix.primary)
+                        && ix.valid
+                        && ix.predicate.is_none()
+                        && ix.columns.iter().all(|c| {
+                            matches!(c.key, crate::catalog::IndexKey::Column(k) if fixed.contains(&k))
+                        })
+                })
+        }
+        _ => false,
+    };
+    // (Only the join's equalities may make it unique: one of them must be a key.)
+    let joined_key = hash.as_ref().is_some_and(|(_, rk)| !rk.is_empty());
+    Plan::Join {
+        kind: if unique && joined_key {
+            JoinKind::Inner
+        } else {
+            JoinKind::Semi
+        },
+        left,
+        right,
+        cond,
+        hash,
+        params,
+        nleft,
+        nright,
+        meta,
+    }
+}
+
+/// convert_VALUES_to_ANY: `x IN (VALUES (a), (b), ...)` of values fixed for the query
+/// (no columns, nothing volatile or a sub-select) is `x = ANY (ARRAY[a, b, ...])`.
+/// `x op ANY (SELECT e)` over one row without FROM: the semi join with the empty relation
+/// pulled up (convert_ANY_sublink_to_join, then remove_useless_result_rtes) leaves the
+/// comparison `x op e` (one per column, ANDed). The test expression must read the query's
+/// columns, as Postgres pulls up only then.
+fn one_row_to_ops(e: Expr) -> Expr {
+    let Expr::Subquery(sub) = &e else { return e };
+    if sub.kind != SubqueryKind::Any
+        || sub.left.is_empty()
+        || sub.left.len() != sub.ops.len()
+        || !sub.params.is_empty()
+        || sub.left.iter().all(|l| l.columns().is_empty())
+        || sub.left.iter().any(|l| l.is_volatile() || has_sublink(l))
+    {
+        return e;
+    }
+    // (Through the binder's projections, composed.)
+    let mut p: &Plan = &sub.plan;
+    let mut maps: Vec<&Vec<Expr>> = Vec::new();
+    while let Plan::Project { input, exprs } = p {
+        maps.push(exprs);
+        p = input;
+    }
+    if !matches!(p, Plan::One) || maps.is_empty() {
+        return e;
+    }
+    let mut row: Vec<Expr> = Vec::new();
+    for m in maps.iter().rev() {
+        row = m
+            .iter()
+            .map(|x| {
+                x.clone()
+                    .transform(&mut |y| {
+                        Ok(match y {
+                            Expr::Col(i, t) => row.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            y => y,
+                        })
+                    })
+                    .unwrap()
+            })
+            .collect();
+    }
+    if row.len() != sub.left.len()
+        || row
+            .iter()
+            .any(|v| !v.columns().is_empty() || v.is_volatile() || has_sublink(v) || v.has_outer_refs())
+    {
+        return e;
+    }
+    let mut cmps: Vec<Expr> = sub
+        .left
+        .iter()
+        .zip(&sub.ops)
+        .zip(row)
+        .map(|((l, op), v)| Expr::Call(op.clone(), vec![l.clone(), v], crate::types::DataType::Bool))
+        .collect();
+    if cmps.len() == 1 { cmps.pop().unwrap() } else { Expr::And(cmps) }
+}
+
+fn values_to_any(e: Expr, ctx: &crate::exec::ExecCtx) -> Expr {
+    let Expr::Subquery(sub) = &e else { return e };
+    if sub.kind != SubqueryKind::Any || sub.left.len() != 1 || sub.ops.len() != 1 || !sub.params.is_empty() {
+        return e;
+    }
+    // (Through the binder's casting projections.)
+    let mut p: &Plan = &sub.plan;
+    let mut maps: Vec<&Vec<Expr>> = Vec::new();
+    while let Plan::Project { input, exprs } = p {
+        if exprs.len() != 1 {
+            return e;
+        }
+        // (Only coercions: a select list computing something over the VALUES is a FROM
+        // subquery's, not a VALUES query.)
+        let mut x = &exprs[0];
+        while let Expr::Cast(inner, ..)
+        | Expr::Relabel(inner, _)
+        | Expr::CoerceToDomain(inner, _)
+        | Expr::Collate(inner, ..) = x
+        {
+            x = inner;
+        }
+        if !matches!(x, Expr::Col(0, _)) {
+            return e;
+        }
+        maps.push(exprs);
+        p = input;
+    }
+    let Plan::Values { rows, .. } = p else { return e };
+    if rows.len() < 2 || rows.iter().any(|r| r.len() != 1) {
+        return e;
+    }
+    let mut elems = Vec::with_capacity(rows.len());
+    for r in rows {
+        let mut v = r[0].clone();
+        for m in maps.iter().rev() {
+            let inner = v.clone();
+            v = m[0]
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(0, _) => inner.clone(),
+                        x => x,
+                    })
+                })
+                .unwrap();
+        }
+        // (Only an array of constants: each value as eval_const_expressions leaves it.)
+        match fold_const(v, ctx) {
+            Some(c) => elems.push(c),
+            None => return e,
+        }
+    }
+    let elem_ty = elems[0].ty();
+    if elems.iter().any(|x| x.ty() != elem_ty) {
+        return e;
+    }
+    let arr_ty = crate::types::DataType::array_of(elem_ty.clone());
+    let items = elems
+        .into_iter()
+        .map(|x| match x {
+            Expr::Const(v, _) => v,
+            _ => unreachable!(),
+        })
+        .collect();
+    let right = Expr::Const(
+        Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(elem_ty, items))),
+        arr_ty,
+    );
+    let saop = Expr::ArrayOp {
+        left: Box::new(sub.left[0].clone()),
+        right: Box::new(right),
+        op: sub.ops[0].clone(),
+        all: false,
+    };
+    // (Over a constant too, the whole test is one.)
+    fold_const(saop.clone(), ctx).unwrap_or(saop)
+}
+
+/// `v` evaluated, when it is a constant expression (no columns, parameters, outer values,
+/// sub-selects or volatile calls).
+fn fold_const(v: Expr, ctx: &crate::exec::ExecCtx) -> Option<Expr> {
+    if let Expr::Const(..) = v {
+        return Some(v);
+    }
+    let mut plain = v.columns().is_empty() && v.is_immutable() && !has_sublink(&v);
+    v.walk(&mut |x| plain &= !matches!(x, Expr::Param(..) | Expr::Outer(..)));
+    if !plain {
+        return None;
+    }
+    let ty = v.ty();
+    crate::sql::expr::eval(&v, &[], ctx).ok().map(|c| Expr::Const(c, ty))
+}

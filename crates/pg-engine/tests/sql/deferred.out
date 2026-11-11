@@ -1,0 +1,179 @@
+> CREATE TABLE p (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE c (id int, pid int CONSTRAINT c_pid_fk REFERENCES p DEFERRABLE)
+-- CREATE TABLE
+
+> CREATE TABLE d (id int, pid int, CONSTRAINT d_pid_fk FOREIGN KEY (pid) REFERENCES p DEFERRABLE INITIALLY DEFERRED)
+-- CREATE TABLE
+
+> CREATE TABLE n (id int, pid int CONSTRAINT n_pid_fk REFERENCES p)
+-- CREATE TABLE
+
+> SELECT conname, condeferrable, condeferred, pg_get_constraintdef(oid) FROM pg_constraint WHERE contype = 'f' ORDER BY conname
+conname:name | condeferrable:bool | condeferred:bool | pg_get_constraintdef:text
+c_pid_fk | t | f | FOREIGN KEY (pid) REFERENCES p(id) DEFERRABLE
+d_pid_fk | t | t | FOREIGN KEY (pid) REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED
+n_pid_fk | f | f | FOREIGN KEY (pid) REFERENCES p(id)
+-- SELECT 3
+
+> SELECT constraint_name, is_deferrable, initially_deferred FROM information_schema.table_constraints WHERE constraint_type = 'FOREIGN KEY' ORDER BY 1
+constraint_name:name | is_deferrable:varchar | initially_deferred:varchar
+c_pid_fk | YES | NO
+d_pid_fk | YES | YES
+n_pid_fk | NO | NO
+-- SELECT 3
+
+> INSERT INTO c VALUES (1, 1)
+ERROR 23503: insert or update on table "c" violates foreign key constraint "c_pid_fk"
+DETAIL: Key (pid)=(1) is not present in table "p".
+OBJECTS: schema=public table=c constraint=c_pid_fk
+
+> BEGIN
+-- BEGIN
+
+> SET CONSTRAINTS c_pid_fk DEFERRED
+-- SET CONSTRAINTS
+
+> INSERT INTO c VALUES (1, 1)
+-- INSERT 0 1
+
+> INSERT INTO p VALUES (1)
+-- INSERT 0 1
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO d VALUES (1, 2)
+-- INSERT 0 1
+
+> SET CONSTRAINTS d_pid_fk IMMEDIATE
+ERROR 23503: insert or update on table "d" violates foreign key constraint "d_pid_fk"
+DETAIL: Key (pid)=(2) is not present in table "p".
+OBJECTS: schema=public table=d constraint=d_pid_fk
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO d VALUES (1, 2)
+-- INSERT 0 1
+
+> INSERT INTO p VALUES (2)
+-- INSERT 0 1
+
+> SET CONSTRAINTS ALL IMMEDIATE
+-- SET CONSTRAINTS
+
+> INSERT INTO d VALUES (2, 3)
+ERROR 23503: insert or update on table "d" violates foreign key constraint "d_pid_fk"
+DETAIL: Key (pid)=(3) is not present in table "p".
+OBJECTS: schema=public table=d constraint=d_pid_fk
+
+> COMMIT
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SET CONSTRAINTS ALL DEFERRED
+-- SET CONSTRAINTS
+
+> DELETE FROM p WHERE id = 1
+-- DELETE 1
+
+> INSERT INTO p VALUES (1)
+-- INSERT 0 1
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> SET CONSTRAINTS ALL DEFERRED
+-- SET CONSTRAINTS
+
+> DELETE FROM p WHERE id = 1
+-- DELETE 1
+
+> COMMIT
+ERROR 23503: update or delete on table "p" violates foreign key constraint "c_pid_fk" on table "c"
+DETAIL: Key (id)=(1) is still referenced from table "c".
+OBJECTS: schema=public table=c constraint=c_pid_fk
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO d VALUES (3, 1)
+-- INSERT 0 1
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> INSERT INTO d VALUES (4, 99)
+-- INSERT 0 1
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO d VALUES (5, 77)
+-- INSERT 0 1
+
+> DELETE FROM d WHERE id = 5
+-- DELETE 1
+
+> COMMIT
+-- COMMIT
+
+> INSERT INTO d VALUES (6, 55)
+ERROR 23503: insert or update on table "d" violates foreign key constraint "d_pid_fk"
+DETAIL: Key (pid)=(55) is not present in table "p".
+OBJECTS: schema=public table=d constraint=d_pid_fk
+
+> SET CONSTRAINTS ALL DEFERRED
+WARNING 25P01: SET CONSTRAINTS can only be used in transaction blocks
+-- SET CONSTRAINTS
+
+> BEGIN
+-- BEGIN
+
+> SET CONSTRAINTS n_pid_fk DEFERRED
+ERROR 42809: constraint "n_pid_fk" is not deferrable
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SET CONSTRAINTS nope DEFERRED
+ERROR 42704: constraint "nope" does not exist
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT * FROM d ORDER BY id
+id:int4 | pid:int4
+3 | 1
+-- SELECT 1
+
+> SELECT * FROM c ORDER BY id
+id:int4 | pid:int4
+1 | 1
+-- SELECT 1
+
+> DROP TABLE c, d, n, p
+-- DROP TABLE
+

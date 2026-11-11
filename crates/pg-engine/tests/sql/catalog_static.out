@@ -1,0 +1,243 @@
+> SELECT 'pg_class' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_class x
+catalog:text | count:int8 | md5:text
+pg_class | 415 | d867c8cada2431b0d2b8781ff941778f
+-- SELECT 1
+
+> SELECT 'pg_attribute' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_attribute x
+catalog:text | count:int8 | md5:text
+pg_attribute | 3161 | a206acc2496a0905aeec9b6a7057cad6
+-- SELECT 1
+
+> SELECT 'pg_index' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_index x
+catalog:text | count:int8 | md5:text
+pg_index | 163 | e773d5153b6e93682a5249b50e73728c
+-- SELECT 1
+
+> SELECT 'pg_constraint' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_constraint x
+catalog:text | count:int8 | md5:text
+pg_constraint | 194 | 354082785ea2a9db5e44a6b1025063b5
+-- SELECT 1
+
+> SELECT 'pg_depend' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_depend x
+catalog:text | count:int8 | md5:text
+pg_depend | 1725 | 30c0e88d5a5025c7af3e45e900236919
+-- SELECT 1
+
+> SELECT 'pg_type' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_type x
+catalog:text | count:int8 | md5:text
+pg_type | 621 | c69ed6a0e28d001cf09e99a5e015f22b
+-- SELECT 1
+
+> SELECT 'pg_description' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_description x
+catalog:text | count:int8 | md5:text
+pg_description | 5408 | c191b87355fe08fd5cfc97b265c53fa0
+-- SELECT 1
+
+> SELECT 'pg_proc' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_proc x
+catalog:text | count:int8 | md5:text
+pg_proc | 3413 | 35fbb90f1ce69579fea7faffd4edf631
+-- SELECT 1
+
+> SELECT 'pg_namespace' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_namespace x
+catalog:text | count:int8 | md5:text
+pg_namespace | 4 | 84ed0b5763766d58434b1dc5ed7d4987
+-- SELECT 1
+
+> SELECT 'pg_am' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_am x
+catalog:text | count:int8 | md5:text
+pg_am | 7 | 1e8a23eced5c57fb991c8dab6089514d
+-- SELECT 1
+
+> SELECT 'pg_amop' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_amop x
+catalog:text | count:int8 | md5:text
+pg_amop | 945 | 367844939bf6ab9c0e96988f1ed4d6a0
+-- SELECT 1
+
+> SELECT 'pg_amproc' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_amproc x
+catalog:text | count:int8 | md5:text
+pg_amproc | 714 | 40c62bb05136e596c6de44ee5947f400
+-- SELECT 1
+
+> SELECT 'pg_conversion' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_conversion x
+catalog:text | count:int8 | md5:text
+pg_conversion | 128 | fe820ac25d666969190db6a917afbaea
+-- SELECT 1
+
+> SELECT 'pg_collation' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_collation x
+catalog:text | count:int8 | md5:text
+pg_collation | 914 | 30019c3a54d786efb60a163a66c9996a
+-- SELECT 1
+
+> SELECT 'pg_cast' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_cast x
+catalog:text | count:int8 | md5:text
+pg_cast | 235 | fdab6261c9dc1718d6e04e4194a3378f
+-- SELECT 1
+
+> SELECT 'pg_aggregate' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_aggregate x
+catalog:text | count:int8 | md5:text
+pg_aggregate | 161 | 097db8e324c8ceabcaf66362aa0f6638
+-- SELECT 1
+
+> SELECT 'pg_auth_members' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_auth_members x
+catalog:text | count:int8 | md5:text
+pg_auth_members | 3 | e9ef6df5cb98a58974d75afb62e934d5
+-- SELECT 1
+
+> SELECT 'pg_init_privs' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_init_privs x
+catalog:text | count:int8 | md5:text
+pg_init_privs | 229 | 60b08b307223d0c2c75224fbf7d3482c
+-- SELECT 1
+
+> SELECT 'pg_rewrite' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_rewrite x
+catalog:text | count:int8 | md5:text
+pg_rewrite | 147 | 1580918665fba95e930472441c475ad6
+-- SELECT 1
+
+> SELECT 'pg_operator' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_operator x
+catalog:text | count:int8 | md5:text
+pg_operator | 799 | 272bcf79eb88362a4c628d472791c6a1
+-- SELECT 1
+
+> SELECT 'pg_opclass' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_opclass x
+catalog:text | count:int8 | md5:text
+pg_opclass | 177 | ebda3904dcb56d2e66d1b524c437e9e7
+-- SELECT 1
+
+> SELECT 'pg_opfamily' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_opfamily x
+catalog:text | count:int8 | md5:text
+pg_opfamily | 146 | 52cd78e4c3dafd73e64ee8f8c5a5a5b7
+-- SELECT 1
+
+> SELECT 'pg_language' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_language x
+catalog:text | count:int8 | md5:text
+pg_language | 4 | fccd38d084207611091244bce31ca490
+-- SELECT 1
+
+> SELECT 'pg_range' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_range x
+catalog:text | count:int8 | md5:text
+pg_range | 6 | 1271421c2a851811712cb1a6dc521ec7
+-- SELECT 1
+
+> SELECT 'pg_ts_config' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_ts_config x
+catalog:text | count:int8 | md5:text
+pg_ts_config | 30 | 2ee024809756a192d242ec27414b5bdb
+-- SELECT 1
+
+> SELECT 'pg_ts_config_map' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_ts_config_map x
+catalog:text | count:int8 | md5:text
+pg_ts_config_map | 570 | 52dc22ad732733b70997b639b3118986
+-- SELECT 1
+
+> SELECT 'pg_ts_dict' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_ts_dict x
+catalog:text | count:int8 | md5:text
+pg_ts_dict | 30 | 8796bd3b132053bbc4b2b34657e497ad
+-- SELECT 1
+
+> SELECT 'pg_ts_parser' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_ts_parser x
+catalog:text | count:int8 | md5:text
+pg_ts_parser | 1 | 654a7d1052a50e3d65ea0e0d848dc686
+-- SELECT 1
+
+> SELECT 'pg_ts_template' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_ts_template x
+catalog:text | count:int8 | md5:text
+pg_ts_template | 5 | c3b390b24abf9e7d3fff2ed30a8f26b5
+-- SELECT 1
+
+> SELECT 'pg_extension' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_extension x
+catalog:text | count:int8 | md5:text
+pg_extension | 1 | b1a160d69e18444362ff2aa626382703
+-- SELECT 1
+
+> SELECT 'pg_statistic' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_statistic x
+catalog:text | count:int8 | md5:text
+pg_statistic | 419 | ff2d7912b635cc9be0325282a1bcbfdb
+-- SELECT 1
+
+> SELECT 'pg_stats' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_stats x
+catalog:text | count:int8 | md5:text
+pg_stats | 419 | d0b609f3aba31a8a846f779a3012e206
+-- SELECT 1
+
+> SELECT 'pg_tablespace' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM pg_tablespace x
+catalog:text | count:int8 | md5:text
+pg_tablespace | 2 | 8f5406bdab321ea5871fc17114badbaa
+-- SELECT 1
+
+> SELECT obj_description('int4pl'::regproc, 'pg_proc'), obj_description('pg_catalog'::regnamespace, 'pg_namespace'), obj_description('int4'::regtype, 'pg_type'), col_description('pg_class'::regclass, 1)
+obj_description:text | obj_description:text | obj_description:text | col_description:text
+implementation of + operator | system catalog schema | -2 billion to 2 billion integer, 4-byte storage | NULL
+-- SELECT 1
+
+> COMMENT ON FUNCTION int4pl(int4, int4) IS 'mine'
+-- COMMENT
+
+> SELECT obj_description('int4pl'::regproc, 'pg_proc'), (SELECT description FROM pg_description WHERE objoid = 'int4pl'::regproc)
+obj_description:text | description:text
+mine | mine
+-- SELECT 1
+
+> COMMENT ON FUNCTION int4pl(int4, int4) IS NULL
+-- COMMENT
+
+> SELECT obj_description('int4pl'::regproc, 'pg_proc'), (SELECT count(*) FROM pg_description WHERE objoid = 'int4pl'::regproc)
+obj_description:text | count:int8
+NULL | 0
+-- SELECT 1
+
+> SELECT amproc FROM pg_amproc WHERE amprocfamily = 434 AND amprocnum = 3 ORDER BY oid LIMIT 2
+amproc:regproc
+pg_catalog.in_range
+pg_catalog.in_range
+-- SELECT 2
+
+> SELECT oprcode, oprrest, oprjoin FROM pg_operator WHERE oid = 'int4pl'::regproc::oid OR oprname = '+' AND oprleft = 23 AND oprright = 23
+oprcode:regproc | oprrest:regproc | oprjoin:regproc
+int4pl | - | -
+-- SELECT 1
+
+> SELECT relname, relkind, reltoastrelid::regclass FROM pg_class WHERE oid IN ('pg_proc'::regclass, 'pg_toast.pg_toast_1255'::regclass, 'pg_proc_oid_index'::regclass) ORDER BY 1
+relname:name | relkind:char | reltoastrelid:regclass
+pg_proc | r | pg_toast.pg_toast_1255
+pg_proc_oid_index | i | -
+pg_toast_1255 | t | -
+-- SELECT 3
+
+> SELECT indexrelid::regclass, indkey, indclass FROM pg_index WHERE indrelid = 'pg_class'::regclass ORDER BY 1
+indexrelid:regclass | indkey:22 | indclass:30
+pg_class_oid_index | 1 | 1981
+pg_class_relname_nsp_index | 2 3 | 10028 1981
+pg_class_tblspc_relfilenode_index | 9 8 | 1981 1981
+-- SELECT 3
+
+> SELECT conname, contype FROM pg_constraint WHERE conrelid = 'pg_namespace'::regclass ORDER BY 1
+conname:name | contype:char
+pg_namespace_nspname_index | u
+pg_namespace_oid_index | p
+pg_namespace_oid_not_null | n
+-- SELECT 3
+
+> SELECT to_tsvector('italian', 'il gatto e la volpe')
+to_tsvector:3614
+'gatt':2 'volp':5
+-- SELECT 1
+
+> SELECT 'sql_features' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM information_schema.sql_features x
+catalog:text | count:int8 | md5:text
+sql_features | 755 | 60654daf1b12302f83ccb278c198c02b
+-- SELECT 1
+
+> SELECT 'sql_implementation_info' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM information_schema.sql_implementation_info x
+catalog:text | count:int8 | md5:text
+sql_implementation_info | 12 | 23d587b3f9ab972edce7a919bc964202
+-- SELECT 1
+
+> SELECT 'sql_parts' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM information_schema.sql_parts x
+catalog:text | count:int8 | md5:text
+sql_parts | 11 | 2fd38fe1a381835c03b9d869aacca382
+-- SELECT 1
+
+> SELECT 'sql_sizing' AS catalog, count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM information_schema.sql_sizing x
+catalog:text | count:int8 | md5:text
+sql_sizing | 23 | a8482ab5f2172bd2f6040c6fe28e8613
+-- SELECT 1
+

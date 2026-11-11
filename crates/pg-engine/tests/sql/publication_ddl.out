@@ -1,0 +1,375 @@
+> set client_min_messages = error
+-- SET
+
+> create publication pubd_none
+-- CREATE PUBLICATION
+
+> reset client_min_messages
+-- RESET
+
+> create publication pubd_w
+WARNING 55000: "wal_level" is insufficient to publish logical changes
+HINT: Set "wal_level" to "logical" before creating subscriptions.
+-- CREATE PUBLICATION
+
+> create publication pubd_none
+ERROR 42710: publication "pubd_none" already exists
+
+> create publication pubd_x with (foo)
+ERROR 42601: unrecognized publication parameter: "foo"
+
+> create publication pubd_x with (publish = 'insert, cluster')
+ERROR 42601: unrecognized value for publication option "publish": "cluster"
+
+> create publication pubd_x with (publish = 'insert', publish = 'update')
+ERROR 42601: conflicting or redundant options (at 53)
+
+> create publication pubd_x with (publish_via_partition_root = 'maybe')
+ERROR 42601: publish_via_partition_root requires a Boolean value
+
+> create publication pubd_x with (publish_generated_columns = 'x')
+ERROR 42601: invalid value for publication parameter "publish_generated_columns": "x"
+DETAIL: Valid values are "none" and "stored".
+
+> set client_min_messages = error
+-- SET
+
+> create schema pubd_ns
+-- CREATE SCHEMA
+
+> create table pubd_t1 (a int primary key, b text, c int)
+-- CREATE TABLE
+
+> create table pubd_t2 (a int, b int)
+-- CREATE TABLE
+
+> create table pubd_ns.pubd_t3 (x int)
+-- CREATE TABLE
+
+> create view pubd_v as select 1 as x
+-- CREATE VIEW
+
+> create temp table pubd_tmp (a int)
+-- CREATE TABLE
+
+> create unlogged table pubd_unl (a int)
+-- CREATE TABLE
+
+> create table pubd_parted (a int, b int) partition by list (a)
+-- CREATE TABLE
+
+> create table pubd_part1 partition of pubd_parted for values in (1)
+-- CREATE TABLE
+
+> create publication pubd_all for all tables with (publish = 'insert, update')
+-- CREATE PUBLICATION
+
+> create publication pubd_tab for table pubd_t1 where (a > 10), pubd_t2 (a) with (publish = 'insert')
+-- CREATE PUBLICATION
+
+> create publication pubd_sch for tables in schema pubd_ns
+-- CREATE PUBLICATION
+
+> reset client_min_messages
+-- RESET
+
+> create publication pubd_bad for table pubd_v
+ERROR 22023: cannot add relation "pubd_v" to publication
+DETAIL: This operation is not supported for views.
+
+> create publication pubd_bad for table pubd_tmp
+ERROR 22023: cannot add relation "pubd_tmp" to publication
+DETAIL: This operation is not supported for temporary tables.
+
+> create publication pubd_bad for table pubd_unl
+ERROR 22023: cannot add relation "pubd_unl" to publication
+DETAIL: This operation is not supported for unlogged tables.
+
+> create publication pubd_bad for table pg_class
+ERROR 22023: cannot add relation "pg_class" to publication
+DETAIL: This operation is not supported for system tables.
+
+> create publication pubd_bad for table pubd_t1, pubd_t1 where (a > 1)
+ERROR 42710: conflicting or redundant WHERE clauses for table "pubd_t1"
+
+> create publication pubd_bad for table pubd_t2 (a, a)
+ERROR 42710: duplicate column "a" in publication column list
+
+> create publication pubd_bad for table pubd_t2 (ctid)
+ERROR 42P10: cannot use system column "ctid" in publication column list
+
+> create publication pubd_bad for table pubd_t2 (nope)
+ERROR 42703: column "nope" of relation "pubd_t2" does not exist
+
+> create publication pubd_bad for table pubd_t2 where (b)
+ERROR 42804: argument of PUBLICATION WHERE must be type boolean, not type integer (at 54)
+
+> create publication pubd_bad for table pubd_t2 where (b < random())
+ERROR 0A000: invalid publication WHERE expression (at 58)
+DETAIL: User-defined or built-in mutable functions are not allowed.
+
+> create publication pubd_bad for table pubd_t2 where (b in (select 1))
+ERROR 0A000: invalid publication WHERE expression (at 54)
+DETAIL: Only columns, constants, built-in operators, built-in data types, built-in collations, and immutable built-in functions are allowed.
+
+> create publication pubd_bad for table pubd_t2 where (xmin = '1')
+ERROR 0A000: invalid publication WHERE expression (at 54)
+DETAIL: System columns are not allowed.
+
+> create publication pubd_bad for table pubd_parted where (a > 1)
+ERROR 22023: cannot use publication WHERE clause for relation "pubd_parted"
+DETAIL: WHERE clause cannot be used for a partitioned table when publish_via_partition_root is false.
+
+> create publication pubd_bad for table pubd_parted (a)
+ERROR 22023: cannot use column list for relation "public.pubd_parted" in publication "pubd_bad"
+DETAIL: Column lists cannot be specified for partitioned tables when publish_via_partition_root is false.
+
+> create publication pubd_bad for tables in schema pg_catalog
+ERROR 22023: cannot add schema "pg_catalog" to publication
+DETAIL: This operation is not supported for system schemas.
+
+> create publication pubd_bad for tables in schema pubd_nope
+ERROR 3F000: schema "pubd_nope" does not exist
+
+> create publication pubd_bad for tables in schema pubd_ns, table pubd_t2 (a)
+ERROR 22023: cannot use column list for relation "public.pubd_t2" in publication "pubd_bad"
+DETAIL: Column lists cannot be specified in publications containing FOR TABLES IN SCHEMA elements.
+
+> select pubname, puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, pubviaroot, pubgencols from pg_publication order by 1
+pubname:name | puballtables:bool | pubinsert:bool | pubupdate:bool | pubdelete:bool | pubtruncate:bool | pubviaroot:bool | pubgencols:char
+pubd_all | t | t | t | f | f | f | n
+pubd_none | f | t | t | t | t | f | n
+pubd_sch | f | t | t | t | t | f | n
+pubd_tab | f | t | f | f | f | f | n
+pubd_w | f | t | t | t | t | f | n
+-- SELECT 5
+
+> select p.pubname, r.prrelid::regclass, pg_get_expr(r.prqual, r.prrelid), r.prattrs from pg_publication_rel r join pg_publication p on p.oid = r.prpubid order by 1, 2
+pubname:name | prrelid:regclass | pg_get_expr:text | prattrs:22
+pubd_tab | pubd_t1 | (a > 10) | NULL
+pubd_tab | pubd_t2 | NULL | 1
+-- SELECT 2
+
+> select p.pubname, n.pnnspid::regnamespace from pg_publication_namespace n join pg_publication p on p.oid = n.pnpubid order by 1
+pubname:name | pnnspid:4089
+pubd_sch | pubd_ns
+-- SELECT 1
+
+> select pubname, schemaname, tablename, attnames, rowfilter from pg_publication_tables where pubname <> 'pubd_all' order by 1, 2, 3
+pubname:name | schemaname:name | tablename:name | attnames:name[] | rowfilter:text
+pubd_sch | pubd_ns | pubd_t3 | {x} | NULL
+pubd_tab | public | pubd_t1 | {a,b,c} | (a > 10)
+pubd_tab | public | pubd_t2 | {a} | NULL
+-- SELECT 3
+
+> select tablename from pg_publication_tables where pubname = 'pubd_all' and tablename like 'pubd%' order by 1
+tablename:name
+pubd_part1
+pubd_t1
+pubd_t2
+pubd_t3
+-- SELECT 4
+
+> alter publication pubd_all add table pubd_t2
+ERROR 55000: publication "pubd_all" is defined as FOR ALL TABLES
+DETAIL: Tables cannot be added to or dropped from FOR ALL TABLES publications.
+
+> alter publication pubd_all add tables in schema pubd_ns
+ERROR 55000: publication "pubd_all" is defined as FOR ALL TABLES
+DETAIL: Schemas cannot be added to or dropped from FOR ALL TABLES publications.
+
+> alter publication pubd_tab add table pubd_t1
+ERROR 42710: relation "pubd_t1" is already member of publication "pubd_tab"
+
+> alter publication pubd_tab drop table pubd_ns.pubd_t3
+ERROR 42704: relation "pubd_t3" is not part of the publication
+
+> alter publication pubd_tab drop table pubd_t1 where (a > 1)
+ERROR 42601: cannot use a WHERE clause when removing a table from a publication
+
+> alter publication pubd_tab drop table pubd_t2 (a)
+ERROR 42601: column list must not be specified in ALTER PUBLICATION ... DROP
+
+> alter publication pubd_tab add tables in schema pubd_ns
+ERROR 22023: cannot add schema to publication "pubd_tab"
+DETAIL: Schemas cannot be added if any tables that specify a column list are already part of the publication.
+
+> alter publication pubd_tab set table pubd_t1 where (a > 10), pubd_ns.pubd_t3
+-- ALTER PUBLICATION
+
+> alter publication pubd_tab set (publish = 'update, delete', publish_via_partition_root = true)
+-- ALTER PUBLICATION
+
+> alter publication pubd_tab add table pubd_parted (a)
+-- ALTER PUBLICATION
+
+> alter publication pubd_tab set (publish_via_partition_root = false)
+ERROR 22023: cannot set parameter "publish_via_partition_root" to false for publication "pubd_tab"
+DETAIL: The publication contains a column list for partitioned table "pubd_parted", which is not allowed when "publish_via_partition_root" is false.
+
+> alter publication pubd_tab drop table pubd_parted
+-- ALTER PUBLICATION
+
+> alter publication pubd_sch drop tables in schema public
+ERROR 42704: tables from schema "public" are not part of the publication
+
+> alter publication pubd_sch set tables in schema public
+-- ALTER PUBLICATION
+
+> alter publication pubd_nope set (publish = 'insert')
+ERROR 42704: publication "pubd_nope" does not exist
+
+> alter publication pubd_sch rename to pubd_sch2
+-- ALTER PUBLICATION
+
+> alter publication pubd_sch2 rename to pubd_tab
+ERROR 42710: publication "pubd_tab" already exists
+
+> select p.pubname, r.prrelid::regclass, pg_get_expr(r.prqual, r.prrelid), r.prattrs from pg_publication_rel r join pg_publication p on p.oid = r.prpubid order by 1, 2
+pubname:name | prrelid:regclass | pg_get_expr:text | prattrs:22
+pubd_tab | pubd_t1 | (a > 10) | NULL
+pubd_tab | pubd_ns.pubd_t3 | NULL | NULL
+-- SELECT 2
+
+> select pubname, pubinsert, pubupdate, pubdelete, pubviaroot from pg_publication where pubname = 'pubd_tab'
+pubname:name | pubinsert:bool | pubupdate:bool | pubdelete:bool | pubviaroot:bool
+pubd_tab | f | t | t | t
+-- SELECT 1
+
+> comment on publication pubd_tab is 'tables'
+-- COMMENT
+
+> select obj_description(oid, 'pg_publication') from pg_publication where pubname = 'pubd_tab'
+obj_description:text
+tables
+-- SELECT 1
+
+> create table pubd_ri (a int, b int, c int)
+-- CREATE TABLE
+
+> alter publication pubd_tab add table pubd_ri where (b > 0)
+-- ALTER PUBLICATION
+
+> update pubd_ri set a = 1
+ERROR 42P10: cannot update table "pubd_ri"
+DETAIL: Column used in the publication WHERE expression is not part of the replica identity.
+
+> delete from pubd_ri
+ERROR 42P10: cannot delete from table "pubd_ri"
+DETAIL: Column used in the publication WHERE expression is not part of the replica identity.
+
+> alter table pubd_ri replica identity full
+-- ALTER TABLE
+
+> update pubd_ri set a = 1
+-- UPDATE 0
+
+> create unique index pubd_ri_a on pubd_ri (a)
+-- CREATE INDEX
+
+> alter table pubd_ri alter column a set not null
+-- ALTER TABLE
+
+> alter table pubd_ri replica identity using index pubd_ri_a
+-- ALTER TABLE
+
+> update pubd_ri set a = 1
+ERROR 42P10: cannot update table "pubd_ri"
+DETAIL: Column used in the publication WHERE expression is not part of the replica identity.
+
+> alter publication pubd_tab set table pubd_ri (b, c)
+-- ALTER PUBLICATION
+
+> update pubd_ri set a = 1
+ERROR 42P10: cannot update table "pubd_ri"
+DETAIL: Column list used by the publication does not cover the replica identity.
+
+> alter publication pubd_tab set table pubd_ri (a, c)
+-- ALTER PUBLICATION
+
+> update pubd_ri set a = 1
+-- UPDATE 0
+
+> delete from pubd_ri
+-- DELETE 0
+
+> alter table pubd_ri replica identity nothing
+-- ALTER TABLE
+
+> update pubd_ri set a = 1
+ERROR 55000: cannot update table "pubd_ri" because it does not have a replica identity and publishes updates
+HINT: To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
+
+> delete from pubd_ri
+ERROR 55000: cannot delete from table "pubd_ri" because it does not have a replica identity and publishes deletes
+HINT: To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.
+
+> update pubd_part1 set b = 1
+ERROR 55000: cannot update table "pubd_part1" because it does not have a replica identity and publishes updates
+HINT: To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
+
+> update pubd_t2 set a = 1
+ERROR 55000: cannot update table "pubd_t2" because it does not have a replica identity and publishes updates
+HINT: To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
+
+> insert into pubd_t2 values (1, 1)
+-- INSERT 0 1
+
+> alter publication pubd_tab add table pubd_t2 (b) where (a > 0)
+-- ALTER PUBLICATION
+
+> alter table pubd_t2 drop column b
+ERROR 2BP01: cannot drop column b of table pubd_t2 because other objects depend on it
+DETAIL: publication of table pubd_t2 in publication pubd_tab depends on column b of table pubd_t2
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> alter table pubd_t2 drop column a
+ERROR 2BP01: cannot drop column a of table pubd_t2 because other objects depend on it
+DETAIL: publication of table pubd_t2 in publication pubd_tab depends on column a of table pubd_t2
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> alter table pubd_t2 drop column a cascade
+NOTICE 00000: drop cascades to publication of table pubd_t2 in publication pubd_tab
+-- ALTER TABLE
+
+> select p.pubname, r.prrelid::regclass from pg_publication_rel r join pg_publication p on p.oid = r.prpubid order by 1, 2
+pubname:name | prrelid:regclass
+pubd_tab | pubd_ri
+-- SELECT 1
+
+> drop table pubd_ri
+-- DROP TABLE
+
+> drop schema pubd_ns cascade
+NOTICE 00000: drop cascades to table pubd_ns.pubd_t3
+-- DROP SCHEMA
+
+> select p.pubname, n.pnnspid::regnamespace from pg_publication_namespace n join pg_publication p on p.oid = n.pnpubid order by 1
+pubname:name | pnnspid:4089
+pubd_sch2 | public
+-- SELECT 1
+
+> drop publication pubd_nope
+ERROR 42704: publication "pubd_nope" does not exist
+
+> drop publication if exists pubd_nope
+NOTICE 00000: publication "pubd_nope" does not exist, skipping
+-- DROP PUBLICATION
+
+> drop publication pubd_none, pubd_all, pubd_tab
+-- DROP PUBLICATION
+
+> drop publication pubd_w
+-- DROP PUBLICATION
+
+> select count(*) from pg_publication
+count:int8
+1
+-- SELECT 1
+
+> drop view pubd_v
+-- DROP VIEW
+
+> drop table pubd_t1, pubd_t2, pubd_parted, pubd_unl
+-- DROP TABLE
+

@@ -1,0 +1,203 @@
+> CREATE DOMAIN dr_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE dr_c AS SELECT 1::dr_pos AS a, 'x'::text AS b
+-- SELECT 1
+
+> SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'dr_c'::regclass AND attnum > 0 ORDER BY attnum
+format_type:text
+dr_pos
+text
+-- SELECT 2
+
+> INSERT INTO dr_c VALUES (0, 'y')
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE PROCEDURE dr_p(x dr_pos) LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'x=%', x; END $$
+-- CREATE PROCEDURE
+
+> CALL dr_p(1)
+NOTICE 00000: x=1
+CONTEXT: PL/pgSQL function dr_p(dr_pos) line 1 at RAISE
+-- CALL
+
+> CALL dr_p(0)
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_s() RETURNS SETOF dr_pos LANGUAGE sql AS $$ VALUES (1), (0) $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_s()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: SQL function "dr_s" statement 1
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> SELECT dr_s()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: SQL function "dr_s" statement 1
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_s2() RETURNS SETOF dr_pos LANGUAGE plpgsql AS $$ BEGIN RETURN NEXT 1; RETURN NEXT 0; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_s2()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: PL/pgSQL function dr_s2() line 1 at RETURN NEXT
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_o() RETURNS oid LANGUAGE plpgsql AS $$ DECLARE r oid; BEGIN GET DIAGNOSTICS r = PG_ROUTINE_OID; RETURN r; END $$
+-- CREATE FUNCTION
+
+> SELECT dr_o() = 'dr_o'::regproc::oid
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE FUNCTION dr_r() RETURNS dr_pos LANGUAGE plpgsql AS $$ BEGIN RETURN 0; END $$
+-- CREATE FUNCTION
+
+> SELECT dr_r()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: PL/pgSQL function dr_r() while casting return value to function's return type
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_q(OUT a dr_pos) LANGUAGE plpgsql AS $$ BEGIN a := 0; END $$
+-- CREATE FUNCTION
+
+> SELECT dr_q()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: PL/pgSQL function dr_q() line 1 at assignment
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_o2(INOUT x dr_pos, OUT a dr_pos, OUT b text) LANGUAGE plpgsql AS $$ BEGIN a := x; b := 'k'; END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION dr_t2() RETURNS TABLE (p dr_pos, q int) LANGUAGE sql AS $$ VALUES (1, 2), (0, 3) $$
+-- CREATE FUNCTION
+
+> SELECT proallargtypes::regtype[], prorettype::regtype FROM pg_proc WHERE proname IN ('dr_o2', 'dr_t2') ORDER BY proname
+proallargtypes:2211 | prorettype:regtype
+{dr_pos,dr_pos,text} | record
+{dr_pos,integer} | record
+-- SELECT 2
+
+> SELECT * FROM dr_o2(1)
+x:int4 | a:int4 | b:text
+1 | 1 | k
+-- SELECT 1
+
+> SELECT * FROM dr_t2()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: SQL function "dr_t2" statement 1
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_o3(OUT a dr_pos, OUT b int) LANGUAGE plpgsql AS $$ BEGIN b := 1; a := 0; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_o3()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: PL/pgSQL function dr_o3() line 1 at assignment
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_o4(x dr_pos) RETURNS int LANGUAGE plpgsql AS $$ BEGIN x := 0; RETURN x; END $$
+-- CREATE FUNCTION
+
+> SELECT dr_o4(5)
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: PL/pgSQL function dr_o4(dr_pos) line 1 at assignment
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE VIEW dr_vd AS SELECT 1::dr_pos AS a
+-- CREATE VIEW
+
+> SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'dr_vd'::regclass AND attnum > 0
+format_type:text
+dr_pos
+-- SELECT 1
+
+> DROP VIEW dr_vd
+-- DROP VIEW
+
+> CREATE FUNCTION dr_rq() RETURNS SETOF dr_pos LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 0; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_rq()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type integer does not match expected type dr_pos in column "" (position 1).
+CONTEXT: SQL statement "SELECT 0"
+CONTEXT: PL/pgSQL function dr_rq() line 1 at RETURN QUERY
+
+> CREATE FUNCTION dr_rq2() RETURNS SETOF dr_pos LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 0::dr_pos; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_rq2()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: SQL statement "SELECT 0::dr_pos"
+CONTEXT: PL/pgSQL function dr_rq2() line 1 at RETURN QUERY
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> CREATE FUNCTION dr_rq3() RETURNS TABLE (a int, bb text) LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 1, 2; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_rq3()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type integer does not match expected type text in column "bb" (position 2).
+CONTEXT: SQL statement "SELECT 1, 2"
+CONTEXT: PL/pgSQL function dr_rq3() line 1 at RETURN QUERY
+
+> CREATE FUNCTION dr_rq4() RETURNS SETOF varchar LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 'x'::text; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_rq4()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type text does not match expected type character varying in column "" (position 1).
+CONTEXT: SQL statement "SELECT 'x'::text"
+CONTEXT: PL/pgSQL function dr_rq4() line 1 at RETURN QUERY
+
+> CREATE FUNCTION dr_rq5() RETURNS TABLE (a int) LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY EXECUTE 'SELECT 1, 2'; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_rq5()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Number of returned columns (2) does not match expected column count (1).
+CONTEXT: SQL statement "SELECT 1, 2"
+CONTEXT: PL/pgSQL function dr_rq5() line 1 at RETURN QUERY
+
+> CREATE FUNCTION dr_rq6() RETURNS SETOF text LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT 'x'; RETURN QUERY SELECT 'y'::varchar; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM dr_rq6()
+ERROR 42804: structure of query does not match function result type
+DETAIL: Returned type character varying does not match expected type text in column "" (position 1).
+CONTEXT: SQL statement "SELECT 'y'::varchar"
+CONTEXT: PL/pgSQL function dr_rq6() line 1 at RETURN QUERY
+
+> CREATE FUNCTION dr_rq7() RETURNS SETOF dr_pos LANGUAGE plpgsql AS $$ BEGIN RETURN 0; END $$
+ERROR 42804: RETURN cannot have a parameter in function returning set (at 83)
+HINT: Use RETURN NEXT or RETURN QUERY.
+
+> CREATE FUNCTION dr_rq8() RETURNS dr_pos LANGUAGE plpgsql AS $$ BEGIN RETURN 0; END $$
+-- CREATE FUNCTION
+
+> SELECT dr_rq8()
+ERROR 23514: value for domain dr_pos violates check constraint "dr_pos_check"
+CONTEXT: PL/pgSQL function dr_rq8() while casting return value to function's return type
+OBJECTS: schema=public datatype=dr_pos constraint=dr_pos_check
+
+> DROP FUNCTION dr_rq, dr_rq2, dr_rq3, dr_rq4, dr_rq5, dr_rq6, dr_rq8
+-- DROP FUNCTION
+
+> DROP TABLE dr_c
+-- DROP TABLE
+
+> DROP PROCEDURE dr_p
+-- DROP PROCEDURE
+
+> DROP FUNCTION dr_s, dr_s2, dr_o, dr_r, dr_q, dr_o2, dr_t2, dr_o3, dr_o4
+-- DROP FUNCTION
+
+> DROP DOMAIN dr_pos
+-- DROP DOMAIN
+

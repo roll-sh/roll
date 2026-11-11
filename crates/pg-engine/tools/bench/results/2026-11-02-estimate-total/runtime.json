@@ -1,0 +1,54 @@
+{
+  "at_utc": "2026-11-02T02:57:57.274586+00:00",
+  "source": "1713aa40fcd7282de3990c38e1fe3cfc28604301",
+  "production_tree": "e6397e949955d4660d569f776ac1c670a7de21ab",
+  "load": "1.76 2.61 2.75 1/2707 1342333\n",
+  "engines": {
+    "baseline": {
+      "pid": 1340671,
+      "port": 53340,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/estimate-total/baseline-data --listen 127.0.0.1:53340 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-915af586.scope\n"
+    },
+    "candidate": {
+      "pid": 1341778,
+      "port": 53341,
+      "sha256": "81e690c510d8e46cbdb5106d8dad58820b3542cb57cf0552e30b815b26b8ffde",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261102/estimate-total/candidate-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261102/estimate-total/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/estimate-total/candidate-data --listen 127.0.0.1:53341 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-915af586.scope\n"
+    }
+  },
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f"
+}

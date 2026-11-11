@@ -1,0 +1,1131 @@
+//! Parallel sequential scans (`exec::parscan`): a big table (past the heap model's limit, so
+//! read in storage order) is read by worker threads, which decode only the columns needed
+//! and filter by kernels (`exec::kernel`). Whatever they do, a query gives what the serial
+//! scan gives: the same rows in the same order, the same errors, the same statistics.
+
+use pg_engine::engine::{Engine, EngineOptions};
+use pg_engine::session::Session;
+use std::time::Duration;
+
+fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
+    Engine::open(EngineOptions {
+        data_dir: dir.to_path_buf(),
+        cache_bytes: 64 << 20,
+        memtable_bytes: 8 << 20,
+        sync: false,
+        idle_close: Duration::from_secs(600),
+        superuser: "postgres".into(),
+        password: None,
+        server_files: None,
+        server_programs: false,
+        shared_preload_libraries: Vec::new(),
+        locale: Default::default(),
+        outbound: Vec::new(),
+        max_prepared_transactions: 0,
+        auth_files: Default::default(),
+        // (The plans compared follow the statistics the test's ANALYZEs set: autovacuum
+        // re-analyzing mid-test would change them, and float sums with them.)
+        settings: vec![("autovacuum".into(), "off".into())],
+    })
+    .unwrap()
+}
+
+/// The last result's rows, or the error.
+fn out(s: &mut Session, sql: &str) -> Vec<String> {
+    match s.query(sql) {
+        Ok(r) => r
+            .last()
+            .map(|q| q.rows.iter().map(|row| format!("{row:?}")).collect())
+            .unwrap_or_default(),
+        Err(e) => vec![format!("ERROR: {} {:?} {:?}", e.message, e.detail, e.code)],
+    }
+}
+
+const QUERIES: &[&str] = &[
+    // Kernel filters (comparisons, LIKE, IN, NULL tests, CASE, arithmetic).
+    "SELECT id, s FROM big WHERE s LIKE '%ab%' AND g IN (1, 5, 7)",
+    "SELECT count(*), sum(x), avg(x), min(s), max(f) FROM big WHERE g < 10 AND x > 50",
+    "SELECT id, x FROM big WHERE x IS NULL OR (x * 2 > 190 AND s NOT LIKE 'a%')",
+    "SELECT id FROM big WHERE CASE WHEN g = 3 THEN f > 1000 ELSE id < 50 END",
+    "SELECT id, g FROM big WHERE c = 'b' AND id + 5 > 419990",
+    // Filters left to the executor's thread (id % 3: no kernel).
+    "SELECT g, count(*), sum(f) FROM big WHERE id % 3 = 0 GROUP BY g ORDER BY g",
+    "SELECT id FROM big WHERE x * 2 > 150 LIMIT 7",
+    // No filter; all columns; a projection over few.
+    "SELECT * FROM big WHERE id > 419995",
+    "SELECT count(*) FROM big",
+    "SELECT sum(id::bigint), count(s) FROM big",
+    // Errors: a kernel's overflow, a bad LIKE pattern, a division by zero, at a late row.
+    "SELECT count(*) FROM big WHERE id * 100000 > 0",
+    "SELECT count(*) FROM big WHERE s LIKE 'ab\\'",
+    "SELECT count(*) FROM big WHERE id = 400000 AND 1 / (id - 400000) > 0",
+    "SELECT count(*) FROM big WHERE g > 200 OR (id > 419000 AND id * 10000 > 0)",
+    // Aggregates over the scan, aggregated in parts by the workers (`exec::partial`): the
+    // hash table's group order, exact sums, the first min / max, NULLs, a row a kernel
+    // can't do (x / 0 below an OR, left to the serial path) and errors.
+    // (Ordered where the parallel plan groups sorted and the serial one hashed: their groups
+    // come out in different orders, as Postgres's do; the values are the serial plan's.)
+    "SELECT g, count(*), sum(x), avg(x), min(s), max(s), count(x), sum(id), avg(id), max(f) FROM big WHERE id > 1000 GROUP BY g ORDER BY g",
+    "SELECT c, g % 2 = 0, sum(x * 2), min(x), max(c) FROM big GROUP BY c, g % 2 = 0",
+    "SELECT count(*), sum(x), min(id) FROM big WHERE s LIKE '%a%'",
+    "SELECT g, sum(id * 100000) FROM big GROUP BY g",
+    "SELECT s, count(*) FROM big WHERE id < 100 OR id > 419900 GROUP BY s",
+    "SELECT sum(f), count(*) FROM big WHERE g = 1",
+    // min / max over values that compare equal but differ (3 and 3.00): which one a tie
+    // keeps shows.
+    "SELECT g, max(n), min(n), count(n) FROM big GROUP BY g",
+    // bpchar filters and keys (casts kernels do: a length coercion, text to bpchar), keys
+    // equal but for trailing spaces grouped together under the first row's value.
+    "SELECT c, count(*), sum(x) FROM big WHERE c IN ('a', 'c') AND c <> 'b' GROUP BY c",
+    "SELECT k, count(*) FROM (SELECT (CASE WHEN g < 50 THEN 'x ' ELSE 'x' END)::bpchar k FROM big WHERE id > 1) t GROUP BY k",
+    "SELECT count(*), sum(x::int) FROM big WHERE x::int8 > 50 AND id::numeric < 400000.5",
+    // Bytewise string comparisons compiled to kernels, and ICU comparisons that must
+    // retain their collation, including deterministic equality and bpchar padding.
+    "SELECT count(*), sum(id) FROM big WHERE s >= 'a' AND s < 'c'",
+    "SELECT id, c, s FROM big WHERE 'abc' = s ORDER BY id",
+    "SELECT count(*) FROM big WHERE s COLLATE und_d = 'abc'",
+    "SELECT count(*) FROM big WHERE s COLLATE und_d < 'abc'",
+    "SELECT count(*) FROM big WHERE s COLLATE und_ci = 'ABC'",
+    "SELECT count(*), sum(id) FROM big WHERE c = 'b ' AND s > 'a'",
+];
+
+fn run_all(s: &mut Session) -> Vec<Vec<String>> {
+    QUERIES.iter().map(|q| out(s, q)).collect()
+}
+
+/// How the plan's top grouping groups (EXPLAIN's): "hashed", "sorted" or "".
+fn grouping(s: &mut Session, q: &str) -> &'static str {
+    let plan = out(s, &format!("EXPLAIN (COSTS OFF) {q}"));
+    match plan.iter().find(|l| l.contains("Aggregate")) {
+        Some(l) if l.contains("HashAggregate") => "hashed",
+        Some(l) if l.contains("GroupAggregate") => "sorted",
+        _ => "",
+    }
+}
+
+/// The serial and parallel runs' rows agree: in the same order, or (when the parallel plan
+/// groups otherwise than the serial one, as Postgres's plans for the two settings do) as
+/// sets, the groups coming out in each plan's order.
+fn assert_same(q: &str, a: &[String], b: &[String], plans: (&str, &str)) {
+    if a == b {
+        return;
+    }
+    assert_ne!(plans.0, plans.1, "{q}: the rows differ under the same grouping\n{a:?}\n{b:?}");
+    let (mut x, mut y) = (a.to_vec(), b.to_vec());
+    x.sort();
+    y.sort();
+    assert_eq!(x, y, "{q}");
+}
+
+fn seq_read(s: &mut Session) -> String {
+    // (The counts reach the shared statistics when flushed: forced, as within a second of
+    // the last flush they wait.)
+    out(s, "SELECT pg_stat_force_next_flush()");
+    out(s, "SELECT seq_scan, seq_tup_read FROM pg_stat_user_tables WHERE relname = 'big'").join(",")
+}
+
+/// One test at a time: they check process-wide counters of parallel scans.
+static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run a test's sessions on a big stack, as the server gives its session threads (an
+/// unoptimized build's frames don't fit the 2 MB of a test thread).
+fn on_session_thread(f: fn()) {
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            pg_engine::stack::set_limit(60 << 20);
+            // These 420,000-row fixtures exercise storage-order scans above the limit.
+            pg_engine::exec::sizing::with_max_versions(400_000, f)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn parallel_scans_match_serial() {
+    on_session_thread(parallel_scans_match_serial_inner);
+}
+
+fn parallel_scans_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big (id int NOT NULL, g int, x numeric(12,2), s text, f float8, c char(1), n numeric)",
+    )
+    .unwrap();
+    s.query(
+        "INSERT INTO big SELECT i, i % 97, CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 1000) / 10.0 END, \
+         md5(i::text), i / 7.0, chr(97 + i % 3), \
+         CASE WHEN i % 2 = 0 THEN (i % 50)::numeric ELSE (i % 50)::numeric(10, 2) END \
+         FROM generate_series(1, 420000) i",
+    )
+    .unwrap();
+    s.query("CREATE COLLATION und_d (provider = icu, locale = 'und')").unwrap();
+    s.query("CREATE COLLATION und_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)").unwrap();
+    s.query("UPDATE big SET s = 'abc' WHERE id % 101 = 0").unwrap();
+    s.query("DELETE FROM big WHERE id % 103 = 0").unwrap();
+    let stat_before = seq_read(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial_plans: Vec<&str> = QUERIES.iter().map(|q| grouping(&mut s, q)).collect();
+    let before = pg_engine::exec::parscan::started();
+    let serial = pg_engine::exec::parscan::without_serial_inline(|| run_all(&mut s));
+    assert_eq!(pg_engine::exec::parscan::started(), before, "no parallel scan with 0 workers");
+    let stat_serial = seq_read(&mut s);
+    // With workers off, aggregations over the scan run the workers' code inline: the serial
+    // plan's rows, in its order, its errors and its statistics.
+    let inlined = pg_engine::exec::parscan::inline_started();
+    let serial_inline = run_all(&mut s);
+    assert!(pg_engine::exec::parscan::inline_started() > inlined, "aggregations ran inline");
+    assert_eq!(pg_engine::exec::parscan::started(), before, "no parallel scan with 0 workers");
+    for ((q, a), b) in QUERIES.iter().zip(&serial).zip(&serial_inline) {
+        assert_eq!(a, b, "{q}: inline with workers off");
+    }
+    let stat_inline = seq_read(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let parallel = run_all(&mut s);
+    assert!(pg_engine::exec::parscan::started() > before, "the scans ran in parallel");
+    let stat_parallel = seq_read(&mut s);
+    let parallel_plans: Vec<&str> = QUERIES.iter().map(|q| grouping(&mut s, q)).collect();
+    for (i, ((q, a), b)) in QUERIES.iter().zip(&serial).zip(&parallel).enumerate() {
+        assert_same(q, a, b, (serial_plans[i], parallel_plans[i]));
+    }
+    // Each run read the table as often and as far: the counts doubled.
+    let n = |st: &str| -> Vec<i64> {
+        st.split('(')
+            .skip(1)
+            .map(|x| x.split(')').next().unwrap().parse().unwrap())
+            .collect()
+    };
+    let baseline = n(&stat_before);
+    let since_setup = |st: &str| n(st).into_iter().zip(&baseline).map(|(n, before)| n - before).collect::<Vec<_>>();
+    let (a, i, b) = (since_setup(&stat_serial), since_setup(&stat_inline), since_setup(&stat_parallel));
+    assert_eq!(a.len(), 2, "{stat_serial}");
+    // (seq_scan and seq_tup_read: twice and three times the serial run's, less the stats
+    // query itself.)
+    assert_eq!(i, [2 * a[0], 2 * a[1]], "{stat_serial} {stat_inline}");
+    assert_eq!(b[0], 3 * a[0], "{stat_serial} {stat_parallel}");
+    assert_eq!(b[1], 3 * a[1], "{stat_serial} {stat_parallel}");
+    // Errors came out as errors.
+    assert!(serial[10][0].starts_with("ERROR: integer out of range"), "{:?}", serial[10]);
+    assert!(serial[11][0].starts_with("ERROR: LIKE pattern must not end"), "{:?}", serial[11]);
+    assert!(serial[12][0].starts_with("ERROR: division by zero"), "{:?}", serial[12]);
+    assert!(serial[17][0].starts_with("ERROR: integer out of range"), "{:?}", serial[17]);
+    assert_eq!(serial[14].len(), 97, "{:?}", serial[14]);
+    assert_eq!(serial[15].len(), 6, "{:?}", serial[15]);
+}
+
+/// Joins over the big table, whose hash join probes (and aggregates above them) run in the
+/// parallel scan's workers (`exec::pipe`): rows in the serial order, errors at the same row.
+const JOIN_QUERIES: &[&str] = &[
+    // Inner joins: rows (their order shows), and aggregated in parts.
+    "SELECT b.id, d.name, b.x FROM big b JOIN dim d ON b.g = d.k WHERE b.id > 419000",
+    // (Ordered: the serial plan hashes, the parallel one sorts, so their groups come out
+    // in different orders, as Postgres's do.)
+    "SELECT d.name, count(*), sum(b.x), avg(b.id), min(b.s), max(d.w) FROM big b JOIN dim d ON b.g = d.k GROUP BY d.name ORDER BY 1",
+    "SELECT d.w, count(*), sum(b.f) FROM big b JOIN dim d ON b.g = d.k WHERE b.s LIKE '%a%' GROUP BY d.w ORDER BY 1",
+    // Several inner rows per key; a join condition beyond the keys.
+    "SELECT b.id, m.k, m.t FROM big b JOIN multi m ON b.g = m.k AND m.t <> b.c WHERE b.id < 2000",
+    "SELECT m.t, count(*), sum(b.id) FROM big b JOIN multi m ON b.g = m.k AND b.x > m.k GROUP BY m.t",
+    // Outer, semi and anti joins (keys that match nothing: dim has 60 of g's 97 values).
+    "SELECT b.id, d.name FROM big b LEFT JOIN dim d ON b.g = d.k WHERE b.id % 5000 = 1",
+    "SELECT d.name IS NULL, count(*), sum(b.x) FROM big b LEFT JOIN dim d ON b.g = d.k GROUP BY 1",
+    "SELECT count(*), sum(b.x) FROM big b WHERE EXISTS (SELECT 1 FROM dim d WHERE d.k = b.g AND d.w < 3)",
+    "SELECT b.g, count(*) FROM big b WHERE NOT EXISTS (SELECT 1 FROM dim d WHERE d.k = b.g) GROUP BY b.g",
+    // Two joins stacked over the scan.
+    "SELECT d2.t, count(*), sum(b.x) FROM big b JOIN dim d ON b.g = d.k JOIN multi d2 ON d.w = d2.k GROUP BY d2.t",
+    "SELECT b.id, d.name, d2.t FROM big b JOIN dim d ON b.g = d.k JOIN multi d2 ON d.w = d2.k WHERE b.id > 419900",
+    // Keys of other types: a numeric meeting an integer, text.
+    "SELECT d.name, count(*) FROM big b JOIN dim d ON b.n = d.k GROUP BY d.name",
+    "SELECT count(*), min(b.id) FROM big b JOIN dim d ON b.c = d.c1",
+    // Errors at a late row: in a key, in the join condition; a filter left to the
+    // executor's thread (id % 3).
+    "SELECT count(*) FROM big b JOIN dim d ON b.id * 10000 = d.k",
+    "SELECT count(*) FROM big b JOIN dim d ON b.g = d.k AND 1 / (b.id - 419990) > -5",
+    "SELECT d.name, count(*) FROM big b JOIN dim d ON b.g = d.k WHERE b.id % 3 = 0 GROUP BY d.name",
+    // A LIMIT stopping early.
+    "SELECT b.id, d.name FROM big b JOIN dim d ON b.g = d.k LIMIT 5",
+    // Right and full joins probed in the workers: the inner rows nothing matched last.
+    "SELECT d.k, b.id FROM big b RIGHT JOIN dim d ON b.g = d.k + 40 AND b.id < 2000",
+    "SELECT d.name, count(b.id), sum(b.x) FROM big b RIGHT JOIN dim d ON b.g = d.k + 30 GROUP BY d.name",
+    "SELECT b.id, d.k FROM big b FULL JOIN dim d ON b.g = d.k + 50 AND b.id > 419000 WHERE b.id IS NULL OR b.id > 419900",
+    // Aggregations over a projection of the join (a FROM subquery's computed outputs): its
+    // keys and arguments through the projection, aggregated in the workers; one read only
+    // in a CASE keeps the serial path unless another aggregate reads it whatever the row.
+    "SELECT g2, w, sum(v), count(*) FROM (SELECT b.g % 5 AS g2, d.w, b.x * 2 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY g2, w",
+    "SELECT g2, sum(CASE WHEN g2 = 1 THEN v ELSE 0 END), sum(v) FROM (SELECT b.g % 5 AS g2, b.x * 2 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY g2",
+    "SELECT n, sum(CASE WHEN n = 'name 1' THEN v END) FROM (SELECT d.name AS n, b.x + 1 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY n",
+    "SELECT count(*), sum(e) FROM (SELECT 100000 / (b.id - 419950) AS e FROM big b JOIN dim d ON b.g = d.k) t",
+    // Groupings sorted on their keys (as TPC-H q13's): an outer join's unmatched rows; NULL
+    // keys.
+    "SELECT c, count(*) FROM (SELECT b.id % 150000 AS k, count(d.k) AS c FROM big b LEFT JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY c ORDER BY 2 DESC, 1",
+    "SELECT k, n, s FROM (SELECT d.k, count(b.id) AS n, sum(b.g) AS s FROM big b RIGHT JOIN dim d ON b.g = d.k + 30 AND b.id % 7 = 0 GROUP BY d.k) t ORDER BY n DESC, k LIMIT 15",
+    "SELECT n, count(*) FROM (SELECT CASE WHEN b.id % 9 = 0 THEN NULL ELSE b.id % 120000 END AS k, count(*) AS n FROM big b JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY n ORDER BY n",
+    // A char(n) key (padded alike: no presort) among many groups.
+    "SELECT c, count(*), sum(n), sum(s) FROM (SELECT b.c, b.id % 60000 AS k, count(*) AS n, sum(b.x) AS s FROM big b JOIN dim d ON b.g = d.k GROUP BY 1, 2) t GROUP BY c ORDER BY c",
+    // Computed keys and arguments over two joins (TPC-H q07 / q09's shape: the joins'
+    // column reorderings, projections over projections, read through by the grouping).
+    "SELECT d.name, extract(year FROM date '2000-01-01' + b.g * 40) AS y, count(*), sum(b.x * (1 - d.w)) FROM big b JOIN dim d ON b.g = d.k JOIN multi m ON m.k = d.w GROUP BY 1, 2 ORDER BY 1, 2",
+];
+
+#[test]
+fn parallel_joins_match_serial() {
+    on_session_thread(parallel_joins_match_serial_inner);
+}
+
+fn parallel_joins_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big (id int NOT NULL, g int, x numeric(12,2), s text, f float8, c char(1), n numeric)",
+    )
+    .unwrap();
+    s.query(
+        "INSERT INTO big SELECT i, i % 97, CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 1000) / 10.0 END, \
+         md5(i::text), i / 7.0, chr(97 + i % 3), (i % 50)::numeric(10, 2) \
+         FROM generate_series(1, 420000) i",
+    )
+    .unwrap();
+    s.query(
+        "CREATE TABLE dim (k int PRIMARY KEY, name text, w int, c1 char(1)); \
+         INSERT INTO dim SELECT k, 'name ' || (k % 13), k % 7, chr(97 + k % 2) FROM generate_series(0, 59) k; \
+         CREATE TABLE multi (k int, t text); \
+         INSERT INTO multi SELECT k % 40, 't' || k FROM generate_series(1, 120) k; \
+         ANALYZE big; ANALYZE dim; ANALYZE multi",
+    )
+    .unwrap();
+    let run = |s: &mut Session| -> Vec<Vec<String>> { JOIN_QUERIES.iter().map(|q| out(s, q)).collect() };
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial_plans: Vec<&str> = JOIN_QUERIES.iter().map(|q| grouping(&mut s, q)).collect();
+    let before = pg_engine::exec::parscan::pipelined();
+    let serial = run(&mut s);
+    assert_eq!(pg_engine::exec::parscan::pipelined(), before, "no parallel scan with 0 workers");
+    let stat_serial = seq_read(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let vrows = pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let parallel = run(&mut s);
+    assert!(pg_engine::exec::parscan::pipelined() > before, "join probes ran in the workers");
+    assert!(
+        pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > vrows,
+        "probes looked up from column batches"
+    );
+    let stat_parallel = seq_read(&mut s);
+    let parallel_plans: Vec<&str> = JOIN_QUERIES.iter().map(|q| grouping(&mut s, q)).collect();
+    for (i, ((q, a), b)) in JOIN_QUERIES.iter().zip(&serial).zip(&parallel).enumerate() {
+        assert_same(q, a, b, (serial_plans[i], parallel_plans[i]));
+    }
+    // The big table was read as often and as far (rows the joins dropped too).
+    let n = |st: &str| -> Vec<i64> {
+        st.split('(')
+            .skip(1)
+            .map(|x| x.split(')').next().unwrap().parse().unwrap())
+            .collect()
+    };
+    let (a, b) = (n(&stat_serial), n(&stat_parallel));
+    assert_eq!(a.len(), 2, "{stat_serial}");
+    assert_eq!(b[0], 2 * a[0], "{stat_serial} {stat_parallel}");
+    assert_eq!(b[1], 2 * a[1], "{stat_serial} {stat_parallel}");
+    assert!(serial[13][0].starts_with("ERROR: integer out of range"), "{:?}", serial[13]);
+    assert!(serial[14][0].starts_with("ERROR: division by zero"), "{:?}", serial[14]);
+    assert!(serial[0].len() > 300, "{:?}", serial[0].len());
+    // Probes looked up from column batches (`exec::vector`) give what the row path gives.
+    let rows = pg_engine::exec::parscan::without_vectors(|| run(&mut s));
+    for ((q, a), b) in JOIN_QUERIES.iter().zip(&rows).zip(&parallel) {
+        assert_eq!(a, b, "{q}: column batches");
+    }
+}
+
+#[test]
+fn split_keys_cover_in_order() {
+    use pg_engine::exec::parscan::split_keys;
+    let lo = vec![0, 0, 0, 7, 1, 2, 3];
+    let hi = vec![0, 0, 0, 7, 9, 0, 0, 0, 0, 0, 1];
+    let cuts = split_keys(&lo, &hi, 16);
+    assert!(!cuts.is_empty());
+    let mut prev = lo.clone();
+    for c in &cuts {
+        assert!(*c > prev && *c <= hi, "{c:?}");
+        prev = c.clone();
+    }
+    assert!(split_keys(&lo, &lo, 4).is_empty());
+}
+
+/// Nested loops over inner index scans whose scans run in the outer parallel scan's
+/// workers (`exec::lookup`), and full index scans read by the workers for an aggregation
+/// above: rows in the serial order, errors at the same row, the same statistics.
+const LOOKUP_QUERIES: &[&str] = &[
+    // Several inner rows per key, in index order; an inner filter; a join condition.
+    "SELECT b.id, c.id, c.v FROM big b JOIN big2 c ON c.k = b.g WHERE b.id > 419500",
+    "SELECT b.id, c.id FROM big b JOIN big2 c ON c.k = b.id AND c.v LIKE 'a%' WHERE b.id < 3000",
+    "SELECT b.id, c.id FROM big b JOIN big2 c ON c.k = b.id AND c.id > b.g * 1000 WHERE b.id < 3000",
+    // Outer, semi and anti joins (keys that find nothing: big2's k stops at 149999).
+    "SELECT b.id, c.id, c.v FROM big b LEFT JOIN big2 c ON c.k = b.id WHERE b.id < 300 OR b.id > 419800",
+    "SELECT count(*), sum(b.id) FROM big b WHERE b.id > 410000 AND EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id - 300000 AND c.v LIKE '%a%')",
+    "SELECT count(*), sum(b.id) FROM big b WHERE (b.id < 2000 OR b.id > 418000) AND NOT EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id)",
+    // Aggregated above, in parts; a unique index of a modelled table; two loops stacked.
+    "SELECT b.g, count(*), sum(c.id) FROM big b JOIN big2 c ON c.k = b.id WHERE b.id < 8000 GROUP BY b.g ORDER BY 1",
+    "SELECT d.name, count(*) FROM big b JOIN dim d ON d.k = b.g WHERE b.x > 50 AND b.id > 400000 GROUP BY d.name ORDER BY 1",
+    "SELECT b.id, c.id, d.name FROM big b JOIN big2 c ON c.k = b.id JOIN dim d ON d.k = c.id % 60 WHERE b.id > 419000",
+    // An error in a key at a late row; a key of another type (int4 meeting an int8).
+    "SELECT count(*) FROM big b JOIN big2 c ON c.k = b.id * 10000 WHERE b.id > 214000",
+    "SELECT count(*), sum(c.id) FROM big b JOIN big2 c ON c.k = b.id::int8 + 7 WHERE b.id < 5000",
+    // Full index scans read by the workers (an index-only count, a grouping along an index).
+    "SELECT count(*) FROM big2",
+    "SELECT k, count(*), sum(id) FROM big2 WHERE id > 10 GROUP BY k HAVING sum(id) > 1000000",
+    // Bounded index ranges read by the workers: index-only counts and sums of the key.
+    "SELECT count(*) FROM big2 WHERE k < 70000",
+    "SELECT count(*), sum(k), min(k), max(k) FROM big2 WHERE k >= 1000 AND k < 90000",
+    "SELECT k, count(*) FROM big2 WHERE k BETWEEN 5 AND 140000 GROUP BY k HAVING count(*) > 2 ORDER BY k LIMIT 50",
+];
+
+/// The last of `LOOKUP_QUERIES` that run as index scans (sequential and bitmap scans off).
+const LOOKUP_INDEXED: usize = 5;
+
+#[test]
+fn parallel_lookups_match_serial() {
+    on_session_thread(parallel_lookups_match_serial_inner);
+}
+
+fn index_stats(s: &mut Session) -> String {
+    out(s, "SELECT pg_stat_force_next_flush()");
+    out(
+        s,
+        "SELECT indexrelname, idx_scan, idx_tup_read, idx_tup_fetch FROM pg_stat_user_indexes \
+         WHERE relname IN ('big2', 'dim') ORDER BY 1",
+    )
+    .join(",")
+}
+
+fn parallel_lookups_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big (id int NOT NULL, g int, x numeric(12,2), s text); \
+         INSERT INTO big SELECT i, i % 97, CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 1000) / 10.0 END, md5(i::text) \
+         FROM generate_series(1, 420000) i; \
+         CREATE TABLE big2 (id int NOT NULL, k int, v text); \
+         INSERT INTO big2 SELECT i, i % 150000, md5((i * 3)::text) FROM generate_series(1, 420000) i; \
+         CREATE INDEX big2_k ON big2 (k); \
+         CREATE TABLE dim (k int PRIMARY KEY, name text); \
+         INSERT INTO dim SELECT k, 'name ' || (k % 13) FROM generate_series(0, 59) k",
+    )
+    .unwrap();
+    for t in ["big", "big2", "dim"] {
+        s.query(&format!("VACUUM ANALYZE {t}")).unwrap();
+    }
+    // (Nested loops over index scans; plain index scans for the last two.)
+    s.query("SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_material = off").unwrap();
+    let run = |s: &mut Session, which: std::ops::Range<usize>| -> Vec<Vec<String>> {
+        LOOKUP_QUERIES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| which.contains(i))
+            .map(|(i, q)| {
+                let off = i + LOOKUP_INDEXED >= LOOKUP_QUERIES.len();
+                if off {
+                    s.query("SET enable_seqscan = off; SET enable_hashagg = off; SET enable_bitmapscan = off").unwrap();
+                }
+                let r = out(s, q);
+                if off {
+                    s.query("RESET enable_seqscan; RESET enable_hashagg; RESET enable_bitmapscan").unwrap();
+                }
+                r
+            })
+            .collect()
+    };
+    // (The statistics compared are the queries' before the one failing: what a parallel
+    // scan's workers read past the failing row is counted as Postgres's workers count it.)
+    let (before, after) = (0..9, 9..LOOKUP_QUERIES.len());
+    let workers = |s: &mut Session, n: u32| s.query(&format!("SET max_parallel_workers_per_gather = {n}")).unwrap();
+    workers(&mut s, 0);
+    let rescans = pg_engine::exec::scan::INDEX_RESCANS.load(std::sync::atomic::Ordering::Relaxed);
+    let mut serial = run(&mut s, before.clone());
+    let stat_serial = index_stats(&mut s);
+    // (The serial nested loops rescan their inner index scans per outer row.)
+    assert!(pg_engine::exec::scan::INDEX_RESCANS.load(std::sync::atomic::Ordering::Relaxed) > rescans + 1000);
+    workers(&mut s, 2);
+    let (looked, scans) = (pg_engine::exec::lookup::started(), pg_engine::exec::parscan::started());
+    let mut parallel = run(&mut s, before);
+    let stat_parallel = index_stats(&mut s);
+    workers(&mut s, 0);
+    serial.extend(run(&mut s, after.clone()));
+    workers(&mut s, 2);
+    parallel.extend(run(&mut s, after));
+    assert!(pg_engine::exec::lookup::started() > looked, "index lookups ran in the workers");
+    assert!(pg_engine::exec::parscan::started() > scans);
+    for ((q, a), b) in LOOKUP_QUERIES.iter().zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+    // Each run scanned the indexes as often and fetched as many rows: the counts doubled.
+    let n = |st: &str| -> Vec<i64> {
+        st.split("Int8(")
+            .skip(1)
+            .map(|x| x.split(')').next().unwrap().parse().unwrap())
+            .collect()
+    };
+    let (a, b) = (n(&stat_serial), n(&stat_parallel));
+    assert!(!a.is_empty(), "{stat_serial}");
+    assert_eq!(b, a.iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_serial} {stat_parallel}");
+    assert!(serial[9][0].starts_with("ERROR: integer out of range"), "{:?}", serial[9]);
+    assert!(serial[0].len() > 1000, "{}", serial[0].len());
+    assert!(serial[3].iter().any(|r| r.contains("Null")), "{:?}", &serial[3][..3]);
+}
+
+/// A unique index's lookups in the workers (`Lookup::unique`: its one visible entry probed)
+/// after updates that moved rows to other keys and back: the entries of the old versions
+/// are still there, the rows are those the serial scans find.
+#[test]
+fn parallel_unique_lookups_match_serial() {
+    on_session_thread(parallel_unique_lookups_match_serial_inner);
+}
+
+fn parallel_unique_lookups_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big (id int NOT NULL, g int); \
+         INSERT INTO big SELECT i, i % 97 FROM generate_series(1, 420000) i; \
+         CREATE TABLE u (k int, v text); \
+         INSERT INTO u SELECT i, md5(i::text) FROM generate_series(1, 150000) i; \
+         CREATE UNIQUE INDEX u_k ON u (k); \
+         UPDATE u SET k = k + 1000000 WHERE k % 5 = 0; \
+         UPDATE u SET k = k - 1000000, v = 'moved' WHERE k > 1000000 AND k % 10 = 0; \
+         UPDATE u SET v = 'again' WHERE k % 7 = 0",
+    )
+    .unwrap();
+    for t in ["big", "u"] {
+        s.query(&format!("VACUUM ANALYZE {t}")).unwrap();
+    }
+    s.query("SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_material = off").unwrap();
+    let queries = [
+        "SELECT count(*), sum(b.id), count(u.v), sum(length(u.v)) FROM big b JOIN u ON u.k = b.id WHERE b.id < 160000",
+        "SELECT b.g, count(u.k), min(u.v), max(u.v) FROM big b LEFT JOIN u ON u.k = b.id WHERE b.id % 3 = 0 GROUP BY b.g ORDER BY 1",
+        "SELECT count(*) FROM big b WHERE b.id < 200000 AND NOT EXISTS (SELECT 1 FROM u WHERE u.k = b.id)",
+    ];
+    let run = |s: &mut Session| queries.iter().map(|q| out(s, q)).collect::<Vec<_>>();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial = run(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let looked = pg_engine::exec::lookup::started();
+    let parallel = run(&mut s);
+    assert!(pg_engine::exec::lookup::started() > looked, "index lookups ran in the workers");
+    for ((q, a), b) in queries.iter().zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+}
+
+/// Queries over a table small enough for its heap to be modelled (rows in heap order, as
+/// Postgres reads its pages) and big enough for a parallel scan (8 MB): pgvector distances
+/// computed by the workers' kernels, a float sum in the serial order, a filter, a top-k.
+const MODELLED_QUERIES: &[&str] = &[
+    "SELECT id FROM vt WHERE v <-> '[1,2,3,4]' < 3.5",
+    "SELECT sum(v <-> '[1,2,3,4]'), sum(v <#> '[1,0,1,0]'), avg(v <=> '[0.5,1,2,1]') FROM vt",
+    "SELECT g, sum(v <+> '[1,1,1,1]'), count(*) FROM vt WHERE id % 2 = 0 GROUP BY g ORDER BY g",
+    "SELECT id, v <-> '[3,1,4,1]' FROM vt ORDER BY v <-> '[3,1,4,1]' LIMIT 12",
+    "SELECT id, s FROM vt WHERE g = 3 AND id > 60000",
+    // Bounded sorts whose rows the workers drop where their heaps would (ties everywhere:
+    // the small vectors repeat), descending, NULLs first, past an offset, over a filter.
+    "SELECT id FROM vt ORDER BY v <=> '[1,1,0,2]' DESC LIMIT 7 OFFSET 3",
+    "SELECT id, v FROM vt ORDER BY v <+> '[2,2,2,2]' NULLS FIRST LIMIT 30",
+    "SELECT id, g FROM vt WHERE g = 2 ORDER BY v <-> '[0,0,0,0]' LIMIT 40",
+    "SELECT id FROM vt ORDER BY v <#> '[1,2,1,2]' LIMIT 5000",
+    // Dimensions that differ: the function's error, at the first row.
+    "SELECT count(*) FROM vt WHERE v <-> '[1,2,3]' > 0",
+    "SELECT id, v FROM vt WHERE s > 'f' AND g = 2 ORDER BY id",
+    "SELECT count(*) FROM vt WHERE s >= 'a' AND s < 'c' AND v <-> '[1,2,3,4]' > 1",
+];
+
+#[test]
+fn parallel_scans_of_modelled_heaps() {
+    on_session_thread(parallel_scans_of_modelled_heaps_inner);
+}
+
+fn parallel_scans_of_modelled_heaps_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE EXTENSION vector; CREATE TABLE vt (id int, g int, s text, v vector(4)); \
+         INSERT INTO vt SELECT i, i % 7, repeat(md5(i::text), 3), \
+         CASE WHEN i % 997 = 0 THEN NULL ELSE ARRAY[i % 5, (i * 7) % 11, (i * 3) % 13 / 2.0, i % 3]::real[]::vector END \
+         FROM generate_series(1, 70000) i",
+    )
+    .unwrap();
+    s.query("DELETE FROM vt WHERE id % 1001 = 0").unwrap();
+    let run = |s: &mut Session| -> Vec<Vec<String>> { MODELLED_QUERIES.iter().map(|q| out(s, q)).collect() };
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let before = pg_engine::exec::parscan::started();
+    let serial = run(&mut s);
+    assert_eq!(pg_engine::exec::parscan::started(), before, "no parallel scan with 0 workers");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let skipped = pg_engine::exec::parscan::topk_skipped();
+    let parallel = run(&mut s);
+    assert!(pg_engine::exec::parscan::started() > before, "the scans ran in parallel");
+    assert!(pg_engine::exec::parscan::topk_skipped() > skipped, "the workers dropped rows for the bounded sorts");
+    for ((q, a), b) in MODELLED_QUERIES.iter().zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+    assert!(serial[0].len() > 100 && serial[3].len() == 12, "{:?} {:?}", serial[0].len(), serial[3]);
+    assert!(serial[9][0].starts_with("ERROR: different vector dimensions 4 and 3"), "{:?}", serial[9]);
+    // After an update the heap isn't in key order: serial scans, in the model's order.
+    s.query("UPDATE vt SET g = g + 1 WHERE id % 1000 = 0").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    let after = out(&mut s, "SELECT id FROM vt WHERE g = 1 AND id % 1000 = 0 LIMIT 3");
+    assert_eq!(pg_engine::exec::parscan::started(), started, "{after:?}");
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    assert_eq!(after, out(&mut s, "SELECT id FROM vt WHERE g = 1 AND id % 1000 = 0 LIMIT 3"));
+}
+
+#[test]
+fn numeric_topk_matches_serial() {
+    on_session_thread(numeric_topk_matches_serial_inner);
+}
+
+fn numeric_topk_matches_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    // Padding puts this small, modelled fixture above the 8 MB worker threshold.
+    s.query(
+        "CREATE TABLE nt (id int, x int, tied int, h smallint, b bigint, f real, d double precision, n numeric, pad text); \
+         INSERT INTO nt SELECT i, 12001 - i, 1, (i % 3)::smallint, i::bigint, \
+         (CASE i % 6 WHEN 0 THEN NULL WHEN 1 THEN 'NaN' WHEN 2 THEN '-0' WHEN 3 THEN '0' WHEN 4 THEN '-1' ELSE '1' END)::real, \
+         (CASE i % 6 WHEN 0 THEN NULL WHEN 1 THEN 'NaN' WHEN 2 THEN '-0' WHEN 3 THEN '0' WHEN 4 THEN '-1' ELSE '1' END)::double precision, \
+         (CASE WHEN i % 2 = 0 THEN '3.00' ELSE '3' END)::numeric, repeat(md5(i::text), 32) \
+         FROM generate_series(1, 12000) i; CREATE SEQUENCE nt_seq",
+    )
+    .unwrap();
+    s.query("VACUUM ANALYZE nt").unwrap();
+    let queries = [
+        ("SELECT id, x FROM nt ORDER BY x DESC, id LIMIT 7 OFFSET 3", true),
+        ("SELECT x, id, x FROM nt ORDER BY x DESC, id LIMIT 7", true),
+        ("SELECT id, h FROM nt ORDER BY h DESC, id DESC LIMIT 7", true),
+        ("SELECT id, b FROM nt ORDER BY b, id LIMIT 7", true),
+        ("SELECT id, f FROM nt ORDER BY f DESC NULLS LAST, id DESC LIMIT 7", true),
+        ("SELECT id, d FROM nt ORDER BY d NULLS FIRST, id DESC LIMIT 7", true),
+        // All first keys tie: the last rows must still win the second comparison.
+        ("SELECT id, tied FROM nt ORDER BY tied, id DESC LIMIT 7", false),
+        ("SELECT id, n FROM nt ORDER BY n DESC, id DESC LIMIT 7", false),
+        ("SELECT id, f FROM nt WHERE f = 'NaN'::real ORDER BY f, id DESC LIMIT 3", false),
+        ("SELECT id, d FROM nt WHERE d = 0 ORDER BY d, id DESC LIMIT 3", false),
+        ("SELECT id, d FROM nt WHERE d IS NULL ORDER BY d, id DESC LIMIT 3", false),
+        // The existing single-key request also uses numeric column kernels.
+        ("SELECT id, x FROM nt ORDER BY x DESC LIMIT 7", true),
+    ];
+    let mut serial = Vec::new();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    for (q, _) in &queries {
+        let rows = out(&mut s, q);
+        assert!(!rows.is_empty() && !rows[0].starts_with("ERROR:"), "{q}: {rows:?}");
+        serial.push(rows);
+    }
+    assert_eq!(pg_engine::exec::parscan::started(), started);
+    assert_eq!(serial[0], out(&mut s, "SELECT i, 12001 - i FROM generate_series(4, 10) i"));
+    assert_eq!(serial[6], out(&mut s, "SELECT i, 1 FROM generate_series(12000, 11994, -1) i"));
+    for (rows, ids) in [
+        (&serial[7], vec![12000, 11999, 11998, 11997, 11996, 11995, 11994]),
+        (&serial[8], vec![11995, 11989, 11983]),
+        (&serial[9], vec![11997, 11996, 11991]),
+        (&serial[10], vec![12000, 11994, 11988]),
+    ] {
+        assert_eq!(rows.len(), ids.len());
+        for (row, id) in rows.iter().zip(ids) {
+            assert!(row.starts_with(&format!("[Int4({id}),")), "late secondary winner: {row}");
+        }
+    }
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    for ((q, prunes), want) in queries.iter().zip(&serial) {
+        let started = pg_engine::exec::parscan::started();
+        let skipped = pg_engine::exec::parscan::topk_skipped();
+        assert_eq!(&out(&mut s, q), want, "{q}");
+        assert!(pg_engine::exec::parscan::started() > started, "workers ran: {q}");
+        if *prunes {
+            assert!(pg_engine::exec::parscan::topk_skipped() > skipped, "workers pruned: {q}");
+        } else {
+            assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "first-key ties survived: {q}");
+        }
+    }
+
+    // A filter kernel leaves an error to the executor even after enough early rows
+    // have filled the heap. The first key cannot hide the late failing row.
+    let q = "SELECT id, x FROM nt WHERE id < 50 OR 1 / (id - 12000) > 0 ORDER BY x DESC, id LIMIT 7";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    assert!(want[0].starts_with("ERROR: division by zero"), "{want:?}");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    assert_eq!(out(&mut s, q), want);
+    assert!(pg_engine::exec::parscan::started() > started, "late filter error used workers");
+
+    // A large LIMIT + OFFSET cannot prune within a worker chunk. Its shallow heap
+    // slots exceed this budget, so numeric projections keep the serial scan path.
+    s.query("SET work_mem = '64kB'").unwrap();
+    for q in [
+        "SELECT id, x FROM nt ORDER BY x DESC LIMIT 1 OFFSET 11999",
+        "SELECT id, x FROM nt ORDER BY x DESC, id LIMIT 1 OFFSET 11999",
+    ] {
+        s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+        let want = out(&mut s, q);
+        assert_eq!(want, ["[Int4(12000), Int4(1)]"], "{q}");
+        s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+        let started = pg_engine::exec::parscan::started();
+        let skipped = pg_engine::exec::parscan::topk_skipped();
+        assert_eq!(out(&mut s, q), want, "{q}");
+        assert_eq!(pg_engine::exec::parscan::started(), started, "large-bound fallback: {q}");
+        assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "large-bound fallback: {q}");
+    }
+    s.query("RESET work_mem").unwrap();
+
+    // A non-column projection, secondary expression, or nonnumeric column disqualifies
+    // the request. Errors on late, otherwise discardable rows must still be evaluated.
+    for q in [
+        "SELECT id, x, 1 / (id - 12000) FROM nt ORDER BY x DESC, id LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x DESC, 1 / (id - 12000) LIMIT 7",
+        "SELECT id, x, pad FROM nt ORDER BY x DESC, id LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x + 0 DESC, id LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x DESC, pad COLLATE \"C\" LIMIT 7",
+    ] {
+        s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+        let want = out(&mut s, q);
+        if q.contains("1 / (id - 12000)") {
+            assert!(want[0].starts_with("ERROR: division by zero"), "{q}: {want:?}");
+        } else {
+            assert_eq!(want.len(), 7, "{q}: {want:?}");
+        }
+        s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+        let skipped = pg_engine::exec::parscan::topk_skipped();
+        assert_eq!(out(&mut s, q), want, "{q}");
+        assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "ineligible: {q}");
+    }
+
+    // Sorting by the volatile output keeps it below the sort. Count every evaluation,
+    // including rows the first key alone could otherwise have discarded.
+    for q in [
+        "SELECT id, x, nextval('nt_seq') AS v FROM nt ORDER BY x DESC, id, v LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x DESC, nextval('nt_seq') LIMIT 7",
+    ] {
+        let mut serial = None;
+        for workers in [0, 2] {
+            s.query(&format!("SET max_parallel_workers_per_gather = {workers}; SELECT setval('nt_seq', 1, false)")).unwrap();
+            let skipped = pg_engine::exec::parscan::topk_skipped();
+            let rows = out(&mut s, q);
+            assert_eq!(rows.len(), 7, "{q}: {rows:?}");
+            if let Some(want) = &serial {
+                assert_eq!(&rows, want, "{q}");
+            } else {
+                serial = Some(rows);
+            }
+            assert_eq!(out(&mut s, "SELECT currval('nt_seq')"), ["[Int8(12000)]"], "{q}");
+            assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "volatile: {q}");
+        }
+    }
+    // Enough rows per chunk to exercise the decoder fallback on a long run of ties.
+    s.query("CREATE TABLE nt_ties AS SELECT i AS id, 1 AS x, repeat(md5(i::text), 2) AS pad FROM generate_series(1, 120000) i").unwrap();
+    s.query("VACUUM ANALYZE nt_ties").unwrap();
+    let q = "SELECT id, x FROM nt_ties ORDER BY x, id DESC LIMIT 7";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    assert_eq!(want, (119994..=120000).rev().map(|i| format!("[Int4({i}), Int4(1)]")).collect::<Vec<_>>());
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    let skipped = pg_engine::exec::parscan::topk_skipped();
+    assert_eq!(out(&mut s, q), want);
+    assert!(pg_engine::exec::parscan::started() > started, "tied scan used workers");
+    assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "all first-key ties survived");
+
+    // Older stored rows get their newly added numeric column from the missing value.
+    s.query("ALTER TABLE nt ADD COLUMN added int DEFAULT 42").unwrap();
+    let q = "SELECT id, x, added FROM nt ORDER BY x DESC, added, id LIMIT 7 OFFSET 3";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    assert_eq!(want.len(), 7);
+    assert!(want.iter().all(|r| r.ends_with("Int4(42)]")), "{want:?}");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let skipped = pg_engine::exec::parscan::topk_skipped();
+    assert_eq!(out(&mut s, q), want);
+    assert!(pg_engine::exec::parscan::topk_skipped() > skipped, "added defaults still prune");
+
+    s.query("INSERT INTO nt VALUES (12001, 0, 1, 1, 12001, 0, 0, 3, repeat(md5('new'), 32), 100)").unwrap();
+    s.query("VACUUM ANALYZE nt").unwrap();
+    let defaults = "SELECT id, added FROM nt ORDER BY added DESC, id DESC LIMIT 7";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let rows = out(&mut s, defaults);
+    assert_eq!(rows[0], "[Int4(12001), Int4(100)]");
+    assert!(rows[1..].iter().all(|r| r.ends_with("Int4(42)]")), "{rows:?}");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    assert_eq!(out(&mut s, defaults), rows);
+    assert!(pg_engine::exec::parscan::started() > started, "missing first-key values used workers");
+
+    s.query("UPDATE nt SET pad = repeat(pad, 2) WHERE id % 1000 = 0").unwrap();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    assert_eq!(out(&mut s, q), want);
+    assert_eq!(pg_engine::exec::parscan::started(), started, "displaced heap stays serial");
+}
+
+/// Scans whose rows the workers fetch by key: a bitmap heap scan of a few percent of a big
+/// table (plain, filtered, aggregated, under a hash join, failing at a late row), and full
+/// primary-key index scans read in index order by the executor's thread (a merge join's
+/// input).
+const FETCHED_QUERIES: &[&str] = &[
+    "SELECT id, v, x FROM big3 WHERE v BETWEEN 10 AND 20",
+    "SELECT id FROM big3 WHERE v BETWEEN 10 AND 20 AND s LIKE '%a%'",
+    "SELECT count(*), sum(x), min(s) FROM big3 WHERE v BETWEEN 10 AND 20",
+    "SELECT b.id, d.name FROM big3 b JOIN dim3 d ON d.k = b.v WHERE b.v BETWEEN 10 AND 20",
+    "SELECT count(*) FROM big3 WHERE v BETWEEN 10 AND 20 AND 1 / (id - 410010) > 0",
+];
+
+/// Run with sequential and bitmap scans off.
+const ORDERED_QUERIES: &[&str] = &[
+    "SELECT id, v FROM big3 ORDER BY id",
+    "SELECT b.id, c.x FROM big3 b JOIN big3 c ON c.id = b.id WHERE b.v = 3",
+];
+
+fn fetch_stats(s: &mut Session) -> String {
+    out(s, "SELECT pg_stat_force_next_flush()");
+    let t = out(s, "SELECT seq_scan, idx_scan, idx_tup_fetch FROM pg_stat_user_tables WHERE relname = 'big3'");
+    let i = out(
+        s,
+        "SELECT idx_scan, idx_tup_read, idx_tup_fetch FROM pg_stat_user_indexes WHERE relname = 'big3' ORDER BY indexrelname",
+    );
+    format!("{t:?} {i:?}")
+}
+
+#[test]
+fn parallel_fetches_match_serial() {
+    on_session_thread(parallel_fetches_match_serial_inner);
+}
+
+fn parallel_fetches_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big3 (id int PRIMARY KEY, v int, x numeric(12,2), s text); \
+         INSERT INTO big3 SELECT i, i % 1000, (i % 777) / 10.0, md5(i::text) FROM generate_series(1, 420000) i; \
+         CREATE INDEX big3_v ON big3 (v); \
+         CREATE TABLE dim3 (k int PRIMARY KEY, name text); \
+         INSERT INTO dim3 SELECT k, 'name ' || k FROM generate_series(0, 30) k",
+    )
+    .unwrap();
+    for t in ["big3", "dim3"] {
+        s.query(&format!("VACUUM ANALYZE {t}")).unwrap();
+    }
+    let run = |s: &mut Session| -> (Vec<Vec<String>>, Vec<String>) {
+        let mut rows = Vec::new();
+        let mut plans = Vec::new();
+        s.query("SET enable_indexscan = off; SET enable_seqscan = off").unwrap();
+        for q in FETCHED_QUERIES {
+            plans.extend(out(s, &format!("EXPLAIN (COSTS OFF) {q}")));
+            rows.push(out(s, q));
+        }
+        s.query("RESET enable_indexscan; SET enable_bitmapscan = off; SET enable_hashjoin = off").unwrap();
+        for q in ORDERED_QUERIES {
+            plans.extend(out(s, &format!("EXPLAIN (COSTS OFF) {q}")));
+            rows.push(out(s, q));
+        }
+        s.query("RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_hashjoin").unwrap();
+        (rows, plans)
+    };
+    let workers = |s: &mut Session, n: u32| s.query(&format!("SET max_parallel_workers_per_gather = {n}")).unwrap();
+    workers(&mut s, 0);
+    // (The setup's counts: the primary key's build scanned the table once.)
+    let stat_setup = fetch_stats(&mut s);
+    let (serial, _) = run(&mut s);
+    let stat_serial = fetch_stats(&mut s);
+    workers(&mut s, 2);
+    let scans = pg_engine::exec::parscan::started();
+    let (parallel, plans) = run(&mut s);
+    let stat_parallel = fetch_stats(&mut s);
+    assert!(pg_engine::exec::parscan::started() >= scans + 6, "the scans ran in the workers");
+    assert!(plans.iter().any(|l| l.contains("Bitmap Heap Scan on big3")), "{plans:?}");
+    assert!(plans.iter().any(|l| l.contains("Index Scan using big3_pkey")), "{plans:?}");
+    let all = FETCHED_QUERIES.iter().chain(ORDERED_QUERIES);
+    for ((q, a), b) in all.zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+    assert!(serial[0].len() > 4000, "{}", serial[0].len());
+    assert!(serial[4][0].starts_with("ERROR: division by zero"), "{:?}", serial[4]);
+    assert_eq!(serial[5].len(), 420000);
+    // Each run fetched as many rows and scanned the indexes as often: the counts doubled.
+    let n = |st: &str| -> Vec<i64> {
+        st.split("Int8(").skip(1).map(|x| x.split(')').next().unwrap().parse().unwrap()).collect()
+    };
+    let (z, a, b) = (n(&stat_setup), n(&stat_serial), n(&stat_parallel));
+    assert!(!a.is_empty(), "{stat_serial}");
+    let runs = |v: &[i64]| v.iter().zip(&z).map(|(x, z)| x - z).collect::<Vec<_>>();
+    assert_eq!(runs(&b), runs(&a).iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_setup} {stat_serial} {stat_parallel}");
+}
+
+/// A bitmap whose quals read only index columns of fixed-width types checks them on the
+/// index entries instead of reading each row (`scan::entry_columns`): the same rows as a
+/// sequential scan, deleted rows (committed, and the transaction's own) left out, a
+/// cross-type bound and an OR of two indexes included.
+#[test]
+fn bitmap_quals_on_entries() {
+    on_session_thread(bitmap_quals_on_entries_inner);
+}
+
+fn bitmap_quals_on_entries_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big4 (id int PRIMARY KEY, v int, d date, s text); \
+         INSERT INTO big4 SELECT i, i % 1000, date '2020-01-01' + i % 3000, md5(i::text) FROM generate_series(1, 420000) i; \
+         CREATE INDEX big4_v ON big4 (v); CREATE INDEX big4_d ON big4 (d); \
+         DELETE FROM big4 WHERE id % 7 = 0",
+    )
+    .unwrap();
+    s.query("VACUUM ANALYZE big4").unwrap();
+    let queries = [
+        "SELECT count(*), sum(id) FROM big4 WHERE v BETWEEN 10 AND 30",
+        "SELECT count(*), sum(id) FROM big4 WHERE d >= date '2021-01-01' AND d < timestamp '2021-02-01 00:00'",
+        "SELECT count(*) FROM big4 WHERE v < 10::bigint AND s LIKE 'a%'",
+        "SELECT id FROM big4 WHERE (v = 3 OR d = date '2020-01-05') AND id < 5000 ORDER BY id",
+    ];
+    let run = |s: &mut Session, bitmap: bool| -> Vec<Vec<String>> {
+        let set = if bitmap {
+            "SET enable_indexscan = off; SET enable_seqscan = off; RESET enable_bitmapscan"
+        } else {
+            "SET enable_indexscan = off; RESET enable_seqscan; SET enable_bitmapscan = off"
+        };
+        s.query(set).unwrap();
+        queries
+            .iter()
+            .map(|q| {
+                let plan = out(s, &format!("EXPLAIN (COSTS OFF) {q}")).join("\n");
+                assert_eq!(plan.contains("Bitmap Heap Scan"), bitmap, "{q}\n{plan}");
+                out(s, q)
+            })
+            .collect()
+    };
+    for own_deletes in [false, true] {
+        if own_deletes {
+            s.query("BEGIN; DELETE FROM big4 WHERE v = 20 OR d = date '2021-01-10'").unwrap();
+        }
+        let (a, b) = (run(&mut s, true), run(&mut s, false));
+        for ((q, a), b) in queries.iter().zip(&a).zip(&b) {
+            assert_eq!(a, b, "{q}");
+        }
+        assert!(a[0][0].contains("Int8("), "{:?}", a[0]);
+    }
+    s.query("ROLLBACK").unwrap();
+}
+
+/// Aggregations over column batches (`exec::vector`, `storage::cols`): rows decoded a batch
+/// at a time as columns, filtered and aggregated by batch kernels, and the rows they can't
+/// do (numerics past an i128 or NaN, columns added since a row
+/// was stored, sums past an i128, filters left to `eval`) through the row path in their
+/// place. Every query gives what the row path gives: the groups in the same order.
+const VECTOR_QUERIES: &[&str] = &[
+    "SELECT count(*), sum(a), sum(b), sum(x), avg(a), count(t), sum(big), count(ok) FROM v",
+    "SELECT a, count(*), sum(x), sum(z), count(z) FROM v GROUP BY a",
+    "SELECT t, count(*), sum(b) FROM v WHERE d >= '2024-03-01' AND ok GROUP BY t",
+    "SELECT c, count(*), sum(id) FROM v WHERE c <> 'cd' GROUP BY c",
+    "SELECT d, ok, count(*), sum(a) FROM v WHERE t IN ('k1', 'k2', NULL) OR a IS NULL GROUP BY d, ok",
+    "SELECT count(*), sum(x * 2.5 - x), sum(x * x) FROM v WHERE NOT ok OR x > 100",
+    "SELECT count(*), sum(x * x * x * x * x * x * x * x * x * x * x) FROM v WHERE x > 160",
+    "SELECT a, sum(b) FROM v WHERE z = 5 GROUP BY a",
+    "SELECT count(*), sum(a) FROM v WHERE t > 'k3' AND length(t) > 0",
+    "SELECT count(*), sum(id) FROM v WHERE c = 'ab  ' AND f < 300.5",
+    "SELECT ok, count(*) FROM v WHERE ok IS NOT NULL AND (c = 'cd' OR t IS NULL) GROUP BY ok",
+    "SELECT count(*), sum(big), sum(x) FROM v WHERE big > 500",
+    "SELECT t, count(*) FROM v WHERE t NOT IN ('k1', 'k5') GROUP BY t",
+    // = ANY / <> ALL of arrays: strings, bpchar, NULL items, integers and numerics.
+    "SELECT c, count(*), sum(b) FROM v WHERE c = ANY ('{ab,cd}'::bpchar[]) GROUP BY c",
+    "SELECT t, count(*) FROM v WHERE t = ANY (ARRAY['k3', NULL, 'k7']) GROUP BY t",
+    "SELECT count(*), sum(id) FROM v WHERE t <> ALL ('{k1,k2}') AND a = ANY ('{1,3,NULL}'::int[])",
+    "SELECT a, count(*) FROM v WHERE x = ANY ('{1.0000,2.5,33.3333}'::numeric[]) OR b <> ALL ('{1000003,2000006}'::int8[]) GROUP BY a",
+    "SELECT a, count(*), sum(x) FROM v WHERE a IN (1, 3, 5) AND id <> ALL (ARRAY[7, NULL]) GROUP BY a",
+    // LIKE over a text column (NULLs, NOT, _ and %), an escape ending the pattern (an error
+    // at the first row with text left), a char(n) column cast to unbounded bpchar.
+    "SELECT t, count(*) FROM v WHERE t LIKE 'k1%' GROUP BY t",
+    "SELECT count(*), sum(id) FROM v WHERE t NOT LIKE '%3' AND t LIKE 'k_'",
+    "SELECT count(*) FROM v WHERE t LIKE 'k1\\'",
+    "SELECT c, count(*) FROM v WHERE c::bpchar IN ('ab', 'zz') GROUP BY c",
+    // Dates against timestamps and dates (NULL and infinite dates among them).
+    "SELECT ok, count(*), sum(a) FROM v WHERE d >= date '2024-02-01' AND d < date '2024-02-01' + interval '1' month GROUP BY ok",
+    "SELECT count(*), sum(id) FROM v WHERE d < timestamp '2024-01-15 12:00' OR d > timestamp 'infinity' OR d >= 'infinity'::date",
+    "SELECT a, count(*) FROM v WHERE d <> date '2024-01-05' AND d <= date '2024-12-31' GROUP BY a",
+    "SELECT count(*) FROM v WHERE d > timestamp '-infinity' AND d IS NOT NULL",
+];
+
+#[test]
+fn vector_batches_match_rows() {
+    // (Past the heap model's limit: read in storage order, a fill at a time.)
+    on_session_thread(vector_batches_match_rows_inner);
+}
+
+fn vector_batches_match_rows_inner() {
+    pg_engine::exec::sizing::with_max_versions(10_000, vector_batches_body)
+}
+
+fn vector_batches_body() {
+    use pg_engine::exec::parscan::{VECTOR_ROWS, without_vectors};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE v (id int, a int2, b int8, x numeric(20, 4), t text, c char(4), d date, ok bool, big numeric, f float8)",
+    )
+    .unwrap();
+    s.query(
+        "INSERT INTO v SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE i % 7 END, i::bigint * 1000003, (i % 500) / 3.0, \
+         CASE WHEN i % 17 = 0 THEN NULL ELSE 'k' || (i % 40) END, \
+         CASE i % 3 WHEN 0 THEN 'ab' WHEN 1 THEN 'ab  ' ELSE 'cd' END, date '2024-01-01' + i % 400, \
+         CASE WHEN i % 19 = 0 THEN NULL ELSE i % 5 = 0 END, \
+         CASE WHEN i % 1000 = 0 THEN 1e40 WHEN i % 997 = 0 THEN 'NaN' ELSE i END, i / 7.0 \
+         FROM generate_series(1, 30000) i",
+    )
+    .unwrap();
+    s.query("ALTER TABLE v ADD COLUMN z int DEFAULT 5").unwrap();
+    s.query(
+        "INSERT INTO v SELECT i, i % 7, i, i / 4.0, 'k' || (i % 40), 'ab', date '2024-02-01', true, i, i, i % 9 \
+         FROM generate_series(30001, 40000) i",
+    )
+    .unwrap();
+    s.query("UPDATE v SET t = 'u' || id, x = x + 1 WHERE id % 211 = 0").unwrap();
+    s.query("DELETE FROM v WHERE id % 307 = 0").unwrap();
+    s.query("UPDATE v SET d = NULL WHERE id % 401 = 0").unwrap();
+    s.query("UPDATE v SET d = 'infinity' WHERE id % 503 = 0").unwrap();
+    s.query("UPDATE v SET d = '-infinity' WHERE id % 509 = 0").unwrap();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let run = |s: &mut Session| VECTOR_QUERIES.iter().map(|q| out(s, q)).collect::<Vec<_>>();
+    let rows = without_vectors(|| run(&mut s));
+    let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let batched = run(&mut s);
+    assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
+    for ((q, a), b) in VECTOR_QUERIES.iter().zip(&rows).zip(&batched) {
+        assert_eq!(a, b, "{q}");
+    }
+    // The serial plan's rows (no inline scan) agree too.
+    let serial = pg_engine::exec::parscan::without_serial_inline(|| run(&mut s));
+    for ((q, a), b) in VECTOR_QUERIES.iter().zip(&serial).zip(&batched) {
+        assert_eq!(a, b, "{q}: serial");
+    }
+}
+
+
+#[test]
+fn parallel_workers_use_execution_context_after_parse() {
+    on_session_thread(parallel_workers_use_execution_context_after_parse_inner);
+}
+
+fn parallel_workers_use_execution_context_after_parse_inner() {
+    use pg_engine::{session::Outcome, types::Value};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let (pid, _, _) = engine.register_backend(None, None);
+    let mut s = engine.connect(pid, "postgres", "postgres", "parse_context").unwrap();
+    s.query("CREATE TABLE p171_parallel AS SELECT g AS a FROM generate_series(1,3000000) g; ANALYZE p171_parallel").unwrap();
+    let sql = "SELECT a FROM p171_parallel WHERE a % 3000000 = 0";
+    fn counts(s: &mut Session) -> (i64, i64) {
+        s.query("SELECT pg_stat_force_next_flush(); SELECT pg_stat_clear_snapshot()").unwrap();
+        let r = s.query("SELECT parallel_workers_to_launch, parallel_workers_launched FROM pg_stat_database WHERE datname = 'postgres'").unwrap();
+        match r.last().unwrap().rows[0].as_slice() {
+            [Value::Int8(a), Value::Int8(b)] => (*a, *b),
+            row => panic!("worker counts: {row:?}"),
+        }
+    }
+    let mut deltas = Vec::new();
+    for (name, before_parse, after_parse) in [
+        ("workers", "SET max_parallel_workers_per_gather=0", "SET max_parallel_workers_per_gather=2"),
+        ("setup", "SET parallel_setup_cost=1000000000", "RESET parallel_setup_cost"),
+    ] {
+        s.query(before_parse).unwrap();
+        s.parse_message(name, sql, &[]).unwrap();
+        s.sync().unwrap();
+        s.query(after_parse).unwrap();
+        let plan = s.query(&format!("EXPLAIN {sql}")).unwrap();
+        println!("{name} current EXPLAIN: {:?}", plan.last().unwrap().rows);
+        assert!(plan.last().unwrap().rows.iter().any(|r| format!("{:?}", r[0]).contains("Gather")), "{plan:?}");
+        let before = counts(&mut s);
+        s.bind_message("", name, Vec::new(), &[], Vec::new()).unwrap();
+        match s.execute_portal("", 0).unwrap().0 {
+            Outcome::Done(q) => assert_eq!(q.rows, vec![vec![Value::Int4(3000000)]]),
+            _ => panic!("one-row statement not completed"),
+        }
+        s.sync().unwrap();
+        let after = counts(&mut s);
+        let delta = (after.0 - before.0, after.1 - before.1);
+        println!("{name}: worker to_launch/launched delta={delta:?}");
+        deltas.push(delta);
+    }
+    drop(s);
+    engine.unregister_backend(pid);
+    engine.shutdown();
+    assert_eq!(deltas, [(2, 2), (2, 2)], "actual worker launches follow settings at first execution");
+}
+
+const REORDERED_QUERIES: &[&str] = &[
+    "SELECT count(*), sum(x), sum(id) FROM r WHERE d >= date '2024-03-01' AND d < date '2024-03-01' + interval '2' month",
+    "SELECT g, count(*), sum(x) FROM r WHERE x < 40.5 AND t LIKE 'r1%' GROUP BY g ORDER BY g",
+    "SELECT id, g, x FROM r WHERE x > 99.5 AND d <> date '2024-01-09'",
+    "SELECT q.w, count(*), sum(r.x) FROM r JOIN q ON r.g = q.k WHERE r.d < timestamp '2024-04-01 06:00' GROUP BY q.w ORDER BY 1",
+    "SELECT r.id, q.w FROM r JOIN q ON r.g = q.k WHERE r.x = 12.25",
+    // A key of EXTRACT over a date through a projection (whole numbers: no presort).
+    "SELECT m, w, count(*), sum(x) FROM (SELECT extract(month FROM r.d) AS m, q.w, r.x FROM r JOIN q ON r.g = q.k) t GROUP BY m, w ORDER BY m, w",
+    "SELECT extract(day FROM d), count(*), sum(id) FROM r WHERE x > 50 GROUP BY 1 ORDER BY 1",
+];
+
+#[test]
+fn reordered_heaps_through_batches() {
+    on_session_thread(reordered_heaps_through_batches_inner);
+}
+
+/// A modelled heap whose later rows went into earlier pages' free space: read in heap order
+/// by the statement's thread, its rows go to the workers a fill at a time and through the
+/// batch kernels, as a table's stored in order do.
+fn reordered_heaps_through_batches_inner() {
+    use pg_engine::exec::parscan::{LIST_FILL_ROWS, VECTOR_ROWS, without_vectors};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE r (id int, g int, x numeric(10, 2), d date, t text, pad text); \
+         INSERT INTO r SELECT i, i % 23, (i % 4000) / 40.0, date '2024-01-01' + i % 150, 'r' || (i % 300), repeat('x', 96) \
+         FROM generate_series(1, 90000) i; \
+         DELETE FROM r WHERE id % 3 = 0",
+    )
+    .unwrap();
+    s.query("VACUUM r").unwrap();
+    s.query(
+        "INSERT INTO r SELECT i, i % 23, CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 4000) / 40.0 END, \
+         CASE WHEN i % 19 = 0 THEN NULL ELSE date '2024-01-01' + i % 150 END, 'r' || (i % 300), repeat('x', 96) \
+         FROM generate_series(90001, 120000) i; \
+         CREATE TABLE q (k int PRIMARY KEY, w int); INSERT INTO q SELECT k, k % 4 FROM generate_series(0, 15) k; \
+         ANALYZE r; ANALYZE q",
+    )
+    .unwrap();
+    // Reordered heaps below 8 MB stay serial; padding makes these workers exercise
+    // ListFill and the column batches while the row count stays within the model cap.
+    assert_eq!(out(&mut s, "SELECT pg_relation_size('r') >= 8 * 1024 * 1024"), ["[Bool(true)]"]);
+    let run = |s: &mut Session| -> Vec<Vec<String>> { REORDERED_QUERIES.iter().map(|q| out(s, q)).collect() };
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial = run(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let list_before = LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(out(&mut s, REORDERED_QUERIES[0]), serial[0]);
+    assert!(pg_engine::exec::parscan::started() > started, "reordered heap ran in workers");
+    assert!(LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed) > list_before, "reordered ListFill source supplied rows");
+    assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
+    let parallel = run(&mut s);
+    let rows = without_vectors(|| run(&mut s));
+    for (((q, a), b), c) in REORDERED_QUERIES.iter().zip(&serial).zip(&parallel).zip(&rows) {
+        assert_eq!(a, b, "{q}");
+        assert_eq!(c, b, "{q}: column batches");
+    }
+    assert!(serial[2].len() > 10, "{:?}", serial[2]);
+}

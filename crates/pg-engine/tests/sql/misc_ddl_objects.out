@@ -1,0 +1,165 @@
+> create schema mdo_s1
+-- CREATE SCHEMA
+
+> create schema mdo_s2
+-- CREATE SCHEMA
+
+> create conversion mdo_s1.mdo_conv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8
+-- CREATE CONVERSION
+
+> create conversion mdo_s1.mdo_conv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8
+ERROR 42710: conversion "mdo_conv" already exists
+
+> create conversion mdo_s1.mdo_bad for 'UTF8' to 'LATIN1' from iso8859_1_to_utf8
+ERROR XX000: expected source encoding "LATIN1", but got "UTF8"
+
+> create conversion mdo_s1.mdo_bad2 for 'NOPE' to 'UTF8' from iso8859_1_to_utf8
+ERROR 42704: source encoding "NOPE" does not exist
+
+> create conversion mdo_s1.mdo_bad3 for 'LATIN1' to 'UTF8' from nope_fn
+ERROR 42883: function nope_fn(integer, integer, cstring, internal, integer, boolean) does not exist
+
+> create conversion mdo_s1.mdo_conv2 for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8
+-- CREATE CONVERSION
+
+> select conname, conforencoding, contoencoding, conproc, condefault from pg_conversion where connamespace = 'mdo_s1'::regnamespace order by 1
+conname:name | conforencoding:int4 | contoencoding:int4 | conproc:regproc | condefault:bool
+mdo_conv | 8 | 6 | iso8859_1_to_utf8 | f
+mdo_conv2 | 8 | 6 | iso8859_1_to_utf8 | f
+-- SELECT 2
+
+> alter conversion mdo_s1.mdo_conv rename to mdo_conv2
+ERROR 42710: conversion "mdo_conv2" already exists in schema "mdo_s1"
+
+> alter conversion mdo_s1.mdo_conv rename to mdo_conv3
+-- ALTER CONVERSION
+
+> alter conversion mdo_s1.mdo_conv3 set schema mdo_s2
+-- ALTER CONVERSION
+
+> select (pg_identify_object('pg_conversion'::regclass, oid, 0)).* from pg_conversion where conname like 'mdo_conv%' order by 4
+type:text | schema:text | name:text | identity:text
+conversion | mdo_s1 | mdo_conv2 | mdo_s1.mdo_conv2
+conversion | mdo_s2 | mdo_conv3 | mdo_s2.mdo_conv3
+-- SELECT 2
+
+> drop conversion if exists mdo_s1.nope
+NOTICE 00000: conversion "mdo_s1.nope" does not exist, skipping
+-- DROP CONVERSION
+
+> drop conversion if exists nope_schema.nope
+NOTICE 00000: schema "nope_schema" does not exist, skipping
+-- DROP CONVERSION
+
+> drop conversion mdo_s1.nope
+ERROR 42704: conversion "mdo_s1.nope" does not exist
+
+> drop conversion koi8_r_to_mic
+ERROR 2BP01: cannot drop conversion koi8_r_to_mic because it is required by the database system
+
+> create access method mdo_am type index handler gisthandler
+-- CREATE ACCESS METHOD
+
+> create access method mdo_am type index handler gisthandler
+ERROR 42710: access method "mdo_am" already exists
+
+> create access method mdo_bad type index handler int4in
+ERROR 42883: function int4in(internal) does not exist
+
+> create access method mdo_bad type index handler heap_tableam_handler
+ERROR 42809: function heap_tableam_handler must return type index_am_handler
+
+> select amname, amhandler, amtype from pg_am where amname like 'mdo%'
+amname:name | amhandler:regproc | amtype:char
+mdo_am | gisthandler | i
+-- SELECT 1
+
+> select pg_describe_object('pg_am'::regclass, oid, 0), (pg_identify_object('pg_am'::regclass, oid, 0)).identity from pg_am where amname = 'mdo_am'
+pg_describe_object:text | identity:text
+access method mdo_am | mdo_am
+-- SELECT 1
+
+> create operator family mdo_fam using mdo_am
+-- CREATE OPERATOR FAMILY
+
+> drop access method mdo_am
+-- DROP ACCESS METHOD
+
+> drop access method if exists mdo_nope
+NOTICE 00000: access method "mdo_nope" does not exist, skipping
+-- DROP ACCESS METHOD
+
+> drop access method mdo_am cascade
+ERROR 42704: access method "mdo_am" does not exist
+
+> drop access method btree
+ERROR 2BP01: cannot drop access method btree because it is required by the database system
+
+> create language mdo_lang handler plpgsql_call_handler
+-- CREATE LANGUAGE
+
+> create language mdo_lang handler plpgsql_call_handler
+ERROR 42710: language "mdo_lang" already exists
+
+> create or replace language mdo_lang handler plpgsql_call_handler
+-- CREATE LANGUAGE
+
+> create language mdo_bad handler int4pl
+ERROR 42883: function int4pl() does not exist
+
+> select lanname, lanispl, lanpltrusted, lanplcallfoid::regproc from pg_language where lanname like 'mdo%'
+lanname:name | lanispl:bool | lanpltrusted:bool | lanplcallfoid:regproc
+mdo_lang | t | f | plpgsql_call_handler
+-- SELECT 1
+
+> alter language mdo_lang rename to plpgsql
+ERROR 42710: language "plpgsql" already exists
+
+> alter language mdo_lang rename to mdo_lang2
+-- ALTER LANGUAGE
+
+> drop language if exists mdo_nope
+NOTICE 00000: language "mdo_nope" does not exist, skipping
+-- DROP LANGUAGE
+
+> drop language mdo_nope
+ERROR 42704: language "mdo_nope" does not exist
+
+> create transform for int language sql (from sql with function prsd_lextype(internal), to sql with function int4recv(internal))
+-- CREATE TRANSFORM
+
+> create transform for int language sql (from sql with function prsd_lextype(internal), to sql with function int4recv(internal))
+ERROR 42710: transform for type integer language "sql" already exists
+
+> select (pg_identify_object('pg_transform'::regclass, oid, 0)).* from pg_transform
+type:text | schema:text | name:text | identity:text
+transform | NULL | NULL | for integer language sql
+-- SELECT 1
+
+> select pg_describe_object('pg_transform'::regclass, oid, 0) from pg_transform
+pg_describe_object:text
+transform for integer language sql
+-- SELECT 1
+
+> drop transform if exists for int language nope
+NOTICE 00000: transform for type pg_catalog.int4 language "nope" does not exist, skipping
+-- DROP TRANSFORM
+
+> drop transform for int language sql
+-- DROP TRANSFORM
+
+> drop transform if exists for int language sql
+NOTICE 00000: transform for type pg_catalog.int4 language "sql" does not exist, skipping
+-- DROP TRANSFORM
+
+> drop language mdo_lang2
+-- DROP LANGUAGE
+
+> drop schema mdo_s1 cascade
+NOTICE 00000: drop cascades to conversion mdo_s1.mdo_conv2
+-- DROP SCHEMA
+
+> drop schema mdo_s2 cascade
+NOTICE 00000: drop cascades to conversion mdo_s2.mdo_conv3
+-- DROP SCHEMA
+

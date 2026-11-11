@@ -1,0 +1,4 @@
+#!/bin/sh
+printf started > /home/meszmate/.cache/pg-engine-resume-20261104/verification/full-service-guard-proof-v2/cases/missing-green/PNPM-START
+cat /home/meszmate/.cache/pg-engine-resume-20261104/verification/full-service-guard-proof-v2/cases/missing-green/pnpm.fixture
+exit 0

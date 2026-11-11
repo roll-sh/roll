@@ -1,0 +1,349 @@
+> CREATE TABLE mb (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO mb VALUES (1, 'one'), (2, 'two'), (3, 'three')
+-- INSERT 0 3
+
+> CREATE MATERIALIZED VIEW mvp AS SELECT a, b FROM mb WITH NO DATA
+-- CREATE MATERIALIZED VIEW
+
+> SELECT relispopulated FROM pg_class WHERE relname = 'mvp'
+relispopulated:bool
+f
+-- SELECT 1
+
+> SELECT ispopulated, hasindexes FROM pg_matviews WHERE matviewname = 'mvp'
+ispopulated:bool | hasindexes:bool
+f | f
+-- SELECT 1
+
+> SELECT * FROM mvp
+ERROR 55000: materialized view "mvp" has not been populated
+HINT: Use the REFRESH MATERIALIZED VIEW command.
+
+> SELECT count(*) FROM (SELECT * FROM mvp) s
+ERROR 55000: materialized view "mvp" has not been populated
+HINT: Use the REFRESH MATERIALIZED VIEW command.
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvp
+ERROR 0A000: CONCURRENTLY cannot be used when the materialized view is not populated
+
+> REFRESH MATERIALIZED VIEW mvp
+-- REFRESH MATERIALIZED VIEW
+
+> SELECT * FROM mvp ORDER BY a
+a:int4 | b:text
+1 | one
+2 | two
+3 | three
+-- SELECT 3
+
+> SELECT relispopulated FROM pg_class WHERE relname = 'mvp'
+relispopulated:bool
+t
+-- SELECT 1
+
+> REFRESH MATERIALIZED VIEW mvp WITH NO DATA
+-- REFRESH MATERIALIZED VIEW
+
+> SELECT relispopulated FROM pg_class WHERE relname = 'mvp'
+relispopulated:bool
+f
+-- SELECT 1
+
+> SELECT * FROM mvp
+ERROR 55000: materialized view "mvp" has not been populated
+HINT: Use the REFRESH MATERIALIZED VIEW command.
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvp WITH NO DATA
+ERROR 0A000: CONCURRENTLY cannot be used when the materialized view is not populated
+
+> REFRESH MATERIALIZED VIEW mvp
+-- REFRESH MATERIALIZED VIEW
+
+> CREATE UNIQUE INDEX mvp_a ON mvp (a)
+-- CREATE INDEX
+
+> CREATE INDEX mvp_b ON mvp (b) WHERE a > 1
+-- CREATE INDEX
+
+> CREATE INDEX mvp_lower ON mvp (lower(b))
+-- CREATE INDEX
+
+> SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'mvp' ORDER BY 1
+indexname:name | indexdef:text
+mvp_a | CREATE UNIQUE INDEX mvp_a ON public.mvp USING btree (a)
+mvp_b | CREATE INDEX mvp_b ON public.mvp USING btree (b) WHERE (a > 1)
+mvp_lower | CREATE INDEX mvp_lower ON public.mvp USING btree (lower(b))
+-- SELECT 3
+
+> SELECT c.relname, i.indisunique, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'mvp'::regclass ORDER BY 1
+relname:name | indisunique:bool | indisvalid:bool
+mvp_a | t | t
+mvp_b | f | t
+mvp_lower | f | t
+-- SELECT 3
+
+> SELECT ispopulated, hasindexes FROM pg_matviews WHERE matviewname = 'mvp'
+ispopulated:bool | hasindexes:bool
+t | t
+-- SELECT 1
+
+> SELECT relhasindex FROM pg_class WHERE relname = 'mvp'
+relhasindex:bool
+t
+-- SELECT 1
+
+> SELECT pg_get_indexdef('mvp_b'::regclass)
+pg_get_indexdef:text
+CREATE INDEX mvp_b ON public.mvp USING btree (b) WHERE (a > 1)
+-- SELECT 1
+
+> INSERT INTO mb VALUES (4, 'four')
+-- INSERT 0 1
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvp
+-- REFRESH MATERIALIZED VIEW
+
+> SELECT * FROM mvp ORDER BY a
+a:int4 | b:text
+1 | one
+2 | two
+3 | three
+4 | four
+-- SELECT 4
+
+> UPDATE mb SET b = 'TWO' WHERE a = 2
+-- UPDATE 1
+
+> DELETE FROM mb WHERE a = 3
+-- DELETE 1
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvp
+-- REFRESH MATERIALIZED VIEW
+
+> SELECT * FROM mvp ORDER BY a
+a:int4 | b:text
+1 | one
+2 | TWO
+4 | four
+-- SELECT 3
+
+> INSERT INTO mb VALUES (1, 'uno')
+-- INSERT 0 1
+
+> REFRESH MATERIALIZED VIEW mvp
+ERROR 23505: could not create unique index "mvp_a"
+DETAIL: Key (a)=(1) is duplicated.
+OBJECTS: schema=public table=mvp constraint=mvp_a
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvp
+ERROR 23505: duplicate key value violates unique constraint "mvp_a"
+DETAIL: Key (a)=(1) already exists.
+CONTEXT: SQL statement "INSERT INTO public.mvp SELECT (diff.newdata).* FROM pg_temp_N.pg_temp_N_2 diff WHERE tid IS NULL"
+OBJECTS: schema=public table=mvp constraint=mvp_a
+
+> DELETE FROM mb WHERE b = 'uno'
+-- DELETE 1
+
+> CREATE UNIQUE INDEX mvp_b_u ON mvp (b)
+-- CREATE INDEX
+
+> INSERT INTO mb VALUES (5, 'two'), (6, 'two')
+-- INSERT 0 2
+
+> CREATE UNIQUE INDEX mvp_b_u2 ON mvp ((b || ''))
+-- CREATE INDEX
+
+> REFRESH MATERIALIZED VIEW mvp
+ERROR 23505: could not create unique index "mvp_b_u"
+DETAIL: Key (b)=(two) is duplicated.
+OBJECTS: schema=public table=mvp constraint=mvp_b_u
+
+> SELECT * FROM mvp ORDER BY a
+a:int4 | b:text
+1 | one
+2 | TWO
+4 | four
+-- SELECT 3
+
+> DROP INDEX mvp_a
+-- DROP INDEX
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvp
+ERROR 23505: duplicate key value violates unique constraint "mvp_b_u"
+DETAIL: Key (b)=(two) already exists.
+CONTEXT: SQL statement "INSERT INTO public.mvp SELECT (diff.newdata).* FROM pg_temp_N.pg_temp_N_2 diff WHERE tid IS NULL"
+OBJECTS: schema=public table=mvp constraint=mvp_b_u
+
+> ALTER INDEX mvp_b RENAME TO mvp_b2
+-- ALTER INDEX
+
+> SELECT indexname FROM pg_indexes WHERE tablename = 'mvp' ORDER BY 1
+indexname:name
+mvp_b2
+mvp_b_u
+mvp_b_u2
+mvp_lower
+-- SELECT 4
+
+> CREATE MATERIALIZED VIEW mvd AS SELECT x FROM (VALUES (1), (2)) v(x)
+-- SELECT 2
+
+> CREATE UNIQUE INDEX mvd_x ON mvd (x)
+-- CREATE INDEX
+
+> CREATE OR REPLACE VIEW mvdsrc AS SELECT 1
+-- CREATE VIEW
+
+> DROP MATERIALIZED VIEW mvd
+-- DROP MATERIALIZED VIEW
+
+> CREATE TABLE md (x int, y int)
+-- CREATE TABLE
+
+> INSERT INTO md VALUES (1, 1), (NULL, 2), (NULL, 2)
+-- INSERT 0 3
+
+> CREATE MATERIALIZED VIEW mvd AS SELECT * FROM md
+-- SELECT 3
+
+> CREATE UNIQUE INDEX mvd_x ON mvd (x)
+-- CREATE INDEX
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvd
+-- REFRESH MATERIALIZED VIEW
+
+> SELECT * FROM mvd ORDER BY x, y
+x:int4 | y:int4
+1 | 1
+NULL | 2
+NULL | 2
+-- SELECT 3
+
+> INSERT INTO md VALUES (3, 3), (3, 3)
+-- INSERT 0 2
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mvd
+ERROR 21000: new data for materialized view "mvd" contains duplicate rows without any null columns
+DETAIL: Row: (3,3)
+
+> DELETE FROM md WHERE x = 3
+-- DELETE 2
+
+> CREATE MATERIALIZED VIEW mve AS SELECT * FROM mb
+-- SELECT 5
+
+> CREATE UNIQUE INDEX mve_p ON mve (a) WHERE a > 0
+-- CREATE INDEX
+
+> CREATE UNIQUE INDEX mve_e ON mve ((a + 1))
+-- CREATE INDEX
+
+> REFRESH MATERIALIZED VIEW CONCURRENTLY mve
+ERROR 55000: cannot refresh materialized view "public.mve" concurrently
+HINT: Create a unique index with no WHERE clause on one or more columns of the materialized view.
+
+> ALTER MATERIALIZED VIEW mve RENAME TO mve2
+-- ALTER MATERIALIZED VIEW
+
+> ALTER MATERIALIZED VIEW mve2 RENAME COLUMN a TO aa
+-- ALTER MATERIALIZED VIEW
+
+> SELECT aa FROM mve2 ORDER BY 1
+aa:int4
+1
+2
+4
+5
+6
+-- SELECT 5
+
+> ALTER MATERIALIZED VIEW IF EXISTS nosuch RENAME TO x
+NOTICE 00000: relation "nosuch" does not exist, skipping
+-- ALTER MATERIALIZED VIEW
+
+> ALTER MATERIALIZED VIEW mve2 SET (fillfactor = 50)
+-- ALTER MATERIALIZED VIEW
+
+> SELECT reloptions FROM pg_class WHERE relname = 'mve2'
+reloptions:text[]
+{fillfactor=50}
+-- SELECT 1
+
+> ALTER MATERIALIZED VIEW mve2 RESET (fillfactor)
+-- ALTER MATERIALIZED VIEW
+
+> ALTER MATERIALIZED VIEW mve2 ALTER COLUMN aa SET STATISTICS 100
+-- ALTER MATERIALIZED VIEW
+
+> ALTER MATERIALIZED VIEW mve2 CLUSTER ON mve_p
+ERROR 0A000: cannot cluster on partial index "mve_p"
+
+> ALTER MATERIALIZED VIEW mve2 SET WITHOUT CLUSTER
+-- ALTER MATERIALIZED VIEW
+
+> CREATE SCHEMA mvs
+-- CREATE SCHEMA
+
+> ALTER MATERIALIZED VIEW mve2 SET SCHEMA mvs
+-- ALTER MATERIALIZED VIEW
+
+> SELECT schemaname, matviewname FROM pg_matviews WHERE matviewname = 'mve2'
+schemaname:name | matviewname:name
+mvs | mve2
+-- SELECT 1
+
+> SELECT schemaname, indexname FROM pg_indexes WHERE tablename = 'mve2' ORDER BY 2
+schemaname:name | indexname:name
+mvs | mve_e
+mvs | mve_p
+-- SELECT 2
+
+> ALTER TABLE mvs.mve2 RENAME TO mve3
+-- ALTER TABLE
+
+> ALTER VIEW mvs.mve2 RENAME TO mve3
+ERROR 42P01: relation "mvs.mve2" does not exist
+
+> INSERT INTO mvp VALUES (9, 'x')
+ERROR 42809: cannot change materialized view "mvp"
+
+> UPDATE mvp SET a = 1
+ERROR 42809: cannot change materialized view "mvp"
+
+> DELETE FROM mvp
+ERROR 42809: cannot change materialized view "mvp"
+
+> TRUNCATE mvp
+ERROR 42809: "mvp" is not a table
+
+> DROP TABLE mb
+ERROR 2BP01: cannot drop table mb because other objects depend on it
+DETAIL: materialized view mvp depends on table mb
+DETAIL: materialized view mvs.mve3 depends on table mb
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE mb CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to materialized view mvp
+DETAIL: drop cascades to materialized view mvs.mve3
+-- DROP TABLE
+
+> SELECT count(*) FROM pg_matviews WHERE matviewname IN ('mvp', 'mve2')
+count:int8
+0
+-- SELECT 1
+
+> DROP MATERIALIZED VIEW mvd
+-- DROP MATERIALIZED VIEW
+
+> DROP TABLE md
+-- DROP TABLE
+
+> DROP SCHEMA mvs
+-- DROP SCHEMA
+
+> DROP VIEW mvdsrc
+-- DROP VIEW
+

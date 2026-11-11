@@ -1,0 +1,381 @@
+> create TEMP TABLE test_jsonb_subscript (
+>        id int,
+>        test_json jsonb
+> )
+-- CREATE TABLE
+
+> insert into test_jsonb_subscript values
+> (1, '{}'), 
+> (2, '{"key": "value"}')
+-- INSERT 0 2
+
+> update test_jsonb_subscript set test_json['a'] = '1' where id = 1
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": 1}
+2 | {"key": "value"}
+-- SELECT 2
+
+> update test_jsonb_subscript set test_json['a'] = '1' where id = 2
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": 1}
+2 | {"a": 1, "key": "value"}
+-- SELECT 2
+
+> update test_jsonb_subscript set test_json['a'] = '"test"'
+-- UPDATE 2
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": "test"}
+2 | {"a": "test", "key": "value"}
+-- SELECT 2
+
+> update test_jsonb_subscript set test_json['a'] = '{"b": 1}'::jsonb
+-- UPDATE 2
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": {"b": 1}}
+2 | {"a": {"b": 1}, "key": "value"}
+-- SELECT 2
+
+> update test_jsonb_subscript set test_json['a'] = '[1, 2, 3]'::jsonb
+-- UPDATE 2
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": [1, 2, 3]}
+2 | {"a": [1, 2, 3], "key": "value"}
+-- SELECT 2
+
+> select * from test_jsonb_subscript where test_json['key'] = '"value"'
+id:int4 | test_json:jsonb
+2 | {"a": [1, 2, 3], "key": "value"}
+-- SELECT 1
+
+> select * from test_jsonb_subscript where test_json['key_doesnt_exists'] = '"value"'
+id:int4 | test_json:jsonb
+-- SELECT 0
+
+> select * from test_jsonb_subscript where test_json['key'] = '"wrong_value"'
+id:int4 | test_json:jsonb
+-- SELECT 0
+
+> update test_jsonb_subscript set test_json[NULL] = '1'
+ERROR 22004: jsonb subscript in assignment must not be null
+
+> update test_jsonb_subscript set test_json['another_key'] = NULL
+-- UPDATE 2
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": [1, 2, 3], "another_key": null}
+2 | {"a": [1, 2, 3], "key": "value", "another_key": null}
+-- SELECT 2
+
+> insert into test_jsonb_subscript values (3, NULL)
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a'] = '1' where id = 3
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": [1, 2, 3], "another_key": null}
+2 | {"a": [1, 2, 3], "key": "value", "another_key": null}
+3 | {"a": 1}
+-- SELECT 3
+
+> update test_jsonb_subscript set test_json = NULL where id = 3
+-- UPDATE 1
+
+> update test_jsonb_subscript set test_json[0] = '1'
+-- UPDATE 3
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"0": 1, "a": [1, 2, 3], "another_key": null}
+2 | {"0": 1, "a": [1, 2, 3], "key": "value", "another_key": null}
+3 | [1]
+-- SELECT 3
+
+> delete from test_jsonb_subscript
+-- DELETE 3
+
+> insert into test_jsonb_subscript values (1, '[0]')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json[5] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | [0, null, null, null, null, 1]
+-- SELECT 1
+
+> update test_jsonb_subscript set test_json[-4] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | [0, null, 1, null, null, 1]
+-- SELECT 1
+
+> update test_jsonb_subscript set test_json[-8] = '1'
+ERROR 22023: path element at position 1 is out of range: -8
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | [0, null, 1, null, null, 1]
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '[]')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json[5] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | [null, null, null, null, null, 1]
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a'][0]['b'][0]['c'] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": [{"b": [{"c": 1}]}]}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a'][2]['b'][2]['c'][2] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": [null, null, {"b": [null, null, {"c": [null, null, 1]}]}]}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{"b": 1}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a'][0] = '2'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": [2], "b": 1}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json[0]['a'] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"0": {"a": 1}}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '[]')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json[0]['a'] = '1'
+-- UPDATE 1
+
+> update test_jsonb_subscript set test_json[2]['b'] = '2'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | [{"a": 1}, null, {"b": 2}]
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a']['b'][1] = '1'
+-- UPDATE 1
+
+> update test_jsonb_subscript set test_json['a']['b'][10] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": {"b": [null, 1, null, null, null, null, null, null, null, null, 1]}}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '[]')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json[0][0][0] = '1'
+-- UPDATE 1
+
+> update test_jsonb_subscript set test_json[0][0][1] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | [[[1, 1]]]
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a']['b'][10] = '1'
+-- UPDATE 1
+
+> update test_jsonb_subscript set test_json['a'][10][10] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": {"b": [null, null, null, null, null, null, null, null, null, null, 1], "10": [null, null, null, null, null, null, null, null, null, null, 1]}}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{"a": {}}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a']['b']['c'][2] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": {"b": {"c": [null, null, 1]}}}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{"a": []}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a'][1]['c'][2] = '1'
+-- UPDATE 1
+
+> select * from test_jsonb_subscript
+id:int4 | test_json:jsonb
+1 | {"a": [null, {"c": [null, null, 1]}]}
+-- SELECT 1
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, '{"a": 1}')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json['a']['b'] = '1'
+ERROR 22023: cannot replace existing key
+DETAIL: The path assumes key is a composite object, but it is a scalar value.
+
+> update test_jsonb_subscript set test_json['a']['b']['c'] = '1'
+ERROR 22023: cannot replace existing key
+DETAIL: The path assumes key is a composite object, but it is a scalar value.
+
+> update test_jsonb_subscript set test_json['a'][0] = '1'
+ERROR 22023: cannot replace existing key
+DETAIL: The path assumes key is a composite object, but it is a scalar value.
+
+> update test_jsonb_subscript set test_json['a'][0]['c'] = '1'
+ERROR 22023: cannot replace existing key
+DETAIL: The path assumes key is a composite object, but it is a scalar value.
+
+> update test_jsonb_subscript set test_json['a'][0][0] = '1'
+ERROR 22023: cannot replace existing key
+DETAIL: The path assumes key is a composite object, but it is a scalar value.
+
+> delete from test_jsonb_subscript
+-- DELETE 1
+
+> insert into test_jsonb_subscript values (1, 'null')
+-- INSERT 0 1
+
+> update test_jsonb_subscript set test_json[0] = '1'
+ERROR 22023: cannot replace existing key
+DETAIL: The path assumes key is a composite object, but it is a scalar value.
+
+> update test_jsonb_subscript set test_json[0][0] = '1'
+ERROR 22023: cannot replace existing key
+DETAIL: The path assumes key is a composite object, but it is a scalar value.
+
+> drop table test_jsonb_subscript
+-- DROP TABLE
+
+> create temp table test_jsonb_subscript (
+>        id text,
+>        test_json jsonb
+> )
+-- CREATE TABLE
+
+> insert into test_jsonb_subscript values('foo', '{"foo": "bar"}')
+-- INSERT 0 1
+
+> insert into test_jsonb_subscript
+>   select s, ('{"' || s || '": "bar"}')::jsonb from repeat('xyzzy', 500) s
+-- INSERT 0 1
+
+> select length(id), test_json[id] from test_jsonb_subscript
+length:int4 | test_json:jsonb
+2500 | "bar"
+3 | "bar"
+-- SELECT 2
+
+> update test_jsonb_subscript set test_json[id] = '"baz"'
+-- UPDATE 2
+
+> select length(id), test_json[id] from test_jsonb_subscript
+length:int4 | test_json:jsonb
+2500 | "baz"
+3 | "baz"
+-- SELECT 2
+
+> update test_jsonb_subscript set test_json[1.5] = '1'
+ERROR 42804: subscript type numeric is not supported (at 43)
+HINT: jsonb subscript must be coercible to either integer or text.
+
+> drop table test_jsonb_subscript
+-- DROP TABLE
+

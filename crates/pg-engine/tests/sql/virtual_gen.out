@@ -1,0 +1,712 @@
+> CREATE TABLE vg (a int, b int GENERATED ALWAYS AS (a * 2), c int GENERATED ALWAYS AS (a + 1) STORED, d text GENERATED ALWAYS AS (a::text || 'x') VIRTUAL)
+-- CREATE TABLE
+
+> INSERT INTO vg (a) VALUES (1), (2)
+-- INSERT 0 2
+
+> SELECT * FROM vg
+a:int4 | b:int4 | c:int4 | d:text
+1 | 2 | 2 | 1x
+2 | 4 | 3 | 2x
+-- SELECT 2
+
+> SELECT attname, attgenerated FROM pg_attribute WHERE attrelid = 'vg'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attgenerated:char
+a | 
+b | v
+c | s
+d | v
+-- SELECT 4
+
+> SELECT column_name, is_generated, generation_expression FROM information_schema.columns WHERE table_name = 'vg' ORDER BY ordinal_position
+column_name:name | is_generated:varchar | generation_expression:varchar
+a | NEVER | NULL
+b | ALWAYS | (a * 2)
+c | ALWAYS | (a + 1)
+d | ALWAYS | ((a)::text || 'x'::text)
+-- SELECT 4
+
+> SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'vg'::regclass ORDER BY adnum
+pg_get_expr:text
+(a * 2)
+(a + 1)
+((a)::text || 'x'::text)
+-- SELECT 3
+
+> INSERT INTO vg (a, b) VALUES (3, 4)
+ERROR 428C9: cannot insert a non-DEFAULT value into column "b"
+DETAIL: Column "b" is a generated column.
+
+> UPDATE vg SET b = 1
+ERROR 428C9: column "b" can only be updated to DEFAULT
+DETAIL: Column "b" is a generated column.
+
+> CREATE INDEX ON vg (b)
+ERROR 0A000: indexes on virtual generated columns are not supported
+
+> CREATE INDEX ON vg ((b + 1))
+ERROR 0A000: indexes on virtual generated columns are not supported
+
+> ALTER TABLE vg ADD CONSTRAINT bpos CHECK (b > 0)
+-- ALTER TABLE
+
+> INSERT INTO vg (a) VALUES (-1)
+ERROR 23514: new row for relation "vg" violates check constraint "bpos"
+DETAIL: Failing row contains (-1, virtual, 0, virtual).
+OBJECTS: schema=public table=vg constraint=bpos
+
+> ALTER TABLE vg ALTER COLUMN b SET EXPRESSION AS (a * 3)
+ERROR 0A000: ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in tables with check constraints
+DETAIL: Column "b" of relation "vg" is a virtual generated column.
+
+> SELECT * FROM vg ORDER BY a
+a:int4 | b:int4 | c:int4 | d:text
+1 | 2 | 2 | 1x
+2 | 4 | 3 | 2x
+-- SELECT 2
+
+> ALTER TABLE vg ALTER COLUMN b DROP EXPRESSION
+ERROR 0A000: ALTER TABLE / DROP EXPRESSION is not supported for virtual generated columns
+DETAIL: Column "b" of relation "vg" is a virtual generated column.
+
+> ALTER TABLE vg ALTER COLUMN c DROP EXPRESSION
+-- ALTER TABLE
+
+> CREATE TABLE vg2 (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL UNIQUE)
+ERROR 0A000: unique constraints on virtual generated columns are not supported
+
+> CREATE TABLE vg3 (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL NOT NULL)
+-- CREATE TABLE
+
+> INSERT INTO vg3 VALUES (NULL)
+ERROR 23502: null value in column "b" of relation "vg3" violates not-null constraint
+DETAIL: Failing row contains (null, virtual).
+OBJECTS: schema=public table=vg3 column=b
+
+> CREATE DOMAIN dpos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE vg4 (a int, b dpos GENERATED ALWAYS AS (a) VIRTUAL)
+ERROR 0A000: virtual generated column "b" cannot have a domain type
+
+> CREATE FUNCTION vgf(int) RETURNS int IMMUTABLE LANGUAGE sql AS 'SELECT $1'
+-- CREATE FUNCTION
+
+> CREATE TABLE vg5 (a int, b int GENERATED ALWAYS AS (vgf(a)) VIRTUAL)
+ERROR 0A000: generation expression uses user-defined function (at 53)
+DETAIL: Virtual generated columns that make use of user-defined functions are not yet supported.
+
+> CREATE TABLE vg6 (a int, b int GENERATED ALWAYS AS (a) VIRTUAL) PARTITION BY RANGE (b)
+ERROR 42P17: cannot use generated column in partition key (at 85)
+DETAIL: Column "b" is a generated column.
+
+> SELECT relpages FROM pg_class WHERE relname='vg'
+relpages:int4
+0
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT b FROM vg WHERE b > 2
+QUERY PLAN:text
+Seq Scan on vg
+  Filter: ((a * 2) > 2)
+-- EXPLAIN
+
+> DROP TABLE vg, vg3
+-- DROP TABLE
+
+> DROP FUNCTION vgf
+-- DROP FUNCTION
+
+> DROP DOMAIN dpos
+-- DROP DOMAIN
+
+> CREATE TABLE vg (a int, b int GENERATED ALWAYS AS (a * 2))
+-- CREATE TABLE
+
+> CREATE TABLE vr (x int REFERENCES vg (b))
+ERROR 42830: there is no unique constraint matching given keys for referenced table "vg"
+
+> ALTER TABLE vg ADD PRIMARY KEY (b)
+ERROR 0A000: primary keys on virtual generated columns are not supported
+
+> CREATE TABLE vg7 (a int, b int GENERATED ALWAYS AS (a * 2) REFERENCES vg (a))
+ERROR 42830: there is no unique constraint matching given keys for referenced table "vg"
+
+> CREATE STATISTICS vgs ON a, b FROM vg
+ERROR 0A000: statistics creation on virtual generated columns is not supported
+
+> CREATE STATISTICS vgs2 ON (b + 1), a FROM vg
+ERROR 0A000: statistics creation on virtual generated columns is not supported
+
+> ALTER TABLE vg ADD COLUMN e int GENERATED ALWAYS AS (a + 10)
+-- ALTER TABLE
+
+> ALTER TABLE vg ALTER COLUMN b TYPE bigint
+-- ALTER TABLE
+
+> SELECT attname, atttypid::regtype, attgenerated FROM pg_attribute WHERE attrelid = 'vg'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atttypid:regtype | attgenerated:char
+a | integer | 
+b | bigint | v
+e | integer | v
+-- SELECT 3
+
+> INSERT INTO vg (a) VALUES (1)
+-- INSERT 0 1
+
+> ANALYZE vg
+-- ANALYZE
+
+> SELECT attname FROM pg_stats WHERE tablename = 'vg' ORDER BY 1
+attname:name
+a
+-- SELECT 1
+
+> CREATE TABLE vg8 (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL, c int GENERATED ALWAYS AS (b + 1) VIRTUAL)
+ERROR 42P17: cannot use generated column "b" in column generation expression (at 96)
+DETAIL: A generated column cannot reference another generated column.
+
+> CREATE TABLE vg9 (a text, b text GENERATED ALWAYS AS (a COLLATE "C") VIRTUAL)
+-- CREATE TABLE
+
+> CREATE TYPE vgt AS (x int)
+-- CREATE TYPE
+
+> CREATE TABLE vg10 (a int, b vgt GENERATED ALWAYS AS (ROW(a)::vgt) VIRTUAL)
+ERROR 0A000: virtual generated column "b" cannot have a user-defined type
+DETAIL: Virtual generated columns that make use of user-defined types are not yet supported.
+
+> CREATE TABLE vg11 (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)
+-- CREATE TABLE
+
+> CREATE TRIGGER t BEFORE INSERT ON vg11 FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()
+-- CREATE TRIGGER
+
+> CREATE TABLE vgp (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)
+-- CREATE TABLE
+
+> CREATE TABLE vgc () INHERITS (vgp)
+-- CREATE TABLE
+
+> CREATE TABLE vgc2 (a int, b int GENERATED ALWAYS AS (a * 2) STORED)
+-- CREATE TABLE
+
+> ALTER TABLE vgc2 INHERIT vgp
+ERROR 42804: column "b" inherits from generated column of different kind
+DETAIL: Parent column is VIRTUAL, child column is STORED.
+
+> CREATE TABLE vgq (a int, b int GENERATED ALWAYS AS (a * 3) VIRTUAL) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE vgq1 PARTITION OF vgq FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE vgq2 (a int, b int GENERATED ALWAYS AS (a * 3) STORED)
+-- CREATE TABLE
+
+> ALTER TABLE vgq ATTACH PARTITION vgq2 FOR VALUES FROM (10) TO (20)
+ERROR 42804: column "b" inherits from generated column of different kind
+DETAIL: Parent column is VIRTUAL, child column is STORED.
+
+> DROP TABLE vg, vg11, vgp, vgq, vgq2, vgc2 CASCADE
+NOTICE 00000: drop cascades to table vgc
+-- DROP TABLE
+
+> DROP TYPE vgt
+-- DROP TYPE
+
+> CREATE TABLE vu (a int PRIMARY KEY, u int UNIQUE)
+-- CREATE TABLE
+
+> CREATE TABLE vf (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL REFERENCES vu (u))
+ERROR 0A000: foreign key constraints on virtual generated columns are not supported
+
+> CREATE TABLE vf (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)
+-- CREATE TABLE
+
+> ALTER TABLE vf ADD FOREIGN KEY (b) REFERENCES vu (u)
+ERROR 0A000: foreign key constraints on virtual generated columns are not supported
+
+> CREATE TABLE vl (LIKE vf INCLUDING GENERATED)
+-- CREATE TABLE
+
+> SELECT attname, attgenerated FROM pg_attribute WHERE attrelid = 'vl'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attgenerated:char
+a | 
+b | v
+-- SELECT 2
+
+> CREATE TABLE vl2 (LIKE vf)
+-- CREATE TABLE
+
+> SELECT attname, attgenerated FROM pg_attribute WHERE attrelid = 'vl2'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attgenerated:char
+a | 
+b | 
+-- SELECT 2
+
+> INSERT INTO vf VALUES (1) RETURNING *
+a:int4 | b:int4
+1 | 2
+-- INSERT 0 1
+
+> INSERT INTO vf VALUES (2, DEFAULT) RETURNING b
+b:int4
+4
+-- INSERT 0 1
+
+> UPDATE vf SET a = a + 10 RETURNING *
+a:int4 | b:int4
+11 | 22
+12 | 24
+-- UPDATE 2
+
+> UPDATE vf SET b = 5
+ERROR 428C9: column "b" can only be updated to DEFAULT
+DETAIL: Column "b" is a generated column.
+
+> CREATE FUNCTION vtrg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'new=%', NEW; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER vt BEFORE INSERT OR UPDATE ON vf FOR EACH ROW EXECUTE FUNCTION vtrg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER vt2 AFTER INSERT ON vf FOR EACH ROW EXECUTE FUNCTION vtrg()
+-- CREATE TRIGGER
+
+> INSERT INTO vf VALUES (3)
+NOTICE 00000: new=(3,)
+CONTEXT: PL/pgSQL function vtrg() line 1 at RAISE
+NOTICE 00000: new=(3,)
+CONTEXT: PL/pgSQL function vtrg() line 1 at RAISE
+-- INSERT 0 1
+
+> DROP TRIGGER vt ON vf
+-- DROP TRIGGER
+
+> DROP TRIGGER vt2 ON vf
+-- DROP TRIGGER
+
+> ALTER TABLE vf ADD COLUMN c int GENERATED ALWAYS AS (a + 100) VIRTUAL NOT NULL
+-- ALTER TABLE
+
+> ALTER TABLE vf ADD COLUMN d int GENERATED ALWAYS AS (NULLIF(a, 3)) VIRTUAL NOT NULL
+ERROR 23502: column "d" of relation "vf" contains null values
+OBJECTS: schema=public table=vf column=d
+
+> ALTER TABLE vf ALTER COLUMN b SET EXPRESSION AS (a * 5)
+-- ALTER TABLE
+
+> SELECT * FROM vf ORDER BY a
+a:int4 | b:int4 | c:int4
+3 | 15 | 103
+11 | 55 | 111
+12 | 60 | 112
+-- SELECT 3
+
+> SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'vf'::regclass ORDER BY adnum
+pg_get_expr:text
+(a * 5)
+(a + 100)
+-- SELECT 2
+
+> SELECT column_name, is_generated, generation_expression FROM information_schema.columns WHERE table_name = 'vf' ORDER BY ordinal_position
+column_name:name | is_generated:varchar | generation_expression:varchar
+a | NEVER | NULL
+b | ALWAYS | (a * 5)
+c | ALWAYS | (a + 100)
+-- SELECT 3
+
+> COPY vf TO STDOUT
+copy:text
+11
+12
+3
+-- COPY 3
+
+> COPY vf (a, b) TO STDOUT
+ERROR 42P10: column "b" is a generated column
+DETAIL: Generated columns cannot be used in COPY.
+
+> CREATE TABLE vo (a text, b text GENERATED ALWAYS AS (a::int4range::text) VIRTUAL)
+ERROR 42P17: generation expression is not immutable
+
+> CREATE TYPE vmood AS ENUM ('x')
+-- CREATE TYPE
+
+> CREATE TABLE vo2 (a text, b text GENERATED ALWAYS AS ((a::vmood)::text) VIRTUAL)
+ERROR 42P17: generation expression is not immutable
+
+> CREATE TABLE vo3 (a int, b int GENERATED ALWAYS AS (a) VIRTUAL, c int GENERATED ALWAYS AS (a) VIRTUAL)
+-- CREATE TABLE
+
+> CREATE INDEX ON vo3 (a) WHERE b > 0
+ERROR 0A000: indexes on virtual generated columns are not supported
+
+> ALTER TABLE vo3 ADD CONSTRAINT vo3x EXCLUDE USING btree (b WITH =)
+ERROR 0A000: unique constraints on virtual generated columns are not supported
+
+> ALTER TABLE vo3 ADD UNIQUE (b)
+ERROR 0A000: unique constraints on virtual generated columns are not supported
+
+> ALTER TABLE vo3 ALTER COLUMN b SET EXPRESSION AS (a + 1)
+-- ALTER TABLE
+
+> ALTER TABLE vo3 ALTER COLUMN b SET STORAGE plain
+-- ALTER TABLE
+
+> ALTER TABLE vo3 ALTER COLUMN b SET STATISTICS 10
+ERROR 0A000: cannot alter statistics on virtual generated column "b"
+
+> ALTER TABLE vo3 ALTER COLUMN b DROP EXPRESSION IF EXISTS
+ERROR 0A000: ALTER TABLE / DROP EXPRESSION is not supported for virtual generated columns
+DETAIL: Column "b" of relation "vo3" is a virtual generated column.
+
+> CREATE TABLE vpp (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE vpp1 PARTITION OF vpp (b GENERATED ALWAYS AS (a * 3) STORED) FOR VALUES IN (1)
+ERROR 42611: column "b" inherits from generated column of different kind
+DETAIL: Parent column is VIRTUAL, child column is STORED.
+
+> CREATE TABLE vpp1 PARTITION OF vpp (b GENERATED ALWAYS AS (a * 3) VIRTUAL) FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE vpp2 PARTITION OF vpp FOR VALUES IN (2)
+-- CREATE TABLE
+
+> INSERT INTO vpp VALUES (1), (2)
+-- INSERT 0 2
+
+> SELECT * FROM vpp ORDER BY a
+a:int4 | b:int4
+1 | 2
+2 | 4
+-- SELECT 2
+
+> CREATE TABLE vic (a int, b int GENERATED ALWAYS AS (a * 9) STORED) INHERITS (vgp0)
+ERROR 42P01: relation "vgp0" does not exist
+
+> CREATE TABLE vgp0 (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)
+-- CREATE TABLE
+
+> CREATE TABLE vic (a int, b int GENERATED ALWAYS AS (a * 9) STORED) INHERITS (vgp0)
+NOTICE 00000: merging column "a" with inherited definition
+NOTICE 00000: merging column "b" with inherited definition
+ERROR 42611: column "b" inherits from generated column of different kind
+DETAIL: Parent column is VIRTUAL, child column is STORED.
+
+> CREATE TABLE vic (a int, b int GENERATED ALWAYS AS (a * 9)) INHERITS (vgp0)
+NOTICE 00000: merging column "a" with inherited definition
+NOTICE 00000: merging column "b" with inherited definition
+-- CREATE TABLE
+
+> INSERT INTO vic VALUES (1)
+-- INSERT 0 1
+
+> SELECT * FROM vgp0
+a:int4 | b:int4
+1 | 2
+-- SELECT 1
+
+> CREATE VIEW vv AS SELECT b FROM vf
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('vv')
+pg_get_viewdef:text
+ SELECT b
+   FROM vf;
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM vf
+QUERY PLAN:text
+Seq Scan on public.vf
+  Output: a, (a * 5), (a + 100)
+-- EXPLAIN
+
+> CREATE TABLE vs (a int, b int GENERATED ALWAYS AS (a) VIRTUAL)
+-- CREATE TABLE
+
+> CREATE POLICY p ON vs USING (b > 0)
+-- CREATE POLICY
+
+> ALTER TABLE vs ADD CONSTRAINT vsc CHECK (b < 100)
+-- ALTER TABLE
+
+> INSERT INTO vs VALUES (200)
+ERROR 23514: new row for relation "vs" violates check constraint "vsc"
+DETAIL: Failing row contains (200, virtual).
+OBJECTS: schema=public table=vs constraint=vsc
+
+> DROP TABLE vu, vf, vl, vl2, vo, vo3, vpp, vgp0, vs CASCADE
+ERROR 42P01: table "vo" does not exist
+
+> DROP TYPE vmood
+-- DROP TYPE
+
+> DROP FUNCTION vtrg
+-- DROP FUNCTION
+
+> CREATE TABLE cs (a int, b int GENERATED ALWAYS AS (a * 2) STORED, c int GENERATED ALWAYS AS (a * 3) VIRTUAL)
+-- CREATE TABLE
+
+> INSERT INTO cs VALUES (1)
+-- INSERT 0 1
+
+> COPY cs TO STDOUT
+copy:text
+1
+-- COPY 1
+
+> COPY cs (a, b) TO STDOUT
+ERROR 42P10: column "b" is a generated column
+DETAIL: Generated columns cannot be used in COPY.
+
+> COPY cs (c) TO STDOUT
+ERROR 42P10: column "c" is a generated column
+DETAIL: Generated columns cannot be used in COPY.
+
+> COPY (SELECT * FROM cs) TO STDOUT
+copy:text
+1	2	3
+-- COPY 1
+
+> SELECT cs FROM cs
+cs:user
+(1,2,3)
+-- SELECT 1
+
+> SELECT row_to_json(cs) FROM cs
+row_to_json:json
+{"a":1,"b":2,"c":3}
+-- SELECT 1
+
+> SELECT cs.* FROM cs
+a:int4 | b:int4 | c:int4
+1 | 2 | 3
+-- SELECT 1
+
+> CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE '% new=% c=%', TG_WHEN, NEW, NEW.c; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER t1 BEFORE UPDATE ON cs FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER t2 AFTER UPDATE ON cs FOR EACH ROW EXECUTE FUNCTION trg()
+-- CREATE TRIGGER
+
+> UPDATE cs SET a = 5
+NOTICE 00000: BEFORE new=(5,,) c=<NULL>
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+NOTICE 00000: AFTER new=(5,10,) c=<NULL>
+CONTEXT: PL/pgSQL function trg() line 1 at RAISE
+-- UPDATE 1
+
+> CREATE TABLE cs2 (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE cs2a PARTITION OF cs2 FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> SELECT attname, attgenerated FROM pg_attribute WHERE attrelid = 'cs2a'::regclass AND attnum > 0
+attname:name | attgenerated:char
+a | 
+b | v
+-- SELECT 2
+
+> CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq)
+-- CREATE OPERATOR
+
+> CREATE TABLE cs3 (a int, b bool GENERATED ALWAYS AS (a === 1) VIRTUAL)
+-- CREATE TABLE
+
+> CREATE TABLE cs4 (a int, b int GENERATED ALWAYS AS (a) VIRTUAL)
+-- CREATE TABLE
+
+> ALTER TABLE cs4 ALTER COLUMN b SET EXPRESSION AS (a + 1)
+-- ALTER TABLE
+
+> ALTER TABLE cs4 ALTER COLUMN a TYPE bigint
+ERROR 0A000: cannot alter type of a column used by a generated column
+DETAIL: Column "a" is used by generated column "b".
+
+> ALTER TABLE cs4 DROP COLUMN a
+ERROR 2BP01: cannot drop column a of table cs4 because other objects depend on it
+DETAIL: column b of table cs4 depends on column a of table cs4
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE cs4 DROP COLUMN a CASCADE
+NOTICE 00000: drop cascades to column b of table cs4
+-- ALTER TABLE
+
+> SELECT * FROM cs4
+
+-- SELECT 0
+
+> DROP TABLE cs, cs2, cs3, cs4
+-- DROP TABLE
+
+> DROP FUNCTION trg
+-- DROP FUNCTION
+
+> DROP OPERATOR === (int, int)
+-- DROP OPERATOR
+
+> CREATE TABLE gx (a int, b int GENERATED ALWAYS AS (a * 2) STORED, c int)
+-- CREATE TABLE
+
+> INSERT INTO gx VALUES (1)
+-- INSERT 0 1
+
+> ALTER TABLE gx ALTER COLUMN c DROP EXPRESSION
+ERROR 55000: column "c" of relation "gx" is not a generated column
+
+> ALTER TABLE gx ALTER COLUMN c DROP EXPRESSION IF EXISTS
+NOTICE 00000: column "c" of relation "gx" is not a generated column, skipping
+-- ALTER TABLE
+
+> ALTER TABLE gx ALTER COLUMN c SET EXPRESSION AS (a)
+ERROR 55000: column "c" of relation "gx" is not a generated column
+
+> ALTER TABLE gx ALTER COLUMN zz SET EXPRESSION AS (a)
+ERROR 42703: column "zz" of relation "gx" does not exist
+
+> ALTER TABLE gx ALTER COLUMN zz DROP EXPRESSION
+ERROR 42703: column "zz" of relation "gx" does not exist
+
+> ALTER TABLE gx ALTER COLUMN b SET EXPRESSION AS (b + 1)
+ERROR 42P17: cannot use generated column "b" in column generation expression
+DETAIL: A generated column cannot reference another generated column.
+
+> ALTER TABLE gx ALTER COLUMN b SET EXPRESSION AS (random())
+ERROR 42P17: generation expression is not immutable
+
+> ALTER TABLE gx ALTER COLUMN b SET EXPRESSION AS (a * 4)
+-- ALTER TABLE
+
+> SELECT * FROM gx
+a:int4 | b:int4 | c:int4
+1 | 4 | NULL
+-- SELECT 1
+
+> ALTER TABLE gx ALTER COLUMN b DROP EXPRESSION
+-- ALTER TABLE
+
+> ALTER TABLE gx ALTER COLUMN b DROP EXPRESSION
+ERROR 55000: column "b" of relation "gx" is not a generated column
+
+> ALTER TABLE gx ALTER COLUMN b DROP EXPRESSION IF EXISTS
+NOTICE 00000: column "b" of relation "gx" is not a generated column, skipping
+-- ALTER TABLE
+
+> SELECT attname, attgenerated, atthasdef FROM pg_attribute WHERE attrelid = 'gx'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attgenerated:char | atthasdef:bool
+a |  | f
+b |  | f
+c |  | f
+-- SELECT 3
+
+> CREATE TABLE gp (a int, b int GENERATED ALWAYS AS (a * 2) STORED)
+-- CREATE TABLE
+
+> CREATE TABLE gc () INHERITS (gp)
+-- CREATE TABLE
+
+> ALTER TABLE ONLY gp ALTER COLUMN b DROP EXPRESSION
+ERROR 0A000: ALTER TABLE / DROP EXPRESSION must be applied to child tables too
+
+> ALTER TABLE gc ALTER COLUMN b DROP EXPRESSION
+ERROR 42P16: cannot drop generation expression from inherited column
+
+> ALTER TABLE ONLY gp ALTER COLUMN b SET EXPRESSION AS (a * 3)
+-- ALTER TABLE
+
+> ALTER TABLE gc ALTER COLUMN b SET EXPRESSION AS (a * 5)
+-- ALTER TABLE
+
+> INSERT INTO gc VALUES (1)
+-- INSERT 0 1
+
+> SELECT * FROM gp
+a:int4 | b:int4
+1 | 5
+-- SELECT 1
+
+> ALTER TABLE gp ALTER COLUMN b SET EXPRESSION AS (a * 7)
+-- ALTER TABLE
+
+> SELECT * FROM gp
+a:int4 | b:int4
+1 | 7
+-- SELECT 1
+
+> SELECT adrelid::regclass, pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid IN ('gp'::regclass, 'gc'::regclass) ORDER BY 1
+adrelid:regclass | pg_get_expr:text
+gp | (a * 7)
+gc | (a * 7)
+-- SELECT 2
+
+> ALTER TABLE gp ALTER COLUMN b DROP EXPRESSION
+-- ALTER TABLE
+
+> SELECT attrelid::regclass, attname, attgenerated FROM pg_attribute WHERE attrelid IN ('gp'::regclass, 'gc'::regclass) AND attnum > 0 ORDER BY 1, attnum
+attrelid:regclass | attname:name | attgenerated:char
+gp | a | 
+gp | b | 
+gc | a | 
+gc | b | 
+-- SELECT 4
+
+> CREATE TABLE gv (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL NOT NULL)
+-- CREATE TABLE
+
+> INSERT INTO gv VALUES (1)
+-- INSERT 0 1
+
+> ALTER TABLE gv ALTER COLUMN b SET EXPRESSION AS (NULLIF(a, 1))
+ERROR 23502: column "b" of relation "gv" contains null values
+OBJECTS: schema=public table=gv column=b
+
+> ALTER TABLE gv ALTER COLUMN b SET EXPRESSION AS (a * 9)
+-- ALTER TABLE
+
+> SELECT * FROM gv
+a:int4 | b:int4
+1 | 9
+-- SELECT 1
+
+> DROP TABLE gx, gp, gv CASCADE
+NOTICE 00000: drop cascades to table gc
+-- DROP TABLE
+
+> CREATE TABLE gd (a int, x int, b int GENERATED ALWAYS AS (a * 2) STORED, c int GENERATED ALWAYS AS (a + x) VIRTUAL)
+-- CREATE TABLE
+
+> ALTER TABLE gd DROP COLUMN a
+ERROR 2BP01: cannot drop column a of table gd because other objects depend on it
+DETAIL: column b of table gd depends on column a of table gd
+DETAIL: column c of table gd depends on column a of table gd
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE gd ALTER COLUMN a TYPE bigint
+ERROR 0A000: cannot alter type of a column used by a generated column
+DETAIL: Column "a" is used by generated column "b".
+
+> ALTER TABLE gd ALTER COLUMN x TYPE bigint
+ERROR 0A000: cannot alter type of a column used by a generated column
+DETAIL: Column "x" is used by generated column "c".
+
+> ALTER TABLE gd DROP COLUMN a CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to column b of table gd
+DETAIL: drop cascades to column c of table gd
+-- ALTER TABLE
+
+> SELECT attname FROM pg_attribute WHERE attrelid = 'gd'::regclass AND attnum > 0 AND NOT attisdropped
+attname:name
+x
+-- SELECT 1
+
+> DROP TABLE gd
+-- DROP TABLE
+

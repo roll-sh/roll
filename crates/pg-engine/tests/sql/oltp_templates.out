@@ -1,0 +1,349 @@
+> CREATE TABLE tq (id int PRIMARY KEY, k int8 UNIQUE, v int NOT NULL DEFAULT 0, n numeric, s text, c int)
+-- CREATE TABLE
+
+> CREATE INDEX ON tq (c)
+-- CREATE INDEX
+
+> INSERT INTO tq SELECT g, g * 10, 0, g / 2.0, 'r' || g, g % 3 FROM generate_series(1, 20) g
+-- INSERT 0 20
+
+> UPDATE tq SET v = v + 5 WHERE id = 1
+-- UPDATE 1
+
+> UPDATE tq SET v = v + 6 WHERE id = 2
+-- UPDATE 1
+
+> UPDATE tq SET v = v + -7 WHERE id = 3
+-- UPDATE 1
+
+> UPDATE tq SET v = v - 8 WHERE id = 4
+-- UPDATE 1
+
+> UPDATE tq SET v = v * 2 WHERE id = 1
+-- UPDATE 1
+
+> UPDATE tq SET v = 9 WHERE id = 30
+-- UPDATE 0
+
+> SELECT v FROM tq WHERE id = 1
+v:int4
+10
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 2
+v:int4
+6
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 3
+v:int4
+-7
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 4
+v:int4
+-8
+-- SELECT 1
+
+> SELECT v, s FROM tq WHERE id = 99
+v:int4 | s:text
+-- SELECT 0
+
+> SELECT id FROM tq WHERE k = 30
+id:int4
+3
+-- SELECT 1
+
+> SELECT id FROM tq WHERE k = 40
+id:int4
+4
+-- SELECT 1
+
+> SELECT id FROM tq WHERE k = 3000000000
+id:int4
+-- SELECT 0
+
+> SELECT id FROM tq WHERE k = 3000000001
+id:int4
+-- SELECT 0
+
+> SELECT id FROM tq WHERE k = 5.5
+id:int4
+-- SELECT 0
+
+> SELECT id FROM tq WHERE k = 6.5
+id:int4
+-- SELECT 0
+
+> SELECT n FROM tq WHERE id = -1
+n:numeric
+-- SELECT 0
+
+> SELECT n FROM tq WHERE id = -2
+n:numeric
+-- SELECT 0
+
+> SELECT count(*) FROM tq WHERE c = 1
+count:int8
+7
+-- SELECT 1
+
+> SELECT count(*) FROM tq WHERE c = 2
+count:int8
+7
+-- SELECT 1
+
+> SELECT id FROM tq WHERE s = 'r5'
+id:int4
+5
+-- SELECT 1
+
+> SELECT id FROM tq WHERE s = 'r6'
+id:int4
+6
+-- SELECT 1
+
+> SELECT id FROM tq WHERE id = 5 AND s = 'r5'
+id:int4
+5
+-- SELECT 1
+
+> SELECT id FROM tq WHERE id = 6 AND s = 'r5'
+id:int4
+-- SELECT 0
+
+> SELECT id FROM tq WHERE id = 6 AND s = 'r6'
+id:int4
+6
+-- SELECT 1
+
+> UPDATE tq SET v = v + 2147483000 WHERE id = 1
+-- UPDATE 1
+
+> UPDATE tq SET v = v + 2147483001 WHERE id = 1
+ERROR 22003: integer out of range
+
+> UPDATE tq SET v = v + 2147483002 WHERE id = 99
+-- UPDATE 0
+
+> UPDATE tq SET c = 1 / 0 WHERE id = 1
+ERROR 22012: division by zero
+
+> UPDATE tq SET c = 2 / 0 WHERE id = 99
+ERROR 22012: division by zero
+
+> INSERT INTO tq (id, k, v) VALUES (21, 210, 1)
+-- INSERT 0 1
+
+> INSERT INTO tq (id, k, v) VALUES (22, 220, 2)
+-- INSERT 0 1
+
+> INSERT INTO tq (id, k, v) VALUES (22, 230, 3)
+ERROR 23505: duplicate key value violates unique constraint "tq_pkey"
+DETAIL: Key (id)=(22) already exists.
+OBJECTS: schema=public table=tq constraint=tq_pkey
+
+> INSERT INTO tq (id, k, v) VALUES (23, 240, 4)
+-- INSERT 0 1
+
+> SELECT id, k, v FROM tq WHERE id > 20 ORDER BY id
+id:int4 | k:int8 | v:int4
+21 | 210 | 1
+22 | 220 | 2
+23 | 240 | 4
+-- SELECT 3
+
+> DELETE FROM tq WHERE id = 23
+-- DELETE 1
+
+> DELETE FROM tq WHERE id = 22
+-- DELETE 1
+
+> DELETE FROM tq WHERE id = 99
+-- DELETE 0
+
+> INSERT INTO tq SELECT g, g * 10, 0, 0, 's', 0 FROM generate_series(100, 3000) g
+-- INSERT 0 2901
+
+> SELECT v FROM tq WHERE id = 1
+v:int4
+2147483010
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 2
+v:int4
+6
+-- SELECT 1
+
+> UPDATE tq SET v = v + 1 WHERE id = 2500
+-- UPDATE 1
+
+> UPDATE tq SET v = v + 1 WHERE id = 2600
+-- UPDATE 1
+
+> SELECT v FROM tq WHERE id = 2500
+v:int4
+1
+-- SELECT 1
+
+> SET enable_indexscan = off
+-- SET
+
+> SELECT v FROM tq WHERE id = 3
+v:int4
+-7
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 4
+v:int4
+-8
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT v FROM tq WHERE id = 4
+QUERY PLAN:text
+Bitmap Heap Scan on tq
+  Recheck Cond: (id = 4)
+  ->  Bitmap Index Scan on tq_pkey
+        Index Cond: (id = 4)
+-- EXPLAIN
+
+> RESET enable_indexscan
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT v FROM tq WHERE id = 4
+QUERY PLAN:text
+Index Scan using tq_pkey on tq
+  Index Cond: (id = 4)
+-- EXPLAIN
+
+> CREATE SCHEMA tqs
+-- CREATE SCHEMA
+
+> CREATE TABLE tqs.tq (id int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> INSERT INTO tqs.tq VALUES (3, 333), (4, 444)
+-- INSERT 0 2
+
+> SET search_path = tqs, public
+-- SET
+
+> SELECT v FROM tq WHERE id = 3
+v:int4
+333
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 4
+v:int4
+444
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT v FROM tq WHERE id = 3
+v:int4
+-7
+-- SELECT 1
+
+> ALTER TABLE tq DROP CONSTRAINT tq_pkey
+-- ALTER TABLE
+
+> SELECT v FROM tq WHERE id = 3
+v:int4
+-7
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 4
+v:int4
+-8
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT v FROM tq WHERE id = 4
+QUERY PLAN:text
+Seq Scan on tq
+  Filter: (id = 4)
+-- EXPLAIN
+
+> ALTER TABLE tq ADD PRIMARY KEY (id)
+-- ALTER TABLE
+
+> SELECT v FROM tq WHERE id = 3
+v:int4
+-7
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 4
+v:int4
+-8
+-- SELECT 1
+
+> ALTER TABLE tq ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> SELECT v FROM tq WHERE id = 3
+v:int4
+-7
+-- SELECT 1
+
+> SELECT v FROM tq WHERE id = 4
+v:int4
+-8
+-- SELECT 1
+
+> ALTER TABLE tq DISABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE RULE tq_r AS ON UPDATE TO tq WHERE new.v < 0 DO INSTEAD NOTHING
+-- CREATE RULE
+
+> UPDATE tq SET v = v - 1000 WHERE id = 3
+-- UPDATE 0
+
+> UPDATE tq SET v = v - 1001 WHERE id = 4
+-- UPDATE 0
+
+> SELECT id, v FROM tq WHERE id IN (3, 4) ORDER BY id
+id:int4 | v:int4
+3 | -7
+4 | -8
+-- SELECT 2
+
+> DROP RULE tq_r ON tq
+-- DROP RULE
+
+> BEGIN
+-- BEGIN
+
+> UPDATE tq SET v = v + 1 WHERE id = 5
+-- UPDATE 1
+
+> SAVEPOINT a
+-- SAVEPOINT
+
+> UPDATE tq SET v = v + 1 WHERE id = 6
+-- UPDATE 1
+
+> ROLLBACK TO a
+-- ROLLBACK
+
+> UPDATE tq SET v = v + 1 WHERE id = 7
+-- UPDATE 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT id, v FROM tq WHERE id BETWEEN 5 AND 7 ORDER BY id
+id:int4 | v:int4
+5 | 1
+6 | 0
+7 | 1
+-- SELECT 3
+
+> DROP SCHEMA tqs CASCADE
+NOTICE 00000: drop cascades to table tqs.tq
+-- DROP SCHEMA
+
+> DROP TABLE tq
+-- DROP TABLE
+

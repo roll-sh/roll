@@ -1,0 +1,585 @@
+roll-conn  681470/683149  [029] 467466.369677:   20408163 cpu-clock: 
+	    5559dac4fd32 _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths8ScanDescEBH_+0x2 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.395135:   20408163 cpu-clock: 
+	    5559dabd99c2 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder8optimize4sort+0x72 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.419531:   20408163 cpu-clock: 
+	    5559dab38060 _RNvNtNtCs70fpZ3uE4FG_9pg_engine7storage4keys18encode_index_value+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.444637:   20408163 cpu-clock: 
+	    5559db536c2d _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr10same_shape.llvm.6191902062211276960+0x4d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.469548:   20408163 cpu-clock: 
+	    7f654377e845 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559da37dd0f copy_nonoverlapping<u8>+0x17f (inlined)
+	    5559da37dd0f append_elements_unreserved<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f append_elements<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f spec_extend<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f extend_from_slice<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f extend_short+0x17f (inlined)
+	    5559da37dd0f _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_5Block4read.llvm.13803518463564608849+0x17f (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da3b93d9 compare<u8>+0x389 (inlined)
+	    5559da3b93d9 chaining_lt<u8>+0x389 (inlined)
+	    5559da3b93d9 __chaining_lt<u8>+0x389 (inlined)
+	    5559da3b93d9 lt<u8>+0x389 (inlined)
+	    5559da3b93d9 lt<[u8], [u8]>+0x389 (inlined)
+	    5559da3b93d9 find+0x389 (inlined)
+	    5559da3b93d9 _RNvMs3_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_9SstReader10find_block+0x389 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.494557:   20408163 cpu-clock: 
+	    5559d9615064 mi_page_malloc_zero+0x34 (inlined)
+	    5559d9615064 mi_theap_malloc_small_zero_nonnull+0x34 (inlined)
+	    5559d9615064 _mi_theap_malloc_zero_ex+0x34 (inlined)
+	    5559d9615064 mi_theap_umalloc+0x34 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559d9c9cece realloc_nonnull+0x5e (inlined)
+	    5559d9c9cece grow_impl_runtime+0x5e (inlined)
+	    5559d9c9cece grow_impl+0x5e (inlined)
+	    5559d9c9cece grow+0x5e (inlined)
+	    5559d9c9cece _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs70fpZ3uE4FG_9pg_engine.llvm.10145509653624036794+0x5e (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.519456:   20408163 cpu-clock: 
+	    5559dafdd485 unlock_shared+0x365 (inlined)
+	    5559dafdd485 drop<parking_lot::raw_rwlock::RawRwLock, alloc::sync::Arc<pg_engine::txn::xids::Xids, alloc::alloc::Global>>+0x365 (inlined)
+	    5559dafdd485 drop_glue<lock_api::rwlock::RwLockReadGuard<parking_lot::raw_rwlock::RawRwLock, alloc::sync::Arc<pg_engine::txn::xids::Xids, alloc::alloc::Global>>>+0x365 (inlined)
+	    5559dafdd485 xids+0x365 (inlined)
+	    5559dafdd485 _RNvMs2_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_3Txn10finish_xid.llvm.3627021269933051864+0x365 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	        429b9e00 [unknown] ([unknown])
+
+roll-conn  681470/683149  [029] 467466.544627:   20408163 cpu-clock: 
+	    5559db47e3b1 _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4Expr9walk_here+0x31 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               f [unknown] ([unknown])
+
+roll-conn  681470/683149  [029] 467466.569258:   20408163 cpu-clock: 
+	    5559db540f3c _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x2e0c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53f53b {closure#0}+0x140b (inlined)
+	    5559db53f53b guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x140b (inlined)
+	    5559db53f53b eval+0x140b (inlined)
+	    5559db53f53b _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x140b (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53e053 {closure#0}+0x83 (inlined)
+	    5559db53e053 guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x83 (inlined)
+	    5559db53e053 eval+0x83 (inlined)
+	    5559db53e053 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_bool+0x83 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.594245:   20408163 cpu-clock: 
+	    5559db5408b5 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x2785 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53f53b {closure#0}+0x140b (inlined)
+	    5559db53f53b guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x140b (inlined)
+	    5559db53f53b eval+0x140b (inlined)
+	    5559db53f53b _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x140b (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53e053 {closure#0}+0x83 (inlined)
+	    5559db53e053 guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x83 (inlined)
+	    5559db53e053 eval+0x83 (inlined)
+	    5559db53e053 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_bool+0x83 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.619302:   20408163 cpu-clock: 
+	    5559dbbca2b8 _RNvMNtNtNtCs8ZKwes1zzDd_3std3sys4time4unixNtB2_10SystemTime3now+0x0 (inlined)
+	    5559dbbca2b8 _RNvMs5_NtCs8ZKwes1zzDd_3std4timeNtB5_10SystemTime3now+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.644415:   20408163 cpu-clock: 
+	    5559d98d655c drop<pg_engine::catalog::Index, alloc::alloc::Global>+0x1c (inlined)
+	    5559d98d655c drop_glue<alloc::sync::Arc<pg_engine::catalog::Index, alloc::alloc::Global>>+0x1c (inlined)
+	    5559d98d655c _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths9IndexInfoEBH_.llvm.4838799075968597823+0x1c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.669485:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.694298:   20408163 cpu-clock: 
+	    5559dac384a0 is_empty<(usize, alloc::vec::Vec<bool, alloc::alloc::Global>), alloc::alloc::Global>+0x0 (inlined)
+	    5559dac384a0 _RINvMs1_NtCs3BTM885nGDo_9hashbrown3mapINtB6_7HashMapjINtNtCsgFX3jaOk65H_5alloc3vec3VecbENtNtNtCs8ZKwes1zzDd_3std4hash6random11RandomStateE3getjECs70fpZ3uE4FG_9pg_engine+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.719377:   20408163 cpu-clock: 
+	ffffffffb3d07c48 tcp_recvmsg_locked+0x4b8 ([kernel.kallsyms])
+	ffffffffb3d08f37 tcp_recvmsg+0x87 ([kernel.kallsyms])
+	ffffffffb3d49994 inet_recvmsg+0x54 ([kernel.kallsyms])
+	ffffffffb3c01287 sock_recvmsg+0x97 ([kernel.kallsyms])
+	ffffffffb3c04112 __sys_recvfrom+0xc2 ([kernel.kallsyms])
+	ffffffffb3c041c4 __x64_sys_recvfrom+0x24 ([kernel.kallsyms])
+	ffffffffb3ef7267 do_syscall_64+0x87 ([kernel.kallsyms])
+	ffffffffb400012f entry_SYSCALL_64_after_hwframe+0x76 ([kernel.kallsyms])
+	    7f65436a672e [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b387 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b3cc [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654371def6 recv+0x16 (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbc1453 _RNvMNtNtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socket4unixNtB2_6Socket15recv_with_flags+0x13 (inlined)
+	    5559dbbc1453 _RNvMNtNtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socket4unixNtB2_6Socket4read+0x13 (inlined)
+	    5559dbbc1453 _RNvMsa_NtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socketNtB5_9UdpSocket4recv+0x13 (inlined)
+	    5559dbbc1453 _RNvXs_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB4_9TcpStreamNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read+0x13 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467466.744337:   20408163 cpu-clock: 
+	    5559dab2f91d _RNvNtNtCs70fpZ3uE4FG_9pg_engine7storage3row12decode_value+0x3d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              10 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467466.786986:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467466.811604:   20408163 cpu-clock: 
+	    5559db57eb1c _RNvXs2_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4ExprNtNtCskADBYZwJmSU_4core3fmt5Debug3fmt+0x2c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbf21447 [unknown] (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467466.836272:   20408163 cpu-clock: 
+	    5559d9612eb0 _mi_page_map_at+0x0 (inlined)
+	    5559d9612eb0 _mi_unchecked_ptr_page+0x0 (inlined)
+	    5559d9612eb0 _mi_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_validate_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_free+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467466.861286:   20408163 cpu-clock: 
+	    5559d986c14c _RNvXsa_NtCs70fpZ3uE4FG_9pg_engine6serverNtB5_8WireSinkNtNtNtB7_7session4sink7RowSink3row+0xcc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467466.886398:   20408163 cpu-clock: 
+	    5559dbc04271 _RNvNtNtCskADBYZwJmSU_4core3str8converts9from_utf8+0x1f1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467466.911258:   20408163 cpu-clock: 
+	    5559db4828dd _RNvMs2_NtNtCs70fpZ3uE4FG_9pg_engine7catalog5btsimNtB5_8KeyBytes6len_of.llvm.6191902062211276960+0x2d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db0906cd _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing11mark_passed.llvm.3627021269933051864+0x2cd (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              10 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467466.936242:   20408163 cpu-clock: 
+	ffffffffb3c07f3a sock_def_readable+0x2a ([kernel.kallsyms])
+	ffffffffb3d16020 tcp_data_queue+0x980 ([kernel.kallsyms])
+	ffffffffb3d16b54 tcp_rcv_established+0x254 ([kernel.kallsyms])
+	ffffffffb3d27c15 tcp_v4_do_rcv+0x165 ([kernel.kallsyms])
+	ffffffffb3d2a231 tcp_v4_rcv+0xff1 ([kernel.kallsyms])
+	ffffffffb3cef172 ip_protocol_deliver_rcu+0x32 ([kernel.kallsyms])
+	ffffffffb3cef346 ip_local_deliver_finish+0x76 ([kernel.kallsyms])
+	ffffffffb3cef3e8 ip_local_deliver+0x68 ([kernel.kallsyms])
+	ffffffffb3c38027 __netif_receive_skb_one_core+0x87 ([kernel.kallsyms])
+	ffffffffb3c382f7 process_backlog+0x87 ([kernel.kallsyms])
+	ffffffffb3c390a8 __napi_poll+0x28 ([kernel.kallsyms])
+	ffffffffb3c39826 net_rx_action+0x336 ([kernel.kallsyms])
+	ffffffffb32cb21f handle_softirqs+0xcf ([kernel.kallsyms])
+	ffffffffb32cae9b do_softirq.part.0+0x3b ([kernel.kallsyms])
+	ffffffffb32cb500 __local_bh_enable_ip+0x60 ([kernel.kallsyms])
+	ffffffffb3c356e2 __dev_queue_xmit+0x422 ([kernel.kallsyms])
+	ffffffffb3cf34cc ip_finish_output2+0x2bc ([kernel.kallsyms])
+	ffffffffb3cf4614 ip_output+0x64 ([kernel.kallsyms])
+	ffffffffb3cf5f00 __ip_queue_xmit+0x190 ([kernel.kallsyms])
+	ffffffffb3d1c1f9 __tcp_transmit_skb+0xac9 ([kernel.kallsyms])
+	ffffffffb3d1db01 tcp_write_xmit+0x4f1 ([kernel.kallsyms])
+	ffffffffb3d1ece6 __tcp_push_pending_frames+0x36 ([kernel.kallsyms])
+	ffffffffb3d066d4 tcp_sendmsg_locked+0xc24 ([kernel.kallsyms])
+	ffffffffb3d0694b tcp_sendmsg+0x2b ([kernel.kallsyms])
+	ffffffffb3c03f2e __sys_sendto+0x1ce ([kernel.kallsyms])
+	ffffffffb3c03f74 __x64_sys_sendto+0x24 ([kernel.kallsyms])
+	ffffffffb3ef7267 do_syscall_64+0x87 ([kernel.kallsyms])
+	ffffffffb400012f entry_SYSCALL_64_after_hwframe+0x76 ([kernel.kallsyms])
+	    7f65436a672e [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b387 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b3cc [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654371df76 __send+0x16 (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbc14c3 _RNvMsa_NtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socketNtB5_9UdpSocket4send+0x13 (inlined)
+	    5559dbbc14c3 _RNvXs0_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB5_9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write5write+0x13 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	             aa6 [unknown] ([unknown])
+	    5559da6f88e4 _RNvYNtNtNtCs8ZKwes1zzDd_3std3net3tcp9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write9write_allCs70fpZ3uE4FG_9pg_engine+0x74 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               7 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467466.961240:   20408163 cpu-clock: 
+	    5559dac6c69c write+0x5c (inlined)
+	    5559dac6c69c write+0x5c (inlined)
+	    5559dac6c69c write_u32<std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c write_i32<std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c hash<std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c hash<i32, std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c _RINvYNtNtNtCs8ZKwes1zzDd_3std4hash6random11RandomStateNtNtCskADBYZwJmSU_4core4hash11BuildHasher8hash_oneRmECs70fpZ3uE4FG_9pg_engine+0x5c (inlined)
+	    5559db47cdb8 grow<(), pg_engine::sql::expr::{impl#3}::walk::{closure_env#0}>+0x148 (inlined)
+	    5559db47cdb8 _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4Expr4walk+0x148 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467466.986237:   20408163 cpu-clock: 
+	    5559da37db90 as_slice+0x0 (inlined)
+	    5559da37db90 deref+0x0 (inlined)
+	    5559da37db90 _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_5Block4read.llvm.13803518463564608849+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              76 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.011307:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.036273:   20408163 cpu-clock: 
+	    5559db53eff8 ok_or_else<pg_engine::types::value::Value, pg_engine::error::Error, pg_engine::sql::expr::eval_here::{closure_env#0}>+0xec8 (inlined)
+	    5559db53eff8 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0xec8 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.061367:   20408163 cpu-clock: 
+	    5559db3e623a get<pg_engine::types::value::Value>+0x29a (inlined)
+	    5559db3e623a get<pg_engine::types::value::Value, usize>+0x29a (inlined)
+	    5559db3e623a param+0x29a (inlined)
+	    5559db3e623a _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder4exprNtB4_6Binder10bind_param+0x29a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              bf [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.086423:   20408163 cpu-clock: 
+	    5559dabd53a1 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder8optimize17reduce_null_tests+0x1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559fffffffe [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.111536:   20408163 cpu-clock: 
+	    5559db7e3653 branch<alloc::vec::Vec<pg_engine::types::value::Value, alloc::alloc::Global>, pg_engine::error::Error>+0x18f3 (inlined)
+	    5559db7e3653 emit+0x18f3 (inlined)
+	    5559db7e3653 _RNvXsa_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNodeNtB7_4Node4next+0x18f3 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db7e7e76 _RNvXsd_NtNtCs70fpZ3uE4FG_9pg_engine4exec5nodesNtB5_11ProjectNodeNtB7_4Node4next+0x36 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+roll-conn  681470/683149  [031] 467467.139459:   20408163 cpu-clock: 
+	    5559d9601c7a mi_bin+0x4a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.173266:   20408163 cpu-clock: 
+	    5559d9612ed1 _mi_unchecked_ptr_page+0x21 (inlined)
+	    5559d9612ed1 _mi_ptr_page+0x21 (inlined)
+	    5559d9612ed1 mi_validate_ptr_page+0x21 (inlined)
+	    5559d9612ed1 mi_free+0x21 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.196192:   20408163 cpu-clock: 
+	    5559db010a10 _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.219235:   20408163 cpu-clock: 
+	    5559d98cf341 _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprEBH_.llvm.4838799075968597823+0x4f1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.243792:   20408163 cpu-clock: 
+	    5559d9612efa mi_free+0x4a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da9f9f88 round_ties_even+0x338 (inlined)
+	    5559da9f9f88 round_ties_even+0x338 (inlined)
+	    5559da9f9f88 clamp_rows+0x338 (inlined)
+	    5559da9f9f88 _RNvMNtNtCs70fpZ3uE4FG_9pg_engine3sql5costsNtB2_6VarRef9ndistinct+0x338 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	408137ffffffffff [unknown] ([unknown])
+
+roll-conn  681470/683149  [029] 467467.268517:   20408163 cpu-clock: 
+	    7f654377e823 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbb4e331 copy_nonoverlapping<u8>+0x51 (inlined)
+	    5559dbb4e331 extend_from_slice+0x51 (inlined)
+	    5559dbb4e331 _RNvXs2_NtCs13iv4QpFrNm_5bytes9bytes_mutNtB5_8BytesMutNtNtNtB7_3buf7buf_mut6BufMut9put_slice+0x51 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.293617:   20408163 cpu-clock: 
+	    5559d9a57add _RNvXs_NtNtCsgFX3jaOk65H_5alloc3vec21spec_from_iter_nestedINtB6_3VecTjjjEEINtB4_18SpecFromIterNestedB13_INtNtNtNtCskADBYZwJmSU_4core4iter8adapters3map3MapINtNtB1I_9enumerate9EnumerateINtNtNtB1M_5slice4iter4IterNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths7IClauseEENCNvMsf_B3n_NtB3n_7Planner13index_path_obs_0EE9from_iterB3r_+0x9d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559daaaf881 from_iter<(usize, usize, usize), core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>+0xf1 (inlined)
+	    5559daaaf881 from_iter<(usize, usize, usize), core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>+0xf1 (inlined)
+	    5559daaaf881 collect<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>, alloc::vec::Vec<(usize, usize, usize), alloc::alloc::Global>>+0xf1 (inlined)
+	    5559daaaf881 _RNvMsf_NtNtCs70fpZ3uE4FG_9pg_engine3sql5pathsNtB5_7Planner13index_path_ob+0xf1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.318345:   20408163 cpu-clock: 
+	    7f654377e7cf [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db0846f5 write<pg_engine::storage::Cursor>+0x3e5 (inlined)
+	    5559db0846f5 push_mut<pg_engine::storage::Cursor, alloc::alloc::Global>+0x3e5 (inlined)
+	    5559db0846f5 push<pg_engine::storage::Cursor, alloc::alloc::Global>+0x3e5 (inlined)
+	    5559db0846f5 _RNvNtCs70fpZ3uE4FG_9pg_engine7storage7sources+0x3e5 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               3 [unknown] ([unknown])
+
+roll-conn  681470/683149  [029] 467467.343263:   20408163 cpu-clock: 
+	    5559db6d4dfc as_ref<alloc::boxed::Box<pg_engine::exec::scan::Skip, alloc::alloc::Global>>+0x1c (inlined)
+	    5559db6d4dfc _RNvMs5_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNode9iter_next+0x1c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.368188:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.393006:   20408163 cpu-clock: 
+	    5559dac9edc6 add<pg_engine::sql::explain::Detail>+0xa86 (inlined)
+	    5559dac9edc6 push_mut<pg_engine::sql::explain::Detail, alloc::alloc::Global>+0xa86 (inlined)
+	    5559dac9edc6 push<pg_engine::sql::explain::Detail, alloc::alloc::Global>+0xa86 (inlined)
+	    5559dac9edc6 _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql7explain8parallelNtB4_7Builder14sorted_partial+0xa86 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.417722:   20408163 cpu-clock: 
+	    7f654377e20b [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db010a8d compare<u8>+0x7d (inlined)
+	    5559db010a8d chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d __chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<[u8], [u8]>+0x7d (inlined)
+	    5559db010a8d _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head+0x7d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.442476:   20408163 cpu-clock: 
+	    5559db0b66a1 sub<(u32, pg_engine::catalog::heapsim::Heap)>+0x1a1 (inlined)
+	    5559db0b66a1 from_base_index<(u32, pg_engine::catalog::heapsim::Heap)>+0x1a1 (inlined)
+	    5559db0b66a1 bucket<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global>+0x1a1 (inlined)
+	    5559db0b66a1 {closure#0}<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<u32, u32, pg_engine::catalog::heapsim::Heap>>+0x1a1 (inlined)
+	    5559db0b66a1 find_inner+0x1a1 (inlined)
+	    5559db0b66a1 find<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<u32, u32, pg_engine::catalog::heapsim::Heap>>+0x1a1 (inlined)
+	    5559db0b66a1 get<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<u32, u32, pg_engine::catalog::heapsim::Heap>>+0x1a1 (inlined)
+	    5559db0b66a1 get<u32, pg_engine::catalog::heapsim::Heap, std::hash::random::RandomState, alloc::alloc::Global, u32>+0x1a1 (inlined)
+	    5559db0b66a1 get<u32, pg_engine::catalog::heapsim::Heap, std::hash::random::RandomState, alloc::alloc::Global, u32>+0x1a1 (inlined)
+	    5559db0b66a1 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing7fetched+0x1a1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbcf26b7 [unknown] (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.467456:   20408163 cpu-clock: 
+	    7f654377e819 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbfc534 _RINvNtCskADBYZwJmSU_4core3ptr19copy_nonoverlappinghECsgFX3jaOk65H_5alloc+0x34 (inlined)
+	    5559dbbfc534 _RNvMs_NtCsgFX3jaOk65H_5alloc3vecINtB4_3VechE26append_elements_unreservedB6_+0x34 (inlined)
+	    5559dbbfc534 _RNvMs_NtCsgFX3jaOk65H_5alloc3vecINtB4_3VechE15append_elementsB6_+0x34 (inlined)
+	    5559dbbfc534 _RNvXs2_NtNtCsgFX3jaOk65H_5alloc3vec11spec_extendINtB7_3VechEINtB5_10SpecExtendRhINtNtNtCskADBYZwJmSU_4core5slice4iter4IterhEE11spec_extendB9_+0x34 (inlined)
+	    5559dbbfc534 _RNvMs1_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VechE17extend_from_sliceB7_+0x34 (inlined)
+	    5559dbbfc534 _RNvMNtCsgFX3jaOk65H_5alloc6stringNtB2_6String8push_str+0x34 (inlined)
+	    5559dbbfc534 _RNvXsZ_NtCsgFX3jaOk65H_5alloc6stringNtB5_6StringNtNtCskADBYZwJmSU_4core3fmt5Write9write_str+0x34 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbc0042e _RNvMsa_NtCskADBYZwJmSU_4core3fmtNtB5_9Formatter9write_str+0x4e (inlined)
+	    5559dbc0042e _RNCNvMs4_NtNtCskADBYZwJmSU_4core3fmt8buildersNtB7_10DebugInner5entry0Bb_+0x4e (inlined)
+	    5559dbc0042e _RINvMNtCskADBYZwJmSU_4core6resultINtB3_6ResultuNtNtB5_3fmt5ErrorE8and_thenuNCNvMs4_NtBL_8buildersNtB1j_10DebugInner5entry0EB5_+0x4e (inlined)
+	    5559dbc0042e _RNvMs4_NtNtCskADBYZwJmSU_4core3fmt8buildersNtB5_10DebugInner5entry+0x4e (inlined)
+	    5559dbc0042e _RNvMs5_NtNtCskADBYZwJmSU_4core3fmt8buildersNtB5_8DebugSet5entry+0x4e (inlined)
+	    5559d99e7bb2 entries<&pg_engine::sql::expr::Expr, core::slice::iter::Iter<pg_engine::sql::expr::Expr>>+0x62 (inlined)
+	    5559d99e7bb2 fmt<pg_engine::sql::expr::Expr>+0x62 (inlined)
+	    5559d99e7bb2 fmt<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0x62 (inlined)
+	    5559d99e7bb2 _RNvXs1g_NtCskADBYZwJmSU_4core3fmtRINtNtCsgFX3jaOk65H_5alloc3vec3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtB6_5Debug3fmtB19_+0x62 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbc03209 _RNvMNtNtCskADBYZwJmSU_4core3fmt2rtNtB2_8Argument3fmt+0x169 (inlined)
+	    5559dbc03209 _RNvNtCskADBYZwJmSU_4core3fmt5write+0x169 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbbfbf70 _RNvXs_NvNtNtCskADBYZwJmSU_4core3fmt5Write9write_fmtQNtNtCsgFX3jaOk65H_5alloc6string6StringNtB4_12SpecWriteFmt14spec_write_fmtBS_+0x130 (inlined)
+	    5559dbbfbf70 _RNvYNtNtCsgFX3jaOk65H_5alloc6string6StringNtNtCskADBYZwJmSU_4core3fmt5Write9write_fmtB6_+0x130 (inlined)
+	    5559dbbfbf70 _RNvNvNtCsgFX3jaOk65H_5alloc3fmt6format12format_inner+0x130 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559d9b1185d {closure#0}+0x1bd (inlined)
+	    5559d9b1185d map_or_else<&str, alloc::string::String, alloc::fmt::format::{closure_env#0}, fn(&str) -> alloc::string::String>+0x1bd (inlined)
+	    5559d9b1185d format+0x1bd (inlined)
+	    5559d9b1185d same_text+0x1bd (inlined)
+	    5559d9b1185d same_as+0x1bd (inlined)
+	    5559d9b1185d {closure#0}+0x1bd (inlined)
+	    5559d9b1185d position<pg_engine::sql::expr::Expr, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure#0}::{closure_env#0}>+0x1bd (inlined)
+	    5559d9b1185d {closure#0}+0x1bd (inlined)
+	    5559d9b1185d {closure#1}+0x1bd (inlined)
+	    5559d9b1185d {closure#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>+0x1bd (inlined)
+	    5559d9b1185d {closure#0}<&pg_engine::sql::paths::IClause, (), core::iter::adapters::map::map_fold::{closure_env#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>>+0x1bd (inlined)
+	    5559d9b1185d fold<pg_engine::sql::paths::IClause, (), core::iter::adapters::enumerate::{impl#1}::fold::enumerate::{closure_env#0}<&pg_engine::sql::paths::IClause, (), core::iter::adapters::map::map_fold::{closure_env#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>>>+0x1bd (inlined)
+	    5559d9b1185d fold<core::slice::iter::Iter<pg_engine::sql::paths::IClause>, (), core::iter::adapters::map::map_fold::{closure_env#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>>+0x1bd (inlined)
+	    5559d9b1185d _RINvXs0_NtNtNtCskADBYZwJmSU_4core4iter8adapters3mapINtB6_3MapINtNtB8_9enumerate9EnumerateINtNtNtBc_5slice4iter4IterNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths7IClauseEENCNvMsf_B1R_NtB1R_7Planner13index_path_obs_0ENtNtNtBa_6traits8iterator8Iterator4folduNCINvNvB3m_8for_each4callTjjjENCINvMsk_NtCsgFX3jaOk65H_5alloc3vecINtB4D_3VecB4p_E14extend_trustedBN_E0E0EB1V_+0x1bd (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+roll-conn  681470/683149  [029] 467467.492395:   20408163 cpu-clock: 
+	    5559d9c44a84 branch<core::ptr::non_null::NonNull<[u8]>, alloc::collections::TryReserveError>+0x64 (inlined)
+	    5559d9c44a84 grow_amortized<alloc::alloc::Global>+0x64 (inlined)
+	    5559d9c44a84 _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs70fpZ3uE4FG_9pg_engine+0x64 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da1ace05 reserve<alloc::alloc::Global>+0x415 (inlined)
+	    5559da1ace05 reserve<u8, alloc::alloc::Global>+0x415 (inlined)
+	    5559da1ace05 reserve<u8, alloc::alloc::Global>+0x415 (inlined)
+	    5559da1ace05 reserve+0x415 (inlined)
+	    5559da1ace05 push+0x415 (inlined)
+	    5559da1ace05 open+0x415 (inlined)
+	    5559da1ace05 _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser5binop+0x415 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.517441:   20408163 cpu-clock: 
+	    5559dbb4c989 release_shared+0x9 (inlined)
+	    5559dbb4c989 _RNvNtCs13iv4QpFrNm_5bytes5bytes11shared_drop.llvm.17419890484745586752+0x9 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.542321:   20408163 cpu-clock: 
+	    5559da1b8d32 reserve<alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 reserve<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 reserve<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 append_elements<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 spec_extend<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 extend_from_slice<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 push_str+0x48f2 (inlined)
+	    5559da1b8d32 _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser9expr_here+0x48f2 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da1acb16 {closure#0}+0x126 (inlined)
+	    5559da1acb16 grow<core::option::Option<()>, pg_engine::sql::ruleutils::{impl#1}::expr::{closure_env#0}>+0x126 (inlined)
+	    5559da1acb16 expr+0x126 (inlined)
+	    5559da1acb16 paren+0x126 (inlined)
+	    5559da1acb16 _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser5binop+0x126 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.567315:   20408163 cpu-clock: 
+	    5559d9aa6780 _RNvXsf_NtNtCs70fpZ3uE4FG_9pg_engine5types5valueNtB5_5ValueNtNtCskADBYZwJmSU_4core5clone5Clone5clone.llvm.4838799075968597823+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.592216:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467467.617221:   20408163 cpu-clock: 
+	    5559d9a709bc write<pg_engine::sql::expr::Expr>+0xac (inlined)
+	    5559d9a709bc to_vec<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xac (inlined)
+	    5559d9a709bc to_vec_in<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xac (inlined)
+	    5559d9a709bc _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtNtCskADBYZwJmSU_4core5clone5Clone5cloneBL_+0xac (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db59163e grow<pg_engine::sql::expr::Expr, pg_engine::sql::expr::{impl#1}::clone::{closure_env#0}>+0x12e (inlined)
+	    5559db59163e _RNvXs_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB4_4ExprNtNtCskADBYZwJmSU_4core5clone5Clone5clone+0x12e (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.646552:   20408163 cpu-clock: 
+	    5559db082c1f equal_same_length<u8, u8>+0xef (inlined)
+	    5559db082c1f eq<u8, u8>+0xef (inlined)
+	    5559db082c1f eq<[u8], [u8]>+0xef (inlined)
+	    5559db082c1f eq+0xef (inlined)
+	    5559db082c1f _RNvNtCs70fpZ3uE4FG_9pg_engine7catalog19is_col_name_keyword+0xef (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.672396:   20408163 cpu-clock: 
+	    7f654377e7f7 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbb4e331 copy_nonoverlapping<u8>+0x51 (inlined)
+	    5559dbb4e331 extend_from_slice+0x51 (inlined)
+	    5559dbb4e331 _RNvXs2_NtCs13iv4QpFrNm_5bytes9bytes_mutNtB5_8BytesMutNtNtNtB7_3buf7buf_mut6BufMut9put_slice+0x51 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.696673:   20408163 cpu-clock: 
+	    5559db6d81f5 deref<pg_engine::sql::plan::ScanPlan>+0x65 (inlined)
+	    5559db6d81f5 _RNvMs7_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNode8full_row+0x65 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.721676:   20408163 cpu-clock: 
+	    5559dae21c81 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4func3ops5op_ge.llvm.8273478932343937147+0x1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.746677:   20408163 cpu-clock: 
+	    5559d9c9cee1 alloc+0x71 (inlined)
+	    5559d9c9cee1 alloc_impl_runtime+0x71 (inlined)
+	    5559d9c9cee1 alloc_impl+0x71 (inlined)
+	    5559d9c9cee1 allocate+0x71 (inlined)
+	    5559d9c9cee1 _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs70fpZ3uE4FG_9pg_engine.llvm.10145509653624036794+0x71 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               3 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.771595:   20408163 cpu-clock: 
+	    5559db496267 _RNvMs4_NtNtCs70fpZ3uE4FG_9pg_engine3sql6binderNtB5_6Binder3new+0x527 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.796610:   20408163 cpu-clock: 
+	    5559d963bbd0 is_empty<(alloc::vec::Vec<u8, alloc::alloc::Global>, pg_engine::txn::locks::Entry), alloc::alloc::Global>+0x0 (inlined)
+	    5559d963bbd0 _RINvMs1_NtCs3BTM885nGDo_9hashbrown3mapINtB6_7HashMapINtNtCsgFX3jaOk65H_5alloc3vec3VechENtNtNtCs70fpZ3uE4FG_9pg_engine3txn5locks5EntryNtNtNtB1t_4exec8fasthash9FastStateE7get_mutBO_EB1t_+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	            2f1f [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.821623:   20408163 cpu-clock: 
+	    5559d9612ec5 _mi_page_map_index+0x15 (inlined)
+	    5559d9612ec5 _mi_unchecked_ptr_page+0x15 (inlined)
+	    5559d9612ec5 _mi_ptr_page+0x15 (inlined)
+	    5559d9612ec5 mi_validate_ptr_page+0x15 (inlined)
+	    5559d9612ec5 mi_free+0x15 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.846735:   20408163 cpu-clock: 
+	    5559dab8c750 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths8parallel13func_parallel+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.871569:   20408163 cpu-clock: 
+	ffffffffb3e9f32a rep_movs_alternative+0x4a ([kernel.kallsyms])
+	ffffffffb389493c _copy_from_iter+0xcc ([kernel.kallsyms])
+	ffffffffb3d05e2f tcp_sendmsg_locked+0x37f ([kernel.kallsyms])
+	ffffffffb3d0694b tcp_sendmsg+0x2b ([kernel.kallsyms])
+	ffffffffb3c03f2e __sys_sendto+0x1ce ([kernel.kallsyms])
+	ffffffffb3c03f74 __x64_sys_sendto+0x24 ([kernel.kallsyms])
+	ffffffffb3ef7267 do_syscall_64+0x87 ([kernel.kallsyms])
+	ffffffffb400012f entry_SYSCALL_64_after_hwframe+0x76 ([kernel.kallsyms])
+	    7f65436a672e [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b387 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b3cc [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654371df76 __send+0x16 (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbc14c3 _RNvMsa_NtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socketNtB5_9UdpSocket4send+0x13 (inlined)
+	    5559dbbc14c3 _RNvXs0_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB5_9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write5write+0x13 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	             aa6 [unknown] ([unknown])
+	    5559da6f88e4 _RNvYNtNtNtCs8ZKwes1zzDd_3std3net3tcp9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write9write_allCs70fpZ3uE4FG_9pg_engine+0x74 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               7 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.896511:   20408163 cpu-clock: 
+	    5559db4e8e6a _RNvMs_NtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder6selectNtB6_6Binder18bind_simple_select+0xae5a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db502469 _RNvMs_NtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder6selectNtB6_6Binder21bind_select_stmt_here+0x399 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dba2a6bd dealloc_nonnull+0x251d (inlined)
+	    5559dba2a6bd deallocate_impl_runtime+0x251d (inlined)
+	    5559dba2a6bd deallocate_impl+0x251d (inlined)
+	    5559dba2a6bd deallocate+0x251d (inlined)
+	    5559dba2a6bd deallocate<alloc::alloc::Global>+0x251d (inlined)
+	    5559dba2a6bd drop<(pg_query::node_ref::NodeRef, i32, pg_query::node_enum::Context, bool), alloc::alloc::Global>+0x251d (inlined)
+	    5559dba2a6bd drop_glue<alloc::raw_vec::RawVec<(pg_query::node_ref::NodeRef, i32, pg_query::node_enum::Context, bool), alloc::alloc::Global>>+0x251d (inlined)
+	    5559dba2a6bd drop_glue<alloc::collections::vec_deque::VecDeque<(pg_query::node_ref::NodeRef, i32, pg_query::node_enum::Context, bool), alloc::alloc::Global>>+0x251d (inlined)
+	    5559dba2a6bd _RNvMNtCsjOBibkc8uvf_8pg_query9node_enumNtNtNtB4_8protobuf4node4Node5nodes+0x251d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467467.921516:   20408163 cpu-clock: 
+	    5559db53efa2 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0xe72 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	4025333333333332 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.946456:   20408163 cpu-clock: 
+	    7f654377e221 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db728317 compare<u8>+0x5e7 (inlined)
+	    5559db728317 chaining_lt<u8>+0x5e7 (inlined)
+	    5559db728317 __chaining_lt<u8>+0x5e7 (inlined)
+	    5559db728317 lt<u8>+0x5e7 (inlined)
+	    5559db728317 lt<[u8], [u8]>+0x5e7 (inlined)
+	    5559db728317 {closure#2}+0x5e7 (inlined)
+	    5559db728317 next_if<core::slice::iter::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>>, pg_engine::exec::scan::fetch_dense::{closure_env#2}>+0x5e7 (inlined)
+	    5559db728317 fetch_dense+0x5e7 (inlined)
+	    5559db728317 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan10fetch_rows+0x5e7 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               7 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.971566:   20408163 cpu-clock: 
+	    5559db736a26 alloc+0x21f6 (inlined)
+	    5559db736a26 alloc_impl_runtime+0x21f6 (inlined)
+	    5559db736a26 alloc_impl+0x21f6 (inlined)
+	    5559db736a26 allocate+0x21f6 (inlined)
+	    5559db736a26 box_new_uninit+0x21f6 (inlined)
+	    5559db736a26 new<pg_engine::exec::scan::ScanNode>+0x21f6 (inlined)
+	    5559db736a26 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan12open_scan_as+0x21f6 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db7463fe _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan9open_scan+0x156e (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               2 [unknown] ([unknown])
+
+roll-conn  681470/683149  [030] 467467.996521:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.021543:   20408163 cpu-clock: 
+	    5559daff3722 _RNvMs2_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_3Txn6commit+0x2d82 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da6d6b5d _RNvXs4_NtCs70fpZ3uE4FG_9pg_engine6engineNtB5_6EngineNtNtNtB7_7session5state7Cluster6commit+0x8d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.046564:   20408163 cpu-clock: 
+	    5559db223b70 _RNvMs5_NtNtCs70fpZ3uE4FG_9pg_engine7session8settingsNtB5_8Settings17start_transaction+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.071417:   20408163 cpu-clock: 
+	    7f654377e23d [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db010a8d compare<u8>+0x7d (inlined)
+	    5559db010a8d chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d __chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<[u8], [u8]>+0x7d (inlined)
+	    5559db010a8d _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head+0x7d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.096519:   20408163 cpu-clock: 
+	    5559dbc00ed1 _RNvMsa_NtCskADBYZwJmSU_4core3fmtNtB5_9Formatter12pad_integral+0xa1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbc0d692 _RNvXsi_NtNtNtCskADBYZwJmSU_4core3fmt3num3impjNtB9_7Display3fmt+0x102 (inlined)
+	    5559dbc03209 _RNvMNtNtCskADBYZwJmSU_4core3fmt2rtNtB2_8Argument3fmt+0x169 (inlined)
+	    5559dbc03209 _RNvNtCskADBYZwJmSU_4core3fmt5write+0x169 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db57f69b write_fmt+0xbab (inlined)
+	    5559db57f69b _RNvXs2_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4ExprNtNtCskADBYZwJmSU_4core3fmt5Debug3fmt+0xbab (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.121558:   20408163 cpu-clock: 
+	    5559daae4db0 cmp+0x130 (inlined)
+	    5559daae4db0 find_key_index<alloc::collections::btree::node::marker::Immut, u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, alloc::collections::btree::node::marker::LeafOrInternal, u32>+0x130 (inlined)
+	    5559daae4db0 search_node<alloc::collections::btree::node::marker::Immut, u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, alloc::collections::btree::node::marker::LeafOrInternal, u32>+0x130 (inlined)
+	    5559daae4db0 search_tree<alloc::collections::btree::node::marker::Immut, u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, u32>+0x130 (inlined)
+	    5559daae4db0 get<u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, alloc::alloc::Global, u32>+0x130 (inlined)
+	    5559daae4db0 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql5costs9col_stats+0x130 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.146175:   20408163 cpu-clock: 
+	    5559db0b6630 lock_shared+0x130 (inlined)
+	    5559db0b6630 read<parking_lot::raw_rwlock::RawRwLock, pg_engine::exec::sizing::RelFiles>+0x130 (inlined)
+	    5559db0b6630 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing7fetched+0x130 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbcf26b7 [unknown] (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.171039:   20408163 cpu-clock: 
+	    5559d9a709e7 write<pg_engine::sql::expr::Expr>+0xd7 (inlined)
+	    5559d9a709e7 to_vec<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xd7 (inlined)
+	    5559d9a709e7 to_vec_in<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xd7 (inlined)
+	    5559d9a709e7 _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtNtCskADBYZwJmSU_4core5clone5Clone5cloneBL_+0xd7 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [029] 467468.208494:   20408163 cpu-clock: 
+	    5559db0e57f9 _RNvXs7_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_5LowerNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next+0x9 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	3fefffffffffffff [unknown] ([unknown])
+
+roll-conn  681470/683149  [029] 467468.243416:   20408163 cpu-clock: 
+	    5559db3a0e04 clone<pg_engine::sql::func::FuncDef, alloc::alloc::Global>+0x524 (inlined)
+	    5559db3a0e04 _RNCNvXs_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB6_4ExprNtNtCskADBYZwJmSU_4core5clone5Clone5clone0Ba_.llvm.6191902062211276960+0x524 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [030] 467468.255236:   20408163 cpu-clock: 
+	    5559d9612eb0 _mi_page_map_at+0x0 (inlined)
+	    5559d9612eb0 _mi_unchecked_ptr_page+0x0 (inlined)
+	    5559d9612eb0 _mi_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_validate_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_free+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [031] 467468.278076:   20408163 cpu-clock: 
+	    5559d9faf983 branch<(), pg_engine::error::Error>+0x163 (inlined)
+	    5559d9faf983 _RNCNCINvNtCs70fpZ3uE4FG_9pg_engine4exec8run_eachNCNCNvMs3_NtB8_7sessionNtBU_7Session9run_querys0_0s2_0E00B8_+0x163 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+roll-conn  681470/683149  [031] 467468.300731:   20408163 cpu-clock: 
+	    5559db74fd17 write<pg_engine::types::value::Value>+0xe7 (inlined)
+	    5559db74fd17 push_mut<pg_engine::types::value::Value, alloc::alloc::Global>+0xe7 (inlined)
+	    5559db74fd17 push<pg_engine::types::value::Value, alloc::alloc::Global>+0xe7 (inlined)
+	    5559db74fd17 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec5nodes14project_moving+0xe7 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbbfc245 _RINvNtCskADBYZwJmSU_4core3ptr19copy_nonoverlappinghECsgFX3jaOk65H_5alloc+0x45 (inlined)
+	    5559dbbfc245 _RNvMNtNtCskADBYZwJmSU_4core3ptr9const_ptrPh22copy_to_nonoverlappingCsgFX3jaOk65H_5alloc+0x45 (inlined)
+	    5559dbbfc245 _RINvXs_NvMNtCsgFX3jaOk65H_5alloc5sliceSp9to_vec_inhNtB5_10ConvertVec6to_vecNtNtBa_5alloc6GlobalEBa_+0x45 (inlined)
+	    5559dbbfc245 _RINvMNtCsgFX3jaOk65H_5alloc5sliceSh9to_vec_inNtNtB5_5alloc6GlobalEB5_+0x45 (inlined)
+	    5559dbbfc245 _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VechENtNtCskADBYZwJmSU_4core5clone5Clone5cloneB7_+0x45 (inlined)
+	    5559dbbfc245 _RNvXs4_NtCsgFX3jaOk65H_5alloc6stringNtB5_6StringNtNtCskADBYZwJmSU_4core5clone5Clone5clone+0x45 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  681470/683149  [031] 467468.323175:   20408163 cpu-clock: 
+	    5559db44c070 _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder4exprNtB4_6Binder9bind_expr+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+roll-conn  681470/683149  [031] 467468.346844:   20408163 cpu-clock: 
+	    5559d9fd31a0 get<isize>+0x10 (inlined)
+	    5559d9fd31a0 new+0x10 (inlined)
+	    5559d9fd31a0 try_borrow<pg_engine::txn::Txn>+0x10 (inlined)
+	    5559d9fd31a0 borrow<pg_engine::txn::Txn>+0x10 (inlined)
+	    5559d9fd31a0 catalog+0x10 (inlined)
+	    5559d9fd31a0 _RNvMs3_NtCs70fpZ3uE4FG_9pg_engine4execNtB5_7ExecCtx8db_owner+0x10 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+

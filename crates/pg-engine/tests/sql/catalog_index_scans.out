@@ -1,0 +1,73 @@
+> explain (costs off) select * from pg_proc where proname ~ 'abc'
+QUERY PLAN:text
+Seq Scan on pg_proc
+  Filter: (proname ~ 'abc'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^abc'
+QUERY PLAN:text
+Index Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: ((proname >= 'abc'::text) AND (proname < 'abd'::text))
+  Filter: (proname ~ '^abc'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^abc$'
+QUERY PLAN:text
+Index Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: (proname = 'abc'::text)
+  Filter: (proname ~ '^abc$'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^abcd*e'
+QUERY PLAN:text
+Index Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: ((proname >= 'abc'::text) AND (proname < 'abd'::text))
+  Filter: (proname ~ '^abcd*e'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^abc+d'
+QUERY PLAN:text
+Index Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: ((proname >= 'abc'::text) AND (proname < 'abd'::text))
+  Filter: (proname ~ '^abc+d'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^(abc)(def)'
+QUERY PLAN:text
+Index Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: ((proname >= 'abcdef'::text) AND (proname < 'abcdeg'::text))
+  Filter: (proname ~ '^(abc)(def)'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^(abc)$'
+QUERY PLAN:text
+Index Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: (proname = 'abc'::text)
+  Filter: (proname ~ '^(abc)$'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^(abc)?d'
+QUERY PLAN:text
+Seq Scan on pg_proc
+  Filter: (proname ~ '^(abc)?d'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_proc where proname ~ '^abcd(x|(?=\w\w)q)'
+QUERY PLAN:text
+Index Scan using pg_proc_proname_args_nsp_index on pg_proc
+  Index Cond: ((proname >= 'abcd'::text) AND (proname < 'abce'::text))
+  Filter: (proname ~ '^abcd(x|(?=\w\w)q)'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_class where relname = 'pg_proc'
+QUERY PLAN:text
+Index Scan using pg_class_relname_nsp_index on pg_class
+  Index Cond: (relname = 'pg_proc'::name)
+-- EXPLAIN
+
+> explain (costs off) select * from pg_class where oid = 1259
+QUERY PLAN:text
+Index Scan using pg_class_oid_index on pg_class
+  Index Cond: (oid = '1259'::oid)
+-- EXPLAIN
+

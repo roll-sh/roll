@@ -1,0 +1,306 @@
+> SET check_function_bodies = false
+-- SET
+
+> SELECT pg_catalog.set_config('search_path', '', false)
+set_config:text
+
+-- SELECT 1
+
+> CREATE SCHEMA a54s
+-- CREATE SCHEMA
+
+> CREATE TYPE a54s.shelltype
+-- CREATE TYPE
+
+> CREATE FUNCTION a54s.shelltype_in(cstring) RETURNS a54s.shelltype
+>     LANGUAGE internal IMMUTABLE STRICT AS $$textin$$
+NOTICE 42809: return type a54s.shelltype is only a shell
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a54s.shelltype_out(a54s.shelltype) RETURNS cstring
+>     LANGUAGE internal IMMUTABLE STRICT AS $$textout$$
+NOTICE 42809: argument type a54s.shelltype is only a shell (at 36)
+-- CREATE FUNCTION
+
+> ALTER FUNCTION a54s.shelltype_in(cstring) OWNER TO CURRENT_USER
+-- ALTER FUNCTION
+
+> ALTER FUNCTION a54s.shelltype_out(a54s.shelltype) OWNER TO CURRENT_USER
+-- ALTER FUNCTION
+
+> COMMENT ON FUNCTION a54s.shelltype_out(a54s.shelltype) IS 'out'
+-- COMMENT
+
+> CREATE TYPE a54s.shelltype (INTERNALLENGTH = variable, INPUT = a54s.shelltype_in,
+>     OUTPUT = a54s.shelltype_out, ALIGNMENT = int4, STORAGE = plain)
+-- CREATE TYPE
+
+> SELECT 'x'::text::a54s.shelltype
+shelltype:user
+x
+-- SELECT 1
+
+> CREATE TYPE a54s.othershell
+-- CREATE TYPE
+
+> ALTER TYPE a54s.othershell OWNER TO CURRENT_USER
+-- ALTER TYPE
+
+> GRANT USAGE ON TYPE a54s.othershell TO public
+-- GRANT
+
+> CREATE TABLE a54s.idl (a int NOT NULL)
+-- CREATE TABLE
+
+> ALTER TABLE a54s.idl ALTER COLUMN a ADD GENERATED ALWAYS AS IDENTITY (
+>     SEQUENCE NAME a54s.idl_a_seq UNLOGGED START WITH 1 INCREMENT BY 1 CACHE 1)
+-- ALTER TABLE
+
+> CREATE UNLOGGED TABLE a54s.idu (a int NOT NULL)
+-- CREATE TABLE
+
+> ALTER TABLE a54s.idu ALTER COLUMN a ADD GENERATED ALWAYS AS IDENTITY (
+>     SEQUENCE NAME a54s.idu_a_seq LOGGED)
+-- ALTER TABLE
+
+> CREATE TABLE a54s.idd (a int GENERATED ALWAYS AS IDENTITY (UNLOGGED LOGGED))
+ERROR 42601: conflicting or redundant options (at 69)
+
+> SELECT relname, relpersistence FROM pg_catalog.pg_class
+>   WHERE relnamespace = 'a54s'::regnamespace AND relname ~ '^id' ORDER BY 1
+relname:name | relpersistence:char
+idl | p
+idl_a_seq | u
+idu | u
+idu_a_seq | p
+-- SELECT 4
+
+> CREATE TABLE a54s.t (a int)
+-- CREATE TABLE
+
+> CREATE FUNCTION a54s.f(int) RETURNS int LANGUAGE sql AS $$select count(*)::int4 from t where a = $1$$
+-- CREATE FUNCTION
+
+> CREATE VIEW a54s.v AS SELECT a, a54s.f(a) AS refcount FROM a54s.t
+-- CREATE VIEW
+
+> SELECT * FROM a54s.v
+ERROR 42P01: relation "t" does not exist
+QUERY: select count(*)::int4 from t where a = $1 (at 28)
+CONTEXT: SQL function "f" during inlining
+
+> SELECT pg_catalog.pg_get_viewdef('a54s.v'::regclass)
+pg_get_viewdef:text
+ SELECT a,
+    a54s.f(a) AS refcount
+   FROM a54s.t;
+-- SELECT 1
+
+> SET search_path = a54s
+-- SET
+
+> SELECT * FROM a54s.v
+a:int4 | refcount:int4
+-- SELECT 0
+
+> SELECT pg_catalog.set_config('search_path', '', false)
+set_config:text
+
+-- SELECT 1
+
+> CREATE TABLE a54s.zero ()
+-- CREATE TABLE
+
+> COPY a54s.zero FROM stdin
+>> 
+>> 
+-- COPY 2
+
+> SELECT count(*) FROM a54s.zero
+count:int8
+2
+-- SELECT 1
+
+> CREATE TABLE a54s.regs (r regclass, t regtype, p regproc, o regoper, n regnamespace)
+-- CREATE TABLE
+
+> COPY a54s.regs FROM stdin
+>> pg_class	regtype	now	||/	pg_catalog
+-- COPY 1
+
+> SELECT * FROM a54s.regs
+r:regclass | t:regtype | p:regproc | o:2203 | n:4089
+pg_class | regtype | now | ||/ | pg_catalog
+-- SELECT 1
+
+> CREATE TABLE a54s.nets (c cidr, i inet)
+-- CREATE TABLE
+
+> CREATE INDEX nets_brin ON a54s.nets USING brin (i, c, c inet_minmax_ops)
+-- CREATE INDEX
+
+> CREATE INDEX nets_btree ON a54s.nets USING btree (c)
+-- CREATE INDEX
+
+> CREATE INDEX nets_hash ON a54s.nets USING hash (c)
+-- CREATE INDEX
+
+> SELECT indexrelid::regclass, indclass FROM pg_catalog.pg_index
+>   WHERE indrelid = 'a54s.nets'::regclass ORDER BY 1
+indexrelid:regclass | indclass:30
+a54s.nets_brin | 10130 10130 10127
+a54s.nets_btree | 10015
+a54s.nets_hash | 10016
+-- SELECT 3
+
+> CREATE DOMAIN a54s.d1 AS int CHECK (VALUE < 100)
+-- CREATE DOMAIN
+
+> CREATE TYPE a54s.d1range AS RANGE (subtype = a54s.d1)
+-- CREATE TYPE
+
+> CREATE TABLE a54s.r (a int, b a54s.d1range GENERATED ALWAYS AS (a54s.d1range(a, a + 5)) STORED,
+>   c a54s.d1, e a54s.d1range DEFAULT a54s.d1range(1::a54s.d1, 2))
+-- CREATE TABLE
+
+> SELECT pg_catalog.pg_get_expr(adbin, adrelid) FROM pg_catalog.pg_attrdef
+>   WHERE adrelid = 'a54s.r'::regclass ORDER BY adnum
+pg_get_expr:text
+a54s.d1range((a)::a54s.d1, ((a + 5))::a54s.d1)
+a54s.d1range((1)::a54s.d1, (2)::a54s.d1)
+-- SELECT 2
+
+> CREATE VIEW a54s.rv AS SELECT a54s.d1range(c, c) FROM a54s.r
+-- CREATE VIEW
+
+> SELECT pg_catalog.pg_get_viewdef('a54s.rv'::regclass)
+pg_get_viewdef:text
+ SELECT a54s.d1range(c, c) AS d1range
+   FROM a54s.r;
+-- SELECT 1
+
+> INSERT INTO a54s.r (a) VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO a54s.r (a) VALUES (99)
+ERROR 23514: value for domain a54s.d1 violates check constraint "d1_check"
+OBJECTS: schema=a54s datatype=d1 constraint=d1_check
+
+> SELECT a, b, e FROM a54s.r
+a:int4 | b:user | e:user
+1 | [1,6) | [1,2)
+-- SELECT 1
+
+> DROP ROLE IF EXISTS a54_fo
+NOTICE 00000: role "a54_fo" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE a54_fo
+-- CREATE ROLE
+
+> ALTER FUNCTION pg_catalog.pg_stat_reset OWNER TO a54_fo
+-- ALTER FUNCTION
+
+> SELECT proowner::regrole, proacl FROM pg_catalog.pg_proc WHERE proname = 'pg_stat_reset'
+proowner:4096 | proacl:1034
+a54_fo | {a54_fo=X/a54_fo}
+-- SELECT 1
+
+> REVOKE EXECUTE ON FUNCTION pg_catalog.pg_stat_reset FROM a54_fo
+-- REVOKE
+
+> SELECT proowner::regrole, proacl FROM pg_catalog.pg_proc WHERE proname = 'pg_stat_reset'
+proowner:4096 | proacl:1034
+a54_fo | {}
+-- SELECT 1
+
+> ALTER FUNCTION pg_catalog.lower(text) OWNER TO a54_fo
+-- ALTER FUNCTION
+
+> SELECT proowner::regrole, proacl FROM pg_catalog.pg_proc WHERE oid = 'pg_catalog.lower(text)'::regprocedure
+proowner:4096 | proacl:1034
+a54_fo | NULL
+-- SELECT 1
+
+> ALTER AGGREGATE pg_catalog.count(*) OWNER TO a54_fo
+-- ALTER AGGREGATE
+
+> SELECT proowner::regrole FROM pg_catalog.pg_proc WHERE oid = 'pg_catalog.count()'::regprocedure
+proowner:4096
+a54_fo
+-- SELECT 1
+
+> ALTER FUNCTION pg_catalog.lower(text) OWNER TO a54_nope
+ERROR 42704: role "a54_nope" does not exist
+
+> ALTER FUNCTION pg_catalog.lower(text) OWNER TO postgres
+-- ALTER FUNCTION
+
+> ALTER AGGREGATE pg_catalog.count(*) OWNER TO postgres
+-- ALTER AGGREGATE
+
+> ALTER FUNCTION pg_catalog.pg_stat_reset OWNER TO postgres
+-- ALTER FUNCTION
+
+> GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_reset() TO postgres
+-- GRANT
+
+> SELECT proowner::regrole, proacl FROM pg_catalog.pg_proc WHERE proname = 'pg_stat_reset'
+proowner:4096 | proacl:1034
+postgres | {postgres=X/postgres}
+-- SELECT 1
+
+> DROP ROLE a54_fo
+-- DROP ROLE
+
+> CREATE TABLE a54s.dn (a int DEFAULT NULL, b int DEFAULT 5, c int DEFAULT NULL::integer, d a54s.d1 DEFAULT NULL)
+-- CREATE TABLE
+
+> ALTER TABLE a54s.dn ALTER COLUMN b SET DEFAULT NULL
+-- ALTER TABLE
+
+> ALTER TABLE a54s.dn ADD COLUMN e text DEFAULT NULL
+-- ALTER TABLE
+
+> SELECT attname, pg_catalog.pg_get_expr(adbin, adrelid) FROM pg_catalog.pg_attrdef
+>   JOIN pg_catalog.pg_attribute ON attrelid = adrelid AND attnum = adnum
+>   WHERE adrelid = 'a54s.dn'::regclass ORDER BY 1
+attname:name | pg_get_expr:text
+d | NULL::integer
+-- SELECT 1
+
+> CREATE FUNCTION a54s.fc(character, varchar(5), numeric(4,2)) RETURNS character(3) LANGUAGE sql AS 'select $1'
+-- CREATE FUNCTION
+
+> SELECT pg_catalog.pg_get_function_identity_arguments('a54s.fc'::regproc), pg_catalog.pg_get_function_result('a54s.fc'::regproc)
+pg_get_function_identity_arguments:text | pg_get_function_result:text
+character, character varying, numeric | character
+-- SELECT 1
+
+> SELECT a54s.fc('abcd', 'xxxxxxx', 123.456), pg_catalog.pg_typeof(a54s.fc('abc', 'x', 1.5))
+fc:bpchar | pg_typeof:regtype
+abcd | character
+-- SELECT 1
+
+> DROP SCHEMA a54s CASCADE
+NOTICE 00000: drop cascades to 18 other objects
+DETAIL: drop cascades to function a54s.shelltype_out(a54s.shelltype)
+DETAIL: drop cascades to type a54s.shelltype
+DETAIL: drop cascades to function a54s.shelltype_in(cstring)
+DETAIL: drop cascades to type a54s.othershell
+DETAIL: drop cascades to table a54s.idl
+DETAIL: drop cascades to table a54s.idu
+DETAIL: drop cascades to table a54s.t
+DETAIL: drop cascades to function a54s.f(integer)
+DETAIL: drop cascades to view a54s.v
+DETAIL: drop cascades to table a54s.zero
+DETAIL: drop cascades to table a54s.regs
+DETAIL: drop cascades to table a54s.nets
+DETAIL: drop cascades to type a54s.d1
+DETAIL: drop cascades to type a54s.d1range
+DETAIL: drop cascades to table a54s.r
+DETAIL: drop cascades to view a54s.rv
+DETAIL: drop cascades to table a54s.dn
+DETAIL: drop cascades to function a54s.fc(character,character varying,numeric)
+-- DROP SCHEMA
+

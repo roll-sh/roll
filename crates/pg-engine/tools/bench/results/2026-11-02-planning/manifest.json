@@ -1,0 +1,31 @@
+{
+  "diagnostic_only": true,
+  "parent_head": "1a53dc93d689e22a806855296c50cd1dbe918c38",
+  "engine_source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "engine_production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "engine_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "client_source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "completed_blocks": [
+    "initial/auto-generic",
+    "continuation/auto-custom",
+    "continuation/phase-generic-custom"
+  ],
+  "runs": {
+    "initial": "run-20261102T014736Z-248764",
+    "continuation": "run-20261102T015527Z-370539"
+  },
+  "invocations_including_warmup": 84,
+  "checked_operations_including_warmup": 4802187,
+  "export_policy": "Completed blocks and both runs' metadata/scripts/cleanup are preserved byte for byte. Incomplete initial auto-custom block, fixture data and executable bytes are omitted. Historical absolute paths inside captured records are cache-relative provenance, not portable links.",
+  "orchestration_failure": "The initial auto-generic block completed and stopped cleanly. The next block failed a safe bind check on a reused port. Continuation used distinct ports and completed auto-custom and the separate instrumented phase pass. The initial root run is not a successful full run.",
+  "audit_scope": "verify.py checks exported hashes, independently regenerates the deterministic fixture digest, parses every completed block's result/resource records, recomputes summaries, verifies counters/settings/runtime metadata and phase arithmetic, and checks recorded cleanup. Executable bytes and live cleanup require separate local inspection. It runs no benchmarks or gates.",
+  "limits": [
+    "Forced-mode differences include Param/Const bounds and folding, so mode deltas cannot isolate planning CPU.",
+    "PGSS times are instrumented elapsed time; execution includes planning. Span-entry plans counts are not rebuild counts. Phase totals include warmup and exclude Parse/Describe setup.",
+    "This is neither an engine optimization nor a PostgreSQL comparison or recommendation to force generic plans in production.",
+    "Prior build provenance limitations remain; the diagnostic records live executable hashes but does not reconstruct compiler invocations.",
+    "Warm 200000-row checked read fixture; no sustained-write or memory-efficiency claim."
+  ]
+}

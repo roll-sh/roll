@@ -1,0 +1,49 @@
+> CREATE TABLE a108_sci (id int, r int4range)
+-- CREATE TABLE
+
+> INSERT INTO a108_sci VALUES (1, '[1,5)')
+-- INSERT 0 1
+
+> SELECT (ROW(xmin, id)).f2 FROM a108_sci
+f2:int4
+1
+-- SELECT 1
+
+> SELECT (ROW(ctid, id, xmax)).f3 FROM a108_sci
+f3:28
+0
+-- SELECT 1
+
+> SELECT (pg_xact_commit_timestamp_origin(xmin)).roident FROM a108_sci
+ERROR 55000: could not get commit timestamp data
+HINT: Make sure the configuration parameter "track_commit_timestamp" is set.
+
+> SELECT pg_xact_commit_timestamp(xmin) FROM a108_sci
+ERROR 55000: could not get commit timestamp data
+HINT: Make sure the configuration parameter "track_commit_timestamp" is set.
+
+> SELECT pg_xact_commit_timestamp('0'::xid)
+ERROR 22023: cannot retrieve commit timestamp for transaction 0
+
+> SELECT pg_xact_commit_timestamp('1'::xid), pg_xact_commit_timestamp('2'::xid)
+pg_xact_commit_timestamp:timestamptz | pg_xact_commit_timestamp:timestamptz
+NULL | NULL
+-- SELECT 1
+
+> SELECT * FROM pg_xact_commit_timestamp_origin('2'::xid)
+timestamp:timestamptz | roident:oid
+NULL | NULL
+-- SELECT 1
+
+> SELECT * FROM pg_last_committed_xact()
+ERROR 55000: could not get commit timestamp data
+HINT: Make sure the configuration parameter "track_commit_timestamp" is set.
+
+> SHOW track_commit_timestamp
+track_commit_timestamp:text
+off
+-- SHOW
+
+> DROP TABLE a108_sci
+-- DROP TABLE
+

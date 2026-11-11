@@ -115,7 +115,7 @@ ryu = "1.0.23"
 indexmap = "2"
 itoa = "1"
 memchr = "2"
-smallvec = { version = "1", features = ["union", "const_generics", "write"] }
+smallvec = { version = "1.16", features = ["union", "const_generics", "write"] }
 foldhash = "0.2"
 rand = "0.8"
 sha1 = "0.10"
@@ -226,6 +226,37 @@ scylla = { version = "1.9", default-features = false, features = ["rustls-023"] 
 rustyline = { version = "19", default-features = false, features = ["with-file-history"] }
 unicode-width = "0.2"
 
+# Postgres-compatible engine.
+fallible-iterator = "0.2"
+unicode-normalization = "0.1"
+pg-engine = { path = "crates/pg-engine" }
+pg-snowball = { path = "crates/pg-snowball" }
+pg-icu = { path = "crates/pg-icu" }
+
+pg_query = { git = "https://github.com/pganalyze/pg_query.rs", rev = "ad0c87ed59c84ec6b42c970bb42d7985b7b5878b" }
+prost = { version = "0.13", features = ["no-recursion-limit"] }
+# On-demand stack growth at recursion points (pg-engine: deep input never overflows a host thread).
+stacker = "0.1"
+psm = "0.1"
+bigdecimal = "0.4"
+# pgcrypto (crates/pg-engine/src/ext/pgcrypto)
+aes = "0.8"
+des = "0.8"
+sha3 = "0.10"
+ripemd = "0.1"
+sm3 = "0.4"
+blake2 = "0.10"
+crossbeam-skiplist = "0.1"
+hashbrown = "0.17"
+# ICU4X: pg-engine's `icu4x` fallback where ICU4C 78.1 (crates/pg-icu) can't be built
+icu_collator = "2.3"
+icu_casemap = "2.3"
+icu_locale_core = "2.3"
+icu_provider = "2.3"
+icu_segmenter = "2.3"
+# pgcrypto uses the digest 0.10 traits shared by sha1, sha2 and hmac.
+md5 = { package = "md-5", version = "0.10" }
+
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
 kafka-protocol = { path = "vendor/kafka-protocol" }
@@ -273,4 +304,11 @@ opt-level = 3
 
 [profile.release]
 lto = "thin"
+codegen-units = 1
+
+# Shipping and benchmark build: whole-program optimisation. Slow to build, so tests and
+# day-to-day work use `release`.
+[profile.dist]
+inherits = "release"
+lto = "fat"
 codegen-units = 1

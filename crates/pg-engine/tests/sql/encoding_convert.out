@@ -1,0 +1,181 @@
+> SELECT convert_from('\xa4a2'::bytea, 'EUC_JP'), convert_from('\x8fa2af'::bytea, 'EUC_JP'), convert_from('\x8eb1'::bytea, 'EUC_JP')
+convert_from:text | convert_from:text | convert_from:text
+あ | ˘ | ｱ
+-- SELECT 1
+
+> SELECT convert_from('\x82a0'::bytea, 'SJIS'), convert_from('\xb1'::bytea, 'SJIS'), convert_from('\x8740'::bytea, 'SJIS'), convert_from('\xed40'::bytea, 'SJIS')
+convert_from:text | convert_from:text | convert_from:text | convert_from:text
+あ | ｱ | ① | 纊
+-- SELECT 1
+
+> SELECT convert_from('\xb0a1'::bytea, 'EUC_CN'), convert_from('\xb0a1'::bytea, 'EUC_KR'), convert_from('\xc4a1'::bytea, 'EUC_TW'), convert_from('\x8ea2a1a1'::bytea, 'EUC_TW')
+convert_from:text | convert_from:text | convert_from:text | convert_from:text
+啊 | 가 | 一 | 乂
+-- SELECT 1
+
+> SELECT convert_from('\xa440'::bytea, 'BIG5'), convert_from('\x8140'::bytea, 'GBK'), convert_from('\x8141'::bytea, 'UHC'), convert_from('\xd065'::bytea, 'JOHAB')
+ERROR 22021: invalid byte sequence for encoding "JOHAB": 0xd0 0x65
+
+> SELECT convert_from('\x81308130'::bytea, 'GB18030'), convert_from('\x8431a439'::bytea, 'GB18030'), convert_from('\x90308130'::bytea, 'GB18030'), convert_from('\xe3329a35'::bytea, 'GB18030'), convert_from('\xa2e3'::bytea, 'GB18030')
+convert_from:text | convert_from:text | convert_from:text | convert_from:text | convert_from:text
+ | ￿ | 𐀀 | 􏿿 | €
+-- SELECT 1
+
+> SELECT convert_from('\xa4f7'::bytea, 'EUC_JIS_2004'), convert_from('\xabc4'::bytea, 'EUC_JIS_2004'), convert_from('\x82f5'::bytea, 'SHIFT_JIS_2004'), convert_from('\x8fa1a1'::bytea, 'EUC_JIS_2004')
+convert_from:text | convert_from:text | convert_from:text | convert_from:text
+か゚ | æ̀ | か゚ | 𠂉
+-- SELECT 1
+
+> SELECT encode(convert_to('あア漢字', 'EUC_JP'), 'hex'), encode(convert_to('あア漢字', 'SJIS'), 'hex'), encode(convert_to('汉字', 'EUC_CN'), 'hex'), encode(convert_to('한글', 'EUC_KR'), 'hex')
+encode:text | encode:text | encode:text | encode:text
+a4a2a5a2b4c1bbfa | 82a083418abf8e9a | babad7d6 | c7d1b1db
+-- SELECT 1
+
+> SELECT encode(convert_to('漢字', 'BIG5'), 'hex'), encode(convert_to('漢字', 'EUC_TW'), 'hex'), encode(convert_to('汉字€', 'GBK'), 'hex'), encode(convert_to('똠', 'UHC'), 'hex'), encode(convert_to('한', 'JOHAB'), 'hex')
+encode:text | encode:text | encode:text | encode:text | encode:text
+ba7ea672 | e9c7c7f3 | babad7d680 | 8c63 | d065
+-- SELECT 1
+
+> SELECT encode(convert_to('😀', 'GB18030'), 'hex'), encode(convert_to('€', 'GB18030'), 'hex'), encode(convert_to(U&'\0080', 'GB18030'), 'hex'), encode(convert_to(U&'\FFFF', 'GB18030'), 'hex')
+encode:text | encode:text | encode:text | encode:text
+9439fc36 | a2e3 | 81308130 | 8431a439
+-- SELECT 1
+
+> SELECT encode(convert_to('か゚', 'EUC_JIS_2004'), 'hex'), encode(convert_to('か゚か', 'SHIFT_JIS_2004'), 'hex'), encode(convert_to('か', 'EUC_JIS_2004'), 'hex'), encode(convert_to('ǽ̀', 'EUC_JIS_2004'), 'hex')
+encode:text | encode:text | encode:text | encode:text
+a4f7 | 82f582a9 | a4ab | abc5abdc
+-- SELECT 1
+
+> SELECT encode(convert_to('Ωé€', 'LATIN1'), 'hex')
+ERROR 22P05: character with byte sequence 0xce 0xa9 in encoding "UTF8" has no equivalent in encoding "LATIN1"
+
+> SELECT encode(convert_to('é€', 'WIN1252'), 'hex'), encode(convert_to('Ж', 'KOI8R'), 'hex'), encode(convert_to('Ж', 'WIN1251'), 'hex'), encode(convert_to('ő', 'LATIN2'), 'hex'), encode(convert_to('ก', 'WIN874'), 'hex')
+encode:text | encode:text | encode:text | encode:text | encode:text
+e980 | f6 | c6 | f5 | a1
+-- SELECT 1
+
+> SELECT convert_from('\xe9'::bytea, 'LATIN1'), convert_from('\x80'::bytea, 'WIN1252'), convert_from('\xc1'::bytea, 'KOI8U'), convert_from('\xa4'::bytea, 'LATIN9')
+convert_from:text | convert_from:text | convert_from:text | convert_from:text
+é | € | а | €
+-- SELECT 1
+
+> SELECT convert_from('\x81'::bytea, 'WIN1252')
+ERROR 22P05: character with byte sequence 0x81 in encoding "WIN1252" has no equivalent in encoding "UTF8"
+
+> SELECT convert_from('\xa4'::bytea, 'EUC_JP')
+ERROR 22021: invalid byte sequence for encoding "EUC_JP": 0xa4
+
+> SELECT convert_from('\xa4a2a4'::bytea, 'EUC_JP')
+ERROR 22021: invalid byte sequence for encoding "EUC_JP": 0xa4
+
+> SELECT convert_from('\xa9a1'::bytea, 'EUC_JP')
+ERROR 22P05: character with byte sequence 0xa9 0xa1 in encoding "EUC_JP" has no equivalent in encoding "UTF8"
+
+> SELECT convert_from('\x81'::bytea, 'GB18030')
+ERROR 22021: invalid byte sequence for encoding "GB18030": 0x81
+
+> SELECT convert_from('\x8130'::bytea, 'GB18030')
+ERROR 22021: invalid byte sequence for encoding "GB18030": 0x81 0x30
+
+> SELECT convert_from('\x8431a530'::bytea, 'GB18030')
+ERROR 22P05: character with byte sequence 0x84 0x31 0xa5 0x30 in encoding "GB18030" has no equivalent in encoding "UTF8"
+
+> SELECT convert_from('\xff'::bytea, 'SJIS')
+ERROR 22021: invalid byte sequence for encoding "SJIS": 0xff
+
+> SELECT convert_from('\x80'::bytea, 'UTF8')
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0x80
+
+> SELECT convert_from('abc\x00'::bytea, 'UTF8')
+ERROR 22P02: invalid input syntax for type bytea (at 21)
+
+> SELECT convert_from('\xc0'::bytea, 'BIG5')
+ERROR 22021: invalid byte sequence for encoding "BIG5": 0xc0
+
+> SELECT convert_to('😀', 'SJIS')
+ERROR 22P05: character with byte sequence 0xf0 0x9f 0x98 0x80 in encoding "UTF8" has no equivalent in encoding "SJIS"
+
+> SELECT convert_to('é', 'EUC_KR')
+ERROR 22P05: character with byte sequence 0xc3 0xa9 in encoding "UTF8" has no equivalent in encoding "EUC_KR"
+
+> SELECT convert_to('€', 'LATIN1')
+ERROR 22P05: character with byte sequence 0xe2 0x82 0xac in encoding "UTF8" has no equivalent in encoding "LATIN1"
+
+> SELECT convert_to('😀', 'BIG5')
+ERROR 22P05: character with byte sequence 0xf0 0x9f 0x98 0x80 in encoding "UTF8" has no equivalent in encoding "BIG5"
+
+> SELECT encode(convert('\xa4a2'::bytea, 'EUC_JP', 'SJIS'), 'hex'), encode(convert('\x82a0'::bytea, 'SJIS', 'EUC_JP'), 'hex'), encode(convert('\xa4a2'::bytea, 'EUC_JP', 'MULE_INTERNAL'), 'hex')
+encode:text | encode:text | encode:text
+82a0 | a4a2 | 92a4a2
+-- SELECT 1
+
+> SELECT encode(convert('\xc4a1'::bytea, 'EUC_TW', 'BIG5'), 'hex'), encode(convert('\xa440'::bytea, 'BIG5', 'EUC_TW'), 'hex'), encode(convert('\xa440'::bytea, 'BIG5', 'MULE_INTERNAL'), 'hex')
+encode:text | encode:text | encode:text
+a440 | c4a1 | 95c4a1
+-- SELECT 1
+
+> SELECT encode(convert('\xb0a1'::bytea, 'EUC_CN', 'MULE_INTERNAL'), 'hex'), encode(convert('\x93b0a1'::bytea, 'MULE_INTERNAL', 'EUC_KR'), 'hex'), encode(convert('\x92b0a1'::bytea, 'MULE_INTERNAL', 'EUC_JP'), 'hex')
+encode:text | encode:text | encode:text
+91b0a1 | b0a1 | b0a1
+-- SELECT 1
+
+> SELECT encode(convert('\xe9'::bytea, 'LATIN1', 'MULE_INTERNAL'), 'hex'), encode(convert('\x81e9'::bytea, 'MULE_INTERNAL', 'LATIN1'), 'hex'), encode(convert('\xc1'::bytea, 'KOI8R', 'WIN1251'), 'hex'), encode(convert('\xa5'::bytea, 'WIN1250', 'LATIN2'), 'hex')
+encode:text | encode:text | encode:text | encode:text
+81e9 | e9 | e0 | a1
+-- SELECT 1
+
+> SELECT encode(convert('\xa4f7'::bytea, 'EUC_JIS_2004', 'SHIFT_JIS_2004'), 'hex'), encode(convert('\x82f5'::bytea, 'SHIFT_JIS_2004', 'EUC_JIS_2004'), 'hex')
+encode:text | encode:text
+82f5 | a4f7
+-- SELECT 1
+
+> SELECT encode(convert('\xa4a2'::bytea, 'EUC_JP', 'SQL_ASCII'), 'hex'), encode(convert('\xa4'::bytea, 'SQL_ASCII', 'EUC_JP'), 'hex'), encode(convert('abc'::bytea, 'SQL_ASCII', 'UTF8'), 'hex')
+ERROR 22021: invalid byte sequence for encoding "EUC_JP": 0xa4
+
+> SELECT convert('\xa4a2'::bytea, 'EUC_JP', 'BIG5')
+ERROR 42883: default conversion function for encoding "EUC_JP" to "BIG5" does not exist
+
+> SELECT convert('\xa9a1'::bytea, 'EUC_JP', 'SJIS')
+convert:bytea
+\x8540
+-- SELECT 1
+
+> SELECT convert('\x8ea1'::bytea, 'MULE_INTERNAL', 'UTF8')
+ERROR 42883: default conversion function for encoding "MULE_INTERNAL" to "UTF8" does not exist
+
+> SELECT convert('\xff'::bytea, 'SQL_ASCII', 'UTF8')
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0xff
+
+> SELECT convert_from('\xe9'::bytea, 'latin1'), convert_from('\xe9'::bytea, 'iso-8859-1'), convert_from('\x82a0'::bytea, 'Shift_JIS')
+convert_from:text | convert_from:text | convert_from:text
+é | é | あ
+-- SELECT 1
+
+> SELECT convert_from('\xa4f7'::bytea, 'foo')
+ERROR 22023: invalid source encoding name "foo"
+
+> SELECT convert_to('x', 'foo')
+ERROR 22023: invalid destination encoding name "foo"
+
+> SELECT convert('\xa4f7'::bytea, 'EUC_JP', 'foo')
+ERROR 22023: invalid destination encoding name "foo"
+
+> SELECT convert('\xa4f7'::bytea, 'foo', 'EUC_JP')
+ERROR 22023: invalid source encoding name "foo"
+
+> SELECT length('\xa4a2a4a4'::bytea, 'EUC_JP'), length('\x8fa2afa4a2'::bytea, 'EUC_JP'), length('\x81308130a4a2'::bytea, 'GB18030'), length('abc'::bytea, 'LATIN1')
+length:int4 | length:int4 | length:int4 | length:int4
+2 | 2 | 2 | 3
+-- SELECT 1
+
+> SELECT length('\xa4'::bytea, 'EUC_JP')
+ERROR 22021: invalid byte sequence for encoding "EUC_JP": 0xa4
+
+> SELECT length('x'::bytea, 'nope')
+ERROR 22023: invalid encoding name "nope"
+
+> SELECT pg_encoding_max_length(6), pg_encoding_max_length(1), pg_encoding_max_length(39), pg_encoding_max_length(8), pg_encoding_max_length(100)
+pg_encoding_max_length:int4 | pg_encoding_max_length:int4 | pg_encoding_max_length:int4 | pg_encoding_max_length:int4 | pg_encoding_max_length:int4
+4 | 3 | 4 | 1 | NULL
+-- SELECT 1
+

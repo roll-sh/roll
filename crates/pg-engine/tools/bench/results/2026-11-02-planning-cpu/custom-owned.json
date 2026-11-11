@@ -1,0 +1,23 @@
+{
+  "pid": 841933,
+  "argv": [
+    "taskset",
+    "-c",
+    "28-31",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+    "--data",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/capture-20261102T022538Z/custom-data",
+    "--listen",
+    "127.0.0.1:53332",
+    "--password",
+    "pw",
+    "--cache-mb",
+    "2048",
+    "-c",
+    "maintenance_work_mem=256MB",
+    "-c",
+    "max_connections=100",
+    "-c",
+    "plan_cache_mode=force_custom_plan"
+  ]
+}

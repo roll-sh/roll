@@ -1,0 +1,339 @@
+> CREATE TABLE a103_t (id int PRIMARY KEY, k int, v text)
+-- CREATE TABLE
+
+> CREATE INDEX a103_t_k ON a103_t (k)
+-- CREATE INDEX
+
+> CREATE INDEX a103_t_kd ON a103_t (k DESC NULLS LAST, id)
+-- CREATE INDEX
+
+> INSERT INTO a103_t SELECT g, g % 7, 'v' || g FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> INSERT INTO a103_t VALUES (2001, NULL, 'null1'), (2002, NULL, 'null2')
+-- INSERT 0 2
+
+> UPDATE a103_t SET v = v || 'x' WHERE id % 5 = 0 AND k = 3
+-- UPDATE 57
+
+> VACUUM ANALYZE a103_t
+-- VACUUM
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> SELECT id, k FROM a103_t ORDER BY id DESC LIMIT 5
+id:int4 | k:int4
+2002 | NULL
+2001 | NULL
+2000 | 5
+1999 | 4
+1998 | 3
+-- SELECT 5
+
+> SELECT id, k FROM a103_t WHERE id < 1500 ORDER BY id DESC LIMIT 3
+id:int4 | k:int4
+1499 | 1
+1498 | 0
+1497 | 6
+-- SELECT 3
+
+> SELECT id, k FROM a103_t WHERE id <= 1500 AND id > 1490 ORDER BY id DESC
+id:int4 | k:int4
+1500 | 2
+1499 | 1
+1498 | 0
+1497 | 6
+1496 | 5
+1495 | 4
+1494 | 3
+1493 | 2
+1492 | 1
+1491 | 0
+-- SELECT 10
+
+> SELECT id, v FROM a103_t WHERE k = 3 ORDER BY k DESC LIMIT 6
+id:int4 | v:text
+3 | v3
+17 | v17
+24 | v24
+31 | v31
+38 | v38
+52 | v52
+-- SELECT 6
+
+> SELECT id, v FROM a103_t WHERE k = 3 ORDER BY k LIMIT 6
+id:int4 | v:text
+3 | v3
+17 | v17
+24 | v24
+31 | v31
+38 | v38
+52 | v52
+-- SELECT 6
+
+> SELECT id, k FROM a103_t WHERE k IN (2, 5) ORDER BY k DESC LIMIT 4
+id:int4 | k:int4
+1559 | 5
+1566 | 5
+1573 | 5
+1580 | 5
+-- SELECT 4
+
+> SELECT id, k FROM a103_t WHERE id = ANY (ARRAY[5, 1999, 77, 1000]) ORDER BY id DESC
+id:int4 | k:int4
+1999 | 4
+1000 | 6
+77 | 0
+5 | 5
+-- SELECT 4
+
+> SELECT id, k FROM a103_t WHERE id = ANY (ARRAY[5, 1999, 77, 1000]) ORDER BY id LIMIT 2
+id:int4 | k:int4
+5 | 5
+77 | 0
+-- SELECT 2
+
+> SELECT k, id FROM a103_t ORDER BY k DESC NULLS LAST, id LIMIT 3
+k:int4 | id:int4
+6 | 6
+6 | 13
+6 | 20
+-- SELECT 3
+
+> SELECT k, id FROM a103_t ORDER BY k NULLS FIRST, id DESC LIMIT 3
+k:int4 | id:int4
+NULL | 2002
+NULL | 2001
+0 | 1995
+-- SELECT 3
+
+> SELECT k, id FROM a103_t WHERE k IS NULL ORDER BY k DESC NULLS LAST, id DESC
+k:int4 | id:int4
+NULL | 2002
+NULL | 2001
+-- SELECT 2
+
+> SELECT min(id), max(id), max(k), min(k) FROM a103_t
+min:int4 | max:int4 | max:int4 | min:int4
+1 | 2002 | 6 | 0
+-- SELECT 1
+
+> SELECT max(id) FROM a103_t WHERE id < 1000
+max:int4
+999
+-- SELECT 1
+
+> SELECT EXISTS (SELECT 1 FROM a103_t WHERE k = 6 AND id > 1990)
+exists:bool
+t
+-- SELECT 1
+
+> SELECT o.x, (SELECT t.id FROM a103_t t WHERE t.id < o.x ORDER BY t.id DESC LIMIT 1) FROM (VALUES (10), (1500), (1)) o(x)
+x:int4 | id:int4
+10 | 9
+1500 | 1499
+1 | NULL
+-- SELECT 3
+
+> SELECT o.x, t.id FROM (VALUES (3), (5)) o(x) CROSS JOIN LATERAL (SELECT id FROM a103_t WHERE k = o.x ORDER BY k DESC, id DESC LIMIT 2) t
+x:int4 | id:int4
+3 | 1998
+3 | 1991
+5 | 2000
+5 | 1993
+-- SELECT 4
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c SCROLL CURSOR FOR SELECT id FROM a103_t WHERE id > 1990 ORDER BY id DESC
+-- DECLARE CURSOR
+
+> FETCH 3 FROM c
+id:int4
+2000
+2001
+2002
+-- FETCH 3
+
+> FETCH BACKWARD 2 FROM c
+id:int4
+2001
+2002
+-- FETCH 2
+
+> FETCH LAST FROM c
+id:int4
+1991
+-- FETCH 1
+
+> FETCH PRIOR FROM c
+id:int4
+1992
+-- FETCH 1
+
+> FETCH ABSOLUTE 2 FROM c
+id:int4
+2001
+-- FETCH 1
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a103_t VALUES (5000, 3, 'new')
+-- INSERT 0 1
+
+> DELETE FROM a103_t WHERE id = 2000
+-- DELETE 1
+
+> UPDATE a103_t SET id = 4999 WHERE id = 1999
+-- UPDATE 1
+
+> SELECT id, k FROM a103_t ORDER BY id DESC LIMIT 4
+id:int4 | k:int4
+5000 | 3
+4999 | 4
+2002 | NULL
+2001 | NULL
+-- SELECT 4
+
+> SELECT id, v FROM a103_t WHERE k = 3 ORDER BY k DESC, id DESC LIMIT 2
+id:int4 | v:text
+5000 | new
+1998 | v1998
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT id FROM a103_t WHERE k = 4 ORDER BY k DESC LIMIT 2 FOR UPDATE SKIP LOCKED
+id:int4
+4
+11
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a103_t ORDER BY id DESC LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Index Only Scan Backward using a103_t_pkey on a103_t
+-- EXPLAIN
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT id, v FROM a103_t WHERE id < 1500 ORDER BY id DESC LIMIT 3
+QUERY PLAN:text
+Limit (actual rows=3.00 loops=1)
+  ->  Index Scan Backward using a103_t_pkey on a103_t (actual rows=3.00 loops=1)
+        Index Cond: (id < 1500)
+        Index Searches: 1
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> DROP TABLE a103_t
+-- DROP TABLE
+
+> CREATE TABLE a103_d (id int PRIMARY KEY, pad text) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO a103_d SELECT g, repeat('x', 40) FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> DELETE FROM a103_d WHERE id <= 2900 AND id <> 1500
+-- DELETE 2899
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT id FROM a103_d ORDER BY id LIMIT 1
+id:int4
+1500
+-- SELECT 1
+
+> SELECT id FROM a103_d WHERE id > 2950 ORDER BY id DESC LIMIT 1
+id:int4
+3000
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> INSERT INTO a103_d SELECT g, repeat('y', 40) FROM generate_series(1, 2900) g WHERE g <> 1500
+-- INSERT 0 2899
+
+> SELECT pg_relation_size('a103_d_pkey') / 8192 AS pages
+pages:int8
+11
+-- SELECT 1
+
+> DROP TABLE a103_d
+-- DROP TABLE
+
+> CREATE TABLE a103_s (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO a103_s SELECT g, 'v' || g FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> VACUUM ANALYZE a103_s
+-- VACUUM
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> SELECT v FROM a103_s ORDER BY id DESC LIMIT 3
+v:text
+v100
+v99
+v98
+-- SELECT 3
+
+> SELECT v FROM a103_s WHERE id > 10 ORDER BY id LIMIT 2
+v:text
+v11
+v12
+-- SELECT 2
+
+> SELECT v FROM a103_s WHERE id < 90 ORDER BY id DESC LIMIT 2
+v:text
+v89
+v88
+-- SELECT 2
+
+> SELECT v FROM a103_s WHERE id = ANY (ARRAY[3, 50, 7]) ORDER BY id DESC LIMIT 2
+v:text
+v50
+v7
+-- SELECT 2
+
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> SELECT idx_scan, idx_tup_read, idx_tup_fetch FROM pg_stat_user_indexes WHERE indexrelname = 'a103_s_pkey'
+idx_scan:int8 | idx_tup_read:int8 | idx_tup_fetch:int8
+4 | 9 | 9
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> DROP TABLE a103_s
+-- DROP TABLE
+

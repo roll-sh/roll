@@ -1,0 +1,169 @@
+> create table shut (id int, t text)
+-- CREATE TABLE
+
+> insert into shut select g, md5(g::text) from generate_series(1, 12000) g
+-- INSERT 0 12000
+
+> analyze shut
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> set work_mem = '64kB'
+-- SET
+
+> set temp_file_limit = '224kB'
+-- SET
+
+> select a.id from shut a join shut b on a.id = b.id limit 1
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> select count(*) from (select a.id from shut a join shut b on a.id = b.id limit 1) s
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> select * from (select a.id from shut a join shut b on a.id = b.id limit 1) s order by id
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> select * from ((select a.id from shut a join shut b on a.id = b.id limit 1) union all select 99999) s limit 1
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> with c as materialized (select a.id from shut a join shut b on a.id = b.id) select id from c limit 1
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> select a.id from shut a join (select x.id from shut x join shut y on x.id = y.id limit 1) b on a.id = b.id limit 1
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> select 1 / (n - 1)::int from (select count(*) n from (select a.id from shut a join shut b on a.id = b.id limit 1) s) t
+ERROR 22012: division by zero
+
+> select 1 / (a.id - 14) from shut a join shut b on a.id = b.id limit 1
+ERROR 22012: division by zero
+
+> begin
+-- BEGIN
+
+> declare c cursor for select a.id from shut a join shut b on a.id = b.id limit 1
+-- DECLARE CURSOR
+
+> fetch all c
+id:int4
+14
+-- FETCH 1
+
+> close c
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c cursor for select a.id from shut a join shut b on a.id = b.id limit 1
+-- DECLARE CURSOR
+
+> fetch 1 c
+id:int4
+14
+-- FETCH 1
+
+> close c
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare c cursor for select a.id from shut a join shut b on a.id = b.id limit 1
+-- DECLARE CURSOR
+
+> fetch 1 c
+id:int4
+14
+-- FETCH 1
+
+> commit
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> begin
+-- BEGIN
+
+> declare c cursor with hold for select a.id from shut a join shut b on a.id = b.id limit 1
+-- DECLARE CURSOR
+
+> fetch 1 c
+id:int4
+14
+-- FETCH 1
+
+> commit
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+
+> create function shut_catch() returns int language plpgsql as $$
+> begin
+>   perform 1 / (n - 1)::int from (select count(*) n from (select a.id from shut a join shut b on a.id = b.id limit 1) s) t;
+>   return 0;
+> exception when division_by_zero then return 42;
+> end
+> $$
+-- CREATE FUNCTION
+
+> select shut_catch()
+shut_catch:int4
+42
+-- SELECT 1
+
+> drop function shut_catch()
+-- DROP FUNCTION
+
+> create function shut_after() returns int language plpgsql as $$
+> begin
+>   perform a.id from shut a join shut b on a.id = b.id limit 1;
+>   raise division_by_zero;
+> end
+> $$
+-- CREATE FUNCTION
+
+> select shut_after()
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+CONTEXT: SQL statement "SELECT a.id from shut a join shut b on a.id = b.id limit 1"
+CONTEXT: PL/pgSQL function shut_after() line 3 at PERFORM
+
+> drop function shut_after()
+-- DROP FUNCTION
+
+> create function shut_sql() returns int language sql volatile as $$select a.id from shut a join shut b on a.id = b.id limit 1$$
+-- CREATE FUNCTION
+
+> select 1 / (shut_sql() - 14)
+ERROR 53400: temporary file size exceeds "temp_file_limit" (224kB)
+CONTEXT: SQL function "shut_sql" statement 1
+
+> drop function shut_sql()
+-- DROP FUNCTION
+
+> reset temp_file_limit
+-- RESET
+
+> with c as materialized (select a.id from shut a join shut b on a.id = b.id) select count(*) from (select id from c limit 1) a, (select id from c offset 1 limit 1) b
+count:int8
+1
+-- SELECT 1
+
+> select a.id from shut a join shut b on a.id = b.id limit 1
+id:int4
+14
+-- SELECT 1
+
+> drop table shut
+-- DROP TABLE
+

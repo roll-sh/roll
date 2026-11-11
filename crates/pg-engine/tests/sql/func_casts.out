@@ -1,0 +1,49 @@
+> select int4('x')
+ERROR 22P02: invalid input syntax for type integer: "x" (at 13)
+
+> select date('x')
+ERROR 22007: invalid input syntax for type date: "x" (at 13)
+
+> select inet('zz')
+ERROR 22P02: invalid input syntax for type inet: "zz" (at 13)
+
+> select text(1)
+text:text
+1
+-- SELECT 1
+
+> select int4('12'), text(true), varchar(12.5), bool('t'), xml('<a/>'), xml('<a')
+ERROR 42601: syntax error at or near "12.5" (at 40)
+
+> select int8(int2 '3'), float8(1), date(timestamp '2020-01-02 03:04')
+int8:int8 | float8:float8 | date:date
+3 | 1 | 2020-01-02
+-- SELECT 1
+
+> create table gx_f(a int, b text)
+-- CREATE TABLE
+
+> create view gx_fv as select text(a) t, int4(b) i, bpchar(a) c from gx_f
+-- CREATE VIEW
+
+> select pg_get_viewdef('gx_fv')
+pg_get_viewdef:text
+ SELECT (a)::text AS t,
+    (b)::integer AS i,
+    (a)::bpchar AS c
+   FROM gx_f;
+-- SELECT 1
+
+> select int4(1.5::numeric), text(row(1,2))
+ERROR 42883: function text(record) does not exist (at 28)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> select timestamptz('2020-01-01'), interval('1 day')
+ERROR 42601: syntax error at or near "'1 day'" (at 44)
+
+> drop view gx_fv
+-- DROP VIEW
+
+> drop table gx_f
+-- DROP TABLE
+

@@ -1,0 +1,1170 @@
+> CREATE TABLE a40_pt (a int, b int, c text) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a40_pt1 PARTITION OF a40_pt FOR VALUES FROM (0) TO (50)
+-- CREATE TABLE
+
+> CREATE TABLE a40_pt2 PARTITION OF a40_pt FOR VALUES FROM (50) TO (100) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE a40_pt2a PARTITION OF a40_pt2 FOR VALUES IN ('x', 'y')
+-- CREATE TABLE
+
+> CREATE TABLE a40_pt2b PARTITION OF a40_pt2 DEFAULT
+-- CREATE TABLE
+
+> INSERT INTO a40_pt SELECT i, i % 7, CASE WHEN i % 5 = 0 THEN NULL WHEN i % 2 = 0 THEN 'x' ELSE 'z' END FROM generate_series(0, 99) i
+-- INSERT 0 100
+
+> CREATE TABLE a40_ih (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE a40_ih_c1 (x int) INHERITS (a40_ih)
+-- CREATE TABLE
+
+> CREATE TABLE a40_ih_c2 () INHERITS (a40_ih)
+-- CREATE TABLE
+
+> INSERT INTO a40_ih SELECT i, i % 4 FROM generate_series(0, 20) i
+-- INSERT 0 21
+
+> INSERT INTO a40_ih_c1 SELECT i, i % 3, i FROM generate_series(21, 40) i
+-- INSERT 0 20
+
+> INSERT INTO a40_ih_c2 SELECT i, i % 5 FROM generate_series(41, 60) i
+-- INSERT 0 20
+
+> CREATE TABLE a40_k (v int, w int)
+-- CREATE TABLE
+
+> INSERT INTO a40_k SELECT i * 3, i FROM generate_series(0, 30) i
+-- INSERT 0 31
+
+> ANALYZE a40_pt
+-- ANALYZE
+
+> ANALYZE a40_ih
+-- ANALYZE
+
+> ANALYZE a40_ih_c1
+-- ANALYZE
+
+> ANALYZE a40_ih_c2
+-- ANALYZE
+
+> ANALYZE a40_k
+-- ANALYZE
+
+> BEGIN
+-- BEGIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM a40_pt WHERE EXISTS (SELECT 1 FROM a40_k k WHERE k.v = a40_pt.a)
+QUERY PLAN:text
+Delete on a40_pt
+  Delete on a40_pt1 a40_pt_1
+  Delete on a40_pt2a a40_pt_2
+  Delete on a40_pt2b a40_pt_3
+  ->  Hash Semi Join
+        Hash Cond: (a40_pt.a = k.v)
+        ->  Append
+              ->  Seq Scan on a40_pt1 a40_pt_1
+              ->  Seq Scan on a40_pt2a a40_pt_2
+              ->  Seq Scan on a40_pt2b a40_pt_3
+        ->  Hash
+              ->  Seq Scan on a40_k k
+-- EXPLAIN
+
+> DELETE FROM a40_pt WHERE EXISTS (SELECT 1 FROM a40_k k WHERE k.v = a40_pt.a) RETURNING tableoid::regclass, *
+tableoid:regclass | a:int4 | b:int4 | c:text
+a40_pt1 | 0 | 0 | NULL
+a40_pt1 | 12 | 5 | x
+a40_pt1 | 15 | 1 | NULL
+a40_pt1 | 18 | 4 | x
+a40_pt1 | 21 | 0 | z
+a40_pt1 | 24 | 3 | x
+a40_pt1 | 27 | 6 | z
+a40_pt1 | 3 | 3 | z
+a40_pt1 | 30 | 2 | NULL
+a40_pt1 | 33 | 5 | z
+a40_pt1 | 36 | 1 | x
+a40_pt1 | 39 | 4 | z
+a40_pt1 | 42 | 0 | x
+a40_pt1 | 45 | 3 | NULL
+a40_pt1 | 48 | 6 | x
+a40_pt1 | 6 | 6 | x
+a40_pt1 | 9 | 2 | z
+a40_pt2a | 54 | 5 | x
+a40_pt2a | 66 | 3 | x
+a40_pt2a | 72 | 2 | x
+a40_pt2a | 78 | 1 | x
+a40_pt2a | 84 | 0 | x
+a40_pt2b | 51 | 2 | z
+a40_pt2b | 57 | 1 | z
+a40_pt2b | 60 | 4 | NULL
+a40_pt2b | 63 | 0 | z
+a40_pt2b | 69 | 6 | z
+a40_pt2b | 75 | 5 | NULL
+a40_pt2b | 81 | 4 | z
+a40_pt2b | 87 | 3 | z
+a40_pt2b | 90 | 6 | NULL
+-- DELETE 31
+
+> SELECT tableoid::regclass, * FROM a40_pt ORDER BY a
+tableoid:regclass | a:int4 | b:int4 | c:text
+a40_pt1 | 1 | 1 | z
+a40_pt1 | 2 | 2 | x
+a40_pt1 | 4 | 4 | x
+a40_pt1 | 5 | 5 | NULL
+a40_pt1 | 7 | 0 | z
+a40_pt1 | 8 | 1 | x
+a40_pt1 | 10 | 3 | NULL
+a40_pt1 | 11 | 4 | z
+a40_pt1 | 13 | 6 | z
+a40_pt1 | 14 | 0 | x
+a40_pt1 | 16 | 2 | x
+a40_pt1 | 17 | 3 | z
+a40_pt1 | 19 | 5 | z
+a40_pt1 | 20 | 6 | NULL
+a40_pt1 | 22 | 1 | x
+a40_pt1 | 23 | 2 | z
+a40_pt1 | 25 | 4 | NULL
+a40_pt1 | 26 | 5 | x
+a40_pt1 | 28 | 0 | x
+a40_pt1 | 29 | 1 | z
+a40_pt1 | 31 | 3 | z
+a40_pt1 | 32 | 4 | x
+a40_pt1 | 34 | 6 | x
+a40_pt1 | 35 | 0 | NULL
+a40_pt1 | 37 | 2 | z
+a40_pt1 | 38 | 3 | x
+a40_pt1 | 40 | 5 | NULL
+a40_pt1 | 41 | 6 | z
+a40_pt1 | 43 | 1 | z
+a40_pt1 | 44 | 2 | x
+a40_pt1 | 46 | 4 | x
+a40_pt1 | 47 | 5 | z
+a40_pt1 | 49 | 0 | z
+a40_pt2b | 50 | 1 | NULL
+a40_pt2a | 52 | 3 | x
+a40_pt2b | 53 | 4 | z
+a40_pt2b | 55 | 6 | NULL
+a40_pt2a | 56 | 0 | x
+a40_pt2a | 58 | 2 | x
+a40_pt2b | 59 | 3 | z
+a40_pt2b | 61 | 5 | z
+a40_pt2a | 62 | 6 | x
+a40_pt2a | 64 | 1 | x
+a40_pt2b | 65 | 2 | NULL
+a40_pt2b | 67 | 4 | z
+a40_pt2a | 68 | 5 | x
+a40_pt2b | 70 | 0 | NULL
+a40_pt2b | 71 | 1 | z
+a40_pt2b | 73 | 3 | z
+a40_pt2a | 74 | 4 | x
+a40_pt2a | 76 | 6 | x
+a40_pt2b | 77 | 0 | z
+a40_pt2b | 79 | 2 | z
+a40_pt2b | 80 | 3 | NULL
+a40_pt2a | 82 | 5 | x
+a40_pt2b | 83 | 6 | z
+a40_pt2b | 85 | 1 | NULL
+a40_pt2a | 86 | 2 | x
+a40_pt2a | 88 | 4 | x
+a40_pt2b | 89 | 5 | z
+a40_pt2b | 91 | 0 | z
+a40_pt2a | 92 | 1 | x
+a40_pt2b | 93 | 2 | z
+a40_pt2a | 94 | 3 | x
+a40_pt2b | 95 | 4 | NULL
+a40_pt2a | 96 | 5 | x
+a40_pt2b | 97 | 6 | z
+a40_pt2a | 98 | 0 | x
+a40_pt2b | 99 | 1 | z
+-- SELECT 69
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> EXPLAIN (COSTS OFF) UPDATE a40_pt SET b = b + 100 WHERE NOT EXISTS (SELECT 1 FROM a40_k k WHERE k.v = a40_pt.a AND k.w > 3) AND c IS NOT NULL
+QUERY PLAN:text
+Update on a40_pt
+  Update on a40_pt1 a40_pt_1
+  Update on a40_pt2a a40_pt_2
+  Update on a40_pt2b a40_pt_3
+  ->  Hash Anti Join
+        Hash Cond: (a40_pt.a = k.v)
+        ->  Append
+              ->  Seq Scan on a40_pt1 a40_pt_1
+                    Filter: (c IS NOT NULL)
+              ->  Seq Scan on a40_pt2a a40_pt_2
+                    Filter: (c IS NOT NULL)
+              ->  Seq Scan on a40_pt2b a40_pt_3
+                    Filter: (c IS NOT NULL)
+        ->  Hash
+              ->  Seq Scan on a40_k k
+                    Filter: (w > 3)
+-- EXPLAIN
+
+> UPDATE a40_pt SET b = b + 100 WHERE NOT EXISTS (SELECT 1 FROM a40_k k WHERE k.v = a40_pt.a AND k.w > 3) AND c IS NOT NULL
+-- UPDATE 59
+
+> SELECT tableoid::regclass, * FROM a40_pt ORDER BY a
+tableoid:regclass | a:int4 | b:int4 | c:text
+a40_pt1 | 0 | 0 | NULL
+a40_pt1 | 1 | 101 | z
+a40_pt1 | 2 | 102 | x
+a40_pt1 | 3 | 103 | z
+a40_pt1 | 4 | 104 | x
+a40_pt1 | 5 | 5 | NULL
+a40_pt1 | 6 | 106 | x
+a40_pt1 | 7 | 100 | z
+a40_pt1 | 8 | 101 | x
+a40_pt1 | 9 | 102 | z
+a40_pt1 | 10 | 3 | NULL
+a40_pt1 | 11 | 104 | z
+a40_pt1 | 12 | 5 | x
+a40_pt1 | 13 | 106 | z
+a40_pt1 | 14 | 100 | x
+a40_pt1 | 15 | 1 | NULL
+a40_pt1 | 16 | 102 | x
+a40_pt1 | 17 | 103 | z
+a40_pt1 | 18 | 4 | x
+a40_pt1 | 19 | 105 | z
+a40_pt1 | 20 | 6 | NULL
+a40_pt1 | 21 | 0 | z
+a40_pt1 | 22 | 101 | x
+a40_pt1 | 23 | 102 | z
+a40_pt1 | 24 | 3 | x
+a40_pt1 | 25 | 4 | NULL
+a40_pt1 | 26 | 105 | x
+a40_pt1 | 27 | 6 | z
+a40_pt1 | 28 | 100 | x
+a40_pt1 | 29 | 101 | z
+a40_pt1 | 30 | 2 | NULL
+a40_pt1 | 31 | 103 | z
+a40_pt1 | 32 | 104 | x
+a40_pt1 | 33 | 5 | z
+a40_pt1 | 34 | 106 | x
+a40_pt1 | 35 | 0 | NULL
+a40_pt1 | 36 | 1 | x
+a40_pt1 | 37 | 102 | z
+a40_pt1 | 38 | 103 | x
+a40_pt1 | 39 | 4 | z
+a40_pt1 | 40 | 5 | NULL
+a40_pt1 | 41 | 106 | z
+a40_pt1 | 42 | 0 | x
+a40_pt1 | 43 | 101 | z
+a40_pt1 | 44 | 102 | x
+a40_pt1 | 45 | 3 | NULL
+a40_pt1 | 46 | 104 | x
+a40_pt1 | 47 | 105 | z
+a40_pt1 | 48 | 6 | x
+a40_pt1 | 49 | 100 | z
+a40_pt2b | 50 | 1 | NULL
+a40_pt2b | 51 | 2 | z
+a40_pt2a | 52 | 103 | x
+a40_pt2b | 53 | 104 | z
+a40_pt2a | 54 | 5 | x
+a40_pt2b | 55 | 6 | NULL
+a40_pt2a | 56 | 100 | x
+a40_pt2b | 57 | 1 | z
+a40_pt2a | 58 | 102 | x
+a40_pt2b | 59 | 103 | z
+a40_pt2b | 60 | 4 | NULL
+a40_pt2b | 61 | 105 | z
+a40_pt2a | 62 | 106 | x
+a40_pt2b | 63 | 0 | z
+a40_pt2a | 64 | 101 | x
+a40_pt2b | 65 | 2 | NULL
+a40_pt2a | 66 | 3 | x
+a40_pt2b | 67 | 104 | z
+a40_pt2a | 68 | 105 | x
+a40_pt2b | 69 | 6 | z
+a40_pt2b | 70 | 0 | NULL
+a40_pt2b | 71 | 101 | z
+a40_pt2a | 72 | 2 | x
+a40_pt2b | 73 | 103 | z
+a40_pt2a | 74 | 104 | x
+a40_pt2b | 75 | 5 | NULL
+a40_pt2a | 76 | 106 | x
+a40_pt2b | 77 | 100 | z
+a40_pt2a | 78 | 1 | x
+a40_pt2b | 79 | 102 | z
+a40_pt2b | 80 | 3 | NULL
+a40_pt2b | 81 | 4 | z
+a40_pt2a | 82 | 105 | x
+a40_pt2b | 83 | 106 | z
+a40_pt2a | 84 | 0 | x
+a40_pt2b | 85 | 1 | NULL
+a40_pt2a | 86 | 102 | x
+a40_pt2b | 87 | 3 | z
+a40_pt2a | 88 | 104 | x
+a40_pt2b | 89 | 105 | z
+a40_pt2b | 90 | 6 | NULL
+a40_pt2b | 91 | 100 | z
+a40_pt2a | 92 | 101 | x
+a40_pt2b | 93 | 102 | z
+a40_pt2a | 94 | 103 | x
+a40_pt2b | 95 | 4 | NULL
+a40_pt2a | 96 | 105 | x
+a40_pt2b | 97 | 106 | z
+a40_pt2a | 98 | 100 | x
+a40_pt2b | 99 | 101 | z
+-- SELECT 100
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> EXPLAIN (COSTS OFF) UPDATE a40_pt SET a = a + 50 WHERE a IN (SELECT v FROM a40_k k WHERE w < 10)
+QUERY PLAN:text
+Update on a40_pt
+  Update on a40_pt1 a40_pt_1
+  Update on a40_pt2a a40_pt_2
+  Update on a40_pt2b a40_pt_3
+  ->  Hash Semi Join
+        Hash Cond: (a40_pt.a = k.v)
+        ->  Append
+              ->  Seq Scan on a40_pt1 a40_pt_1
+              ->  Seq Scan on a40_pt2a a40_pt_2
+              ->  Seq Scan on a40_pt2b a40_pt_3
+        ->  Hash
+              ->  Seq Scan on a40_k k
+                    Filter: (w < 10)
+-- EXPLAIN
+
+> UPDATE a40_pt SET a = a + 50 WHERE a IN (SELECT v FROM a40_k k WHERE w < 10) RETURNING tableoid::regclass, *
+tableoid:regclass | a:int4 | b:int4 | c:text
+a40_pt2a | 56 | 6 | x
+a40_pt2a | 62 | 5 | x
+a40_pt2a | 68 | 4 | x
+a40_pt2a | 74 | 3 | x
+a40_pt2b | 50 | 0 | NULL
+a40_pt2b | 53 | 3 | z
+a40_pt2b | 59 | 2 | z
+a40_pt2b | 65 | 1 | NULL
+a40_pt2b | 71 | 0 | z
+a40_pt2b | 77 | 6 | z
+-- UPDATE 10
+
+> SELECT tableoid::regclass, * FROM a40_pt ORDER BY a, b
+tableoid:regclass | a:int4 | b:int4 | c:text
+a40_pt1 | 1 | 1 | z
+a40_pt1 | 2 | 2 | x
+a40_pt1 | 4 | 4 | x
+a40_pt1 | 5 | 5 | NULL
+a40_pt1 | 7 | 0 | z
+a40_pt1 | 8 | 1 | x
+a40_pt1 | 10 | 3 | NULL
+a40_pt1 | 11 | 4 | z
+a40_pt1 | 13 | 6 | z
+a40_pt1 | 14 | 0 | x
+a40_pt1 | 16 | 2 | x
+a40_pt1 | 17 | 3 | z
+a40_pt1 | 19 | 5 | z
+a40_pt1 | 20 | 6 | NULL
+a40_pt1 | 22 | 1 | x
+a40_pt1 | 23 | 2 | z
+a40_pt1 | 25 | 4 | NULL
+a40_pt1 | 26 | 5 | x
+a40_pt1 | 28 | 0 | x
+a40_pt1 | 29 | 1 | z
+a40_pt1 | 30 | 2 | NULL
+a40_pt1 | 31 | 3 | z
+a40_pt1 | 32 | 4 | x
+a40_pt1 | 33 | 5 | z
+a40_pt1 | 34 | 6 | x
+a40_pt1 | 35 | 0 | NULL
+a40_pt1 | 36 | 1 | x
+a40_pt1 | 37 | 2 | z
+a40_pt1 | 38 | 3 | x
+a40_pt1 | 39 | 4 | z
+a40_pt1 | 40 | 5 | NULL
+a40_pt1 | 41 | 6 | z
+a40_pt1 | 42 | 0 | x
+a40_pt1 | 43 | 1 | z
+a40_pt1 | 44 | 2 | x
+a40_pt1 | 45 | 3 | NULL
+a40_pt1 | 46 | 4 | x
+a40_pt1 | 47 | 5 | z
+a40_pt1 | 48 | 6 | x
+a40_pt1 | 49 | 0 | z
+a40_pt2b | 50 | 0 | NULL
+a40_pt2b | 50 | 1 | NULL
+a40_pt2b | 51 | 2 | z
+a40_pt2a | 52 | 3 | x
+a40_pt2b | 53 | 3 | z
+a40_pt2b | 53 | 4 | z
+a40_pt2a | 54 | 5 | x
+a40_pt2b | 55 | 6 | NULL
+a40_pt2a | 56 | 0 | x
+a40_pt2a | 56 | 6 | x
+a40_pt2b | 57 | 1 | z
+a40_pt2a | 58 | 2 | x
+a40_pt2b | 59 | 2 | z
+a40_pt2b | 59 | 3 | z
+a40_pt2b | 60 | 4 | NULL
+a40_pt2b | 61 | 5 | z
+a40_pt2a | 62 | 5 | x
+a40_pt2a | 62 | 6 | x
+a40_pt2b | 63 | 0 | z
+a40_pt2a | 64 | 1 | x
+a40_pt2b | 65 | 1 | NULL
+a40_pt2b | 65 | 2 | NULL
+a40_pt2a | 66 | 3 | x
+a40_pt2b | 67 | 4 | z
+a40_pt2a | 68 | 4 | x
+a40_pt2a | 68 | 5 | x
+a40_pt2b | 69 | 6 | z
+a40_pt2b | 70 | 0 | NULL
+a40_pt2b | 71 | 0 | z
+a40_pt2b | 71 | 1 | z
+a40_pt2a | 72 | 2 | x
+a40_pt2b | 73 | 3 | z
+a40_pt2a | 74 | 3 | x
+a40_pt2a | 74 | 4 | x
+a40_pt2b | 75 | 5 | NULL
+a40_pt2a | 76 | 6 | x
+a40_pt2b | 77 | 0 | z
+a40_pt2b | 77 | 6 | z
+a40_pt2a | 78 | 1 | x
+a40_pt2b | 79 | 2 | z
+a40_pt2b | 80 | 3 | NULL
+a40_pt2b | 81 | 4 | z
+a40_pt2a | 82 | 5 | x
+a40_pt2b | 83 | 6 | z
+a40_pt2a | 84 | 0 | x
+a40_pt2b | 85 | 1 | NULL
+a40_pt2a | 86 | 2 | x
+a40_pt2b | 87 | 3 | z
+a40_pt2a | 88 | 4 | x
+a40_pt2b | 89 | 5 | z
+a40_pt2b | 90 | 6 | NULL
+a40_pt2b | 91 | 0 | z
+a40_pt2a | 92 | 1 | x
+a40_pt2b | 93 | 2 | z
+a40_pt2a | 94 | 3 | x
+a40_pt2b | 95 | 4 | NULL
+a40_pt2a | 96 | 5 | x
+a40_pt2b | 97 | 6 | z
+a40_pt2a | 98 | 0 | x
+a40_pt2b | 99 | 1 | z
+-- SELECT 100
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> EXPLAIN (COSTS OFF) DELETE FROM a40_ih WHERE EXISTS (SELECT 1 FROM a40_k k, LATERAL (SELECT k.w FROM a40_k k2 LIMIT 2) ss WHERE k.v = a40_ih.a)
+QUERY PLAN:text
+Delete on a40_ih
+  Delete on a40_ih a40_ih_1
+  Delete on a40_ih_c1 a40_ih_2
+  Delete on a40_ih_c2 a40_ih_3
+  ->  Hash Semi Join
+        Hash Cond: (a40_ih.a = k.v)
+        ->  Append
+              ->  Seq Scan on a40_ih a40_ih_1
+              ->  Seq Scan on a40_ih_c1 a40_ih_2
+              ->  Seq Scan on a40_ih_c2 a40_ih_3
+        ->  Hash
+              ->  Nested Loop
+                    ->  Seq Scan on a40_k k
+                    ->  Subquery Scan on ss
+                          ->  Limit
+                                ->  Seq Scan on a40_k k2
+-- EXPLAIN
+
+> DELETE FROM a40_ih WHERE EXISTS (SELECT 1 FROM a40_k k, LATERAL (SELECT k.w FROM a40_k k2 LIMIT 2) ss WHERE k.v = a40_ih.a) RETURNING tableoid::regclass, *
+tableoid:regclass | a:int4 | b:int4
+a40_ih | 0 | 0
+a40_ih | 12 | 0
+a40_ih | 15 | 3
+a40_ih | 18 | 2
+a40_ih | 3 | 3
+a40_ih | 6 | 2
+a40_ih | 9 | 1
+a40_ih_c1 | 21 | 0
+a40_ih_c1 | 24 | 0
+a40_ih_c1 | 27 | 0
+a40_ih_c1 | 30 | 0
+a40_ih_c1 | 33 | 0
+a40_ih_c1 | 36 | 0
+a40_ih_c1 | 39 | 0
+a40_ih_c2 | 42 | 2
+a40_ih_c2 | 45 | 0
+a40_ih_c2 | 48 | 3
+a40_ih_c2 | 51 | 1
+a40_ih_c2 | 54 | 4
+a40_ih_c2 | 57 | 2
+a40_ih_c2 | 60 | 0
+-- DELETE 21
+
+> SELECT tableoid::regclass, * FROM a40_ih ORDER BY a
+tableoid:regclass | a:int4 | b:int4
+a40_ih | 1 | 1
+a40_ih | 2 | 2
+a40_ih | 4 | 0
+a40_ih | 5 | 1
+a40_ih | 7 | 3
+a40_ih | 8 | 0
+a40_ih | 10 | 2
+a40_ih | 11 | 3
+a40_ih | 13 | 1
+a40_ih | 14 | 2
+a40_ih | 16 | 0
+a40_ih | 17 | 1
+a40_ih | 19 | 3
+a40_ih | 20 | 0
+a40_ih_c1 | 22 | 1
+a40_ih_c1 | 23 | 2
+a40_ih_c1 | 25 | 1
+a40_ih_c1 | 26 | 2
+a40_ih_c1 | 28 | 1
+a40_ih_c1 | 29 | 2
+a40_ih_c1 | 31 | 1
+a40_ih_c1 | 32 | 2
+a40_ih_c1 | 34 | 1
+a40_ih_c1 | 35 | 2
+a40_ih_c1 | 37 | 1
+a40_ih_c1 | 38 | 2
+a40_ih_c1 | 40 | 1
+a40_ih_c2 | 41 | 1
+a40_ih_c2 | 43 | 3
+a40_ih_c2 | 44 | 4
+a40_ih_c2 | 46 | 1
+a40_ih_c2 | 47 | 2
+a40_ih_c2 | 49 | 4
+a40_ih_c2 | 50 | 0
+a40_ih_c2 | 52 | 2
+a40_ih_c2 | 53 | 3
+a40_ih_c2 | 55 | 0
+a40_ih_c2 | 56 | 1
+a40_ih_c2 | 58 | 3
+a40_ih_c2 | 59 | 4
+-- SELECT 40
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> EXPLAIN (COSTS OFF) UPDATE a40_ih SET b = -b WHERE EXISTS (SELECT 1 FROM (SELECT v FROM a40_k k ORDER BY v LIMIT 8) s WHERE s.v = a40_ih.a)
+QUERY PLAN:text
+Update on a40_ih
+  Update on a40_ih a40_ih_1
+  Update on a40_ih_c1 a40_ih_2
+  Update on a40_ih_c2 a40_ih_3
+  ->  Hash Semi Join
+        Hash Cond: (a40_ih.a = s.v)
+        ->  Append
+              ->  Seq Scan on a40_ih a40_ih_1
+              ->  Seq Scan on a40_ih_c1 a40_ih_2
+              ->  Seq Scan on a40_ih_c2 a40_ih_3
+        ->  Hash
+              ->  Subquery Scan on s
+                    ->  Limit
+                          ->  Sort
+                                Sort Key: k.v
+                                ->  Seq Scan on a40_k k
+-- EXPLAIN
+
+> UPDATE a40_ih SET b = -b WHERE EXISTS (SELECT 1 FROM (SELECT v FROM a40_k k ORDER BY v LIMIT 8) s WHERE s.v = a40_ih.a)
+-- UPDATE 8
+
+> SELECT tableoid::regclass, * FROM a40_ih ORDER BY a
+tableoid:regclass | a:int4 | b:int4
+a40_ih | 0 | 0
+a40_ih | 1 | 1
+a40_ih | 2 | 2
+a40_ih | 3 | -3
+a40_ih | 4 | 0
+a40_ih | 5 | 1
+a40_ih | 6 | -2
+a40_ih | 7 | 3
+a40_ih | 8 | 0
+a40_ih | 9 | -1
+a40_ih | 10 | 2
+a40_ih | 11 | 3
+a40_ih | 12 | 0
+a40_ih | 13 | 1
+a40_ih | 14 | 2
+a40_ih | 15 | -3
+a40_ih | 16 | 0
+a40_ih | 17 | 1
+a40_ih | 18 | -2
+a40_ih | 19 | 3
+a40_ih | 20 | 0
+a40_ih_c1 | 21 | 0
+a40_ih_c1 | 22 | 1
+a40_ih_c1 | 23 | 2
+a40_ih_c1 | 24 | 0
+a40_ih_c1 | 25 | 1
+a40_ih_c1 | 26 | 2
+a40_ih_c1 | 27 | 0
+a40_ih_c1 | 28 | 1
+a40_ih_c1 | 29 | 2
+a40_ih_c1 | 30 | 0
+a40_ih_c1 | 31 | 1
+a40_ih_c1 | 32 | 2
+a40_ih_c1 | 33 | 0
+a40_ih_c1 | 34 | 1
+a40_ih_c1 | 35 | 2
+a40_ih_c1 | 36 | 0
+a40_ih_c1 | 37 | 1
+a40_ih_c1 | 38 | 2
+a40_ih_c1 | 39 | 0
+a40_ih_c1 | 40 | 1
+a40_ih_c2 | 41 | 1
+a40_ih_c2 | 42 | 2
+a40_ih_c2 | 43 | 3
+a40_ih_c2 | 44 | 4
+a40_ih_c2 | 45 | 0
+a40_ih_c2 | 46 | 1
+a40_ih_c2 | 47 | 2
+a40_ih_c2 | 48 | 3
+a40_ih_c2 | 49 | 4
+a40_ih_c2 | 50 | 0
+a40_ih_c2 | 51 | 1
+a40_ih_c2 | 52 | 2
+a40_ih_c2 | 53 | 3
+a40_ih_c2 | 54 | 4
+a40_ih_c2 | 55 | 0
+a40_ih_c2 | 56 | 1
+a40_ih_c2 | 57 | 2
+a40_ih_c2 | 58 | 3
+a40_ih_c2 | 59 | 4
+a40_ih_c2 | 60 | 0
+-- SELECT 61
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM a40_pt WHERE EXISTS (SELECT 1 FROM a40_k k, LATERAL (SELECT k.w FROM a40_k k2 LIMIT 2) ss WHERE a40_pt.c IS NULL)
+-- DELETE 20
+
+> SELECT tableoid::regclass, * FROM a40_pt ORDER BY a
+tableoid:regclass | a:int4 | b:int4 | c:text
+a40_pt1 | 1 | 1 | z
+a40_pt1 | 2 | 2 | x
+a40_pt1 | 3 | 3 | z
+a40_pt1 | 4 | 4 | x
+a40_pt1 | 6 | 6 | x
+a40_pt1 | 7 | 0 | z
+a40_pt1 | 8 | 1 | x
+a40_pt1 | 9 | 2 | z
+a40_pt1 | 11 | 4 | z
+a40_pt1 | 12 | 5 | x
+a40_pt1 | 13 | 6 | z
+a40_pt1 | 14 | 0 | x
+a40_pt1 | 16 | 2 | x
+a40_pt1 | 17 | 3 | z
+a40_pt1 | 18 | 4 | x
+a40_pt1 | 19 | 5 | z
+a40_pt1 | 21 | 0 | z
+a40_pt1 | 22 | 1 | x
+a40_pt1 | 23 | 2 | z
+a40_pt1 | 24 | 3 | x
+a40_pt1 | 26 | 5 | x
+a40_pt1 | 27 | 6 | z
+a40_pt1 | 28 | 0 | x
+a40_pt1 | 29 | 1 | z
+a40_pt1 | 31 | 3 | z
+a40_pt1 | 32 | 4 | x
+a40_pt1 | 33 | 5 | z
+a40_pt1 | 34 | 6 | x
+a40_pt1 | 36 | 1 | x
+a40_pt1 | 37 | 2 | z
+a40_pt1 | 38 | 3 | x
+a40_pt1 | 39 | 4 | z
+a40_pt1 | 41 | 6 | z
+a40_pt1 | 42 | 0 | x
+a40_pt1 | 43 | 1 | z
+a40_pt1 | 44 | 2 | x
+a40_pt1 | 46 | 4 | x
+a40_pt1 | 47 | 5 | z
+a40_pt1 | 48 | 6 | x
+a40_pt1 | 49 | 0 | z
+a40_pt2b | 51 | 2 | z
+a40_pt2a | 52 | 3 | x
+a40_pt2b | 53 | 4 | z
+a40_pt2a | 54 | 5 | x
+a40_pt2a | 56 | 0 | x
+a40_pt2b | 57 | 1 | z
+a40_pt2a | 58 | 2 | x
+a40_pt2b | 59 | 3 | z
+a40_pt2b | 61 | 5 | z
+a40_pt2a | 62 | 6 | x
+a40_pt2b | 63 | 0 | z
+a40_pt2a | 64 | 1 | x
+a40_pt2a | 66 | 3 | x
+a40_pt2b | 67 | 4 | z
+a40_pt2a | 68 | 5 | x
+a40_pt2b | 69 | 6 | z
+a40_pt2b | 71 | 1 | z
+a40_pt2a | 72 | 2 | x
+a40_pt2b | 73 | 3 | z
+a40_pt2a | 74 | 4 | x
+a40_pt2a | 76 | 6 | x
+a40_pt2b | 77 | 0 | z
+a40_pt2a | 78 | 1 | x
+a40_pt2b | 79 | 2 | z
+a40_pt2b | 81 | 4 | z
+a40_pt2a | 82 | 5 | x
+a40_pt2b | 83 | 6 | z
+a40_pt2a | 84 | 0 | x
+a40_pt2a | 86 | 2 | x
+a40_pt2b | 87 | 3 | z
+a40_pt2a | 88 | 4 | x
+a40_pt2b | 89 | 5 | z
+a40_pt2b | 91 | 0 | z
+a40_pt2a | 92 | 1 | x
+a40_pt2b | 93 | 2 | z
+a40_pt2a | 94 | 3 | x
+a40_pt2a | 96 | 5 | x
+a40_pt2b | 97 | 6 | z
+a40_pt2a | 98 | 0 | x
+a40_pt2b | 99 | 1 | z
+-- SELECT 80
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM a40_ih_c1 WHERE x IN (SELECT v FROM a40_k k) RETURNING *
+a:int4 | b:int4 | x:int4
+21 | 0 | 21
+24 | 0 | 24
+27 | 0 | 27
+30 | 0 | 30
+33 | 0 | 33
+36 | 0 | 36
+39 | 0 | 39
+-- DELETE 7
+
+> SELECT * FROM a40_ih ORDER BY a
+a:int4 | b:int4
+0 | 0
+1 | 1
+2 | 2
+3 | 3
+4 | 0
+5 | 1
+6 | 2
+7 | 3
+8 | 0
+9 | 1
+10 | 2
+11 | 3
+12 | 0
+13 | 1
+14 | 2
+15 | 3
+16 | 0
+17 | 1
+18 | 2
+19 | 3
+20 | 0
+22 | 1
+23 | 2
+25 | 1
+26 | 2
+28 | 1
+29 | 2
+31 | 1
+32 | 2
+34 | 1
+35 | 2
+37 | 1
+38 | 2
+40 | 1
+41 | 1
+42 | 2
+43 | 3
+44 | 4
+45 | 0
+46 | 1
+47 | 2
+48 | 3
+49 | 4
+50 | 0
+51 | 1
+52 | 2
+53 | 3
+54 | 4
+55 | 0
+56 | 1
+57 | 2
+58 | 3
+59 | 4
+60 | 0
+-- SELECT 54
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE a40_int4(f1 int4)
+-- CREATE TABLE
+
+> INSERT INTO a40_int4(f1) VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> CREATE TABLE a40_int2(f1 int2)
+-- CREATE TABLE
+
+> INSERT INTO a40_int2(f1) VALUES (0), (1234), (-1234), (32767), (-32767)
+-- INSERT 0 5
+
+> ANALYZE a40_int4
+-- ANALYZE
+
+> ANALYZE a40_int2
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select * from a40_int4 i left join
+>   lateral (select coalesce(i) from a40_int2 j where i.f1 = j.f1) k on true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i.f1, (COALESCE(i.*))
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.f1, i.*
+  ->  Seq Scan on public.a40_int2 j
+        Output: j.f1, COALESCE(i.*)
+        Filter: (i.f1 = j.f1)
+-- EXPLAIN
+
+> select * from a40_int4 i left join
+>   lateral (select coalesce(i) from a40_int2 j where i.f1 = j.f1) k on true
+f1:int4 | coalesce:user
+-123456 | NULL
+-2147483647 | NULL
+0 | (0)
+123456 | NULL
+2147483647 | NULL
+-- SELECT 5
+
+> explain (verbose, costs off)
+> select i, j.f1 from a40_int4 i join a40_int2 j on i.f1 = j.f1
+QUERY PLAN:text
+Hash Join
+  Output: i.*, j.f1
+  Hash Cond: (i.f1 = j.f1)
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.*, i.f1
+  ->  Hash
+        Output: j.f1
+        ->  Seq Scan on public.a40_int2 j
+              Output: j.f1
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select i from a40_int4 i join a40_int2 j on i.f1 = j.f1
+QUERY PLAN:text
+Hash Join
+  Output: i.*
+  Hash Cond: (i.f1 = j.f1)
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.*, i.f1
+  ->  Hash
+        Output: j.f1
+        ->  Seq Scan on public.a40_int2 j
+              Output: j.f1
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from a40_int4 i, lateral (select i, j.f1 from a40_int2 j where j.f1 > i.f1 offset 0) k
+QUERY PLAN:text
+Nested Loop
+  Output: i.f1, (i.*), j.f1
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.f1, i.*
+  ->  Seq Scan on public.a40_int2 j
+        Output: i.*, j.f1
+        Filter: (j.f1 > i.f1)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from a40_int4 i left join lateral (select i from a40_int2 j where i.f1 = j.f1) k on true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i.f1, (i.*)
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.f1, i.*
+  ->  Seq Scan on public.a40_int2 j
+        Output: j.f1, i.*
+        Filter: (i.f1 = j.f1)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select j.f1 from a40_int4 i join a40_int2 j on i.f1 = j.f1 where i is not null
+QUERY PLAN:text
+Hash Join
+  Output: j.f1
+  Hash Cond: (i.f1 = j.f1)
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.f1
+        Filter: (i.* IS NOT NULL)
+  ->  Hash
+        Output: j.f1
+        ->  Seq Scan on public.a40_int2 j
+              Output: j.f1
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select row_to_json(i), j from a40_int4 i join a40_int2 j on i.f1 = j.f1
+QUERY PLAN:text
+Hash Join
+  Output: row_to_json(i.*), j.*
+  Hash Cond: (i.f1 = j.f1)
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.*, i.f1
+  ->  Hash
+        Output: j.*, j.f1
+        ->  Seq Scan on public.a40_int2 j
+              Output: j.*, j.f1
+-- EXPLAIN
+
+> CREATE TABLE a40_wt (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO a40_wt SELECT i, 'v' || i FROM generate_series(1, 50) i
+-- INSERT 0 50
+
+> explain (verbose, costs off) select i from a40_int4 i, a40_int2 j
+QUERY PLAN:text
+Nested Loop
+  Output: i.*
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.*
+  ->  Materialize
+        ->  Seq Scan on public.a40_int2 j
+-- EXPLAIN
+
+> explain (verbose, costs off) select j, i.f1 from a40_int4 i left join a40_int2 j on i.f1 = j.f1
+QUERY PLAN:text
+Hash Left Join
+  Output: j.*, i.f1
+  Hash Cond: (i.f1 = j.f1)
+  ->  Seq Scan on public.a40_int4 i
+        Output: i.f1
+  ->  Hash
+        Output: j.*, j.f1
+        ->  Seq Scan on public.a40_int2 j
+              Output: j.*, j.f1
+-- EXPLAIN
+
+> explain (verbose, costs off) select w, i.f1 from a40_wt w join a40_int4 i on w.a = i.f1 join a40_int2 j on j.f1 = i.f1
+QUERY PLAN:text
+Hash Join
+  Output: w.*, i.f1
+  Hash Cond: (w.a = j.f1)
+  ->  Hash Join
+        Output: w.*, w.a, i.f1
+        Hash Cond: (w.a = i.f1)
+        ->  Seq Scan on public.a40_wt w
+              Output: w.*, w.a
+        ->  Hash
+              Output: i.f1
+              ->  Seq Scan on public.a40_int4 i
+                    Output: i.f1
+  ->  Hash
+        Output: j.f1
+        ->  Seq Scan on public.a40_int2 j
+              Output: j.f1
+-- EXPLAIN
+
+> explain (verbose, costs off) select w.a from a40_wt w join a40_int4 i on w.a = i.f1 where w is not null and w::text <> i::text
+QUERY PLAN:text
+Hash Join
+  Output: w.a
+  Hash Cond: (w.a = i.f1)
+  Join Filter: ((w.*)::text <> (i.*)::text)
+  ->  Seq Scan on public.a40_wt w
+        Output: w.a, w.*
+        Filter: (w.* IS NOT NULL)
+  ->  Hash
+        Output: i.f1, i.*
+        ->  Seq Scan on public.a40_int4 i
+              Output: i.f1, i.*
+-- EXPLAIN
+
+> set enable_hashjoin = off
+-- SET
+
+> explain (verbose, costs off) select w, i from a40_wt w join a40_int4 i on w.a = i.f1
+QUERY PLAN:text
+Merge Join
+  Output: w.*, i.*
+  Merge Cond: (i.f1 = w.a)
+  ->  Sort
+        Output: i.*, i.f1
+        Sort Key: i.f1
+        ->  Seq Scan on public.a40_int4 i
+              Output: i.*, i.f1
+  ->  Sort
+        Output: w.*, w.a
+        Sort Key: w.a
+        ->  Seq Scan on public.a40_wt w
+              Output: w.*, w.a
+-- EXPLAIN
+
+> set enable_mergejoin = off
+-- SET
+
+> explain (verbose, costs off) select w, i from a40_wt w join a40_int4 i on w.a = i.f1
+QUERY PLAN:text
+Nested Loop
+  Output: w.*, i.*
+  Join Filter: (w.a = i.f1)
+  ->  Seq Scan on public.a40_wt w
+        Output: w.*, w.a
+  ->  Materialize
+        Output: i.*, i.f1
+        ->  Seq Scan on public.a40_int4 i
+              Output: i.*, i.f1
+-- EXPLAIN
+
+> select * from a40_wt w, lateral (select w, i.f1 from a40_int4 i where i.f1 = w.a) ss
+a:int4 | b:text | w:user | f1:int4
+-- SELECT 0
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> CREATE VIEW a40_sbv WITH (security_barrier) AS SELECT * FROM a40_ih WHERE EXISTS (SELECT 1 FROM a40_k k WHERE k.v = a40_ih.a)
+-- CREATE VIEW
+
+> CREATE VIEW a40_pv AS SELECT * FROM a40_ih WHERE EXISTS (SELECT 1 FROM a40_k k WHERE k.v = a40_ih.a)
+-- CREATE VIEW
+
+> BEGIN
+-- BEGIN
+
+> EXPLAIN (COSTS OFF) UPDATE a40_sbv SET b = 1000 WHERE a < 30
+QUERY PLAN:text
+Update on a40_ih
+  Update on a40_ih a40_ih_1
+  Update on a40_ih_c1 a40_ih_2
+  Update on a40_ih_c2 a40_ih_3
+  ->  Result
+        ->  Append
+              ->  Seq Scan on a40_ih a40_ih_1
+                    Filter: ((a < 30) AND (ANY (a = (hashed SubPlan 2).col1)))
+                    SubPlan 2
+                      ->  Seq Scan on a40_k k
+              ->  Seq Scan on a40_ih_c1 a40_ih_2
+                    Filter: ((a < 30) AND (ANY (a = (hashed SubPlan 2).col1)))
+              ->  Seq Scan on a40_ih_c2 a40_ih_3
+                    Filter: ((a < 30) AND (ANY (a = (hashed SubPlan 2).col1)))
+-- EXPLAIN
+
+> UPDATE a40_sbv SET b = 1000 WHERE a < 30
+-- UPDATE 10
+
+> EXPLAIN (COSTS OFF) UPDATE a40_pv SET b = 2000 WHERE a > 30
+QUERY PLAN:text
+Update on a40_ih
+  Update on a40_ih a40_ih_1
+  Update on a40_ih_c1 a40_ih_2
+  Update on a40_ih_c2 a40_ih_3
+  ->  Hash Semi Join
+        Hash Cond: (a40_ih.a = k.v)
+        ->  Append
+              ->  Seq Scan on a40_ih a40_ih_1
+                    Filter: (a > 30)
+              ->  Seq Scan on a40_ih_c1 a40_ih_2
+                    Filter: (a > 30)
+              ->  Seq Scan on a40_ih_c2 a40_ih_3
+                    Filter: (a > 30)
+        ->  Hash
+              ->  Seq Scan on a40_k k
+-- EXPLAIN
+
+> UPDATE a40_pv SET b = 2000 WHERE a > 30
+-- UPDATE 10
+
+> SELECT tableoid::regclass, * FROM a40_ih ORDER BY a
+tableoid:regclass | a:int4 | b:int4
+a40_ih | 0 | 1000
+a40_ih | 1 | 1
+a40_ih | 2 | 2
+a40_ih | 3 | 1000
+a40_ih | 4 | 0
+a40_ih | 5 | 1
+a40_ih | 6 | 1000
+a40_ih | 7 | 3
+a40_ih | 8 | 0
+a40_ih | 9 | 1000
+a40_ih | 10 | 2
+a40_ih | 11 | 3
+a40_ih | 12 | 1000
+a40_ih | 13 | 1
+a40_ih | 14 | 2
+a40_ih | 15 | 1000
+a40_ih | 16 | 0
+a40_ih | 17 | 1
+a40_ih | 18 | 1000
+a40_ih | 19 | 3
+a40_ih | 20 | 0
+a40_ih_c1 | 21 | 1000
+a40_ih_c1 | 22 | 1
+a40_ih_c1 | 23 | 2
+a40_ih_c1 | 24 | 1000
+a40_ih_c1 | 25 | 1
+a40_ih_c1 | 26 | 2
+a40_ih_c1 | 27 | 1000
+a40_ih_c1 | 28 | 1
+a40_ih_c1 | 29 | 2
+a40_ih_c1 | 30 | 0
+a40_ih_c1 | 31 | 1
+a40_ih_c1 | 32 | 2
+a40_ih_c1 | 33 | 2000
+a40_ih_c1 | 34 | 1
+a40_ih_c1 | 35 | 2
+a40_ih_c1 | 36 | 2000
+a40_ih_c1 | 37 | 1
+a40_ih_c1 | 38 | 2
+a40_ih_c1 | 39 | 2000
+a40_ih_c1 | 40 | 1
+a40_ih_c2 | 41 | 1
+a40_ih_c2 | 42 | 2000
+a40_ih_c2 | 43 | 3
+a40_ih_c2 | 44 | 4
+a40_ih_c2 | 45 | 2000
+a40_ih_c2 | 46 | 1
+a40_ih_c2 | 47 | 2
+a40_ih_c2 | 48 | 2000
+a40_ih_c2 | 49 | 4
+a40_ih_c2 | 50 | 0
+a40_ih_c2 | 51 | 2000
+a40_ih_c2 | 52 | 2
+a40_ih_c2 | 53 | 3
+a40_ih_c2 | 54 | 2000
+a40_ih_c2 | 55 | 0
+a40_ih_c2 | 56 | 1
+a40_ih_c2 | 57 | 2000
+a40_ih_c2 | 58 | 3
+a40_ih_c2 | 59 | 4
+a40_ih_c2 | 60 | 2000
+-- SELECT 61
+
+> ROLLBACK
+-- ROLLBACK
+

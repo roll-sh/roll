@@ -1,0 +1,235 @@
+> CREATE TABLE org (id int PRIMARY KEY, name text NOT NULL UNIQUE, slug text, CONSTRAINT slug_ok CHECK (slug ~ '^[a-z]+$'))
+-- CREATE TABLE
+
+> INSERT INTO org VALUES (1, 'Acme', 'acme'), (2, 'Beta', NULL)
+-- INSERT 0 2
+
+> INSERT INTO org VALUES (1, 'Dup', 'dup')
+ERROR 23505: duplicate key value violates unique constraint "org_pkey"
+DETAIL: Key (id)=(1) already exists.
+OBJECTS: schema=public table=org constraint=org_pkey
+
+> INSERT INTO org VALUES (3, 'Acme', 'x')
+ERROR 23505: duplicate key value violates unique constraint "org_name_key"
+DETAIL: Key (name)=(Acme) already exists.
+OBJECTS: schema=public table=org constraint=org_name_key
+
+> INSERT INTO org VALUES (3, NULL, 'x')
+ERROR 23502: null value in column "name" of relation "org" violates not-null constraint
+DETAIL: Failing row contains (3, null, x).
+OBJECTS: schema=public table=org column=name
+
+> INSERT INTO org VALUES (3, 'Gamma', 'Bad1')
+ERROR 23514: new row for relation "org" violates check constraint "slug_ok"
+DETAIL: Failing row contains (3, Gamma, Bad1).
+OBJECTS: schema=public table=org constraint=slug_ok
+
+> INSERT INTO org (id, name) VALUES (3, 'Gamma') ON CONFLICT (id) DO NOTHING
+-- INSERT 0 1
+
+> INSERT INTO org (id, name) VALUES (3, 'Gamma2') ON CONFLICT (id) DO UPDATE SET name = excluded.name RETURNING *
+id:int4 | name:text | slug:text
+3 | Gamma2 | NULL
+-- INSERT 0 1
+
+> INSERT INTO org (id, name) VALUES (4, 'Acme') ON CONFLICT ON CONSTRAINT org_name_key DO UPDATE SET slug = 'acme' RETURNING id, name, slug
+id:int4 | name:text | slug:text
+1 | Acme | acme
+-- INSERT 0 1
+
+> CREATE TABLE member (org_id int, user_id int, role text DEFAULT 'member', PRIMARY KEY (org_id, user_id), UNIQUE NULLS NOT DISTINCT (org_id, role))
+-- CREATE TABLE
+
+> INSERT INTO member VALUES (1, 1, 'owner'), (1, 2, NULL)
+-- INSERT 0 2
+
+> INSERT INTO member VALUES (1, 3, NULL)
+ERROR 23505: duplicate key value violates unique constraint "member_org_id_role_key"
+DETAIL: Key (org_id, role)=(1, null) already exists.
+OBJECTS: schema=public table=member constraint=member_org_id_role_key
+
+> INSERT INTO member VALUES (1, 1, 'x')
+ERROR 23505: duplicate key value violates unique constraint "member_pkey"
+DETAIL: Key (org_id, user_id)=(1, 1) already exists.
+OBJECTS: schema=public table=member constraint=member_pkey
+
+> CREATE TABLE team (id serial PRIMARY KEY, org_id int NOT NULL REFERENCES org ON DELETE CASCADE, lead_id int, name text)
+-- CREATE TABLE
+
+> CREATE TABLE task (id serial PRIMARY KEY, team_id int REFERENCES team (id) ON DELETE SET NULL ON UPDATE CASCADE, title text)
+-- CREATE TABLE
+
+> INSERT INTO team (org_id, name) VALUES (1, 'core'), (2, 'ops')
+-- INSERT 0 2
+
+> INSERT INTO team (org_id, name) VALUES (99, 'ghost')
+ERROR 23503: insert or update on table "team" violates foreign key constraint "team_org_id_fkey"
+DETAIL: Key (org_id)=(99) is not present in table "org".
+OBJECTS: schema=public table=team constraint=team_org_id_fkey
+
+> INSERT INTO task (team_id, title) VALUES (1, 'a'), (2, 'b'), (NULL, 'c')
+-- INSERT 0 3
+
+> DELETE FROM org WHERE id = 2
+-- DELETE 1
+
+> SELECT t.id, t.team_id, t.title FROM task t ORDER BY t.id
+id:int4 | team_id:int4 | title:text
+1 | 1 | a
+2 | NULL | b
+3 | NULL | c
+-- SELECT 3
+
+> UPDATE team SET id = 10 WHERE id = 1
+-- UPDATE 1
+
+> SELECT id, team_id FROM task ORDER BY id
+id:int4 | team_id:int4
+1 | 10
+2 | NULL
+3 | NULL
+-- SELECT 3
+
+> DELETE FROM team WHERE id = 10
+-- DELETE 1
+
+> SELECT id, team_id FROM task ORDER BY id
+id:int4 | team_id:int4
+1 | NULL
+2 | NULL
+3 | NULL
+-- SELECT 3
+
+> CREATE TABLE parent (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE child (id int PRIMARY KEY, parent_id int REFERENCES parent ON DELETE RESTRICT)
+-- CREATE TABLE
+
+> INSERT INTO parent VALUES (1)
+-- INSERT 0 1
+
+> INSERT INTO child VALUES (1, 1)
+-- INSERT 0 1
+
+> DELETE FROM parent WHERE id = 1
+ERROR 23001: update or delete on table "parent" violates RESTRICT setting of foreign key constraint "child_parent_id_fkey" on table "child"
+DETAIL: Key (id)=(1) is referenced from table "child".
+OBJECTS: schema=public table=child constraint=child_parent_id_fkey
+
+> CREATE TABLE child2 (id int, parent_id int REFERENCES parent DEFERRABLE INITIALLY DEFERRED)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO child2 VALUES (1, 5)
+-- INSERT 0 1
+
+> INSERT INTO parent VALUES (5)
+-- INSERT 0 1
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO child2 VALUES (2, 6)
+-- INSERT 0 1
+
+> COMMIT
+ERROR 23503: insert or update on table "child2" violates foreign key constraint "child2_parent_id_fkey"
+DETAIL: Key (parent_id)=(6) is not present in table "parent".
+OBJECTS: schema=public table=child2 constraint=child2_parent_id_fkey
+
+> SELECT * FROM child2 ORDER BY id
+id:int4 | parent_id:int4
+1 | 5
+-- SELECT 1
+
+> CREATE TABLE node (id int PRIMARY KEY, parent int REFERENCES node)
+-- CREATE TABLE
+
+> INSERT INTO node VALUES (1, NULL), (2, 1), (3, 2)
+-- INSERT 0 3
+
+> DELETE FROM node WHERE id = 1
+ERROR 23503: update or delete on table "node" violates foreign key constraint "node_parent_fkey" on table "node"
+DETAIL: Key (id)=(1) is still referenced from table "node".
+OBJECTS: schema=public table=node constraint=node_parent_fkey
+
+> CREATE TABLE assignment (org_id int, user_id int, FOREIGN KEY (org_id, user_id) REFERENCES member MATCH FULL)
+-- CREATE TABLE
+
+> INSERT INTO assignment VALUES (1, NULL)
+ERROR 23503: insert or update on table "assignment" violates foreign key constraint "assignment_org_id_user_id_fkey"
+DETAIL: MATCH FULL does not allow mixing of null and nonnull key values.
+OBJECTS: schema=public table=assignment constraint=assignment_org_id_user_id_fkey
+
+> INSERT INTO assignment VALUES (1, 1), (NULL, NULL)
+-- INSERT 0 2
+
+> ALTER TABLE task ADD CONSTRAINT title_len CHECK (length(title) < 3)
+-- ALTER TABLE
+
+> ALTER TABLE task ADD CONSTRAINT title_len2 CHECK (length(title) < 3) NOT VALID
+-- ALTER TABLE
+
+> INSERT INTO task (title) VALUES ('long')
+ERROR 23514: new row for relation "task" violates check constraint "title_len"
+DETAIL: Failing row contains (4, null, long).
+OBJECTS: schema=public table=task constraint=title_len
+
+> ALTER TABLE task VALIDATE CONSTRAINT title_len2
+-- ALTER TABLE
+
+> ALTER TABLE task DROP CONSTRAINT title_len2
+-- ALTER TABLE
+
+> ALTER TABLE task ALTER COLUMN title SET NOT NULL
+-- ALTER TABLE
+
+> UPDATE task SET title = NULL WHERE id = 1
+ERROR 23502: null value in column "title" of relation "task" violates not-null constraint
+DETAIL: Failing row contains (1, null, null).
+OBJECTS: schema=public table=task column=title
+
+> ALTER TABLE task ADD UNIQUE (title)
+-- ALTER TABLE
+
+> SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN ('task'::regclass, 'team'::regclass, 'member'::regclass) ORDER BY conrelid::regclass::text, conname
+conname:name | contype:char | pg_get_constraintdef:text
+member_org_id_not_null | n | NOT NULL org_id
+member_org_id_role_key | u | UNIQUE NULLS NOT DISTINCT (org_id, role)
+member_pkey | p | PRIMARY KEY (org_id, user_id)
+member_user_id_not_null | n | NOT NULL user_id
+task_id_not_null | n | NOT NULL id
+task_pkey | p | PRIMARY KEY (id)
+task_team_id_fkey | f | FOREIGN KEY (team_id) REFERENCES team(id) ON UPDATE CASCADE ON DELETE SET NULL
+task_title_key | u | UNIQUE (title)
+task_title_not_null | n | NOT NULL title
+title_len | c | CHECK ((length(title) < 3))
+team_id_not_null | n | NOT NULL id
+team_org_id_fkey | f | FOREIGN KEY (org_id) REFERENCES org(id) ON DELETE CASCADE
+team_org_id_not_null | n | NOT NULL org_id
+team_pkey | p | PRIMARY KEY (id)
+-- SELECT 14
+
+> SELECT tc.table_name, tc.constraint_name, tc.constraint_type, kcu.column_name, ccu.table_name AS ref_table, rc.update_rule, rc.delete_rule
+> FROM information_schema.table_constraints tc
+> JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name AND kcu.table_name = tc.table_name
+> LEFT JOIN information_schema.referential_constraints rc ON rc.constraint_name = tc.constraint_name
+> LEFT JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = rc.unique_constraint_name
+> WHERE tc.table_name IN ('team', 'task') ORDER BY 1, 2, 4
+table_name:name | constraint_name:name | constraint_type:varchar | column_name:name | ref_table:name | update_rule:varchar | delete_rule:varchar
+task | task_pkey | PRIMARY KEY | id | NULL | NULL | NULL
+task | task_team_id_fkey | FOREIGN KEY | team_id | team | CASCADE | SET NULL
+task | task_title_key | UNIQUE | title | NULL | NULL | NULL
+team | team_org_id_fkey | FOREIGN KEY | org_id | org | NO ACTION | CASCADE
+team | team_pkey | PRIMARY KEY | id | NULL | NULL | NULL
+-- SELECT 5
+
+> DROP TABLE assignment, node, child2, child, parent, task, team, member, org
+-- DROP TABLE
+

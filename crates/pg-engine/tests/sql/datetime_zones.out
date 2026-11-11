@@ -1,0 +1,249 @@
+> SET TimeZone = 'America/New_York'
+-- SET
+
+> SELECT '2024-03-10 02:30'::timestamptz, '2024-11-03 01:30'::timestamptz, '2024-11-03 01:30 EDT'::timestamptz
+timestamptz:timestamptz | timestamptz:timestamptz | timestamptz:timestamptz
+2024-03-10 03:30:00-04 | 2024-11-03 01:30:00-05 | 2024-11-03 01:30:00-04
+-- SELECT 1
+
+> SELECT timestamptz '2024-07-01 12:00+00' AT TIME ZONE 'Europe/Berlin', timestamptz '2024-01-01 12:00+00' AT TIME ZONE 'Asia/Kolkata'
+timezone:timestamp | timezone:timestamp
+2024-07-01 14:00:00 | 2024-01-01 17:30:00
+-- SELECT 1
+
+> SELECT timestamp '2024-07-01 12:00' AT TIME ZONE 'Australia/Sydney', timestamp '2024-07-01 12:00' AT TIME ZONE 'UTC+3'
+timezone:timestamptz | timezone:timestamptz
+2024-06-30 22:00:00-04 | 2024-07-01 11:00:00-04
+-- SELECT 1
+
+> SELECT '2024-06-01 10:00 PST8PDT'::timestamptz, '2024-06-01 10:00 EST5EDT'::timestamptz, '2024-06-01 10:00 MSK'::timestamptz
+timestamptz:timestamptz | timestamptz:timestamptz | timestamptz:timestamptz
+2024-06-01 13:00:00-04 | 2024-06-01 10:00:00-04 | 2024-06-01 03:00:00-04
+-- SELECT 1
+
+> SELECT timezone('Europe/London', timestamptz '1970-06-01 00:00+00'), timezone('Europe/London', timestamptz '2100-06-01 00:00+00')
+timezone:timestamp | timezone:timestamp
+1970-06-01 01:00:00 | 2100-06-01 01:00:00
+-- SELECT 1
+
+> SELECT '1900-01-01 00:00'::timestamptz, '1883-11-18 12:00'::timestamptz
+timestamptz:timestamptz | timestamptz:timestamptz
+1900-01-01 00:00:00-05 | 1883-11-18 12:00:00-05
+-- SELECT 1
+
+> SET TimeZone = 'Europe/Moscow'
+-- SET
+
+> SELECT '2010-06-01'::timestamptz, '2014-12-01'::timestamptz, '2011-03-27 02:30'::timestamptz
+timestamptz:timestamptz | timestamptz:timestamptz | timestamptz:timestamptz
+2010-06-01 00:00:00+04 | 2014-12-01 00:00:00+03 | 2011-03-27 03:30:00+04
+-- SELECT 1
+
+> SET TimeZone = '+05:30'
+-- SET
+
+> SELECT '2024-01-01 00:00'::timestamptz, current_setting('TimeZone')
+timestamptz:timestamptz | current_setting:text
+2024-01-01 00:00:00-05:30 | +05:30
+-- SELECT 1
+
+> SET TimeZone = 'UTC'
+-- SET
+
+> SELECT '2024-01-01 00:00 Europe/Paris'::timestamptz, '2024-07-01 00:00 America/Sao_Paulo'::timestamptz
+timestamptz:timestamptz | timestamptz:timestamptz
+2023-12-31 23:00:00+00 | 2024-07-01 03:00:00+00
+-- SELECT 1
+
+> SELECT 'J2451545'::date, '2024-01-01 allballs'::timestamp, 'epoch'::timestamptz
+date:date | timestamp:timestamp | timestamptz:timestamptz
+2000-01-01 | 2024-01-01 00:00:00 | 1970-01-01 00:00:00+00
+-- SELECT 1
+
+> SET TimeZone = 'No/Such_Zone'
+ERROR 22023: invalid value for parameter "TimeZone": "No/Such_Zone"
+
+> SELECT '2024-01-01 00:00 No/Such_Zone'::timestamptz
+ERROR 22023: time zone "no/such_zone" not recognized (at 8)
+
+> SET timezone_abbreviations = 'Australia'
+-- SET
+
+> SELECT '2024-01-01 10:00 EST'::timestamptz, '2024-01-01 10:00 CST'::timestamptz
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-01-01 00:00:00+00 | 2024-01-01 00:30:00+00
+-- SELECT 1
+
+> RESET timezone_abbreviations
+-- RESET
+
+> SELECT '2024-01-01 10:00 EST'::timestamptz
+timestamptz:timestamptz
+2024-01-01 15:00:00+00
+-- SELECT 1
+
+> SET DateStyle = 'Postgres, DMY'
+-- SET
+
+> SELECT timestamptz '2024-02-29 13:45:06.5+00', date '2024-02-29', '01/02/2024'::date
+timestamptz:timestamptz | date:date | date:date
+Thu 29 Feb 13:45:06.5 2024 UTC | 29-02-2024 | 01-02-2024
+-- SELECT 1
+
+> SET DateStyle = 'SQL, MDY'
+-- SET
+
+> SELECT timestamptz '2024-02-29 13:45:06.5+00', date '2024-02-29', '01/02/2024'::date
+timestamptz:timestamptz | date:date | date:date
+02/29/2024 13:45:06.5 UTC | 02/29/2024 | 01/02/2024
+-- SELECT 1
+
+> SET DateStyle = 'German'
+-- SET
+
+> SELECT timestamptz '2024-02-29 13:45:06.5+00', date '0044-03-15 BC'
+timestamptz:timestamptz | date:date
+29.02.2024 13:45:06.5 UTC | 15.03.0044 BC
+-- SELECT 1
+
+> SET DateStyle = 'ISO, YMD'
+-- SET
+
+> SELECT '24-02-29'::date, timestamptz '2024-02-29 13:45:06.5+00'
+date:date | timestamptz:timestamptz
+2024-02-29 | 2024-02-29 13:45:06.5+00
+-- SELECT 1
+
+> RESET DateStyle
+-- RESET
+
+> SET IntervalStyle = 'sql_standard'
+-- SET
+
+> SELECT interval '1 year 2 mons 3 days 04:05:06.7', interval '-1 day 2 hours', interval '1-2', interval '3 4:05:06'
+interval:interval | interval:interval | interval:interval | interval:interval
++1-2 +3 +4:05:06.7 | -1 2:00:00 | 1-2 | 3 4:05:06
+-- SELECT 1
+
+> SET IntervalStyle = 'postgres_verbose'
+-- SET
+
+> SELECT interval '1 year 2 mons 3 days 04:05:06.7', interval '-1 day 2 hours', interval '-00:00:01.5'
+interval:interval | interval:interval | interval:interval
+@ 1 year 2 mons 3 days 4 hours 5 mins 6.7 secs | @ 1 day -2 hours ago | @ 1.5 secs ago
+-- SELECT 1
+
+> SET IntervalStyle = 'iso_8601'
+-- SET
+
+> SELECT interval '1 year 2 mons 3 days 04:05:06.7', interval '-1 day 2 hours', interval '0'
+interval:interval | interval:interval | interval:interval
+P1Y2M3DT4H5M6.7S | P-1DT2H | PT0S
+-- SELECT 1
+
+> RESET IntervalStyle
+-- RESET
+
+> SELECT interval '1 day 2 hours' minute to second, interval '123456789 years', interval '2147483647 days' + interval '1 day'
+ERROR 22008: interval out of range
+
+> SELECT interval 'P0.5Y', interval 'PT1.5H', interval '@ 1 day ago', interval '1.5 weeks'
+interval:interval | interval:interval | interval:interval | interval:interval
+6 mons | 01:30:00 | -1 days | 10 days 12:00:00
+-- SELECT 1
+
+> SELECT to_char(timestamp '2024-07-04 13:05:09.123456', 'YYYY-MM-DD HH24:MI:SS.US Day DY Month MON IW IYYY Q WW J')
+to_char:text
+2024-07-04 13:05:09.123456 Thursday  THU July      JUL 27 2024 3 27 2460496
+-- SELECT 1
+
+> SELECT to_char(timestamp '2024-07-04 13:05:09', 'FMDay, FMDDth "of" FMMonth YYYY HH12:MI AM'), to_char(date '0001-01-01' - 1, 'YYYY BC')
+to_char:text | to_char:text
+Thursday, 4th of July 2024 01:05 PM | 0001 BC
+-- SELECT 1
+
+> SELECT to_char(interval '1 day 25:61:61', 'DD HH24:MI:SS'), to_char(timestamptz '2024-07-04 13:05:09+00', 'TZ OF TZH:TZM')
+ERROR 22015: interval field value out of range: "1 day 25:61:61" (at 25)
+
+> SELECT to_timestamp('2024-07-04 13:05:09.5 +02', 'YYYY-MM-DD HH24:MI:SS.FF1 TZH'), to_timestamp('04 Jul 2024', 'DD Mon YYYY')
+to_timestamp:timestamptz | to_timestamp:timestamptz
+2024-07-04 11:05:09.5+00 | 2024-07-04 00:00:00+00
+-- SELECT 1
+
+> SELECT to_date('2024 185', 'YYYY DDD'), to_date('2024-W27-4', 'IYYY-"W"IW-ID'), to_timestamp(1720098309.5)
+to_date:date | to_date:date | to_timestamp:timestamptz
+2024-07-03 | 2024-07-04 | 2024-07-04 13:05:09.5+00
+-- SELECT 1
+
+> SELECT to_date('2024-13-01', 'YYYY-MM-DD')
+ERROR 22008: date/time field value out of range: "2024-13-01"
+
+> SELECT to_timestamp('2024-07-04 25:00', 'YYYY-MM-DD HH24:MI')
+ERROR 22008: date/time field value out of range: "2024-07-04 25:00"
+
+> SELECT extract(epoch FROM timestamptz '2024-07-04 13:05:09.5+02'), extract(timezone_hour FROM timestamptz '2024-07-04 00:00+00'), extract(julian FROM date '2024-07-04')
+extract:numeric | extract:numeric | extract:numeric
+1720091109.500000 | 0 | 2460496
+-- SELECT 1
+
+> SELECT date_bin('15 minutes', timestamp '2024-07-04 13:07:09', timestamp '2000-01-01'), date_trunc('day', timestamptz '2024-07-04 23:30+00', 'Asia/Tokyo')
+date_bin:timestamp | date_trunc:timestamptz
+2024-07-04 13:00:00 | 2024-07-04 15:00:00+00
+-- SELECT 1
+
+> SELECT timestamp '294276-12-31 23:59:59' + interval '1 second'
+ERROR 22008: timestamp out of range
+
+> SELECT date '5874897-12-31' + 1
+ERROR 22008: date out of range
+
+> SELECT make_interval(years => 2147483647)
+ERROR 22008: interval out of range
+
+> SELECT '12:00'::time(7), '2024-01-01 12:00:00.1234567'::timestamp(9), localtimestamp(8) IS NOT NULL, current_time(7) IS NOT NULL
+WARNING 22023: TIME(7) precision reduced to maximum allowed, 6 (at 17)
+WARNING 22023: TIMESTAMP(9) precision reduced to maximum allowed, 6 (at 57)
+WARNING 22023: TIMESTAMP(8) precision reduced to maximum allowed, 6
+WARNING 22023: TIME(7) WITH TIME ZONE precision reduced to maximum allowed, 6
+time:time | timestamp:timestamp | ?column?:bool | ?column?:bool
+12:00:00 | 2024-01-01 12:00:00.123457 | t | t
+-- SELECT 1
+
+> SELECT '12:00'::timestamptz(-1)
+ERROR 22023: TIMESTAMP(-1) WITH TIME ZONE precision must not be negative (at 17)
+
+> SELECT make_timestamptz(2024, 7, 4, 13, 5, 9.5, 'America/Chicago'), make_date(-44, 3, 15)
+make_timestamptz:timestamptz | make_date:date
+2024-07-04 18:05:09.5+00 | 0044-03-15 BC
+-- SELECT 1
+
+> SELECT age(timestamptz '2024-03-31 00:00+00', timestamptz '2024-02-29 12:00+00'), interval '1 month' / 3, interval '1 hour' * 1.5
+age:interval | ?column?:interval | ?column?:interval
+1 mon 1 day 12:00:00 | 10 days | 01:30:00
+-- SELECT 1
+
+> SELECT jsonb_path_query('"2017-03-10 12:34:56+3:10"', '$.datetime()'), jsonb_path_query('"12:34:56.789Z"', '$.datetime().type()')
+jsonb_path_query:jsonb | jsonb_path_query:jsonb
+"2017-03-10T12:34:56+03:10" | "time with time zone"
+-- SELECT 1
+
+> SELECT jsonb_path_query_tz('"2023-08-15 12:34:56 +05:30"', '$.timestamp()'), jsonb_path_query('"2023-08-15"', '$.timestamp(2).string()')
+jsonb_path_query_tz:jsonb | jsonb_path_query:jsonb
+"2023-08-15T07:04:56" | "2023-08-15T00:00:00"
+-- SELECT 1
+
+> SELECT jsonb_path_query('"10-03-2017 12:34"', '$.datetime("dd-mm-yyyy HH24:MI")'), jsonb_path_query('"12:34:56.789"', '$.time(10)')
+WARNING 22023: TIME(10) precision reduced to maximum allowed, 6
+jsonb_path_query:jsonb | jsonb_path_query:jsonb
+"2017-03-10T12:34:00" | "12:34:56.789"
+-- SELECT 1
+
+> SELECT jsonb_path_query('"2023-08-15 12:34:56"', '$.timestamp_tz()')
+ERROR 0A000: cannot convert value from timestamp to timestamptz without time zone usage
+HINT: Use *_tz() function for time zone support.
+
+> SELECT to_jsonb(timestamptz '2024-07-04 13:05:09+00'), to_json(date 'infinity'), to_jsonb(time '10:00:00.5')
+to_jsonb:jsonb | to_json:json | to_jsonb:jsonb
+"2024-07-04T13:05:09+00:00" | "infinity" | "10:00:00.5"
+-- SELECT 1
+

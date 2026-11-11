@@ -1,0 +1,171 @@
+> select 'ſ' ~* 's', 's' ~* 'ſ', 'S' ~* 'ſ', 'ǅ' ~* 'ǅ', 'ǆ' ~* 'ǅ', 'K' ~* 'k', 'k' ~* 'K', 'ß' ~* 'ẞ', 'ẞ' ~* 'ß'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | f | t | t | t | t | f
+-- SELECT 1
+
+> select 'ſ' ilike 's', 's' ilike 'ſ', 'K' ilike 'k', 'ǅ' ilike 'ǆ', 'ß' ilike 'ẞ'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | t | t
+-- SELECT 1
+
+> select 'É' ~* '[é]', 'É' ~* '[à-ê]', 'Σ' ~* 'ς', 'ς' ~* 'Σ', 'σ' ~* 'ς'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | f | f
+-- SELECT 1
+
+> select upper(name 'àb'), lower(name 'ÀB'), initcap(name 'àb cd'), upper('àb'::name::text), upper(('àb'::name)::text collate "default")
+upper:text | lower:text | initcap:text | upper:text | upper:text
+àB | Àb | àB Cd | àB | ÀB
+-- SELECT 1
+
+> select upper(n), upper(n || 'x'), upper(n::text) from (select 'àb'::name n) s
+upper:text | upper:text | upper:text
+àB | àBX | àB
+-- SELECT 1
+
+> select n ~* 'À', n::text ~* 'À', n ilike 'À%', n::text ilike 'À%' from (select 'àb'::name n) s
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | f | f
+-- SELECT 1
+
+> select regexp_replace('àbÀB', 'à', 'x', 'gi'), regexp_replace('àbÀB' collate "C", 'à', 'x', 'gi')
+regexp_replace:text | regexp_replace:text
+xbxB | xbÀB
+-- SELECT 1
+
+> select regexp_match('àbÀB' collate "C", '[[:alpha:]]+'), regexp_match('àbÀB', '[[:alpha:]]+')
+regexp_match:text[] | regexp_match:text[]
+{b} | {àbÀB}
+-- SELECT 1
+
+> select regexp_matches('àbÀB' collate "C", 'B', 'gi'), regexp_like('À' collate "C", 'à', 'i'), regexp_count('àÀaA' collate "C", 'a', 1, 'i'), regexp_instr('àÀaA' collate "C", 'A', 1, 1, 0, 'i'), regexp_substr('àÀaA' collate "C", 'A', 1, 1, 'i')
+regexp_matches:text[] | regexp_like:bool | regexp_count:int4 | regexp_instr:int4 | regexp_substr:text
+{B} | f | 2 | 3 | a
+{b} | f | 2 | 3 | a
+-- SELECT 2
+
+> select regexp_split_to_array('aÀbàc' collate "C", 'à', 'i'), regexp_split_to_table('aÀbàc' collate "C", '[[:alpha:]]')
+regexp_split_to_array:text[] | regexp_split_to_table:text
+{aÀb,c} | 
+{aÀb,c} | 
+{aÀb,c} | À
+{aÀb,c} | à
+-- SELECT 4
+
+> select regexp_like('é' collate "C", '\w'), regexp_like('é', '\w'), 'é' collate "C" ~ '\w', regexp_like('é' collate "C", '[[:upper:]]', 'i')
+regexp_like:bool | regexp_like:bool | ?column?:bool | regexp_like:bool
+f | t | f | f
+-- SELECT 1
+
+> select substring('àbÀB' collate "C" from '[[:alpha:]]+'), substring('àbÀB' from '[[:alpha:]]+')
+substring:text | substring:text
+b | àbÀB
+-- SELECT 1
+
+> select 'ǅ' ~* '[ǅ]', 'Ǆ' ~* '[ǅ]', 'x' ~* '[ǅ-ǅ]', 'ǅ' ~* '[ǅ-ǆ]'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | f | t
+-- SELECT 1
+
+> select collation for ('abc'::text::name), collation for ('àb'::name::text), collation for (upper('àb'::name)), collation for ('abc'::name), collation for ('a'::name || 'b')
+pg_collation_for:text | pg_collation_for:text | pg_collation_for:text | pg_collation_for:text | pg_collation_for:text
+"default" | "C" | "C" | "C" | "C"
+-- SELECT 1
+
+> select upper('àb'::text::name), upper(('àb'::text::name)::text)
+upper:text | upper:text
+ÀB | ÀB
+-- SELECT 1
+
+> create table rc_tc (a text collate "C", b text)
+-- CREATE TABLE
+
+> insert into rc_tc values ('àbÀB', 'àbÀB')
+-- INSERT 0 1
+
+> select upper(a), upper(b), a ~* 'À', b ~* 'À', regexp_replace(a, 'à', 'x', 'gi'), regexp_replace(b, 'à', 'x', 'gi') from rc_tc
+upper:text | upper:text | ?column?:bool | ?column?:bool | regexp_replace:text | regexp_replace:text
+àBÀB | ÀBÀB | t | t | xbÀB | xbxB
+-- SELECT 1
+
+> select * from regexp_matches((select a from rc_tc), '[[:alpha:]]', 'g')
+regexp_matches:text[]
+{B}
+{b}
+-- SELECT 2
+
+> select * from regexp_split_to_table((select a from rc_tc), '[[:alpha:]]')
+regexp_split_to_table:text
+
+À
+à
+-- SELECT 3
+
+> select x from rc_tc, regexp_split_to_table(a, 'b', 'i') x
+x:text
+
+À
+à
+-- SELECT 3
+
+> select regexp_matches(a, '.', 'gi') from rc_tc
+regexp_matches:text[]
+{B}
+{b}
+{À}
+{à}
+-- SELECT 4
+
+> select a similar to '%À%', a similar to '%[[:upper:]]%' , substring(a from '[[:upper:]]'), substring(b from '[[:upper:]]') from rc_tc
+?column?:bool | ?column?:bool | substring:text | substring:text
+t | t | B | À
+-- SELECT 1
+
+> drop table rc_tc
+-- DROP TABLE
+
+> select 'ÀB' ~ '\w+$', 'ÀB' collate "C" ~ '\w+$', 'ÀB' collate "C" ~ '^\W', 'aB' collate "C" ~* '^[[:lower:]]+$', 'ÀB' collate "C" ~ '[[:<:]]B'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t
+-- SELECT 1
+
+> select regexp_replace('Ab Cd', '\m(\w)', '<\1>', 'g'), regexp_replace('Ab Cd' collate "C", '[[:<:]]', '|', 'g')
+regexp_replace:text | regexp_replace:text
+<A>b <C>d | |Ab |Cd
+-- SELECT 1
+
+> create table rc_tc (a text collate "C", b text)
+-- CREATE TABLE
+
+> insert into rc_tc values ('àbÀB', 'àbÀB')
+-- INSERT 0 1
+
+> select upper(x), x ~* 'À' from (select a x from rc_tc) s
+upper:text | ?column?:bool
+àBÀB | t
+-- SELECT 1
+
+> select upper((select a from rc_tc)), (select a from rc_tc) ~* 'À', upper((select b from rc_tc))
+upper:text | ?column?:bool | upper:text
+àBÀB | t | ÀBÀB
+-- SELECT 1
+
+> create view rc_v as select a, b from rc_tc
+-- CREATE VIEW
+
+> select upper(a), upper(b) from rc_v
+upper:text | upper:text
+àBÀB | ÀBÀB
+-- SELECT 1
+
+> with w as (select a from rc_tc) select upper(a) from w
+upper:text
+àBÀB
+-- SELECT 1
+
+> drop view rc_v
+-- DROP VIEW
+
+> drop table rc_tc
+-- DROP TABLE
+

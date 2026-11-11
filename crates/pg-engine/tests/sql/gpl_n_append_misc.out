@@ -1,0 +1,223 @@
+> CREATE TABLE gpl_m0 (id serial PRIMARY KEY, name text)
+-- CREATE TABLE
+
+> CREATE TABLE gpl_m1 (id integer PRIMARY KEY) INHERITS (gpl_m0)
+NOTICE 00000: merging column "id" with inherited definition
+-- CREATE TABLE
+
+> CREATE TABLE gpl_m2 (id integer PRIMARY KEY) INHERITS (gpl_m0)
+NOTICE 00000: merging column "id" with inherited definition
+-- CREATE TABLE
+
+> CREATE INDEX gpl_m0i ON gpl_m0 ((1 - id))
+-- CREATE INDEX
+
+> CREATE INDEX gpl_m1i ON gpl_m1 ((1 - id))
+-- CREATE INDEX
+
+> INSERT INTO gpl_m1 (name) VALUES ('a'), ('b')
+-- INSERT 0 2
+
+> INSERT INTO gpl_m2 (name) VALUES ('c'), ('d')
+-- INSERT 0 2
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_parallel_append = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM gpl_m0 ORDER BY 1 - id
+QUERY PLAN:text
+Merge Append
+  Sort Key: ((1 - gpl_m0.id))
+  ->  Index Scan using gpl_m0i on public.gpl_m0 gpl_m0_1
+        Output: gpl_m0_1.id, gpl_m0_1.name, (1 - gpl_m0_1.id)
+  ->  Index Scan using gpl_m1i on public.gpl_m1 gpl_m0_2
+        Output: gpl_m0_2.id, gpl_m0_2.name, (1 - gpl_m0_2.id)
+  ->  Sort
+        Output: gpl_m0_3.id, gpl_m0_3.name, ((1 - gpl_m0_3.id))
+        Sort Key: ((1 - gpl_m0_3.id))
+        ->  Seq Scan on public.gpl_m2 gpl_m0_3
+              Disabled: true
+              Output: gpl_m0_3.id, gpl_m0_3.name, (1 - gpl_m0_3.id)
+-- EXPLAIN
+
+> SELECT * FROM gpl_m0 ORDER BY 1 - id
+id:int4 | name:text
+4 | d
+3 | c
+2 | b
+1 | a
+-- SELECT 4
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT min(1 - id) FROM gpl_m0
+QUERY PLAN:text
+Result
+  Output: (InitPlan 1).col1
+  InitPlan 1
+    ->  Limit
+          Output: ((1 - gpl_m0.id))
+          ->  Result
+                Output: ((1 - gpl_m0.id))
+                ->  Merge Append
+                      Sort Key: ((1 - gpl_m0.id))
+                      ->  Index Scan using gpl_m0i on public.gpl_m0 gpl_m0_1
+                            Output: gpl_m0_1.id, (1 - gpl_m0_1.id)
+                            Index Cond: ((1 - gpl_m0_1.id) IS NOT NULL)
+                      ->  Index Scan using gpl_m1i on public.gpl_m1 gpl_m0_2
+                            Output: gpl_m0_2.id, (1 - gpl_m0_2.id)
+                            Index Cond: ((1 - gpl_m0_2.id) IS NOT NULL)
+                      ->  Sort
+                            Output: gpl_m0_3.id, ((1 - gpl_m0_3.id))
+                            Sort Key: ((1 - gpl_m0_3.id))
+                            ->  Bitmap Heap Scan on public.gpl_m2 gpl_m0_3
+                                  Output: gpl_m0_3.id, (1 - gpl_m0_3.id)
+                                  Filter: ((1 - gpl_m0_3.id) IS NOT NULL)
+                                  ->  Bitmap Index Scan on gpl_m2_pkey
+-- EXPLAIN
+
+> SELECT min(1 - id) FROM gpl_m0
+min:int4
+-3
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_parallel_append
+-- RESET
+
+> CREATE TABLE gpl_u (thousand int, tenthous int, hundred int)
+-- CREATE TABLE
+
+> CREATE INDEX gpl_u_tt ON gpl_u (thousand, tenthous)
+-- CREATE INDEX
+
+> CREATE INDEX gpl_u_h ON gpl_u (hundred)
+-- CREATE INDEX
+
+> INSERT INTO gpl_u SELECT g % 1000, g, g % 100 FROM generate_series(1, 10000) g
+-- INSERT 0 10000
+
+> ANALYZE gpl_u
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT thousand, tenthous, thousand + tenthous AS x FROM gpl_u
+> UNION ALL
+> SELECT 42, 42, hundred FROM gpl_u
+> ORDER BY thousand, tenthous
+QUERY PLAN:text
+Merge Append
+  Sort Key: gpl_u.thousand, gpl_u.tenthous
+  ->  Index Only Scan using gpl_u_tt on gpl_u
+  ->  Sort
+        Sort Key: 42, 42
+        ->  Seq Scan on gpl_u gpl_u_1
+-- EXPLAIN
+
+> CREATE TABLE gpl_pm (a int, b varchar(16)) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE gpl_pm1 PARTITION OF gpl_pm FOR VALUES FROM (1) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE gpl_pm2 PARTITION OF gpl_pm FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE INDEX gpl_pm1i ON gpl_pm1 (a, b)
+-- CREATE INDEX
+
+> CREATE INDEX gpl_pm2i ON gpl_pm2 (a, b)
+-- CREATE INDEX
+
+> INSERT INTO gpl_pm VALUES (1, '12345'), (2, '12345'), (15, 'x')
+-- INSERT 0 3
+
+> EXPLAIN (COSTS OFF) SELECT min(a), max(a) FROM gpl_pm WHERE b = '12345' AND a < 10
+QUERY PLAN:text
+Aggregate
+  ->  Bitmap Heap Scan on gpl_pm1 gpl_pm
+        Recheck Cond: ((a < 10) AND ((b)::text = '12345'::text))
+        ->  Bitmap Index Scan on gpl_pm1i
+              Index Cond: ((a < 10) AND ((b)::text = '12345'::text))
+-- EXPLAIN
+
+> SELECT min(a), max(a) FROM gpl_pm WHERE b = '12345' AND a < 10
+min:int4 | max:int4
+1 | 2
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gpl_pm WHERE a = 2 ORDER BY a, b
+QUERY PLAN:text
+Index Only Scan using gpl_pm1i on gpl_pm1 gpl_pm
+  Index Cond: (a = 2)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> CREATE TABLE gpl_v (a int, b varchar(16), c int)
+-- CREATE TABLE
+
+> CREATE INDEX gpl_v_b ON gpl_v (b)
+-- CREATE INDEX
+
+> INSERT INTO gpl_v SELECT g, g::text, g FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> VACUUM ANALYZE gpl_v
+-- VACUUM
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gpl_v WHERE b = '12'
+QUERY PLAN:text
+Index Scan using gpl_v_b on gpl_v
+  Index Cond: ((b)::text = '12'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT b FROM gpl_v WHERE b = '12'
+QUERY PLAN:text
+Index Only Scan using gpl_v_b on gpl_v
+  Index Cond: (b = '12'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> CREATE TABLE gpl_c (a int, b char(2))
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM gpl_c WHERE a BETWEEN 3 AND 23 AND b IN ('ab')
+QUERY PLAN:text
+Seq Scan on gpl_c
+  Filter: ((a >= 3) AND (a <= 23) AND (b = 'ab'::bpchar))
+-- EXPLAIN
+
+> DROP TABLE gpl_m0 CASCADE
+NOTICE 00000: drop cascades to 2 other objects
+DETAIL: drop cascades to table gpl_m1
+DETAIL: drop cascades to table gpl_m2
+-- DROP TABLE
+
+> DROP TABLE gpl_u, gpl_pm, gpl_c, gpl_v
+-- DROP TABLE
+

@@ -1,0 +1,1271 @@
+> SET enable_partitionwise_join to true
+-- SET
+
+> CREATE TABLE a40_p1 (a int, b int, c varchar) PARTITION BY RANGE(a)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p1_1 PARTITION OF a40_p1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p1_3 PARTITION OF a40_p1 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p1_2 PARTITION OF a40_p1 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> INSERT INTO a40_p1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> CREATE INDEX a40_i1_1_a on a40_p1_1(a)
+-- CREATE INDEX
+
+> CREATE INDEX a40_i1_2_a on a40_p1_2(a)
+-- CREATE INDEX
+
+> CREATE INDEX a40_i1_3_a on a40_p1_3(a)
+-- CREATE INDEX
+
+> ANALYZE a40_p1
+-- ANALYZE
+
+> CREATE TABLE a40_p2 (a int, b int, c varchar) PARTITION BY RANGE(b)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p2_1 PARTITION OF a40_p2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p2_2 PARTITION OF a40_p2 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p2_3 PARTITION OF a40_p2 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO a40_p2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> CREATE INDEX a40_i2_1_b on a40_p2_1(b)
+-- CREATE INDEX
+
+> CREATE INDEX a40_i2_2_b on a40_p2_2(b)
+-- CREATE INDEX
+
+> CREATE INDEX a40_i2_3_b on a40_p2_3(b)
+-- CREATE INDEX
+
+> ANALYZE a40_p2
+-- ANALYZE
+
+> CREATE TABLE a40_plain (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO a40_plain SELECT i, i % 7 FROM generate_series(0, 599, 5) i
+-- INSERT 0 120
+
+> ANALYZE a40_plain
+-- ANALYZE
+
+> CREATE TABLE a40_p3 (a int, b int) PARTITION BY LIST (b)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p3_1 PARTITION OF a40_p3 FOR VALUES IN (0, 1, 2)
+-- CREATE TABLE
+
+> CREATE TABLE a40_p3_2 PARTITION OF a40_p3 FOR VALUES IN (3, 4, 5, 6)
+-- CREATE TABLE
+
+> INSERT INTO a40_p3 SELECT i, i % 7 FROM generate_series(0, 599, 4) i
+-- INSERT 0 150
+
+> ANALYZE a40_p3
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t1.c, t2.b, t2.c FROM (SELECT * FROM a40_p1 WHERE a = 1 AND a = 2) t1 RIGHT JOIN a40_p2 t2 ON t1.a = t2.b, a40_p1 t3 WHERE t2.b = t3.a
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (t2.b = a)
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t3_1.a = t2_1.b)
+              ->  Seq Scan on a40_p1_1 t3_1
+              ->  Hash
+                    ->  Seq Scan on a40_p2_1 t2_1
+        ->  Hash Join
+              Hash Cond: (t3_2.a = t2_2.b)
+              ->  Seq Scan on a40_p1_2 t3_2
+              ->  Hash
+                    ->  Seq Scan on a40_p2_2 t2_2
+        ->  Hash Join
+              Hash Cond: (t3_3.a = t2_3.b)
+              ->  Seq Scan on a40_p1_3 t3_3
+              ->  Hash
+                    ->  Seq Scan on a40_p2_3 t2_3
+  ->  Hash
+        ->  Result
+              One-Time Filter: false
+-- EXPLAIN
+
+> SELECT t1.a, t1.c, t2.b, t2.c FROM (SELECT * FROM a40_p1 WHERE a = 1 AND a = 2) t1 RIGHT JOIN a40_p2 t2 ON t1.a = t2.b, a40_p1 t3 WHERE t2.b = t3.a ORDER BY t2.b, t2.c
+a:int4 | c:varchar | b:int4 | c:varchar
+NULL | NULL | 0 | 0000
+NULL | NULL | 6 | 0006
+NULL | NULL | 12 | 0012
+NULL | NULL | 18 | 0018
+NULL | NULL | 24 | 0024
+NULL | NULL | 30 | 0030
+NULL | NULL | 36 | 0036
+NULL | NULL | 42 | 0042
+NULL | NULL | 48 | 0048
+NULL | NULL | 54 | 0054
+NULL | NULL | 60 | 0060
+NULL | NULL | 66 | 0066
+NULL | NULL | 72 | 0072
+NULL | NULL | 78 | 0078
+NULL | NULL | 84 | 0084
+NULL | NULL | 90 | 0090
+NULL | NULL | 96 | 0096
+NULL | NULL | 102 | 0102
+NULL | NULL | 108 | 0108
+NULL | NULL | 114 | 0114
+NULL | NULL | 120 | 0120
+NULL | NULL | 126 | 0126
+NULL | NULL | 132 | 0132
+NULL | NULL | 138 | 0138
+NULL | NULL | 144 | 0144
+NULL | NULL | 150 | 0150
+NULL | NULL | 156 | 0156
+NULL | NULL | 162 | 0162
+NULL | NULL | 168 | 0168
+NULL | NULL | 174 | 0174
+NULL | NULL | 180 | 0180
+NULL | NULL | 186 | 0186
+NULL | NULL | 192 | 0192
+NULL | NULL | 198 | 0198
+NULL | NULL | 204 | 0204
+NULL | NULL | 210 | 0210
+NULL | NULL | 216 | 0216
+NULL | NULL | 222 | 0222
+NULL | NULL | 228 | 0228
+NULL | NULL | 234 | 0234
+NULL | NULL | 240 | 0240
+NULL | NULL | 246 | 0246
+NULL | NULL | 252 | 0252
+NULL | NULL | 258 | 0258
+NULL | NULL | 264 | 0264
+NULL | NULL | 270 | 0270
+NULL | NULL | 276 | 0276
+NULL | NULL | 282 | 0282
+NULL | NULL | 288 | 0288
+NULL | NULL | 294 | 0294
+NULL | NULL | 300 | 0300
+NULL | NULL | 306 | 0306
+NULL | NULL | 312 | 0312
+NULL | NULL | 318 | 0318
+NULL | NULL | 324 | 0324
+NULL | NULL | 330 | 0330
+NULL | NULL | 336 | 0336
+NULL | NULL | 342 | 0342
+NULL | NULL | 348 | 0348
+NULL | NULL | 354 | 0354
+NULL | NULL | 360 | 0360
+NULL | NULL | 366 | 0366
+NULL | NULL | 372 | 0372
+NULL | NULL | 378 | 0378
+NULL | NULL | 384 | 0384
+NULL | NULL | 390 | 0390
+NULL | NULL | 396 | 0396
+NULL | NULL | 402 | 0402
+NULL | NULL | 408 | 0408
+NULL | NULL | 414 | 0414
+NULL | NULL | 420 | 0420
+NULL | NULL | 426 | 0426
+NULL | NULL | 432 | 0432
+NULL | NULL | 438 | 0438
+NULL | NULL | 444 | 0444
+NULL | NULL | 450 | 0450
+NULL | NULL | 456 | 0456
+NULL | NULL | 462 | 0462
+NULL | NULL | 468 | 0468
+NULL | NULL | 474 | 0474
+NULL | NULL | 480 | 0480
+NULL | NULL | 486 | 0486
+NULL | NULL | 492 | 0492
+NULL | NULL | 498 | 0498
+NULL | NULL | 504 | 0504
+NULL | NULL | 510 | 0510
+NULL | NULL | 516 | 0516
+NULL | NULL | 522 | 0522
+NULL | NULL | 528 | 0528
+NULL | NULL | 534 | 0534
+NULL | NULL | 540 | 0540
+NULL | NULL | 546 | 0546
+NULL | NULL | 552 | 0552
+NULL | NULL | 558 | 0558
+NULL | NULL | 564 | 0564
+NULL | NULL | 570 | 0570
+NULL | NULL | 576 | 0576
+NULL | NULL | 582 | 0582
+NULL | NULL | 588 | 0588
+NULL | NULL | 594 | 0594
+-- SELECT 100
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b, p.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b LEFT JOIN a40_plain p ON p.a = t1.a WHERE t1.b < 20
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (t1.a = p.a)
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t1_1.a = t2_1.b)
+              ->  Seq Scan on a40_p1_1 t1_1
+                    Filter: (b < 20)
+              ->  Hash
+                    ->  Seq Scan on a40_p2_1 t2_1
+        ->  Hash Join
+              Hash Cond: (t1_2.a = t2_2.b)
+              ->  Seq Scan on a40_p1_2 t1_2
+                    Filter: (b < 20)
+              ->  Hash
+                    ->  Seq Scan on a40_p2_2 t2_2
+        ->  Hash Join
+              Hash Cond: (t1_3.a = t2_3.b)
+              ->  Seq Scan on a40_p1_3 t1_3
+                    Filter: (b < 20)
+              ->  Hash
+                    ->  Seq Scan on a40_p2_3 t2_3
+  ->  Hash
+        ->  Seq Scan on a40_plain p
+-- EXPLAIN
+
+> SELECT t1.a, t2.b, p.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b LEFT JOIN a40_plain p ON p.a = t1.a WHERE t1.b < 20 ORDER BY 1, 2, 3
+a:int4 | b:int4 | b:int4
+0 | 0 | 0
+6 | 6 | NULL
+12 | 12 | NULL
+18 | 18 | NULL
+30 | 30 | 2
+36 | 36 | NULL
+42 | 42 | NULL
+54 | 54 | NULL
+60 | 60 | 4
+66 | 66 | NULL
+78 | 78 | NULL
+84 | 84 | NULL
+90 | 90 | 6
+102 | 102 | NULL
+108 | 108 | NULL
+114 | 114 | NULL
+126 | 126 | NULL
+132 | 132 | NULL
+138 | 138 | NULL
+144 | 144 | NULL
+150 | 150 | 3
+156 | 156 | NULL
+162 | 162 | NULL
+168 | 168 | NULL
+180 | 180 | 5
+186 | 186 | NULL
+192 | 192 | NULL
+204 | 204 | NULL
+210 | 210 | 0
+216 | 216 | NULL
+228 | 228 | NULL
+234 | 234 | NULL
+240 | 240 | 2
+252 | 252 | NULL
+258 | 258 | NULL
+264 | 264 | NULL
+276 | 276 | NULL
+282 | 282 | NULL
+288 | 288 | NULL
+294 | 294 | NULL
+300 | 300 | 6
+306 | 306 | NULL
+312 | 312 | NULL
+318 | 318 | NULL
+330 | 330 | 1
+336 | 336 | NULL
+342 | 342 | NULL
+354 | 354 | NULL
+360 | 360 | 3
+366 | 366 | NULL
+378 | 378 | NULL
+384 | 384 | NULL
+390 | 390 | 5
+402 | 402 | NULL
+408 | 408 | NULL
+414 | 414 | NULL
+426 | 426 | NULL
+432 | 432 | NULL
+438 | 438 | NULL
+444 | 444 | NULL
+450 | 450 | 2
+456 | 456 | NULL
+462 | 462 | NULL
+468 | 468 | NULL
+480 | 480 | 4
+486 | 486 | NULL
+492 | 492 | NULL
+504 | 504 | NULL
+510 | 510 | 6
+516 | 516 | NULL
+528 | 528 | NULL
+534 | 534 | NULL
+540 | 540 | 1
+552 | 552 | NULL
+558 | 558 | NULL
+564 | 564 | NULL
+576 | 576 | NULL
+582 | 582 | NULL
+588 | 588 | NULL
+594 | 594 | NULL
+-- SELECT 80
+
+> EXPLAIN (COSTS OFF)
+> SELECT p.a, t1.a, t2.b FROM a40_plain p LEFT JOIN (a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b) ON p.a = t1.a
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (t1.a = p.a)
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t1_1.a = t2_1.b)
+              ->  Seq Scan on a40_p1_1 t1_1
+              ->  Hash
+                    ->  Seq Scan on a40_p2_1 t2_1
+        ->  Hash Join
+              Hash Cond: (t1_2.a = t2_2.b)
+              ->  Seq Scan on a40_p1_2 t1_2
+              ->  Hash
+                    ->  Seq Scan on a40_p2_2 t2_2
+        ->  Hash Join
+              Hash Cond: (t1_3.a = t2_3.b)
+              ->  Seq Scan on a40_p1_3 t1_3
+              ->  Hash
+                    ->  Seq Scan on a40_p2_3 t2_3
+  ->  Hash
+        ->  Seq Scan on a40_plain p
+-- EXPLAIN
+
+> SELECT p.a, t1.a, t2.b FROM a40_plain p LEFT JOIN (a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b) ON p.a = t1.a ORDER BY 1, 2, 3
+a:int4 | a:int4 | b:int4
+0 | 0 | 0
+5 | NULL | NULL
+10 | NULL | NULL
+15 | NULL | NULL
+20 | NULL | NULL
+25 | NULL | NULL
+30 | 30 | 30
+35 | NULL | NULL
+40 | NULL | NULL
+45 | NULL | NULL
+50 | NULL | NULL
+55 | NULL | NULL
+60 | 60 | 60
+65 | NULL | NULL
+70 | NULL | NULL
+75 | NULL | NULL
+80 | NULL | NULL
+85 | NULL | NULL
+90 | 90 | 90
+95 | NULL | NULL
+100 | NULL | NULL
+105 | NULL | NULL
+110 | NULL | NULL
+115 | NULL | NULL
+120 | 120 | 120
+125 | NULL | NULL
+130 | NULL | NULL
+135 | NULL | NULL
+140 | NULL | NULL
+145 | NULL | NULL
+150 | 150 | 150
+155 | NULL | NULL
+160 | NULL | NULL
+165 | NULL | NULL
+170 | NULL | NULL
+175 | NULL | NULL
+180 | 180 | 180
+185 | NULL | NULL
+190 | NULL | NULL
+195 | NULL | NULL
+200 | NULL | NULL
+205 | NULL | NULL
+210 | 210 | 210
+215 | NULL | NULL
+220 | NULL | NULL
+225 | NULL | NULL
+230 | NULL | NULL
+235 | NULL | NULL
+240 | 240 | 240
+245 | NULL | NULL
+250 | NULL | NULL
+255 | NULL | NULL
+260 | NULL | NULL
+265 | NULL | NULL
+270 | 270 | 270
+275 | NULL | NULL
+280 | NULL | NULL
+285 | NULL | NULL
+290 | NULL | NULL
+295 | NULL | NULL
+300 | 300 | 300
+305 | NULL | NULL
+310 | NULL | NULL
+315 | NULL | NULL
+320 | NULL | NULL
+325 | NULL | NULL
+330 | 330 | 330
+335 | NULL | NULL
+340 | NULL | NULL
+345 | NULL | NULL
+350 | NULL | NULL
+355 | NULL | NULL
+360 | 360 | 360
+365 | NULL | NULL
+370 | NULL | NULL
+375 | NULL | NULL
+380 | NULL | NULL
+385 | NULL | NULL
+390 | 390 | 390
+395 | NULL | NULL
+400 | NULL | NULL
+405 | NULL | NULL
+410 | NULL | NULL
+415 | NULL | NULL
+420 | 420 | 420
+425 | NULL | NULL
+430 | NULL | NULL
+435 | NULL | NULL
+440 | NULL | NULL
+445 | NULL | NULL
+450 | 450 | 450
+455 | NULL | NULL
+460 | NULL | NULL
+465 | NULL | NULL
+470 | NULL | NULL
+475 | NULL | NULL
+480 | 480 | 480
+485 | NULL | NULL
+490 | NULL | NULL
+495 | NULL | NULL
+500 | NULL | NULL
+505 | NULL | NULL
+510 | 510 | 510
+515 | NULL | NULL
+520 | NULL | NULL
+525 | NULL | NULL
+530 | NULL | NULL
+535 | NULL | NULL
+540 | 540 | 540
+545 | NULL | NULL
+550 | NULL | NULL
+555 | NULL | NULL
+560 | NULL | NULL
+565 | NULL | NULL
+570 | 570 | 570
+575 | NULL | NULL
+580 | NULL | NULL
+585 | NULL | NULL
+590 | NULL | NULL
+595 | NULL | NULL
+-- SELECT 120
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b, t3.a FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b LEFT JOIN a40_p3 t3 ON t3.a = t2.b AND t3.b > 2
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (t2.b = t3.a)
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t1_1.a = t2_1.b)
+              ->  Seq Scan on a40_p1_1 t1_1
+              ->  Hash
+                    ->  Seq Scan on a40_p2_1 t2_1
+        ->  Hash Join
+              Hash Cond: (t1_2.a = t2_2.b)
+              ->  Seq Scan on a40_p1_2 t1_2
+              ->  Hash
+                    ->  Seq Scan on a40_p2_2 t2_2
+        ->  Hash Join
+              Hash Cond: (t1_3.a = t2_3.b)
+              ->  Seq Scan on a40_p1_3 t1_3
+              ->  Hash
+                    ->  Seq Scan on a40_p2_3 t2_3
+  ->  Hash
+        ->  Seq Scan on a40_p3_2 t3
+              Filter: (b > 2)
+-- EXPLAIN
+
+> SELECT t1.a, t2.b, t3.a FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b LEFT JOIN a40_p3 t3 ON t3.a = t2.b AND t3.b > 2 ORDER BY 1, 2, 3
+a:int4 | b:int4 | a:int4
+0 | 0 | NULL
+6 | 6 | NULL
+12 | 12 | 12
+18 | 18 | NULL
+24 | 24 | 24
+30 | 30 | NULL
+36 | 36 | NULL
+42 | 42 | NULL
+48 | 48 | 48
+54 | 54 | NULL
+60 | 60 | 60
+66 | 66 | NULL
+72 | 72 | NULL
+78 | 78 | NULL
+84 | 84 | NULL
+90 | 90 | NULL
+96 | 96 | 96
+102 | 102 | NULL
+108 | 108 | 108
+114 | 114 | NULL
+120 | 120 | NULL
+126 | 126 | NULL
+132 | 132 | 132
+138 | 138 | NULL
+144 | 144 | 144
+150 | 150 | NULL
+156 | 156 | NULL
+162 | 162 | NULL
+168 | 168 | NULL
+174 | 174 | NULL
+180 | 180 | 180
+186 | 186 | NULL
+192 | 192 | 192
+198 | 198 | NULL
+204 | 204 | NULL
+210 | 210 | NULL
+216 | 216 | 216
+222 | 222 | NULL
+228 | 228 | 228
+234 | 234 | NULL
+240 | 240 | NULL
+246 | 246 | NULL
+252 | 252 | NULL
+258 | 258 | NULL
+264 | 264 | 264
+270 | 270 | NULL
+276 | 276 | 276
+282 | 282 | NULL
+288 | 288 | NULL
+294 | 294 | NULL
+300 | 300 | 300
+306 | 306 | NULL
+312 | 312 | 312
+318 | 318 | NULL
+324 | 324 | NULL
+330 | 330 | NULL
+336 | 336 | NULL
+342 | 342 | NULL
+348 | 348 | 348
+354 | 354 | NULL
+360 | 360 | 360
+366 | 366 | NULL
+372 | 372 | NULL
+378 | 378 | NULL
+384 | 384 | 384
+390 | 390 | NULL
+396 | 396 | 396
+402 | 402 | NULL
+408 | 408 | NULL
+414 | 414 | NULL
+420 | 420 | NULL
+426 | 426 | NULL
+432 | 432 | 432
+438 | 438 | NULL
+444 | 444 | 444
+450 | 450 | NULL
+456 | 456 | NULL
+462 | 462 | NULL
+468 | 468 | 468
+474 | 474 | NULL
+480 | 480 | 480
+486 | 486 | NULL
+492 | 492 | NULL
+498 | 498 | NULL
+504 | 504 | NULL
+510 | 510 | NULL
+516 | 516 | 516
+522 | 522 | NULL
+528 | 528 | 528
+534 | 534 | NULL
+540 | 540 | NULL
+546 | 546 | NULL
+552 | 552 | 552
+558 | 558 | NULL
+564 | 564 | 564
+570 | 570 | NULL
+576 | 576 | NULL
+582 | 582 | NULL
+588 | 588 | NULL
+594 | 594 | NULL
+-- SELECT 100
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b, p.a FROM (a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b) FULL JOIN a40_plain p ON p.a = t1.a
+QUERY PLAN:text
+Hash Full Join
+  Hash Cond: (t1.a = p.a)
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t1_1.a = t2_1.b)
+              ->  Seq Scan on a40_p1_1 t1_1
+              ->  Hash
+                    ->  Seq Scan on a40_p2_1 t2_1
+        ->  Hash Join
+              Hash Cond: (t1_2.a = t2_2.b)
+              ->  Seq Scan on a40_p1_2 t1_2
+              ->  Hash
+                    ->  Seq Scan on a40_p2_2 t2_2
+        ->  Hash Join
+              Hash Cond: (t1_3.a = t2_3.b)
+              ->  Seq Scan on a40_p1_3 t1_3
+              ->  Hash
+                    ->  Seq Scan on a40_p2_3 t2_3
+  ->  Hash
+        ->  Seq Scan on a40_plain p
+-- EXPLAIN
+
+> SELECT t1.a, t2.b, p.a FROM (a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b) FULL JOIN a40_plain p ON p.a = t1.a ORDER BY 1, 2, 3
+a:int4 | b:int4 | a:int4
+0 | 0 | 0
+6 | 6 | NULL
+12 | 12 | NULL
+18 | 18 | NULL
+24 | 24 | NULL
+30 | 30 | 30
+36 | 36 | NULL
+42 | 42 | NULL
+48 | 48 | NULL
+54 | 54 | NULL
+60 | 60 | 60
+66 | 66 | NULL
+72 | 72 | NULL
+78 | 78 | NULL
+84 | 84 | NULL
+90 | 90 | 90
+96 | 96 | NULL
+102 | 102 | NULL
+108 | 108 | NULL
+114 | 114 | NULL
+120 | 120 | 120
+126 | 126 | NULL
+132 | 132 | NULL
+138 | 138 | NULL
+144 | 144 | NULL
+150 | 150 | 150
+156 | 156 | NULL
+162 | 162 | NULL
+168 | 168 | NULL
+174 | 174 | NULL
+180 | 180 | 180
+186 | 186 | NULL
+192 | 192 | NULL
+198 | 198 | NULL
+204 | 204 | NULL
+210 | 210 | 210
+216 | 216 | NULL
+222 | 222 | NULL
+228 | 228 | NULL
+234 | 234 | NULL
+240 | 240 | 240
+246 | 246 | NULL
+252 | 252 | NULL
+258 | 258 | NULL
+264 | 264 | NULL
+270 | 270 | 270
+276 | 276 | NULL
+282 | 282 | NULL
+288 | 288 | NULL
+294 | 294 | NULL
+300 | 300 | 300
+306 | 306 | NULL
+312 | 312 | NULL
+318 | 318 | NULL
+324 | 324 | NULL
+330 | 330 | 330
+336 | 336 | NULL
+342 | 342 | NULL
+348 | 348 | NULL
+354 | 354 | NULL
+360 | 360 | 360
+366 | 366 | NULL
+372 | 372 | NULL
+378 | 378 | NULL
+384 | 384 | NULL
+390 | 390 | 390
+396 | 396 | NULL
+402 | 402 | NULL
+408 | 408 | NULL
+414 | 414 | NULL
+420 | 420 | 420
+426 | 426 | NULL
+432 | 432 | NULL
+438 | 438 | NULL
+444 | 444 | NULL
+450 | 450 | 450
+456 | 456 | NULL
+462 | 462 | NULL
+468 | 468 | NULL
+474 | 474 | NULL
+480 | 480 | 480
+486 | 486 | NULL
+492 | 492 | NULL
+498 | 498 | NULL
+504 | 504 | NULL
+510 | 510 | 510
+516 | 516 | NULL
+522 | 522 | NULL
+528 | 528 | NULL
+534 | 534 | NULL
+540 | 540 | 540
+546 | 546 | NULL
+552 | 552 | NULL
+558 | 558 | NULL
+564 | 564 | NULL
+570 | 570 | 570
+576 | 576 | NULL
+582 | 582 | NULL
+588 | 588 | NULL
+594 | 594 | NULL
+NULL | NULL | 5
+NULL | NULL | 10
+NULL | NULL | 15
+NULL | NULL | 20
+NULL | NULL | 25
+NULL | NULL | 35
+NULL | NULL | 40
+NULL | NULL | 45
+NULL | NULL | 50
+NULL | NULL | 55
+NULL | NULL | 65
+NULL | NULL | 70
+NULL | NULL | 75
+NULL | NULL | 80
+NULL | NULL | 85
+NULL | NULL | 95
+NULL | NULL | 100
+NULL | NULL | 105
+NULL | NULL | 110
+NULL | NULL | 115
+NULL | NULL | 125
+NULL | NULL | 130
+NULL | NULL | 135
+NULL | NULL | 140
+NULL | NULL | 145
+NULL | NULL | 155
+NULL | NULL | 160
+NULL | NULL | 165
+NULL | NULL | 170
+NULL | NULL | 175
+NULL | NULL | 185
+NULL | NULL | 190
+NULL | NULL | 195
+NULL | NULL | 200
+NULL | NULL | 205
+NULL | NULL | 215
+NULL | NULL | 220
+NULL | NULL | 225
+NULL | NULL | 230
+NULL | NULL | 235
+NULL | NULL | 245
+NULL | NULL | 250
+NULL | NULL | 255
+NULL | NULL | 260
+NULL | NULL | 265
+NULL | NULL | 275
+NULL | NULL | 280
+NULL | NULL | 285
+NULL | NULL | 290
+NULL | NULL | 295
+NULL | NULL | 305
+NULL | NULL | 310
+NULL | NULL | 315
+NULL | NULL | 320
+NULL | NULL | 325
+NULL | NULL | 335
+NULL | NULL | 340
+NULL | NULL | 345
+NULL | NULL | 350
+NULL | NULL | 355
+NULL | NULL | 365
+NULL | NULL | 370
+NULL | NULL | 375
+NULL | NULL | 380
+NULL | NULL | 385
+NULL | NULL | 395
+NULL | NULL | 400
+NULL | NULL | 405
+NULL | NULL | 410
+NULL | NULL | 415
+NULL | NULL | 425
+NULL | NULL | 430
+NULL | NULL | 435
+NULL | NULL | 440
+NULL | NULL | 445
+NULL | NULL | 455
+NULL | NULL | 460
+NULL | NULL | 465
+NULL | NULL | 470
+NULL | NULL | 475
+NULL | NULL | 485
+NULL | NULL | 490
+NULL | NULL | 495
+NULL | NULL | 500
+NULL | NULL | 505
+NULL | NULL | 515
+NULL | NULL | 520
+NULL | NULL | 525
+NULL | NULL | 530
+NULL | NULL | 535
+NULL | NULL | 545
+NULL | NULL | 550
+NULL | NULL | 555
+NULL | NULL | 560
+NULL | NULL | 565
+NULL | NULL | 575
+NULL | NULL | 580
+NULL | NULL | 585
+NULL | NULL | 590
+NULL | NULL | 595
+-- SELECT 200
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b WHERE NOT EXISTS (SELECT 1 FROM a40_plain p WHERE p.a = t1.a)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (t1.a = p.a)
+  ->  Append
+        ->  Hash Join
+              Hash Cond: (t1_1.a = t2_1.b)
+              ->  Seq Scan on a40_p1_1 t1_1
+              ->  Hash
+                    ->  Seq Scan on a40_p2_1 t2_1
+        ->  Hash Join
+              Hash Cond: (t1_2.a = t2_2.b)
+              ->  Seq Scan on a40_p1_2 t1_2
+              ->  Hash
+                    ->  Seq Scan on a40_p2_2 t2_2
+        ->  Hash Join
+              Hash Cond: (t1_3.a = t2_3.b)
+              ->  Seq Scan on a40_p1_3 t1_3
+              ->  Hash
+                    ->  Seq Scan on a40_p2_3 t2_3
+  ->  Hash
+        ->  Seq Scan on a40_plain p
+-- EXPLAIN
+
+> SELECT t1.a, t2.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b WHERE NOT EXISTS (SELECT 1 FROM a40_plain p WHERE p.a = t1.a) ORDER BY 1, 2
+a:int4 | b:int4
+6 | 6
+12 | 12
+18 | 18
+24 | 24
+36 | 36
+42 | 42
+48 | 48
+54 | 54
+66 | 66
+72 | 72
+78 | 78
+84 | 84
+96 | 96
+102 | 102
+108 | 108
+114 | 114
+126 | 126
+132 | 132
+138 | 138
+144 | 144
+156 | 156
+162 | 162
+168 | 168
+174 | 174
+186 | 186
+192 | 192
+198 | 198
+204 | 204
+216 | 216
+222 | 222
+228 | 228
+234 | 234
+246 | 246
+252 | 252
+258 | 258
+264 | 264
+276 | 276
+282 | 282
+288 | 288
+294 | 294
+306 | 306
+312 | 312
+318 | 318
+324 | 324
+336 | 336
+342 | 342
+348 | 348
+354 | 354
+366 | 366
+372 | 372
+378 | 378
+384 | 384
+396 | 396
+402 | 402
+408 | 408
+414 | 414
+426 | 426
+432 | 432
+438 | 438
+444 | 444
+456 | 456
+462 | 462
+468 | 468
+474 | 474
+486 | 486
+492 | 492
+498 | 498
+504 | 504
+516 | 516
+522 | 522
+528 | 528
+534 | 534
+546 | 546
+552 | 552
+558 | 558
+564 | 564
+576 | 576
+582 | 582
+588 | 588
+594 | 594
+-- SELECT 80
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b WHERE EXISTS (SELECT 1 FROM a40_plain p WHERE p.a = t1.a AND p.b > 1)
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (t2.b = t1.a)
+  ->  Append
+        ->  Seq Scan on a40_p2_1 t2_1
+        ->  Seq Scan on a40_p2_2 t2_2
+        ->  Seq Scan on a40_p2_3 t2_3
+  ->  Hash
+        ->  Hash Semi Join
+              Hash Cond: (t1.a = p.a)
+              ->  Append
+                    ->  Seq Scan on a40_p1_1 t1_1
+                    ->  Seq Scan on a40_p1_2 t1_2
+                    ->  Seq Scan on a40_p1_3 t1_3
+              ->  Hash
+                    ->  Seq Scan on a40_plain p
+                          Filter: (b > 1)
+-- EXPLAIN
+
+> SELECT t1.a, t2.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b WHERE EXISTS (SELECT 1 FROM a40_plain p WHERE p.a = t1.a AND p.b > 1) ORDER BY 1, 2
+a:int4 | b:int4
+30 | 30
+60 | 60
+90 | 90
+150 | 150
+180 | 180
+240 | 240
+270 | 270
+300 | 300
+360 | 360
+390 | 390
+450 | 450
+480 | 480
+510 | 510
+570 | 570
+-- SELECT 14
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b, t3.a, t4.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b LEFT JOIN (a40_p1 t3 JOIN a40_p2 t4 ON t3.a = t4.b) ON t3.a = t1.a AND t3.b < 3 WHERE t1.b = 0
+QUERY PLAN:text
+Append
+  ->  Nested Loop Left Join
+        ->  Hash Join
+              Hash Cond: (t2_1.b = t1_1.a)
+              ->  Seq Scan on a40_p2_1 t2_1
+              ->  Hash
+                    ->  Seq Scan on a40_p1_1 t1_1
+                          Filter: (b = 0)
+        ->  Nested Loop
+              ->  Index Scan using a40_i1_1_a on a40_p1_1 t3_1
+                    Index Cond: (a = t1_1.a)
+                    Filter: (b < 3)
+              ->  Index Only Scan using a40_i2_1_b on a40_p2_1 t4_1
+                    Index Cond: (b = t3_1.a)
+  ->  Nested Loop Left Join
+        ->  Hash Join
+              Hash Cond: (t2_2.b = t1_2.a)
+              ->  Seq Scan on a40_p2_2 t2_2
+              ->  Hash
+                    ->  Seq Scan on a40_p1_2 t1_2
+                          Filter: (b = 0)
+        ->  Nested Loop
+              ->  Index Scan using a40_i1_2_a on a40_p1_2 t3_2
+                    Index Cond: (a = t1_2.a)
+                    Filter: (b < 3)
+              ->  Index Only Scan using a40_i2_2_b on a40_p2_2 t4_2
+                    Index Cond: (b = t3_2.a)
+  ->  Nested Loop Left Join
+        ->  Hash Join
+              Hash Cond: (t2_3.b = t1_3.a)
+              ->  Seq Scan on a40_p2_3 t2_3
+              ->  Hash
+                    ->  Seq Scan on a40_p1_3 t1_3
+                          Filter: (b = 0)
+        ->  Nested Loop
+              ->  Index Scan using a40_i1_3_a on a40_p1_3 t3_3
+                    Index Cond: (a = t1_3.a)
+                    Filter: (b < 3)
+              ->  Index Only Scan using a40_i2_3_b on a40_p2_3 t4_3
+                    Index Cond: (b = t3_3.a)
+-- EXPLAIN
+
+> SELECT t1.a, t2.b, t3.a, t4.b FROM a40_p1 t1 JOIN a40_p2 t2 ON t1.a = t2.b LEFT JOIN (a40_p1 t3 JOIN a40_p2 t4 ON t3.a = t4.b) ON t3.a = t1.a AND t3.b < 3 WHERE t1.b = 0 ORDER BY 1, 2, 3, 4
+a:int4 | b:int4 | a:int4 | b:int4
+0 | 0 | 0 | 0
+150 | 150 | 150 | 150
+300 | 300 | 300 | 300
+450 | 450 | 450 | 450
+-- SELECT 4
+
+> CREATE TABLE a40_adv1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a40_adv1_p1 PARTITION OF a40_adv1 FOR VALUES FROM (100) TO (200)
+-- CREATE TABLE
+
+> CREATE TABLE a40_adv1_p2 PARTITION OF a40_adv1 FOR VALUES FROM (200) TO (300)
+-- CREATE TABLE
+
+> CREATE TABLE a40_adv1_p3 PARTITION OF a40_adv1 FOR VALUES FROM (300) TO (400)
+-- CREATE TABLE
+
+> CREATE INDEX a40_adv1_a_idx ON a40_adv1 (a)
+-- CREATE INDEX
+
+> INSERT INTO a40_adv1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(100, 399) i
+-- INSERT 0 300
+
+> ANALYZE a40_adv1
+-- ANALYZE
+
+> CREATE TABLE a40_adv2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE a40_adv2_p1 PARTITION OF a40_adv2 FOR VALUES FROM (100) TO (150)
+-- CREATE TABLE
+
+> CREATE TABLE a40_adv2_p2 PARTITION OF a40_adv2 FOR VALUES FROM (200) TO (300)
+-- CREATE TABLE
+
+> CREATE TABLE a40_adv2_p3 PARTITION OF a40_adv2 FOR VALUES FROM (350) TO (500)
+-- CREATE TABLE
+
+> CREATE INDEX a40_adv2_b_idx ON a40_adv2 (b)
+-- CREATE INDEX
+
+> INSERT INTO a40_adv2_p1 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(100, 149) i
+-- INSERT 0 50
+
+> INSERT INTO a40_adv2_p2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(200, 299) i
+-- INSERT 0 100
+
+> INSERT INTO a40_adv2_p3 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(350, 499) i
+-- INSERT 0 150
+
+> ANALYZE a40_adv2
+-- ANALYZE
+
+> CREATE TABLE a40_adv2_extra PARTITION OF a40_adv2 FOR VALUES FROM (500) TO (MAXVALUE)
+-- CREATE TABLE
+
+> INSERT INTO a40_adv2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(500, 599) i
+-- INSERT 0 100
+
+> ANALYZE a40_adv2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT t1.b, t1.c, t2.a, t2.c, t3.a, t3.c FROM a40_adv2 t1 LEFT JOIN a40_adv1 t2 ON (t1.b = t2.a) INNER JOIN a40_adv1 t3 ON (t1.b = t3.a) WHERE t1.a = 0 ORDER BY t1.b, t2.a, t3.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.b, t2.a
+  ->  Append
+        ->  Nested Loop Left Join
+              ->  Nested Loop
+                    ->  Seq Scan on a40_adv2_p1 t1_1
+                          Filter: (a = 0)
+                    ->  Index Scan using a40_adv1_p1_a_idx on a40_adv1_p1 t3_1
+                          Index Cond: (a = t1_1.b)
+              ->  Index Scan using a40_adv1_p1_a_idx on a40_adv1_p1 t2_1
+                    Index Cond: (a = t1_1.b)
+        ->  Hash Right Join
+              Hash Cond: (t2_2.a = t1_2.b)
+              ->  Seq Scan on a40_adv1_p2 t2_2
+              ->  Hash
+                    ->  Hash Join
+                          Hash Cond: (t3_2.a = t1_2.b)
+                          ->  Seq Scan on a40_adv1_p2 t3_2
+                          ->  Hash
+                                ->  Seq Scan on a40_adv2_p2 t1_2
+                                      Filter: (a = 0)
+        ->  Hash Right Join
+              Hash Cond: (t2_3.a = t1_3.b)
+              ->  Seq Scan on a40_adv1_p3 t2_3
+              ->  Hash
+                    ->  Hash Join
+                          Hash Cond: (t3_3.a = t1_3.b)
+                          ->  Seq Scan on a40_adv1_p3 t3_3
+                          ->  Hash
+                                ->  Seq Scan on a40_adv2_p3 t1_3
+                                      Filter: (a = 0)
+-- EXPLAIN
+
+> SELECT t1.b, t1.c, t2.a, t2.c, t3.a, t3.c FROM a40_adv2 t1 LEFT JOIN a40_adv1 t2 ON (t1.b = t2.a) INNER JOIN a40_adv1 t3 ON (t1.b = t3.a) WHERE t1.a = 0 ORDER BY t1.b, t2.a, t3.a
+b:int4 | c:varchar | a:int4 | c:varchar | a:int4 | c:varchar
+100 | 0100 | 100 | 0100 | 100 | 0100
+125 | 0125 | 125 | 0125 | 125 | 0125
+200 | 0200 | 200 | 0200 | 200 | 0200
+225 | 0225 | 225 | 0225 | 225 | 0225
+250 | 0250 | 250 | 0250 | 250 | 0250
+275 | 0275 | 275 | 0275 | 275 | 0275
+350 | 0350 | 350 | 0350 | 350 | 0350
+375 | 0375 | 375 | 0375 | 375 | 0375
+-- SELECT 8
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> create table a40_sj (a int unique, b int, c int unique)
+-- CREATE TABLE
+
+> create table a40_sj2 (a int unique, b int, c int unique)
+-- CREATE TABLE
+
+> insert into a40_sj values (1, null, 2), (null, 2, null), (2, 1, 1),(3,1,3)
+-- INSERT 0 4
+
+> insert into a40_sj2 select * from a40_sj
+-- INSERT 0 4
+
+> analyze a40_sj
+-- ANALYZE
+
+> analyze a40_sj2
+-- ANALYZE
+
+> CREATE OR REPLACE RULE a40_sj_del_rule AS ON DELETE TO a40_sj
+>   DO INSTEAD
+>     UPDATE a40_sj SET a = 1 WHERE a = old.a
+-- CREATE RULE
+
+> EXPLAIN (COSTS OFF) DELETE FROM a40_sj
+QUERY PLAN:text
+Update on a40_sj a40_sj_1
+  ->  Nested Loop
+        Join Filter: (a40_sj.a = a40_sj_1.a)
+        ->  Seq Scan on a40_sj a40_sj_1
+        ->  Materialize
+              ->  Seq Scan on a40_sj
+-- EXPLAIN
+
+> DROP RULE a40_sj_del_rule ON a40_sj
+-- DROP RULE
+
+> CREATE OR REPLACE RULE a40_sj_del_rule AS ON DELETE TO a40_sj
+>   DO INSTEAD
+>     UPDATE a40_sj SET a = 1 WHERE old.a = a
+-- CREATE RULE
+
+> EXPLAIN (COSTS OFF) DELETE FROM a40_sj
+QUERY PLAN:text
+Update on a40_sj a40_sj_1
+  ->  Nested Loop
+        Join Filter: (a40_sj.a = a40_sj_1.a)
+        ->  Seq Scan on a40_sj a40_sj_1
+        ->  Materialize
+              ->  Seq Scan on a40_sj
+-- EXPLAIN
+
+> DROP RULE a40_sj_del_rule ON a40_sj
+-- DROP RULE
+
+> CREATE OR REPLACE RULE a40_sj_del_rule AS ON DELETE TO a40_sj
+>   DO INSTEAD
+>     UPDATE a40_sj2 SET a = 1 WHERE a = old.a
+-- CREATE RULE
+
+> EXPLAIN (COSTS OFF) DELETE FROM a40_sj
+QUERY PLAN:text
+Update on a40_sj2
+  ->  Nested Loop
+        Join Filter: (a40_sj.a = a40_sj2.a)
+        ->  Seq Scan on a40_sj2
+        ->  Materialize
+              ->  Seq Scan on a40_sj
+-- EXPLAIN
+
+> DROP RULE a40_sj_del_rule ON a40_sj
+-- DROP RULE
+
+> CREATE OR REPLACE RULE a40_sj_del_rule AS ON DELETE TO a40_sj
+>   DO INSTEAD
+>     UPDATE a40_sj2 SET a = 1 WHERE b = old.b
+-- CREATE RULE
+
+> EXPLAIN (COSTS OFF) DELETE FROM a40_sj
+QUERY PLAN:text
+Update on a40_sj2
+  ->  Nested Loop
+        Join Filter: (a40_sj2.b = a40_sj.b)
+        ->  Seq Scan on a40_sj2
+        ->  Materialize
+              ->  Seq Scan on a40_sj
+-- EXPLAIN
+
+> DROP RULE a40_sj_del_rule ON a40_sj
+-- DROP RULE
+
+> EXPLAIN (COSTS OFF) UPDATE a40_sj2 SET a = 1 FROM a40_sj WHERE a40_sj2.a = a40_sj.a
+QUERY PLAN:text
+Update on a40_sj2
+  ->  Nested Loop
+        Join Filter: (a40_sj2.a = a40_sj.a)
+        ->  Seq Scan on a40_sj2
+        ->  Materialize
+              ->  Seq Scan on a40_sj
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE a40_sj SET a = 1 FROM a40_sj s2 WHERE a40_sj.a = s2.a
+QUERY PLAN:text
+Update on a40_sj
+  ->  Nested Loop
+        Join Filter: (a40_sj.a = s2.a)
+        ->  Seq Scan on a40_sj
+        ->  Materialize
+              ->  Seq Scan on a40_sj s2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) UPDATE a40_sj SET a = 1 FROM a40_sj s2 WHERE a40_sj.b = s2.b
+QUERY PLAN:text
+Update on a40_sj
+  ->  Nested Loop
+        Join Filter: (a40_sj.b = s2.b)
+        ->  Seq Scan on a40_sj
+        ->  Materialize
+              ->  Seq Scan on a40_sj s2
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+

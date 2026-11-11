@@ -1,0 +1,149 @@
+> CREATE TABLE a5_tk (unique1 int, unique2 int, thousand int, twothousand int)
+-- CREATE TABLE
+
+> INSERT INTO a5_tk SELECT (i * 7919) % 10000, i, ((i * 7919) % 10000) % 1000, ((i * 7919) % 10000) % 2000
+>   FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX a5_tk_unique2 ON a5_tk (unique2)
+-- CREATE INDEX
+
+> CREATE INDEX a5_tk_thous ON a5_tk (thousand)
+-- CREATE INDEX
+
+> VACUUM ANALYZE a5_tk
+-- VACUUM
+
+> SELECT a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
+>   FROM a5_tk a LEFT JOIN a5_tk b ON b.thousand = a.unique1
+>   LEFT JOIN a5_tk c ON c.unique2 = coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 < 10 AND coalesce(b.twothousand, a.twothousand) = 44
+unique1:int4 | unique1:int4 | unique1:int4 | coalesce:int4
+-- SELECT 0
+
+> SELECT a.unique1, b.unique1
+>   FROM a5_tk a LEFT JOIN a5_tk b ON b.thousand = a.unique1
+>   LEFT JOIN a5_tk c ON c.unique2 = coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 < 10 AND coalesce(b.twothousand, a.twothousand) = 4
+unique1:int4 | unique1:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF)
+> SELECT a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
+>   FROM a5_tk a LEFT JOIN a5_tk b ON b.thousand = a.unique1
+>   LEFT JOIN a5_tk c ON c.unique2 = coalesce(b.twothousand, a.twothousand)
+>   WHERE a.unique2 < 10 AND coalesce(b.twothousand, a.twothousand) = 44
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Hash Right Join
+        Hash Cond: (b.thousand = a.unique1)
+        Filter: (COALESCE(b.twothousand, a.twothousand) = 44)
+        ->  Seq Scan on a5_tk b
+        ->  Hash
+              ->  Index Scan using a5_tk_unique2 on a5_tk a
+                    Index Cond: (unique2 < 10)
+  ->  Index Scan using a5_tk_unique2 on a5_tk c
+        Index Cond: (unique2 = 44)
+-- EXPLAIN
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> EXPLAIN SELECT a.unique1, b.twothousand FROM a5_tk a LEFT JOIN a5_tk b ON b.thousand = a.unique1
+>   WHERE a.unique2 < 30
+QUERY PLAN:text
+Nested Loop Left Join  (cost=2.51..288.11 rows=30 width=8)
+  ->  Index Scan using a5_tk_unique2 on a5_tk a  (cost=0.29..8.81 rows=30 width=4)
+        Index Cond: (unique2 < 30)
+  ->  Bitmap Heap Scan on a5_tk b  (cost=2.23..9.21 rows=10 width=8)
+        Recheck Cond: (thousand = a.unique1)
+        ->  Bitmap Index Scan on a5_tk_thous  (cost=0.00..2.23 rows=10 width=0)
+              Index Cond: (thousand = a.unique1)
+-- EXPLAIN
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> CREATE TABLE a5_tt (c1 int, c2 int, c3 int)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t5.c1 FROM (a5_tt t2 LEFT JOIN a5_tt t3 ON t2.c3 = t3.c1)
+>   LEFT JOIN (a5_tt t4 JOIN a5_tt t5 ON t4.c2 = t5.c1) ON t3.c2 = t5.c1
+QUERY PLAN:text
+Merge Right Join
+  Merge Cond: (t5.c1 = t3.c2)
+  ->  Merge Join
+        Merge Cond: (t4.c2 = t5.c1)
+        ->  Sort
+              Sort Key: t4.c2
+              ->  Seq Scan on a5_tt t4
+        ->  Sort
+              Sort Key: t5.c1
+              ->  Seq Scan on a5_tt t5
+  ->  Sort
+        Sort Key: t3.c2
+        ->  Merge Left Join
+              Merge Cond: (t2.c3 = t3.c1)
+              ->  Sort
+                    Sort Key: t2.c3
+                    ->  Seq Scan on a5_tt t2
+              ->  Sort
+                    Sort Key: t3.c1
+                    ->  Seq Scan on a5_tt t3
+-- EXPLAIN
+
+> SELECT * FROM a5_tt t1
+> WHERE NOT EXISTS (
+>   SELECT 1 FROM a5_tt t2
+>     LEFT JOIN a5_tt t3 ON t2.c3 = t3.c1
+>     LEFT JOIN (SELECT t5.c1 AS c1 FROM a5_tt t4 LEFT JOIN a5_tt t5 ON t4.c2 = t5.c1) a1 ON t3.c2 = a1.c1
+>   WHERE t1.c1 = t2.c2
+> )
+c1:int4 | c2:int4 | c3:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a5_tt t1
+> WHERE NOT EXISTS (
+>   SELECT 1 FROM a5_tt t2
+>     LEFT JOIN a5_tt t3 ON t2.c3 = t3.c1
+>     LEFT JOIN (SELECT t5.c1 AS c1 FROM a5_tt t4 LEFT JOIN a5_tt t5 ON t4.c2 = t5.c1) a1 ON t3.c2 = a1.c1
+>   WHERE t1.c1 = t2.c2
+> )
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (t1.c1 = t2.c2)
+  ->  Seq Scan on a5_tt t1
+  ->  Hash
+        ->  Merge Right Join
+              Merge Cond: (t5.c1 = t3.c2)
+              ->  Merge Join
+                    Merge Cond: (t4.c2 = t5.c1)
+                    ->  Sort
+                          Sort Key: t4.c2
+                          ->  Seq Scan on a5_tt t4
+                    ->  Sort
+                          Sort Key: t5.c1
+                          ->  Seq Scan on a5_tt t5
+              ->  Sort
+                    Sort Key: t3.c2
+                    ->  Merge Left Join
+                          Merge Cond: (t2.c3 = t3.c1)
+                          ->  Sort
+                                Sort Key: t2.c3
+                                ->  Seq Scan on a5_tt t2
+                          ->  Sort
+                                Sort Key: t3.c1
+                                ->  Seq Scan on a5_tt t3
+-- EXPLAIN
+
+> DROP TABLE a5_tk, a5_tt
+-- DROP TABLE
+

@@ -1,0 +1,86 @@
+> CREATE TABLE a143_c (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE a143_o (id int PRIMARY KEY, cust int)
+-- CREATE TABLE
+
+> CREATE TABLE a143_d (order_id int, n int)
+-- CREATE TABLE
+
+> INSERT INTO a143_c SELECT g FROM generate_series(1, 4) g
+-- INSERT 0 4
+
+> INSERT INTO a143_o SELECT g, 1 + g % 4 FROM generate_series(1, 40) g
+-- INSERT 0 40
+
+> INSERT INTO a143_d SELECT 1 + g % 40, g FROM generate_series(1, 400) g
+-- INSERT 0 400
+
+> ANALYZE a143_c, a143_o, a143_d
+-- ANALYZE
+
+> CREATE FUNCTION a143_note(int) RETURNS int LANGUAGE plpgsql AS
+>   $$ BEGIN RAISE NOTICE 'initplan %', $1; RETURN $1; END $$
+-- CREATE FUNCTION
+
+> EXPLAIN (COSTS OFF)
+> SELECT c.id, (SELECT sum(d.n) FROM a143_d d
+>               WHERE d.order_id = (SELECT a143_note(o1.id) FROM a143_o o1 WHERE o1.cust = c.id ORDER BY o1.id LIMIT 1))
+> FROM a143_c c ORDER BY c.id
+QUERY PLAN:text
+Sort
+  Sort Key: c.id
+  ->  Seq Scan on a143_c c
+        SubPlan 2
+          ->  Aggregate
+                InitPlan 1
+                  ->  Limit
+                        ->  Index Scan using a143_o_pkey on a143_o o1
+                              Filter: (cust = c.id)
+                ->  Seq Scan on a143_d d
+                      Filter: (order_id = (InitPlan 1).col1)
+-- EXPLAIN
+
+> SELECT c.id, (SELECT sum(d.n) FROM a143_d d
+>               WHERE d.order_id = (SELECT a143_note(o1.id) FROM a143_o o1 WHERE o1.cust = c.id ORDER BY o1.id LIMIT 1))
+> FROM a143_c c ORDER BY c.id
+NOTICE 00000: initplan 4
+CONTEXT: PL/pgSQL function a143_note(integer) line 1 at RAISE
+NOTICE 00000: initplan 1
+CONTEXT: PL/pgSQL function a143_note(integer) line 1 at RAISE
+NOTICE 00000: initplan 2
+CONTEXT: PL/pgSQL function a143_note(integer) line 1 at RAISE
+NOTICE 00000: initplan 3
+CONTEXT: PL/pgSQL function a143_note(integer) line 1 at RAISE
+id:int4 | sum:int8
+1 | 1830
+2 | 2200
+3 | 1810
+4 | 1820
+-- SELECT 4
+
+> SELECT c.id, (SELECT count(*) FROM a143_o o2 WHERE o2.cust = c.id AND
+>                 (SELECT count(*) FROM a143_d d WHERE d.order_id = (SELECT max(o1.id) FROM a143_o o1 WHERE o1.cust = c.id AND o1.id <= o2.id)) > 0)
+> FROM a143_c c ORDER BY c.id
+id:int4 | count:int8
+1 | 10
+2 | 10
+3 | 10
+4 | 10
+-- SELECT 4
+
+> SELECT c.id, x.s FROM a143_c c, LATERAL (SELECT sum(d.n) AS s FROM a143_d d
+>   WHERE d.order_id = (SELECT min(o1.id) FROM a143_o o1 WHERE o1.cust = c.id)) x ORDER BY c.id
+id:int4 | s:int8
+1 | 1830
+2 | 2200
+3 | 1810
+4 | 1820
+-- SELECT 4
+
+> DROP FUNCTION a143_note(int)
+-- DROP FUNCTION
+
+> DROP TABLE a143_c, a143_o, a143_d
+-- DROP TABLE
+

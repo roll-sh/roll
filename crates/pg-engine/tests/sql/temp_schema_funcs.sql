@@ -1,0 +1,30 @@
+create function pg_temp.whoami() returns text as $$select 'temp'::text$$ language sql;
+select pg_temp.whoami();
+create domain pg_temp.nonempty as text check (value <> '');
+select pg_temp.nonempty('x');
+create view pg_temp.gx_tv as select 1 as x;
+create sequence pg_temp.gx_ts;
+create type pg_temp.gx_tt as (a int);
+select nspname like 'pg_temp%' from pg_namespace n join pg_proc p on p.pronamespace = n.oid where proname = 'whoami';
+drop function pg_temp.whoami();
+SELECT to_regtypemod('text'), to_regtypemod('timestamp(4)'), to_regtypemod('no_such_type(4)');
+SELECT format_type(to_regtype('varchar(32)'), to_regtypemod('varchar(32)'));
+SELECT format_type(to_regtype('bit'), to_regtypemod('bit'));
+SELECT format_type(to_regtype('"bit"'), to_regtypemod('"bit"'));
+SELECT to_regtypemod('int4 int4');
+SELECT pg_trigger_depth(), pg_numa_available();
+CREATE TABLE gx_depth (a int);
+CREATE FUNCTION gx_depth_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE NOTICE 'depth = %', pg_trigger_depth();
+  IF NEW.a < 3 THEN INSERT INTO gx_depth VALUES (NEW.a + 1); END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER gx_depth_t BEFORE INSERT ON gx_depth FOR EACH ROW EXECUTE FUNCTION gx_depth_trg();
+INSERT INTO gx_depth VALUES (1);
+SELECT pg_trigger_depth();
+DO $$ BEGIN SHOW work_mem; END $$;
+CREATE UNLOGGED TABLE gx_unl (a int) PARTITION BY RANGE (a);
+SELECT pg_stat_force_next_flush();
+DROP TABLE gx_depth;
+DROP FUNCTION gx_depth_trg();

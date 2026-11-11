@@ -1,0 +1,77 @@
+> create table vrt_t (x int primary key, y text, z numeric)
+-- CREATE TABLE
+
+> create view vrt_v0 as select x, y from vrt_t where z > 0
+-- CREATE VIEW
+
+> create table vrt_n0 (q int)
+-- CREATE TABLE
+
+> create view vrt_v1 as select x, y, z, x+1 as a1, x+2 as a2, x+3 as a3, x+4 as a4, x+5 as a5, x+6 as a6, x+7 as a7, x+8 as a8, x+9 as a9, x+10 as a10, x+11 as a11 from vrt_t
+-- CREATE VIEW
+
+> create table vrt_n1 (q int)
+-- CREATE TABLE
+
+> create view vrt_v2 as select x, y, z, x+1 as a1, x+2 as a2, x+3 as a3, x+4 as a4, x+5 as a5, x+6 as a6, x+7 as a7, x+8 as a8, x+9 as a9, x+10 as a10, x+11 as a11, upper(y) u1, lower(y) u2, length(y) u3, z*2 m1, z/3 m2, coalesce(y, 'q') c1, case when x > 1 then 'a' when x > 2 then 'b' else 'c' end k1, x::text t1, y || 'zz' t2, now() n1, current_date d1, abs(x) b1, sign(z) s1, round(z) r1, trunc(z, 2) r2 from vrt_t where x > 0 and y like 'a%' and z between 1 and 10
+-- CREATE VIEW
+
+> create table vrt_n2 (q int)
+-- CREATE TABLE
+
+> create or replace view vrt_v2 as select x, y, z, x+1 as a1, x+2 as a2, x+3 as a3, x+4 as a4, x+5 as a5, x+6 as a6, x+7 as a7, x+8 as a8, x+9 as a9, x+10 as a10, x+11 as a11, upper(y) u1, lower(y) u2, length(y) u3, z*2 m1, z/3 m2, coalesce(y, 'q') c1, case when x > 1 then 'a' when x > 2 then 'b' else 'c' end k1, x::text t1, y || 'zz' t2, now() n1, current_date d1, abs(x) b1, sign(z) s1, round(z) r1, trunc(z, 2) r2, 1 as e1 from vrt_t where x > 0 and y like 'a%' and z between 1 and 10
+-- CREATE VIEW
+
+> create table vrt_n3 (q int)
+-- CREATE TABLE
+
+> create view vrt_v3 (p, q) as select t.x, count(*) from vrt_t t join vrt_t u using (x) group by t.x having count(*) > 1 order by 2
+-- CREATE VIEW
+
+> create materialized view vrt_m1 as select x, y, z, x+1 as a1, x+2 as a2, x+3 as a3, x+4 as a4, x+5 as a5, x+6 as a6, x+7 as a7, x+8 as a8, x+9 as a9, x+10 as a10, x+11 as a11, upper(y) u1, lower(y) u2, length(y) u3, z*2 m1, z/3 m2, coalesce(y, 'q') c1, case when x > 1 then 'a' when x > 2 then 'b' else 'c' end k1, x::text t1, y || 'zz' t2, abs(x) b1, sign(z) s1, round(z) r1, trunc(z, 2) r2, x+12 a12, x+13 a13, x+14 a14 from vrt_t where x > 0 and y like 'a%' and z between 1 and 10
+-- SELECT 0
+
+> create table vrt_n4 (q int)
+-- CREATE TABLE
+
+> select relname, oid::int8 - 'vrt_t'::regclass::oid::int8 as delta from pg_class where relname like 'vrt\_%' and relkind in ('r', 'v', 'm') order by oid
+relname:name | delta:int8
+vrt_t | 0
+vrt_v0 | 8
+vrt_n0 | 12
+vrt_v1 | 15
+vrt_n1 | 19
+vrt_v2 | 22
+vrt_n2 | 27
+vrt_n3 | 31
+vrt_v3 | 34
+vrt_m1 | 38
+vrt_n4 | 50
+-- SELECT 11
+
+> select r.ev_class::regclass, length(ev_action), md5(regexp_replace(ev_action::text, ':(relid|resorigtbl) [1-9][0-9]{4,}', ':\1 X', 'g')) from pg_rewrite r where ev_class::regclass::text like 'vrt\_%' order by 1
+ev_class:regclass | length:int4 | md5:text
+vrt_v0 | 2314 | d27c224253055d1139d81329240707de
+vrt_v1 | 7807 | 0413997626e58b055d7e181d707588aa
+vrt_v2 | 17891 | f65cfcb73202f0af1b89bd24cdf4c77c
+vrt_v3 | 5020 | 7eeead898ef5594f714d417980639552
+vrt_m1 | 18810 | b1eb04a55089f29ecf572c370d031590
+-- SELECT 5
+
+> select regexp_replace(ev_action::text, ':(relid|resorigtbl) [1-9][0-9]{4,}', ':\1 X', 'g') from pg_rewrite where ev_class = 'vrt_v0'::regclass
+regexp_replace:text
+({QUERY :commandType 1 :querySource 0 :canSetTag true :utilityStmt <> :resultRelation 0 :hasAggs false :hasWindowFuncs false :hasTargetSRFs false :hasSubLinks false :hasDistinctOn false :hasRecursive false :hasModifyingCTE false :hasForUpdate false :hasRowSecurity false :hasGroupRTE false :isReturn false :cteList <> :rtable ({RANGETBLENTRY :alias <> :eref {ALIAS :aliasname vrt_t :colnames ("x" "y" "z")} :rtekind 0 :relid X :inh true :relkind r :rellockmode 1 :perminfoindex 1 :tablesample <> :lateral false :inFromCl true :securityQuals <>}) :rteperminfos ({RTEPERMISSIONINFO :relid X :inh true :requiredPerms 2 :checkAsUser 0 :selectedCols (b 8 9 10) :insertedCols (b) :updatedCols (b)}) :jointree {FROMEXPR :fromlist ({RANGETBLREF :rtindex 1}) :quals {OPEXPR :opno 1756 :opfuncid 1720 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 3 :vartype 1700 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 3 :location -1} {FUNCEXPR :funcid 1740 :funcresulttype 1700 :funcretset false :funcvariadic false :funcformat 2 :funccollid 0 :inputcollid 0 :args ({CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location -1}) :location -1}} :mergeActionList <> :mergeTargetRelation 0 :mergeJoinCondition <> :targetList ({TARGETENTRY :expr {VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 1 :location -1} :resno 1 :resname x :ressortgroupref 0 :resorigtbl X :resorigcol 1 :resjunk false} {TARGETENTRY :expr {VAR :varno 1 :varattno 2 :vartype 25 :vartypmod -1 :varcollid 100 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 2 :location -1} :resno 2 :resname y :ressortgroupref 0 :resorigtbl X :resorigcol 2 :resjunk false}) :override 0 :onConflict <> :returningOldAlias <> :returningNewAlias <> :returningList <> :groupClause <> :groupDistinct false :groupingSets <> :havingQual <> :windowClause <> :distinctClause <> :sortClause <> :limitOffset <> :limitCount <> :limitOption 0 :rowMarks <> :setOperations <> :constraintDeps <> :withCheckOptions <> :stmt_location -1 :stmt_len -1})
+-- SELECT 1
+
+> drop table vrt_t cascade
+NOTICE 00000: drop cascades to 5 other objects
+DETAIL: drop cascades to view vrt_v0
+DETAIL: drop cascades to view vrt_v1
+DETAIL: drop cascades to view vrt_v2
+DETAIL: drop cascades to view vrt_v3
+DETAIL: drop cascades to materialized view vrt_m1
+-- DROP TABLE
+
+> drop table vrt_n0, vrt_n1, vrt_n2, vrt_n3, vrt_n4
+-- DROP TABLE
+

@@ -1,0 +1,46 @@
+> CREATE TABLE a68s (id int, n int, z int, b jsonb)
+-- CREATE TABLE
+
+> INSERT INTO a68s VALUES (1, NULL, 0, 'null'), (2, 5, 1, '{"a": 1}')
+-- INSERT 0 2
+
+> SELECT id, (b #> '{a,b}') || (b - 'a') FROM a68s ORDER BY id
+ERROR 22023: cannot delete from scalar
+
+> SELECT id, n + 10 / z FROM a68s ORDER BY id
+ERROR 22012: division by zero
+
+> SELECT id, n + 10 / z FROM a68s WHERE id = 2
+id:int4 | ?column?:int4
+2 | 15
+-- SELECT 1
+
+> SELECT id, power(n, 10 / z) FROM a68s ORDER BY id
+ERROR 22012: division by zero
+
+> SELECT id, substr(NULLIF(b::text, 'null'), 1, 10 / z) FROM a68s ORDER BY id
+ERROR 22012: division by zero
+
+> UPDATE a68s SET b = (b #> '{a,b}') || (b - 'a')
+ERROR 22023: cannot delete from scalar
+
+> SELECT id, b FROM a68s ORDER BY id
+id:int4 | b:jsonb
+1 | null
+2 | {"a": 1}
+-- SELECT 2
+
+> SELECT id, n + z FROM a68s ORDER BY id
+id:int4 | ?column?:int4
+1 | NULL
+2 | 6
+-- SELECT 2
+
+> SELECT id, lpad(NULL, 3, (10 / z)::text) FROM a68s WHERE id = 2
+id:int4 | lpad:text
+2 | NULL
+-- SELECT 1
+
+> DROP TABLE a68s
+-- DROP TABLE
+

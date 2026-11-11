@@ -1,0 +1,61 @@
+> CREATE EXTENSION postgres_fdw
+-- CREATE EXTENSION
+
+> CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (fdw_tuple_cost '0', fdw_startup_cost '10000')
+-- CREATE SERVER
+
+> CREATE USER MAPPING FOR CURRENT_USER SERVER remote
+-- CREATE USER MAPPING
+
+> CREATE TABLE l (i int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> INSERT INTO l SELECT i, 'local' FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> ANALYZE l
+-- ANALYZE
+
+> CREATE FOREIGN TABLE f1 (i int, v text) SERVER remote OPTIONS (table_name 't1')
+-- CREATE FOREIGN TABLE
+
+> CREATE FOREIGN TABLE f2 (i int, v text) SERVER remote OPTIONS (table_name 't2')
+-- CREATE FOREIGN TABLE
+
+> SET enable_nestloop = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT l.i, f1.i, f1.v, f2.i FROM l, f1, f2
+> WHERE f1.i = f2.i AND l.i = f1.i AND f1.i < 30 AND f2.i < 30 FOR UPDATE OF l
+QUERY PLAN:text
+LockRows
+  Output: l.i, f1.i, f1.v, f2.i, l.ctid, f1.*, f2.*
+  ->  Hash Join
+        Output: l.i, f1.i, f1.v, f2.i, l.ctid, f1.*, f2.*
+        Inner Unique: true
+        Hash Cond: (f1.i = l.i)
+        ->  Foreign Scan
+              Output: f1.i, f1.v, f1.*, f2.i, f2.*
+              Relations: (public.f1) INNER JOIN (public.f2)
+              Remote SQL: SELECT r2.i, r2.v, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.i, r2.v) END, r3.i, CASE WHEN (r3.*)::text IS NOT NULL THEN ROW(r3.i, r3.v) END FROM (public.t1 r2 INNER JOIN public.t2 r3 ON (((r2.i = r3.i)) AND ((r3.i < 30)) AND ((r2.i < 30))))
+              ->  Hash Join
+                    Output: f1.i, f1.v, f1.*, f2.i, f2.*
+                    Hash Cond: (f1.i = f2.i)
+                    ->  Foreign Scan on public.f1
+                          Output: f1.i, f1.v, f1.*
+                          Remote SQL: SELECT i, v FROM public.t1 WHERE ((i < 30))
+                    ->  Hash
+                          Output: f2.i, f2.*
+                          ->  Foreign Scan on public.f2
+                                Output: f2.i, f2.*
+                                Remote SQL: SELECT i, v FROM public.t2 WHERE ((i < 30))
+        ->  Hash
+              Output: l.i, l.ctid
+              ->  Seq Scan on public.l
+                    Output: l.i, l.ctid
+-- EXPLAIN
+
