@@ -36,7 +36,7 @@ Parameters:
     Description: rolld nodes, one per instance; also the floor service auto scaling keeps (one per zone).
   MaxNodes:
     Type: Number
-    Default: 7
+    Default: 4
     MinValue: 1
     Description: The most nodes auto scaling runs. Keep it at MaxInstances - 2 (a deploy and the canary each need a spare instance).
   InstanceType:
@@ -62,7 +62,7 @@ Parameters:
     MinValue: 0
   MaxInstances:
     Type: Number
-    Default: 9
+    Default: 6
     MinValue: 1
   DesiredInstances:
     Type: Number
@@ -109,7 +109,9 @@ Parameters:
     Description: HTTP 5xx answers per minute across the fleet that count as an incident.
   SystemDbConnections:
     Type: Number
-    Default: 10
+    # 8 a node holds 7 (DbBudget); with MaxNodes 4, a deploy's 6 nodes hold 42, under a 50
+    # max_connections less the provider's own and the superuser reserve.
+    Default: 8
     MinValue: 6
     Description: >-
       ROLL_SYSTEM_DB_CONNECTIONS, the system database connections each node may open across its
