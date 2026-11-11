@@ -915,9 +915,12 @@ impl Block {
         }
         // (The values after every key: `vbase`.)
         let vbase = out.len() as u32;
-        out.reserve_exact(vals.len());
-        out.extend_from_slice(&vals);
-        out.shrink_to_fit();
+        // (Copied into an allocation of its own size: shrinking the one sized for the raw
+        // block keeps the raw block's bytes when it shrinks by less than half, as mimalloc's
+        // realloc does, and a cache of blocks would hold them all.)
+        let mut data = Vec::with_capacity(out.len() + vals.len());
+        data.extend_from_slice(&out);
+        data.extend_from_slice(&vals);
         restarts.shrink_to_fit();
         rvals.iter_mut().for_each(|v| *v += vbase);
         rvals.shrink_to_fit();
@@ -933,7 +936,7 @@ impl Block {
             *r |= word(&rkey_at(i)[common..]) >> 32 << 32;
         }
         Ok(Block {
-            data: Bytes::from(out),
+            data: Bytes::from(data),
             restarts,
             rvals,
             common,
