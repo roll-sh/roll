@@ -835,10 +835,14 @@ impl Session {
             self.param_plans.uses += 1;
             return Some((bq, None));
         }
-        self.param_plans.map.get(&*p.sql)?;
+        // (Custom plans not known to be the binding need no environment read: the caller
+        // binds them, starting the transaction itself.)
+        if self.param_entry(&p.sql, &oids)?.custom_is_generic != Some(true) {
+            return None;
+        }
         let env = self.lit_env();
         let e = self.param_entry(&p.sql, &oids)?;
-        if e.custom_is_generic != Some(true) || e.env != env || e.parsed.param_types != p.param_types {
+        if e.env != env || e.parsed.param_types != p.param_types {
             return None;
         }
         let (bq, mut reads, cost) = (e.parsed.bq.clone(), e.reads.clone(), e.custom_cost);

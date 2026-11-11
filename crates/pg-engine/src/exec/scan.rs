@@ -1330,11 +1330,12 @@ pub(super) fn predicate_locked(t: &Table, ctx: &ExecCtx) -> bool {
     !t.temporary && ctx.txn.borrow().takes_predicate_locks()
 }
 
-/// A column's smallest and largest non-null value among the table's current rows (what
-/// get_actual_variable_range reads from an index's ends); None when it has none.
-pub fn column_range(t: &Table, col: usize, ctx: &ExecCtx) -> Result<Option<(Value, Value)>> {
+/// get_actual_variable_range for one end of column `col`: its least (`min`) or greatest
+/// non-NULL value among the rows the snapshot sees (None: none), read from the end of a
+/// btree index on it when one serves, as PostgreSQL reads only the end it was asked for.
+pub fn column_end(t: &Table, col: usize, min: bool, ctx: &ExecCtx) -> Result<Option<Value>> {
     crate::sql::literals::note_read(|| crate::sql::literals::SizeRead::Data);
-    if let Some(r) = column_range_by_index(t, col, ctx)? {
+    if let Some(r) = column_end_by_index(t, col, min, ctx)? {
         return Ok(r);
     }
     let start = index_prefix(t.oid, 0);
@@ -1347,35 +1348,25 @@ pub fn column_range(t: &Table, col: usize, ctx: &ExecCtx) -> Result<Option<(Valu
         };
         it.collect::<Result<_>>()?
     };
-    let mut out: Option<(Value, Value)> = None;
+    let mut out: Option<Value> = None;
     for (_, v) in rows {
         let row = decode_table_row(t, &v)?;
         let Some(x) = row.get(col).filter(|x| !x.is_null()) else {
             continue;
         };
-        let cmp = |a: &Value, b: &Value| {
-            crate::exec::agg::cmp_rows(std::slice::from_ref(a), std::slice::from_ref(b))
-        };
-        out = Some(match out {
-            None => (x.clone(), x.clone()),
-            Some((lo, hi)) => (
-                if cmp(x, &lo).is_lt() { x.clone() } else { lo },
-                if cmp(x, &hi).is_gt() { x.clone() } else { hi },
-            ),
-        });
+        let o = crate::exec::agg::cmp_rows(std::slice::from_ref(x), std::slice::from_ref(out.as_ref().unwrap_or(x)));
+        if out.is_none() || (if min { o.is_lt() } else { o.is_gt() }) {
+            out = Some(x.clone());
+        }
     }
     Ok(out)
 }
 
-/// `column_range` from the ends of a btree index on the column, as get_actual_variable_range
-/// reads them, instead of every row: its entries are stored in the order of the values'
+/// `column_end` from the end of a btree index on the column, as get_actual_variable_range
+/// reads it, instead of every row: its entries are stored in the order of the values'
 /// encoding, which for these types is the order `cmp_total` gives. None (outer) when no
 /// index serves.
-fn column_range_by_index(
-    t: &Table,
-    col: usize,
-    ctx: &ExecCtx,
-) -> Result<Option<Option<(Value, Value)>>> {
+fn column_end_by_index(t: &Table, col: usize, min: bool, ctx: &ExecCtx) -> Result<Option<Option<Value>>> {
     use crate::types::DataType as T;
     let Some(c) = t.columns.get(col) else {
         return Ok(None);
@@ -1433,36 +1424,23 @@ fn column_range_by_index(
         let Some(row) = row else { return Ok(None) };
         Ok(decode_table_row(t, &row)?.into_iter().nth(col).filter(|v| !v.is_null()))
     };
-    // The first and the last entry that isn't a NULL's.
-    let mut ends = [None, None];
-    for (i, rev) in [false, true].into_iter().enumerate() {
-        let txn = ctx.txn.borrow();
-        let entries: Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>> = match (rev, snap.as_deref()) {
-            (true, s) => Box::new(txn.scan_rev(&prefix, &end, s)),
-            (false, Some(s)) => Box::new(txn.scan_snap(&prefix, &end, s)),
-            (false, None) => Box::new(txn.scan(&prefix, &end)),
-        };
-        for e in entries {
-            let (k, dkey) = e?;
-            if k.get(prefix.len()) == Some(&null_byte) {
-                continue;
-            }
-            match value(&dkey)? {
-                Some(v) => ends[i] = Some(v),
-                // (Not the entry's row as expected: every row is read instead.)
-                None => return Ok(None),
-            }
-            break;
-        }
-    }
-    let [Some(first_v), Some(last_v)] = ends else {
-        return Ok(Some(None));
+    // The first entry in the direction of the end asked for that isn't a NULL's.
+    let rev = min == first.desc;
+    let txn = ctx.txn.borrow();
+    let entries: Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>> = match (rev, snap.as_deref()) {
+        (true, s) => Box::new(txn.scan_rev(&prefix, &end, s)),
+        (false, Some(s)) => Box::new(txn.scan_snap(&prefix, &end, s)),
+        (false, None) => Box::new(txn.scan(&prefix, &end)),
     };
-    Ok(Some(Some(if first.desc {
-        (last_v, first_v)
-    } else {
-        (first_v, last_v)
-    })))
+    for e in entries {
+        let (k, dkey) = e?;
+        if k.get(prefix.len()) == Some(&null_byte) {
+            continue;
+        }
+        // (None: not the entry's row as expected, every row is read instead.)
+        return Ok(value(&dkey)?.map(Some));
+    }
+    Ok(Some(None))
 }
 
 /// Rows of an index scan in the order of the made operator classes of its columns.

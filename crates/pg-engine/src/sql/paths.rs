@@ -1674,6 +1674,108 @@ fn cmp_parts(e: &Expr) -> Option<(Expr, &'static str, Expr)> {
 
 // ── paths ──
 
+/// `Planner::index_match`.
+struct IndexMatch {
+    pred_ok: bool,
+    cs: Vec<IClause>,
+    fwd_keys: Vec<PathKey>,
+    only: bool,
+    back_keys: Vec<PathKey>,
+    ob_keys: Vec<PathKey>,
+    orderbys: Vec<Expr>,
+}
+
+/// `Planner::skel`: each index's `index_match` (None: no path) over `quals`.
+struct Skel {
+    quals: Vec<Expr>,
+    ixs: Vec<Option<IxSkel>>,
+    /// An OR clause is among them (bitmap_or_paths has some to look at).
+    ors: bool,
+}
+
+struct IxSkel {
+    cs: Vec<ClauseAt>,
+    fwd_keys: Vec<PathKey>,
+    only: bool,
+    back_keys: Vec<PathKey>,
+}
+
+/// An index clause made of restriction clause `qual` (`key op value`, or commuted when
+/// `commuted`) as `match_clause` makes it.
+struct ClauseAt {
+    col: usize,
+    qual: usize,
+    kind: Kind,
+    commuted: bool,
+}
+
+impl ClauseAt {
+    /// How `c` is made of `quals` (None: not of a binary operator's clause alone).
+    fn of(c: &IClause, quals: &[Expr]) -> Option<ClauseAt> {
+        if c.lossy || !matches!(c.kind, Kind::Op(_)) {
+            return None;
+        }
+        let value = c.value.as_ref()?;
+        [false, true].into_iter().find_map(|commuted| {
+            let at = ClauseAt { col: c.col, qual: c.qual, kind: c.kind.clone(), commuted };
+            let m = at.made(quals)?;
+            (m.expr.same_as(&c.expr) && m.value.as_ref()?.same_as(value) && m.orig.same_as(&c.orig)).then_some(at)
+        })
+    }
+
+    fn made(&self, quals: &[Expr]) -> Option<IClause> {
+        let q = quals.get(self.qual)?;
+        let Expr::Call(def, args, ty) = q else { return None };
+        let [a, b] = &args[..] else { return None };
+        let (expr, value) = if self.commuted {
+            (commuted_call(def, b.clone(), a.clone(), ty.clone()), a.clone())
+        } else {
+            (q.clone(), b.clone())
+        };
+        Some(IClause { col: self.col, qual: self.qual, expr, kind: self.kind.clone(), value: Some(value), orig: q.clone(), lossy: false })
+    }
+}
+
+impl IxSkel {
+    /// The index's `index_match` over `quals` (which `Skel::fits`).
+    fn matched(&self, quals: &[Expr]) -> Option<IndexMatch> {
+        Some(IndexMatch {
+            pred_ok: false,
+            cs: self.cs.iter().map(|c| c.made(quals)).collect::<Option<_>>()?,
+            fwd_keys: self.fwd_keys.clone(),
+            only: self.only,
+            back_keys: self.back_keys.clone(),
+            ob_keys: Vec::new(),
+            orderbys: Vec::new(),
+        })
+    }
+}
+
+impl Skel {
+    /// `quals` match the indexes as this one's do: each clause is its own, or the same
+    /// comparison (`=`, `<`, `<=`, `>`, `>=`) of the same operands but for a constant
+    /// (not NULL) of the same type in its place, which `match_clause` takes alike whatever its value.
+    fn fits(&self, quals: &[Expr]) -> bool {
+        fn other_const(a: &Expr, b: &Expr) -> bool {
+            match (a, b) {
+                (Expr::Const(v, t), Expr::Const(w, u)) => {
+                    t == u && !v.is_null() && !w.is_null() && std::mem::discriminant(v) == std::mem::discriminant(w)
+                }
+                _ => false,
+            }
+        }
+        quals.len() == self.quals.len()
+            && self.quals.iter().zip(quals).all(|(k, q)| match (k, q) {
+                (Expr::Call(d, xs, t), Expr::Call(e, ys, u))
+                    if Arc::ptr_eq(d, e) && t == u && xs.len() == 2 && ys.len() == 2 && matches!(d.name, "=" | "<" | "<=" | ">" | ">=") =>
+                {
+                    xs.iter().zip(ys).all(|(x, y)| other_const(x, y) || x.same_as(y))
+                }
+                _ => k.same_as(q),
+            })
+    }
+}
+
 /// A pathkey: an expression over the table row and its direction.
 #[derive(Clone, Debug)]
 pub struct PathKey {
@@ -1984,7 +2086,10 @@ struct Planner<'c, 'a> {
     cat: Arc<crate::catalog::Catalog>,
     g: Gucs,
     /// Columns' actual (min, max), read once (get_actual_variable_range).
-    ends: std::cell::RefCell<std::collections::HashMap<(u32, usize), Option<(Value, Value)>>>,
+    ends: std::cell::RefCell<std::collections::HashMap<(u32, usize, bool), Option<Value>>>,
+    /// The next `paths` call's matches of the clauses to the indexes, kept from another
+    /// call over clauses of the same shapes (`ScanChoice::rechoose`).
+    skel: std::cell::RefCell<Option<Arc<Skel>>>,
     /// Relations join removal and self-join elimination took out of the plan (they stay
     /// in the range table: EXPLAIN still qualifies column names).
     removed: std::cell::Cell<usize>,
@@ -2078,6 +2183,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             cat: ctx.catalog(),
             g: Gucs::read(ctx),
             ends: Default::default(),
+            skel: Default::default(),
             removed: Default::default(),
             whole_rows: Default::default(),
             ref_marks: Default::default(),
@@ -2109,43 +2215,38 @@ impl<'c, 'a> Planner<'c, 'a> {
     }
 
     /// get_actual_variable_range: the column's current min or max, when a btree index
-    /// (default operator class, no predicate) has it as its first column.
+    /// (default operator class, no predicate) has it as its first column. Only the end asked
+    /// for is read.
     fn endpoint(&self, v: &VarRef, min: bool) -> Option<Value> {
         if v.expr.is_some() {
             return None;
         }
-        let key = (v.table.oid, v.col);
-        let cached = self.ends.borrow().get(&key).cloned();
-        let r = match cached {
-            Some(r) => r,
-            None => {
-                let t = &v.table;
-                let indexed = self
-                    .cat
-                    .table_indexes(t)
-                    .iter()
-                    .chain(t.pkey_index.and_then(|p| self.cat.index(p)))
-                    .any(|ix| {
-                        ix.valid
-                            && ix.method == "btree"
-                            && ix.predicate.is_none()
-                            && ix.columns.first().is_some_and(|c| {
-                                matches!(c.key, crate::catalog::IndexKey::Column(k) if k == v.col)
-                                    && !matches!(c.opclass, 4217..=4219)
-                            })
-                    });
-                let r = if indexed {
-                    crate::exec::scan::column_range(t, v.col, self.ctx)
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                };
-                self.ends.borrow_mut().insert(key, r.clone());
-                r
-            }
+        let key = (v.table.oid, v.col, min);
+        if let Some(r) = self.ends.borrow().get(&key) {
+            return r.clone();
+        }
+        let t = &v.table;
+        let indexed = self
+            .cat
+            .table_indexes(t)
+            .iter()
+            .chain(t.pkey_index.and_then(|p| self.cat.index(p)))
+            .any(|ix| {
+                ix.valid
+                    && ix.method == "btree"
+                    && ix.predicate.is_none()
+                    && ix.columns.first().is_some_and(|c| {
+                        matches!(c.key, crate::catalog::IndexKey::Column(k) if k == v.col)
+                            && !matches!(c.opclass, 4217..=4219)
+                    })
+            });
+        let r = if indexed {
+            crate::exec::scan::column_end(t, v.col, min, self.ctx).ok().flatten()
+        } else {
+            None
         };
-        r.map(|(a, b)| if min { a } else { b })
+        self.ends.borrow_mut().insert(key, r.clone());
+        r
     }
 }
 
@@ -3327,6 +3428,8 @@ impl Planner<'_, '_> {
 
     /// set_plain_rel_pathlist: the relation's paths after add_path.
     fn paths(&self, rel: &Rel, want: &Want) -> Vec<Path> {
+        // (A skeleton has no TID quals: `Planner::skel`.)
+        let skel = self.skel.borrow_mut().take();
         let startup = want.startup();
         let mut list = Vec::new();
         // cost_seqscan (or the foreign table's wrapper's estimate).
@@ -3348,7 +3451,7 @@ impl Planner<'_, '_> {
             startup,
         );
         // create_tidscan_paths.
-        if let Some((quals, removed)) = tid_quals(rel) {
+        if let Some((quals, removed)) = tid_quals(rel).filter(|_| skel.is_none()) {
             let (st, tot) = self.tid_cost(rel, &quals);
             add_path(
                 &mut list,
@@ -3363,7 +3466,7 @@ impl Planner<'_, '_> {
                 startup,
             );
         }
-        let range = tid_range_quals(rel);
+        let range = if skel.is_some() { Vec::new() } else { tid_range_quals(rel) };
         if !range.is_empty() {
             let (st, tot) = self.tid_range_cost(rel, &range);
             add_path(
@@ -3382,22 +3485,19 @@ impl Planner<'_, '_> {
         // create_index_paths.
         let mut bitindex: Vec<BPath> = Vec::new();
         for (ix, ii) in rel.indexes.iter().enumerate() {
-            let pred_ok = !ii.pred.is_empty() && implied_by(&ii.pred, &rel.quals);
-            if !ii.pred.is_empty() && !pred_ok {
+            let kept = skel.as_ref().and_then(|k| match &k.ixs[ix] {
+                Some(x) => x.matched(&rel.quals).map(Some),
+                None => Some(None),
+            });
+            let Some(IndexMatch { pred_ok, cs, fwd_keys, only, back_keys, ob_keys, orderbys }) = (match kept {
+                Some(m) => m,
+                None => self.index_match(rel, ii, want),
+            }) else {
                 continue;
-            }
-            let cs = match_quals(ii, &rel.quals, None, rel.booleq.as_ref(), self);
-            if cs.is_empty() && !ii.am.optionalkey() {
-                continue;
-            }
-            let fwd_keys = index_pathkeys(rel, ii, false, want);
-            let only = self.g.indexonlyscan && self.index_only(rel, ii);
+            };
             let mut made = Vec::new();
             // (The clauses go to the last path made of them.)
-            let back_keys = index_pathkeys(rel, ii, true, want);
             let back_cs = (!back_keys.is_empty()).then(|| cs.clone());
-            // match_pathkeys_to_index: ordering operators for (a prefix of) the ORDER BY.
-            let (ob_keys, orderbys) = order_by_ops(ii, want);
             if !orderbys.is_empty() {
                 made.push(self.index_path_ob(rel, ix, cs, ob_keys, orderbys, false, only));
             } else if !cs.is_empty() || !fwd_keys.is_empty() || pred_ok || only {
@@ -3430,7 +3530,9 @@ impl Planner<'_, '_> {
                 add_path(&mut list, path, startup);
             }
         }
-        bitindex.extend(self.bitmap_or_paths(rel, &rel.quals, &[]));
+        if skel.as_ref().is_none_or(|k| k.ors) {
+            bitindex.extend(self.bitmap_or_paths(rel, &rel.quals, &[]));
+        }
         if !bitindex.is_empty() {
             let b = self.choose_bitmap_and(rel, bitindex);
             let (st, tot, _, _) = self.bitmap_heap(rel, &b);
@@ -3448,6 +3550,49 @@ impl Planner<'_, '_> {
             );
         }
         list
+    }
+
+    /// What create_index_paths finds for index `ii` before costing: its clauses, the
+    /// orders it reads in, whether it is read index-only (None: no path of it).
+    fn index_match(&self, rel: &Rel, ii: &IndexInfo, want: &Want) -> Option<IndexMatch> {
+        let pred_ok = !ii.pred.is_empty() && implied_by(&ii.pred, &rel.quals);
+        if !ii.pred.is_empty() && !pred_ok {
+            return None;
+        }
+        let cs = match_quals(ii, &rel.quals, None, rel.booleq.as_ref(), self);
+        if cs.is_empty() && !ii.am.optionalkey() {
+            return None;
+        }
+        let fwd_keys = index_pathkeys(rel, ii, false, want);
+        let only = self.g.indexonlyscan && self.index_only(rel, ii);
+        let back_keys = index_pathkeys(rel, ii, true, want);
+        // match_pathkeys_to_index: ordering operators for (a prefix of) the ORDER BY.
+        let (ob_keys, orderbys) = order_by_ops(ii, want);
+        Some(IndexMatch { pred_ok, cs, fwd_keys, only, back_keys, ob_keys, orderbys })
+    }
+
+    /// `index_match` of every index of `rel`, kept for clauses of the same shapes with
+    /// other constants (`Skel::fits`). None when a match could read a constant's value: an
+    /// index with a predicate (implied or not by the values), of an operator family or
+    /// ordering operators, a TID qual, or an index clause not made of its clause as written
+    /// (or commuted) alone.
+    fn skel(&self, rel: &Rel, want: &Want) -> Option<Skel> {
+        if tid_quals(rel).is_some() || !tid_range_quals(rel).is_empty() {
+            return None;
+        }
+        let mut ixs = Vec::with_capacity(rel.indexes.len());
+        for ii in rel.indexes.iter() {
+            if !ii.pred.is_empty() || ii.am.by_family() || ii.am.orders_by_op() {
+                return None;
+            }
+            let Some(m) = self.index_match(rel, ii, want) else {
+                ixs.push(None);
+                continue;
+            };
+            let cs = m.cs.iter().map(|c| ClauseAt::of(c, &rel.quals)).collect::<Option<Vec<_>>>()?;
+            ixs.push(Some(IxSkel { cs, fwd_keys: m.fwd_keys, only: m.only, back_keys: m.back_keys }));
+        }
+        Some(Skel { quals: rel.quals.clone(), ixs, ors: rel.quals.iter().any(|q| matches!(q, Expr::Or(_))) })
     }
 
     /// check_index_only.
@@ -6324,7 +6469,7 @@ impl Planner<'_, '_> {
                 && s.phv_quals.is_empty()
                 && FINAL_FRACTION.get().is_none();
             let choice = keep.then(|| {
-                Arc::new(ScanChoice { rel: rel.shallow(), want: want.clone(), width, gucs: self.g.clone(), sorted })
+                Arc::new(ScanChoice { rel: rel.shallow(), want: want.clone(), width, gucs: self.g.clone(), sorted, skel: Default::default() })
             });
             CHOICES.with(|c| c.borrow_mut().as_mut().map(|v| v.push(choice)));
         }
@@ -6841,6 +6986,9 @@ pub struct ScanChoice {
     gucs: Gucs,
     /// The path delivers the order asked for (the Sort above the scan was removed).
     sorted: bool,
+    /// How the first clauses chosen again for matched the indexes (`Planner::skel`), for
+    /// later ones of the same shapes (None: their matches could read the values).
+    skel: std::sync::OnceLock<Option<Arc<Skel>>>,
 }
 
 /// `f`, and the choice of the one scan it planned (None: no scan, more than one, or one
@@ -6889,6 +7037,10 @@ impl ScanChoice {
         let written = Arc::new(written);
         rel.written = written.clone();
         p.estimate_quals(&mut rel);
+        let skel = self.skel.get_or_init(|| p.skel(&rel, &self.want).map(Arc::new));
+        if let Some(k) = skel.as_ref().filter(|k| k.ixs.len() == rel.indexes.len() && k.fits(&rel.quals)) {
+            p.skel.replace(Some(k.clone()));
+        }
         let mut s = Box::new(unchosen(kept, filter));
         let sorted = p.scan_path_applied(&rel, &mut s, &self.want, self.width);
         drop(rel);
