@@ -1,0 +1,156 @@
+> create table t21_n (nk int primary key, name text)
+-- CREATE TABLE
+
+> create table t21_s (sk int primary key, nk int, name text)
+-- CREATE TABLE
+
+> create table t21_o (ok int primary key, st char(1))
+-- CREATE TABLE
+
+> create table t21_l (ok int, ln int, sk int, cd int, rd int, primary key (ok, ln))
+-- CREATE TABLE
+
+> insert into t21_n select g, 'N' || g from generate_series(0, 24) g
+-- INSERT 0 25
+
+> insert into t21_s select g, g % 25, 'S' || g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> insert into t21_o select g, case when g % 2 = 0 then 'F' else 'O' end from generate_series(1, 7000) g
+-- INSERT 0 7000
+
+> insert into t21_l select o, ln, (o * 7 + ln * 13) % 1000 + 1, (o + ln) % 30, (o * 3 + ln) % 31 from generate_series(1, 7000) o, generate_series(1, 4) ln
+-- INSERT 0 28000
+
+> analyze t21_n, t21_s, t21_o, t21_l
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> explain select s.name, count(*) from t21_s s, t21_l l1, t21_o o, t21_n n
+>   where s.sk = l1.sk and o.ok = l1.ok and o.st = 'F' and l1.rd > l1.cd
+>     and exists (select * from t21_l l2 where l2.ok = l1.ok and l2.sk <> l1.sk)
+>     and not exists (select * from t21_l l3 where l3.ok = l1.ok and l3.sk <> l1.sk and l3.rd > l3.cd)
+>     and s.nk = n.nk and n.name = 'N1'
+>   group by s.name order by 2 desc, 1 limit 100
+QUERY PLAN:text
+Limit  (cost=769.34..769.35 rows=1 width=12)
+  ->  Sort  (cost=769.34..769.35 rows=1 width=12)
+        Sort Key: (count(*)) DESC, s.name
+        ->  GroupAggregate  (cost=769.31..769.33 rows=1 width=12)
+              Group Key: s.name
+              ->  Sort  (cost=769.31..769.32 rows=1 width=4)
+                    Sort Key: s.name
+                    ->  Nested Loop  (cost=21.75..769.30 rows=1 width=4)
+                          ->  Nested Loop Semi Join  (cost=21.47..768.98 rows=1 width=12)
+                                ->  Nested Loop Anti Join  (cost=21.18..768.47 rows=1 width=12)
+                                      ->  Hash Join  (cost=20.89..588.62 rows=373 width=12)
+                                            Hash Cond: (l1.sk = s.sk)
+                                            ->  Seq Scan on t21_l l1  (cost=0.00..529.00 rows=9333 width=8)
+                                                  Filter: (rd > cd)
+                                            ->  Hash  (cost=20.39..20.39 rows=40 width=8)
+                                                  ->  Hash Join  (cost=1.32..20.39 rows=40 width=8)
+                                                        Hash Cond: (s.nk = n.nk)
+                                                        ->  Seq Scan on t21_s s  (cost=0.00..16.00 rows=1000 width=12)
+                                                        ->  Hash  (cost=1.31..1.31 rows=1 width=4)
+                                                              ->  Seq Scan on t21_n n  (cost=0.00..1.31 rows=1 width=4)
+                                                                    Filter: (name = 'N1'::text)
+                                      ->  Index Scan using t21_l_pkey on t21_l l3  (cost=0.29..0.50 rows=1 width=8)
+                                            Index Cond: (ok = l1.ok)
+                                            Filter: ((rd > cd) AND (sk <> l1.sk))
+                                ->  Index Scan using t21_l_pkey on t21_l l2  (cost=0.29..0.49 rows=4 width=8)
+                                      Index Cond: (ok = l1.ok)
+                                      Filter: (sk <> l1.sk)
+                          ->  Index Scan using t21_o_pkey on t21_o o  (cost=0.28..0.33 rows=1 width=4)
+                                Index Cond: (ok = l1.ok)
+                                Filter: (st = 'F'::bpchar)
+-- EXPLAIN
+
+> select s.name, count(*) from t21_s s, t21_l l1, t21_o o, t21_n n
+>   where s.sk = l1.sk and o.ok = l1.ok and o.st = 'F' and l1.rd > l1.cd
+>     and exists (select * from t21_l l2 where l2.ok = l1.ok and l2.sk <> l1.sk)
+>     and not exists (select * from t21_l l3 where l3.ok = l1.ok and l3.sk <> l1.sk and l3.rd > l3.cd)
+>     and s.nk = n.nk and n.name = 'N1'
+>   group by s.name order by 2 desc, 1 limit 5
+name:text | count:int8
+S176 | 1
+S326 | 1
+S626 | 1
+-- SELECT 3
+
+> explain select s.name, count(*) from t21_s s, t21_l l1, t21_o o, t21_n n
+>   where s.sk = l1.sk and o.ok = l1.ok + 0 and o.st = 'F' and l1.rd > l1.cd
+>     and exists (select * from t21_l l2 where l2.ok = l1.ok and l2.sk <> l1.sk)
+>     and not exists (select * from t21_l l3 where l3.ok = l1.ok and l3.sk <> l1.sk and l3.rd > l3.cd)
+>     and s.nk = n.nk and n.name = 'N1'
+>   group by s.name order by 2 desc, 1 limit 100
+QUERY PLAN:text
+Limit  (cost=769.34..769.35 rows=1 width=12)
+  ->  Sort  (cost=769.34..769.35 rows=1 width=12)
+        Sort Key: (count(*)) DESC, s.name
+        ->  GroupAggregate  (cost=769.31..769.33 rows=1 width=12)
+              Group Key: s.name
+              ->  Sort  (cost=769.31..769.32 rows=1 width=4)
+                    Sort Key: s.name
+                    ->  Nested Loop Semi Join  (cost=21.76..769.30 rows=1 width=4)
+                          ->  Nested Loop  (cost=21.47..768.79 rows=1 width=12)
+                                ->  Nested Loop Anti Join  (cost=21.18..768.47 rows=1 width=12)
+                                      ->  Hash Join  (cost=20.89..588.62 rows=373 width=12)
+                                            Hash Cond: (l1.sk = s.sk)
+                                            ->  Seq Scan on t21_l l1  (cost=0.00..529.00 rows=9333 width=8)
+                                                  Filter: (rd > cd)
+                                            ->  Hash  (cost=20.39..20.39 rows=40 width=8)
+                                                  ->  Hash Join  (cost=1.32..20.39 rows=40 width=8)
+                                                        Hash Cond: (s.nk = n.nk)
+                                                        ->  Seq Scan on t21_s s  (cost=0.00..16.00 rows=1000 width=12)
+                                                        ->  Hash  (cost=1.31..1.31 rows=1 width=4)
+                                                              ->  Seq Scan on t21_n n  (cost=0.00..1.31 rows=1 width=4)
+                                                                    Filter: (name = 'N1'::text)
+                                      ->  Index Scan using t21_l_pkey on t21_l l3  (cost=0.29..0.50 rows=1 width=8)
+                                            Index Cond: (ok = l1.ok)
+                                            Filter: ((rd > cd) AND (sk <> l1.sk))
+                                ->  Index Scan using t21_o_pkey on t21_o o  (cost=0.29..0.33 rows=1 width=4)
+                                      Index Cond: (ok = (l1.ok + 0))
+                                      Filter: (st = 'F'::bpchar)
+                          ->  Index Scan using t21_l_pkey on t21_l l2  (cost=0.29..0.49 rows=4 width=8)
+                                Index Cond: (ok = l1.ok)
+                                Filter: (sk <> l1.sk)
+-- EXPLAIN
+
+> select * from t21_o o
+>   where o.ok = 5 and exists (select 1 from t21_l l where l.ok = o.ok)
+>     and not exists (select 1 from t21_l l3 where l3.ok = o.ok and l3.sk = 1)
+ok:int4 | st:bpchar
+5 | O
+-- SELECT 1
+
+> explain (costs off) select count(*) from t21_o o, t21_l l1
+>   where o.ok = l1.ok and exists (select 1 from t21_l l2 where l2.ok = l1.ok and l2.sk <> l1.sk)
+>     and not exists (select 1 from t21_l l3 where l3.ok = o.ok and l3.rd > 29)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Semi Join
+        Hash Cond: (o.ok = l2.ok)
+        Join Filter: (l2.sk <> l1.sk)
+        ->  Hash Anti Join
+              Hash Cond: (o.ok = l3.ok)
+              ->  Hash Join
+                    Hash Cond: (l1.ok = o.ok)
+                    ->  Seq Scan on t21_l l1
+                    ->  Hash
+                          ->  Seq Scan on t21_o o
+              ->  Hash
+                    ->  Seq Scan on t21_l l3
+                          Filter: (rd > 29)
+        ->  Hash
+              ->  Seq Scan on t21_l l2
+-- EXPLAIN
+
+> select count(*) from t21_o o, t21_l l1
+>   where o.ok = l1.ok and exists (select 1 from t21_l l2 where l2.ok = l1.ok and l2.sk <> l1.sk)
+>     and not exists (select 1 from t21_l l3 where l3.ok = o.ok and l3.rd > 29)
+count:int8
+24388
+-- SELECT 1
+

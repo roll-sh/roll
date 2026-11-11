@@ -272,7 +272,7 @@ impl Search<'_, '_, '_> {
     pub(super) fn fdw_param_clauses(&self, l: usize) {
         let me = 1u32 << l;
         for c in &self.clauses {
-            if !c.ecable || c.on && !(self.semi_classes() && c.sj.is_some()) {
+            if !c.ecable || c.on && !(self.semi_classes() && self.semi_clause(c)) {
                 continue;
             }
             let Some((a, b, al, bl)) = &c.eq else { continue };

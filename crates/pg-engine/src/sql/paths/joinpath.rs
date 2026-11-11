@@ -1188,7 +1188,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     fn clause_ec(&self, c: &Clause) -> Option<usize> {
         // (A semi join's own clause equates its sides as an inner join's does.)
         if !c.ecable
-            || (c.on && !(self.kind == JoinKind::Semi && !self.general) && !(self.semi_classes() && c.sj.is_some()))
+            || (c.on && !(self.kind == JoinKind::Semi && !self.general) && !(self.semi_classes() && self.semi_clause(c)))
         {
             return None;
         }
@@ -1324,8 +1324,16 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// its quals; process_equivalence), and so the classes choose its joins' clauses.
     pub(super) fn semi_classes(&self) -> bool {
         self.general
-            && (self.reduced_semi_classes || !self.sjs.is_empty() && self.sjs.iter().all(|j| j.kind == JoinKind::Semi))
+            && (self.reduced_semi_classes
+                || self.sjs.iter().any(|j| j.kind == JoinKind::Semi)
+                    && self.sjs.iter().all(|j| matches!(j.kind, JoinKind::Semi | JoinKind::Anti)))
             && self.phvs.is_empty()
+    }
+
+    /// A clause of one of the group's semi joins: in its classes (`semi_classes`), as an
+    /// inner join's is. (An anti join's own clauses are an outer join's: in none.)
+    pub(super) fn semi_clause(&self, c: &Clause) -> bool {
+        c.sj.is_some_and(|t| self.sjs.get(t).is_some_and(|j| j.kind == JoinKind::Semi))
     }
 
     /// Add the equalities between equivalence class members of different FROM items the
@@ -1499,7 +1507,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 let c = &self.clauses[i];
                 // (A semi join's own clause is a class's as an inner join's is, in a group
                 // of semi joins.)
-                if !c.ecable || c.on && !(self.semi_classes() && c.sj.is_some()) {
+                if !c.ecable || c.on && !(self.semi_classes() && self.semi_clause(c)) {
                     return false;
                 }
                 let Some((a, b, _, _)) = &c.eq else { return false };
@@ -3958,7 +3966,7 @@ impl Search<'_, '_, '_> {
                         // (A semi join's own clause is a class's in a group of semi joins:
                         // generate_join_implied_equalities_normal makes the join's clause
                         // anew (parent_ec set: never the source clause as written).)
-                        let semi = self.semi_classes() && c.sj.is_some();
+                        let semi = self.semi_classes() && self.semi_clause(c);
                         if !c.ecable || c.on && !semi {
                             continue;
                         }
@@ -9161,10 +9169,12 @@ impl Planner<'_, '_> {
         // clause comes back as it was, never checked as hashable (only clauses
         // distribute_restrictinfo_to_rels places are).)
         let semi_classes = s.semi_classes();
+        let semi_sjs: Vec<bool> = s.sjs.iter().map(|j| j.kind == JoinKind::Semi).collect();
+        let classed = |c: &Clause| c.sj.is_none_or(|t| semi_classes && semi_sjs.get(t) == Some(&true));
         for c in s.clauses.iter_mut() {
             if c.ecable
                 && !c.commutes
-                && !(s.general && ((c.sj.is_some() && !semi_classes) || c.req != c.leaves))
+                && !(s.general && (!classed(c) || c.req != c.leaves))
                 && !(!s.general && outer_join && c.on)
                 && let Some((_, _, al, bl)) = &c.eq
                 && al.trailing_zeros() > bl.trailing_zeros()
@@ -9174,7 +9184,7 @@ impl Planner<'_, '_> {
         }
         for c in &s.clauses {
             if !c.ecable
-                || (s.general && ((c.sj.is_some() && !semi_classes) || c.req != c.leaves))
+                || (s.general && (!classed(c) || c.req != c.leaves))
                 || (!s.general && outer_join && c.on)
             {
                 continue;
