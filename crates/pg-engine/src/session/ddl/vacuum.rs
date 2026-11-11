@@ -1467,7 +1467,7 @@ impl Ddl<'_, '_> {
             modelled: Option<u32>,
             tuples: usize,
             /// (sort key, index tuple size), when its pages aren't modelled.
-            keys: Vec<(u128, Vec<u8>, usize)>,
+            keys: Vec<MeasureKey>,
             /// A btree's keys as its model has them, when its pages aren't modelled: sized
             /// by the model's sorted build (`sizing::btree_build_blocks`).
             btree_keys: Option<Vec<(crate::catalog::btsim::Key, Vec<u8>)>>,
@@ -1706,15 +1706,9 @@ impl Ddl<'_, '_> {
                 } else if let Some(big) = &mut ix.big {
                     big.add(&vals);
                 } else if ix.modelled.is_none() {
-                    let mut sort = super::table::key_bytes(&vals);
+                    let sort = super::table::key_bytes(&vals);
                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
-                    let prefix = key_prefix(&sort);
-                    // (A key of up to 16 bytes is its prefix: keys are prefix-free, so equal
-                    // prefixes are equal keys, and no copy of it is kept to compare.)
-                    if sort.len() <= 16 {
-                        sort = Vec::new();
-                    }
-                    ix.keys.push((prefix, sort, relsize::index_tuple(&ix.types, &vals, &text)));
+                    ix.keys.push(measure_key(sort, relsize::index_tuple(&ix.types, &vals, &text)));
                 }
             }
         }
@@ -1881,7 +1875,7 @@ impl RowMeasure {
 
 /// A btree's pages by its keys (sort key, key bytes, index tuple size; `measure_rows_with`):
 /// sorted, deduplicated where PostgreSQL's btree would, packed as its build packs them.
-pub(super) fn btree_pages_of(bix: &crate::sql::plan::BoundIndex, types: &[DataType], mut keys: Vec<(u128, Vec<u8>, usize)>) -> i32 {
+pub(super) fn btree_pages_of(bix: &crate::sql::plan::BoundIndex, types: &[DataType], mut keys: Vec<MeasureKey>) -> i32 {
     // (By the first 8 bytes, then the key, then the size: the keys' order, the prefix
     // compared without reading the key. Unstable: entries equal as (key, size) are
     // interchangeable.)
@@ -1895,7 +1889,7 @@ pub(super) fn btree_pages_of(bix: &crate::sql::plan::BoundIndex, types: &[DataTy
 pub(super) fn btree_pages_sorted(
     bix: &crate::sql::plan::BoundIndex,
     types: &[DataType],
-    keys: impl Iterator<Item = (u128, Vec<u8>, usize)>,
+    keys: impl Iterator<Item = MeasureKey>,
     n: usize,
 ) -> i32 {
     let dedup = !bix.index.unique
@@ -1903,19 +1897,19 @@ pub(super) fn btree_pages_sorted(
         && types.iter().all(relsize::equal_image)
         && bix.colls.iter().flatten().all(|k| k.coll.deterministic);
     let mut sizes = Vec::with_capacity(n);
-    let mut group: Option<((u128, Vec<u8>, usize), usize)> = None;
+    let mut group: Option<(MeasureKey, usize)> = None;
     for k in keys {
         match &mut group {
             Some((g, count)) if dedup && g.0 == k.0 && g.1 == k.1 => *count += 1,
             _ => {
                 if let Some((g, count)) = group.replace((k, 1)) {
-                    relsize::posting_tuples(g.2, count, &mut sizes);
+                    relsize::posting_tuples(g.2 as usize, count, &mut sizes);
                 }
             }
         }
     }
     if let Some((g, count)) = group {
-        relsize::posting_tuples(g.2, count, &mut sizes);
+        relsize::posting_tuples(g.2 as usize, count, &mut sizes);
     }
     relsize::btree_pages(&sizes)
 }
@@ -1933,13 +1927,27 @@ impl Ddl<'_, '_> {
     }
 }
 
-/// A sort key's first 16 bytes, big-endian, zero-padded: ordering by it, then by the whole key,
-/// orders keys as the whole key does.
-pub(super) fn key_prefix(k: &[u8]) -> u128 {
+/// A btree measure's key: its sort key's first 16 bytes (`key_prefix`), the rest of the key
+/// when it is longer, and the index tuple's size. Keys are prefix-free, so equal prefixes of
+/// keys of up to 16 bytes are equal keys, and no copy of those is kept to compare. (None, not
+/// an empty `Vec`: comparing two empty `Vec`s ran memcmp over their dangling pointers, a
+/// microcode assist of about 80 ns each, an eighth of a CREATE INDEX. Two words and a `u32`,
+/// not a `u128` and a `usize`: 40 bytes a key, not 48, which a big build holds a million of.)
+pub(super) type MeasureKey = ([u64; 2], Option<Box<[u8]>>, u32);
+
+/// The measure's key of the index tuple of `size` bytes with sort key `sort` (`key_bytes`).
+pub(super) fn measure_key(sort: Vec<u8>, size: usize) -> MeasureKey {
+    (key_prefix(&sort), (sort.len() > 16).then(|| sort.into_boxed_slice()), size as u32)
+}
+
+/// A sort key's first 16 bytes as two big-endian words, zero-padded: ordering by them, then by
+/// the whole key, orders keys as the whole key does.
+fn key_prefix(k: &[u8]) -> [u64; 2] {
     let mut b = [0u8; 16];
     let n = k.len().min(16);
     b[..n].copy_from_slice(&k[..n]);
-    u128::from_be_bytes(b)
+    let (hi, lo) = b.split_at(8);
+    [u64::from_be_bytes(hi.try_into().unwrap()), u64::from_be_bytes(lo.try_into().unwrap())]
 }
 
 /// A boolean VACUUM option's value (no argument: true).

@@ -24,29 +24,31 @@ use super::idxprogress::IndexProgress;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// One participant's index entries: the entry keys back to back in `data`; each entry's
-/// (its key's 8 bytes after the index's prefix, offset, key length | tail length << 16 |
+/// (its key's 16 bytes after the index's prefix, offset, key length | tail length << 16 |
 /// `CHECKED`) in `ents`, sorted by key at the end. Its value, the row's data key, is the
 /// table's prefix and the key's tail (`index_entry_key`).
 #[derive(Default)]
 struct Entries {
     data: Vec<u8>,
-    ents: Vec<(u64, u32, u32)>,
+    ents: Vec<Ent>,
 }
 
 /// An entry whose key values take part in the unique check (none null, or NULLS NOT
 /// DISTINCT).
 const CHECKED: u32 = 1 << 31;
 
-type Ent = (u64, u32, u32);
+/// (Two words, not a `u128`: its 16-byte alignment made an entry 32 bytes.)
+type Ent = ([u64; 2], u32, u32);
 
 impl Entries {
     fn push(&mut self, k: &[u8], tail: usize, checked: bool) {
-        let mut w = [0u8; 8];
+        let mut w = [0u8; 16];
         let rest = k.get(8..).unwrap_or(&[]);
-        let n = rest.len().min(8);
+        let n = rest.len().min(16);
         w[..n].copy_from_slice(&rest[..n]);
         let lens = k.len() as u32 | (tail as u32) << 16 | if checked { CHECKED } else { 0 };
-        self.ents.push((u64::from_be_bytes(w), self.data.len() as u32, lens));
+        let word = |b: &[u8]| u64::from_be_bytes(b.try_into().unwrap());
+        self.ents.push(([word(&w[..8]), word(&w[8..])], self.data.len() as u32, lens));
         self.data.extend_from_slice(k);
     }
 
@@ -59,8 +61,9 @@ impl Entries {
         &k[k.len() - ((e.2 & !CHECKED) >> 16) as usize..]
     }
 
-    /// By each key's first 8 bytes past the index's prefix, then the keys themselves where
-    /// those tie.
+    /// By each key's first 16 bytes past the index's prefix, then the keys themselves where
+    /// those tie. (Eight bytes tied for an integer column's keys a few hundred apart, and every
+    /// tie read two keys at random places in `data`.)
     fn sort(&mut self) {
         let mut ents = std::mem::take(&mut self.ents);
         ents.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| self.key(*a).cmp(self.key(*b))));
@@ -72,8 +75,9 @@ impl Entries {
 #[derive(Default)]
 struct Part {
     rows: usize,
-    /// The heap's tuples' sizes, in order (`relsize::heap_pages` packs them).
-    sizes: Vec<usize>,
+    /// The heap's tuples' sizes, in order (`relsize::heap_pages` packs them; 4 bytes each, as
+    /// a big build holds a million).
+    sizes: Vec<u32>,
 }
 
 /// What a participant gathered over its chunks.
@@ -81,7 +85,7 @@ struct Part {
 struct Gathered {
     entries: Entries,
     /// The measure's (sort key, key bytes, index tuple size) of each entry.
-    keys: Vec<(u128, Vec<u8>, usize)>,
+    keys: Vec<super::vacuum::MeasureKey>,
     parts: Vec<(usize, Part)>,
     /// The first entry in index order past a btree's third of a page (`rowsize`): its key,
     /// size and row's data key.
@@ -143,12 +147,8 @@ impl Plan<'_> {
         let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
         let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
         g.entries.push(&k, dkey.len().saturating_sub(8), checked);
-        let mut sort = super::table::key_bytes(&vals);
+        let sort = super::table::key_bytes(&vals);
         vals.extend(self.ix.include.iter().map(|&i| row[i].clone()));
-        let prefix = super::vacuum::key_prefix(&sort);
-        if sort.len() <= 16 {
-            sort = Vec::new();
-        }
         let size = relsize::index_tuple(&self.ix_types, &vals, &text);
         if size > crate::exec::rowsize::INDEX_SIZE_MASK {
             return Err(crate::exec::rowsize::form_error(size));
@@ -156,16 +156,16 @@ impl Plan<'_> {
         if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0) {
             g.oversized = Some((k.clone(), size, dkey.to_vec()));
         }
-        g.keys.push((prefix, sort, size));
+        g.keys.push(super::vacuum::measure_key(sort, size));
         match stored {
-            Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len)),
+            Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len) as u32),
             None => {
                 for &i in &self.virt {
                     if i < row.len() {
                         row[i] = Value::Null;
                     }
                 }
-                part.sizes.push(relsize::heap_tuple(&self.types, &row, &text));
+                part.sizes.push(relsize::heap_tuple(&self.types, &row, &text) as u32);
             }
         }
         Ok(())
@@ -414,7 +414,7 @@ impl Ddl<'_, '_> {
             progress.loaded(tuples as u64);
             return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
         }
-        let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes));
+        let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes).map(|s| s as usize));
         let tuples = keys.iter().map(Vec::len).sum::<usize>();
         progress.scanned_all(tuples as u64);
         let pages = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);
