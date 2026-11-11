@@ -877,6 +877,22 @@ against base2, prepared point select at 8 clients:
 Footprint (fresh server each, cgroup anon+shmem 25 s into 100 idle sessions; fresh data
 directory): base2 36.5 MB / 3.03 MB, cand3 36.3 MB / 3.03 MB, twice each: unchanged.
 
+## L0 across restarts (2026-11-11, agent 201)
+
+HANDOFF.md "L0 kept bounded across restarts". `~/.cache/a201/bench/restarts.sh`: one data
+directory, `pgbench -i -s 10`, then 400 clean restarts (dist build in a container, `docker
+stop`), each with one `INSERT`; then pgbench select-only, prepared, 8 clients, three 20 s runs
+on CPUs 0-3 (client 4-7), user instructions of the server's cgroup per transaction. **base**
+is round 10's build (its storage as pushed in `d54dcbe10`), **new** `d54dcbe10` with the fix.
+
+| | L0 files after 50 / 200 / 400 restarts | tps | server µs CPU / txn | instructions / txn |
+|---|---|---|---|---|
+| base | 52 / 202 / 402 | 59,354, 60,910, 58,470 | 60, 60, 62 | 196k, 197k, 197k |
+| new | 2 / 2 / 2 | 96,314, 93,280, 91,884 | 36, 37, 38 | 57.4k, 57.7k, 57.8k |
+
+Point reads take 71% fewer instructions on the restarted directory. The bulk measurements in
+this file's round 10 start every run on a fresh data directory (one start each): unaffected.
+
 ## Bulk writes, round 10 (2026-11-10, agent 201)
 
 HANDOFF.md, "Bulk writes, round 10", has what changed. Method as rounds 8-9's, in

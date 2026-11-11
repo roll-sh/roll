@@ -9653,6 +9653,23 @@ create_table: 4552/4553 units. The same isolation specs and regress units differ
 binary against the same reference (its pg_stat_statements preload shows `Query Identifier`
 in EXPLAIN VERBOSE, and the engine had max_prepared_transactions 0).
 
+## L0 kept bounded across restarts (agent 201, from agent 204's finding)
+
+Every restart left one more L0 file that nothing compacted: a clean close flushes the memtable
+to L0, and compaction ran only in the background after a memtable filled, which a session of
+a few writes never does. After 400 restarts of one data directory L0 held 402 files, and every
+point read looks at each (BENCH.md "L0 across restarts": point reads 3.4x the instructions).
+Now `Store::close` compacts first when L0 and the frozen sources are at
+`l0_compaction_trigger` (4), as it already did for pending range deletions and linked runs, and
+`Store::open` starts the background compaction when it finds L0 at the trigger (a crash's
+leftovers, or a directory an older build closed). L0 stays at 4 files or fewer across restarts.
+Test `storage::tests::restarts_keep_l0_bounded` (50 restarts with a write each; it fails on
+the code before: "restart 4: 5 L0 files"). No format change. Verification on `d54dcbe10` with
+the fix, the full `tools/verification-train.sh`: release and debug crate tests 522 passed each,
+Clippy 19 warnings (none new), crash_random seeds 1-30 x 4, the power stage (power_cut 4,
+`CRASH_POWER=1` with and without `CRASH_ASYNC=1`), regress 0 units newly differing, isolation
+1647/1648 permutations (as before), pg_dump_tap 14,609 passed.
+
 ## Bulk writes, round 10 (agent 201)
 
 BENCH.md "Bulk writes, round 10" has the measurements: over the 1M-row bulk sequence the
