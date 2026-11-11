@@ -285,6 +285,89 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Range reads, round 4 (2026-11-11, agent 203)
+
+HANDOFF.md, "Range reads round 4", has what changed: a secondary index scan hands each row out
+from the batch its rows were read into, and a DataRow of fixed-width binary values is written
+in one copy. Agent 198's harness (copied to `~/.cache/a203/h`): dist builds in containers, the
+server on CPUs 24-27 and the client on 28-31, 100,000 accounts, 8 clients, 2 s warmup, 10 s
+measured, every row value-checked, user instructions and cycles from `perf stat -e
+instructions:u,cycles:u` over 9 s of each run, a pair run again when another tenant used more
+than 0.3 cores of the server's CPUs. The prepared 100-row range read, five alternating pairs
+per step. **base** is `c92dd8116`.
+
+Two harness changes. The candidate binary now sits at a path as long as the baseline's
+(`bin/newbuild/`, was `bin/`): three A/A pairs (one binary on both arms) with the old paths
+showed the candidate arm +1.2% to +4.0% ops/s, three with equal paths -3.2% to +0.2%
+(instructions within 0.6% either way in both). And a process pinned to the CPUs is reported
+but no longer refuses a run (only their load, the 20% idle wait and the foreign-core check
+do): other agents' builds and verification trains were pinned to 16-31 for hours.
+
+Step 1, rows handed out from their batch, against base:
+
+| pair | base ops/s | new ops/s | base us CPU / op | new us CPU / op | base instr / op | new instr / op |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 29,465 | 32,369 | 119.4 | 108.4 | 497k | 462k (-7.0%) |
+| 2 | 29,039 | 31,752 | 120.6 | 109.8 | 498k | 457k (-8.2%) |
+| 3 | 28,063 | 30,199 | 125.8 | 115.9 | 499k | 458k (-8.3%) |
+| 4 | 28,260 | 31,060 | 126.4 | 111.5 | 496k | 459k (-7.5%) |
+| 5 | 28,673 | 30,096 | 120.1 | 115.7 | 499k | 459k (-8.0%) |
+
+Medians: +8.3% ops/s, -7.5% server CPU per operation, -7.9% user instructions (user cycles
+-6.9% to -12.8% in every pair).
+
+Step 2, the fixed-width DataRow, against step 1:
+
+| pair | base ops/s | new ops/s | base us CPU / op | new us CPU / op | base instr / op | new instr / op |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 30,909 | 31,075 | 113.3 | 112.5 | 459k | 446k (-2.8%) |
+| 2 | 30,424 | 31,654 | 115.4 | 110.3 | 458k | 436k (-4.9%) |
+| 3 | 30,241 | 31,932 | 115.1 | 109.3 | 461k | 439k (-4.9%) |
+| 4 | 31,054 | 30,998 | 111.3 | 112.9 | 459k | 442k (-3.8%) |
+| 5 | 30,254 | 32,621 | 115.2 | 105.8 | 458k | 439k (-4.1%) |
+
+Medians: +4.0% ops/s, -4.2% CPU per operation, -4.4% instructions.
+
+Both steps against base, in one set (the final commits, five pairs): -10.6% to -11.7%
+instructions per pair (498k -> 444k median), +6.2% to +20.8% ops/s (median +10.3%), CPU per
+operation -5.8% to -20.0% (median -9.6%); the base runs of this set were slower than the
+earlier ones (118-149 us CPU / op), the instruction counts the same.
+
+The same two steps measured first on `16eccc605` (before agents 199 and 202 landed; step 1
+on CPUs 18-25): step 1 -7.6% to -8.2% instructions per pair, +9.3% median ops/s, -9.3% CPU;
+step 2 -4.0% to -5.0%, +2.9% ops/s, -2.5% CPU. Memory after the runs is 55-56 MiB against
+51-55 on base (the engine process's RssAnon after the same run, measured on its own: +0.2-0.5
+MB).
+
+PostgreSQL 18.6 in the same session, single runs on the same CPUs right after a set of
+pairs (ops/s, us CPU / op, MiB after the run, p99 ms): with step 2 on `16eccc605`, PostgreSQL
+32,887 / 104.9 / 103 / 0.558 against the engine's 33,037 / 104.6 / 55.6 / 0.567; on base,
+34,275 / 101.1 / 103 / 0.521 against 32,600 / 106.5 / 56.0 / 0.568; with the final commits,
+32,024 / 109.3 / 103 / 0.558 against 30,303 / 115.9 / 55.3 / 0.670. The engine is within
+about 5% of PostgreSQL on this read now (base was about 12% behind), on half its memory, not past
+it.
+
+The point read (`point_select`, base against the final commits, five pairs): ops/s -1.7% to
++21.0% (median +10.6%; two base runs slowed by a busy machine), CPU per operation median
+-9.6%, user instructions -1.6% to +2.7% (median +0.56%). A unique key's scan keeps
+`next_raw`'s path (`point`); its row of five columns tries the fixed-width DataRow and leaves
+it at the text column. The prepared single-row UPDATE (`update_indexed`, five pairs): ops/s
+-7.9% to +13.3% (median +4.7%), CPU per operation median -3.7%, instructions -0.5% to +0.6%
+(median +0.17%). Neither regresses beyond the runs' spread.
+
+Dropped (`~/.cache/a203/c3-dropped.patch`, measured on `16eccc605` over step 2): a projected
+row's header stepped over unread (`row_data_fast`) and `PlanRef`'s part read through a static
+trait instead of a function pointer. Two sets of five pairs: -2.2% to -3.3% instructions
+(median -3.0%) with median ops/s -0.4%; then -1.8% to -3.0% (two pairs under 2%), +0.8% ops/s,
+-1.8% CPU. Real, but under the gate's 2% in every pair.
+
+The LBR profile of `16eccc605` this round started from (148k samples, shares of the server's
+user samples): the index scan 39% (entries and their rows 22.7%: the rows' range read 9.3%,
+the entries' fill 6.3%, the copies and their allocation about 4%; the row made from the
+stored bytes 9.5%), planning (`planned_as`) 19.5% (choosing the scan again 11.1%, placing the
+WHERE 3.6%), the kernel send at ReadyForQuery 11.9%, the DataRows 4.2%, opening the executor
+3.5%, reading the next message 4.4%, the transaction's end 2.7%, Bind 2.1% (Describe 1.3%).
+
 ## Executor, round 12 (2026-11-10, agent 200)
 
 HANDOFF "Executor, round 12, batch 1" has what changed: a Parallel Hash Join's table is sized

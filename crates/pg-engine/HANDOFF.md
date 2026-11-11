@@ -9636,6 +9636,74 @@ and value, then an unzip into the fetch queue; allocation under it 1.35%) and
 `fetch_dense` 7.7%; `Feed::row` 4.5% and the wire encode about 3%; the kernel send at
 ReadyForQuery 11% (equal on both sides).
 
+## Range reads round 4 (agent 203)
+
+BENCH.md "Range reads, round 4" has the measurements: the prepared 100-row range read takes
+about 11% fewer user instructions per operation (step 1 -7.9%, every pair 7.0-8.3%; step 2
+-4.4%, every pair 2.8-4.9%; both, -10.9%) and comes within about 5% of PostgreSQL 18.6 in the
+same session (three single runs: +0.5%, -4.9%, -5.4% ops/s), on half its memory. Two changes:
+
+- **An index scan's rows handed out from their fetch batch** (`exec/scan.rs`,
+  `ScanNode::next_secondary_ref`, through `next_raw_ref`): a secondary index scan that isn't
+  index-only, nor one unique key's (`point`, read `next_raw`'s way one entry at a time), reads
+  a batch of entries into `erb` (`read_entries`, appending fill to fill) and, when their data
+  keys are close together, their rows as stored into `rb` by reference (`fetch_dense_ref`:
+  `fetch_dense`'s read and conditions, now `dense_keys`). `erow` is where each entry's row is
+  (`NO_ROW`: none visible), and a row is handed out at `rb`'s cursor (`RowBatch::set_pos`), so
+  `next` and `emit` read it in place: no entry key, data key or row copied, nor any `Bytes`
+  reference counted, per row. An entry whose key the next entries share starts a run: the
+  run's rows are copied out, put in heap order (`heap_order`; `backward_order` on a backward
+  scan) and handed out owned (`one`), as `next_raw` did; a run reaching the batch's end reads
+  on into the next batches (`continues`). LP_DEAD marks (`Kills`) get the same keys as before.
+  The first batch whose rows aren't close together (an UPDATE's one row, a scan of another
+  index's order) sends the rest of the scan `next_raw`'s way (`owned`, the entries pushed to
+  `fetched` by `fetch_entries`, a run in progress continued through `next_entry` and
+  `pending`). A new `ScanNode` field must be reset in `rescan_index` and `park`, as `erow`,
+  `epos` and `owned` are.
+- **A DataRow of fixed-width binary values in one copy** (`server.rs`,
+  `put_data_row_fixed`): a row whose values are each NULL or a bool, int2/4/8, oid, xid8 or
+  float4/8 in binary format is made in a 256-byte stack buffer and copied into the send buffer
+  at once (`binary::encode` writes those whatever the column's type); any other row goes the
+  old way.
+
+Why it is exact: the same rows reach `emit` in the same order with the same bytes (the dense
+read is `fetch_dense`'s, its rows matched to the entries the same way; everything else is
+`next_raw`'s code), and runs are ordered by the same code; the DataRow bytes are
+`binary::encode`'s. A differential script against PostgreSQL 18.6 (`~/.cache/a198/edge.sql`
+plus `~/.cache/a203/edge2.sql`: runs of equal keys within and across fetch batches, a unique
+index's NULL keys, deleted and updated rows, a transaction's own uncommitted writes, nested
+loop rescans, backward scans, a scroll cursor, an out-of-line value) gives the same output as
+base, and a raw-protocol script (`~/.cache/a203/binrows.py`: NULLs, bool, int2/4/8, float4/8,
+oid, xid8, numeric, arrays, text, 41 columns, binary and text formats) gives byte-identical
+DataRows. Both servers differ on one statement there, as base does: `FETCH LAST` on a scroll
+cursor over `u_g` (no ORDER BY) after DELETEs and UPDATEs gives 4967 where PostgreSQL gives
+4893 (heap order after updates; not this change).
+
+Verification on `c92dd8116` with both changes: release build; release lib tests (211 passed),
+kept_plans (10), wire (69) and golden (all files); debug golden (all files, with the reuse
+cross-check and the implied-filter assertion) and kept_plans; the planner regress subset
+(select, join, subselect, aggregates, create_index, btree_index, partition_prune, portals,
+limit, prepare, plancache; debug build, a private PG 18.6 reference): 4184/4186 units, no newly
+differing unit. Release Clippy with `-D warnings` fails as on `c92dd8116`, with the same lints
+in the same files (math.rs, json.rs, text.rs, explain.rs, nodes.rs' test module placement and
+others), none in this change. (The same gates passed on `16eccc605` with both changes and the
+dropped third.) The DataRow fast path still zeroes its 256-byte buffer and writes the leading
+fixed-width values of a row it then leaves (`point_select`'s, at its text column): a check of
+the row first would spare that.
+
+Dropped (`~/.cache/a203/c3-dropped.patch`): a projected row's header stepped over unread and
+`PlanRef`'s part read through a static trait instead of a function pointer (-2.3% to -3.0%
+median instructions over two sets of five pairs, two pairs under the 2% gate).
+
+Next, from the profile (BENCH.md): planning is now the largest part of the range read (about
+21%): `rechoose` re-runs `match_quals`, `index_pathkeys`, `index_only`, the IClause copies
+and `add_path` on every Bind though only the values changed, and `Analyzed::placed` (3.6%)
+substitutes and places the WHERE again; keeping the value-independent parts per statement
+(pgrust's bound key cells) is the next lever. `Planner::endpoint` (0.8%) reads both ends of
+the column where get_actual_variable_range reads the one it needs. The row made from the
+stored bytes (`emit` 9.5%: the decode 2.9%, its allocation 1.2%, the header's numbers 0.8%,
+`PlanRef`'s calls 0.6%). Describe at Bind starts the transaction (`ensure_txn`, 0.7%).
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
