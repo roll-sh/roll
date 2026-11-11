@@ -10854,3 +10854,20 @@ Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.
   model freezes. Still differs: the first VACUUM after VACUUM FULL or CLUSTER doesn't
   advance relfrozenxid (no `new relfrozenxid` line): the rewritten rows keep the rewrite's
   xmin in storage, which `advance_frozen_xid` reads, where PostgreSQL froze them.
+- **Scroll cursors turning in mid-scan** (`session/cursor.rs`, `Paged`): PostgreSQL's btree
+  scan loads a leaf page's matching items at once in the direction it moves; moving back
+  over them returns exactly the reverse, and leaving the page reads the next one afresh in
+  the direction moved (_bt_steppage / _bt_readpage), a posting list's TIDs ascending either
+  way. The first time a scroll cursor over a plain btree index scan moves back, it reads its
+  scan's rows' keys again (`keyed_scan`) and places each row in the btree model
+  (`Btree::places`: leaf page and index tuple); from then on each step onto a row of another
+  page puts that page's rows in the order of a read in that direction (an index tuple's rows
+  reversed when read against the scan). This replaces agent 206's turn at the ends
+  (`restart_scan`, still used when the index or heap isn't modelled). Golden
+  `a214_cursor_pages` (turns over pages and within one, a filter, deletes in the same
+  transaction, a backward scan, a unique index); `a206_cursor_turn` still passes.
+  Still differs: a turn after the same transaction's inserts or non-HOT updates split leaf
+  pages the scan had read. PostgreSQL's currPos keeps the page as it was loaded and its old
+  sibling links; the model places rows by the pages as they are now (a run of 16 rows came
+  in another order in the probe `~/.cache/a214/cur1.sql` case D). Modelling it needs the
+  leaf pages as of each page read.

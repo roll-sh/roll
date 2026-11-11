@@ -1453,6 +1453,23 @@ impl Btree {
         }
     }
 
+    /// Where the entries for heap TIDs `want` are: each one's leaf page and index tuple
+    /// there (its place on the page). What a scroll cursor's turns read again page by page.
+    pub fn places(&self, want: &std::collections::HashSet<Tid>) -> std::collections::HashMap<Tid, (u32, u32)> {
+        let mut out = std::collections::HashMap::with_capacity(want.len());
+        for (b, p) in self.pages.iter().enumerate() {
+            let Some(p) = p.as_ref().filter(|p| p.leaf) else { continue };
+            for (i, it) in p.items.iter().enumerate() {
+                for t in it.tids.iter() {
+                    if want.contains(&t) {
+                        out.insert(t, (b as u32, i as u32));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The index tuples whose key attributes are `key` (their encoding), in index order:
     /// each one's heap TIDs, ascending (a posting list's). What orders a backward scan's
     /// equal keys: tuples last first, a posting list's TIDs ascending (_bt_readpage).

@@ -4757,6 +4757,16 @@ pub fn entry_pages(
 }
 
 /// A btree index's size in pages, if modelled.
+/// Where modelled btree `index` has the entries for heap TIDs `want` (`Btree::places`).
+pub fn btree_places(
+    table: u32,
+    index: u32,
+    want: &std::collections::HashSet<Tid>,
+    db: &Database,
+) -> Option<std::collections::HashMap<Tid, (u32, u32)>> {
+    Some(db.relfiles.of(table).read().btrees.get(&index)?.places(want))
+}
+
 /// Modelled btree `index`'s index tuples with key attributes `key` (`Btree::postings`).
 pub fn btree_postings(table: u32, index: u32, key: &[u8], db: &Database) -> Option<Vec<Vec<Tid>>> {
     Some(db.relfiles.of(table).read().btrees.get(&index)?.postings(key))

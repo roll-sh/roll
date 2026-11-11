@@ -83,6 +83,27 @@ pub struct Cursor {
     /// `rows` are in the order a btree scan started afresh backward from the end reads them
     /// (`restart_scan`), reversed.
     turned: bool,
+    /// A scroll cursor over a btree index scan that has turned: where its rows are in the
+    /// index, page by page (`Paged`).
+    paged: Option<Box<Paged>>,
+}
+
+/// The leaf pages of a scroll cursor's btree index scan, as PostgreSQL's scan reads them:
+/// a page's matching items are loaded at once in the direction the scan is moving
+/// (_bt_readpage), and moving back over them returns them in exactly the reverse order;
+/// leaving the page, the next one is read afresh in the direction moved. Read in the scan's
+/// own direction, a posting list's TIDs come ascending; read against it, a backward page
+/// read saves them ascending too, so in the cursor's order each posting list of a page
+/// entered against the scan comes reversed. `rows` keep each page's rows in the order the
+/// page was last read in, whose places these are.
+struct Paged {
+    /// Each kept row's place (as `rows`): its leaf page, its index tuple there, and its
+    /// place in the scan's own order.
+    at: Vec<(u32, u32, u32)>,
+    /// The places of the rows the query has yet to return, in order.
+    ahead: std::collections::VecDeque<(u32, u32, u32)>,
+    /// The page the scan is on (currPos): None once it ran off an end or was rewound.
+    cur: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -638,6 +659,7 @@ impl Cursor {
             row_marks: false,
             simple: None,
             turned: false,
+            paged: None,
         };
         for r in rows {
             c.push_row(r);
@@ -684,6 +706,12 @@ impl Cursor {
             keys.push(key);
         }
         self.rows.push(r);
+        if let Some(p) = &mut self.paged {
+            match p.ahead.pop_front() {
+                Some(a) => p.at.push(a),
+                None => self.paged = None,
+            }
+        }
     }
 
     /// The rows the query has produced so far.
@@ -968,11 +996,13 @@ impl Cursor {
                 };
                 let Some(r) = more else {
                     self.pos = n + 1;
+                    self.enter_page(true);
                     return Ok(None);
                 };
                 self.push_row(r);
             }
             self.pos += 1;
+            self.enter_page(true);
         } else {
             if self.pos == 0 {
                 return Ok(None);
@@ -984,11 +1014,132 @@ impl Cursor {
                 return Ok(self.last.clone());
             }
             self.pos -= 1;
+            self.enter_page(false);
             if self.pos == 0 {
                 return Ok(None);
             }
         }
         self.visit(ex, ctx).map(Some)
+    }
+
+    /// The scan moved onto row `pos` (`forward` or back): a row on another leaf page than the
+    /// one it was on means that page was read afresh in that direction (`Paged`), its rows
+    /// put in that read's order.
+    fn enter_page(&mut self, forward: bool) {
+        let Some(p) = &mut self.paged else { return };
+        if p.at.len() != self.rows.len() || self.base != 0 {
+            self.paged = None;
+            return;
+        }
+        if self.pos == 0 || self.pos > self.rows.len() {
+            p.cur = None;
+            return;
+        }
+        let i = self.pos - 1;
+        let page = p.at[i].0;
+        if p.cur == Some(page) {
+            return;
+        }
+        p.cur = Some(page);
+        let (mut s, mut e) = (i, i + 1);
+        while s > 0 && p.at[s - 1].0 == page {
+            s -= 1;
+        }
+        while e < p.at.len() && p.at[e].0 == page {
+            e += 1;
+        }
+        // The scan's own order, each index tuple's rows reversed when read against it.
+        let mut order: Vec<usize> = (s..e).collect();
+        order.sort_by_key(|&j| p.at[j].2);
+        if !forward {
+            let mut a = 0;
+            while a < order.len() {
+                let item = p.at[order[a]].1;
+                let mut b = a + 1;
+                while b < order.len() && p.at[order[b]].1 == item {
+                    b += 1;
+                }
+                order[a..b].reverse();
+                a = b;
+            }
+        }
+        if order.iter().enumerate().all(|(k, &j)| j == s + k) {
+            return;
+        }
+        let at: Vec<_> = order.iter().map(|&j| p.at[j]).collect();
+        p.at[s..e].copy_from_slice(&at);
+        let rows: Vec<Row> = order.iter().map(|&j| std::mem::take(&mut self.rows[j])).collect();
+        for (k, r) in rows.into_iter().enumerate() {
+            self.rows[s + k] = r;
+        }
+        if let Some((_, keys)) = &mut self.keys {
+            let ks: Vec<Arc<[u8]>> = order.iter().map(|&j| keys[j].clone()).collect();
+            keys[s..e].clone_from_slice(&ks);
+        }
+    }
+
+    /// Before a scroll cursor over a plain btree index scan first moves back: where each of
+    /// its scan's rows is in the index (`Paged`), from the scan run again with its rows'
+    /// keys. None (as before: stepping back over the rows passed) when the index or the heap
+    /// isn't modelled or a row isn't placed.
+    fn page_model(&mut self, ex: Option<&mut Exec<'_>>, ctx: &ExecCtx) -> Result<()> {
+        let Some(ex) = ex else { return Ok(()) };
+        if self.paged.is_some()
+            || self.turned
+            || self.base != 0
+            || self.streams()
+            || ex.fill
+            || ex.window.is_some()
+            || ex.qual.is_some()
+            || ex.qual_limit.is_some()
+            || self.keys.as_ref().is_some_and(|(_, k)| k.len() != self.rows.len())
+        {
+            return Ok(());
+        }
+        fn scan(p: &Plan) -> Option<&crate::sql::plan::ScanPlan> {
+            match p {
+                Plan::Scan(s) => Some(s),
+                Plan::Project { input, .. } | Plan::Filter { input, .. } => scan(input),
+                _ => None,
+            }
+        }
+        let Some(s) = scan(ex.plan) else { return Ok(()) };
+        let Some((ix, _)) = s.index.as_ref().filter(|(ix, _)| ix.method == "btree") else { return Ok(()) };
+        if !matches!(s.access, crate::sql::plan::Access::Index { .. }) || !replayable(ex.plan) {
+            return Ok(());
+        }
+        let Some((keyed, at)) = keyed_scan(ex.plan) else { return Ok(()) };
+        let mut node = crate::exec::nodes::open(&Arc::new(keyed), ctx)?;
+        let mut keys = Vec::new();
+        while let Some(r) = node.next(ctx)? {
+            ctx.check()?;
+            match r.get(at) {
+                Some(Value::Bytea(k)) => keys.push(k.to_vec()),
+                _ => return Ok(()),
+            }
+        }
+        drop(node);
+        if keys.len() < self.rows.len() {
+            return Ok(());
+        }
+        let Some(roots) = crate::exec::sizing::row_roots(&s.table, &keys, ctx) else { return Ok(()) };
+        let Some(tids) = roots.into_iter().collect::<Option<Vec<_>>>() else { return Ok(()) };
+        let want: std::collections::HashSet<_> = tids.iter().copied().collect();
+        let Some(places) = crate::exec::sizing::btree_places(s.table.oid, ix.oid, &want, &ctx.sess.db) else {
+            return Ok(());
+        };
+        let Some(mut all) = tids
+            .iter()
+            .enumerate()
+            .map(|(i, t)| places.get(t).map(|&(b, it)| (b, it, i as u32)))
+            .collect::<Option<std::collections::VecDeque<_>>>()
+        else {
+            return Ok(());
+        };
+        let at: Vec<_> = all.drain(..self.rows.len()).collect();
+        let cur = (self.pos >= 1 && self.pos <= at.len()).then(|| at[self.pos - 1].0);
+        self.paged = Some(Box::new(Paged { at, ahead: all, cur }));
+        Ok(())
     }
 
     /// A btree scan that ran off an end of its range forgets its place (_bt_readnextpage
@@ -1068,7 +1219,12 @@ impl Cursor {
         if (if forward { self.at_end } else { self.at_start }) || count <= 0 {
             return Ok((out, 0));
         }
-        self.restart_scan(ex.as_deref_mut(), ctx, forward)?;
+        if !forward {
+            self.page_model(ex.as_deref_mut(), ctx)?;
+        }
+        if self.paged.is_none() {
+            self.restart_scan(ex.as_deref_mut(), ctx, forward)?;
+        }
         let mut n: u64 = 0;
         while count == FETCH_ALL || n < count as u64 {
             let Some(r) = self.step(ex.as_deref_mut(), ctx, forward)? else {
@@ -1112,6 +1268,10 @@ impl Cursor {
             return Err(backward_err());
         }
         self.pos = 0;
+        // (ExecutorRewind: the index scan starts again from its first page.)
+        if let Some(p) = &mut self.paged {
+            p.cur = None;
+        }
         self.at_start = true;
         self.at_end = false;
         self.portal_pos = 0;
@@ -1239,6 +1399,7 @@ impl Cursor {
         self.projected = false;
         self.last = None;
         self.current_key = None;
+        self.paged = None;
         self.rows = rows;
         self.base = 0;
         self.plain = false;
@@ -1367,6 +1528,37 @@ fn replayable_expr(expr: &Expr) -> bool {
         };
     });
     safe
+}
+
+/// The scan under `plan`'s projections and filters, returning each row's storage key too:
+/// the plan and the key's column. (A scroll cursor's page model reads its scan's rows' keys:
+/// `Cursor::page_model`.)
+fn keyed_scan(plan: &Plan) -> Option<(Plan, usize)> {
+    // (With system columns, the key goes before them: expressions over them move up one.)
+    fn go(p: &Plan) -> Option<(Plan, usize, bool)> {
+        match p {
+            // (A cursor's scan may return its rows' keys already.)
+            Plan::Scan(s) if s.with_key => Some((p.clone(), s.table.columns.len(), false)),
+            Plan::Scan(s) => {
+                let mut s = s.clone();
+                s.with_key = true;
+                let key = s.table.columns.len();
+                if s.sys {
+                    s.filter = s.filter.as_ref().map(|f| f.clone().remap_cols(&|i| if i >= key { i + 1 } else { i }));
+                }
+                let sys = s.sys;
+                Some((Plan::Scan(s), key, sys))
+            }
+            Plan::Project { input, .. } => go(input),
+            Plan::Filter { input, pred } => {
+                let (i, key, sys) = go(input)?;
+                let pred = if sys { pred.clone().remap_cols(&|c| if c >= key { c + 1 } else { c }) } else { pred.clone() };
+                Some((Plan::Filter { input: Arc::new(i), pred }, key, sys))
+            }
+            _ => None,
+        }
+    }
+    go(plan).map(|(p, key, _)| (p, key))
 }
 
 /// Restarting is safe only for immutable expressions over ordinary stored rows.
