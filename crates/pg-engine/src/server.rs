@@ -2037,11 +2037,15 @@ fn put_data_row_fixed(b: &mut BytesMut, row: &[crate::types::Value], formats: &[
     true
 }
 
-/// `put_data_row_fixed` of a row as its stored values (`data`, `storage::row`: the row is
-/// its columns `picked`, ascending), each null or of fixed width, made from the stored bytes
-/// without decoding them: the bytes `put_data_row_fixed` writes for the row decoded. False:
-/// another row (nothing written).
-fn put_data_row_stored(b: &mut BytesMut, data: &[u8], picked: &[u32], formats: &[i16]) -> Result<bool> {
+/// `put_data_row` of a row as its stored values (`data`, `storage::row`: the row is its
+/// columns `picked`, ascending, of the result's columns `cols`), made from the stored bytes
+/// without decoding them: each value null, of fixed width in binary (the bytes
+/// `put_data_row_fixed` writes for the row decoded), or in text one `put_text_fast` writes
+/// (a bool, int2/4/8 or oid of its own type, a valid UTF-8 string of a string type for a
+/// UTF-8 client): the bytes `put_data_row` writes for the row decoded. False: another row
+/// (nothing written).
+fn put_data_row_stored(b: &mut BytesMut, data: &[u8], picked: &[u32], cols: &[OutCol], formats: &[i16]) -> Result<bool> {
+    use crate::types::DataType as T;
     use crate::storage::row::tag;
     let mut m = [0u8; 256];
     let mut at = 7;
@@ -2070,7 +2074,71 @@ fn put_data_row_stored(b: &mut BytesMut, data: &[u8], picked: &[u32], formats: &
                 col += 1;
                 continue;
             }
-            _ if result_format(formats, i) != 1 => return Ok(false),
+            _ if result_format(formats, i) != 1 => {
+                let ty = cols.get(i).map(|c| &c.ty);
+                let x: i64 = match (t, ty) {
+                    (tag::FALSE | tag::TRUE, Some(T::Bool)) => {
+                        if at + 5 > m.len() {
+                            return Ok(false);
+                        }
+                        m[at..at + 4].copy_from_slice(&1i32.to_be_bytes());
+                        m[at + 4] = if t == tag::TRUE { b't' } else { b'f' };
+                        at += 5;
+                        pos += 1;
+                        col += 1;
+                        continue;
+                    }
+                    (tag::TEXT, Some(T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name)) if plain_utf8() => {
+                        let mut p = pos + 1;
+                        let s = crate::storage::sst::get_varint(data, &mut p)? as usize;
+                        let v = data.get(p..p + s).ok_or_else(|| crate::error::internal("truncated row"))?;
+                        // (Invalid UTF-8 fails decoding the row: its error, from there.)
+                        if at + 4 + s > m.len() || std::str::from_utf8(v).is_err() {
+                            return Ok(false);
+                        }
+                        m[at..at + 4].copy_from_slice(&(s as i32).to_be_bytes());
+                        m[at + 4..at + 4 + s].copy_from_slice(v);
+                        at += 4 + s;
+                        pos = p + s;
+                        col += 1;
+                        continue;
+                    }
+                    (tag::INT2, Some(T::Int2)) => i16::from_le_bytes(stored_le(data, pos)?) as i64,
+                    (tag::INT4, Some(T::Int4)) => i32::from_le_bytes(stored_le(data, pos)?) as i64,
+                    (tag::INT8, Some(T::Int8)) => i64::from_le_bytes(stored_le(data, pos)?),
+                    (tag::OID, Some(T::Oid)) => u32::from_le_bytes(stored_le(data, pos)?) as i64,
+                    _ => return Ok(false),
+                };
+                // (`put_text_fast`'s digits.)
+                let mut buf = [0u8; 20];
+                let mut d = buf.len();
+                let mut u = x.unsigned_abs();
+                loop {
+                    d -= 1;
+                    buf[d] = b'0' + (u % 10) as u8;
+                    u /= 10;
+                    if u == 0 {
+                        break;
+                    }
+                }
+                let n = buf.len() - d + usize::from(x < 0);
+                if at + 4 + n > m.len() {
+                    return Ok(false);
+                }
+                m[at..at + 4].copy_from_slice(&(n as i32).to_be_bytes());
+                if x < 0 {
+                    m[at + 4] = b'-';
+                }
+                m[at + 4 + n - (buf.len() - d)..at + 4 + n].copy_from_slice(&buf[d..]);
+                at += 4 + n;
+                pos += 1 + match t {
+                    tag::INT2 => 2,
+                    tag::INT8 => 8,
+                    _ => 4,
+                };
+                col += 1;
+                continue;
+            }
             tag::FALSE | tag::TRUE => 0,
             tag::INT2 => 2,
             tag::INT4 | tag::FLOAT4 | tag::OID => 4,
@@ -2100,6 +2168,13 @@ fn put_data_row_stored(b: &mut BytesMut, data: &[u8], picked: &[u32], formats: &
     m[5..7].copy_from_slice(&(picked.len() as i16).to_be_bytes());
     b.put_slice(&m[..at]);
     Ok(true)
+}
+
+/// The `N` stored bytes of the fixed-width value whose tag is at `pos`.
+fn stored_le<const N: usize>(data: &[u8], pos: usize) -> Result<[u8; N]> {
+    data.get(pos + 1..pos + 1 + N)
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| crate::error::internal("truncated row"))
 }
 
 /// The text output of the commonest values written straight into the message (what
@@ -2211,11 +2286,11 @@ impl crate::session::RowSink for WireSink {
         r
     }
 
-    fn row_stored(&mut self, data: &[u8], picked: &[u32]) -> Result<bool> {
+    fn row_stored(&mut self, data: &[u8], picked: &[u32], cols: &[OutCol]) -> Result<bool> {
         let formats = std::mem::take(&mut self.formats);
         let mut sent = false;
         let r = self.put(|b| {
-            sent = put_data_row_stored(b, data, picked, &formats)?;
+            sent = put_data_row_stored(b, data, picked, cols, &formats)?;
             Ok(())
         });
         self.formats = formats;

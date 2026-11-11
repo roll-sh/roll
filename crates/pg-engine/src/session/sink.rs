@@ -26,9 +26,9 @@ pub trait RowSink {
     fn row(&mut self, row: Row, cols: &[OutCol], fmt: &FormatCtx) -> Result<()>;
 
     /// One row as its stored values (`exec::Stored::Cols`: `data` a stored row's values, the
-    /// row its columns `picked`), sent as `row` would send it decoded. False: this sink
-    /// can't (nothing sent; the row comes again decoded).
-    fn row_stored(&mut self, _data: &[u8], _picked: &[u32]) -> Result<bool> {
+    /// row its columns `picked`; `cols` as `row`'s), sent as `row` would send it decoded.
+    /// False: this sink can't (nothing sent; the row comes again decoded).
+    fn row_stored(&mut self, _data: &[u8], _picked: &[u32], _cols: &[OutCol]) -> Result<bool> {
         Ok(false)
     }
 
@@ -98,7 +98,7 @@ impl Feed<'_> {
     /// `row` of a row as its stored values (`RowSink::row_stored`; false: not sent).
     pub fn row_stored(&mut self, ctx: &ExecCtx, data: &[u8], picked: &[u32]) -> Result<bool> {
         ctx.check()?;
-        let sent = self.sink.row_stored(data, picked)?;
+        let sent = self.sink.row_stored(data, picked, self.cols)?;
         self.sent += usize::from(sent);
         Ok(sent)
     }
