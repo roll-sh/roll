@@ -9968,10 +9968,16 @@ fn dup_colls(cat: &crate::catalog::Catalog, t: &Table, bix: &BoundIndex) -> Vec<
 /// Order-preserving bytes for a tuple of values (for duplicate detection).
 pub(super) fn key_bytes(vals: &[Value]) -> Vec<u8> {
     let mut k = Vec::new();
-    for v in vals {
-        crate::storage::keys::encode_value(&mut k, v, false);
-    }
+    key_bytes_into(&mut k, vals);
     k
+}
+
+/// `key_bytes` into `out` (emptied first).
+pub(super) fn key_bytes_into(out: &mut Vec<u8>, vals: &[Value]) {
+    out.clear();
+    for v in vals {
+        crate::storage::keys::encode_value(out, v, false);
+    }
 }
 
 /// The unique keys an index build has seen, each with the data key of the row that had it

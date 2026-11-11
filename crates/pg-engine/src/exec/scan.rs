@@ -199,6 +199,16 @@ pub fn index_entry_key(t: &Table, ix: &Index, keyvals: &[Value], dkey: &[u8], co
     k
 }
 
+/// `index_entry_key` appended to `out` (a build's entries, end to end).
+pub fn index_entry_key_into(out: &mut Vec<u8>, t: &Table, ix: &Index, keyvals: &[Value], dkey: &[u8], colls: &[Option<KeyColl>]) {
+    crate::storage::keys::put_u32(out, t.oid);
+    crate::storage::keys::put_u32(out, ix.id);
+    for (i, (v, c)) in keyvals.iter().zip(&ix.columns).enumerate() {
+        encode_index_value(out, v, c.desc, c.nulls_first, colls.get(i).and_then(Option::as_ref));
+    }
+    out.extend_from_slice(&dkey[8..]);
+}
+
 /// Prefix of index entries with exactly these key values (for uniqueness checks): equal
 /// under the columns' collations.
 pub fn index_value_prefix(t: &Table, ix: &Index, keyvals: &[Value], colls: &[Option<KeyColl>]) -> Vec<u8> {

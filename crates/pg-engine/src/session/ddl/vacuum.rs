@@ -1708,7 +1708,7 @@ impl Ddl<'_, '_> {
                 } else if ix.modelled.is_none() {
                     let sort = super::table::key_bytes(&vals);
                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
-                    ix.keys.push(measure_key(sort, relsize::index_tuple(&ix.types, &vals, &text)));
+                    ix.keys.push(measure_key(&sort, relsize::index_tuple(&ix.types, &vals, &text)));
                 }
             }
         }
@@ -1936,8 +1936,8 @@ impl Ddl<'_, '_> {
 pub(super) type MeasureKey = ([u64; 2], Option<Box<[u8]>>, u32);
 
 /// The measure's key of the index tuple of `size` bytes with sort key `sort` (`key_bytes`).
-pub(super) fn measure_key(sort: Vec<u8>, size: usize) -> MeasureKey {
-    (key_prefix(&sort), (sort.len() > 16).then(|| sort.into_boxed_slice()), size as u32)
+pub(super) fn measure_key(sort: &[u8], size: usize) -> MeasureKey {
+    (key_prefix(sort), (sort.len() > 16).then(|| sort.into()), size as u32)
 }
 
 /// A sort key's first 16 bytes as two big-endian words, zero-padded: ordering by them, then by

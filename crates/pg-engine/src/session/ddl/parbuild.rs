@@ -42,14 +42,21 @@ type Ent = ([u64; 2], u32, u32);
 
 impl Entries {
     fn push(&mut self, k: &[u8], tail: usize, checked: bool) {
+        let at = self.data.len();
+        self.data.extend_from_slice(k);
+        self.push_at(at, tail, checked);
+    }
+
+    /// An entry whose key was appended to `data` from `at` on.
+    fn push_at(&mut self, at: usize, tail: usize, checked: bool) {
+        let k = &self.data[at..];
         let mut w = [0u8; 16];
         let rest = k.get(8..).unwrap_or(&[]);
         let n = rest.len().min(16);
         w[..n].copy_from_slice(&rest[..n]);
         let lens = k.len() as u32 | (tail as u32) << 16 | if checked { CHECKED } else { 0 };
         let word = |b: &[u8]| u64::from_be_bytes(b.try_into().unwrap());
-        self.ents.push(([word(&w[..8]), word(&w[8..])], self.data.len() as u32, lens));
-        self.data.extend_from_slice(k);
+        self.ents.push(([word(&w[..8]), word(&w[8..])], at as u32, lens));
     }
 
     fn key(&self, e: Ent) -> &[u8] {
@@ -92,6 +99,9 @@ struct Gathered {
     oversized: Option<(Vec<u8>, usize, Vec<u8>)>,
     /// A modelled table's: each row's key in the index's model, with its data key.
     model: Vec<(Key, Vec<u8>)>,
+    /// A row's key values and sort key (`row`'s, kept for the next row: no allocation each).
+    vals: Vec<Value>,
+    sort: Vec<u8>,
 }
 
 /// What every participant needs, shared.
@@ -143,20 +153,25 @@ impl Plan<'_> {
             Some(_) => crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?,
             None => crate::exec::scan::decode_table_row(self.t, bytes)?,
         };
-        let mut vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
-        let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
+        let mut vals = std::mem::take(&mut g.vals);
+        vals.clear();
+        vals.extend(self.cols.iter().map(|&i| row[i].clone()));
+        let at = g.entries.data.len();
+        crate::exec::scan::index_entry_key_into(&mut g.entries.data, self.t, self.ix, &vals, dkey, self.colls);
         let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
-        g.entries.push(&k, dkey.len().saturating_sub(8), checked);
-        let sort = super::table::key_bytes(&vals);
+        g.entries.push_at(at, dkey.len().saturating_sub(8), checked);
+        let k = &g.entries.data[at..];
+        super::table::key_bytes_into(&mut g.sort, &vals);
         vals.extend(self.ix.include.iter().map(|&i| row[i].clone()));
         let size = relsize::index_tuple(&self.ix_types, &vals, &text);
         if size > crate::exec::rowsize::INDEX_SIZE_MASK {
             return Err(crate::exec::rowsize::form_error(size));
         }
-        if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0) {
-            g.oversized = Some((k.clone(), size, dkey.to_vec()));
+        if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0.as_slice()) {
+            g.oversized = Some((k.to_vec(), size, dkey.to_vec()));
         }
-        g.keys.push(super::vacuum::measure_key(sort, size));
+        g.keys.push(super::vacuum::measure_key(&g.sort, size));
+        g.vals = vals;
         match stored {
             Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len) as u32),
             None => {
