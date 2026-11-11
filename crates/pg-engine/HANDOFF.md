@@ -9973,6 +9973,88 @@ the changed functions).
   are worth a measured round. ed986715f has since added a unique key's point probe, so
   check that first.
 
+## Bulk writes, round 11 (agent 208)
+
+BENCH.md "Bulk writes, round 11" has the measurements: on the 1M-row bulk sequence, user
+instructions of COPY in -4.1% (every round), CREATE INDEX -5.4 to -7.9%, CREATE UNIQUE INDEX
+-9.3 to -17.5%, every other step within 2%; peak RSS and bytes written unchanged. Three
+changes, each its own commit:
+
+- **`stored_tuple_len` counts its rows in debug builds only** (`storage::row::STORED_SIZES`).
+  The counter, read by one test (`big_tables::measured_sizes_from_stored_rows`, which now
+  checks it in debug builds), was a `fetch_add` on one cache line that a parallel build's
+  three participants all size rows through: the `lock xadd` was half of the function's
+  cycles (perf annotate), and the function 7.5% of CREATE INDEX's cycles and 10.9% of CREATE
+  UNIQUE INDEX's (5.2% and 5.7% without the counter). It shows in cycles, not instructions.
+  - **The same hazard is any global atomic a parallel loop touches per row.** Count per
+    participant and add once, or only in debug builds.
+- **A parallel index build's entry keys and sort keys made in place** (`parbuild::Plan::row`,
+  `scan::index_entry_key_into`, `table::key_bytes_into`, `vacuum::measure_key` taking a slice).
+  Per row the build allocated the entry key (then copied it into the participant's arena),
+  the measure's sort key (dropped again for keys of up to 16 bytes, which the measure keeps
+  as two words) and the key values' `Vec`. Now the key is encoded straight into the arena,
+  the sort key into a buffer the participant keeps, and the values' `Vec` is reused.
+- **A plain text COPY's line without escapes parsed straight into its values**
+  (`copy::plain_values`, `Rec::Plain`). `split_text` made each such line a `Vec` of fields
+  (value and raw text, 48 bytes each), which the record loop then walked for DEFAULT markers,
+  the NULL marker and the field count before parsing them. When none of those can apply (a
+  plain COPY: no CSV, no DEFAULT option, a NULL marker with a backslash, which a line
+  without escapes can't hold, and the line not the header), the line's fields are parsed in
+  place; a line with too few or too many fields, or a value that fails to parse, goes the
+  general way from its start (parsing has no side effects), so errors, ON_ERROR, notices and
+  line numbers are as before.
+
+Measured and not kept (patches and a note of each in `~/.cache/a208/patches/`): the merge
+putting the source it moved back in its place among the others' heads (DELETE -1 to -4%; the
+per-entry fast path of `Merge::min`, `fill` and `head` of the current source, is most of its
+cost, not the full rescan this removes); a compact lock set growing without hashing its keys
+again plus `int % int` in 64 bits (DELETE -2 to -7%, not 3% in every round); COPY's insert
+taking its feed's rows a batch at a time plus the row-id and heap-estimate maps on the fast
+hasher (COPY -1.9%); a run writer's versioned key in one buffer (-0.6%); DELETE's tombstone
+keys in one arena (no measurable change); an SST writer's shared prefix eight bytes at a time
+(about -0.5%); relsize aligning by a mask instead of a division (`stored_tuple_len` 5.2 ->
+2.6% of CREATE INDEX's cycles in profiles, but the cgroup's cycles moved both ways); agent
+191's two-source merge a pair at a time (`wip/a191` 779e79b8e, ported to `10d70e555`:
+DELETE +1.5 / -7.6 / -3.3; it does take the merge out, `Merge::min` 13.5 -> 2.4% and
+`Scan::position` 17.2 -> 0.1% of DELETE's instructions, but the pair's own comparisons and
+runs cost most of that again, `Scan::fill_batch` 24.2 -> 21.2%: about -2.6% of the step).
+
+Method notes:
+- **CPUs 0-3's hyperthread siblings are 18-21**, inside the build CPUs 16-23: a build there
+  (anyone's, mine too) makes the server's cycles per instruction jump 40-80% while its own
+  instruction count doesn't move. Cycles and CPU seconds on this machine decide nothing
+  unless 18-21 are idle (`~/.cache/a208/bench/waitidle2.py` waits for 0-3 and 18-21).
+- DELETE's instruction count moves +-3% between runs of one binary (its flush and the
+  compaction beside it are timing-dependent), so a 1-2% DELETE change can't pass a 3% gate in
+  three rounds. Steps were measured settled (`settle` before each, so a step's count doesn't
+  carry the previous one's background compaction); the table against PostgreSQL is unsettled.
+
+Not done, for the next round (BENCH.md has the profiles):
+- DELETE (3.4-4x PostgreSQL's CPU): the scan's merge of the UPDATE's versions with the
+  table's (`Merge::min` 12-14% of its instructions, nearly all the per-entry `fill` / `head`
+  of the current source: three `head` calls a row between `min`, `position` and
+  `fill_batch`; the two-source merge above removes the merge but not the per-row cost: the
+  rest is the row-at-a-time switching between two sources whose rows alternate, which only a
+  merged layout, the UPDATE's versions compacted into the table's file, takes away), the tombstones' sort and run (`put_entry_deletes` 18%: `SstWriter::add` 5%,
+  of which the bloom's FNV hash a third), the filter over lazily decoded rows (emit 26%).
+- COPY in (1.4x): `parse_copy_data` is still 10% (the raw line copied per row for error
+  context, `lines`), zstd 11%, the heap-size model per row (`sizing::inserted_with` 13%: its
+  relfiles read and write locks, SipHash maps, `heap_fillfactor` parsing the options each row).
+- Index builds: zstd decompression of the table (8%), the entries' sort (9%), the vectors
+  growing in `Plan::run` (realloc and page faults, 6%: no row estimate to reserve by).
+- VACUUM's row is DELETE's background compaction (48 MB written); settled it is 0.25-0.31 s.
+
+Verification: before the push, on `5a67e195a` with the three changes, release lib tests
+(213), big_tables, golden and txn_spill; release Clippy, no warning in the files changed (19,
+as on the base); the whole release crate suite on a superset of the change (522 passed, 0
+failed). After the push, the full `tools/verification-train.sh` on `10d70e555`: release crate
+tests 523 passed, 0 failed; Clippy 19 warnings, none in the files changed; crash_random seeds
+1-30 x 4; the power stage (power_cut 4 passed, `CRASH_POWER=1` seeds 1-30 x 4, with and
+without `CRASH_ASYNC=1`); debug crate tests 523 passed; the full regression suite against a
+private PostgreSQL 18.6 reference 51,148 / 51,150 units, none newly differing; isolation
+121/122 specs, 1647/1648 permutations (the known one); pg_dump_tap 14,609 passed. No format
+change: the stored bytes are the same.
+
 ## Short write transactions, round 1 (agent 197)
 
 BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients

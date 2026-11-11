@@ -574,6 +574,103 @@ transaction's settings 0.13); the index probe 2.4 and the row's point read 1.9; 
 executor's restart 1.8 (`rescan_index` 1.55); Bind 2.0, its Describe 1.3; the transaction's
 end 2.2 (`Txn::commit` 1.0).
 
+## Bulk writes, round 11 (2026-11-11, agent 208)
+
+HANDOFF.md, "Bulk writes, round 11", has what changed. Method as round 10's (agent 201's
+harness, copied to `~/.cache/a208/bench`): dist builds with line tables, each server a fresh
+container on CPUs 0-3 (8 GiB, `--cpu-shares 2`, host network), psql in a third container on
+CPUs 4-7, 1M rows (`bulk1m.tsv`), autovacuum off; per step the server cgroup's CPU and bytes
+written, `perf stat -e instructions:u,cycles:u` of the server cgroup, VmHWM; rows checked
+equal on every run (count and sums of every column of both tables). Each change was gated on
+**settled** rounds (`settle` before every step: a step's count then carries no earlier step's
+background compaction, only its own), interleaved, three rounds. **base** is `5a67e195a`
+(origin with agent 201's L0 fix), **new** the three changes on it (pushed rebased as
+`10d70e555`).
+
+CPU seconds and cycles were not usable this round. CPUs 0-3's hyperthread siblings are 18-21,
+inside the build CPUs 16-23, and other agents' builds kept 3.1-3.5 of those 4 busy through
+nearly every run (`bulk2.sh` records it, `sib`); the server's cycles per instruction then
+moved by 20-80% from one run to the next of the same binary while its instruction count
+moved by under 1% (COPY, UPDATE, ANALYZE, count) to 3-5% (DELETE and the parallel index
+builds, whose background work and participants' shares vary with timing). The CPU column
+below is the median of six unsettled runs per arm, as noisy as that implies; the instruction
+column is the comparison that holds.
+
+### The step table against PostgreSQL 18.6 (unsettled, medians of six runs per arm)
+
+| step | PostgreSQL wall / CPU s / G ins | base wall / CPU s / G ins | new wall / CPU s / G ins | CPU / PG base -> new | instructions / PG base -> new | written MB PG / base / new |
+|---|---|---|---|---|---|---|
+| COPY in | 1.03 / 0.90 / 6.48 | 1.70 / 1.57 / 10.60 | 1.92 / 1.78 / 10.17 | 1.75 -> 1.99 | 1.64 -> **1.57** | 189 / 32 / 32 |
+| CREATE INDEX | 0.50 / 0.86 / 3.13 | 0.83 / 1.35 / 7.50 | 0.72 / 1.11 / 6.92 | 1.58 -> 1.30 | 2.39 -> **2.21** | 48 / 18 / 18 |
+| CREATE UNIQUE INDEX | 0.40 / 0.49 / 2.25 | 0.60 / 0.92 / 7.40 | 0.56 / 0.74 / 7.07 | 1.88 -> 1.51 | 3.30 -> **3.15** | 71 / 9 / 9 |
+| COPY out | 0.54 / 0.45 / 3.21 | 0.49 / 0.39 / 4.40 | 0.53 / 0.43 / 4.34 | 0.87 -> 0.95 | 1.37 -> 1.35 | 0 / 0 / 0 |
+| INSERT … SELECT | 1.08 / 0.87 / 4.31 | 1.08 / 0.95 / 7.02 | 1.48 / 1.19 / 7.02 | 1.09 -> 1.37 | 1.63 -> 1.63 | 376 / 34 / 34 |
+| UPDATE half | 4.68 / 4.61 / 27.50 | 2.79 / 2.65 / 13.36 | 2.32 / 2.17 / 13.36 | 0.57 -> 0.47 | 0.49 -> 0.49 | 642 / 56 / 56 |
+| DELETE a quarter | 0.35 / 0.24 / 1.67 | 1.26 / 1.16 / 6.16 | 1.10 / 1.01 / 6.26 | 4.75 -> 4.12 | 3.69 -> 3.75 | 62 / 34 / 34 |
+| VACUUM | 0.38 / 0.38 / 2.53 | 0.60 / 0.91 / 11.42 | 0.55 / 0.85 / 11.11 | 2.42 -> 2.26 | 4.52 -> 4.39 | 14 / 48 / 34 |
+| ANALYZE | 0.23 / 0.14 / 0.50 | 0.42 / 0.31 / 1.69 | 0.40 / 0.29 / 1.69 | 2.15 -> 2.03 | 3.38 -> 3.38 | 0 / 0 / 0 |
+| count(*) after | 0.16 / 0.12 / 0.49 | 0.18 / 0.20 / 1.33 | 0.19 / 0.24 / 1.33 | 1.66 -> 1.96 | 2.73 -> 2.73 | 0 / 0 / 0 |
+| TRUNCATE | 0.12 / 0.04 / 0.02 | 0.12 / 0.01 / 0.45 | 0.10 / 0.01 / 0.44 | 0.29 -> 0.27 | | 0 / 0 / 0 |
+| DROP TABLE | 0.15 / 0.06 / 0.04 | 0.11 / 0.08 / 4.36 | 0.11 / 0.11 / 3.94 | 1.40 -> 1.96 | | 0 / 23 / 0 |
+| **all steps** | 9.14 CPU s / 52.1 G | 10.49 / 75.7 | 9.92 / 73.7 | 1.15 -> 1.09 | 1.45 -> **1.41** | |
+
+(Unsettled, VACUUM's row carries DELETE's background compaction: 11 G instructions against
+2.5 G settled. Round 10's 0.98x of PostgreSQL's CPU over all steps was measured with the
+siblings quieter; with them this busy the same base measures 1.15x.)
+
+### The changes, gated on settled rounds (per round %, user instructions)
+
+| step | **new against base** (`s6`) | `stored_tuple_len` debug-only counter | index build's keys in place | COPY's plain lines parsed in place |
+|---|---|---|---|---|
+| COPY in | -4.1 / -4.1 / -4.1 | +0.0 x3 | (COPY not touched) | **-4.2 / -4.2 / -4.2** |
+| CREATE INDEX | **-7.3 / -5.4 / -7.9** | cycles -26.8 / -10.8 / -13.6, -6.7 / -1.0 / -2.8 / -12.7 / -2.5 | **-11.1 / -7.3 / -6.5** | |
+| CREATE UNIQUE INDEX | **-9.3 / -10.1 / -17.5** | cycles -26.0 / -7.5 / -2.2, -20.6 / -19.9 / -5.6 / +1.2 / -20.7 | **-8.8 / -13.0 / -6.6** | |
+| every other step | within 2% but DELETE +1.6 / -3.2 / -1.6, VACUUM's first round (the base's left-over compaction) | within 0.5% | | |
+
+- The counter's effect is in cycles, not instructions (a contended `lock xadd`): eight
+  interleaved rounds against round 10's head (`s2`, `ix`), CREATE INDEX's cgroup CPU better
+  in 6 of 8 (median -11.5%, worst +4.6%), CREATE UNIQUE INDEX's in 8 of 8 (median -12.1%);
+  `stored_tuple_len` 7.5% -> 5.2% of CREATE INDEX's cycles and 10.9% -> 5.7% of CREATE UNIQUE
+  INDEX's (perf record, LBR), the `lock` instruction half of the function's samples before.
+- The index-build change against its predecessor in `s2` (`c6` against `c3`, which differ
+  elsewhere only in DELETE's and COPY's paths). The COPY change against the stack without it
+  (`nf` against `n9`, `s5`), deterministic to 0.1%.
+- Peak RSS (VmHWM, nine runs each): base 271-277 MB, new 272-280, both medians 274 (the peak
+  is during UPDATE, which no change touches); container peaks 308-375 / 310-354;
+  PostgreSQL's 952. Bytes written per step equal
+  (the totals differ only by where background compaction fell).
+- Behaviour: COPY edge cases (`~/.cache/a208/data/edge`: a bad int, an out-of-range int, a
+  missing and an extra column, `\N`, an escaped tab, HEADER true and MATCH, the end marker,
+  `DELIMITER '|'`, `NULL ''`, a column list, `DEFAULT` on a column without one, ON_ERROR
+  ignore with `log_verbosity verbose` and with `reject_limit 1`, NOT NULL, a unique violation
+  past 1,000 rows) print the same rows, errors, contexts and notices on base, new and
+  PostgreSQL 18.6.
+
+### Measured and not kept
+
+Patches and a note of each in `~/.cache/a208/patches/` (HANDOFF lists them): the merge's
+re-ranking of the source it moved (DELETE -1.9 / -4.3 / +0.5), compact lock sets growing
+without rehashing and `%` in 64 bits (DELETE -7.3 / -2.2 / -3.6, then +3.3 / -1.1 / -2.6 with
+the SST prefix change), COPY's feed taken a batch at a time with the load's maps on the fast
+hasher (COPY -1.9 x3), the run writer's key buffer (COPY -0.6), DELETE's tombstone arena
+(+4.6 / -0.8 / -3.9), the SST writer's word-at-a-time shared prefix (about -0.5), relsize's
+mask alignment (cycles both ways), agent 191's two-source merge a pair at a time (DELETE
++1.5 / -7.6 / -3.3 against `10d70e555`; `Merge::min` 13.5 -> 2.4% and `Scan::position`
+17.2 -> 0.1% of DELETE's instructions, `Scan::fill_batch` 24.2 -> 21.2%).
+
+### Where the instructions still go (base, `perf record -e instructions:u`, settled)
+
+- DELETE (3.7x PostgreSQL's instructions): the scan 44% (`Merge::min` 12-14%, almost all of
+  it the per-entry `fill` / `head` of the current source; `ScanNode::emit` 26%: the filter's
+  kernel, lazy column decode), the tombstones 18% (`SstWriter::add` 5%, a third of it the
+  bloom's byte-at-a-time FNV hash, the sort 2%), the row locks 7% (`KeySet::grow` 2.2%,
+  `__modti3` 1.3%), background compaction 4-7%.
+- COPY in (1.6x): `parse_copy_data` 16% before this round (now about 11%), zstd 11%, the
+  per-row heap-size model 13% (`sizing::inserted_with`: two shard locks, SipHash maps,
+  `heap_fillfactor` parsing the table's options), `SstWriter::add` and the bloom 6%.
+- Index builds (2.2x, 3.2x): zstd decompression of the table 7-8%, the entries' sort 9%,
+  `SstWriter::add` 7% (the bloom hash a fifth), the measure's `stored_tuple_len` 5%.
+
 ## Point reads, round 2 (2026-11-11, agent 205)
 
 HANDOFF.md "Point reads, round 2" has what changed. Agent 202's harness
