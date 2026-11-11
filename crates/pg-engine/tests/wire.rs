@@ -1889,20 +1889,24 @@ fn cursors_are_portals() {
 /// bytes the decoded rows make: each statement's DataRows and CommandComplete, executed again
 /// and again, in binary, text and mixed result formats, as those of the same statement under a
 /// LIMIT (whose rows are decoded first). Fixed-width values, NULLs, a column added since the
-/// rows were stored, text, a repeated column and columns out of their stored order.
+/// rows were stored, text, a repeated column and columns out of their stored order; strings
+/// of the string types (multibyte ones too) and a date, for a UTF-8 and a LATIN1 client.
 #[test]
 fn stored_rows_go_out_as_decoded_ones() {
     let s = server(AuthMethod::Trust);
     let mut c = raw::Raw::connect(&s.addr, "postgres");
     c.query(
-        "CREATE TABLE sr (id int PRIMARY KEY, i2 int2, i8 int8, f4 real, f8 float8, b bool, o oid, t text, n int);
-         INSERT INTO sr SELECT g, g::int2, g * 1000003, g / 7.0, g / 3.0, g % 2 = 0, g + 7, 'v' || g,
-           CASE WHEN g % 5 = 0 THEN NULL ELSE -g END FROM generate_series(1, 300) g;
+        "CREATE TABLE sr (id int PRIMARY KEY, i2 int2, i8 int8, f4 real, f8 float8, b bool, o oid, t text, n int,
+           vc varchar(8), bp char(4), nm name, d date, ut text);
+         INSERT INTO sr SELECT g, (g - 150)::int2, (150 - g) * 1000003, g / 7.0, g / 3.0, g % 2 = 0, g + 7, 'v' || g,
+           CASE WHEN g % 5 = 0 THEN NULL ELSE -g END, 'c' || g, 'p' || g % 10, ('m' || g)::name,
+           date '2024-01-01' + g, CASE WHEN g % 3 = 0 THEN 'é' || g WHEN g % 3 = 1 THEN '' END
+           FROM generate_series(1, 300) g;
          ANALYZE sr;
          ALTER TABLE sr ADD COLUMN late int DEFAULT 77;
-         INSERT INTO sr VALUES (301, 1, 2, 3, 4, true, 5, 'new', NULL, 9)",
+         INSERT INTO sr VALUES (301, 1, 2, 3, 4, true, 5, 'new', NULL, 'x', 'y', 'z', NULL, 'ü', 9)",
     );
-    let lists = ["id, i2, i8, f4, f8, b, o, n", "n, id", "id, late", "id, t", "id, id", "i8"];
+    let lists = ["id, i2, i8, f4, f8, b, o, n", "n, id", "id, late", "id, t", "id, id", "i8", "id, vc, bp, nm, ut", "ut, d", "b, o"];
     for (i, cols) in lists.iter().enumerate() {
         let q = format!("SELECT {cols} FROM sr WHERE id BETWEEN $1 AND $1 + 12 ORDER BY id");
         c.parse(&format!("s{i}"), &q);
@@ -1921,6 +1925,19 @@ fn stored_rows_go_out_as_decoded_ones() {
                 assert_eq!(got[0], got[1], "{q} ({v}, formats {formats:?})");
                 assert!(got[0].iter().any(|(t, _)| *t == b'D'), "{q} ({v}): rows");
             }
+        }
+    }
+    // (Strings converted to the client's encoding: decoded.)
+    c.query("SET client_encoding = 'LATIN1'");
+    for i in [3, 6, 7] {
+        for v in ["1", "290", "1"] {
+            let mut got = Vec::new();
+            for stmt in [format!("s{i}"), format!("l{i}")] {
+                c.bind_with("", &stmt, &[v], &[0]);
+                c.execute("", 0);
+                got.push(c.sync_messages());
+            }
+            assert_eq!(got[0], got[1], "{} ({v}, LATIN1)", lists[i]);
         }
     }
     s.engine.shutdown();
