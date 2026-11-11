@@ -2822,6 +2822,49 @@ impl Kills {
         Some(k)
     }
 
+    /// `new` for the scan's next run (a rescan): `last`, the marker of its run before, is
+    /// done (its marks made as when it is dropped) and starts over when every page is
+    /// still all-visible, as it found them (nothing to mark: no reference to the watch, the
+    /// database or the catalog taken again, counts every session's scans write).
+    pub fn again(
+        last: Option<Kills>,
+        table: u32,
+        index: u32,
+        prefix: &[u8],
+        ranges: &[(Vec<u8>, Vec<u8>)],
+        rev: bool,
+        ctx: &ExecCtx,
+    ) -> Option<Kills> {
+        match last {
+            Some(mut k)
+                if k.table == table
+                    && k.index == index
+                    && k.prefix == prefix
+                    && k.visible.as_ref().is_some_and(heapsim::VisWatch::holds) =>
+            {
+                // (What its drop would mark: nothing, every page all-visible.)
+                k.at = None;
+                k.queued = None;
+                let strip = |x: &[u8]| x.strip_prefix(prefix).map(<[u8]>::to_vec);
+                k.ranges.clear();
+                k.ranges.extend(ranges.iter().map(|(lo, hi)| (strip(lo), strip(hi))));
+                k.rev = rev;
+                k.since = 0;
+                k.every = 1;
+                k.queued_once = false;
+                if k.temp.is_some() {
+                    k.temp = Some(ctx.txn.borrow().xid_if_assigned());
+                }
+                k.from = k.start();
+                Some(k)
+            }
+            last => {
+                drop(last);
+                Kills::new(table, index, prefix, ranges, rev, ctx)
+            }
+        }
+    }
+
     /// Where the first range starts, in scan order.
     fn start(&self) -> Option<Vec<u8>> {
         let r = self.ranges.front()?;

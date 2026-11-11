@@ -926,7 +926,7 @@ fn open_scan_as(
         .is_some_and(|(ix, _)| !matches!(ix.method.as_str(), "btree" | "hash"));
     let tid_order =
         !clustered && only.is_none() && (s.index.is_none() || secondary || heap_read);
-    let Bound { ranges, kills, ios_entries, skip, stat } = bind_scan(s, ranges, only.is_some(), rev, ctx)?;
+    let Bound { ranges, kills, ios_entries, skip, stat } = bind_scan(s, ranges, only.is_some(), rev, None, ctx)?;
     let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
     let implied = secondary && only.is_none() && filter_implied(s, ctx);
     let point = secondary && only.is_none() && ios_cols.is_none() && !ios && unique_point(s, ctx);
@@ -1122,7 +1122,14 @@ struct Bound {
 /// A scan of `s` starting over `ranges` (`only`: WHERE CURRENT OF's one key; `rev`: read
 /// backward): its ranges in the order it reads them, its LP_DEAD marks (or EXPLAIN
 /// ANALYZE's entries), its skip scan, the scan counted in the statistics, its SSI locks.
-fn bind_scan(s: &ScanPlan, mut ranges: Vec<(Vec<u8>, Vec<u8>)>, only: bool, rev: bool, ctx: &ExecCtx) -> Result<Bound> {
+fn bind_scan(
+    s: &ScanPlan,
+    mut ranges: Vec<(Vec<u8>, Vec<u8>)>,
+    only: bool,
+    rev: bool,
+    last_kills: Option<super::sizing::Kills>,
+    ctx: &ExecCtx,
+) -> Result<Bound> {
     if rev {
         ranges.reverse();
     }
@@ -1141,7 +1148,7 @@ fn bind_scan(s: &ScanPlan, mut ranges: Vec<(Vec<u8>, Vec<u8>)>, only: bool, rev:
             ios_entries = super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, true, ctx)
                 .map(IosEntries::new);
         } else {
-            kills = super::sizing::Kills::new(s.table.oid, ix.oid, &prefix, &ranges, rev, ctx);
+            kills = super::sizing::Kills::again(last_kills, s.table.oid, ix.oid, &prefix, &ranges, rev, ctx);
         }
     }
     // (An index-only scan under EXPLAIN ANALYZE counts what its whole ranges hold.)
@@ -3103,9 +3110,9 @@ impl ScanNode {
             return Ok(false);
         }
         let r = ranges(&s.table, ix, b, ctx)?;
-        // (The entries the last scan passed are marked as it goes.)
-        self.kills = None;
-        let bound = bind_scan(s, r, false, self.rev, ctx)?;
+        // (The entries the last scan passed are marked as it goes; its marker starts over.)
+        let last = self.kills.take();
+        let bound = bind_scan(s, r, false, self.rev, last, ctx)?;
         self.ranges = bound.ranges;
         self.kills = bound.kills;
         self.ios_entries = bound.ios_entries;

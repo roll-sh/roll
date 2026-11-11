@@ -1950,6 +1950,10 @@ impl Txn {
                 crate::exec::sizing::storage_rolled_back(rel, &self.db);
             }
         }
+        // (A transaction without ids, as a read's is, leaves the id table alone.)
+        if self.xid == 0 && self.sub_committed.is_empty() && self.savepoints.iter().all(|sp| sp.xid == 0 && sp.committed.is_empty()) {
+            return;
+        }
         let xids = self.db.xids();
         let subs: Vec<u64> = std::mem::take(&mut self.sub_committed)
             .into_iter()

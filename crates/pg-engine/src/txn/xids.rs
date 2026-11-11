@@ -71,7 +71,7 @@ pub struct Xids {
     /// counts it: what a session registers in its slot (`register_snapshot_in`).
     run_now: std::sync::atomic::AtomicU64,
     /// The sessions' slots of registered xmins (`xmin_slot`), which `publish` reads.
-    slots: Mutex<Vec<std::sync::Arc<XminSlot>>>,
+    slots: Mutex<Vec<std::sync::Arc<XminShared>>>,
 }
 
 /// One session's registered snapshot xmins (its PGPROC.xmin): kept under a mutex of its
@@ -81,16 +81,28 @@ pub struct Xids {
 /// and reads `run_now` again (a change meanwhile: it registers the new one), and `publish`
 /// stores `run_now` before it reads the slots, all sequentially consistent: one that
 /// `publish` missed then sees the xmin it published, which the horizon is no newer than.
-#[repr(align(128))]
 pub struct XminSlot {
-    /// The `Xids::uid` of the table it belongs to.
-    xids: u64,
+    /// The table it belongs to: its registrations reach it through the slot, a reference
+    /// count of this session's, not one every session's count.
+    xids: std::sync::Arc<Xids>,
+    shared: std::sync::Arc<XminShared>,
+}
+
+impl std::ops::Deref for XminSlot {
+    type Target = XminShared;
+    fn deref(&self) -> &XminShared {
+        &self.shared
+    }
+}
+
+/// What `publish` reads of a slot (made by its session's thread, as `PinSlot` is).
+pub struct XminShared {
     entries: Mutex<Vec<(u64, Option<u64>)>>,
     /// The oldest registered xmin, u64::MAX for none.
     min: std::sync::atomic::AtomicU64,
 }
 
-impl XminSlot {
+impl XminShared {
     fn add(&self, xmin: u64, owner: Option<u64>) {
         let mut e = self.entries.lock();
         e.push((xmin, owner));
@@ -116,7 +128,8 @@ impl XminSlot {
 
 /// A snapshot's xmin, registered (`Xids::register_snapshot`) until this is dropped.
 pub struct SnapshotXmin {
-    xids: std::sync::Arc<Xids>,
+    /// Its table, unless it is registered in a slot (which holds it).
+    table: Option<std::sync::Arc<Xids>>,
     xmin: u64,
     owner: Option<u64>,
     /// `Xids::completions` when the xmin was found.
@@ -126,6 +139,14 @@ pub struct SnapshotXmin {
 }
 
 impl SnapshotXmin {
+    fn xids(&self) -> &std::sync::Arc<Xids> {
+        match (&self.slot, &self.table) {
+            (Some(s), _) => &s.xids,
+            (None, Some(t)) => t,
+            (None, None) => unreachable!("a registration without its table"),
+        }
+    }
+
     pub fn xmin(&self) -> u64 {
         self.xmin
     }
@@ -133,7 +154,7 @@ impl SnapshotXmin {
     /// A snapshot taken now would have another xmin: a transaction id ended since this one
     /// was found.
     pub fn stale(&self) -> bool {
-        self.xids.completions.load(std::sync::atomic::Ordering::Acquire) != self.seen
+        self.xids().completions.load(std::sync::atomic::Ordering::Acquire) != self.seen
     }
 }
 
@@ -143,14 +164,15 @@ impl Drop for SnapshotXmin {
             // (An xmin older than `xmin_now` may be what holds the horizon back; one that is
             // `xmin_now` can't be: the horizon is no newer than it.)
             if slot.remove(self.xmin, self.owner)
-                && self.xmin < self.xids.run_now.load(std::sync::atomic::Ordering::SeqCst)
+                && self.xmin < slot.xids.run_now.load(std::sync::atomic::Ordering::SeqCst)
             {
-                let s = self.xids.state.lock();
-                self.xids.publish(&s);
+                let s = slot.xids.state.lock();
+                slot.xids.publish(&s);
             }
             return;
         }
-        let mut s = self.xids.state.lock();
+        let xids = self.xids().clone();
+        let mut s = xids.state.lock();
         if let Some(n) = s.snapshots.get_mut(&self.xmin) {
             *n -= 1;
             if *n == 0 {
@@ -167,7 +189,7 @@ impl Drop for SnapshotXmin {
                 s.owners.remove(&o);
             }
         }
-        self.xids.publish(&s);
+        xids.publish(&s);
     }
 }
 
@@ -230,17 +252,17 @@ impl Xids {
 
     /// A slot for one session's snapshot xmins (`register_snapshot_in`), read by the
     /// horizon for as long as a registration or its session holds it.
-    pub fn xmin_slot(&self) -> std::sync::Arc<XminSlot> {
-        let slot = std::sync::Arc::new(XminSlot {
-            xids: self.uid,
+    pub fn xmin_slot(self: &std::sync::Arc<Self>) -> std::sync::Arc<XminSlot> {
+        let shared = std::sync::Arc::new(XminShared {
             entries: Mutex::new(Vec::new()),
             min: std::sync::atomic::AtomicU64::new(u64::MAX),
         });
         let mut slots = self.slots.lock();
         // (Slots nothing else holds any more go.)
         slots.retain(|s| std::sync::Arc::strong_count(s) > 1);
-        slots.push(slot.clone());
-        slot
+        slots.push(shared.clone());
+        drop(slots);
+        std::sync::Arc::new(XminSlot { xids: self.clone(), shared })
     }
 
     /// A number no other transaction id table of the process has (caches of ended
@@ -384,14 +406,14 @@ impl Xids {
         }
         self.publish(&s);
         let seen = self.completions.load(std::sync::atomic::Ordering::Relaxed);
-        SnapshotXmin { xids: self.clone(), xmin, owner, seen, slot: None }
+        SnapshotXmin { table: Some(self.clone()), xmin, owner, seen, slot: None }
     }
 
     /// `register_snapshot_of(owner)` in a session's slot (`xmin_slot`) when it has one of
     /// this table, without the state's mutex.
     pub fn register_snapshot_in(self: &std::sync::Arc<Self>, slot: Option<&std::sync::Arc<XminSlot>>, owner: Option<u64>) -> SnapshotXmin {
         use std::sync::atomic::Ordering::{Acquire, SeqCst};
-        let Some(slot) = slot.filter(|s| s.xids == self.uid) else {
+        let Some(slot) = slot.filter(|s| std::sync::Arc::ptr_eq(&s.xids, self)) else {
             return self.register_snapshot_of(owner);
         };
         loop {
@@ -400,7 +422,7 @@ impl Xids {
             let xmin = self.run_now.load(SeqCst);
             slot.add(xmin, owner);
             if self.run_now.load(SeqCst) == xmin {
-                return SnapshotXmin { xids: self.clone(), xmin, owner, seen, slot: Some(slot.clone()) };
+                return SnapshotXmin { table: None, xmin, owner, seen, slot: Some(slot.clone()) };
             }
             // (A `publish` may have counted it meanwhile: published again without it.)
             if slot.remove(xmin, owner) {
@@ -420,7 +442,7 @@ impl Xids {
         slot: Option<&std::sync::Arc<XminSlot>>,
     ) -> SnapshotXmin {
         let mut o = match old {
-            Some(o) if std::sync::Arc::ptr_eq(&o.xids, self) && o.owner == owner => o,
+            Some(o) if std::sync::Arc::ptr_eq(o.xids(), self) && o.owner == owner => o,
             old => {
                 // (The new one registered before the old one goes, as assigning it did.)
                 let new = self.register_snapshot_in(slot, owner);
@@ -432,7 +454,7 @@ impl Xids {
         if !o.stale() {
             return o;
         }
-        if o.slot.is_some() || slot.is_some_and(|s| s.xids == self.uid) {
+        if o.slot.is_some() || slot.is_some_and(|s| std::sync::Arc::ptr_eq(&s.xids, self)) {
             let new = self.register_snapshot_in(slot, owner);
             drop(o);
             return new;
