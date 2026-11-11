@@ -4186,18 +4186,59 @@ type Buffered<I> = std::iter::Map<I, BufFn>;
 type SpilledWrites = Box<dyn Iterator<Item = Result<(Vec<u8>, Option<Bytes>)>>>;
 
 /// Sort items by their keys (`key`), every key sharing its first `skip` bytes (one index's):
-/// by the 16 bytes after them first, with the items' places, then runs of equal ones by the
+/// by the 24 bytes after them first, with the items' places, then runs of equal ones by the
 /// whole key. (The keys aren't read while they differ there: a sort of plain numbers.)
+///
+/// Items are grouped by those bytes' first 8 first (a few groups: a statement's deleted rows
+/// and each index's entries, each 8-byte prefix one), keeping their order, and a group that
+/// came in order (a table's rows as its scan read them) isn't sorted again.
 fn sort_by_key_after<T>(items: &mut Vec<T>, skip: usize, key: impl Fn(&T) -> &[u8]) {
+    // (Three words, not a u64 and a u128: its 16-byte alignment made an item 48 bytes.)
     let word = |k: &[u8]| {
-        let mut b = [0u8; 16];
+        let mut b = [0u8; 24];
         let rest = k.get(skip..).unwrap_or(&[]);
-        let n = rest.len().min(16);
+        let n = rest.len().min(24);
         b[..n].copy_from_slice(&rest[..n]);
-        u128::from_be_bytes(b)
+        let w = |i: usize| u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        [w(0), w(8), w(16)]
     };
-    let mut order: Vec<(u128, usize)> = items.iter().enumerate().map(|(i, e)| (word(key(e)), i)).collect();
-    order.sort_unstable_by_key(|o| o.0);
+    let mut order: Vec<([u64; 3], usize)> = items.iter().enumerate().map(|(i, e)| (word(key(e)), i)).collect();
+    // (The groups by the first 8 bytes, at most a few: else one sort of them all.)
+    const GROUPS: usize = 8;
+    let mut groups: Vec<(u64, usize)> = Vec::new();
+    for o in &order {
+        match groups.iter().position(|g| g.0 == o.0[0]) {
+            Some(g) => groups[g].1 += 1,
+            None if groups.len() < GROUPS => groups.push((o.0[0], 1)),
+            None => {
+                groups.clear();
+                break;
+            }
+        }
+    }
+    // (Where each group starts in `order`; none or one: all of it, as one.)
+    let mut starts = vec![0];
+    if groups.len() > 1 {
+        groups.sort_unstable();
+        starts = groups.iter().scan(0, |n, g| Some(std::mem::replace(n, *n + g.1))).collect();
+        let mut at = starts.clone();
+        let mut grouped = vec![([0; 3], 0); order.len()];
+        for o in &order {
+            let g = groups.iter().position(|g| g.0 == o.0[0]).expect("a group");
+            grouped[at[g]] = *o;
+            at[g] += 1;
+        }
+        order = grouped;
+    }
+    let ends: Vec<usize> = starts.iter().skip(1).copied().chain([order.len()]).collect();
+    let mut from = 0;
+    for end in ends {
+        let g = &mut order[from..end];
+        if !g.is_sorted_by_key(|o| o.0) {
+            g.sort_unstable_by_key(|o| o.0);
+        }
+        from = end;
+    }
     for run in order.chunk_by_mut(|a, b| a.0 == b.0) {
         if run.len() > 1 {
             run.sort_unstable_by(|a, b| key(&items[a.1]).cmp(key(&items[b.1])));
@@ -4516,5 +4557,17 @@ mod tests {
         assert_eq!(keys(&entries), keys(&want));
         entries.sort();
         assert_eq!(entries, want);
+        // A deletion's keys: a table's rows in order, an index's entries in order but for
+        // equal first 24 bytes, another's in no order, interleaved.
+        let mut keys3: Vec<Vec<u8>> = Vec::new();
+        for i in 0..3000u64 {
+            keys3.push([&[0, 0, 0, 9, 0, 0, 0, 0][..], &i.to_be_bytes()].concat());
+            keys3.push([&[0, 0, 0, 9, 0, 0, 0, 2][..], &[0; 16], &[(3000 - i) as u8]].concat());
+            keys3.push([&[0, 0, 0, 9, 0, 0, 0, 1][..], &next().to_be_bytes(), &i.to_be_bytes()].concat());
+        }
+        let mut want = keys3.clone();
+        want.sort();
+        super::sort_by_key_after(&mut keys3, 0, |k| k.as_slice());
+        assert_eq!(keys3, want);
     }
 }
