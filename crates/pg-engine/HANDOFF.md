@@ -9576,6 +9576,38 @@ when it loses; an index none of whose key columns a clause reads still runs
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
 
+## Short write transactions, round 3 (agent 213)
+
+Nothing kept; BENCH.md "Short write transactions, round 3" has the same-day table (8 clients:
+roll 0.79x PostgreSQL, 0.70x pgrust; 32 clients 0.74x and 0.59x), the profiles and the three
+dropped candidates (patches in `~/.cache/a213/patches/`: `memkey`, `shared-state` 0001-0003;
+code also on origin `wip/a213`).
+
+What the round found, for the next one:
+
+- The gap is user CPU per transaction, and it grows with clients while PostgreSQL's and
+  pgrust's shrinks: the same functions cost 20% more at 8 clients than at 1 and 37% more at
+  32. Context switches are the visible cause at 32 (12.2 a transaction: 3.6 `sched_yield`,
+  2.8 futex): parking_lot's spin-then-yield on 32 threads over 4 cores. The most contended
+  lock is the sizing models' shard `RwLock` (`Models::of`): every transaction reads it
+  (`Fetcher::new` for its prune hints and visibility watch, `mark_passed`, `updated`'s TOAST
+  lookup) and writes it twice (`sizing::updated` on accounts, `inserted_with` on events).
+  Readers that need only the heap's prune hints could read them without the lock (published
+  in an `ArcSwap` per table when they change), and so could `updated`'s TOAST lookup: the
+  best lead for 32 clients. Making other parts cheaper without it made 32 clients
+  worse (candidate 2).
+- perf c2c lists the lines every session writes (BENCH.md has them); candidate 3 (padding)
+  is built on top of candidate 2 and unmeasured: measure it alone, at 8 and 32 clients.
+- The measurement: one binary's user instructions per transaction spread about ±4% between
+  runs even with the fixes in BENCH.md, so a 2% gain in every pair needs a change of 5% or
+  more, or longer runs. A `perf stat -p` attached before the bench's connections exist counts
+  them into the acceptor thread (inherited), and only once they exit.
+- Not done: WAL writes batched at the fsync (one pwrite a commit now, inside the commit
+  mutex; PostgreSQL and pgrust write once a flush); the memtable inserts out of the commit
+  mutex (needs a visible-prefix of applied commits and rotation waiting for them); the
+  identity key's unique probe (5.2 µs: a store point read of a key that is past every
+  committed one).
+
 ## Point reads, round 2 (agent 205)
 
 BENCH.md "Point reads, round 2" has the measurements: prepared point selects at 8 clients

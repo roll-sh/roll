@@ -285,6 +285,97 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Short write transactions, round 3 (2026-11-11, agent 213)
+
+Nothing kept: three candidates measured, all dropped (patches and numbers in
+`~/.cache/a213/patches/`). HANDOFF.md "Short write transactions, round 3" has the leads.
+Harness: agent 205's (`~/.cache/a213/bench`), servers on CPUs 32-35 (8 GiB, `--cpu-shares 2`),
+clients on 4-7, `short_txn` of 100,000 accounts, fsync and synchronous_commit on, data on the
+same disk for all three. Two changes to it: a `CHECKPOINT` and 5 s of quiet after the
+fixture's reload, and the per-thread `perf stat` window over 0.8 s to 9.6 s of the 10 s run
+(it was 1 s to 8 s; the ops in it were taken as the run's average rate, which moved every
+symbol's count per transaction by the same 10-15% between runs of one binary). One binary's
+user instructions per transaction still spread about ±4% from run to run.
+
+**Three servers, same day** (`sb2`, one round, roll is `a9ced4585`):
+
+| clients | server | tps | CPU µs/txn (user+sys) | p50 / p99 ms | peak MiB | roll ÷PG | roll ÷pgrust |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1 | roll | 2,415 | 328.5 (182.3+146.2) | 0.317 / 3.199 | 147 | 0.89x | 0.88x |
+| | PostgreSQL | 2,699 | 233.2 (113.7+119.5) | 0.336 / 0.845 | 212 | | |
+| | pgrust | 2,732 | 227.6 (127.8+99.8) | 0.350 / 0.766 | 363 | | |
+| 8 | roll | 12,185 | 273.5 (170.1+103.5) | 0.576 / 2.195 | 148 | 0.79x | 0.70x |
+| | PostgreSQL | 15,427 | 211.9 (103.7+108.3) | 0.463 / 1.511 | 286 | | |
+| | pgrust | 17,403 | 181.0 (100.3+80.7) | 0.398 / 1.522 | 463 | | |
+| 32 | roll | 11,420 | 298.9 (180.9+118.0) | 2.104 / 12.465 | 151 | 0.74x | 0.59x |
+| | PostgreSQL | 15,369 | 231.9 (119.9+112.1) | 1.709 / 8.307 | 351 | | |
+| | pgrust | 19,397 | 180.2 (103.5+76.6) | 1.392 / 8.501 | 569 | | |
+
+(Roll's 1-client run had 0.76 cores of other tenants on its CPUs; quieter runs the same day
+gave 2,923-2,952 tps. Roll's 1-client CPU includes up to 50 µs of polling for the client's
+next message per round trip, about 25 µs a transaction.)
+
+**Where a transaction's CPU goes** (8 clients, `a9ced4585`):
+
+- All three servers are CPU-bound at about 3.1 of the 4 cores, so tps follows CPU per
+  transaction. Kernel time is close (roll 89-105 µs, PostgreSQL 108-118, pgrust 81-84: TCP
+  loopback and nftables dominate all three; fsync's block I/O is about 2% of cycles in each).
+  The gap is user CPU: roll 158-171 µs against 100-115.
+- User instructions per transaction: roll 279k at 0.52 instructions a cycle, PostgreSQL 215k
+  at 0.64, pgrust 203k at 0.65 (`perf stat`, whole servers). Roll's cycles: 37% more
+  instructions, the rest lower IPC: 21% of its user cycles are instruction-fetch stalls
+  (`icache_16b.ifdata_stall`), 5% iTLB walks.
+- Roll's work grows with clients; PostgreSQL's and pgrust's shrinks. User µs a transaction
+  of the same functions (LBR call stacks), 1 / 8 / 32 clients: `execute_with` 115 / 138 /
+  158, `mi_malloc_aligned` self 10.8 / 15.9 / 25.5, the lock slow paths 0 / 1.3 / 2.3.
+  Context switches a transaction: roll 8.5 at 8 clients (4.6 waiting for the client, 1.06
+  futex, 0.95 `sched_yield`, 0.75 in fdatasync, 1.1 preempted), 12.2 at 32 (3.6
+  `sched_yield`, 2.8 futex); PostgreSQL about 7.5 at 8. The yields are parking_lot's spin
+  before it parks: the sizing models' shard `RwLock` (`relfiles.of`: `Fetcher::new` and
+  `mark_passed` reading, `sizing::updated` and `inserted_with` writing, every transaction),
+  the commit mutex, `wait_durable`'s mutex, the sequence's mutex.
+- perf c2c, 8 clients (HITM loads by line): the `RwLock<Arc<Xids>>` and `RwLock<Arc<Catalog>>`
+  of `Database` (every `db.xids()` and `db.catalog()` is a lock and a count write), the
+  `Arc<Database>` count beside `next_txn` and the fields every statement reads, `Store`'s
+  `assigned` / `sync_assigned` written by each commit beside `visible` / `view` read by each
+  statement, the `Xids` mutex beside its read-only fields, the server's `WORKING` /
+  `SPINNING` counters (written around every message) beside `log::active` and `WAIT_SPIN_NS`.
+- Roll's user time by part (171 µs, `a9ced4585`, 8 clients): the UPDATE 44.6 (its index
+  scan 27.6; after the row is found 13: `sizing::updated` 5.5, the row lock 3.4, TOAST's
+  replace 1.3), the INSERT 25.6 (`sizing::inserted_with` 9.1 of which btree model 5.9, the
+  identity key's unique probe 5.2, new row 2.5), COMMIT 20 (the memtable's skiplist 7.1 under
+  the commit mutex, `release_locks` 3.7, pgstat 2.0, the `Txn`'s drop 1.6, `wait_durable` 1.1,
+  the WAL record 0.6), Bind 6.7, the allocator 18 across everything (125 allocations and 127
+  frees a transaction, counted with uprobes). The heap and btree models (the sizing models)
+  together are about 22 µs, which PostgreSQL and pgrust spend on their real pages instead.
+- Group commit: roll fsyncs 0.70 times a commit at 8 clients (0.53 at 32), PostgreSQL 0.46 and
+  pgrust 0.45; roll's fsyncs are shorter (one 220-byte record a commit, one pwrite a commit),
+  so its leader is free again sooner. Each leaves about the same CPU: not the gap.
+
+**Candidates** (5 alternating pairs, 8 clients unless noted; base `a9ced4585`):
+
+1. *Memtable keys inline* (agent 197's / 199's `memkey`: `SmallVec<[u8; 40]>` keys, no
+   `mvcc_key` allocation): first run (old window) instructions -3.9% to -7.0% in four pairs,
+   +0.3%..-5% ops; second run (new window): instructions +3.2%, +1.1%, -6.2%, -7.2%, +5.7%,
+   cycles -2.1%..+2.0%, ops +1.6% median. Dropped: no difference the measurement can see.
+2. *Lock bookkeeping without allocations* (lock keys inline, `SmallVec<[u8; 24]>`; the lock
+   tables and lists kept by the thread between transactions; `release_locks` without a `Vec`
+   per key; statement-trigger marks in an inline list) together with *shared state read
+   without writes* (`Database::catalog` and `xids` as `ArcSwap`, read without a lock or a
+   count; `shared_search_path` borrowing the catalog; `Txn::commit` borrowing its database;
+   the spin counters on lines of their own). 8 clients, run 1: instructions -4.2%, -4.8%,
+   -4.0%, +1.4% (one pair lost its counts), ops +0.8% median; run 2 (quiet: every pair
+   12.4-13.0k): ops +3.4%, +0.5%, +1.9%, +1.2%, +1.7%, CPU -3.3%, -0.8%, -1.9%, -1.3%,
+   -1.5%, cycles -3.5%, -1.1%, -2.1%, 0.0%, -1.9%, instructions flat. 32 clients, three
+   pairs: ops -1.8%, -6.0%, -20.4%, CPU +2.8% to +11.1%, kernel time up in all three
+   (`sched_yield` 3.60 -> 4.07 and futex 2.80 -> 3.15 a transaction): the faster parts bring
+   more threads to the sizing models' lock at once. Dropped (no pair rule met at 8; worse at
+   32).
+3. *Hot fields on lines of their own* (`Padded<T>`, 128-byte aligned: `Store`'s view, commit,
+   visible, assigned, durable, sync and snapshot locks; the `Xids` mutex; `Database` aligned so
+   the `Arc` counts don't share its first fields' line; `next_txn`), on top of 2: built, not
+   measured (the build queue held it past the round).
+
 ## Executor, round 13 (2026-11-11, agent 207)
 
 HANDOFF "Executor, round 13" has what changed: q21's plan made PostgreSQL's (three planner
