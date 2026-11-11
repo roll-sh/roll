@@ -15798,7 +15798,10 @@ impl Builder<'_, '_> {
             // gather.)
             lg.node.wanted_order.clear();
             self.settle(&mut lg.node);
-            lateral_gathered = parallel::has_gather(&lg.node) && !parallel::has_gather(&l.node);
+            // (Its Gather path won at its relation, though a Gather below the relation's
+            // serial plan (TPC-H q21's anti join over a gathered hash join) may have one.)
+            let gather = |n: &ExNode| matches!(n.node_type, "Gather" | "Gather Merge");
+            lateral_gathered = gather(&lg.node) && !gather(&l.node);
         }
         // (A partial nested loop takes the inner side's cheapest path, which a Gather
         // can't run under.)

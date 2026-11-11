@@ -44,3 +44,17 @@ explain (costs off) select count(*) from t21_o o, t21_l l1
 select count(*) from t21_o o, t21_l l1
   where o.ok = l1.ok and exists (select 1 from t21_l l2 where l2.ok = l1.ok and l2.sk <> l1.sk)
     and not exists (select 1 from t21_l l3 where l3.ok = o.ok and l3.rd > 29);
+-- In parallel (setup and tuple costs free): the anti join's Gather path, which won at its
+-- relation, under the serial semi join and join to orders (a tie with the Gather above
+-- them: the first path made kept).
+set max_parallel_workers_per_gather = 2;
+set parallel_setup_cost = 0;
+set parallel_tuple_cost = 0;
+set min_parallel_table_scan_size = 0;
+set min_parallel_index_scan_size = 0;
+explain select s.name, count(*) from t21_s s, t21_l l1, t21_o o, t21_n n
+  where s.sk = l1.sk and o.ok = l1.ok and o.st = 'F' and l1.rd > l1.cd
+    and exists (select * from t21_l l2 where l2.ok = l1.ok and l2.sk <> l1.sk)
+    and not exists (select * from t21_l l3 where l3.ok = l1.ok and l3.sk <> l1.sk and l3.rd > l3.cd)
+    and s.nk = n.nk and n.name = 'N1'
+  group by s.name order by 2 desc, 1 limit 100;
