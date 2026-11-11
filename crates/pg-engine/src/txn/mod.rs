@@ -99,7 +99,7 @@ pub struct Database {
     /// outside the database is keyed by.
     pub instance: u64,
     pub store: Arc<Store>,
-    catalog: RwLock<Arc<Catalog>>,
+    catalog: crate::published::Published<Catalog>,
     pub locks: LockManager,
     /// Its serializable transactions' predicate locks and rw-conflicts.
     pub ssi: ssi::Ssi,
@@ -131,7 +131,7 @@ pub struct Database {
     /// The catalog version the last commit other than a shared-catalog update left.
     last_local: AtomicU64,
     /// Transaction ids (the engine's, shared by every database).
-    xids: RwLock<Arc<xids::Xids>>,
+    xids: crate::published::Published<xids::Xids>,
     /// Prepared transactions (the engine's registry, shared by every database).
     twophase: RwLock<Arc<twophase::TwoPhase>>,
     /// The modelled on-disk layout of tables and indexes (`exec::sizing`), locked per
@@ -245,7 +245,7 @@ impl Database {
             oid,
             instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
             store,
-            catalog: RwLock::new(Arc::new(catalog)),
+            catalog: crate::published::Published::new(Arc::new(catalog)),
             locks: LockManager::default(),
             ssi: Default::default(),
             moved: Mutex::new(HashMap::new()),
@@ -260,7 +260,7 @@ impl Database {
             notify: Default::default(),
             lo_oid: Mutex::new(0),
             last_local: AtomicU64::new(version),
-            xids: RwLock::new(Arc::new(xids::Xids::local())),
+            xids: crate::published::Published::new(Arc::new(xids::Xids::local())),
             twophase: RwLock::new(Arc::new(twophase::TwoPhase::local())),
             relfiles: Default::default(),
             pgstat: Mutex::new(Default::default()),
@@ -329,7 +329,12 @@ impl Database {
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
-        self.catalog.read().clone()
+        self.catalog.load()
+    }
+
+    /// `f` of `catalog()`, without a reference of its own.
+    pub fn with_catalog<R>(&self, f: impl FnOnce(&Arc<Catalog>) -> R) -> R {
+        self.catalog.with(f)
     }
 
     /// The catalog a commit's DDL is checked against and merged onto (under the store's
@@ -360,7 +365,12 @@ impl Database {
     }
 
     pub fn xids(&self) -> Arc<xids::Xids> {
-        self.xids.read().clone()
+        self.xids.load()
+    }
+
+    /// `f` of `xids()`, without a reference of its own.
+    pub fn with_xids<R>(&self, f: impl FnOnce(&Arc<xids::Xids>) -> R) -> R {
+        self.xids.with(f)
     }
 
     /// Take part in the cluster's prepared transactions.
@@ -1315,8 +1325,9 @@ impl Txn {
             }
             // The statement's snapshot holds back pruning while it runs (and, here, until
             // the next statement or the transaction's end).
+            let old = self.xmin.take();
             self.xmin = match needs_snapshot {
-                true => Some(self.db.xids().renew_snapshot(self.xmin.take(), Some(self.id), self.xmin_slot.as_ref())),
+                true => Some(self.db.with_xids(|x| x.renew_snapshot(old, Some(self.id), self.xmin_slot.as_ref()))),
                 false => None,
             };
             if needs_snapshot {
@@ -1366,7 +1377,7 @@ impl Txn {
 
     /// (Pinned atomically with the timestamp it reads: `Store::pin_visible`.)
     fn take_snapshot(&mut self) {
-        self.xmin = Some(self.db.xids().register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id)));
+        self.xmin = Some(self.db.with_xids(|x| x.register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id))));
         self.hold_own_xact_lock();
         if self.db.store.visible_ts() != self.snapshot_ts && !self.wrote {
             let pin = self.pin_visible();
@@ -1438,12 +1449,11 @@ impl Txn {
             (Some(c), _) => f(c),
             (None, Some(c)) if !self.stmt_snapshot || !c.has_detach_pending() => f(c),
             (None, None) => {
-                let c = self.db.catalog.read();
-                if !self.stmt_snapshot || !c.has_detach_pending() {
-                    return f(&c);
+                let mut f = Some(f);
+                if let Some(r) = self.db.with_catalog(|c| (!self.stmt_snapshot || !c.has_detach_pending()).then(|| (f.take().unwrap())(c))) {
+                    return r;
                 }
-                drop(c);
-                f(&self.catalog())
+                (f.take().unwrap())(&self.catalog())
             }
             _ => f(&self.catalog()),
         }
@@ -3395,9 +3405,7 @@ impl Txn {
             && let Some(rc) = &self.read_catalog
         {
             // (Unchanged, as it mostly is: no new reference to it.)
-            let now = self.db.catalog.read();
-            if !Arc::ptr_eq(rc, &now) {
-                let now = now.clone();
+            if let Some(now) = self.db.with_catalog(|now| (!Arc::ptr_eq(rc, now)).then(|| now.clone())) {
                 self.read_catalog = Some(now);
             }
         }
@@ -4132,7 +4140,7 @@ impl Txn {
     /// logical slot's consistent point: CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use')).
     pub fn use_snapshot(&mut self, ts: u64) {
         self._pin = Some(self.db.store.pin(ts));
-        self.xmin = Some(self.db.xids().register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id)));
+        self.xmin = Some(self.db.with_xids(|x| x.register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id))));
         self.snapshot_ts = ts;
         self.start_ts = ts;
         self.snapshot_fixed = true;
@@ -4165,7 +4173,7 @@ impl Txn {
             );
         }
         self._pin = Some(self.db.store.pin(ts));
-        self.xmin = Some(self.db.xids().register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id)));
+        self.xmin = Some(self.db.with_xids(|x| x.register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id))));
         self.snapshot_ts = ts;
         self.start_ts = ts;
         // (The transaction's snapshot is this one now: SSI tracks it from here.)

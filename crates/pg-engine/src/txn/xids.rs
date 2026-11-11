@@ -464,7 +464,8 @@ impl Xids {
 
     /// The xmin a snapshot taken now would have.
     pub fn current_xmin(&self) -> u64 {
-        Self::xmin_now(&self.state.lock())
+        // (Published with every change that moves it: no mutex every session shares.)
+        self.run_now.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// GetCurrentVirtualXIDs for WaitForOlderSnapshots: the transactions other than `me`

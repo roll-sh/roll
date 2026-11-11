@@ -27,7 +27,7 @@ use crate::error::{Result, internal};
 use bytes::Bytes;
 use cache::BlockCache;
 use crossbeam_skiplist::SkipMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sst::{SstMeta, SstReader, SstWriter, key_ts, user_key};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -284,7 +284,7 @@ struct CommitState {
 pub struct Store {
     dir: PathBuf,
     opts: StoreOptions,
-    view: RwLock<Arc<View>>,
+    view: crate::published::Published<View>,
     commit: Mutex<CommitState>,
     manifest: Mutex<Manifest>,
     visible: AtomicU64,
@@ -508,7 +508,7 @@ impl Store {
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
-            view: RwLock::new(Arc::new(View { mem, imm, l0, l1, rdels: Arc::default() })),
+            view: crate::published::Published::new(Arc::new(View { mem, imm, l0, l1, rdels: Arc::default() })),
             commit: Mutex::new(CommitState { wal }),
             manifest: Mutex::new(Manifest {
                 next_id,
@@ -703,7 +703,7 @@ impl Store {
     }
 
     pub fn view(&self) -> Arc<View> {
-        self.view.read().clone()
+        self.view.load()
     }
 
     /// Whether reading all of [start, end) is a bulk read: its files' blocks over that
@@ -1156,7 +1156,7 @@ impl Store {
             self.assigned.store(ts, Ordering::Release);
             self.sync_assigned.store(ts, Ordering::Release);
             ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
-            let view = self.view.read().clone();
+            let view = self.view.load();
             self.apply_hot(ts, &writes, &view);
             self.note_untouched(&writes);
             let mem = view.mem.clone();
@@ -1209,7 +1209,7 @@ impl Store {
             c.wal.append(ts, &writes)?;
             self.assigned.store(ts, Ordering::Release);
             before = self.sync_assigned.load(Ordering::Acquire);
-            let view = self.view.read().clone();
+            let view = self.view.load();
             self.apply_hot(ts, &writes, &view);
             self.note_untouched(&writes);
             let mem = view.mem.clone();
@@ -1311,7 +1311,7 @@ impl Store {
                 }
                 self.assigned.store(ts, Ordering::Release);
                 ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
-                let view = self.view.read().clone();
+                let view = self.view.load();
                 self.apply_hot(ts, &writes, &view);
                 self.note_untouched(&writes);
                 let mem = view.mem.clone();
@@ -1500,7 +1500,7 @@ impl Store {
         {
             let mut m = self.manifest.lock();
             let mut next = m.clone();
-            let cur = self.view.read().clone();
+            let cur = self.view.load();
             let mut bottom = Vec::with_capacity(files.len());
             for i in 0..files.len() {
                 bottom.push(match bg.is_some() {
@@ -1614,7 +1614,7 @@ impl Store {
     /// (under the commit lock, before the commit is visible). Whether there were any.
     fn note_rdels<'a>(&self, writes: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>, ts: u64) -> bool {
         // (Only commits change the list, and they hold the commit lock.)
-        let cur = self.view.read().rdels.clone();
+        let cur = self.view.with(|v| v.rdels.clone());
         let Some(list) = rdel::noted(&cur, writes, ts) else {
             return false;
         };
@@ -1731,7 +1731,7 @@ impl Store {
                         break;
                     }
                     // (Sources frozen while it ran, which their scheduling left to it.)
-                    if this.view.read().imm.is_empty()
+                    if this.view.with(|v| v.imm.is_empty())
                         || this.closed.load(Ordering::Acquire)
                         || this.bg_running.swap(true, Ordering::AcqRel)
                     {
@@ -1747,7 +1747,7 @@ impl Store {
     pub fn flush_all(&self) -> Result<()> {
         let _g = self.bg.lock();
         loop {
-            let oldest = { self.view.read().imm.last().cloned() };
+            let oldest = self.view.with(|v| v.imm.last().cloned());
             let Some(frozen) = oldest else { return Ok(()) };
             let mem = match &frozen {
                 Frozen::Mem(m) => m.clone(),
@@ -1853,7 +1853,7 @@ impl Store {
 
     /// Merge L0 into L1 once L0 has enough files, dropping versions no snapshot can see.
     pub fn maybe_compact(&self) -> Result<()> {
-        if self.view.read().l0.len() < self.opts.l0_compaction_trigger {
+        if self.view.with(|v| v.l0.len()) < self.opts.l0_compaction_trigger {
             return Ok(());
         }
         self.compact()

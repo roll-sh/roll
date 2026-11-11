@@ -15,6 +15,7 @@ pub mod exec;
 pub mod largeobj;
 pub mod notify;
 pub mod plpgsql;
+pub mod published;
 pub mod remote;
 pub mod repl;
 pub mod server;

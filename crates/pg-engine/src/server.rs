@@ -815,6 +815,8 @@ fn handle(
 ) -> std::io::Result<()> {
     let forked = std::time::Instant::now();
     crate::stack::set_limit(THREAD_STACK - (2 << 20));
+    // (The connection's thread keeps its own copies of what every session reads.)
+    crate::published::keep_on_this_thread();
     stream.set_nodelay(true)?;
     let stream = Arc::new(stream);
     let mut c = Conn {

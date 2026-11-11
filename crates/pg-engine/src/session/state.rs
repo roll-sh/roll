@@ -897,12 +897,13 @@ impl SessionState {
     /// the same (each statement takes one).
     pub fn shared_search_path(&self) -> crate::catalog::names::SearchPath {
         // `$user` is the current user (SET ROLE, a SECURITY DEFINER function's owner).
-        let cat = self.db.catalog();
-        let oid = self.current_role(&cat);
-        let user = cat.roles.get(&oid).map_or(self.user.as_str(), |r| r.name.as_str());
-        self.settings
-            .borrow()
-            .session_search_path(user, self.pid, || self.temp_schema())
+        self.db.with_catalog(|cat| {
+            let oid = self.current_role(cat);
+            let user = cat.roles.get(&oid).map_or(self.user.as_str(), |r| r.name.as_str());
+            self.settings
+                .borrow()
+                .session_search_path(user, self.pid, || self.temp_schema())
+        })
     }
 
     /// Name of this session's schema for temporary tables: pg_temp_N for its proc array
