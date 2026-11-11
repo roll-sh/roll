@@ -1874,23 +1874,54 @@ fn dense_bitmap_scan(
                 let ecols = entry_columns(t, index, bounds, quals, ctx);
                 let kernel = ecols.as_ref().and_then(|_| super::kernel::compile(&Expr::And(quals.iter().map(|q| q.orig.clone()).collect())));
                 let mut row = vec![Value::Null; t.columns.len()];
+                // (The entries' keys a batch at a time. An entry's values are fixed-width
+                // keys: one whose encoded values are the last decoded one's has its verdict,
+                // so the check runs once per distinct value, not per entry.)
+                let mut batch = crate::storage::batch::RowBatch::default();
+                let mut last: Option<(Vec<u8>, bool)> = None;
                 for (start, end) in ranges(t, index, bounds, ctx)? {
                     let txn = ctx.txn.borrow();
-                    let it = match ctx.snapshot().as_deref() {
+                    let mut it = match ctx.snapshot().as_deref() {
                         Some(sn) => txn.scan_snap(&start, &end, sn),
                         None => txn.scan(&start, &end),
-                    };
-                    for r in it {
-                        let (k, _) = r?;
-                        if let Some(cols) = &ecols
-                            && entry_into(&mut row, cols, &k)
-                            && !kernel.as_ref().and_then(|f| f.passes(&row[..])).unwrap_or_else(|| {
-                                quals.iter().all(|c| eval_bool(&c.orig, &row, ctx).unwrap_or(true))
-                            })
-                        {
-                            continue;
+                    }
+                    .raw();
+                    loop {
+                        batch.clear();
+                        it.fill_batch(&mut batch, 1024)?;
+                        if batch.is_empty() {
+                            break;
                         }
-                        n += 1;
+                        ctx.check()?;
+                        let Some(cols) = &ecols else {
+                            n += batch.len() as i64;
+                            continue;
+                        };
+                        for i in 0..batch.len() {
+                            let k = batch.get(i).0;
+                            if let Some((vals, pass)) = &last
+                                && k.get(8..8 + vals.len()) == Some(vals.as_slice())
+                            {
+                                n += i64::from(*pass);
+                                continue;
+                            }
+                            let mut pos = 8;
+                            let decoded = cols.iter().all(|(col, ty, desc)| {
+                                match crate::storage::keys::decode_index_value(k, &mut pos, ty, *desc) {
+                                    Some(v) => {
+                                        row[*col] = v;
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            });
+                            let pass = !decoded
+                                || kernel.as_ref().and_then(|f| f.passes(&row[..])).unwrap_or_else(|| {
+                                    quals.iter().all(|c| eval_bool(&c.orig, &row, ctx).unwrap_or(true))
+                                });
+                            last = decoded.then(|| (k[8..pos].to_vec(), pass));
+                            n += i64::from(pass);
+                        }
                     }
                 }
                 counted.push((index.oid, n));
