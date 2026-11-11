@@ -239,8 +239,12 @@ running tag's `fetch-<tag>`; deploys don't touch them.
   waits 10 minutes.
 - Instances follow the nodes: the ECS capacity provider adds and removes them. Keep
   `MaxInstances` at least `MaxNodes + 2`: a deploy needs a spare instance, and so does the canary.
-- `OnDemandInstances` stay on-demand; the rest are Spot. Add `InstanceType2` and `InstanceType3`
-  (same size, for example c7g.large and m7g.large) for more Spot pools.
+- Every instance is on-demand by default: `OnDemandInstances` (3, one per zone) and
+  `OnDemandAbovePercent` (100) for deploy spares, the canary and scale-out. Spot can run out in a
+  zone: on the first deploy it left one zone empty and a deploy's spare unlaunchable. Lower
+  either to save money once losing a zone's capacity for a while is acceptable.
+- `InstanceType`, `InstanceType2` and `InstanceType3` (t4g.medium, c6g.large, c7g.large: same
+  size) are tried in order, so one type running out in a zone doesn't stop a launch.
 - A stopping node drains: it fails its health check, the NLB takes it out within about 15 s, it
   hands its leases over and exits, within 120 s. Spot's two-minute notice, scale-in and instance
   refreshes all drain the node first (ECS managed draining).

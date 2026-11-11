@@ -11,7 +11,7 @@ Metadata:
       - Label: { default: Image }
         Parameters: [ImageTag]
       - Label: { default: Fleet }
-        Parameters: [Nodes, MaxNodes, InstanceType, InstanceType2, InstanceType3, OnDemandInstances, MinInstances, MaxInstances, DesiredInstances, NodeCpu, NodeMemory, DiskGiB]
+        Parameters: [Nodes, MaxNodes, InstanceType, InstanceType2, InstanceType3, OnDemandInstances, OnDemandAbovePercent, MinInstances, MaxInstances, DesiredInstances, NodeCpu, NodeMemory, DiskGiB]
       - Label: { default: Edge }
         Parameters: [Domain, SiteDomain, AcmeEmail, UseElasticIps]
       - Label: { default: Alarms and scaling }
@@ -45,17 +45,23 @@ Parameters:
     Description: Graviton instance type, first choice for on-demand.
   InstanceType2:
     Type: String
-    Default: ""
-    Description: Optional second type of the same size (more Spot pools, fewer interruptions), e.g. c7g.large.
+    Default: c6g.large
+    Description: Second type of the same size, used when the first has no capacity in a zone. Empty for none.
   InstanceType3:
     Type: String
-    Default: ""
-    Description: Optional third type, e.g. m7g.large.
+    Default: c7g.large
+    Description: Third type of the same size. Empty for none.
   OnDemandInstances:
     Type: Number
-    Default: 1
+    Default: 3
     MinValue: 0
-    Description: Instances kept on-demand; the rest are Spot.
+    Description: Instances that are always on-demand, at least one per zone. Spot can run out in a zone and leave it empty.
+  OnDemandAbovePercent:
+    Type: Number
+    Default: 100
+    MinValue: 0
+    MaxValue: 100
+    Description: On-demand share of the instances above OnDemandInstances (deploy spares, the canary, scale-out). 0 puts them on Spot, and a deploy then waits whenever Spot has no capacity.
   MinInstances:
     Type: Number
     Default: 3
@@ -682,7 +688,7 @@ Resources:
         InstancesDistribution:
           OnDemandAllocationStrategy: prioritized
           OnDemandBaseCapacity: !Ref OnDemandInstances
-          OnDemandPercentageAboveBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: !Ref OnDemandAbovePercent
           SpotAllocationStrategy: price-capacity-optimized
         LaunchTemplate:
           LaunchTemplateSpecification:
