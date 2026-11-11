@@ -285,6 +285,137 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Point reads, round 2 (2026-11-11, agent 205)
+
+HANDOFF.md "Point reads, round 2" has what changed. Agent 202's harness
+(`~/.cache/a205/bench`): dist builds in a container on CPUs 32-35 (8 GiB, swap off,
+`--cpu-shares 2`), clients on 12-15; 100,000 accounts, 2 s warmup, 10 s measured, every value
+checked (short transactions' rows counted afterwards); user instructions and cycles per
+operation from `perf stat --per-thread` of the connections' threads over 7 s of each run (a
+privileged helper, `a205-perf`); a pair is run again when another tenant used more than 0.3
+cores of the server CPUs. **base** is `c92dd8116` (round 1's head).
+
+**Three servers, same day** (`sb1`: one round, each server started once, roll is this
+round's head; PostgreSQL 18.6 and pgrust `malisper/pgrust:v0.4-beta-amd64` as in round 1):
+
+| workload | clients | server | ops/s | CPU µs/op (user+sys) | p50 / p99 ms | peak MiB | roll ÷PG | roll ÷pgrust |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| prepared point select | 1 | roll | 21,031 | 45.3 (20.9+24.4) | 0.042 / 0.091 | 120 | 1.81x | 1.31x |
+| | | PostgreSQL | 11,646 | 52.4 (24.1+28.2) | 0.084 / 0.188 | 189 | | |
+| | | pgrust | 16,082 | 35.3 (18.9+16.4) | 0.055 / 0.119 | 344 | | |
+| prepared point select | 8 | roll | 98,642 | 35.8 (22.5+13.3) | 0.070 / 0.195 | 126 | 1.14x | 0.67x |
+| | | PostgreSQL | 86,859 | 40.6 (18.7+21.8) | 0.088 / 0.218 | 209 | | |
+| | | pgrust | 147,981 | 23.9 (12.5+11.4) | 0.047 / 0.117 | 383 | | |
+| prepared point select | 32 | roll | 106,678 | 36.9 (23.4+13.5) | 0.157 / 4.204 | 126 | 1.22x | 0.72x |
+| | | PostgreSQL | 87,256 | 45.3 (21.7+23.6) | 0.366 / 1.017 | 254 | | |
+| | | pgrust | 148,220 | 26.3 (14.0+12.3) | 0.168 / 0.672 | 461 | | |
+| pgbench -S prepared | 32 | roll | 108,951 | 35.1 (23.0+12.0) | 0.138 / 4.129 | 126 | 1.19x | 0.73x |
+| | | PostgreSQL | 91,602 | 42.1 (20.5+21.6) | 0.299 / 1.047 | 268 | | |
+| | | pgrust | 148,457 | 24.1 (13.4+10.7) | 0.164 / 0.633 | 466 | | |
+| short transactions | 8 | roll | 13,377 | 245.6 (152.9+92.7) | 0.527 / 2.044 | 149 | 0.92x | 0.78x |
+| | | PostgreSQL | 14,558 | 213.1 (105.0+108.1) | 0.465 / 2.245 | 328 | | |
+| | | pgrust | 17,213 | 182.6 (102.9+79.8) | 0.405 / 1.735 | 531 | | |
+
+(The three-server run's roll is this round's code before its rebase onto agent 203's round 4,
+`6aaa71d13`, as are the tables below but the last.) Prepared point selects: roll is now ahead
+of PostgreSQL at every client count (1.14x at 8, 1.22x at 32) and still 0.67-0.72x of pgrust at
+8 and 32. The gap is user CPU: 22.5 µs a read against pgrust's 12.5 (round 1: 30.2 against
+12.9); kernel CPU is close (13.3 against 11.4). Short transactions are about as round 1 left
+them: 0.92x PostgreSQL, 0.78x pgrust (user 152.9 µs against 103-105).
+
+**Where a read goes now** (prepared point select, 8 clients, this round's head, LBR call
+stacks of cycles:u, 102k samples, 23.2 µs user a read): the index entry's probe 2.1
+(`first_raw`: block search and seek 1.0, the version lookup 0.3) and the row's point read 2.0
+(`file_get` 1.35); the executor's restart 1.6 (`rescan_index` 1.4: the key's range bytes,
+`bind_scan`'s per-scan counts); the row's decode and checks (`emit`) 1.2; Bind 2.0 (Describe's
+binding check 1.4, of which the implicit transaction's begin 0.9); the read-only commit 2.4
+(`Txn::commit` 1.3, of which the `Txn`'s drop 0.6); statement begin 0.7, locks and privileges
+0.8; wire encode 0.7; mimalloc 2.2 self across all of it.
+
+**Behaviour, against PostgreSQL 18.6** (`tests/isolation/specs/roll-statement-snapshot.spec`;
+the scenarios' psql transcripts for both servers in `~/.cache/a205/beh`):
+
+| what | PostgreSQL 18.6 | roll before | roll now |
+|---|---|---|---|
+| backend_xmin of a query that waited for a lock while the holder aborted | moves on (768 -> 769) | stays | moves on |
+| the same, the holder committed | moves on (771 -> 772) | stays (shown); registered xmin renewed | moves on |
+| SQL EXECUTE that waited, holder aborted | stays | stays | stays |
+| rows SQL EXECUTE sees of the commit it waited for | not seen (1 of 2) | seen | not seen |
+| rows a simple query / Bind sees of it | seen | seen | seen |
+| backend_xmin idle in a READ COMMITTED transaction block | NULL | NULL | NULL |
+| VACUUM while a READ COMMITTED reader idles in its block | removes every dead row | (as PG) | (as PG) |
+| pg_stat_statements total_exec_time of a statement that waited 2 s for a lock | 0 ms | 2,011 ms | 0 ms |
+
+**Kept changes** (alternating pairs of dist builds; prepared point select, 8 clients):
+
+0. *A statement's snapshot after its locks, as PostgreSQL takes it* (**fix1**, a behaviour
+   fix, not a performance candidate) against base: ops/s -0.3%, CPU +0.0%, instructions
+   +1.5%, cycles -0.1% (pairs -1.2% to +5.4% ops/s): no cost.
+
+1. *A unique key's index entry read by a point probe* (**probe1**) against fix1:
+
+| pair | fix1 ops/s | probe1 ops/s | Δ ops/s | fix1 µs/op | probe1 µs/op | Δ CPU | Δ instr | Δ cycles |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 91,694 | 98,447 | +7.4% | 38.9 | 36.3 | -6.7% | -2.2% | -6.5% |
+| 2 | 94,774 | 97,513 | +2.9% | 37.9 | 36.5 | -3.6% | -3.9% | -6.1% |
+| 3 | 93,203 | 94,886 | +1.8% | 38.3 | 37.5 | -2.0% | -3.7% | -4.8% |
+| 4 | 91,486 | 97,148 | +6.2% | 39.1 | 36.5 | -6.6% | -2.9% | -8.0% |
+| 5 | 92,871 | 96,030 | +3.4% | 38.3 | 36.9 | -3.7% | -3.6% | -6.9% |
+
+   Medians +3.4% ops/s, -3.7% CPU, -3.6% instructions, -6.5% cycles. Three pairs each: one
+   client +3.4% ops/s, -4.5% CPU, cycles -7.1%; 32 clients +3.7%, -3.5%, cycles -9.3%; range
+   reads -0.6% ops/s, +1.7% CPU, instructions -0.1% (pair 1 -5.8% ops/s in a run of the
+   unchanged range path; the final stack's three range pairs below are all better).
+
+2. *Less per statement and per read-only commit* (**c4**) against probe1:
+
+| pair | probe1 ops/s | c4 ops/s | Δ ops/s | probe1 µs/op | c4 µs/op | Δ CPU | Δ instr | Δ cycles |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 92,814 | 96,182 | +3.6% | 37.9 | 36.8 | -2.9% | -4.1% | -3.7% |
+| 2 | 93,162 | 96,184 | +3.2% | 38.3 | 37.0 | -3.4% | -3.8% | -3.8% |
+| 3 | 93,405 | 100,046 | +7.1% | 38.3 | 35.5 | -7.2% | -3.6% | -5.0% |
+| 4 | 92,315 | 93,358 | +1.1% | 38.5 | 37.2 | -3.3% | -4.5% | -5.7% |
+| 5 | 93,006 | 94,199 | +1.3% | 38.0 | 37.5 | -1.4% | -5.0% | -4.5% |
+
+   Medians +3.2% ops/s, -3.3% CPU, -4.1% instructions, -4.5% cycles. Its commit-side half
+   alone (**c3**: the statistics prune check and the origin lookup) was -0.9% instructions,
+   -2.9% cycles, +5.3% ops/s median but not 2% in every pair: kept only with the rest.
+
+**The round's head against base** (c4 against base; a release build of the verification ran
+on CPUs 16-23 during the 8-client pairs, which the base runs show as lower ops/s):
+
+| cell | pairs | Δ ops/s | Δ CPU/op | Δ instr/op | Δ cycles/op | worst pair ops/s |
+|---|---:|---:|---:|---:|---:|---:|
+| point select, 8 clients | 5 | +12.3% | -9.8% | -6.7% | -11.6% | +4.1% |
+| point select, 1 client | 3 | +8.6% | -8.4% | -5.8% | -10.3% | +7.5% |
+| point select, 32 clients | 3 | +2.1% | -2.6% | -8.7% | -14.5% | -1.9% |
+| pgbench -S prepared, 32 clients | 3 | +10.3% | -9.4% | -7.5% | -13.7% | +1.9% |
+| range read (100 rows), 8 clients | 3 | +2.1% | -1.4% | +0.6% | -0.2% | +1.8% |
+| short transactions, 8 clients | 5 | +0.9% | -1.0% | -6.1% | -3.3% | +0.2% |
+
+(Short transactions ran on the point reads' CPUs, 32-35 and 12-15: other agents' builds held
+16-23 for the whole evening, and `waitidle` never found them idle.)
+
+**Rebased onto agent 203's range reads, round 4** (`c35d07a86`, whose index scans read their
+entries into a batch, `read_entries`; the probe puts its entry there): the pushed head
+against `c35d07a86`, dist builds of both:
+
+| cell | pairs | Δ ops/s | Δ CPU/op | Δ instr/op | Δ cycles/op | worst pair ops/s |
+|---|---:|---:|---:|---:|---:|---:|
+| point select, 8 clients | 5 | +7.5% | -6.8% | -6.0% | -9.5% | +2.8% |
+| range read (100 rows), 8 clients | 3 | -0.2% | -0.0% | -1.0% | -0.9% | -0.4% |
+| short transactions, 8 clients | 3 | +8.1% | -4.3% | -1.2% | -3.5% | +2.0% |
+
+Point select, every pair: instructions -5.4% to -8.5%, cycles -8.5% to -12.8%.
+
+Footprint (fresh server each, cgroup anon+shmem 25 s into 100 idle sessions; fresh data
+directory): base 35.2 / 36.4 MB, c4 36.4 / 36.5 MB, data 3.03 MB each: unchanged.
+
+**Dropped** (patches in `~/.cache/a205/`): the probe's and the row's point read sharing one
+`PointReader` per snapshot, its buffers kept by the thread from reader to reader
+(`dropped-probe2-*.patch`): against probe1, run twice, instructions -2.1% / -3.0% median but
+cycles -0.3% / -1.1% and CPU flat, -0.2% to -4.8% instructions by pair.
+
 ## Range reads, round 4 (2026-11-11, agent 203)
 
 HANDOFF.md, "Range reads round 4", has what changed: a secondary index scan hands each row out
@@ -368,6 +499,8 @@ stored bytes 9.5%), planning (`planned_as`) 19.5% (choosing the scan again 11.1%
 WHERE 3.6%), the kernel send at ReadyForQuery 11.9%, the DataRows 4.2%, opening the executor
 3.5%, reading the next message 4.4%, the transaction's end 2.7%, Bind 2.1% (Describe 1.3%).
 
+
+
 ## Executor, round 12, batch 2 (2026-11-11, agent 204)
 
 HANDOFF "Executor, round 12, batch 2" has what changed: a Parallel Hash's inner rows read and
@@ -442,6 +575,7 @@ can't depend on which rows a part holds (patches in
 workers' parts, ~100k groups each at ~250 bytes a group) and q13's wall time up (the big
 parts merge after the scan instead of during it). `agg::IntGroups` alone (parts' integer
 keys found through a dense vector): q13 -0.7 / +0.0 / +0.4%.
+
 
 ## Executor, round 12 (2026-11-10, agent 200)
 

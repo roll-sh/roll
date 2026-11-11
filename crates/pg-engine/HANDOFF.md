@@ -9505,6 +9505,86 @@ when it loses; an index none of whose key columns a clause reads still runs
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
 
+## Point reads, round 2 (agent 205)
+
+BENCH.md "Point reads, round 2" has the measurements: prepared point selects at 8 clients
+take 6.7% fewer user instructions and 11.6% fewer cycles a read than round 1's head (+12.3%
+ops/s; rebased, against agent 203's range reads round 4: -6.0%, -9.5%, +7.5%); roll is now 1.14x PostgreSQL at 8 clients and 1.22x at 32, and 0.67-0.72x pgrust
+(user CPU 22.5 µs a read against 12.5). What changed, each its own commit:
+
+- *A statement's snapshot after its locks, as PostgreSQL takes it* (round 1's two
+  differences, checked against PostgreSQL 18.6; `roll-statement-snapshot.spec` records
+  them). PostgreSQL's PortalStart takes a new snapshot once the plan's locks are held, and
+  GetSnapshotData's reuse moves its xmin on when any transaction id ended meanwhile, an
+  abort too (`xactCompletionCount`). `Xids` now counts completions (`finish`,
+  `recover_running`) and a `SnapshotXmin` remembers the count it saw: `stale()`.
+  `run_query`'s fused path begins the snapshot again when `snapshot_behind()` (a commit) or
+  `xmin_stale()` (any end), and reports the new xmin in pg_stat_activity
+  (`Cluster::set_backend_xmin`: the activity slot's backend_xmin was only set at a message's
+  start, so even round 0's second context showed the old one). `renew_snapshot` returns the
+  registration as it is without the xid table's mutex when nothing ended. SQL EXECUTE keeps
+  the snapshot taken before its plan's locks (ExecuteQuery's PortalStart with the active
+  snapshot): it does not see the commit it waited for, in PostgreSQL too (`sql_execute`,
+  set by `execute_stmt`, taken by `run_query`). pg_stat_statements' execution time now
+  starts once the locks are held (`Tracked::executing_since`): it began at `pgss_begin`,
+  before planning and the lock waits, so a statement that waited 2 s showed 2,011 ms where
+  PostgreSQL shows 0 (both before and after round 1). What PostgreSQL shows and roll
+  matched already: backend_xmin is NULL while a READ COMMITTED session idles in its block,
+  and VACUUM then removes every dead row.
+- *A unique key's index entry read by a point probe*: `ScanNode::probe_point` (a `point`
+  scan's one forward range, at an MVCC snapshot) reads the range's first entry with
+  `Txn::first_snap` → `Store::first_noted` → `PointReader::first_raw` (each source
+  positioned at the key, the newest visible version taken; the hot ranges as `scan_raw`
+  reads them, the probe counted toward keeping a range hot as a scan is) instead of a
+  merging scan. `first_snap` declines (None: scan) with writes, spilled writes or range
+  deletions of the transaction in the range, and `first_raw` gives up (`Unknown`) after a
+  few keys without a visible version. The probe's entry goes into the scan's entry batch
+  (`erb`, agent 203's `read_entries`) and `ScanNode::probe` follows it through the
+  execution: when the entry's row is not visible at the snapshot (`fetch_entries`), the range
+  is read as a scan from its start. Debug builds compare the probe's entry with the scan's
+  first.
+- *Less per statement and per read-only commit*: `end_xact_counts` reads
+  `Database::pgstat_pruned_at` (an atomic copy of `Shared::pruned_at`, written under the
+  lock) before taking the statistics lock every session shares and copying the catalog;
+  `origin::before_commit` asks whether the transaction has an id before looking up the
+  replication origin; `Session::fast_slot` keeps the backend's lock manager fast-path slot
+  for its transactions (`Txn::use_fast_slot`; the slot lasts as long as `SessionState`);
+  `Settings::forced_parallel` (derived) replaces `in_parallel_worker`'s two `get_raw`
+  lookups per streamed statement; `ScanNode::plan_decided` keeps what the plan alone
+  decides of `filter_implied` and `unique_point` across restarts (the snapshot and
+  predicate-lock checks are still made each time).
+
+Dropped (patches in `~/.cache/a205/`): sharing one `PointReader` between the probe and the
+row's read and keeping readers' buffers per thread (`dropped-probe2-*.patch`): fewer
+instructions, no fewer cycles.
+
+**Next**, by the profile in BENCH.md (23.2 µs user a read): the read-only commit (2.4 µs:
+`Txn::commit`'s generic path and the `Txn`'s drop, with the store's snapshot pin and the xid
+table's registration each taking a mutex every session shares twice a read, 0.9 µs together);
+Bind's Describe (1.4, mostly the implicit transaction's begin, which has to happen somewhere,
+and `shared_search_path`); the executor restart's `rescan_index` (1.4: the key's bytes and
+`bind_scan`'s counts); the two point reads themselves (4.1: block search and seek in one L1
+file each); mimalloc 2.2 (the `Txn`'s collections made per transaction: `Txn::lock`'s set,
+`hold_xact_fast`'s key). pgrust's remaining lead is about 10 µs of user CPU a read. Short
+transactions are as round 1 left them (BENCH.md "Short write transactions, round 1" has the
+list): their SELECT takes the probe, but the UPDATE's key lookup does not (its scan appends
+the row's key, `with_key`, which `unique_point` leaves out); a point path for it, with READ
+COMMITTED's recheck of a concurrently updated row kept exact, is the next step there.
+
+Verification, on `79552d81b` (this round's code rebased onto agent 203's round 4) and before on
+`6aaa71d13`, the same results: release build; release Clippy: 19 warnings, none in a file
+changed here (math.rs, json.rs, text.rs, nodes.rs, explain.rs and others, as round 1 listed);
+release lib tests; golden, golden_wire and golden_shuffled; kept_plans; wire; twophase;
+crash_random seeds 1-30; the isolation suite and the engine's own specs against a private
+PostgreSQL 18.6 (a205-pgref, port 54110, max_prepared_transactions 10): 140/141 specs,
+1813/1814 permutations (intra-grant-inplace, the hunk agent 197's base had),
+roll-statement-snapshot matching (the base binary differs on it: the xmin after the holder's
+abort); the regress files test_setup, select, prepare, plancache, portals, privileges,
+rowsecurity, transactions, btree_index, insert, update against the same reference: 4530/4530
+units. After the rebase onto agents 200, 201 and 204's commits of the same night (`e87df9ca1`,
+no conflict in code): release build, lib tests, golden (all three), kept_plans, wire, twophase,
+crash_random seeds 1-3, the isolation run and the regress subset again, the same results.
+
 ## Point reads, round 1 (agent 202)
 
 BENCH.md "Point reads, round 1" has the three-server table (roll, PostgreSQL 18.6, pgrust on
