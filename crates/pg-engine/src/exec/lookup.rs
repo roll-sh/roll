@@ -81,6 +81,9 @@ pub struct Lookup {
     table: u32,
     /// Keep looked-up keys' rows (the table is small: modelled).
     cache: bool,
+    /// A unique index's every key column equated: its one visible entry read without a
+    /// merging scan (`Store::first_with`), as the serial point path reads it.
+    unique: bool,
 }
 
 /// `e` with the nested loop's parameters (`Outer(1, k)`: `params[k]`, over the outer
@@ -225,6 +228,7 @@ impl Lookup {
             index: ix.oid,
             table: s.table.oid,
             cache: modelled,
+            unique: (ix.unique || ix.primary) && b.eq.len() == ix.columns.len(),
         }))
     }
 
@@ -301,6 +305,18 @@ impl Lookup {
     fn entries(&self, start: &[u8], sc: &mut LookupScratch) -> Option<()> {
         let end = prefix_end(start);
         sc.dkeys.clear();
+        if self.unique {
+            use crate::storage::point::First;
+            let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
+            match self.store.first_with(r, start, &end, false).ok()? {
+                First::Row(_, v) => {
+                    sc.dkeys.push(v.to_vec());
+                    return Some(());
+                }
+                First::None => return Some(()),
+                First::Unknown => {}
+            }
+        }
         for e in self.store.scan(start, &end, self.ts) {
             sc.dkeys.push(e.ok()?.1.to_vec());
         }
