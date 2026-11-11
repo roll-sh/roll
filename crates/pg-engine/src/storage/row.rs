@@ -841,11 +841,15 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
     if has_null {
         off += tuple_header(types.len(), true) - tuple_header(types.len(), false);
     }
-    STORED_SIZES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // (Counted in debug builds only: a parallel build's participants size rows side by side,
+    // and one counter's cache line moving between them was half of this function's time.)
+    if cfg!(debug_assertions) {
+        STORED_SIZES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     Some(off)
 }
 
-/// Rows `stored_tuple_len` sized (tests read it).
+/// Rows `stored_tuple_len` sized, in debug builds (tests read it).
 pub static STORED_SIZES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The stored bytes of a fixed-size value tagged `t` in a column of type `ty`, when the tag

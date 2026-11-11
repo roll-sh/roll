@@ -314,7 +314,10 @@ fn measured_sizes_from_stored_rows() {
         run(&mut s, "CREATE INDEX m2_i ON m2 (i);\nCREATE UNIQUE INDEX m2_l ON m2 (l) INCLUDE (t);\nANALYZE m2;\nVACUUM m2");
         // (VACUUM measures the rows; the builds take the heap's estimated pages and size only
         // the rows at the table's start, and ANALYZE of a table too big to model samples them.)
-        assert!(pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed) >= sized + 1500, "sized from the stored bytes");
+        // (Counted in debug builds only.)
+        if cfg!(debug_assertions) {
+            assert!(pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed) >= sized + 1500, "sized from the stored bytes");
+        }
         let pages = rows(&mut s, "SELECT relpages > 0, reltuples FROM pg_class WHERE relname = 'm2'");
         assert_eq!(pages, ["[Bool(true), Float4(1500.0)]"]);
     });
