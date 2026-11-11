@@ -58,7 +58,8 @@ pub async fn start(args: &Args, auth: &crate::auth::Auth, home: &std::path::Path
             anyhow::ensure!(matches!(storage, StorageConfig::S3 { .. }), "roll streams in a cluster need S3 (--s3-bucket): a local directory isn't shared");
             let secret = args.code.cluster.resolve(args.code.code_cluster_secret.as_deref(), None, None)?.secret;
             let secret = secret.ok_or_else(|| anyhow::anyhow!("a cluster needs ROLL_CLUSTER_SECRET"))?;
-            let db = tokio::task::block_in_place(|| code_sql::Db::connect(url, "streams", code_sql::PgOptions { max_connections: 8, ..Default::default() }))?;
+            let opts = code_sql::PgOptions { max_connections: args.db_budget()?.streams, ca: args.code.code_db_ca.clone(), ..Default::default() };
+            let db = tokio::task::block_in_place(|| code_sql::Db::connect(url, "streams", opts))?;
             let mut fleet = Fleet::new(cluster.clone(), Arc::new(EdgeSplicer { signer: roll_edge::splice::Signer::new(&secret)? }));
             fleet.linger = Duration::from_millis(args.streams.ack_linger_ms);
             let broker = stream_broker::Broker::on_fleet(c, db, fleet).await?;

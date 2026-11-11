@@ -31,7 +31,7 @@ fn catalog(args: &crate::Args, clustered: bool) -> anyhow::Result<Option<redis_c
     let Some(url) = url else {
         anyhow::bail!("Redis in a cluster needs the system database (ROLL_SYSTEM_DATABASE): every node must see the same catalog");
     };
-    let opts = code_sql::PgOptions { max_connections: 8, ca: args.code.code_db_ca.clone(), ..Default::default() };
+    let opts = code_sql::PgOptions { max_connections: args.db_budget()?.redis, ca: args.code.code_db_ca.clone(), ..Default::default() };
     Ok(Some(redis_control::store::Store::open(code_sql::Db::connect(&url, "redis", opts)?)?))
 }
 

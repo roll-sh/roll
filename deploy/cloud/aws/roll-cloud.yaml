@@ -107,6 +107,14 @@ Parameters:
     Type: Number
     Default: 50
     Description: HTTP 5xx answers per minute across the fleet that count as an incident.
+  SystemDbConnections:
+    Type: Number
+    Default: 10
+    MinValue: 6
+    Description: >-
+      ROLL_SYSTEM_DB_CONNECTIONS, the system database connections each node may open across its
+      products. Keep (MaxNodes + 2) x this under the database's max_connections, less what the
+      provider keeps for itself (a deploy runs a canary and one extra node).
   LatencyP99Ms:
     Type: Number
     Default: 2000
@@ -1054,6 +1062,7 @@ Resources:
             # Every product but Postgres, whose computes need Docker, until it runs in process.
             - { Name: ROLL_PRODUCTS, Value: "redis,streams,tasks,storage,nosql,queues,code" }
             - { Name: ROLL_QUEUES_USER, Value: roll-admin }
+            - { Name: ROLL_SYSTEM_DB_CONNECTIONS, Value: !Ref SystemDbConnections }
           Secrets:
             - { Name: ROLL_CLUSTER_SECRET, ValueFrom: !Ref ClusterSecret }
             - { Name: ROLL_SECRET_KEY, ValueFrom: !Ref SecretKey }

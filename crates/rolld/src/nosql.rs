@@ -213,6 +213,7 @@ impl Nosql {
         storage: &StorageConfig,
         cluster: Option<&Arc<roll_cluster::Cluster>>,
         system_database: Option<&str>,
+        db_connections: usize,
         public: Option<&crate::edge::Public>,
     ) -> anyhow::Result<Self> {
         let cluster = shared(cluster);
@@ -242,6 +243,7 @@ impl Nosql {
         let dedicated = args.nosql_cql_tls.is_some() || args.nosql_cql_shard_aware_tls.is_some();
         let mut cfg = NosqlConfig::local(home.join("nosql"));
         cfg.database = database;
+        cfg.database_connections = db_connections;
         cfg.storage = storage_config(&args, home, storage);
         cfg.node_name = node.clone();
         cfg.public_host = public_host.to_string();

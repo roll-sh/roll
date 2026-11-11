@@ -57,6 +57,43 @@ pub struct ClusterArgs {
     /// product. roll code keeps its data there unless `--code-database` names another.
     #[arg(id = "roll_system_database", long = "system-database", env = "ROLL_SYSTEM_DATABASE", hide_env_values = true)]
     pub system_database: Option<String>,
+    /// Connections this node may open to the system database, across every product on it:
+    /// rolld splits them between the products' pools ([`DbBudget`]). Unset: each product's own
+    /// default (about 57 with every product on). Size it so nodes × budget, with a deploy's extra
+    /// nodes, stays under the database's `max_connections`.
+    #[arg(long = "system-db-connections", env = "ROLL_SYSTEM_DB_CONNECTIONS")]
+    pub system_db_connections: Option<usize>,
+}
+
+/// How many system-database connections each product's pool may open on this node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DbBudget {
+    /// Each of roll code's two pools (its store and its control plane).
+    pub code: usize,
+    pub nosql: usize,
+    pub redis: usize,
+    pub streams: usize,
+}
+
+impl DbBudget {
+    /// Each product's own default when no budget is set.
+    pub const DEFAULT: DbBudget = DbBudget { code: 16, nosql: 16, redis: 8, streams: 8 };
+
+    /// Split `total` between the pools of the products that are on. Queues keeps one
+    /// connection of its own and roll code one for `LISTEN`: both come off the top. The rest is
+    /// shared by weight (roll code's two pools 3 each, nosql 2, redis and streams 1), at least
+    /// one connection per pool.
+    pub fn split(total: Option<usize>, on: crate::products::Products) -> DbBudget {
+        use crate::products::Product;
+        let Some(total) = total else { return DbBudget::DEFAULT };
+        let weight = |p: Product, w: usize| if on.on(p) { w } else { 0 };
+        let reserved = weight(Product::Queues, 1) + weight(Product::Code, 1);
+        let weights = [weight(Product::Code, 3), weight(Product::Code, 3), weight(Product::Nosql, 2), weight(Product::Redis, 1), weight(Product::Streams, 1)];
+        let sum: usize = weights.iter().sum::<usize>().max(1);
+        let left = total.saturating_sub(reserved);
+        let share = |w: usize| (left * w / sum).max(1);
+        DbBudget { code: share(3), nosql: share(2), redis: share(1), streams: share(1) }
+    }
 }
 
 /// How long a stopping cluster node keeps serving after its health check starts failing, so the
@@ -158,5 +195,23 @@ mod tests {
         assert!(matches!(t.c.code_backend(r.backend), code_control::ClusterBackend::DynamoDb(d) if d.table == "roll-cluster"));
         assert!(T::parse_from(["t", "--cluster-backend", "dynamodb"]).c.resolve(None, None, None).is_err(), "a cluster needs a secret");
         assert!(T::parse_from(["t", "--cluster-backend", "memory"]).c.resolve(Some("0123456789abcdef"), None, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod db_budget_tests {
+    use super::DbBudget;
+    use crate::products::{Product, Products};
+
+    #[test]
+    fn a_budget_is_split_between_the_pools_of_the_products_that_are_on() {
+        assert_eq!(DbBudget::split(None, Products::all()), DbBudget::DEFAULT);
+        let all = DbBudget::split(Some(12), Products::all());
+        // 12 less queues' and code's LISTEN connections, over code 3+3, nosql 2, redis 1, streams 1.
+        assert_eq!(all, DbBudget { code: 3, nosql: 2, redis: 1, streams: 1 });
+        assert!(2 * all.code + all.nosql + all.redis + all.streams + 2 <= 12);
+        let code_only = DbBudget::split(Some(12), Products::from_iter([Product::Code]));
+        assert_eq!(code_only.code, 5, "code's two pools share what's left after LISTEN");
+        assert_eq!(DbBudget::split(Some(1), Products::all()).redis, 1, "every pool gets at least one");
     }
 }

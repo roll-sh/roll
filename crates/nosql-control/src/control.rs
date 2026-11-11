@@ -50,6 +50,8 @@ pub struct NosqlConfig {
     /// The catalog: `None` keeps it in `<home>/nosql.db` (one node); a Postgres URL (the system
     /// database, `ROLL_SYSTEM_DATABASE`) shares it between the nodes of a cluster.
     pub database: Option<String>,
+    /// Connections the catalog's pool opens at most, when it's in Postgres.
+    pub database_connections: usize,
     /// This node's name in object storage (commit log segments are per node).
     pub node_name: String,
     /// Host written into endpoints (without a domain).
@@ -117,6 +119,7 @@ impl NosqlConfig {
         NosqlConfig {
             home,
             database: None,
+            database_connections: 16,
             node_name: "local".into(),
             public_host: "127.0.0.1".into(),
             cql_port: 59042,
@@ -338,11 +341,10 @@ fn masking_policy(m: &Map<String, Value>) -> Result<std::collections::BTreeMap<(
 impl Control {
     pub async fn new(cfg: NosqlConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.home)?;
-        let target = match &cfg.database {
-            Some(url) => code_sql::Target::Postgres { url: url.clone(), schema: crate::store::PG_SCHEMA.into() },
-            None => code_sql::Target::Sqlite(cfg.home.join("nosql.db")),
-        };
-        let store = Arc::new(Store::open(&target)?);
+        let store = Arc::new(match &cfg.database {
+            Some(url) => Store::on(code_sql::Db::connect(url, crate::store::PG_SCHEMA, code_sql::PgOptions { max_connections: cfg.database_connections.max(1), ..Default::default() })?)?,
+            None => Store::open(&code_sql::Target::Sqlite(cfg.home.join("nosql.db")))?,
+        });
         if cfg.database.is_none() {
             // One node: whatever it was importing stopped with it. (A shared catalog's imports
             // are taken over by their database's owner instead.)

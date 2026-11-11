@@ -284,6 +284,12 @@ struct Args {
 
 impl Args {
     /// The products this node runs: one set, from `--products` and the older switches.
+    /// The system database's connections per product pool on this node
+    /// (`ROLL_SYSTEM_DB_CONNECTIONS`, split by [`cluster::DbBudget::split`]).
+    fn db_budget(&self) -> anyhow::Result<cluster::DbBudget> {
+        Ok(cluster::DbBudget::split(self.code.cluster.system_db_connections, self.products()?))
+    }
+
     fn products(&self) -> anyhow::Result<Products> {
         Products::resolve(products::Switches {
             products: self.products.clone(),
@@ -386,7 +392,7 @@ async fn run() -> anyhow::Result<()> {
     }
     // roll nosql: same object storage; in a cluster its databases follow their leases.
     let nosql = match on.on(Product::Nosql) {
-        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref(), edge::Public::of(&args).as_ref()).await?),
+        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref(), args.db_budget()?.nosql, edge::Public::of(&args).as_ref()).await?),
         false => None,
     };
     // roll queues on the node's cluster: each queue runs on its lease's holder.
@@ -686,6 +692,11 @@ async fn start_code(
         ..code_control::Config::local(home.to_path_buf())
     };
     args.code.apply(&mut code_config, &args.public_host, args.api)?;
+    if args.code.cluster.system_db_connections.is_some()
+        && let Some(d) = code_config.database.as_mut()
+    {
+        d.connections = args.db_budget()?.code;
+    }
     // Docker on this host, or a Fargate task per run (ROLL_CODE_RUNNER; isolation.rs).
     let isolation = isolation::setup(home, &mut code_config.sandboxes).await?;
     let code = code_control::Code::open(code_config, objects)?;
