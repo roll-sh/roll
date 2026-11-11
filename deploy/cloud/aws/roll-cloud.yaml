@@ -1238,8 +1238,9 @@ Resources:
                   MetricName: CPUUtilization
                   Dimensions: [{ Name: ClusterName, Value: !Ref Cluster }, { Name: ServiceName, Value: !GetAtt NodeService.Name }]
                 Stat: SampleCount
+            # No node data (no tasks) leaves the point out, and target tracking waits.
             - Id: perNode
-              Expression: flows / MAX([nodes, 1])
+              Expression: flows / nodes
               Label: flows per node
               ReturnData: true
 
