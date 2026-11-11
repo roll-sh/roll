@@ -9667,6 +9667,35 @@ pushed head (its result follows in this section).
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 4 (agent 216)
+
+Nothing kept; BENCH.md "Short write transactions, round 4" has the same-night table (lane A, 2
+cores: roll 0.87x PostgreSQL and 0.76x pgrust at 8 clients, 0.78x and 0.60x at 32) and the steps;
+patches in `~/.cache/a216/patches/` (0001 read side, 0002 WAL write at the fsync, 0003-0006 213's
+candidates 2 and 3 rebased), code on origin `wip/a216`.
+
+What the round found, for the next one:
+
+- Taking the readers off the size models' shard lock works as designed (a thread-kept
+  `heapsim::ReadSide`; a published watch is exact because every loss of all-visibility moves the
+  change count, and one not yet published only sends a scan down the paths that look at the
+  pages) and cuts the yields by 43% and the context switches by 18% at 32 clients, but user cycles
+  a transaction hardly move: on a 2-core lane the lock waits cost less CPU than round 3's
+  profile suggested. What's left on the shards is two `mark_passed` reads (a btree walk each:
+  `kill_walk` 5.5 µs a transaction at 32 clients, mostly cache misses) and two writes.
+- All four steps together are +1% (8) and +3% (32) tps in every pair, -1.4% / -3.6% CPU: real but
+  under the gate. The gap to PostgreSQL is per-transaction work, not contention: roll's user CPU
+  is 172 µs at 8 clients against 119 and 115, with the size models about 25-35 µs of it
+  (`updated`, `inserted_with`'s btree inserts, `Kills::done`'s walk, `fetched_at`'s pruning).
+- Best lead: make the models' per-row work cheaper rather than less contended: `Kills` for a
+  unique point lookup whose fetched row's chain is the key's only entry could skip the walk
+  (needs the heap to know a key never had another root since its entry), and the btree model's
+  inserts (7.6 µs) are cache misses on leaf buffers. Then the commit path's memtable insert under
+  the commit lock (8 µs) and the `Xids` mutex (assign, finish, each statement's snapshot and every
+  status lookup of a running xid, nested under the shard lock in the models' visibility checks).
+- `perf record --call-graph dwarf` of the yields stops at libc (the server's container's libc
+  isn't the perf container's): use the LBR profile's callers of the lock slow paths instead.
+
 ## Short write transactions, round 3 (agent 213)
 
 Nothing kept; BENCH.md "Short write transactions, round 3" has the same-day table (8 clients:

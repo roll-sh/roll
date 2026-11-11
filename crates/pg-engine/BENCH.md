@@ -285,6 +285,57 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Short write transactions, round 4 (2026-11-11/12, agent 216)
+
+Nothing kept: four steps measured, none met the keep gate (user cycles per transaction down in
+every pair at 8 and 32 clients, median -5% at 32). Patches and numbers in
+`~/.cache/a216/patches/` (`MEASURED.txt`), code on origin `wip/a216`. HANDOFF.md "Short write
+transactions, round 4" has the design and the leads.
+Harness: 213's (rebuilt in `~/.cache/a216/bench`) on the new lane A: servers on CPUs 6,7,24,25
+(2 cores, 4 threads; 8 GiB, `--cpu-shares 2`), clients on 8,9,26,27, `short_txn` of 100,000
+accounts, fsync and synchronous_commit on, a `CHECKPOINT` and 5 s of quiet before each run, user
+instructions and cycles per transaction over 0.8-9.6 s of the 10 s run. Numbers are not comparable
+with round 3's (4 cores then).
+
+**Three servers, same night** (one round, `tri`; roll is `f41a4749e`; PostgreSQL's and pgrust's
+own earlier round that evening gave 12,162 / 13,095 and 13,433 / 14,457 tps at 8 / 32 clients:
+the host's other tenants move them by 10-20%):
+
+| clients | server | tps | CPU µs/txn (user+sys) | p50 / p99 ms | peak MiB | roll ÷PG | roll ÷pgrust |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1 | roll | 2,719 | 333.4 (153.6+179.8) | 0.333 / 0.881 | 137 | 1.39x | 1.28x |
+| | PostgreSQL | 1,955 | 304.1 (147.8+156.3) | 0.461 / 1.099 | 213 | | |
+| | pgrust | 2,124 | 269.5 (149.5+120.1) | 0.431 / 1.045 | 459 | | |
+| 8 | roll | 11,542 | 286.1 (172.5+113.6) | 0.619 / 2.227 | 138 | 0.87x | 0.76x |
+| | PostgreSQL | 13,303 | 247.4 (119.3+128.1) | 0.545 / 1.717 | 283 | | |
+| | pgrust | 15,163 | 214.2 (114.7+99.5) | 0.470 / 1.599 | 538 | | |
+| 32 | roll | 10,611 | 340.7 (201.3+139.5) | 2.440 / 12.095 | 148 | 0.78x | 0.60x |
+| | PostgreSQL | 13,609 | 268.1 (139.4+128.8) | 2.111 / 9.593 | 329 | | |
+| | pgrust | 17,730 | 208.0 (114.6+93.4) | 1.672 / 6.618 | 624 | | |
+
+**Steps** (5 alternating pairs each; Δ is the step over the arm before it):
+
+1. *The size models' read side without the shard lock*: a heap publishes a `ReadSide` (its prune
+   hints, whether stored TIDs are its, and an all-visible watch published by VACUUM, layouts and
+   locked readers) that a thread keeps between statements; `Fetcher::new` and `Kills::new` take no
+   lock while it is current; `updated` looks for the old version's out-of-line values under its
+   write lock instead of a read lock before it, `inserted_with` checks the size limit in its write
+   section. Shard lock acquisitions about 9 -> 4 a transaction (two `mark_passed` reads, two
+   writes). 8 clients: ops +1.3% median (every pair up), CPU -1.0%, cycles -0.1%. 32 clients:
+   ops +1.6%, CPU -2.6%, cycles 0.0% (-1.4..+3.8). Per transaction at 32: context switches 14.2
+   -> 11.6, `sched_yield` 5.7 -> 3.3, futex 5.9 -> 5.7.
+2. *Group commits' WAL records written by the fsync leader* (appended in memory under the commit
+   lock, one write per fsync; `commit_async` and DDL commits write at once): pwrite a commit 1.01
+   -> 0.55, fsyncs a commit 0.58 -> 0.54 (every commit still acknowledged after the fsync covering
+   its record). Over step 1: 8 clients ops -0.4%, cycles +0.8%; 32 clients ops +1.8%, CPU
+   -1.2%, cycles -0.5%.
+3. *213's candidates 2 and 3* (lock bookkeeping without allocations, catalog and xids read
+   without a lock, hot fields padded) on top of 1 and 2, all four against the base: 8 clients ops
+   +1.0% (every pair up), CPU -1.4%, cycles -1.8% (one pair +0.3%), instructions -3.6%; 32 clients
+   ops +3.0% (+1.2..+6.8), CPU -3.6%, cycles -2.2% (one pair +0.6%). 213's 32-client loss with
+   candidate 2 is gone once step 1 takes the readers off the size models' lock. Context switches
+   at 32 11.7 a transaction, `sched_yield` 3.2, futex 5.9.
+
 ## Short write transactions, round 3 (2026-11-11, agent 213)
 
 Nothing kept: three candidates measured, all dropped (patches and numbers in
