@@ -634,6 +634,18 @@ struct Phv {
 }
 
 /// The join clauses a parameterized path enforces (its scans', through its joins).
+/// has_indexed_join_quals' test of a nested loop's inner side: an index scan whose index
+/// conditions are every join clause moved into it (its parameterization's, which come after
+/// the relation's own restrictions in its quals). A join clause it checks as a filter (TPC-H
+/// q21's `l2.l_suppkey <> l1.l_suppkey`) makes a semi or anti join cost the scan as a plain
+/// rescan.
+fn index_takes_joins(ip: &JP) -> bool {
+    let JNode::Scan { path, enforced, rel, .. } = &ip.node else { return false };
+    let PathKind::Index(ix) = &path.kind else { return false };
+    let Some(base) = rel.quals.len().checked_sub(enforced.len()) else { return false };
+    (base..rel.quals.len()).all(|q| ix.clauses.iter().any(|c| c.qual == q))
+}
+
 fn enforced_of(p: &JP) -> Vec<usize> {
     match &p.node {
         JNode::Scan { enforced, .. } | JNode::Append { enforced, .. } => enforced.clone(),
@@ -5553,10 +5565,7 @@ impl Search<'_, '_, '_> {
         let full = (1u32 << self.leaves.len()) - 1;
         let post = if ex.set == full { self.post } else { 0.0 };
         let qc: f64 = quals.iter().map(|&c| self.clauses[c].cost).sum::<f64>() + post;
-        let indexed = ip.req != 0
-            && quals.is_empty()
-            && !enforced.is_empty()
-            && matches!(&ip.node, JNode::Scan { path, .. } if matches!(path.kind, PathKind::Index(_)));
+        let indexed = ip.req != 0 && quals.is_empty() && !enforced.is_empty() && index_takes_joins(ip);
         let mut inner = ip.input();
         if indexed {
             inner.kind = InKind::IndexedJoin;
