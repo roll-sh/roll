@@ -80,6 +80,9 @@ pub struct Cursor {
     /// Append: `explain::cursor_plan`): the tables `WHERE CURRENT OF` finds a row of, once
     /// per scan (search_plan_tree).
     pub simple: Option<Vec<u32>>,
+    /// `rows` are in the order a btree scan started afresh backward from the end reads them
+    /// (`restart_scan`), reversed.
+    turned: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -634,6 +637,7 @@ impl Cursor {
             rels: Vec::new(),
             row_marks: false,
             simple: None,
+            turned: false,
         };
         for r in rows {
             c.push_row(r);
@@ -987,6 +991,66 @@ impl Cursor {
         self.visit(ex, ctx).map(Some)
     }
 
+    /// A btree scan that ran off an end of its range forgets its place (_bt_readnextpage
+    /// invalidates currPos), so the next row in the other direction comes from a scan started
+    /// afresh from that end (_bt_first). Started backward it reads each posting list's TIDs
+    /// ascending (_bt_readpage), not in the reverse of the order the forward scan gave them:
+    /// the rows of a scroll cursor over a plain btree index scan are put in the fresh
+    /// backward scan's order (reversed, the cursor being after its last row) when it turns
+    /// back at the end, and in the forward scan's again when it turns at its start.
+    fn restart_scan(&mut self, ex: Option<&mut Exec<'_>>, ctx: &ExecCtx, forward: bool) -> Result<()> {
+        let Some(ex) = ex else { return Ok(()) };
+        let turns = if forward { self.turned && self.pos == 0 } else { !self.turned && *ex.done && self.pos == self.produced() + 1 };
+        if !turns || ex.fill || ex.window.is_some() || ex.qual_limit.is_some() {
+            return Ok(());
+        }
+        // (The scan under projections and filters: those pass its rows on as they come.)
+        fn scan(p: &mut Plan) -> Option<&mut crate::sql::plan::ScanPlan> {
+            match p {
+                Plan::Scan(s) => Some(s),
+                Plan::Project { input, .. } | Plan::Filter { input, .. } => scan(Arc::make_mut(input)),
+                _ => None,
+            }
+        }
+        let mut plan = (**ex.plan).clone();
+        let Some(s) = scan(&mut plan) else { return Ok(()) };
+        let btree = s.index.as_ref().is_some_and(|(ix, _)| ix.method == "btree");
+        if !btree || !matches!(s.access, crate::sql::plan::Access::Index { .. }) || !replayable(ex.plan) {
+            return Ok(());
+        }
+        let plan = if forward {
+            ex.plan.clone()
+        } else {
+            s.reverse = !s.reverse;
+            Arc::new(plan)
+        };
+        let mut node = crate::exec::nodes::open_need(&plan, ex.scan_need(), ctx)?;
+        let mut rows = Vec::new();
+        while let Some(r) = node.next(ctx)? {
+            ctx.check()?;
+            rows.push(if ex.project.is_none() && ex.qual.is_none() { ex.coerce(r, ctx)? } else { r });
+        }
+        drop(node);
+        self.rows.clear();
+        self.base = 0;
+        if let Some((_, keys)) = &mut self.keys {
+            keys.clear();
+        }
+        for r in rows {
+            self.push_row(r);
+        }
+        if !forward {
+            self.rows.reverse();
+            if let Some((_, keys)) = &mut self.keys {
+                keys.reverse();
+            }
+            self.pos = self.rows.len() + 1;
+        }
+        self.turned = !forward;
+        self.rerun = false;
+        Ok(())
+    }
+
     /// PortalRunSelect: up to `count` rows in one direction (FETCH_ALL: all); returned when
     /// `dest`. With how many it processed.
     fn select(
@@ -1004,6 +1068,7 @@ impl Cursor {
         if (if forward { self.at_end } else { self.at_start }) || count <= 0 {
             return Ok((out, 0));
         }
+        self.restart_scan(ex.as_deref_mut(), ctx, forward)?;
         let mut n: u64 = 0;
         while count == FETCH_ALL || n < count as u64 {
             let Some(r) = self.step(ex.as_deref_mut(), ctx, forward)? else {
