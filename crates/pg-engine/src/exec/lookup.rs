@@ -55,6 +55,10 @@ pub struct LookupScratch {
     reader: Option<crate::storage::point::PointReader>,
     /// The index entries' row keys of a lookup, reused.
     dkeys: Vec<Vec<u8>>,
+    /// The scan of the last lookup's entries (a key not unique), sought to the next one's
+    /// (`Scan::reseek`): its sources aren't made again, and a lookup landing in the block
+    /// the last one read reads on in it.
+    entries: Option<crate::storage::Scan>,
 }
 
 /// One nested loop's inner index scans.
@@ -303,37 +307,12 @@ impl Lookup {
     /// The row keys of the index entries under key `start`, in index order, into
     /// `sc.dkeys` (None: a read failed).
     fn entries(&self, start: &[u8], sc: &mut LookupScratch) -> Option<()> {
-        let end = prefix_end(start);
-        sc.dkeys.clear();
-        if self.unique {
-            use crate::storage::point::First;
-            let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
-            match self.store.first_with(r, start, &end, false).ok()? {
-                // (An entry whose row the snapshot doesn't see (an updated row's old
-                // version's): the range read as a scan, the entries after it too.)
-                First::Row(_, v) => {
-                    if self.get(&v, &mut sc.reader)?.is_some() {
-                        sc.dkeys.push(v.to_vec());
-                        return Some(());
-                    }
-                }
-                First::None => return Some(()),
-                First::Unknown => {}
-            }
-        }
-        for e in self.store.scan(start, &end, self.ts) {
-            sc.dkeys.push(e.ok()?.1.to_vec());
-        }
-        Some(())
+        entry_keys(&self.store, self.ts, self.unique, start, sc)
     }
 
     /// Row `d` at the snapshot, through the worker's reader (None inside: not visible).
     fn get(&self, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
-        let r = reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
-        match self.store.get_with(r, d, true).ok()? {
-            Some((_, Some(b))) => Some(Some(b)),
-            _ => Some(None),
-        }
+        row_at(&self.store, self.ts, d, reader)
     }
 
     /// The rows of the index entries under key `start`, in index order (None: a read
@@ -471,6 +450,46 @@ impl Lookup {
     }
 }
 
+/// `Lookup::entries`: the row keys of the index entries under key `start` visible at `ts`,
+/// in index order, into `sc.dkeys`. A unique key's first visible entry is probed
+/// (`Store::first_with`) and taken when its row is visible too; otherwise (no answer in a
+/// few tries, or an entry whose row the snapshot doesn't see) the range is read as a scan,
+/// the entries after it too.
+fn entry_keys(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], sc: &mut LookupScratch) -> Option<()> {
+    let end = prefix_end(start);
+    sc.dkeys.clear();
+    if unique {
+        use crate::storage::point::First;
+        let r = sc.reader.get_or_insert_with(|| store.point_reader(ts, false));
+        match store.first_with(r, start, &end, false).ok()? {
+            First::Row(_, v) => {
+                if row_at(store, ts, &v, &mut sc.reader)?.is_some() {
+                    sc.dkeys.push(v.to_vec());
+                    return Some(());
+                }
+            }
+            First::None => return Some(()),
+            First::Unknown => {}
+        }
+    }
+    if !sc.entries.as_mut().is_some_and(|s| s.reseek(start, &end, ts)) {
+        sc.entries = Some(store.scan(start, &end, ts));
+    }
+    for e in sc.entries.iter_mut().flatten() {
+        sc.dkeys.push(e.ok()?.1.to_vec());
+    }
+    Some(())
+}
+
+/// Row `d` visible at `ts`, through `reader` (None inside: not visible; None: a read failed).
+fn row_at(store: &Store, ts: u64, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
+    let r = reader.get_or_insert_with(|| store.point_reader(ts, false));
+    match store.get_with(r, d, true).ok()? {
+        Some((_, Some(b))) => Some(Some(b)),
+        _ => Some(None),
+    }
+}
+
 /// A plain btree index scan by equality that does nothing per row on the executor's
 /// thread (`Lookup`'s conditions).
 fn plain_index_scan(s: &ScanPlan, ctx: &super::ExecCtx) -> bool {
@@ -499,4 +518,31 @@ fn plain_index_scan(s: &ScanPlan, ctx: &super::ExecCtx) -> bool {
         && !ctx.gone_rels.borrow().contains(&s.table.oid)
         && !ctx.catalog().views.contains_key(&s.table.oid)
         && !super::scan::predicate_locked(&s.table, ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::{Store, StoreOptions};
+    use bytes::Bytes;
+
+    /// A unique key's probe whose first visible entry names a row the snapshot doesn't see
+    /// reads the range as a scan: a later entry under the key, whose row the snapshot sees,
+    /// is found (the probe alone would stop at the first).
+    #[test]
+    fn unique_probe_past_an_entry_without_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), StoreOptions { sync: false, ..Default::default() }).unwrap();
+        let key = b"ix\x00\x00\x00\x01\x00\x02k5".to_vec();
+        let entry = |row: &[u8]| [key.as_slice(), row].concat();
+        let (gone, live) = (b"row-1".to_vec(), b"row-2".to_vec());
+        let rows = vec![
+            (entry(&gone), Some(Bytes::from(gone.clone()))),
+            (entry(&live), Some(Bytes::from(live.clone()))),
+            (live.clone(), Some(Bytes::from_static(b"v"))),
+        ];
+        store.commit(rows, |_| Ok(())).unwrap();
+        let mut sc = super::LookupScratch::default();
+        super::entry_keys(&store, store.visible_ts(), true, &key, &mut sc).unwrap();
+        assert!(sc.dkeys.contains(&live), "the visible row's entry is read: {:?}", sc.dkeys);
+    }
 }
