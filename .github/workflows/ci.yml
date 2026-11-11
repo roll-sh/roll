@@ -88,12 +88,12 @@ jobs:
           done
       - name: Validate workflows
         run: |
-          version=1.7.7
+          version=1.7.12
           if curl -fsSL --max-time 20 --retry 1 --retry-all-errors -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v$version/actionlint_${version}_linux_amd64.tar.gz"; then
             tar -xzf actionlint.tar.gz actionlint
             ./actionlint -shellcheck=
           else
-            docker run --rm -v "$PWD:/repo" -w /repo "rhysd/actionlint:$version@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9" -shellcheck=
+            docker run --rm -v "$PWD:/repo" -w /repo "rhysd/actionlint:$version@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667" -shellcheck=
           fi
 
   ci:
