@@ -309,9 +309,13 @@ impl Lookup {
             use crate::storage::point::First;
             let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
             match self.store.first_with(r, start, &end, false).ok()? {
+                // (An entry whose row the snapshot doesn't see (an updated row's old
+                // version's): the range read as a scan, the entries after it too.)
                 First::Row(_, v) => {
-                    sc.dkeys.push(v.to_vec());
-                    return Some(());
+                    if self.get(&v, &mut sc.reader)?.is_some() {
+                        sc.dkeys.push(v.to_vec());
+                        return Some(());
+                    }
                 }
                 First::None => return Some(()),
                 First::Unknown => {}

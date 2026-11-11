@@ -475,6 +475,50 @@ fn parallel_lookups_match_serial_inner() {
     assert!(serial[3].iter().any(|r| r.contains("Null")), "{:?}", &serial[3][..3]);
 }
 
+/// A unique index's lookups in the workers (`Lookup::unique`: its one visible entry probed)
+/// after updates that moved rows to other keys and back: the entries of the old versions
+/// are still there, the rows are those the serial scans find.
+#[test]
+fn parallel_unique_lookups_match_serial() {
+    on_session_thread(parallel_unique_lookups_match_serial_inner);
+}
+
+fn parallel_unique_lookups_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big (id int NOT NULL, g int); \
+         INSERT INTO big SELECT i, i % 97 FROM generate_series(1, 420000) i; \
+         CREATE TABLE u (k int, v text); \
+         INSERT INTO u SELECT i, md5(i::text) FROM generate_series(1, 150000) i; \
+         CREATE UNIQUE INDEX u_k ON u (k); \
+         UPDATE u SET k = k + 1000000 WHERE k % 5 = 0; \
+         UPDATE u SET k = k - 1000000, v = 'moved' WHERE k > 1000000 AND k % 10 = 0; \
+         UPDATE u SET v = 'again' WHERE k % 7 = 0",
+    )
+    .unwrap();
+    for t in ["big", "u"] {
+        s.query(&format!("VACUUM ANALYZE {t}")).unwrap();
+    }
+    s.query("SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_material = off").unwrap();
+    let queries = [
+        "SELECT count(*), sum(b.id), count(u.v), sum(length(u.v)) FROM big b JOIN u ON u.k = b.id WHERE b.id < 160000",
+        "SELECT b.g, count(u.k), min(u.v), max(u.v) FROM big b LEFT JOIN u ON u.k = b.id WHERE b.id % 3 = 0 GROUP BY b.g ORDER BY 1",
+        "SELECT count(*) FROM big b WHERE b.id < 200000 AND NOT EXISTS (SELECT 1 FROM u WHERE u.k = b.id)",
+    ];
+    let run = |s: &mut Session| queries.iter().map(|q| out(s, q)).collect::<Vec<_>>();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial = run(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let looked = pg_engine::exec::lookup::started();
+    let parallel = run(&mut s);
+    assert!(pg_engine::exec::lookup::started() > looked, "index lookups ran in the workers");
+    for ((q, a), b) in queries.iter().zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+}
+
 /// Queries over a table small enough for its heap to be modelled (rows in heap order, as
 /// Postgres reads its pages) and big enough for a parallel scan (8 MB): pgvector distances
 /// computed by the workers' kernels, a float sum in the serial order, a filter, a top-k.
