@@ -68,15 +68,19 @@ pub(crate) fn release_workers(n: usize) {
     ACTIVE.fetch_sub(n, std::sync::atomic::Ordering::AcqRel);
 }
 
-static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// Parallel index builds this thread's statements ran.
+    static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// Parallel index builds run so far (`session::ddl::parbuild`), for tests.
+/// Parallel index builds this thread's statements ran (`session::ddl::parbuild`), for tests
+/// (other tests' builds, on threads of their own, don't count).
 pub fn index_builds() -> u64 {
-    BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+    BUILDS.with(std::cell::Cell::get)
 }
 
 pub(crate) fn count_index_build() {
-    BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BUILDS.with(|c| c.set(c.get() + 1));
 }
 
 /// Rows a worker sends at a time.
