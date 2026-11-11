@@ -681,6 +681,105 @@ against base2, prepared point select at 8 clients:
 Footprint (fresh server each, cgroup anon+shmem 25 s into 100 idle sessions; fresh data
 directory): base2 36.5 MB / 3.03 MB, cand3 36.3 MB / 3.03 MB, twice each: unchanged.
 
+## Bulk writes, round 10 (2026-11-10, agent 201)
+
+HANDOFF.md, "Bulk writes, round 10", has what changed. Method as rounds 8-9's, in
+`~/.cache/a201/bench` (`bulk.sh`, `rounds.sh`, `med.py`): dist builds with line tables, each
+server a fresh container on CPUs 0-3 (8 GiB, `--cpu-shares 2`, host network), psql in a third
+container on CPUs 4-7; 1M rows (`bulk1m.tsv`, agent 182's), autovacuum off; per step the
+server cgroup's CPU and bytes written, `perf stat -e instructions:u,cycles:u` of the server
+cgroup (a privileged helper, `-a -C 0-3 -G`), the engine's VmRSS / VmHWM after each step;
+rounds interleaved, medians of three. Rows checked equal on every run (count and sums of
+every column of both tables). **base** is `a96bce378`; **new** the three changes on it.
+
+The machine was busy: other tenants used 0.3-1.5 cores of CPUs 0-3 during most steps
+(another agent's builds pinned to 0-7, and benchmarks on the hyperthread siblings 16-23), so
+cgroup CPU and wall times move 10-30% from round to round; user instructions don't, and the
+gates rest on them, with cycles and CPU alongside. A rerun on a quiet round was rarely
+possible (a step was rerun once when it saw more than 0.3 foreign cores, then kept).
+
+### The step table against PostgreSQL 18.6 (medians of three, interleaved)
+
+| step | PostgreSQL wall / CPU s | base wall / CPU s | new wall / CPU s | CPU / PG base -> new | written MB PG / base / new |
+|---|---|---|---|---|---|
+| COPY in | 0.94 / 0.79 | 1.38 / 1.26 | 1.29 / 1.18 | 1.59 -> 1.49 | 189 / 32 / 32 |
+| CREATE INDEX | 0.42 / 0.66 | 0.89 / 1.36 | 0.65 / 1.08 | 2.05 -> **1.62** | 48 / 17 / 18 |
+| CREATE UNIQUE INDEX | 0.32 / 0.39 | 0.65 / 0.99 | 0.52 / 0.70 | 2.56 -> **1.80** | 71 / 9 / 9 |
+| COPY out | 0.53 / 0.43 | 0.51 / 0.61 | 0.45 / 0.34 | 1.41 -> **0.79** | 0 / 59 / 0 |
+| INSERT … SELECT | 0.94 / 0.72 | 0.98 / 0.86 | 0.92 / 0.80 | 1.20 -> 1.12 | 376 / 34 / 34 |
+| UPDATE half | 4.29 / 4.30 | 2.23 / 2.12 | 2.02 / 1.86 | 0.49 -> 0.43 | 642 / 56 / 56 |
+| DELETE a quarter | 0.34 / 0.22 | 1.08 / 0.97 | 0.99 / 0.87 | 4.33 -> 3.88 | 62 / 34 / 34 |
+| VACUUM | 0.36 / 0.33 | 0.57 / 0.76 | 0.45 / 0.77 | 2.28 -> 2.32 | 14 / 48 / 48 |
+| ANALYZE | 0.21 / 0.13 | 0.38 / 0.28 | 0.33 / 0.23 | 2.19 -> 1.79 | 0 / 0 / 0 |
+| count(*) after | 0.14 / 0.13 | 0.19 / 0.18 | 0.18 / 0.18 | 1.38 -> 1.39 | 0 / 0 / 0 |
+| TRUNCATE | 0.13 / 0.04 | 0.10 / 0.01 | 0.11 / 0.01 | 0.22 -> 0.22 | 0 / 0 / 0 |
+| DROP TABLE | 0.14 / 0.05 | 0.10 / 0.09 | 0.11 / 0.02 | 1.68 -> 0.30 | 0 / 0 / 0 |
+| **all steps** | 8.20 CPU s | 9.48 | 8.03 | **1.16 -> 0.98** | 1,485 / 334 / 230 |
+
+(This table is the run of `a96bce378` with the first two changes and the third without its
+memory packing; the final tree's CPU is the same within its spread, `c4` below. User
+instructions over all steps: PostgreSQL 52.1 G, base 85.5-87.4 G, new 74.3-76.2 G, -13%.
+Written: the medians of the per-round sums.) The VACUUM row carries the background
+compaction of the DELETE's tombstones (48 MB written): with the server idle before it
+(`settle`), VACUUM takes 0.25 s of CPU, PostgreSQL's 0.33-0.39. So does part of DELETE's,
+ANALYZE's and count's CPU: the steps after UPDATE share one compaction between them.
+
+Where the time went before: CREATE INDEX had a compaction rewrite the table loaded just
+before it (all of L0's span, the catalog's keys at one end, the index's runs at the other),
+so the next three statements read the table's new files cold (zstd and block decode in CREATE
+UNIQUE INDEX; half of COPY out's CPU was the compaction itself); a sixth of CREATE INDEX was
+memcmp over two empty `Vec`s, a microcode assist each (HANDOFF); DELETE's tombstone sort
+compared keys that tied on 16 bytes.
+
+### The changes, each against the one before (per-round %, instructions / cycles / CPU / wall)
+
+**1. Compaction rewrites only the overlapped L1 files** (c1 against base, rounds of r1-r3):
+
+| step | round 1 | round 2 | round 3 |
+|---|---|---|---|
+| CREATE UNIQUE INDEX | -35.6 / -36.1 / -18.2 / -6.2 | -30.8 / -50.6 / -41.5 / -21.5 | -31.7 / -34.0 / -27.2 / -20.0 |
+| COPY out | -56.1 / -55.8 / -25.5 / +18.6 | -69.1 / -68.5 / -59.1 / -17.7 | -53.6 / -60.5 / -50.1 / -33.1 |
+| INSERT … SELECT | -12.8 / -8.7 / -1.4 / +10.5 | -12.8 / -12.6 / -21.1 / -19.5 | -12.8 / -35.9 / -35.9 / -33.0 |
+
+Instructions of every other step within 0.6% (CREATE INDEX -0.6/+2.8/-1.7; DELETE's -1.0/
++2.5/+2.7 move with the compaction that runs beside it: UPDATE through count together
++0.0/-0.2/+1.2). All steps: instructions -12%, bytes written 314/338/275 -> 276/231/276 MB.
+
+**2. DELETE's tombstones sorted by group** (c2 against c1, r2): DELETE -3.1 / -2.6 / -1.0 /
++0.2, -4.4 / -15.2 / -20.9 / -19.1, -11.0 / -14.9 / -15.5 / -13.6; the other steps' instructions
+within 0.1% but VACUUM's and COPY out's, which take the background compaction that moved
+(UPDATE through count together -1.0 / -1.4 / +0.1).
+
+**3. No empty-slice memcmp in the btree measure, the entry sort's 16-byte word** (c3 against
+c1, r3 and the settled r4, which waits for the server to idle before DELETE, VACUUM, ANALYZE
+and count):
+
+| step | r3 round 1 | r3 round 2 | r3 round 3 | r4 (settled) round 1 | round 2 | round 3 |
+|---|---|---|---|---|---|---|
+| CREATE INDEX | -6.3 / -27.9 / -26.0 / -31.6 | -10.7 / -31.4 / -28.2 / -31.7 | -5.2 / -28.5 / -26.1 / -29.9 | -4.6 / -28.9 / -31.9 / -32.7 | -4.5 / -27.8 / -27.0 / -31.4 | -1.8 / -26.1 / -27.8 / -28.0 |
+| DELETE (with 2) | -6.8 / -12.9 / -12.8 / -12.2 | -4.2 / -11.2 / -9.2 / -8.7 | -6.5 / -11.6 / -14.5 / -12.5 | -6.9 / -10.7 / -3.5 / -0.3 | -5.4 / -13.7 / -16.0 / -14.1 | -4.0 / -7.7 / -14.1 / -11.3 |
+| VACUUM | +6.6 / -0.5 / -8.3 / -14.6 | -0.1 / +4.9 / +10.2 / +13.5 | +2.7 / +2.6 / +2.7 / +16.4 | +0.0 / -0.2 / -5.7 / -3.4 | +0.0 / -6.5 / -5.1 / -10.4 | +0.0 / -1.1 / -1.2 / -5.6 |
+
+Settled, VACUUM's instructions are equal and its CPU lower; in r3 it carried more of the
+compaction that the faster DELETE left. ANALYZE's instructions moved by nothing or both ways
+(-0.1, -0.1, +0.0, +0.0, +4.4, -4.1); its cycles moved with the other tenants' load (-6.9 ... +35%
+in both directions, one round with 1.4 foreign cores). The final tree packs the measure's key
+in 40 bytes (two words and a `u32`, not a `u128` and a `usize`) and the heap sizes as `u32`
+(**c4**, against c3, r6): instructions within 1.1% on every step but those sharing the
+compaction, CPU 7.83 -> 7.95 s over all steps (base 8.59 in the same rounds), the index
+builds' peak RSS 254-273 -> 214-267 MB.
+
+### Memory, bytes written, the smoke runs
+
+- Peak RSS (VmHWM, MB): base 266-306 over fifteen runs (median 274); final tree 277, 279, 278
+  (r6; its peak is now during UPDATE, the index builds' below base's). The container's peak
+  (page cache included): base 306-340, final 334-336; PostgreSQL's 952.
+- Bytes written over all steps: base 289-384 MB, new 185-305 (median 230): CREATE INDEX no
+  longer rewrites the table. Disk after the run: 27 MB both.
+- pgbench scale 10, prepared, 8 clients, 20 s (`smoke.sh`, CPUs 0-3 / 4-7), server µs of
+  CPU per transaction, base / new, three alternating rounds: select-only 56, 57, 60 / 55, 63,
+  55; tpcb-like 417, 444, 468 / 417, 456, 418. No change beyond the noise.
+
 ## Short write transactions, round 1 (2026-11-10, agent 197)
 
 HANDOFF.md, "Short write transactions, round 1", has what changed. `short_txn`: 100,000

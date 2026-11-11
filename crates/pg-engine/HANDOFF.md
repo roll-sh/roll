@@ -9573,6 +9573,73 @@ create_table: 4552/4553 units. The same isolation specs and regress units differ
 binary against the same reference (its pg_stat_statements preload shows `Query Identifier`
 in EXPLAIN VERBOSE, and the engine had max_prepared_transactions 0).
 
+## Bulk writes, round 10 (agent 201)
+
+BENCH.md "Bulk writes, round 10" has the measurements: over the 1M-row bulk sequence the
+engine's server CPU went from 1.16x PostgreSQL's to 0.98x (same rounds), user instructions
+-13%, bytes written about -20%; peak RSS 278 MB against base's 274 median (266-306 over its
+runs), the index builds' peaks now below base's. Three changes, each its own commit:
+
+- **Compaction rewrites only the L1 files an L0 file overlaps** (`Store::compact`). It took
+  the span of all L0 files, lowest first key to highest last key, and rewrote every L1 file in
+  it. L0 nearly always holds a catalog flush (the lowest keys) next to a new index's runs
+  (high keys), so a CREATE INDEX rewrote the table loaded just before (14.5 of the 26 MB it
+  wrote), and the next statements read that table's new files cold: zstd decompression and
+  block decode in CREATE UNIQUE INDEX, COPY out's CPU half background compaction. Now an
+  L1 file goes in only when one L0 file's user-key range meets its own; the outputs end
+  before each file left in place (no input key is in its range), and L1 is the files left
+  and the outputs in key order, still without overlaps. The manifest's form is unchanged:
+  older builds read it. Test `storage::tests::compaction_leaves_l1_files_between_l0_ranges`.
+  - A consequence: L1 can keep files smaller than `target_file_bytes` (a load's tail, a
+    catalog range) that no later compaction merges with their neighbours unless an L0 file
+    overlaps them. Nothing merges adjacent small L1 files yet.
+- **DELETE's deferred tombstones sorted by group** (`txn::sort_by_key_after`): the keys
+  are grouped by their first 8 bytes after the shared prefix (the table's rows, each index's
+  entries: up to 8 groups, else one sort as before), keeping their order, and a group that
+  came in order (the rows and a serial index's entries, as the scan read them) isn't sorted
+  again. The sort word is 24 bytes, not 16 (as three `u64`s: a `u128` made each item 48
+  bytes): an int index's keys tied on 16 and every tie compared two keys at random places.
+- **No empty-slice memcmp in the btree measure** (`vacuum::MeasureKey`, CREATE INDEX's and
+  VACUUM's index measures): the key's rest past 16 bytes is an `Option<Box<[u8]>>`, not a
+  `Vec` emptied for short keys. Comparing two empty `Vec`s calls memcmp on their dangling
+  pointers, and glibc's AVX-512 memcmp does a masked load there, which takes a microcode
+  assist: about 80 ns a comparison (`~/.cache/a201/micro/empty.rs`: 150-170 ns a pair of
+  `==` and `cmp`, against 2.5 for `None`). It was an eighth of a CREATE INDEX (the sort of
+  the measure's keys and the leader's merge of them, every tie of an int key). The parallel
+  build's entry sort (`parbuild::Entries`) also takes 16 bytes past the index's prefix
+  instead of 8 (two `u64`s), so an int key's entries no longer tie in runs of a few hundred.
+  To keep the build's peak, the measure's key is two words and a `u32` (40 bytes, was 48)
+  and a participant's heap tuple sizes `u32`s: the entries' 8 more bytes are paid back.
+  - **The same hazard is anywhere two empty `Vec<u8>`, `String` or `Box<[u8]>` values are
+    compared in a hot loop**: sorting or grouping empty text values, comparing empty keys.
+    Compare lengths first, or use `Option`. A global fix (a `memcmp` that returns at `n == 0`)
+    isn't done.
+
+Measured and not kept: nothing (each change passed its gate; BENCH.md has them).
+
+Not done, for the next round (BENCH.md has the profiles):
+- DELETE (3.6x PostgreSQL's CPU): the two-source merge of the UPDATE's versions with the
+  table's, a row at a time (16% of the step: `Merge::min` rescans both heads per switch);
+  the deferred tombstones (18%: their keys a `Vec` each, copied again into the run); the
+  filter over lazily decoded rows (15%; `int4 % int4` goes through i128 `__modti3`,
+  `sql/func/ops.rs p_int_mod`); the compact lock set (9%).
+- CREATE UNIQUE INDEX (1.7x) and CREATE INDEX (1.4x): `stored_tuple_len` (11% / 7%) sizes
+  every heap row again for relpages, also when the table didn't change since the build
+  before; a kept measure (`txn::unchanged`) after a parallel build would need its xmins.
+- COPY in (1.37x): `parse_copy_data` 13%, the row's insert node and size model about 15%.
+- count(*) (1.5x): decoding the summed column per row (`parscan::partial_row`).
+
+Verification on `a96bce378` with the three changes, the full `tools/verification-train.sh`:
+release crate tests 520 passed, 0 failed (lib, golden, big_tables, txn_spill, compact_locks
+among them); Clippy 19 warnings, none in the files changed; crash_random seeds 1-30 x 4;
+the power stage (power_cut 4 passed, `CRASH_POWER=1` seeds 1-30 x 4, with and without
+`CRASH_ASYNC=1`); debug crate tests 520 passed; the full regression suite against a private
+PostgreSQL 18.6 reference 51,148 / 51,150 units, none newly differing; isolation 121/122
+specs, 1647/1648 permutations (the known intra-grant-inplace one); pg_dump_tap 14,609 passed.
+The manifest's form is unchanged and a clean close still rewrites linked L1 files, so older
+builds read a cleanly closed store. Rebased for the push onto `c35d07a86` (agents 198-203's commits touch none of
+the changed functions).
+
 ## Short write transactions, round 1 (agent 197)
 
 BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients
