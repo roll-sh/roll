@@ -94,17 +94,23 @@ pub struct StoreOptions {
     pub txn_spill_bytes: usize,
 }
 
-/// `set_default_txn_spill_bytes`'s value (0: none set).
-static DEFAULT_SPILL_BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// `with_txn_spill_bytes`'s value on this thread (0: none set).
+    static SPILL_BYTES_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-/// The default `txn_spill_bytes` of stores opened from now on (tests; 0: the usual one).
-pub fn set_default_txn_spill_bytes(n: usize) {
-    DEFAULT_SPILL_BYTES.store(n, Ordering::Relaxed);
+/// Run `f` with the stores and engines it opens on this thread taking `n` as their default
+/// `txn_spill_bytes` (tests). An engine keeps the value it was opened with for every store
+/// it opens later, on any thread. (A process-wide default set and reset around an open let
+/// tests running at once open with each other's value.)
+pub fn with_txn_spill_bytes<R>(n: usize, f: impl FnOnce() -> R) -> R {
+    let _g = crate::scoped::set(&SPILL_BYTES_HERE, n, "storage::SPILL_BYTES_HERE");
+    f()
 }
 
 /// The default `StoreOptions::txn_spill_bytes`.
-fn default_spill_bytes() -> usize {
-    match DEFAULT_SPILL_BYTES.load(Ordering::Relaxed) {
+pub(crate) fn default_spill_bytes() -> usize {
+    match SPILL_BYTES_HERE.with(|c| c.get()) {
         0 => std::env::var("ROLL_TXN_SPILL_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())

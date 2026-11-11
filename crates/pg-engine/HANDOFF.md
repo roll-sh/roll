@@ -4580,7 +4580,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
 - **Bounded memory for big transactions and COPY** (round 19, agent 69; BENCH.md's agent 69
   section):
   - A transaction's write buffer spills to disk past `StoreOptions::txn_spill_bytes` (64 MB;
-    `ROLL_TXN_SPILL_BYTES` or `storage::set_default_txn_spill_bytes` for tests), so a
+    `ROLL_TXN_SPILL_BYTES` or `storage::with_txn_spill_bytes` for tests), so a
     transaction of any size holds a bounded buffer (`txn/spill.rs`). The buffer and its undo
     journal go to a sorted run (a private, unsynced SST under `<db>/spill/<txn>/`). Every
     version in a run carries its journal position (`Ent::ts`), so statement snapshots,

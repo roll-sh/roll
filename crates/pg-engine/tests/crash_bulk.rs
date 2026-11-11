@@ -46,9 +46,8 @@ fn crash_child() {
     let Ok(dir) = std::env::var("CRASH_BULK_DIR") else {
         return;
     };
-    pg_engine::storage::set_default_txn_spill_bytes(256 << 10);
     let dir = Path::new(&dir);
-    let eng = open(&dir.join("data"));
+    let eng = pg_engine::storage::with_txn_spill_bytes(256 << 10, || open(&dir.join("data")));
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     s.query("CREATE TABLE IF NOT EXISTS t (id int PRIMARY KEY, v text, n int)").unwrap();
     s.query("CREATE INDEX IF NOT EXISTS t_n ON t (n)").unwrap();

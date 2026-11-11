@@ -291,6 +291,8 @@ pub struct Engine {
     refusing: AtomicBool,
     startup: Mutex<Option<StartupReport>>,
     me: Weak<Engine>,
+    /// Its stores' `txn_spill_bytes`: the default when it was opened.
+    txn_spill_bytes: usize,
     server_files: Option<crate::server_files::ServerFiles>,
     /// The directory server programs run in, when they're allowed.
     server_programs: Option<PathBuf>,
@@ -574,6 +576,7 @@ impl Engine {
                 refusing: AtomicBool::new(false),
                 startup: Mutex::new(None),
                 me: me.clone(),
+                txn_spill_bytes: crate::storage::default_spill_bytes(),
                 server_files,
                 server_programs,
                 statements,
@@ -725,6 +728,7 @@ impl Engine {
             memtable_bytes: self.opts.memtable_bytes,
             sync: self.opts.sync,
             cache: self.cache.clone(),
+            txn_spill_bytes: self.txn_spill_bytes,
             ..StoreOptions::default()
         }
     }

@@ -7,7 +7,7 @@
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
-use pg_engine::storage::set_default_txn_spill_bytes;
+use pg_engine::storage::with_txn_spill_bytes;
 use pg_engine::txn::TXN_SPILLS;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -193,7 +193,7 @@ const AFTER_REOPEN: &[&str] = &[
 ];
 
 fn script_on(dir: &std::path::Path, spill: usize) -> Vec<String> {
-    set_default_txn_spill_bytes(spill);
+    let open = |dir: &std::path::Path| with_txn_spill_bytes(spill, || open(dir));
     let mut out = {
         let eng = open(dir);
         let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
@@ -207,7 +207,6 @@ fn script_on(dir: &std::path::Path, spill: usize) -> Vec<String> {
     out.extend(run(&mut s, AFTER_REOPEN));
     drop(s);
     eng.shutdown();
-    set_default_txn_spill_bytes(0);
     out
 }
 

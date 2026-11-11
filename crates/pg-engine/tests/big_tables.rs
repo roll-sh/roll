@@ -6,6 +6,7 @@ use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::exec::scan::ROWS_FROM_INDEX_ENTRIES;
 use pg_engine::exec::sizing::with_max_versions;
 use pg_engine::session::Session;
+use pg_engine::storage::with_txn_spill_bytes;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -154,9 +155,7 @@ fn copy_through_the_sink() {
     // (A buffer that holds the load's first batch until its TIDs are stamped, as the usual
     // 64 MB one does: stamped after a spill, those rows are rewritten, and the spilled run
     // with them, whose entries span the index's range, keeps the sink's runs from linking.)
-    pg_engine::storage::set_default_txn_spill_bytes(1 << 20);
-    let eng = open(dir.path());
-    pg_engine::storage::set_default_txn_spill_bytes(0);
+    let eng = with_txn_spill_bytes(1 << 20, || open(dir.path()));
     let queries = ["SELECT count(*), sum(a) FROM cs", "SELECT a, count(*) FROM cs WHERE a < 9 GROUP BY a ORDER BY a"];
     let data = |from: i32, to: i32| -> String { (from..=to).map(|i| format!("{i}\t{}\tt{i}\n", i % 37)).collect() };
     let before = with_max_versions(500, || {
@@ -455,9 +454,7 @@ fn brin_gin_builds_measure_as_postgres() {
 fn deferred_entry_deletes() {
     let dir = tempfile::tempdir().unwrap();
     // (A 1 MB buffer: a DELETE of more than 16 kB of keys writes them as runs.)
-    pg_engine::storage::set_default_txn_spill_bytes(1 << 20);
-    let eng = open(dir.path());
-    pg_engine::storage::set_default_txn_spill_bytes(0);
+    let eng = with_txn_spill_bytes(1 << 20, || open(dir.path()));
     let runs = || pg_engine::txn::DELETE_RUNS.load(Ordering::Relaxed);
     with_max_versions(500, || {
         let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
