@@ -12,6 +12,8 @@ import {
   type Target,
   acceptsWebp,
   asksTransform,
+  bareDomain,
+  bucketOfHost,
   cacheKey,
   cacheTags,
   credentialOf,
@@ -21,6 +23,7 @@ import {
   parsePath,
   parseRange,
   parseRoutes,
+  passesThrough,
   privateKey,
   safeEqual,
   verifyJwt,
@@ -33,6 +36,14 @@ export interface Env {
   ROLL_API_ORIGIN?: string;
   ROLL_CDN_ORIGIN_SECRET: string;
   ROLL_ROUTES?: string;
+  /** Hosts sent to the origin as they are (`passesThrough`). */
+  ROLL_PASS_HOSTS?: string;
+  /**
+   * `<bucket>.<this>` serves the bucket (virtual-host style: the `s3` route's `<key>`). Copies
+   * are stored and purged as the path-style `https://<this>/<bucket>/<key>`, so roll's CDN
+   * `base_url` is `https://<this>`.
+   */
+  ROLL_BUCKET_DOMAIN?: string;
   ROLL_CDN_JWT_SECRET?: string;
   ROLL_CDN_JWT_ES256_JWK?: string;
   ROLL_CDN_PRESIGN_KEY_ID?: string;
@@ -365,7 +376,21 @@ export default {
     const hook = await testHook(req, env, url.pathname);
     if (hook) return hook;
 
-    const route = matchRoute(routes(env), url.pathname);
+    // Hosts in this zone that aren't the CDN's (previews): straight to the origin.
+    if (passesThrough(url.hostname, env.ROLL_PASS_HOSTS)) return fetch(req);
+    // A bucket by its host: served exactly as its path-style URL on the bucket domain (one copy
+    // at the edge, which roll's purges of that URL reach).
+    const vhost = bucketOfHost(url.hostname, env.ROLL_BUCKET_DOMAIN);
+    let clientHost = req.headers.get("host") ?? url.host;
+    const s3Route = routes(env).find((r) => r.kind === "s3");
+    if (vhost) {
+      if (!s3Route) return denied(undefined, 404, "buckets aren't served by host here");
+      if (credentialOf(url.search, false).kind === "presigned") return denied(s3Route, 403, "presigned URLs are path style: https://<bucket domain>/<bucket>/<key>");
+      url.pathname = `${s3Route.prefix}${vhost}${url.pathname}`;
+      url.host = bareDomain(env.ROLL_BUCKET_DOMAIN);
+      clientHost = url.host;
+    }
+    const route = vhost ? s3Route : matchRoute(routes(env), url.pathname);
     if (!route) return denied(undefined, 404, "no route for this path");
     // Paths the CDN doesn't serve (the storage API's authenticated and write routes: use the
     // API itself).
@@ -373,7 +398,7 @@ export default {
     const head = req.method === "HEAD";
     if (req.method === "OPTIONS") {
       // CORS preflights go to the origin as they are.
-      const a: Asked = { route, target: null, url, host: url.host, credential: { kind: "none" } };
+      const a: Asked = { route, target: null, url, host: clientHost, credential: { kind: "none" } };
       return forClient(await fetch(originRequest(env, a, "OPTIONS", joinPairs(nonAuthPairs(url.search)), passHeaders(req))), "PASS");
     }
     if (req.method !== "GET" && !head) {
@@ -420,7 +445,7 @@ export default {
       }
       if (route.auth === "token" && credential.kind === "none") return denied(route, 403, "this URL needs a signed token");
     }
-    const a: Asked = { route, target, url, host: req.headers.get("host") ?? url.host, credential };
+    const a: Asked = { route, target, url, host: clientHost, credential };
 
     // Never cached: bucket-level paths, and S3 requests with other parameters (versionId,
     // response-* overrides, subresources). Immutable URLs keep a rendition's query (they can only

@@ -42,7 +42,9 @@ the ideas of Piper and Mononoke/Bonsai, and adapts it to a multi-tenant serverle
      SQLite or Postgres meta   pg_storage::Objects (S3 or local dir): blobs
 ```
 
-Previews and checks run as containers through the same driver that runs Postgres computes.
+Previews and checks run as containers through an `Isolation` (`code-preview`): the `docker` CLI
+on this host, or a Fargate task per run on roll cloud's fleet (`ROLL_CODE_RUNNER=fargate`;
+docs/cloud/README.md, "Isolated work").
 Previews branch the repository's linked roll Postgres project and roll Redis database.
 
 ## Crates
@@ -360,8 +362,9 @@ merges per second; most of the time goes into writing the tree out for each test
   heartbeats. The lease expires back to `open`. That's queue semantics, so many agents can pull
   work safely.
 - **Checks** (`crates/code-preview`): runner checks come from `roll.toml`.
-  - Each check runs as `sh -c <run>` in its own container. The tree is copied in, never
-    bind-mounted, and the container gets memory, CPU and process limits and a timeout. The
+  - Each check runs as `sh -c <run>` in its own container (a Docker container here, a Fargate
+    task on the fleet). The tree is copied in, never bind-mounted, and the container gets
+    memory, CPU and process limits and a timeout. The
     timeout covers the run, not creating the container (pulling its image has its own 10
     minutes), so a timeout can never leave a container behind that appeared after removal.
   - The tail of the output becomes the check's summary.
@@ -487,12 +490,59 @@ Setting up the App is described in [github-app.md](github-app.md); the code is i
   - When both sides changed the same file, or history was rewritten, the mirror pauses with
     the paths in `mirror.error` until someone reconciles.
   - roll's own mirror pushes coming back (`<slug>[bot]`) are ignored.
-- **Outbound** (`github/notify.rs`, driven by the control plane's event feed, once each):
+- **Outbound** (`github/notify.rs`, sent from the durable delivery queue, once each):
   - Landing a change from a PR comments with the landed commit and closes the PR. It's closed,
     not merged, because roll already put the commit on `main`.
   - Finishing a work item from an issue comments and closes the issue (`completed` or
     `not_planned`). Nothing goes back for state that came from GitHub.
-  - Checks on a PR's change become check runs on its head commit.
+  - Checks on a PR's change become check runs on its head commit; reviews and threads made in
+    roll are posted to the PR.
+  - All of it goes through the one delivery queue webhooks and review apps use
+    (`review_deliveries`, target `gh_<repo id>`, `github/outbox.rs`), queued with the event:
+    `Code::emit` queues it before it returns, and the state changes that promise their event
+    (`webhooks::Promises`) promise it to GitHub too. Nothing is driven by the broadcast channel.
+    A delivery names what to bring up to date (a change, an issue, a check, a review, a
+    thread), and the repo's owner sends it, one at a time per repo, reading the state as it is
+    then, so retries and reordering converge; marks in `github_marks` make the closes and
+    reviews happen once.
+  - **GitHub down**: a connection error, a 5xx or a timeout is retried with backoff (at most
+    5 minutes apart) for as long as it takes; a rate limit (`retry-after`, `x-ratelimit-reset`,
+    a secondary limit) is retried when GitHub said (the GitHub client is impatient inside the
+    queue, so a worker never sleeps on it). Only a 4xx from GitHub counts towards giving up (8
+    attempts). A long outage costs rows, not memory. The mirror's backoff is capped at 30 s, so
+    a GitHub that comes back is caught up within about that, and a refused push re-reads
+    GitHub's head.
+- **Catching up** (roll was down; `github/catchup.rs`, `github/reconcile.rs`):
+  - GitHub doesn't redeliver a failed webhook delivery on its own. On start and every 5 minutes
+    one node (`Code::singleton("github-catchup")`) reads the App's delivery log
+    (`GET /app/hook/deliveries`, JWT, cursor pages, back to its last look and within GitHub's
+    three days) and asks for another attempt (`POST /app/hook/deliveries/{id}/attempts`) of each
+    delivery no attempt got through and roll hasn't recorded (by `X-GitHub-Delivery`): at most 5
+    times each, and not again while the last asked-for attempt hasn't shown up. The redelivery
+    arrives as an ordinary webhook.
+  - For anything older, or missing from the log, each connected repo's owner reconciles when it
+    takes the repo (a restart, a handoff) and every 10 minutes, holding the repo's delivery lock:
+    it lists GitHub's branch heads (`ls-remote` with the installation's credentials) and the pull
+    requests updated since its last look, and ingests what's missing through the webhook code
+    paths. The default branch always goes through the push path (fast-forward, merge, or nothing
+    when roll is ahead; with no push's `before`, the merge base is the newest of GitHub's first
+    parents on roll's mainline), so a mirror stopped because GitHub had commits roll never saw
+    resumes. Other branches are ingested when their head is a commit roll doesn't have; pull
+    requests into the default branch unless their change already matches.
+- **When roll is down** (the client side): `roll code land` and `roll code change create` on a
+  connected repo, and an agent thread's publish (`thread.publish`, whose grant names the repo's
+  GitHub side), fall back to pushing a branch of their own to GitHub and opening a pull request
+  with the user's own GitHub credentials on that machine (`GH_TOKEN`/`GITHUB_TOKEN`,
+  `gh auth token`, or git's credential helper; `agent_host::github`). The credentials go to
+  GitHub only, never to roll, a file or a log, and the default branch is never pushed. "Down"
+  means a connection that can't be made or 502/503/504 after the CLI's retries (honouring
+  `Retry-After`). The CLI records the intent in `~/.config/roll/code/queued.json` and replays it
+  on the next command that reaches roll, once roll has ingested the pull request (webhook or
+  reconcile): a land goes through roll's rules (on a queue repo, the merge queue);
+  `roll code queued` lists what's waiting. Which repos are connected is remembered from roll's
+  answers, so a native repo (or one this machine never saw reach roll) gets a plain "roll is
+  unreachable" error. The daemon keeps its intent with the thread in `agent.db` and answers
+  `landing: queued`; publishing the thread again once roll is back links and lands the change.
 
 ## HTTP API (`/v1/code`)
 

@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use common::docker::{self, Container, RunOpts};
 
+const MIGRATE: &str = "migrate/migrate:v4.18.3@sha256:39b59b389634e43bb3f2d4e94bc1edef0775ec2a9a3540ce6a2cf330e5daae55";
+
 fn tools() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/tools")
 }
@@ -95,14 +97,14 @@ fn golang_migrate() {
         cqlsh_in(&c, "CREATE KEYSPACE mig WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}");
         let db = format!("cassandra://{}:9042/mig?x-multi-statement=true", c.ip());
         let mount = format!("{}:/migrations:ro", mig.display());
-        let up = tool(&["-v", &mount], "migrate/migrate:v4.18.3", &["-path=/migrations", "-database", &db, "up"]);
+        let up = tool(&["-v", &mount], MIGRATE, &["-path=/migrations", "-database", &db, "up"]);
         assert!(up.status.success(), "migrate up: {}", out(&up));
-        let v = tool(&["-v", &mount], "migrate/migrate:v4.18.3", &["-path=/migrations", "-database", &db, "version"]);
+        let v = tool(&["-v", &mount], MIGRATE, &["-path=/migrations", "-database", &db, "version"]);
         assert_eq!(out(&v).trim(), "3", "migrate version");
         let o = c.exec(&["cqlsh", "-e", "SELECT kind FROM mig.events; SELECT version, dirty FROM mig.schema_migrations; DESCRIBE TABLE mig.users"]);
         let s = out(&o);
         assert!(s.contains("migrated") && s.contains("tags set<text>") && s.contains("address frozen<address>") && s.contains("False"), "{s}");
-        let down = tool(&["-v", &mount], "migrate/migrate:v4.18.3", &["-path=/migrations", "-database", &db, "down", "-all"]);
+        let down = tool(&["-v", &mount], MIGRATE, &["-path=/migrations", "-database", &db, "down", "-all"]);
         assert!(down.status.success(), "migrate down: {}", out(&down));
         let o = c.exec(&["cqlsh", "-e", "DESCRIBE KEYSPACE mig"]);
         let s = out(&o);

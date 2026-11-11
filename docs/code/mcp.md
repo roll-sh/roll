@@ -8,8 +8,8 @@ send the caller's own token, see exactly what the routes allow, and return the s
 ## Connect
 
 The server uses the Streamable HTTP transport. Authenticate with an owner token (`roll code token
-create <owner> <name>`) or the admin token, sent as a Bearer token. A local daemon with no
-`ROLL_CODE_TOKEN` is open, like the rest of the local API.
+create <owner> <name>`) or an admin token (`ROLL_CODE_TOKEN` or rolld's `ROLL_ADMIN_TOKEN`), sent as
+a Bearer token. A local daemon with neither is open, like the rest of the local API.
 
 Claude Code:
 

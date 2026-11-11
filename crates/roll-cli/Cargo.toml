@@ -25,6 +25,7 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
+getrandom.workspace = true
 clap.workspace = true
 nosql-engine = { workspace = true, optional = true }
 nosql-proto = { workspace = true, features = ["client"] }
@@ -42,6 +43,7 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 unicode-width.workspace = true
+url.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]

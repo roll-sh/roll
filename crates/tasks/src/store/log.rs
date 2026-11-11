@@ -372,7 +372,6 @@ pub struct LogStore {
 struct Replay {
     cfg: LogConfig,
     tenants: BTreeMap<String, (SqliteStore, u64, u64, u64)>, // db, snapshot, previous snapshot, last section
-    gone: BTreeSet<String>,
 }
 
 impl Replay {
@@ -389,14 +388,12 @@ impl Replay {
                         remove_db_files(&db_path(&self.cfg.dir, &s.tenant));
                     }
                     let db = open_tenant_db(&self.cfg, &s.tenant, true)?;
-                    self.gone.remove(&s.tenant);
                     self.tenants.insert(s.tenant, (db, 0, 0, seq));
                 }
                 Op::Drop => {
                     if self.tenants.remove(&s.tenant).is_some() {
                         remove_db_files(&db_path(&self.cfg.dir, &s.tenant));
                     }
-                    self.gone.insert(s.tenant);
                 }
                 Op::Changes => match self.tenants.get_mut(&s.tenant) {
                     Some(t) => {
@@ -412,35 +409,79 @@ impl Replay {
     }
 }
 
-impl Log {
-    /// Rebuild every tenant from the log, take over as its writer, and start committing.
-    pub async fn open(cfg: LogConfig) -> Result<Arc<Self>> {
+/// A copy of a cell's data that follows its log without writing to it: a hot standby. It
+/// rebuilds every tenant once (as a new leader would), then applies each new log entry as it
+/// appears, so [`Log::take_over`] only has to read what's new.
+pub struct Follower {
+    replay: Replay,
+    /// Log entries after the pruned point (sequence number, bytes), for the committer.
+    wal: VecDeque<(u64, u64)>,
+    /// The last entry applied.
+    last: u64,
+}
+
+/// Each tenant's snapshots, by listing `snap/`.
+async fn list_snapshots(objects: &dyn ObjectStore, prefix: &str) -> Result<BTreeMap<String, Vec<u64>>> {
+    let mut snaps: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let listed: Vec<_> = objects.list(Some(&ObjPath::from(format!("{prefix}/snap")))).try_collect().await?;
+    for m in listed {
+        if let Some((tenant, seq)) = snap_of(&m.location) {
+            snaps.entry(tenant).or_default().push(seq);
+        }
+    }
+    for seqs in snaps.values_mut() {
+        seqs.sort_unstable_by(|a, b| b.cmp(a));
+    }
+    Ok(snaps)
+}
+
+async fn read_pruned(objects: &dyn ObjectStore, prefix: &str) -> Result<u64> {
+    match objects.get(&pruned_path(prefix)).await {
+        Ok(r) => Ok(serde_json::from_slice::<Value>(&r.bytes().await?)?["through"].as_u64().unwrap_or(0)),
+        Err(object_store::Error::NotFound { .. }) => Ok(0),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The log entries after `after`, in order, checked to follow on from it without a gap. (A plain
+/// list: directory buckets neither sort listings nor start after a key.)
+async fn list_entries(cfg: &LogConfig, after: u64) -> Result<Vec<u64>> {
+    let (objects, prefix) = cfg.wal_store();
+    let mut seqs: Vec<u64> = objects
+        .list(Some(&ObjPath::from(format!("{prefix}/wal"))))
+        .map_ok(|m| seq_of(&m.location))
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .flatten()
+        .filter(|s| *s > after)
+        .collect();
+    seqs.sort_unstable();
+    for (i, s) in seqs.iter().enumerate() {
+        let want = after + 1 + i as u64;
+        anyhow::ensure!(*s == want, "log gap: expected entry {want}, found {s}");
+    }
+    Ok(seqs)
+}
+
+impl Follower {
+    /// Copy every tenant from its newest snapshot and the log after it, into `cfg.dir` (which
+    /// is cleared first).
+    pub async fn start(cfg: LogConfig) -> Result<Self> {
         let _ = std::fs::remove_dir_all(cfg.dir.join("tenants"));
         let _ = std::fs::remove_dir_all(cfg.dir.join("snapshots"));
         std::fs::create_dir_all(cfg.dir.join("tenants"))?;
         std::fs::create_dir_all(cfg.dir.join("snapshots"))?;
         let objects = cfg.objects.clone();
         let prefix = cfg.prefix.clone();
-
-        let pruned = match objects.get(&pruned_path(&prefix)).await {
-            Ok(r) => serde_json::from_slice::<Value>(&r.bytes().await?)?["through"].as_u64().unwrap_or(0),
-            Err(object_store::Error::NotFound { .. }) => 0,
-            Err(e) => return Err(e.into()),
-        };
+        let pruned = read_pruned(&*objects, &prefix).await?;
 
         // Each tenant's newest readable snapshot (the one before it is the fallback).
-        let mut snaps: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-        let listed: Vec<_> = objects.list(Some(&ObjPath::from(format!("{prefix}/snap")))).try_collect().await?;
-        for m in listed {
-            if let Some((tenant, seq)) = snap_of(&m.location) {
-                snaps.entry(tenant).or_default().push(seq);
-            }
-        }
+        let snaps = list_snapshots(&*objects, &prefix).await?;
         let loaded: Vec<Result<(String, SqliteStore, u64, u64)>> = futures::stream::iter(snaps.clone())
-            .map(|(tenant, mut seqs)| {
+            .map(|(tenant, seqs)| {
                 let (cfg, objects, prefix) = (cfg.clone(), objects.clone(), prefix.clone());
                 async move {
-                    seqs.sort_unstable_by(|a, b| b.cmp(a));
                     let path = db_path(&cfg.dir, &tenant);
                     for (i, seq) in seqs.iter().take(2).enumerate() {
                         match download_snapshot(&*objects, &snap_path(&prefix, &tenant, *seq), &path).await {
@@ -461,62 +502,112 @@ impl Log {
             .buffer_unordered(16)
             .collect()
             .await;
-        let mut replay = Replay { cfg: cfg.clone(), tenants: BTreeMap::new(), gone: BTreeSet::new() };
+        let mut replay = Replay { cfg: cfg.clone(), tenants: BTreeMap::new() };
         for r in loaded {
             let (tenant, db, snap, prev) = r?;
             replay.tenants.insert(tenant, (db, snap, prev, snap));
         }
+        let mut f = Follower { replay, wal: VecDeque::new(), last: pruned };
+        let seqs = list_entries(&cfg, pruned).await?;
+        f.apply_entries(seqs).await?;
+        Ok(f)
+    }
 
-        // The log after the pruned point, in order, without gaps. (A plain list: directory buckets
-        // neither sort listings nor start after a key; pruned entries are deleted anyway.)
-        let (wal_objects, wal_prefix) = cfg.wal_store();
-        let mut seqs: Vec<u64> = wal_objects
-            .list(Some(&ObjPath::from(format!("{wal_prefix}/wal"))))
-            .map_ok(|m| seq_of(&m.location))
-            .try_collect::<Vec<_>>()
-            .await?
-            .into_iter()
-            .flatten()
-            .filter(|s| *s > pruned)
-            .collect();
-        seqs.sort_unstable();
-        for (i, s) in seqs.iter().enumerate() {
-            let want = pruned + 1 + i as u64;
-            anyhow::ensure!(*s == want, "log gap: expected entry {want}, found {s}");
-        }
-        let mut wal = VecDeque::new();
-        let mut entries = futures::stream::iter(seqs.clone())
+    /// The last log entry this copy holds.
+    pub fn seq(&self) -> u64 {
+        self.last
+    }
+
+    /// Download and apply entries, in order.
+    async fn apply_entries(&mut self, seqs: Vec<u64>) -> Result<()> {
+        let (objects, prefix) = self.replay.cfg.wal_store();
+        let mut entries = futures::stream::iter(seqs)
             .map(|s| {
-                let (objects, prefix) = (wal_objects.clone(), wal_prefix.clone());
+                let (objects, prefix) = (objects.clone(), prefix.clone());
                 async move { Ok::<_, anyhow::Error>((s, objects.get(&wal_path(&prefix, s)).await?.bytes().await?)) }
             })
             .buffered(64);
-        let mut last = pruned;
         while let Some(entry) = entries.next().await {
             let (seq, bytes) = entry?;
-            replay.apply(seq, decode(&bytes)?)?;
-            wal.push_back((seq, bytes.len() as u64));
-            last = seq;
+            self.apply(seq, &bytes)?;
         }
+        Ok(())
+    }
+
+    fn apply(&mut self, seq: u64, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(seq == self.last + 1, "log entry {seq} out of order (after {})", self.last);
+        self.replay.apply(seq, decode(bytes)?)?;
+        self.wal.push_back((seq, bytes.len() as u64));
+        self.last = seq;
+        Ok(())
+    }
+
+    /// Apply whatever the leader committed since the last look (one GET while nothing is new).
+    /// `check`: also make sure the log wasn't pruned past this copy (it fell behind for too
+    /// long); an error means the copy can't follow any more and must be made again.
+    pub async fn poll(&mut self, check: bool) -> Result<u64> {
+        let (objects, prefix) = self.replay.cfg.wal_store();
+        if check {
+            let pruned = read_pruned(&*self.replay.cfg.objects, &self.replay.cfg.prefix).await?;
+            anyhow::ensure!(pruned <= self.last, "the log was pruned past this copy (entry {} is gone)", self.last + 1);
+        }
+        let from = self.last;
+        loop {
+            let seq = self.last + 1;
+            match objects.get(&wal_path(&prefix, seq)).await {
+                Ok(r) => {
+                    let bytes = r.bytes().await?;
+                    self.apply(seq, &bytes)?;
+                }
+                Err(object_store::Error::NotFound { .. }) => return Ok(self.last - from),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Log {
+    /// Rebuild every tenant from the log, take over as its writer, and start committing.
+    pub async fn open(cfg: LogConfig) -> Result<Arc<Self>> {
+        Self::take_over(Follower::start(cfg).await?).await
+    }
+
+    /// Take over the log as its writer from a copy that follows it (in the copy's directory),
+    /// and start committing. Reads what the copy hasn't seen yet; fails if the log was pruned
+    /// past it (start a fresh copy then, or use [`Log::open`]).
+    pub async fn take_over(mut f: Follower) -> Result<Arc<Self>> {
+        let cfg = f.replay.cfg.clone();
+        let objects = cfg.objects.clone();
+        let prefix = cfg.prefix.clone();
+        // What's new, by listing (never by probing the next number: a pruned entry's slot is
+        // empty, and claiming it would let the previous writer go on below it).
+        let seqs = list_entries(&cfg, f.last).await?;
+        let pruned = read_pruned(&*objects, &prefix).await?;
+        anyhow::ensure!(pruned <= f.last, "the log was pruned past this copy (entry {} is gone)", f.last + 1);
+        f.apply_entries(seqs).await?;
 
         // Take over: claim the next entry. Anything a previous writer slipped in first gets
         // replayed, and from here on its commits fail.
-        let mut seq = last + 1;
+        let (wal_objects, wal_prefix) = cfg.wal_store();
+        let mut seq = f.last + 1;
         loop {
             let marker = encode(seq, "takeover", &cfg.node, &[]);
             match wal_objects.put_opts(&wal_path(&wal_prefix, seq), PutPayload::from(marker), PutMode::Create.into()).await {
                 Ok(_) => break,
                 Err(object_store::Error::AlreadyExists { .. }) => {
                     let bytes = wal_objects.get(&wal_path(&wal_prefix, seq)).await?.bytes().await?;
-                    replay.apply(seq, decode(&bytes)?)?;
-                    wal.push_back((seq, bytes.len() as u64));
+                    f.apply(seq, &bytes)?;
                     seq += 1;
                 }
                 Err(e) => return Err(e.into()),
             }
         }
+        let Follower { replay, mut wal, .. } = f;
+        wal.retain(|(s, _)| *s > pruned);
         wal.push_back((seq, 0));
 
+        // A copy that followed the log for a while knows only the snapshots it started from.
+        let snaps = list_snapshots(&*objects, &prefix).await?;
         // Snapshots of deleted tenants are garbage now.
         let stale: Vec<String> = snaps.keys().filter(|t| !replay.tenants.contains_key(*t)).cloned().collect();
         if !stale.is_empty() {
@@ -531,7 +622,11 @@ impl Log {
         }
 
         let mut tenants = BTreeMap::new();
-        for (id, (db, snap, prev, last_section)) in replay.tenants {
+        for (id, (db, mut snap, mut prev, last_section)) in replay.tenants {
+            if let Some(seqs) = snaps.get(&id).filter(|s| s.first().is_some_and(|s| *s > snap)) {
+                snap = seqs[0];
+                prev = seqs.get(1).copied().unwrap_or(0);
+            }
             db.record_changes()?;
             tenants.insert(id.clone(), Arc::new(Tenant::new(id, db, snap, prev, last_section)));
         }
@@ -635,6 +730,18 @@ impl Log {
     /// markers).
     pub fn take_storage_writes(&self) -> u64 {
         self.metered.swap(0, Ordering::Relaxed)
+    }
+
+    /// Test hook: stop as a killed process would. Nothing more is committed, relaxed writes
+    /// included, and writes fail.
+    #[doc(hidden)]
+    pub fn fault_kill(&self) {
+        self.fence("killed".into());
+    }
+
+    /// Whether writes can still commit (not fenced, closed or failed).
+    pub fn is_open(&self) -> bool {
+        self.durable.borrow().fenced.is_none()
     }
 
     /// Resolves (with the reason) once this node can no longer commit.
@@ -835,6 +942,36 @@ impl LogStore {
     }
 }
 
+/// Start a log with an existing SQLite database (a single node's tasks database from before the
+/// log store) as `tenant`, if the log is new: its snapshot at entry 1, then entry 1 itself
+/// (create-only). `false` if the log already has entries. A crash between the two leaves no
+/// entry, so the import runs again. Only for a log nothing else writes (one node).
+pub async fn import_sqlite(cfg: &LogConfig, tenant: &str, file: &Path) -> Result<bool> {
+    anyhow::ensure!(valid_tenant_id(tenant), "bad tenant id {tenant:?}");
+    if read_pruned(&*cfg.objects, &cfg.prefix).await? > 0 || !list_entries(cfg, 0).await?.is_empty() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(cfg.dir.join("snapshots"))?;
+    let copy = cfg.dir.join("snapshots").join(format!("{tenant}-import.db"));
+    remove_db_files(&copy);
+    let (from, to) = (file.to_path_buf(), copy.clone());
+    // A consistent copy, write-ahead log included.
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let db = rusqlite::Connection::open_with_flags(&from, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        db.execute("VACUUM INTO ?1", [to.to_string_lossy().as_ref()])?;
+        Ok(())
+    })
+    .await??;
+    upload_snapshot(cfg.objects.clone(), copy, snap_path(&cfg.prefix, tenant, 1)).await?;
+    let (objects, prefix) = cfg.wal_store();
+    let marker = encode(1, "import", &cfg.node, &[]);
+    match objects.put_opts(&wal_path(&prefix, 1), PutPayload::from(marker), PutMode::Create.into()).await {
+        Ok(_) => Ok(true),
+        Err(object_store::Error::AlreadyExists { .. }) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 async fn download_snapshot(objects: &dyn ObjectStore, from: &ObjPath, to: &Path) -> Result<()> {
     let zst = to.with_extension("db.zst");
     {
@@ -968,6 +1105,9 @@ async fn committer(log: Arc<Log>, mut next_seq: u64, mut wal: VecDeque<(u64, u64
     let mut last_eval = Instant::now();
     let mut last_start = Instant::now() - gap;
     loop {
+        if !log.is_open() {
+            break;
+        }
         let stopping = log.stopping.load(Ordering::SeqCst);
         if stopping && let Some((t, _)) = copying.take() {
             t.db.snapshot_abort();
@@ -1159,6 +1299,24 @@ impl Store for LogStore {
 
     fn shards(&self) -> u32 {
         self.t.db.shards()
+    }
+
+    async fn sync(&self) -> Result<()> {
+        // Strict, whatever the caller's mode: it's the wait the relaxed writes skipped.
+        self.log.written(None).await
+    }
+
+    async fn write_all(&self, writes: &[Write]) -> Result<bool> {
+        anyhow::ensure!(
+            !writes.iter().any(|w| matches!(w, Write::Doc { kind, .. } if kind == crate::engine::KIND_NODE)),
+            "node records are local to a node; they don't go in a group of writes"
+        );
+        // One SQLite transaction, so one commit of the log (a cut takes the database's lock).
+        let ok = self.t.db.write_all(writes).await?;
+        if ok {
+            self.written().await?;
+        }
+        Ok(ok)
     }
 
     fn take_storage_writes(&self) -> u64 {

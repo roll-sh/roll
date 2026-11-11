@@ -4,8 +4,6 @@ use pg_proxy::{Proxy, ProxyConfig};
 use pg_storage::StorageConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use stream_broker::config::TlsFiles;
-use stream_broker::store::Settings;
 use tracing::info;
 
 /// mimalloc hands freed memory back to the OS; the system allocator on macOS keeps it.
@@ -15,10 +13,22 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod auth;
+mod cluster;
 mod code;
+mod edge;
+mod isolation;
+mod logs;
 mod nosql;
+mod products;
 mod queues;
+mod storage;
+mod redis;
 mod storage_events;
+mod streams;
+mod tasks;
+
+use products::{Product, Products};
 
 /// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks,
 /// RabbitMQ-compatible queues and ScyllaDB/Cassandra-compatible nosql on your machine (or an EC2 host).
@@ -96,7 +106,7 @@ struct Args {
     kafka_tls_cert: Option<PathBuf>,
     #[arg(long, env = "ROLL_KAFKA_TLS_KEY", requires = "kafka_tls_cert")]
     kafka_tls_key: Option<PathBuf>,
-    /// Require an API key on the HTTP stream data plane.
+    /// Require an API key on the HTTP stream data plane (always on with ROLL_ADMIN_TOKEN).
     #[arg(long, env = "ROLL_STREAM_REQUIRE_AUTH")]
     stream_require_auth: bool,
     /// Local disk target for stream data across open partitions, in MiB (0 = only per-topic
@@ -106,9 +116,6 @@ struct Args {
     /// Keep closed partitions' data on local disk instead of serving it from object storage.
     #[arg(long, env = "ROLL_STREAM_KEEP_LOCAL")]
     stream_keep_local: bool,
-    /// Token for the tasks API (`/v1/tasks`); without one it's open, like the rest of the local API.
-    #[arg(long, env = "ROLL_TASKS_TOKEN")]
-    tasks_token: Option<String>,
     /// Run only roll queues (no Postgres control plane or proxy): broker nodes on AWS.
     #[arg(long, env = "ROLL_QUEUES_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     queues_only: bool,
@@ -137,7 +144,8 @@ struct Args {
     /// roll code previews answer on `<change>.<this domain>` (on the API port).
     #[arg(long, env = "ROLL_CODE_PREVIEW_DOMAIN", default_value = "preview.localhost")]
     code_preview_domain: String,
-    /// roll code checks running at once on this host (each in its own container).
+    /// roll code checks running at once from this node (each in its own container or Fargate
+    /// task; `ROLL_CODE_RUNNER`, see `isolation.rs`).
     #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]
     code_runner_concurrency: usize,
     /// roll code event streams (`/events`, MCP) one caller may hold open: a token, or an
@@ -257,7 +265,57 @@ struct Args {
     #[command(flatten)]
     queues: queues::QueuesArgs,
     #[command(flatten)]
+    tasks: tasks::TasksArgs,
+    #[command(flatten)]
     nosql: nosql::NosqlArgs,
+    #[command(flatten)]
+    edge: edge::EdgeArgs,
+    #[command(flatten)]
+    streams: streams::StreamArgs,
+    /// Products this node runs, comma-separated: postgres, redis, streams, tasks, storage, nosql,
+    /// queues, code (default: all). `--no-<product>` and `--<product>-only` narrow it.
+    #[arg(long, env = "ROLL_PRODUCTS", value_enum, value_delimiter = ',')]
+    products: Option<Vec<Product>>,
+    /// `text`, or `json`: one JSON object per line, with an access line per HTTP request and
+    /// CloudWatch metrics (Embedded Metric Format).
+    #[arg(long, env = "ROLL_LOG_FORMAT", value_enum, default_value_t = logs::LogFormat::Text)]
+    log_format: logs::LogFormat,
+}
+
+impl Args {
+    /// The products this node runs: one set, from `--products` and the older switches.
+    /// The system database's connections per product pool on this node
+    /// (`ROLL_SYSTEM_DB_CONNECTIONS`, split by [`cluster::DbBudget::split`]).
+    fn db_budget(&self) -> anyhow::Result<cluster::DbBudget> {
+        Ok(cluster::DbBudget::split(self.code.cluster.system_db_connections, self.products()?))
+    }
+
+    fn products(&self) -> anyhow::Result<Products> {
+        Products::resolve(products::Switches {
+            products: self.products.clone(),
+            no_storage: self.no_storage,
+            no_queues: self.queues.disabled,
+            no_nosql: self.nosql.nosql_disabled,
+            code_only: self.code_only,
+            queues_only: self.queues_only,
+            nosql_only: self.nosql.nosql_only,
+        })
+    }
+}
+
+/// Every socket is a file descriptor: client connections, each product's pools to S3, DynamoDB
+/// and Postgres, node-to-node hops. Containers start with a soft limit of 1024, which a fleet node
+/// ran out of while draining under the fleet test (`Too many open files`, then nothing could
+/// reach the next owner); the hard limit is the real ceiling, so take it, as Go's runtime does.
+fn raise_open_files_limit() {
+    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit and setrlimit only read and write the struct passed.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 && rl.rlim_cur < rl.rlim_max {
+            rl.rlim_cur = rl.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &rl);
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -267,6 +325,7 @@ fn main() -> anyhow::Result<()> {
     // → 24–31 MB (and ~90 MB → ~60 MB with 600 partitions).
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
     nosql_storage::memory::set_allocator_release(|| unsafe { libmimalloc_sys::mi_collect(true) });
+    raise_open_files_limit();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .on_thread_park(|| unsafe { libmimalloc_sys::mi_collect(false) })
@@ -281,16 +340,14 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,code_control=info,code_store=info,code_git=info,code_review=info,code_index=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,nosql_server=info,nosql_control=info,nosql_storage=info,s3_store=info,s3_server=info,s3_control=info".into()),
-        )
-        .init();
-    let args = Args::parse();
+    let mut args = Args::parse();
+    logs::init(args.log_format);
+    edge::configure(&mut args);
+    let auth = auth::Auth::new(&args)?;
+    let on = args.products()?;
+    info!(products = %on, "starting");
     let home = std::path::absolute(&args.home)?;
-    let home_abs = home.clone();
-    let storage_opts = StorageOpts::from(&args);
+    let storage_opts = storage::StorageOpts::from(&args);
     let storage = match &args.s3_bucket {
         Some(bucket) => StorageConfig::S3 {
             bucket: bucket.clone(),
@@ -301,208 +358,229 @@ async fn run() -> anyhow::Result<()> {
         None => StorageConfig::Local(home.join("objects")),
     };
 
-    if args.code_only {
-        anyhow::ensure!(!args.queues_only, "--code-only and --queues-only can't both be set");
-        let node = start_code(&args, &home, &storage, None).await?;
-        let listener = tokio::net::TcpListener::bind(args.api).await?;
-        info!(addr = %args.api, "roll code API listening");
-        let router = node.router(code_control::api::router(node.code.clone()));
-        let (close, closed) = tokio::sync::oneshot::channel::<()>();
-        let api = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .with_graceful_shutdown(async move {
-                let _ = closed.await;
-            })
-            .into_future();
-        tokio::pin!(api);
-        tokio::select! {
-            r = &mut api => r?,
-            grace = node.shutdown(&args) => finish_requests(api, close, grace).await?,
+    // Each product on starts here (ROLL_PRODUCTS); one that's off binds nothing and runs nothing.
+    let postgres = match on.on(Product::Postgres) {
+        true => Some(start_postgres(&args, &home, &storage).await?),
+        false => None,
+    };
+    let mut redis = match on.on(Product::Redis) {
+        true => Some(redis::Redis::start(&args, &storage, redis::Redis::clustered(&args)).await?),
+        false => None,
+    };
+    // roll code: same object storage; previews branch roll Postgres and Redis.
+    let code = match on.on(Product::Code) {
+        true => {
+            let data = code_preview::RollData { postgres: postgres.as_ref().map(|p| p.control.clone()), redis: redis.as_ref().map(|r| r.control.clone()) };
+            Some(start_code(&args, &auth, &home, &storage, std::sync::Arc::new(data)).await?)
         }
-        info!("shut down");
-        return Ok(());
+        false => None,
+    };
+    let cluster = cluster::handle(code.as_ref().map(|c| &*c.code), &args.code, &args.code.default_url(&args.public_host, args.api))?;
+    let metrics = logs::ClusterMetrics::start(cluster.clone());
+    // roll streams: one owner per stream in a cluster, so it starts once the cluster is joined.
+    let mut streams = match on.on(Product::Streams) {
+        true => Some(streams::start(&args, &auth, &home, &storage, &cluster).await?),
+        false => None,
+    };
+    // roll tasks on the node's cluster: every node serves it, the cell's leader runs it.
+    let tasks = match on.on(Product::Tasks) {
+        true => Some(tasks::start(&args.tasks, &auth, &home, &storage, cluster.clone()).await?),
+        false => None,
+    };
+    if let Some(r) = &redis {
+        r.join(&cluster);
+    }
+    // roll nosql: same object storage; in a cluster its databases follow their leases.
+    let nosql = match on.on(Product::Nosql) {
+        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref(), args.db_budget()?.nosql, edge::Public::of(&args).as_ref()).await?),
+        false => None,
+    };
+    // roll queues on the node's cluster: each queue runs on its lease's holder.
+    let queues = match on.on(Product::Queues) {
+        true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host, cluster.clone(), args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()), &storage, edge::Public::of(&args).as_ref()).await?),
+        false => None,
+    };
+
+    // roll storage on the node's cluster: every node serves it, the metadata's owner runs it, with
+    // its event notifications into roll queues and streams, in process.
+    let mut storage_svc = match on.on(Product::Storage) {
+        true => {
+            let sink = std::sync::Arc::new(storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: streams.as_ref().map(|s| s.broker.clone()) });
+            Some(storage::start(&storage_opts, &home, &storage, cluster.clone(), sink).await?)
+        }
+        false => None,
+    };
+
+    // The internal API: every product's routes, and a clear 404 for the ones that are off.
+    let mut router = axum::Router::new();
+    if let Some(p) = &postgres {
+        router = router.merge(api::router(p.control.clone()));
+    }
+    if let Some(r) = &redis {
+        router = router.merge(redis_control::api::router(r.control.clone()));
+    }
+    if let Some(s) = &streams {
+        router = router.merge(stream_broker::http::router(s.broker.clone()));
+    }
+    if let Some(t) = &tasks {
+        router = router.merge(t.api_routes());
+    }
+    if let Some(c) = &code {
+        router = router.merge(code_control::api::router(c.code.clone()));
+    }
+    if let Some(q) = &queues {
+        router = router.merge(q.router());
+    }
+    if let Some(st) = &storage_svc {
+        router = router.merge(st.api_routes());
+    }
+    if let Some(n) = &nosql {
+        router = router.merge(n.router());
+    }
+    // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
+    // products that are off answer before it. The gated router merges last so its fallback (401
+    // without the token) stays the fallback.
+    let router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes()).merge(auth.gate("api", router));
+    let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
+    if let Some(c) = &code {
+        router = c.router(router);
+    }
+    // In a cluster, requests from other nodes are verified first.
+    if cluster.backend_name() != "memory" {
+        router = router.layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
+    }
+    // roll cloud's public listeners (ROLL_EDGE); the internal API gains /healthz.
+    let products = edge::Products {
+        api: router.clone(),
+        pg: postgres.as_ref().map(|p| p.proxy.clone()),
+        redis: redis.as_ref(),
+        streams: streams.as_ref().map(|s| s.broker.clone()),
+        tasks: tasks.as_ref().map(|t| t.router()),
+        storage: storage_svc.as_ref().map(|s| s.s3_router()),
+        nosql: nosql.as_ref(),
+        queues: queues.as_ref(),
+        auth: &auth,
+    };
+    // Connections other nodes splice here, on every cluster node (the edge or not).
+    let splice = edge::splice_routes(&cluster, &products)?;
+    let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(edge::ClusterSingleton(cluster.clone()))).await?;
+    let mut router = edge::internal(router, edge.as_ref());
+    if let Some(s) = splice {
+        router = router.merge(s);
+    }
+    if let Some(r) = &redis {
+        router = r.internal(router);
     }
 
-    if args.nosql.nosql_only {
-        anyhow::ensure!(!args.nosql.nosql_disabled, "--nosql-only with --no-nosql leaves nothing to run");
-        let n = nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?;
-        let listener = tokio::net::TcpListener::bind(args.api).await?;
-        info!(addr = %args.api, "nosql control API listening");
-        tokio::select! {
-            r = axum::serve(listener, n.router()) => r?,
-            r = n.serve() => r?,
-            _ = shutdown_signal() => info!("shutting down"),
+    // Everything that serves until it fails; any of them ending ends the process.
+    type Serving<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>>;
+    let mut serving: Vec<Serving<'_>> = vec![Box::pin(edge::serve(edge))];
+    if let Some(p) = &postgres {
+        serving.push(Box::pin(p.proxy.clone().serve_shared()));
+        serving.push(Box::pin(async {
+            reconciler::run(p.control.clone()).await;
+            Ok(())
+        }));
+    }
+    let redis_listeners = redis.as_mut().and_then(|r| r.listeners.take());
+    if let (Some(r), Some((resp, http))) = (&redis, redis_listeners) {
+        serving.push(Box::pin(r.serve_resp(resp)));
+        serving.push(Box::pin(r.serve_rest(http)));
+    }
+    let kafka = streams.as_mut().and_then(|s| s.kafka.take());
+    if let (Some(s), Some(kafka)) = (&streams, kafka) {
+        serving.push(Box::pin(stream_broker::server::serve_on(s.broker.clone(), kafka)));
+        serving.push(Box::pin(async {
+            s.broker.clone().run().await;
+            Ok(())
+        }));
+    }
+    if let Some(st) = storage_svc.as_mut() {
+        let serve = st.serve();
+        serving.push(Box::pin(async move { Ok(serve.await?) }));
+    }
+    if let Some(q) = &queues {
+        serving.push(Box::pin(q.serve()));
+    }
+    if let Some(n) = &nosql {
+        serving.push(Box::pin(n.serve()));
+    }
+
+    let listener = tokio::net::TcpListener::bind(args.api).await?;
+    info!(addr = %args.api, products = %on, "control API listening");
+    let (close, closed) = tokio::sync::oneshot::channel::<()>();
+    // Client addresses reach handlers (roll code counts anonymous event streams per address).
+    let api = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .with_graceful_shutdown(async move {
+            let _ = closed.await;
+        })
+        .into_future();
+    tokio::pin!(api);
+    tokio::select! {
+        r = &mut api => r?,
+        (r, ..) = futures::future::select_all(serving) => r?,
+        grace = stop(code.as_ref(), queues.as_ref(), &cluster, &args) => {
+            metrics.flush();
+            // Queue clients go while the API finishes its requests: gradually, so they don't
+            // all reconnect at once (a node alone closes them quickly, as it always did).
+            let clustered = cluster.backend_name() != "memory";
+            let close_clients = async {
+                if let Some(q) = &queues {
+                    q.close_clients(if clustered { grace } else { std::time::Duration::from_secs(2) }).await;
+                }
+            };
+            let (finished, ()) = tokio::join!(finish_requests(api, close, grace), close_clients);
+            finished?;
+            if postgres.is_some() {
+                info!("computes keep running and are adopted on next start");
+            }
+            if let Some(r) = &redis {
+                r.shutdown().await?;
+            }
         }
+    }
+    if let Some(n) = &nosql {
         n.shutdown().await?;
-        return Ok(());
     }
-
-    let queues = if args.queues.disabled { None } else { Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host).await?) };
-    if args.queues_only {
-        let q = queues.ok_or_else(|| anyhow::anyhow!("--queues-only with --no-queues leaves nothing to run"))?;
-        let listener = tokio::net::TcpListener::bind(args.api).await?;
-        info!(addr = %args.api, "queues control API listening");
-        tokio::select! {
-            r = axum::serve(listener, q.router()) => r?,
-            r = q.serve() => r?,
-            _ = shutdown_signal() => info!("shutting down"),
-        }
+    if let Some(q) = &queues {
         q.shutdown().await;
-        return Ok(());
     }
+    if let Some(st) = &storage_svc {
+        st.shutdown().await;
+    }
+    if let Some(t) = &tasks {
+        t.shutdown().await;
+    }
+    if let Some(s) = &streams {
+        s.broker.sync_all().await;
+    }
+    info!("shut down");
+    Ok(())
+}
 
-    let tasks_store = std::sync::Arc::new(tasks::store::sqlite::SqliteStore::open(&home.join("tasks.db"), 4)?);
-    let tasks = tasks::Tasks::new(
-        tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), ..tasks::Config::default() },
-        tasks_store,
-    )
-    .await?;
-    let tasks_worker = tasks::start(tasks.clone());
+/// roll postgres: the control plane (computes in Docker) and the proxy.
+struct Postgres {
+    control: std::sync::Arc<Control>,
+    proxy: std::sync::Arc<Proxy<pg_control::control::ProxyRouter>>,
+}
 
-    let mut stream_config = stream_broker::Config::local(home.clone());
-    stream_config.listen = args.kafka;
-    stream_config.advertised_host = args.kafka_advertised_host.clone().unwrap_or_else(|| args.public_host.clone());
-    stream_config.advertised_port = args.kafka_advertised_port.unwrap_or(args.kafka.port());
-    stream_config.default_stream = Some(args.default_stream.clone()).filter(|s| !s.is_empty());
-    stream_config.tls = args.kafka_tls_cert.clone().zip(args.kafka_tls_key.clone()).map(|(cert, key)| TlsFiles { cert, key });
-    stream_config.http_url = format!("http://{}:{}", args.public_host, args.api.port());
-    stream_config.http_require_auth = args.stream_require_auth;
-    stream_config.local_disk_bytes = args.stream_disk_mb << 20;
-    stream_config.evict_on_unload = !args.stream_keep_local;
-
-    let mut config = Config::local(home.clone());
+async fn start_postgres(args: &Args, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Postgres> {
+    let mut config = Config::local(home.to_path_buf());
     config.public_host = args.public_host.clone();
     config.public_port = args.proxy.port();
     config.mem_mb_per_cu = args.mem_per_cu;
     config.evict_after_s = args.evict_after;
     config.internal_url = args.internal_url.clone().unwrap_or_else(|| format!("http://host.docker.internal:{}", args.api.port()));
     config.storage = storage.clone();
-    stream_config.storage = config.storage.clone();
-
+    // Behind the edge, connection strings name the endpoint's public hostname.
+    if let Some(p) = edge::Public::of(args) {
+        p.postgres(&mut config);
+    }
     let control = Control::new(config).await?;
     info!(storage = %control.objects.description, "durable storage");
     reconciler::recover(&control).await?;
-
-    let proxy = Proxy::new(
-        api::proxy_router(control.clone()),
-        ProxyConfig { listen: args.proxy, default_endpoint: args.default_endpoint.clone() },
-    );
-    // Serverless Redis: same object storage, its own node.
-    let mut rcfg = redis_control::RedisConfig::local(std::path::absolute(&args.home)?.join("redis"));
-    rcfg.node_name = args.node.clone();
-    rcfg.public_host = args.public_host.clone();
-    rcfg.resp_port = args.redis.port();
-    rcfg.http_port = args.redis_http.port();
-    let tls = match (&args.redis_tls_cert, &args.redis_tls_key) {
-        (Some(c), Some(k)) => Some(redis_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?),
-        _ => None,
-    };
-    rcfg.tls = tls.is_some();
-    let redis = redis_control::Control::new(rcfg, redis_server::persist::Objects::new(&storage)?).await?;
-    let redis_dir: std::sync::Arc<dyn redis_server::Directory> = redis.node.clone();
-    let redis_listener = tokio::net::TcpListener::bind(args.redis).await?;
-    let redis_http = tokio::net::TcpListener::bind(args.redis_http).await?;
-    info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
-    let redis_opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
-
-    let (storage_svc, s3_listener) = if args.no_storage {
-        (None, None)
-    } else {
-        let (st, l) = start_storage(&storage_opts, &home_abs, &storage).await?;
-        (Some(st), Some(l))
-    };
-    // roll nosql: same object storage, its own node.
-    let nosql = if args.nosql.nosql_disabled { None } else { Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?) };
-
-    let broker = stream_broker::Broker::new(stream_config).await?;
-    if let Some(name) = &broker.config.default_stream
-        && broker.find_stream(name).is_none()
-    {
-        broker.create_stream(name, Settings::default())?;
-    }
-    broker.txns.recover(&broker).await?;
-    let kafka = tokio::net::TcpListener::bind(args.kafka).await?;
-    // Storage event notifications into roll queues and streams, in process.
-    if let Some(st) = &storage_svc {
-        let sink = storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: broker.clone() };
-        st.server.notifier.set_sink(std::sync::Arc::new(sink));
-        st.control.set_server(st.server.clone());
-    }
-
-    // roll code: same object storage; previews branch roll Postgres and Redis.
-    let data: std::sync::Arc<dyn code_preview::DataBranches> = std::sync::Arc::new(code_preview::RollData { postgres: control.clone(), redis: redis.clone() });
-    let node = start_code(&args, &home, &storage, Some(data)).await?;
-
-    let listener = tokio::net::TcpListener::bind(args.api).await?;
-    info!(addr = %args.api, "control API listening");
-    let mut router = api::router(control.clone())
-        .merge(redis_control::api::router(redis.clone()))
-        .merge(stream_broker::http::router(broker.clone()))
-        .merge(tasks::api::router(tasks.clone()))
-        .merge(code_control::api::router(node.code.clone()));
-    if let Some(q) = &queues {
-        router = router.merge(q.router());
-    }
-    if let Some(st) = &storage_svc {
-        router = router.merge(s3_control::api::router(st.control.clone()));
-    }
-    let storage_serve = async {
-        match (&storage_svc, s3_listener) {
-            (Some(st), Some((l, api))) => tokio::select! {
-                r = s3_server::serve(l, st.server.clone()) => r,
-                r = s3_api::serve(api, st.api.clone()) => r,
-            },
-            _ => std::future::pending().await,
-        }
-    };
-    if let Some(n) = &nosql {
-        router = router.merge(n.router());
-    }
-    let nosql_serve = async {
-        match &nosql {
-            Some(n) => n.serve().await,
-            None => std::future::pending().await,
-        }
-    };
-    let router = node.router(router);
-    let queues_serve = async {
-        match &queues {
-            Some(q) => q.serve().await,
-            None => std::future::pending().await,
-        }
-    };
-
-    tokio::select! {
-        r = proxy.serve() => r?,
-        // Client addresses reach handlers (roll code counts anonymous event streams per address).
-        r = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
-        r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
-        r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
-        r = queues_serve => r?,
-        r = storage_serve => r?,
-        r = nosql_serve => r?,
-        r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
-        _ = reconciler::run(control.clone()) => {}
-        _ = broker.clone().run() => {}
-        _ = node.shutdown(&args) => {
-            info!("shutting down; computes keep running and are adopted on next start");
-            // Make every acknowledged Redis write durable before exiting.
-            redis.shipper.flush().await?;
-            redis.shipper.write_manifests(true).await?;
-        }
-    }
-    if let Some(n) = &nosql {
-        n.shutdown().await?;
-    }
-    if let Some(q) = &queues {
-        q.shutdown().await;
-    }
-    if let Some(st) = &storage_svc {
-        // Commit pending metadata and usage before exiting.
-        st.server.store.close().await;
-    }
-    tasks_worker.shutdown().await;
-    broker.sync_all().await;
-    Ok(())
+    let proxy = std::sync::Arc::new(Proxy::new(api::proxy_router(control.clone()), ProxyConfig { listen: args.proxy, default_endpoint: args.default_endpoint.clone() }));
+    Ok(Postgres { control, proxy })
 }
 
 /// roll code, running: the control plane and its previews.
@@ -513,31 +591,55 @@ struct CodeNode {
 }
 
 impl CodeNode {
-    /// The top-level router: requests for preview hosts go to the preview's container, the rest
-    /// to `router`; in a cluster, requests from other nodes are verified first.
+    /// Requests for preview hosts go to the preview's container, the rest to `router`.
     fn router(&self, router: axum::Router) -> axum::Router {
-        let router = router.layer(axum::middleware::from_fn_with_state(self.previews.clone(), code_preview::route));
-        match self.code.cluster() {
-            Some(c) => router.layer(axum::middleware::from_fn_with_state(c.clone(), code_cluster::accept_forwarded)),
-            None => router,
-        }
+        router.layer(axum::middleware::from_fn_with_state(self.previews.clone(), code_preview::route))
     }
+}
 
-    /// Wait for Ctrl-C or SIGTERM; then, in a cluster, hand every repo this node owns to the
-    /// others (the API keeps serving meanwhile) before the process exits. Returns how long the
-    /// API may then take to finish the requests it still has in flight: what's left of the drain
-    /// timeout, between 5 and 10 s (an open event stream holds the API until then).
-    async fn shutdown(&self, args: &Args) -> std::time::Duration {
-        shutdown_signal().await;
-        let started = std::time::Instant::now();
-        if self.code.cluster().is_some() {
-            info!(timeout_s = args.code.code_drain_timeout_s, "roll code: draining this node");
-            self.code.drain(args.code.drain_timeout()).await;
-            info!("roll code: drained");
+/// Wait for Ctrl-C or SIGTERM; then, in a cluster, hand everything this node owns to the others
+/// (the API keeps serving meanwhile) before the process exits. With the edge, that runs once the
+/// load balancer has let go and the public listeners stopped accepting (`edge::stopping`).
+/// Returns how long the API may then take to finish the requests it still has in flight: what's
+/// left of the drain timeout, between 5 and 10 s (an open event stream holds the API until then).
+async fn stop(code: Option<&CodeNode>, queues: Option<&queues::Queues>, cluster: &roll_cluster::Cluster, args: &Args) -> std::time::Duration {
+    shutdown_signal().await;
+    let started = std::time::Instant::now();
+    let timeout = args.code.drain_timeout();
+    let clustered = cluster.backend_name() != "memory";
+    let grace = move || timeout.saturating_sub(started.elapsed()).clamp(std::time::Duration::from_secs(5), std::time::Duration::from_secs(10));
+    let products = async {
+        if !clustered {
+            return;
         }
-        let left = args.code.drain_timeout().saturating_sub(started.elapsed());
-        left.clamp(std::time::Duration::from_secs(5), std::time::Duration::from_secs(10))
+        match code {
+            // roll code stops its own duties too.
+            Some(c) if c.code.cluster().is_some() => {
+                info!(timeout_s = timeout.as_secs(), "roll code: draining this node");
+                c.code.drain(timeout).await;
+                info!("roll code: drained");
+            }
+            _ => {
+                info!(timeout_s = timeout.as_secs(), "draining this node");
+                cluster.drain(timeout).await;
+                info!("drained");
+            }
+        }
+        // Behind the edge, queue clients are the edge's connections served here: queues closes
+        // them gradually (they reconnect to other nodes) before the edge closes what's left.
+        if args.edge.enabled
+            && let Some(q) = queues
+        {
+            q.close_clients(grace()).await;
+        }
+    };
+    let edge = edge::stopping(products).await;
+    if clustered && !edge {
+        // Without the edge, a cluster node fails its health check when its drain starts and keeps
+        // serving until the load balancer has stopped sending to it (docs/code/cluster.md).
+        tokio::time::sleep(cluster::DEREGISTER.saturating_sub(started.elapsed())).await;
     }
+    grace()
 }
 
 /// Stop taking connections and let the requests in flight finish, for up to `grace`: requests
@@ -558,95 +660,22 @@ where
     }
 }
 
-/// roll storage: its store (metadata under `<home>/storage`, blobs next to everything else's
-/// durable state), the S3 API and the control plane.
-struct Storage {
-    server: std::sync::Arc<s3_server::Server>,
-    control: std::sync::Arc<s3_control::Control>,
-    /// The developer API (`s3-api`).
-    api: std::sync::Arc<s3_api::Api>,
-}
-
-/// rolld's storage flags (taken before the other products consume theirs).
-struct StorageOpts {
-    s3: SocketAddr,
-    public_host: String,
-    node: String,
-    s3_domain: Option<String>,
-    s3_website_domain: Option<String>,
-    s3_block_public_access: bool,
-    s3_storage_class: Option<String>,
-    s3_internal_cidrs: Option<String>,
-    s3_kms: Option<bool>,
-    s3_sse_s3_at_rest: Option<bool>,
-    s3_access_key: Option<String>,
-    s3_secret_key: Option<String>,
-    s3_notify_aws: bool,
-    s3_notify_aws_endpoint: Option<String>,
-    s3_notify_aws_endpoints: Option<String>,
-    s3_replication_metrics_cloudwatch: bool,
-    s3_public_endpoint: Option<String>,
-    storage_api: SocketAddr,
-    storage_api_public_url: Option<String>,
-    s3_saml_audiences: Option<String>,
-    s3_webhook_allow_private: bool,
-    s3_cache_memory: String,
-    s3_cache_disk: String,
-    s3_cache_dir: Option<PathBuf>,
-    s3_cache_max_object: String,
-    s3_cache_kms: bool,
-    cdn_origin_secret: Option<String>,
-    cdn_cloudflare_api: String,
-}
-
-impl From<&Args> for StorageOpts {
-    fn from(a: &Args) -> Self {
-        Self {
-            s3: a.s3,
-            public_host: a.public_host.clone(),
-            node: a.node.clone(),
-            s3_domain: a.s3_domain.clone(),
-            s3_website_domain: a.s3_website_domain.clone(),
-            s3_block_public_access: a.s3_block_public_access,
-            s3_storage_class: a.s3_storage_class.clone(),
-            s3_internal_cidrs: a.s3_internal_cidrs.clone(),
-            s3_kms: a.s3_kms,
-            s3_sse_s3_at_rest: a.s3_sse_s3_at_rest,
-            s3_access_key: a.s3_access_key.clone(),
-            s3_secret_key: a.s3_secret_key.clone(),
-            s3_notify_aws: a.s3_notify_aws,
-            s3_notify_aws_endpoint: a.s3_notify_aws_endpoint.clone(),
-            s3_notify_aws_endpoints: a.s3_notify_aws_endpoints.clone(),
-            s3_replication_metrics_cloudwatch: a.s3_replication_metrics_cloudwatch,
-            s3_public_endpoint: a.s3_public_endpoint.clone(),
-            storage_api: a.storage_api,
-            storage_api_public_url: a.storage_api_public_url.clone(),
-            s3_saml_audiences: a.s3_saml_audiences.clone(),
-            s3_webhook_allow_private: a.s3_webhook_allow_private,
-            s3_cache_memory: a.s3_cache_memory.clone(),
-            s3_cache_disk: a.s3_cache_disk.clone(),
-            s3_cache_dir: a.s3_cache_dir.clone(),
-            s3_cache_max_object: a.s3_cache_max_object.clone(),
-            s3_cache_kms: a.s3_cache_kms,
-            cdn_origin_secret: a.cdn_origin_secret.clone().filter(|s| !s.is_empty()),
-            cdn_cloudflare_api: a.cdn_cloudflare_api.clone(),
-        }
-    }
-}
 
 /// Open roll code on `storage` with its flags, and start its reviewer, webhooks, GitHub App,
-/// checks and previews (`data`: what previews branch; none on a roll code-only node).
+/// checks and previews (`data`: what previews branch).
 async fn start_code(
     args: &Args,
+    auth: &auth::Auth,
     home: &std::path::Path,
     storage: &StorageConfig,
-    data: Option<std::sync::Arc<dyn code_preview::DataBranches>>,
+    data: std::sync::Arc<dyn code_preview::DataBranches>,
 ) -> anyhow::Result<CodeNode> {
     // Blobs are fsynced before a write returns (a local directory; S3 always is durable).
     let objects = pg_storage::Objects::new_durable(storage)?;
     let code_public = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
     let mut code_config = code_control::Config {
         admin_token: args.code_token.clone().filter(|t| !t.is_empty()),
+        operator_token: auth.token(),
         git_url: args.code_git_url.clone().unwrap_or_else(|| format!("{}/git", code_public.trim_end_matches('/'))),
         api_url: code_public,
         web_url: args.web_url.clone(),
@@ -663,9 +692,16 @@ async fn start_code(
         ..code_control::Config::local(home.to_path_buf())
     };
     args.code.apply(&mut code_config, &args.public_host, args.api)?;
+    if args.code.cluster.system_db_connections.is_some()
+        && let Some(d) = code_config.database.as_mut()
+    {
+        d.connections = args.db_budget()?.code;
+    }
+    // Docker on this host, or a Fargate task per run (ROLL_CODE_RUNNER; isolation.rs).
+    let isolation = isolation::setup(home, &mut code_config.sandboxes).await?;
     let code = code_control::Code::open(code_config, objects)?;
     match (&code.config.database, code.cluster()) {
-        (_, Some(c)) => info!(node = %c.node_id(), url = %c.config().advertise_url, "roll code: cluster node (Postgres)"),
+        (_, Some(c)) => info!(node = %c.node_id(), url = %c.config().advertise_url, backend = c.backend_name(), "roll code: cluster node (data on Postgres)"),
         (Some(_), None) => info!("roll code: one node on Postgres"),
         (None, None) => info!("roll code: one node on SQLite"),
     }
@@ -697,92 +733,21 @@ async fn start_code(
     if code_control::chatops::enable_from_env(&code)? {
         info!("roll code: chat ops configured");
     }
-    // Checks and previews: containers, with previews branching roll Postgres and Redis.
+    // Checks and previews: containers or Fargate tasks, with previews branching roll Postgres and Redis.
     let previews = code_preview::Previews::new(
         code_preview::PreviewConfig {
             domain: args.code_preview_domain.trim_matches('.').to_ascii_lowercase(),
             port: Some(args.api.port()),
             ..Default::default()
         },
-        data,
+        Some(data),
+        isolation.clone(),
     );
-    let checks = code_preview::start(&code, std::sync::Arc::new(code_preview::DockerRunner::new(args.code_runner_concurrency)), previews.clone());
+    let runner = code_preview::CheckRunner::new(isolation, args.code_runner_concurrency);
+    let checks = code_preview::start(&code, std::sync::Arc::new(runner), previews.clone());
     Ok(CodeNode { code, previews, _checks: checks })
 }
 
-async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<(Storage, (tokio::net::TcpListener, tokio::net::TcpListener))> {
-    let class = args.s3_storage_class.clone().or_else(|| match storage {
-        StorageConfig::S3 { endpoint: None, .. } => Some("INTELLIGENT_TIERING".into()),
-        StorageConfig::S3 { endpoint: Some(_), .. } => Some("STANDARD".into()),
-        StorageConfig::Local(_) => None,
-    });
-    let class = class.filter(|_| matches!(storage, StorageConfig::S3 { .. }));
-    // Bind first: a node that can't serve shouldn't take over the metadata log.
-    let listener = tokio::net::TcpListener::bind(args.s3).await?;
-    let api_listener = tokio::net::TcpListener::bind(args.storage_api).await?;
-    let backend = s3_store::from_config(storage, class.as_deref()).await?;
-    let mut scfg = s3_server::Config {
-        virtual_host_domain: args.s3_domain.clone(),
-        website_domain: args.s3_website_domain.clone(),
-        spool_dir: home.join("storage").join("spool"),
-        ..Default::default()
-    };
-    scfg.notify.aws = args.s3_notify_aws;
-    if args.s3_replication_metrics_cloudwatch {
-        scfg.notify.replication_metrics_interval = Some(std::time::Duration::from_secs(60));
-    }
-    scfg.notify.webhook_allow_private = args.s3_webhook_allow_private;
-    let size = |name: &str, v: &str| s3_server::cache::parse_size(v).map_err(|e| anyhow::anyhow!("{name}: {e}"));
-    scfg.cache = s3_server::CacheConfig {
-        memory_bytes: size("ROLL_S3_CACHE_MEMORY", &args.s3_cache_memory)?,
-        disk_bytes: size("ROLL_S3_CACHE_DISK", &args.s3_cache_disk)?,
-        dir: Some(args.s3_cache_dir.clone().unwrap_or_else(|| home.join("storage").join("cache"))),
-        max_object_bytes: size("ROLL_S3_CACHE_MAX_OBJECT", &args.s3_cache_max_object)?,
-        kms: args.s3_cache_kms,
-        ..Default::default()
-    };
-    scfg.cdn.origin_secret = args.cdn_origin_secret.clone();
-    scfg.cdn.cloudflare_api = args.cdn_cloudflare_api.clone();
-    scfg.notify.aws_endpoint = args.s3_notify_aws_endpoint.clone().filter(|e| !e.is_empty());
-    for pair in args.s3_notify_aws_endpoints.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        let (service, url) = pair.split_once('=').ok_or_else(|| anyhow::anyhow!("ROLL_S3_NOTIFY_AWS_ENDPOINTS: {pair} isn't <service>=<url>"))?;
-        scfg.notify.aws_endpoints.insert(service.trim().to_string(), url.trim().to_string());
-    }
-    scfg.public_endpoint = Some(args.s3_public_endpoint.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.s3.port())));
-    scfg.torrent_announce = std::env::var("ROLL_S3_TORRENT_ANNOUNCE").ok().filter(|a| !a.trim().is_empty());
-    scfg.saml_audiences = args.s3_saml_audiences.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|a| !a.is_empty()).map(str::to_string).collect();
-    let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
-    cfg.node = args.node.clone();
-    cfg.block_public_access = args.s3_block_public_access;
-    cfg.region = scfg.region.clone();
-    cfg.kms = args.s3_kms;
-    cfg.sse_s3_at_rest = args.s3_sse_s3_at_rest;
-    if let Some(d) = std::env::var("ROLL_S3_DERIVED_EXPIRY_DAYS").ok().filter(|v| !v.trim().is_empty()) {
-        cfg.derived_expiry_days = d.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_S3_DERIVED_EXPIRY_DAYS: {d} isn't a number of days"))?;
-    }
-    if let Some(n) = std::env::var("ROLL_S3_IMAGE_CONCURRENCY").ok().filter(|v| !v.trim().is_empty()) {
-        scfg.image_concurrency = n.trim().parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| anyhow::anyhow!("ROLL_S3_IMAGE_CONCURRENCY: {n} isn't a positive number"))?;
-    }
-    let store = s3_store::Store::open(cfg, backend).await?;
-    if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
-        store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;
-    }
-    std::fs::create_dir_all(&scfg.spool_dir)?;
-    if let Some(c) = &args.s3_internal_cidrs {
-        scfg.internal_cidrs = s3_server::parse_cidrs(c)?;
-    }
-    let endpoint = format!("http://{}:{}", args.public_host, args.s3.port());
-    let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), website_domain: args.s3_website_domain.clone(), storage_class: class, pricing: Default::default() };
-    let control = s3_control::Control::new(store.clone(), ccfg).await?;
-    let spool = scfg.spool_dir.clone();
-    let server = s3_server::Server::new(store, scfg);
-    info!(s3 = %args.s3, storage = %server.store.describe(), "storage (S3 API) listening");
-    let api_url = args.storage_api_public_url.clone().unwrap_or_else(|| format!("http://{}:{}{}", args.public_host, args.storage_api.port(), s3_api::PREFIX));
-    control.set_api_endpoint(api_url.clone());
-    let api = s3_api::Api::new(server.clone(), s3_api::Config { public_url: args.storage_api_public_url.clone(), spool_dir: spool, ..Default::default() });
-    info!(api = %args.storage_api, url = api_url, "storage developer API listening");
-    Ok((Storage { server, control, api }, (listener, api_listener)))
-}
 
 /// Ctrl-C, or SIGTERM from a supervisor (systemd, ECS, Kubernetes) during a rolling upgrade.
 async fn shutdown_signal() {
@@ -843,5 +808,14 @@ mod tests {
         let mut config = code_control::Config::local(PathBuf::from("/tmp/x"));
         single.code.apply(&mut config, "h", "0.0.0.0:1".parse().unwrap()).unwrap();
         assert!(config.database.is_some() && config.cluster.is_none());
+        // The stack sets only the system database: code's data goes there, unless named.
+        let system = Args::parse_from(["rolld", "--system-database", "postgres://sys/roll", "--cluster-secret", "0123456789abcdef0123"]);
+        let mut config = code_control::Config::local(PathBuf::from("/tmp/x"));
+        system.code.apply(&mut config, "h", "0.0.0.0:1".parse().unwrap()).unwrap();
+        assert_eq!(config.database.unwrap().url, "postgres://sys/roll");
+        let both = Args::parse_from(["rolld", "--system-database", "postgres://sys/roll", "--code-database", "postgres://code/roll"]);
+        let mut config = code_control::Config::local(PathBuf::from("/tmp/x"));
+        both.code.apply(&mut config, "h", "0.0.0.0:1".parse().unwrap()).unwrap();
+        assert_eq!(config.database.unwrap().url, "postgres://code/roll");
     }
 }

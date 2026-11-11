@@ -925,6 +925,17 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
   around the rules; the answer is `Published.landing {status: landed | queued | blocked |
   conflict | failed, message, blockers}`, a result, never an error. A project that isn't a roll
   code repo pushes to `origin` as before (and refuses `land`).
+- **When roll is down.** A publish's grant for a GitHub-connected repo names its GitHub side
+  (`CodeGrant.github`: owner, repo, web URL, default branch; never a credential). If the push to
+  roll fails on the way (`git::Network`), the daemon pushes the thread's branch to GitHub and
+  opens a pull request with the user's own GitHub credentials on the machine
+  (`agent_host::github`: `GH_TOKEN`/`GITHUB_TOKEN`, `gh auth token`, or git's credential helper;
+  a header in that one git process's environment, never relayed, stored or logged). The default
+  branch is never pushed. The reply is `Published` with the pull request's `url` and, with `land`,
+  `landing: queued` ("queued on GitHub as pull request #N"); the relay leaves the daemon's
+  landing alone. The daemon keeps it with the thread in `agent.db` (`github_queued`) until a
+  publish reaches roll: roll ingests the pull request as the branch's change (webhook or
+  reconcile), and publishing again links it and lands it through roll's rules.
 - **The first commit.** A repository with no commits has nothing to branch a worktree from, so its
   threads work in the project folder (`thread.create`). Publishing one of them is the repo's first
   commit, the way T3's local-mode commit and push works: the daemon commits the folder's files on
@@ -1420,6 +1431,15 @@ routes: docs/code/http-api.md, "Sandboxes".
       there. `ROLL_SANDBOX_DOCKER_DISK_LIMIT=1` caps each container's writable layer
       (`--storage-opt size=<disk_gb>G`) on storage drivers that support it (overlay2 on xfs with
       `pquota`, btrfs, zfs). agent37 enforces the size's disk itself.
+  - **fargate** (roll cloud's fleet, `ROLL_SANDBOX_BACKEND=fargate` with `ROLL_CODE_RUNNER=fargate`;
+    `code-preview/src/sandbox.rs`): a running sandbox is one Fargate task of the stack's sandbox
+    template named `roll-sbx-<id>`, with a task role that has no permissions, in the isolated
+    subnets and security group (docs/cloud/README.md, "Isolated work"). Stopped or asleep is no
+    task. The env is kept sealed with `ROLL_SECRET_KEY` in S3 (`code/sandboxes/<id>.sealed`) until
+    the sandbox is deleted, since every start needs it again, and goes to the task in a bundle
+    behind a short presigned URL, never in the `RunTask` request; `fetch` writes it to
+    `/roll/env`, which the sandbox's command removes once read. Its home is the task's storage:
+    a sleep loses it (provider logins, `agent.db`); an EFS access point per sandbox would keep it.
 - **The image** is `deploy/agent/Dockerfile`: the non-root user `roll`, the `roll` CLI built from
   this repository, git, node, ripgrep, and the codex and claude CLIs at pinned versions,
   `IS_SANDBOX=1`. Its command is `roll agent up`, which, with no login file, takes the machine token

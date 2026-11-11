@@ -7,7 +7,7 @@ HOST=${1:?usage: run.sh <host> <port>}
 PORT=${2:?usage: run.sh <host> <port>}
 TAG=v1.15.0
 REPO=https://github.com/rabbitmq/amqp091-go
-IMAGE=golang:1.25-alpine
+IMAGE=golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
 SRC=roll-qtest-amqp091-go-src
 HERE=$(cd "$(dirname "$0")" && pwd)
 

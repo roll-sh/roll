@@ -294,6 +294,52 @@ async fn proxy_speaks_postgres() {
     assert_eq!(sql_state(&err), Some(&SqlState::QUERY_CANCELED));
 }
 
+/// psql (in Docker, on the host's network) with `conninfo`: its output, or its error.
+async fn psql(conninfo: &str, sql: &str) -> Result<String, String> {
+    let out = tokio::process::Command::new("docker")
+        .args(["run", "--rm", "--network", "host", "postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395", "psql", conninfo, "-Atc", sql])
+        .output()
+        .await
+        .unwrap();
+    match out.status.success() {
+        true => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+        false => Err(String::from_utf8_lossy(&out.stderr).to_string()),
+    }
+}
+
+/// roll cloud's edge in front of the proxy: TLS by SSLRequest or directly
+/// (`sslnegotiation=direct`), the endpoint from the server name (`<id>.pg.<region>.<domain>`) or,
+/// without one, from `options=endpoint=`; no plaintext.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edge_tls_routes_by_server_name_or_options() {
+    let h = harness!();
+    let db = h.project(None).await;
+    let hosts = roll_edge::Hostnames::new("roll.test", "rollsite.test", "r1");
+    let store = roll_edge::CertStore::new();
+    store.install(&roll_edge::tls::self_signed(&hosts.all_cert_names()).unwrap().parse().unwrap());
+    let tls = roll_edge::tls::server_config(store, &[roll_edge::pg::ALPN]);
+    let proxy = Arc::new(Proxy::new(api::proxy_router(h.control.clone()), ProxyConfig { listen: "127.0.0.1:0".parse().unwrap(), default_endpoint: None }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(roll_edge::pg::serve(l, tls, Default::default(), roll_edge::Drain::new(), hosts.clone(), proxy));
+
+    let ep = &db.ep.id;
+    let base = format!("port={port} user=roll password={} dbname=main sslmode=require", db.project.password);
+    let by_name = format!("host={} hostaddr=127.0.0.1 {base}", hosts.tenant("pg", ep));
+    let by_options = format!("host=127.0.0.1 options=endpoint={ep} {base}");
+    for conninfo in [&by_name, &by_options] {
+        for negotiation in ["postgres", "direct"] {
+            let got = psql(&format!("{conninfo} sslnegotiation={negotiation}"), "SELECT 'ok', ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").await;
+            // The proxy talks to the compute in the clear; TLS ends at the edge.
+            assert_eq!(got.as_deref(), Ok("ok|f"), "{conninfo} sslnegotiation={negotiation}");
+        }
+    }
+    let plain = psql(&format!("host=127.0.0.1 options=endpoint={ep} {}", base.replace("sslmode=require", "sslmode=disable")), "SELECT 1").await;
+    assert!(plain.as_ref().is_err_and(|e| e.contains("requires TLS")), "{plain:?}");
+    let mismatch = psql(&format!("{by_name} options=endpoint=other"), "SELECT 1").await;
+    assert!(mismatch.as_ref().is_err_and(|e| e.contains("names endpoint")), "{mismatch:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_errors() {
     let h = harness!();

@@ -111,6 +111,22 @@ pub struct SandboxConfig {
 pub enum BackendConfig {
     Agent37(agent37::Agent37Config),
     Docker(docker::DockerConfig),
+    /// `ROLL_SANDBOX_BACKEND=fargate`: each sandbox its own Fargate task. The embedding (rolld)
+    /// makes the backend (code-preview's `sandbox::FargateSandboxes`) and puts it in as
+    /// [`BackendConfig::External`].
+    Fargate,
+    /// A backend made outside this crate.
+    External(ExternalBackend),
+}
+
+/// A backend made outside this crate (`Debug` shows its name).
+#[derive(Clone)]
+pub struct ExternalBackend(pub Arc<dyn SandboxBackend>);
+
+impl std::fmt::Debug for ExternalBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExternalBackend({})", self.0.name())
+    }
 }
 
 impl Default for SandboxConfig {
@@ -174,7 +190,8 @@ pub fn parse_sizes(s: &str) -> anyhow::Result<Vec<Size>> {
 
 impl SandboxConfig {
     /// From the environment:
-    /// - `ROLL_SANDBOX_BACKEND`: `agent37` (the default when `ROLL_AGENT37_API_KEY` is set) or `docker`
+    /// - `ROLL_SANDBOX_BACKEND`: `agent37` (the default when `ROLL_AGENT37_API_KEY` is set), `docker`
+    ///   or `fargate` (rolld, with `ROLL_CODE_RUNNER=fargate`; docs/cloud/README.md, "Isolated work")
     /// - agent37: `ROLL_AGENT37_API_KEY`, `ROLL_AGENT37_URL`, `ROLL_AGENT37_TEMPLATE`, `ROLL_AGENT37_REGION`
     /// - docker: `ROLL_SANDBOX_IMAGE`, `ROLL_SANDBOX_RUNTIME` (`auto`: `runsc` when Docker has it),
     ///   `ROLL_SANDBOX_DOCKER_NETWORK` (default: `roll-sandboxes`, made on first use),
@@ -224,7 +241,8 @@ impl SandboxConfig {
                 d.disk_limit = get("ROLL_SANDBOX_DOCKER_DISK_LIMIT").is_some_and(|v| v == "1" || v == "true");
                 Some(BackendConfig::Docker(d))
             }
-            Some(other) => anyhow::bail!("ROLL_SANDBOX_BACKEND is agent37, docker or none, not {other}"),
+            Some("fargate") => Some(BackendConfig::Fargate),
+            Some(other) => anyhow::bail!("ROLL_SANDBOX_BACKEND is agent37, docker, fargate or none, not {other}"),
         };
         if let Some(s) = get("ROLL_SANDBOX_SIZES") {
             c.sizes = parse_sizes(&s).map_err(|e| anyhow::anyhow!("ROLL_SANDBOX_SIZES: {e}"))?;
@@ -296,7 +314,7 @@ pub struct Tagged {
 /// Where sandboxes run. Every call is idempotent: the reconciler repeats them.
 #[async_trait]
 pub trait SandboxBackend: Send + Sync {
-    /// `agent37` or `docker` (`SandboxInfo.backend`).
+    /// `agent37`, `docker` or `fargate` (`SandboxInfo.backend`).
     fn name(&self) -> &'static str;
     /// Create sandbox `spec.id` and start it: the backend's id for it. If it exists already (a
     /// create whose answer was lost), its id.
@@ -342,6 +360,10 @@ impl Sandboxes {
             None => None,
             Some(BackendConfig::Agent37(c)) => Some(Arc::new(agent37::Agent37::new(c.clone())?)),
             Some(BackendConfig::Docker(c)) => Some(Arc::new(docker::Docker::new(c.clone()))),
+            Some(BackendConfig::External(b)) => Some(b.0.clone()),
+            Some(BackendConfig::Fargate) => {
+                anyhow::bail!("ROLL_SANDBOX_BACKEND=fargate runs sandboxes as Fargate tasks: it needs ROLL_CODE_RUNNER=fargate and its settings")
+            }
         };
         Ok(Sandboxes { backend, reconcilers: Mutex::default(), locks: Mutex::default(), sweeping: AtomicBool::new(false), stopped_links: Mutex::default() })
     }

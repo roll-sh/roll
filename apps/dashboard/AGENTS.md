@@ -16,7 +16,11 @@ tanstack.com/start before relying on what you remember.
 - Env: `VITE_ROLL_API` is the API as browsers reach it, built into the client (default
   `http://127.0.0.1:7070`). `ROLL_API_URL` is how the server reaches rolld, read at runtime
   (`serverApi()` in `lib/roll-api.ts`; read it per request, never at module scope).
-  `VITE_ROLL_TASKS_TOKEN` is a tasks token for local development.
+- Tokens never go into the bundle (no `VITE_*` secrets). The browser sends the token the user
+  signed in with (`lib/code-token.ts`): rolld's operator token (`ROLL_ADMIN_TOKEN`) goes to every
+  product's API through `operatorHeaders()` (`apiHeaders()` in `lib/roll-api.ts`), a roll code token
+  only to roll code, a storage console session only to storage. Server functions call rolld
+  anonymously (public pages must never see what the operator sees).
 
 ## Routes
 

@@ -1,0 +1,32 @@
+[package]
+name = "roll-cluster"
+description = "roll on many nodes: membership, leases with self-fencing, placement, handoff and request forwarding, on Memory, Postgres or DynamoDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aws-config.workspace = true
+aws-sdk-dynamodb.workspace = true
+axum.workspace = true
+bytes.workspace = true
+code-sql.workspace = true
+hex.workspace = true
+hmac.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+libc.workspace = true
+parking_lot.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tracing-subscriber.workspace = true

@@ -120,6 +120,13 @@ impl Cell {
         self.tenants.read().unwrap().values().cloned().collect()
     }
 
+    /// End every tenant's long polls and run waits (see [`Tasks::stop_waiting`]).
+    pub fn stop_waiting(&self) {
+        for rt in self.runtimes() {
+            rt.tasks.stop_waiting();
+        }
+    }
+
     /// Drain every tenant's deliveries.
     pub async fn shutdown(&self) {
         let rts = self.runtimes();
@@ -162,8 +169,13 @@ impl Cell {
             .with_state(self)
     }
 
-    fn is_admin(&self, headers: &axum::http::HeaderMap) -> bool {
-        let Some(token) = &self.base.token else { return true };
+    /// The node's admin: rolld's operator (`roll_auth::Operator`), or the default tenant's token.
+    /// Without either configured, open unless the deployment requires credentials.
+    fn is_admin(&self, headers: &axum::http::HeaderMap, operator: bool) -> bool {
+        if operator {
+            return true;
+        }
+        let Some(token) = &self.base.token else { return !self.base.require_auth };
         let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
         bearer.is_some_and(|b| constant_eq(b.as_bytes(), token.as_bytes()))
     }
@@ -191,7 +203,14 @@ async fn default_api(State(cell): S, req: Request) -> Response {
 }
 
 async fn tenant_api(State(cell): S, Path((id, rest)): Path<(String, String)>, req: Request) -> Response {
-    let Some(rt) = cell.runtime(&id) else { return error(StatusCode::NOT_FOUND, format!("tenant {id} not found")) };
+    let operator = roll_auth::Operator::on(req.extensions());
+    let Some(rt) = cell.runtime(&id) else {
+        // Only the operator learns which tenants exist; anyone else gets what a bad key gets.
+        if operator {
+            return error(StatusCode::NOT_FOUND, format!("tenant {id} not found"));
+        }
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid API token");
+    };
     let path = match req.uri().query() {
         Some(q) => format!("/{rest}?{q}"),
         None => format!("/{rest}"),
@@ -204,11 +223,14 @@ async fn tenant_api(State(cell): S, Path((id, rest)): Path<(String, String)>, re
     *inner.uri_mut() = uri;
     *inner.version_mut() = parts.version;
     *inner.headers_mut() = parts.headers;
+    if operator {
+        inner.extensions_mut().insert(roll_auth::Operator);
+    }
     rt.api.clone().oneshot(inner).await.into_response()
 }
 
-async fn list(State(cell): S, headers: axum::http::HeaderMap) -> Response {
-    if !cell.is_admin(&headers) {
+async fn list(State(cell): S, op: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap) -> Response {
+    if !cell.is_admin(&headers, op.is_some()) {
         return unauthorized();
     }
     let stats = cell.log.stats();
@@ -220,8 +242,8 @@ struct NewTenant {
     id: String,
 }
 
-async fn create(State(cell): S, headers: axum::http::HeaderMap, Json(b): Json<NewTenant>) -> Response {
-    if !cell.is_admin(&headers) {
+async fn create(State(cell): S, op: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap, Json(b): Json<NewTenant>) -> Response {
+    if !cell.is_admin(&headers, op.is_some()) {
         return unauthorized();
     }
     if !valid_tenant_id(&b.id) {
@@ -239,8 +261,8 @@ async fn create(State(cell): S, headers: axum::http::HeaderMap, Json(b): Json<Ne
     }
 }
 
-async fn delete(State(cell): S, headers: axum::http::HeaderMap, Path(id): Path<String>) -> Response {
-    if !cell.is_admin(&headers) {
+async fn delete(State(cell): S, op: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap, Path(id): Path<String>) -> Response {
+    if !cell.is_admin(&headers, op.is_some()) {
         return unauthorized();
     }
     if id == DEFAULT_TENANT {
@@ -258,8 +280,8 @@ struct NewKey {
     name: String,
 }
 
-async fn new_key(State(cell): S, headers: axum::http::HeaderMap, Path(id): Path<String>, Json(b): Json<NewKey>) -> Response {
-    if !cell.is_admin(&headers) {
+async fn new_key(State(cell): S, op: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap, Path(id): Path<String>, Json(b): Json<NewKey>) -> Response {
+    if !cell.is_admin(&headers, op.is_some()) {
         return unauthorized();
     }
     let Some(rt) = cell.runtime(&id) else { return error(StatusCode::NOT_FOUND, format!("tenant {id} not found")) };

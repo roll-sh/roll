@@ -6,15 +6,21 @@
 //! ten thousand mostly idle databases cost the same as one, and an idle database costs nothing.
 //!
 //! ```text
-//! redis/seg/<node>/<seq>.zst         segments: frames of (db, start offset, RESP commands)
-//! redis/db/<db>/manifest.json        where a database's state lives: snapshot + segments
-//! redis/db/<db>/snap/<offset>.rdb.zst snapshots
+//! redis/seg/<log>/<seq>.zst                 segments: frames of (db, start offset, RESP commands)
+//! redis/db/<db>/manifest.json               where a database's state lives: snapshot + segments
+//! redis/db/<db>/snap/<offset>-<log>.rdb.zst snapshots
 //! ```
 //!
-//! Manifests are rewritten lazily (every 30s for busy databases, and when a database unloads).
-//! A manifest names the node that owned the database and the last segment it had flushed; after a
-//! crash, the loader also scans that node's later segments, so nothing acknowledged as durable is
-//! lost to the lazy manifest.
+//! A log (`<node>.<random>`) has one writer: the process that started it. Manifests are
+//! rewritten lazily (every 30s for busy databases, and when a database unloads). While a database
+//! is served, its manifest names the log its owner writes and the last segment it had flushed;
+//! after a crash, the loader also scans that log's later segments, so nothing acknowledged as
+//! durable is lost to the lazy manifest. A manifest written on a clean unload names no log.
+//!
+//! Every write that decides what a database's history is happens once: segments are created,
+//! never overwritten; manifests are compare-and-swapped on the version their writer last saw; a
+//! node taking a database over fences the previous owner's log first (see [`Shipper`]). Two nodes
+//! that both believe they own a database (a lease that just moved) can't both commit.
 //!
 //! Snapshots ([`Shipper::snapshot`]) bound how much log a load replays. Branches and in-place
 //! restores embed a frozen copy of the history they start from ([`history`]), so a database's
@@ -34,7 +40,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
-pub use pg_storage::{Objects, StorageConfig};
+pub use pg_storage::{ObjectVersion, Objects, StorageConfig};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SnapRef {
@@ -85,6 +91,9 @@ pub struct Manifest {
     /// may hold newer frames.
     pub node: Option<String>,
     pub after_seq: u64,
+    /// The stored object's version when it was read (what replacing it compares against).
+    #[serde(skip)]
+    pub version: Option<ObjectVersion>,
 }
 
 /// Object storage for tests: S3 under a unique prefix when `ROLL_E2E_S3_BUCKET` is set (with
@@ -113,8 +122,9 @@ pub fn segment_key(node: &str, seq: u64) -> String {
     format!("redis/seg/{node}/{seq:016}.zst")
 }
 
-pub fn snapshot_key(db: &str, offset: u64) -> String {
-    format!("redis/db/{db}/snap/{offset:020}.rdb.zst")
+/// `log` is the writer's: no two nodes ever write the same snapshot key.
+pub fn snapshot_key(db: &str, offset: u64, log: &str) -> String {
+    format!("redis/db/{db}/snap/{offset:020}-{log}.rdb.zst")
 }
 
 /// Serializes a keyspace for snapshots (the RDB format in production).
@@ -147,6 +157,7 @@ pub fn history(m: &Manifest, source: &str, upto: u64) -> Manifest {
         end: upto,
         node: None,
         after_seq: 0,
+        version: None,
     }
 }
 
@@ -229,6 +240,9 @@ struct DbLog {
     durable: watch::Sender<u64>,
     dirty: bool,
     feed_id: u64,
+    /// The log the stored manifest names (`manifest.node` as last written): frames go into a
+    /// segment of the current log only once this is it.
+    named: Option<String>,
 }
 
 pub struct ShipperConfig {
@@ -267,16 +281,47 @@ pub struct LogStats {
 /// all of the node's later segments from garbage collection.
 const MANIFEST_LAG: u64 = 600;
 
+/// A log of this process: `<node>.<random>`. Each process writes its own, and a node whose log
+/// was fenced moves to a new one, so a log only ever has one writer (were two to pick the same
+/// name, create-only segments would fence one of them).
+fn new_log(node: &str) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static N: AtomicU64 = AtomicU64::new(0);
+    // Seeded by the OS per process.
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(redis_engine::util::now_us() as u64);
+    h.write_u64(N.fetch_add(1, Ordering::Relaxed));
+    format!("{node}.{:012x}", h.finish() & 0xffff_ffff_ffff)
+}
+
+/// What a [`Shipper`] calls with a database another node took over.
+type FencedHook = Box<dyn Fn(&str) + Send + Sync>;
+
 /// The node's durability pipeline (one per node).
+///
+/// **Fencing.** Correctness doesn't rest on who believes it owns a database: segments are written
+/// create-only, and a node taking a database over first puts an empty object at the next
+/// segment number of the log its manifest names ([`restore`]). The old owner's next segment
+/// write then fails; it moves to a new log, and before any frame of a database goes into a
+/// segment of it, that database's manifest is rewritten (compare-and-swap on the version it last
+/// wrote) to name the new log. A database whose manifest someone else wrote meanwhile was taken
+/// over: it is dropped here ([`Shipper::on_fenced`]) and its frames with it. So everything the
+/// old owner made durable before the fence is in what the new owner replayed, and nothing it
+/// writes after it can be acknowledged as durable.
 pub struct Shipper {
+    /// The node's name; its logs are `<node>.<random>`.
     pub node: String,
     pub objects: Objects,
     cfg: ShipperConfig,
+    log: Mutex<String>,
     pending: Mutex<Pending>,
     kick: Notify,
     dbs: Mutex<HashMap<String, DbLog>>,
     next_seq: AtomicU64,
     flush_lock: tokio::sync::Mutex<()>,
+    /// Serializes manifest writes (each compares against the version the last one left).
+    manifest_lock: tokio::sync::Mutex<()>,
+    fenced: std::sync::OnceLock<FencedHook>,
     /// Bytes and objects written (metering / tests).
     pub bytes_put: AtomicU64,
     pub objects_put: AtomicU64,
@@ -301,21 +346,32 @@ impl FeedSink for ShipSink {
     }
 }
 
+/// `data` without the frames of databases `keep` refuses.
+fn filter_frames(data: &[u8], keep: impl Fn(&str) -> bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    for f in frames(data) {
+        if keep(f.db) {
+            put_frame(&mut out, f.db, f.start, f.at_ms, f.data);
+        }
+    }
+    out
+}
+
 impl Shipper {
     pub async fn start(node: impl Into<String>, objects: Objects, cfg: ShipperConfig) -> anyhow::Result<Arc<Self>> {
         let node = node.into();
-        // Continue numbering after whatever this node wrote before (restart).
-        let existing = objects.list(&format!("redis/seg/{node}/")).await?;
-        let next = existing.iter().filter_map(|(k, _)| seq_of(k)).max().map_or(1, |s| s + 1);
         let me = Arc::new(Self {
+            log: Mutex::new(new_log(&node)),
             node,
             objects,
             cfg,
             pending: Mutex::new(Pending::default()),
             kick: Notify::new(),
             dbs: Mutex::new(HashMap::new()),
-            next_seq: AtomicU64::new(next),
+            next_seq: AtomicU64::new(1),
             flush_lock: tokio::sync::Mutex::new(()),
+            manifest_lock: tokio::sync::Mutex::new(()),
+            fenced: std::sync::OnceLock::new(),
             bytes_put: AtomicU64::new(0),
             objects_put: AtomicU64::new(0),
         });
@@ -342,20 +398,56 @@ impl Shipper {
         Ok(me)
     }
 
-    /// Last flushed segment number.
+    /// The log this node writes segments to now (`<node>.<random>`).
+    pub fn log(&self) -> String {
+        self.log.lock().clone()
+    }
+
+    /// Last flushed segment number of the current log.
     pub fn last_seq(&self) -> u64 {
         self.next_seq.load(Ordering::SeqCst) - 1
     }
 
-    /// Start shipping `db`'s writes. `manifest` is what it was restored from.
+    /// Called with a database's id when another node took it over (its manifest changed under
+    /// this one): it is no longer shipped, and must stop serving at once.
+    pub fn on_fenced(&self, f: impl Fn(&str) + Send + Sync + 'static) {
+        let _ = self.fenced.set(Box::new(f));
+    }
+
+    fn fence_db(&self, id: &str) {
+        if self.dbs.lock().remove(id).is_some() {
+            tracing::warn!(db = id, "another node took this database over; dropping it here");
+            if let Some(f) = self.fenced.get() {
+                f(id);
+            }
+        }
+    }
+
+    /// Start shipping `db`'s writes. `manifest` is what it was restored from ([`restore`]): it's
+    /// rewritten to name this node's log only if nobody else wrote it since.
     pub async fn attach(self: &Arc<Self>, db: &Arc<Database>, mut manifest: Manifest) -> anyhow::Result<()> {
+        // No flush in between: every frame of the database lands in a segment it records.
+        let _serial = self.flush_lock.lock().await;
+        let _one = self.manifest_lock.lock().await;
         let sink = Arc::new(ShipSink { shipper: self.clone(), db: db.id.clone() });
         let (feed_id, offset) = db.subscribe(sink);
+        let log = self.log();
         manifest.end = offset;
-        manifest.node = Some(self.node.clone());
+        manifest.node = Some(log.clone());
         manifest.after_seq = self.last_seq();
         // Record ownership right away so a crash before the first lazy manifest is recoverable.
-        self.objects.put(&manifest_key(&db.id), Bytes::from(serde_json::to_vec(&manifest)?)).await?;
+        let version = match self.cas_manifest(&db.id, &manifest).await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                db.unsubscribe(feed_id);
+                anyhow::bail!("database {} was taken over by another node while it loaded", db.id);
+            }
+            Err(e) => {
+                db.unsubscribe(feed_id);
+                return Err(e);
+            }
+        };
+        manifest.version = Some(version);
         let (durable, rx) = watch::channel(offset);
         let me = Arc::downgrade(self);
         *db.durability.lock() = Some(crate::database::Durability {
@@ -366,21 +458,40 @@ impl Shipper {
                 }
             }),
         });
-        self.dbs.lock().insert(db.id.clone(), DbLog { manifest, durable, dirty: false, feed_id });
+        self.dbs.lock().insert(db.id.clone(), DbLog { manifest, durable, dirty: false, feed_id, named: Some(log) });
         Ok(())
     }
 
     /// Stop shipping: flush, write the final manifest. Call after the database stopped serving.
+    /// The final manifest names no log: everything is in the segments it lists, so the next
+    /// owner has nothing to fence.
     pub async fn detach(&self, db: &Database) -> anyhow::Result<Manifest> {
         self.flush().await?;
+        let _one = self.manifest_lock.lock().await;
         let log = self.dbs.lock().remove(&db.id);
         let Some(log) = log else { anyhow::bail!("database {} is not attached", db.id) };
         db.unsubscribe(log.feed_id);
         *db.durability.lock() = None;
         let mut m = log.manifest;
-        m.after_seq = self.last_seq();
-        self.objects.put(&manifest_key(&db.id), Bytes::from(serde_json::to_vec(&m)?)).await?;
+        m.node = None;
+        m.after_seq = 0;
+        match self.cas_manifest(&db.id, &m).await {
+            Ok(Some(v)) => m.version = Some(v),
+            Ok(None) => tracing::warn!(db = db.id, "another node took this database over while it unloaded"),
+            // Still named by its manifest: the next owner fences this log and replays it.
+            Err(e) => tracing::warn!(db = db.id, error = %e, "the final manifest write failed; the next owner recovers from the log"),
+        }
         Ok(m)
+    }
+
+    /// Stop shipping a database without a final manifest (it couldn't be unloaded cleanly): its
+    /// manifest still names this node's log, so whoever loads it next fences the log and replays
+    /// what was flushed.
+    pub fn abandon(&self, db: &Database) {
+        if let Some(log) = self.dbs.lock().remove(&db.id) {
+            db.unsubscribe(log.feed_id);
+        }
+        *db.durability.lock() = None;
     }
 
     /// Watch the durable (flushed to object storage) stream offset of a database.
@@ -400,24 +511,93 @@ impl Shipper {
     /// Flush everything buffered as one segment.
     pub async fn flush(&self) -> anyhow::Result<()> {
         let _serial = self.flush_lock.lock().await;
-        let p = std::mem::take(&mut *self.pending.lock());
-        if p.data.is_empty() {
+        loop {
+            let mut p = std::mem::take(&mut *self.pending.lock());
+            if p.data.is_empty() {
+                return Ok(());
+            }
+            let log = self.log();
+            // Databases about to write into this log for the first time get manifests naming it.
+            let stale: Vec<String> = {
+                let dbs = self.dbs.lock();
+                p.ends.keys().filter(|id| dbs.get(*id).is_some_and(|l| l.named.as_ref() != Some(&log))).cloned().collect()
+            };
+            for id in &stale {
+                if let Err(e) = self.store_manifest(id, |_| {}).await {
+                    self.requeue(p);
+                    return Err(e);
+                }
+            }
+            // Frames of databases taken over (now, or while they waited) stay out of the log.
+            let gone = {
+                let dbs = self.dbs.lock();
+                p.ends.keys().any(|id| !dbs.contains_key(id))
+            };
+            if gone {
+                let dbs = self.dbs.lock();
+                p.data = filter_frames(&p.data, |db| dbs.contains_key(db));
+                p.ends.retain(|id, _| dbs.contains_key(id));
+                if p.data.is_empty() {
+                    continue;
+                }
+            }
+            let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+            let level = self.cfg.zstd_level;
+            let raw = p.data.clone();
+            let data = if raw.len() > 64 << 10 {
+                tokio::task::spawn_blocking(move || zstd::encode_all(&raw[..], level)).await??
+            } else {
+                zstd::encode_all(&raw[..], level)?
+            };
+            let key = segment_key(&log, seq);
+            let data = Bytes::from(data);
+            if !self.put_segment(&key, &data).await {
+                // Another node took a database of this log over and fenced it: on to a new log.
+                // These frames go there, behind manifests that name it.
+                let next = new_log(&self.node);
+                tracing::warn!(log, seq, next, "this node's redis log was fenced by a takeover; continuing on a new log");
+                *self.log.lock() = next;
+                self.next_seq.store(1, Ordering::SeqCst);
+                self.requeue(p);
+                continue;
+            }
+            self.bytes_put.fetch_add(data.len() as u64, Ordering::Relaxed);
+            self.objects_put.fetch_add(1, Ordering::Relaxed);
+            let mut dbs = self.dbs.lock();
+            for (db, end) in p.ends {
+                let Some(l) = dbs.get_mut(&db) else { continue };
+                match l.manifest.segments.last_mut() {
+                    Some(last) if last.node == log && last.seq == seq => last.end = end,
+                    _ => l.manifest.segments.push(SegRef { node: log.clone(), seq, end }),
+                }
+                l.manifest.end = end;
+                l.dirty = true;
+                l.durable.send_replace(end);
+            }
             return Ok(());
         }
-        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
-        let level = self.cfg.zstd_level;
-        let raw = p.data;
-        let data = if raw.len() > 64 << 10 {
-            tokio::task::spawn_blocking(move || zstd::encode_all(&raw[..], level)).await??
-        } else {
-            zstd::encode_all(&raw[..], level)?
-        };
-        let key = segment_key(&self.node, seq);
-        let data = Bytes::from(data);
+    }
+
+    /// Put frames back in front of whatever was buffered since.
+    fn requeue(&self, p: Pending) {
+        let mut cur = self.pending.lock();
+        let mut data = p.data;
+        data.extend_from_slice(&cur.data);
+        cur.data = data;
+        for (db, end) in p.ends {
+            cur.ends.entry(db).or_insert(end);
+        }
+    }
+
+    /// Write a segment create-only, retrying until storage answers. False: the key is taken by
+    /// something else (a fence).
+    async fn put_segment(&self, key: &str, data: &Bytes) -> bool {
         let mut backoff = Duration::from_millis(50);
         loop {
-            match self.objects.put(&key, data.clone()).await {
-                Ok(()) => break,
+            // Ours too if an earlier attempt's answer was lost (`put_new` checks the bytes).
+            let r = self.objects.put_new(key, data.clone()).await.map(|v| v.is_some());
+            match r {
+                Ok(ours) => return ours,
                 Err(e) => {
                     tracing::warn!(error = %e, key, "segment upload failed, retrying");
                     tokio::time::sleep(backoff).await;
@@ -425,39 +605,64 @@ impl Shipper {
                 }
             }
         }
-        self.bytes_put.fetch_add(data.len() as u64, Ordering::Relaxed);
-        self.objects_put.fetch_add(1, Ordering::Relaxed);
-        let mut dbs = self.dbs.lock();
-        for (db, end) in p.ends {
-            let Some(log) = dbs.get_mut(&db) else { continue };
-            match log.manifest.segments.last_mut() {
-                Some(last) if last.node == self.node && last.seq == seq => last.end = end,
-                _ => log.manifest.segments.push(SegRef { node: self.node.clone(), seq, end }),
+    }
+
+    /// Compare-and-swap `id`'s manifest from the version in `m`. `None`: someone else wrote it.
+    async fn cas_manifest(&self, id: &str, m: &Manifest) -> anyhow::Result<Option<ObjectVersion>> {
+        let raw = Bytes::from(serde_json::to_vec(m)?);
+        let key = manifest_key(id);
+        // This very write counts too, if an earlier attempt's answer was lost (`put_if` checks).
+        self.objects.put_if(&key, raw, m.version.as_ref()).await
+    }
+
+    /// Store `id`'s manifest as this node knows it (after `edit`), naming the current log. False
+    /// if the database isn't attached, or was taken over (it's dropped).
+    async fn store_manifest(&self, id: &str, edit: impl FnOnce(&mut Manifest)) -> anyhow::Result<bool> {
+        let _one = self.manifest_lock.lock().await;
+        let log = self.log();
+        let m = {
+            let mut dbs = self.dbs.lock();
+            let Some(l) = dbs.get_mut(id) else { return Ok(false) };
+            edit(&mut l.manifest);
+            l.manifest.node = Some(log.clone());
+            l.manifest.after_seq = self.last_seq();
+            l.dirty = false;
+            l.manifest.clone()
+        };
+        match self.cas_manifest(id, &m).await {
+            Ok(Some(v)) => {
+                if let Some(l) = self.dbs.lock().get_mut(id) {
+                    l.manifest.version = Some(v);
+                    l.named = Some(log);
+                }
+                Ok(true)
             }
-            log.manifest.end = end;
-            log.dirty = true;
-            log.durable.send_replace(end);
+            Ok(None) => {
+                self.fence_db(id);
+                Ok(false)
+            }
+            Err(e) => {
+                if let Some(l) = self.dbs.lock().get_mut(id) {
+                    l.dirty = true;
+                }
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     /// Rewrite manifests of databases that changed (all of them with `force`).
     pub async fn write_manifests(&self, force: bool) -> anyhow::Result<()> {
         let after = self.last_seq();
-        let todo: Vec<(String, Manifest)> = {
-            let mut dbs = self.dbs.lock();
-            dbs.iter_mut()
+        let todo: Vec<String> = {
+            let dbs = self.dbs.lock();
+            dbs.iter()
                 // An idle database's stale `after_seq` would keep this node's segments alive.
                 .filter(|(_, l)| force || l.dirty || after.saturating_sub(l.manifest.after_seq) >= MANIFEST_LAG)
-                .map(|(id, l)| {
-                    l.dirty = false;
-                    l.manifest.after_seq = after;
-                    (id.clone(), l.manifest.clone())
-                })
+                .map(|(id, _)| id.clone())
                 .collect()
         };
-        for (id, m) in todo {
-            self.objects.put(&manifest_key(&id), Bytes::from(serde_json::to_vec(&m)?)).await?;
+        for id in todo {
+            self.store_manifest(&id, |_| {}).await?;
         }
         Ok(())
     }
@@ -497,7 +702,9 @@ impl Shipper {
         let at_ms = redis_engine::util::now_ms();
         let level = self.cfg.zstd_level.max(3);
         let data = Bytes::from(tokio::task::spawn_blocking(move || zstd::encode_all(&raw[..], level)).await??);
-        let key = snapshot_key(&db.id, offset);
+        // Named after this node's log too: two nodes that both thought they owned the database
+        // never write the same snapshot key.
+        let key = snapshot_key(&db.id, offset, &self.log());
         let size = data.len() as u64;
         self.objects.put(&key, data).await?;
         self.bytes_put.fetch_add(size, Ordering::Relaxed);
@@ -506,19 +713,8 @@ impl Shipper {
         self.flush().await?;
         let snap = SnapRef { key, offset, at_ms };
         self.snapshotted(&db.id, snap.clone(), retain_ms);
-        self.write_manifest(&db.id).await?;
+        self.store_manifest(&db.id, |_| {}).await?;
         Ok(Some(snap))
-    }
-
-    async fn write_manifest(&self, db: &str) -> anyhow::Result<()> {
-        let m = {
-            let mut dbs = self.dbs.lock();
-            let Some(l) = dbs.get_mut(db) else { return Ok(()) };
-            l.dirty = false;
-            l.manifest.after_seq = self.last_seq();
-            l.manifest.clone()
-        };
-        self.objects.put(&manifest_key(db), Bytes::from(serde_json::to_vec(&m)?)).await
     }
 
     /// Record a snapshot. Snapshots older than `retain_ms` (but always the newest) are dropped
@@ -571,29 +767,91 @@ impl Until {
     }
 }
 
+/// A database's manifest, with the version a compare-and-swap of it needs.
 pub async fn read_manifest(objects: &Objects, id: &str) -> anyhow::Result<Option<Manifest>> {
-    match objects.get(&manifest_key(id)).await? {
-        Some(raw) => Ok(Some(serde_json::from_slice(&raw)?)),
+    match objects.get_versioned(&manifest_key(id)).await? {
+        Some((raw, v)) => Ok(Some(Manifest { version: Some(v), ..serde_json::from_slice(&raw)? })),
         None => Ok(None),
     }
 }
 
-/// Load a database's latest state from object storage. Returns its manifest, with `end` set to
-/// the restored offset (a database without a manifest starts empty).
+/// Write a manifest that must not exist yet (a new branch, an archive). False: it does.
+pub async fn create_manifest(objects: &Objects, id: &str, m: &Manifest) -> anyhow::Result<bool> {
+    Ok(objects.put_if(&manifest_key(id), Bytes::from(serde_json::to_vec(m)?), None).await?.is_some())
+}
+
+/// Replace a manifest read as `m.version` (`None`: one that doesn't exist yet). False: it
+/// changed meanwhile.
+pub async fn replace_manifest(objects: &Objects, id: &str, m: &Manifest) -> anyhow::Result<bool> {
+    Ok(objects.put_if(&manifest_key(id), Bytes::from(serde_json::to_vec(m)?), m.version.as_ref()).await?.is_some())
+}
+
+/// Segments of `log` after `after_seq` (and before `fence`), in order, without fences.
+pub async fn later_segments(objects: &Objects, log: &str, after_seq: u64, fence: Option<u64>) -> anyhow::Result<Vec<u64>> {
+    let mut later: Vec<u64> = objects
+        .list(&format!("redis/seg/{log}/"))
+        .await?
+        .iter()
+        .filter(|(_, size)| *size > 0)
+        .filter_map(|(k, _)| seq_of(k))
+        .filter(|s| *s > after_seq && fence.is_none_or(|f| *s < f))
+        .collect();
+    later.sort_unstable();
+    Ok(later)
+}
+
+/// Fence `log` (a database's last owner's): put an empty object at its next segment number, so
+/// its writer can't add to it any more. Returns that number: every segment of the log below it
+/// is all there will ever be. A log fenced already keeps its fence.
+pub async fn fence_log(objects: &Objects, log: &str, after_seq: u64) -> anyhow::Result<u64> {
+    loop {
+        let listed: Vec<(u64, u64)> = objects.list(&format!("redis/seg/{log}/")).await?.iter().filter_map(|(k, size)| Some((seq_of(k)?, *size))).collect();
+        if let Some(fence) = listed.iter().filter(|(_, size)| *size == 0).map(|(s, _)| *s).min() {
+            return Ok(fence);
+        }
+        let next = listed.iter().map(|(s, _)| *s).max().unwrap_or(0).max(after_seq) + 1;
+        if objects.put_new(&segment_key(log, next), Bytes::new()).await?.is_some() {
+            return Ok(next);
+        }
+        // The writer got there first (or this very fence, its answer lost): look again.
+    }
+}
+
+/// Load a database's latest state from object storage to serve it (the node is taking it on).
+/// The log its manifest names (its last owner's, which may still be running) is fenced first
+/// ([`fence_log`]), so the state loaded holds every write that owner ever made durable. Returns
+/// its manifest, with `end` set to the restored offset and the version [`Shipper::attach`]
+/// compares against (a database without a manifest starts empty).
 pub async fn restore(objects: &Objects, db: &Arc<Database>, codec: Option<&dyn SnapshotCodec>) -> anyhow::Result<Manifest> {
     let id = db.id.clone();
-    restore_at(objects, &id, db, Until::LATEST, codec).await
+    let mut st = Replay { applied: 0, dbsel: 0, last_ms: 0 };
+    let mut m = match read_manifest(objects, &id).await? {
+        Some(m) => {
+            let fence = match &m.node {
+                Some(log) => Some(fence_log(objects, log, m.after_seq).await?),
+                None => None,
+            };
+            let version = m.version.clone();
+            let mut m = replay(objects, &id, m, db, Until::LATEST, codec, &mut st, fence).await?;
+            m.version = version;
+            m
+        }
+        None => Manifest::default(),
+    };
+    db.set_offset(st.applied);
+    m.end = st.applied;
+    Ok(m)
 }
 
 /// Load the state of database `source` as of `until` into `db` (point-in-time restore when
-/// `source` is `db`'s own id, branching when it's another database): the newest snapshot the
-/// target allows, then log frames up to the target. Branches restore their parent's history up
-/// to the branch point first. Also scans the segments that the last owning node wrote after the
-/// manifest (crash recovery).
+/// `source` is `db`'s own id, branching when it's another database), reading only: the newest
+/// snapshot the target allows, then log frames up to the target. Branches restore their parent's
+/// history up to the branch point first. Also reads the segments that the last owning node wrote
+/// after the manifest (crash recovery, or a primary that is running).
 pub async fn restore_at(objects: &Objects, source: &str, db: &Arc<Database>, until: Until, codec: Option<&dyn SnapshotCodec>) -> anyhow::Result<Manifest> {
     let mut st = Replay { applied: 0, dbsel: 0, last_ms: 0 };
     let mut m = match read_manifest(objects, source).await? {
-        Some(m) => replay(objects, source, m, db, until, codec, &mut st).await?,
+        Some(m) => replay(objects, source, m, db, until, codec, &mut st, None).await?,
         None => Manifest::default(),
     };
     db.set_offset(st.applied);
@@ -610,6 +868,7 @@ struct Replay {
 /// Segments fetched ahead while replaying (cold-start latency is mostly GET round trips).
 const PREFETCH: usize = 8;
 
+#[allow(clippy::too_many_arguments)]
 fn replay<'a>(
     objects: &'a Objects,
     id: &'a str,
@@ -618,6 +877,7 @@ fn replay<'a>(
     until: Until,
     codec: Option<&'a dyn SnapshotCodec>,
     st: &'a mut Replay,
+    fence: Option<u64>,
 ) -> futures::future::BoxFuture<'a, anyhow::Result<Manifest>> {
     Box::pin(async move {
         let stream = m.stream.clone().unwrap_or_else(|| id.to_string());
@@ -638,21 +898,14 @@ fn replay<'a>(
                 Some(h) => *h,
                 None => read_manifest(objects, &base.db).await?.unwrap_or_default(),
             };
-            replay(objects, &base.db, parent, db, lim, codec, st).await?;
+            replay(objects, &base.db, parent, db, lim, codec, st, None).await?;
             if st.applied < base.offset && until.offset.is_none_or(|o| o >= base.offset) && until.time_ms.is_none() {
                 anyhow::bail!("{id}: parent {} history ends at {} before the branch point {}", base.db, st.applied, base.offset);
             }
         }
         let mut segs = m.segments.clone();
         if let Some(node) = &m.node {
-            let mut later: Vec<u64> = objects
-                .list(&format!("redis/seg/{node}/"))
-                .await?
-                .iter()
-                .filter_map(|(k, _)| seq_of(k))
-                .filter(|s| *s > m.after_seq)
-                .collect();
-            later.sort_unstable();
+            let later = later_segments(objects, node, m.after_seq, fence).await?;
             segs.extend(later.into_iter().map(|seq| SegRef { node: node.clone(), seq, end: 0 }));
         }
         let mut seen = HashSet::new();

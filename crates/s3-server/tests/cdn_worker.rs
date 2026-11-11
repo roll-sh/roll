@@ -25,7 +25,7 @@ use std::time::Duration;
 
 const ORIGIN_SECRET: &str = "edge-origin-secret-0123456789";
 const JWT_SECRET: &str = "jwt-secret-for-tokens";
-const IMAGE: &str = "node:22-bookworm-slim";
+const IMAGE: &str = "node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d";
 
 fn required() -> bool {
     std::env::var("ROLL_CDN_REQUIRED").is_ok_and(|v| v == "1")
@@ -212,6 +212,7 @@ async fn edge() -> Option<Edge> {
             ("ROLL_CDN_JWT_SECRET", JWT_SECRET.into()),
             ("ROLL_CDN_USAGE_FLUSH_MS", "3600000".into()),
             ("ROLL_TEST_HOOKS", "1".into()),
+            ("ROLL_BUCKET_DOMAIN", "cdn.test".into()),
         ],
     );
     *cf.worker.lock().unwrap() = w.url.clone();
@@ -270,6 +271,23 @@ async fn the_edge_caches_checks_tokens_purges_and_reports() {
     let r = e.get("/pub/img/a%20b.png").await;
     assert_eq!(r.headers()["x-roll-cdn-cache"], "MISS");
     assert_eq!(r.bytes().await.unwrap().to_vec(), v2);
+
+    // ---- Buckets by host (`<bucket>.<ROLL_BUCKET_DOMAIN>/<key>`), cached as their path-style
+    // URL on that domain; previews' hosts are never buckets.
+    let by_host = |host: &str, path: &str| e.http.get(format!("{}{path}", e.w.url)).header("host", host.to_string()).send();
+    let r = by_host("pub.cdn.test", "/img/a%20b.png").await.unwrap();
+    assert_eq!((r.status().as_u16(), r.headers()["x-roll-cdn-cache"].to_str().unwrap().to_string()), (200, "MISS".to_string()));
+    assert_eq!(r.bytes().await.unwrap().to_vec(), v2);
+    let pulls = e.origin_requests();
+    for _ in 0..20 {
+        if by_host("pub.cdn.test", "/img/a%20b.png").await.unwrap().headers()["x-roll-cdn-cache"] == "HIT" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(by_host("pub.cdn.test", "/img/a%20b.png").await.unwrap().headers()["x-roll-cdn-cache"], "HIT");
+    assert!(e.origin_requests() <= pulls + 1);
+    assert_eq!(by_host("chg-pub.cdn.test", "/img/a%20b.png").await.unwrap().status(), 404, "not a bucket: the path names one");
 
     // ---- Immutable URLs: a year at the edge and in browsers.
     let meta = t.store.get_object("pub", "img/a b.png").unwrap();

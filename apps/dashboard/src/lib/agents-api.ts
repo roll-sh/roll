@@ -1576,6 +1576,15 @@ export interface CodeGrant {
   /** The one branch a write grant pushes (a thread's branch, or an empty repo's default branch). */
   branch?: string;
   expires_at: Millis;
+  /** A connected repo's GitHub side: where a publish goes as a pull request while roll is down. */
+  github?: GrantGithub;
+}
+
+export interface GrantGithub {
+  owner: string;
+  repo: string;
+  url: string;
+  default_branch: string;
 }
 
 // ── device login ──
@@ -2472,7 +2481,17 @@ export const relayFrameD: Decoder<RelayFrame> = tagged("type", {
     id: str,
     by: str,
     command: commandD,
-    grant: opt(obj<CodeGrant>({ repo: repoRefD, url: str, token: str, write: bool, branch: optional(str), expires_at: int })),
+    grant: opt(
+      obj<CodeGrant>({
+        repo: repoRefD,
+        url: str,
+        token: str,
+        write: bool,
+        branch: optional(str),
+        expires_at: int,
+        github: optional(obj<GrantGithub>({ owner: str, repo: str, url: str, default_branch: str })),
+      }),
+    ),
   }),
   ping: obj<object>({}),
 } satisfies Record<RelayFrame["type"], Decoder<object>>);

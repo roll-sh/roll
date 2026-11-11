@@ -5,7 +5,7 @@
 //! with long polling (`wait_ms`), stateless multi-partition cursors, server-managed groups
 //! (see [`super::leases`]) and Server-Sent Events.
 
-use super::{Api, ApiError, ApiResult, S, data_stream, leases};
+use super::{Api, ApiError, ApiResult, Caller, S, data_stream, leases};
 use crate::broker::{Broker, Stream, Topic};
 use crate::error::KafkaError;
 use crate::handlers::fetch::read_partition;
@@ -15,7 +15,7 @@ use crate::{partitioner, records};
 use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -149,11 +149,16 @@ pub async fn produce_records(api: &Api, stream: &Arc<Stream>, topic: &Arc<Topic>
         }
     }
     let results = futures::future::join_all(waits.into_iter().map(|(idx, d)| async move { (idx, d.wait(timeout).await) })).await;
-    for (idx, ok) in results {
-        if !ok {
-            for i in idx {
-                out[i] = Some(Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "request_timed_out", "timed out waiting for the write to become durable")));
+    for (idx, r) in results {
+        let err = match r {
+            Ok(()) => continue,
+            Err(kafka_protocol::ResponseError::NotLeaderOrFollower) => {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "not_leader_or_follower", "the stream moved to another node before the write became durable; retry")
             }
+            Err(_) => ApiError::new(StatusCode::GATEWAY_TIMEOUT, "request_timed_out", "timed out waiting for the write to become durable"),
+        };
+        for i in idx {
+            out[i] = Some(Err(ApiError { status: err.status, code: err.code.clone(), message: err.message.clone(), extra: None }));
         }
     }
     out.into_iter().map(|r| r.expect("every record has a result")).collect()
@@ -307,7 +312,7 @@ fn parse_body(content_type: &str, body: &Bytes, q: &ProduceQuery) -> ApiResult<V
     Ok(vec![defaults(Incoming { partition: None, record: NewRecord { key: None, value: Some(body.clone()), headers: vec![], timestamp: None } })])
 }
 
-async fn produce(State(api): S, Path((s, t)): Path<(String, String)>, Query(q): Query<ProduceQuery>, headers: HeaderMap, body: Bytes) -> ApiResult<Response> {
+async fn produce(State(api): S, Path((s, t)): Path<(String, String)>, Query(q): Query<ProduceQuery>, headers: Caller, body: Bytes) -> ApiResult<Response> {
     let stream = data_stream(&api, &headers, &s)?;
     let acks = Acks::parse(q.acks.as_deref())?;
     let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -604,7 +609,7 @@ async fn start_offset(b: &Broker, stream: &Stream, topic: &Topic, p: i32, q: &Re
 }
 
 /// `GET .../partitions/{p}/records`: stateless reads by offset.
-async fn read_one(State(api): S, Path((s, t, p)): Path<(String, String, i32)>, Query(q): Query<ReadQuery>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+async fn read_one(State(api): S, Path((s, t, p)): Path<(String, String, i32)>, Query(q): Query<ReadQuery>, headers: Caller) -> ApiResult<Json<Value>> {
     let stream = data_stream(&api, &headers, &s)?;
     let topic = super::topic_of(&stream, &t)?;
     let offset = start_offset(&api.b, &stream, &topic, p, &q, q.committed()?).await?;
@@ -702,7 +707,7 @@ pub async fn read_many(
 }
 
 /// `GET .../topics/{t}/records`: all partitions, with a cursor (stateless) or a group.
-async fn read_topic(State(api): S, Path((s, t)): Path<(String, String)>, Query(q): Query<ReadQuery>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+async fn read_topic(State(api): S, Path((s, t)): Path<(String, String)>, Query(q): Query<ReadQuery>, headers: Caller) -> ApiResult<Json<Value>> {
     let stream = data_stream(&api, &headers, &s)?;
     let topic = super::topic_of(&stream, &t)?;
     if let Some(group) = q.group.clone() {
@@ -743,7 +748,7 @@ async fn initial_positions(b: &Broker, stream: &Stream, topic: &Topic, q: &ReadQ
 
 /// `GET .../topics/{t}/tail`: Server-Sent Events, one `record` event per record. Event ids are
 /// cursors, so `Last-Event-ID` resumes where a dropped connection stopped.
-async fn tail(State(api): S, Path((s, t)): Path<(String, String)>, Query(mut q): Query<ReadQuery>, headers: HeaderMap) -> ApiResult<Response> {
+async fn tail(State(api): S, Path((s, t)): Path<(String, String)>, Query(mut q): Query<ReadQuery>, headers: Caller) -> ApiResult<Response> {
     let stream = data_stream(&api, &headers, &s)?;
     let topic = super::topic_of(&stream, &t)?;
     let opts = q.opts()?;
@@ -802,7 +807,7 @@ struct CommitBody {
     offsets: Vec<CommitOffset>,
 }
 
-async fn commit(State(api): S, Path((s, g)): Path<(String, String)>, headers: HeaderMap, Json(body): Json<CommitBody>) -> ApiResult<Json<Value>> {
+async fn commit(State(api): S, Path((s, g)): Path<(String, String)>, headers: Caller, Json(body): Json<CommitBody>) -> ApiResult<Json<Value>> {
     let stream = data_stream(&api, &headers, &s)?;
     if api.b.groups.is_active(&stream.id, &g) {
         return Err(ApiError::conflict(format!("group {g} has Kafka members; commit through the Kafka protocol")));
@@ -821,7 +826,7 @@ async fn commit(State(api): S, Path((s, g)): Path<(String, String)>, headers: He
 }
 
 /// Leave a group: commit what was delivered (in `auto` mode) and free the partitions now.
-async fn leave(State(api): S, Path((s, g, c)): Path<(String, String, String)>, headers: HeaderMap) -> ApiResult<StatusCode> {
+async fn leave(State(api): S, Path((s, g, c)): Path<(String, String, String)>, headers: Caller) -> ApiResult<StatusCode> {
     let stream = data_stream(&api, &headers, &s)?;
     let rows = api.leases.leave(&stream.id, &g, &c);
     if !rows.is_empty() {

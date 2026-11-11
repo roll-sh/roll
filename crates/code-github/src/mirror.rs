@@ -18,6 +18,7 @@ pub struct MirrorConfig {
     /// …or once the oldest unpushed landing is this old, even if landings keep coming.
     pub max_delay: Duration,
     pub backoff_initial: Duration,
+    /// The longest wait between failed pushes: a GitHub that comes back is caught up within it.
     pub backoff_max: Duration,
 }
 
@@ -27,7 +28,7 @@ impl Default for MirrorConfig {
             debounce: Duration::from_secs(2),
             max_delay: Duration::from_secs(10),
             backoff_initial: Duration::from_secs(1),
-            backoff_max: Duration::from_secs(300),
+            backoff_max: Duration::from_secs(30),
         }
     }
 }

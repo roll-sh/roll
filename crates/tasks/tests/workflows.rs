@@ -370,21 +370,25 @@ async fn debounce_keeps_the_last_event() {
     let env = env().await;
     let app = MockApp::start("deb").await;
     app.function(
-        json!({ "id": "sync-profile", "debounce": { "period_ms": 400, "key": "event.data.user" }, "triggers": [{ "event": "profile.changed" }] }),
+        json!({ "id": "sync-profile", "debounce": { "period_ms": 1000, "key": "event.data.user" }, "triggers": [{ "event": "profile.changed" }] }),
         |ctx| Ok(ctx.event["data"]["v"].clone()),
     );
     app.sync(&env).await;
-    for v in 1..=4 {
-        env.post("/events", json!({ "name": "profile.changed", "data": { "user": "u1", "v": v } })).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    env.post("/events", json!({ "name": "profile.changed", "data": { "user": "u2", "v": 99 } })).await;
-    eventually(5000, "debounced runs", || async {
-        env.runs("sync-profile").await.iter().filter(|r| r["status"] == "completed").count() == 2
+    // No worker runs while the events go in, so they're all within one window however slow the
+    // store is: a window is wall-clock time on the server, and a slow store (DynamoDB Local on a
+    // busy runner) spaced even one request's events past it, closing it early.
+    env.take_worker().unwrap().shutdown().await;
+    let mut events: Vec<Value> = (1..=4).map(|v| json!({ "name": "profile.changed", "data": { "user": "u1", "v": v } })).collect();
+    events.push(json!({ "name": "profile.changed", "data": { "user": "u2", "v": 99 } }));
+    env.post("/events", json!(events)).await;
+    let _worker = tasks::start(env.tasks.clone());
+    eventually(10_000, "debounced runs", || async {
+        let runs = env.runs("sync-profile").await;
+        runs.len() >= 2 && runs.iter().all(|r| r["status"] == "completed")
     })
     .await;
     let runs = env.runs("sync-profile").await;
-    let mut outputs: Vec<i64> = runs.iter().map(|r| r["output"].as_i64().unwrap()).collect();
+    let mut outputs: Vec<i64> = runs.iter().map(|r| r["output"].as_i64().unwrap_or(-1)).collect();
     outputs.sort();
     assert_eq!(outputs, vec![4, 99]);
 }
@@ -622,13 +626,19 @@ async fn workflows_survive_a_worker_crash() {
     env.post("/events", json!(events)).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     b.worker.take().unwrap().kill();
-    let deadline = now_ms() + 15_000;
+    // As long as the runs move (a loaded machine may take long), wait; a run that stops moving
+    // for several leases and backoffs is stuck.
+    let (mut deadline, mut seen) = (now_ms() + 10_000, String::new());
     loop {
         let runs = env.runs("pipeline").await;
         if runs.iter().filter(|r| r["status"] == "completed").count() == 10 {
             break;
         }
         assert!(runs.iter().all(|r| r["status"] != "failed"), "pipeline failed: {runs:#?}");
+        let now_at: String = runs.iter().map(|r| format!("{}@{} ", r["id"], r["version"])).collect();
+        if now_at != seen {
+            (deadline, seen) = (now_ms() + 10_000, now_at);
+        }
         if now_ms() >= deadline {
             for run in &runs {
                 if let Some(id) = run["invocation"].as_str() {

@@ -1,0 +1,37 @@
+name: fleet
+
+# roll cloud end to end (scripts/test-fleet.sh): every product through a local fleet of rolld
+# containers behind HAProxy, under load, through a SIGKILL, a rolling restart and a scale-out.
+# Slow (~20 min with the image build); run on demand.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: fleet-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  e2e:
+    # arm64, like the fleet (Graviton).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: scripts/test-fleet.sh
+        env:
+          ROLL_E2E_WORK: ${{ runner.temp }}/fleet
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-logs
+          path: ${{ runner.temp }}/fleet/fleet.log
+          if-no-files-found: ignore

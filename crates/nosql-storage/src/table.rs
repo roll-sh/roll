@@ -709,6 +709,11 @@ impl Table {
     // ---- compaction ----
 
     /// Turns background compaction of this table on or off (major compactions still run).
+    /// Whether background compaction is on for this table (`set_auto_compaction`).
+    pub fn auto_compaction(&self) -> bool {
+        !self.auto_compaction_off.load(AO::SeqCst)
+    }
+
     pub fn set_auto_compaction(&self, on: bool) {
         self.auto_compaction_off.store(!on, AO::SeqCst);
         if on {

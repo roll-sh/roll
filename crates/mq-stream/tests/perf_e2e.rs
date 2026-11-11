@@ -23,7 +23,7 @@ async fn stream_perf_test() {
     let uri = format!("rabbitmq-stream://guest:guest@host.docker.internal:{}/%2f", addr.port());
     let out = tokio::task::spawn_blocking(move || {
         Command::new("docker")
-            .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway", "pivotalrabbitmq/stream-perf-test"])
+            .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway", "pivotalrabbitmq/stream-perf-test:1.8.0@sha256:50b9308152b37656a2046d75b17d8b71fd5500ce62dae7ac4a07cf74666dbc80"])
             .args(["--uris", &uri, "--time", &secs])
             .output()
             .expect("docker run")

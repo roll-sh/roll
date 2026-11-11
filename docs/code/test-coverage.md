@@ -212,6 +212,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | creates are retried on capacity errors, a create whose answer was lost is adopted by roll's id (never made twice), a refused create fails with agent37's reason and isn't retried; always on (an instance that stopped is started again); an instance agent37 lost fails the sandbox; removing a sandbox's machine deletes the sandbox | `sandboxes.rs::creates_are_retried_adopted_or_failed_and_limits_hold` |
 | running time is metered per UTC month (split at month boundaries) and priced from the size's hourly price (one hour of 3¢ is $0.03, 90 minutes $0.045) | `sandboxes.rs::a_sandbox_runs_on_agent37_from_create_to_delete`, `code-control/src/agents/sandbox/mod.rs::months_split_at_their_boundaries` |
 | the agent37 client: a refused key is an error that names the variable, not the key; answers are bounded; unreachable is retryable; statuses and errors map to retry or not; ids are checked before they go in a path | `sandboxes.rs::the_agent37_client_is_bounded_and_keeps_its_key`, `code-control/src/agents/sandbox/agent37.rs::statuses_map_to_roll_states`, `code-control/src/agents/sandbox/agent37.rs::errors_say_whether_to_retry`, `code-control/src/agents/sandbox/agent37.rs::ids_are_checked_before_they_go_in_a_path` |
+| the fargate backend (fake ECS, S3 in process or MinIO): a sandbox is a task of the sandbox template named after it (a create whose answer was lost finds it), its env sealed in S3 and handed over in a bundle (never in `RunTask`, never in the clear in the bucket); asleep is no task, waking starts a new one with the same env; delete stops it and drops what was kept; `roll-sbx-<id>` ↔ `sbx_<id>` | `code-preview/tests/fargate.rs::sandboxes_are_tasks_that_start_again_with_their_sealed_env`, `code-preview/src/sandbox.rs::names_map_to_sandboxes` |
 | the docker backend (real Docker; skipped without it): no new privileges, all capabilities dropped, pids/memory (no swap)/CPU limits, an init, a named home volume, no host network or Docker socket, env through a file that's removed; idempotent create, stop, start, delete with the volume | `sandboxes.rs::the_docker_backend_runs_hardened_containers`, `code-control/src/agents/sandbox/docker.rs::run_args_are_hardened_and_carry_no_secrets` |
 | the sandbox image (`deploy/agent/Dockerfile`; opt-in with `ROLL_SANDBOX_TEST_IMAGE`): as `roll` without capabilities, `roll agent up` takes the token from its env and comes online with codex and claude installed | `sandboxes.rs::the_sandbox_image_comes_online_with_its_token` |
 | config from the environment (backend, sizes, limit), the agent37 key never in `Debug`; an owner's env is validated (names, reserved `ROLL_*`/`AGENT37_*`, sizes, one line) and the spec's `Debug` shows only names | `code-control/src/agents/sandbox/mod.rs::sizes_and_env_config`, `code-control/src/agents/sandbox/api.rs::env_is_checked` |
@@ -233,6 +234,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `Thread.work`: claimed for the thread (as `agent:<machine>`), 204 when none is left, let go, a given `owner/repo#N` taken; kept across the daemon's updates | `agents_code.rs::publishing_does_the_threads_work_item` |
 | a thread's claim is kept alive (renewed past its lease) while the thread runs; it runs out like any other once the thread sits idle past the grace, or its machine goes offline | `agents_code.rs::a_working_threads_claim_stays_alive_and_lapses_when_it_stops` |
 | `thread.publish` links the change to the thread's work item (`PATCH /v1/code/changes/{id}` `work_item`): the item goes to `review`, lists the change, and is `done` once the change lands through the queue; another item, an unknown one, a non-string or a landed change refused | `agents_code.rs::publishing_does_the_threads_work_item` |
+| `thread.publish` while roll can't be reached, in a GitHub-connected repo (the grant names its GitHub side): the thread's branch goes to GitHub and a pull request opens with the user's own token, the reply's landing is `queued`, the default branch is never pushed | `agent-host/tests/threads.rs::publish_falls_back_to_github_while_roll_is_down` |
 | the first publish of an empty repo (a thread in the project folder, no worktree possible): the grant names the default branch while it's absent, the folder's files become its first commit with the same id (it lands as pushed), a clone that's too late gets a 400 ("has commits now"), a repo that requires reviews gets it as a change on `roll/first-commit` (blocked until reviewed) the thread follows | `agents_code.rs::the_first_publish_of_an_empty_repo_starts_its_default_branch` |
 | auto-pull of a roll code project: turning it on (`project.update`, with a fetch grant) pulls at once; a change landing on the default branch is pulled by itself (the relay sends `project.pull` with a fetch-only grant; the grant is never written down); a checkout with local changes is skipped and left as it is; `project.pull` by hand answers `pulled`; agent tokens can't change settings or pull (403) | `agents_code.rs::roll_code_projects_with_auto_pull_follow_their_default_branch`, `code-control/src/agents/policy.rs::agents_drive_threads_but_never_reach_past_them` |
 
@@ -320,7 +322,6 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | work: create, priority and label validation, claim (priority order, labels, 204), lease expiry, heartbeat (keeps the lease length), release, complete, patch, someone else's lease (409) | `api.rs::changes_and_work`, `contract.rs::lookups_by_number_and_id`, `contract.rs::errors_are_json_with_the_right_status` |
 | SSE: `landed`, `change`, `work`, `check`, `preview` shapes, per-repo isolation, private feeds | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks`, `routes.rs::every_repo_route_follows_the_auth_matrix` |
 | errors: JSON `{error}` with the right status for bad JSON, unknown revs, bad paths, bad enums and every 404 | `contract.rs::errors_are_json_with_the_right_status` |
-| CORS: preflight with `Authorization`, `x-roll-changeset` exposed | `contract.rs::cors_for_the_browser` |
 | GitHub endpoints without an App: info, installations, setup redirect, webhook 404, connect refused | `contract.rs::open_mode_makes_everyone_admin`, `contract.rs::auth_matrix`, `routes.rs::bad_tokens_are_401_on_every_route` |
 | restart: owners, repos, redirects, changes, checks, work items, the number counter | `contract.rs::state_survives_a_restart` |
 | blame: per-line commits equal `git blame --first-parent` of a pushed history with a merge; author/time/message per range; cached; a revision is echoed; 404 file and revision | `webhooks.rs::blame_matches_git` |
@@ -338,8 +339,8 @@ Open mode: `contract.rs::open_mode_makes_everyone_admin`.
 
 | Caller | Read public | Read private | Write public | Write private |
 | --- | --- | --- | --- | --- |
-| open mode (no `ROLL_CODE_TOKEN`) | ✓ | ✓ | ✓ | ✓ |
-| admin token | ✓ | ✓ | ✓ | ✓ |
+| open mode (no `ROLL_CODE_TOKEN` or `ROLL_ADMIN_TOKEN`) | ✓ | ✓ | ✓ | ✓ |
+| admin token (`ROLL_CODE_TOKEN`, or rolld's operator token: `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token`) | ✓ | ✓ | ✓ | ✓ |
 | owner's token | ✓ | ✓ | ✓ | ✓ |
 | another owner's token | ✓ | 404 | 403 | 404 |
 | anonymous | ✓ | 404 (git: 401 with a Basic challenge, so git sends credentials) | 401 | 404 (git: 401) |
@@ -465,7 +466,7 @@ included), 2 a conflict to rebase, 3 `work claim` with nothing to claim.
 | `roll code cat` | default, `@cs`, `@branch`, binary-safe; missing exit 1 | `roll-cli/tests/code.rs::owners_repos_and_reading`, `roll-cli/tests/code.rs::landing_changes_checks_and_conflicts`, `roll-cli/tests/code.rs::repo_land_and_usage_edges` |
 | `roll code log` | `-n`, `--path`, `@branch` | `roll-cli/tests/code.rs::owners_repos_and_reading`, `roll-cli/tests/code.rs::repo_land_and_usage_edges` |
 | `roll code show` | text diff, `--json`; unknown changeset exit 1 | `roll-cli/tests/code.rs::owners_repos_and_reading`, `roll-cli/tests/code.rs::repo_land_and_usage_edges` |
-| `roll code land` | local files, `local=path`, exec bit, `--author`, `--stdin-json` (map / whole body / not JSON / not an object / bad `files`), `--delete`, binary, `--ref`; conflict exit 2 (text and `--json`); queued exit 0; usage errors exit 1 | `roll-cli/tests/code.rs::owners_repos_and_reading`, `roll-cli/tests/code.rs::landing_changes_checks_and_conflicts`, `roll-cli/tests/code.rs::merge_queue_commands`, `roll-cli/tests/code.rs::repo_land_and_usage_edges` |
+| `roll code land` | local files, `local=path`, exec bit, `--author`, `--stdin-json` (map / whole body / not JSON / not an object / bad `files`), `--delete`, binary, `--ref`; conflict exit 2 (text and `--json`); queued exit 0; usage errors exit 1; roll unreachable: a GitHub pull request | `roll-cli/tests/code.rs::owners_repos_and_reading`, `roll-cli/tests/code.rs::landing_changes_checks_and_conflicts`, `roll-cli/tests/code.rs::merge_queue_commands`, `roll-cli/tests/code.rs::repo_land_and_usage_edges`, `roll-cli/tests/code.rs::land_falls_back_to_a_github_pull_request_while_roll_is_down` |
 | `roll code change list` | text, `--state`, `ls` alias | `roll-cli/tests/code.rs::landing_changes_checks_and_conflicts`, `roll-cli/tests/code.rs::change_and_work_edges` |
 | `roll code change create` | from files, `--changeset`, `--work` id and number; unknown `--work` exit 1; `--changeset` with files refused | `roll-cli/tests/code.rs::landing_changes_checks_and_conflicts`, `roll-cli/tests/code.rs::change_and_work_edges`, `roll-cli` `code::tests::args` |
 | `roll code change show` | by number, text; unknown exit 1 | `roll-cli/tests/code.rs::landing_changes_checks_and_conflicts`, `roll-cli/tests/code.rs::change_and_work_edges` |
@@ -527,6 +528,7 @@ included), 2 a conflict to rebase, 3 `work claim` with nothing to claim.
 | `roll code status` | post, combined view; bad state and unknown rev exit 1 | `roll-cli/tests/code.rs::webhooks_statuses_blame_jobs_and_tokens`, `roll-cli/tests/code.rs::reviewer_webhook_and_thread_edges` |
 | `roll code blame` | aligned, one author per range, `@rev`; missing file, unknown repo exit 1 | `roll-cli/tests/code.rs::webhooks_statuses_blame_jobs_and_tokens`, `roll-cli/tests/code.rs::reviewer_webhook_and_thread_edges` |
 | `roll code jobs` | none, stage and groups; unknown change exit 1 | `roll-cli/tests/code.rs::webhooks_statuses_blame_jobs_and_tokens`, `roll-cli/tests/code.rs::ai_reviewer_commands`, `roll-cli/tests/code.rs::reviewer_webhook_and_thread_edges` |
+| `roll code queued` | roll down (503s past the retry budget): `land` on a connected repo pushes a branch and opens a PR with the user's own token (never sent to roll); a native repo exits 1 with a clear error; once roll is back and has the PR as a change, the next command lands it and the list empties | `roll-cli/tests/code.rs::land_falls_back_to_a_github_pull_request_while_roll_is_down` |
 | `roll code search` | literal, `--regex`, `-n`, `--case`, `--path`, `@rev`; bad regex, unknown rev or repo exit 1 | `roll-cli/tests/code.rs::ai_reviewer_commands`, `roll-cli/tests/code.rs::reviewer_webhook_and_thread_edges` |
 | exit codes | usage errors exit 1 (not clap's 2, which means a conflict), `--help` 0, API down exit 1 with "is rolld running?" | `roll-cli/tests/code.rs::repo_land_and_usage_edges` |
 
@@ -906,6 +908,10 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | mirror `error` → `ok` | `github.rs::connect_import_webhooks_and_mirror` |
 | mirror `paused` (overlap, rewritten history, disconnected) and back | `github.rs::push_to_github_main_is_ingested_and_merged`, `github.rs::push_webhooks_for_branches_tags_and_echoes`, `github.rs::pull_request_issue_and_installation_actions` |
 | mirror coalescing (200 landings ≤ 10 pushes), stops on delete; scheduler: max delay, backoff, lost responses, GitHub ahead, diverged | `github.rs::connect_import_webhooks_and_mirror`, `code-github/tests/mirror.rs` (all) |
+| GitHub down: a landed PR's close and comment wait in the delivery queue (`gh_…`, retried with backoff, never given up while GitHub doesn't answer) and reach GitHub once after it's back | `github.rs::a_landed_prs_close_reaches_github_after_an_outage` |
+| rate limits on the way out: inside the outbox a `retry-after` is an error with its reset at once (the delivery waits until then) | `code-github/tests/github.rs::rate_limits_and_retries` |
+| mirror backoff capped at 30 s, however long GitHub was down | `code-github/tests/mirror.rs::a_long_outage_retries_within_thirty_seconds` |
+| roll down: a failed delivery in the App's log is redelivered once asked (not one roll recorded, nor one that got through, nor again while its attempt is pending); with nothing in the log the reconcile ingests a direct push to main that stopped the mirror (merged in, mirror resumes) and a PR opened meanwhile, and a second look finds nothing | `github.rs::what_github_did_while_roll_was_down_is_caught_up` |
 
 ### Behaviours
 
@@ -987,7 +993,9 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 
 Three nodes in one process, each a `Code` with its own server, sharing one database pair (two
 fresh Postgres schemas with `ROLL_CODE_TEST_DATABASE`, else one SQLite pair) and one object
-directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md).
+directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md). Leases are in code's
+database, or on DynamoDB Local with `ROLL_CODE_TEST_CLUSTER_BACKEND=dynamodb`: `pnpm test:code
+--docker` runs the whole file both ways (data on Postgres).
 
 | Behaviour | Tests |
 | --- | --- |
@@ -1007,10 +1015,32 @@ directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md).
 | health: 200 with the node's id while it holds its leases, 503 while it can't reach the database, 200 again after | `cluster.rs::health_follows_each_node` |
 | a landing on one node reaches a webhook within well under the 5 s poll when the forwarder runs on another node (Postgres `NOTIFY` in the landing's transaction; in-process on SQLite) | `cluster.rs::landings_on_one_node_wake_the_forwarder_on_another`, `code-sql/tests/backends.rs::listen_wakes_on_notify`, `code-sql/tests/backends.rs::listen_wakes_on_notify_after_commit_in_one_process` |
 | losing a repo drops its code index; deleting one (through a non-owner) removes the owner's index and deletes its lease row, which nobody takes back; a 404 takes no lease | `cluster.rs::moving_or_deleting_a_repo_leaves_no_index_or_lease_behind` |
-| an idle repo (no request, stream or work for `repo_idle_release`, no work waiting) is given up and its row deleted; an open stream or waiting work keeps it; the next request takes it again | `cluster.rs::idle_repos_are_released_and_taken_again_on_demand`, `code-cluster/tests/handoff.rs::idle_keys_are_released_and_reacquired_on_demand`, `code-cluster/tests/handoff.rs::a_retired_key_loses_its_lease_row_and_comes_back_only_on_demand` |
+| an idle repo (no request, stream or work for `repo_idle_release`, no work waiting) is given up and its row deleted; an open stream or waiting work keeps it; the next request takes it again | `cluster.rs::idle_repos_are_released_and_taken_again_on_demand`, `roll-cluster/tests/core.rs::idle_keys_are_released_and_reacquired_on_demand`, `roll-cluster/tests/core.rs::a_retired_key_loses_its_lease_row_and_comes_back_only_on_demand` |
 | indexes left on disk: a single node removes those of deleted repos at startup, a cluster node all of them | `cluster.rs::leftover_indexes_are_removed_at_startup` |
 | GitHub deliveries for a repo another node owns are recorded before GitHub is answered: the owner dying mid-delivery, or unreachable when one arrives, gets 202 and the next owner handles each part once; redeliveries don't run twice | `cluster.rs::github_deliveries_survive_their_owner_dying` |
-| WebSocket-style upgrades through a non-owner reach the owner and stream both ways (3 MiB echoed); reads whose connection drops before an answer are sent again, writes never | `code-cluster/tests/forward.rs::upgrades_are_forwarded_and_stream_both_ways`, `code-cluster/tests/forward.rs::reads_are_sent_again_when_the_connection_drops_before_an_answer` |
+| WebSocket-style upgrades through a non-owner reach the owner and stream both ways (3 MiB echoed); reads whose connection drops before an answer are sent again, writes never | `roll-cluster/tests/forward.rs::upgrades_are_forwarded_and_stream_both_ways`, `roll-cluster/tests/forward.rs::reads_are_sent_again_when_the_connection_drops_before_an_answer` |
+
+### The cluster layer (`roll-cluster`)
+
+`roll-cluster/tests/suite.rs` runs on every backend: in-process (`memory::`), `code_nodes`/
+`code_leases` on SQLite or, with `ROLL_CODE_TEST_DATABASE`, Postgres (`postgres::`), and a fresh
+table on DynamoDB Local in Docker (`dynamodb::`, container `roll-cloud-cluster-ddb`; skipped with
+a message without Docker). The rest is backend-independent and runs in-process.
+
+| Behaviour | Tests |
+| --- | --- |
+| every node routes a key to one owner, its preferred node, which takes it on first use; nothing moves while membership is stable | `roll-cluster/tests/suite.rs::every_node_routes_a_key_to_the_same_owner` |
+| contenders racing for one lease: exactly one wins, the epoch rises by one per new holder | `roll-cluster/tests/suite.rs::exactly_one_contender_wins` |
+| a dead node's keys move to their preferred live nodes with a new epoch, never while it could still act on them | `roll-cluster/tests/suite.rs::a_dead_nodes_keys_move_to_their_preferred_live_node` |
+| self-fencing: a node cut off from the backend emits `Lost` and fails health before anyone takes its key, and gets it back after | `roll-cluster/tests/suite.rs::a_node_cut_off_from_the_backend_fences_itself_first_and_recovers` |
+| draining hands every key to its new preferred node at once (not after a lease's length) | `roll-cluster/tests/suite.rs::draining_hands_everything_over` |
+| a pinned node id waits for its previous incarnation; the replaced process owns nothing | `roll-cluster/tests/suite.rs::a_pinned_node_id_waits_for_its_previous_incarnation` |
+| a joining node gets its keys by handoff; a guard holds a handoff back until dropped, or until the handoff timeout | `roll-cluster/tests/core.rs::a_joining_node_gets_its_keys_by_handoff_and_a_guard_holds_one_back`, `roll-cluster/tests/core.rs::a_handoff_goes_ahead_after_its_timeout` |
+| a singleton has one holder at a time and moves when it dies | `roll-cluster/tests/core.rs::a_singleton_has_one_holder_and_moves_when_it_dies` |
+| leaving releases everything at once; an outage shorter than the margin loses nothing | `roll-cluster/tests/core.rs::leaving_releases_everything`, `roll-cluster/tests/core.rs::a_blip_shorter_than_the_lease_margin_loses_nothing` |
+| forwarding: methods, headers, queries, big bodies and streamed answers both ways, one retry after Unavailable, the hop limit, signatures | `roll-cluster/tests/forward.rs::forwards_methods_headers_and_queries_to_the_owner`, `roll-cluster/tests/forward.rs::streams_large_bodies_both_ways`, `roll-cluster/tests/forward.rs::streams_responses_incrementally`, `roll-cluster/tests/forward.rs::retries_once_after_the_owner_answers_unavailable`, `roll-cluster/tests/forward.rs::refuses_to_forward_past_the_hop_limit`, `roll-cluster/tests/forward.rs::rejects_unsigned_and_tampered_internal_requests` |
+| rendezvous placement spreads keys and moves about 1/N when a node joins | `roll-cluster/tests/placement.rs::rendezvous_spreads_keys_and_moves_about_one_in_n` |
+| rolld's cluster settings: the backend follows the secret, roll code's flags are aliases, a cluster needs a secret | `rolld/src/cluster.rs::secrets_pick_the_backend_and_code_flags_are_aliases` |
 
 ### Cluster in Docker (`rolld/tests/code_cluster_e2e.rs`)
 
@@ -1052,6 +1082,9 @@ otherwise. The module docs give the client retry policy and exactly what is asse
 | broken main: bisected to the culprit, a revert opened (item stays claimable), closed when main is green again; `[main] auto_revert` lands it; approved fork changes and queued changes run checks | `service.rs::post_merge_opens_one_broken_main_item_and_closes_it_on_green`, `service.rs::auto_revert_undoes_the_change_that_broke_main`, `service.rs::approved_fork_changes_and_queued_changes_run_their_checks` |
 | HTTP and WebSocket proxying, unknown and closed previews, idle reaper, reconcile after restart | `code-preview/src/preview.rs::proxies_http_and_websockets_and_reconciles_after_restart` |
 | real Docker: success, failure, timeout, broken config, no leftovers; preview through the host router; post-merge; cleanup on land | `code-preview/tests/docker.rs` (all) |
+| Fargate checks (fake ECS and Logs, S3 in process or MinIO with `ROLL_E2E`): one task each from a task definition registered once per image off the check template; the isolated subnets and security group, no public IP, on demand; no env or secret in `RunTask` (the env reaches the check through the bundle); success, failure with its output, a timeout stops the task; no task or bundle left | `code-preview/tests/fargate.rs::checks_run_as_fargate_tasks_and_leave_nothing_behind` |
+| Fargate previews: a visit starts the task (the guard proxies `--to` the app's port), the node proxies to the task's address, the bundle goes once the tree is in, closing the change stops the task | `code-preview/tests/fargate.rs::a_preview_is_a_task_the_node_proxies_to_and_stops` |
+| the bundle: a tree round-trips with its env (sh reads values back exactly) and symlinks kept as symlinks; hostile bundles refused with nothing written outside the tree (repeated names, writes through symlinks, `..`, absolute paths, hard links, a second env, sizes by the bytes read); Fargate sizes round up; `ROLL_CODE_RUNNER` settings | `roll-fetch/src/lib.rs::a_tree_round_trips_with_its_env_and_symlinks`, `roll-fetch/tests/hostile.rs::hostile_bundles_are_refused_and_nothing_lands_outside_the_tree`, `code-preview/src/fargate.rs::sizes_round_up_to_fargate_shapes` |
 
 ## control.db on SQLite and Postgres (`code-control/tests/concurrency.rs`, `code-sql/tests/backends.rs`)
 
@@ -1072,6 +1105,8 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 
 | Defect fixed | Test |
 | --- | --- |
+| control planes without auth: every route rolld merges answers 401 without the operator token (and to a wrong one, or another credential, where the product checks its own) and not 401 with it, except `crates/rolld/src/auth.rs`'s public list; CORS answers only `ROLL_DASHBOARD_ORIGIN` | `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token` |
+| rolld off loopback (or `ROLL_EDGE=1`) without `ROLL_ADMIN_TOKEN`, or with a short one, refuses to start and doesn't print it | `rolld/tests/auth.rs::refuses_to_listen_off_loopback_without_a_token` |
 | owners' provider `base_url` on private addresses (SSRF; literals at set and use time, credentials in the URL) | `reviewer.rs::byok_endpoints_on_private_addresses_are_refused` |
 | provider answers over 16 MiB, and redirects | `code-review/tests/engine.rs::oversized_answers_and_redirects_are_refused` |
 | NAT64/6to4-wrapped private IPv4, `*.localhost` | `review::apps` unit `private_ranges` |
@@ -1139,7 +1174,7 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | diff parsing and split pairing | `src/lib/diff.test.ts` |
 | highlighting: language mapping, token classes, limits | `src/lib/highlight.test.ts` |
 | git proxy: target URL, header allowlist, forwarding headers, streaming body, dropped response headers, 401 passthrough, 502 | `src/lib/git-proxy.test.ts` |
-| sign-in token storage and events | `src/lib/code-token.test.ts` |
+| sign-in token storage and events; the token goes to the other products' APIs only while it's rolld's operator token | `src/lib/code-token.test.ts` |
 | owner tokens list and revoke requests, token rows (prefix or id, last use) | `src/lib/code-api.test.ts`, `src/lib/ci.test.ts` |
 | 404s and renames on public pages: the app's own names never reach the API, a missing repo or owner is a 404, a renamed repo a 308 keeping the rest of the path and the query, a repo's tab typed as a path (`/dashboard/code/o/r/changes`) a 307 to the repo page on that tab (`#changes`), API down is the error page; the route tree sends app routes, owner and repo pages and git traffic where they belong, and keeps search params as written | `src/lib/public-pages.test.ts`, `src/router.test.tsx` (and checked against the production server: real 404 and 308) |
 | reserved names: lowercase, unique, every top-level route, in sync with Rust | `src/lib/reserved-names.test.ts`, `code-control/src/names.rs::reserved_matches_the_dashboard` |

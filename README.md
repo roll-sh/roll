@@ -34,7 +34,7 @@ crates/
   code-github/      GitHub App: auth, webhooks, REST client, event mapping, mirror scheduling
   code-control/     roll code control plane: owners, repos, changes, work items, git adapter, HTTP API
   code-preview/     roll code checks and previews: roll.toml, containers, branched Postgres/Redis, host routing
-  code-cluster/     roll code on many nodes: membership, repo leases with self-fencing, placement, handoff, forwarding
+  roll-cluster/     roll on many nodes: membership, leases with self-fencing, placement, handoff, forwarding (Memory, Postgres, DynamoDB)
   s3-proto/         S3 wire protocol: SigV4 (headers, presigned, aws-chunked + trailers), XML, checksums, errors
   s3-store/         roll storage metadata: SQLite + durable log on S3, branching, refcounts, trash, GC, blob backend
   s3-server/        S3-compatible HTTP API: routing, auth, handlers, streaming to and from S3
@@ -52,6 +52,15 @@ pnpm dev            # http://localhost:3000
 pnpm typecheck
 pnpm build
 ```
+
+### The control-plane API's token
+
+`rolld` on 127.0.0.1 needs no token. Anywhere else it refuses to start without
+`ROLL_ADMIN_TOKEN` (32 characters or more), the operator token every control-plane API takes as
+`Authorization: Bearer`; `roll` sends it from the same variable, and the dashboard asks for it in
+the header. CORS answers `ROLL_DASHBOARD_ORIGIN` (on loopback, the local dashboard). The routes
+that don't need it are listed in `crates/rolld/src/auth.rs`; docs/cloud/README.md, "Security",
+has the rest.
 
 ## The marks
 
@@ -659,13 +668,15 @@ How it works:
     at `chg-<id>.preview.localhost`. It scales to zero when idle.
 - **Many nodes.**
   - One node keeps everything in SQLite. `--code-database postgres://…` moves both databases to
-    Postgres, and `--code-cluster-secret` makes the node one of a cluster of identical
-    `rolld --code-only` nodes sharing that database and S3 behind any load balancer.
+    Postgres, and `--cluster-secret` makes the node one of a cluster of identical
+    `rolld --code-only` nodes sharing that database and S3 behind any load balancer. Leases
+    live in that Postgres, or in DynamoDB with `--cluster-backend dynamodb`.
   - Each repo has one owner node (a lease); every node forwards a repo's requests to it.
     Killed nodes' repos move after their leases expire, joining nodes take their share, and
     SIGTERM drains a node first. `GET /v1/code/health` is the load balancer's check.
   - Flags: `--code-only`, `--code-database`, `--code-db-connections`, `--code-db-ca`,
-    `--code-cluster-secret`, `--code-advertise-url`, `--code-node-id`, `--code-drain-timeout`,
+    `--cluster-secret`, `--cluster-backend`, `--cluster-table`, `--advertise-url`, `--node-id`,
+    `--zone`, `--drain-timeout` (the `--code-cluster-*` names still work),
     and the git memory budget (`--code-git-memory-budget`, `--code-git-max-request-memory`,
     `--code-git-memory-wait-secs`). See [docs/code/cluster.md](docs/code/cluster.md).
 

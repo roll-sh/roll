@@ -38,7 +38,7 @@ async fn curl_from_docker() {
     tokio::spawn(mq_http::serve_api(api, listener));
     let out = tokio::task::spawn_blocking(move || {
         Command::new("docker")
-            .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway", "-e", &format!("PORT={port}"), "--entrypoint", "sh", "curlimages/curl:8.10.1", "-c", SCRIPT])
+            .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway", "-e", &format!("PORT={port}"), "--entrypoint", "sh", "curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b", "-c", SCRIPT])
             .output()
             .expect("docker")
     })

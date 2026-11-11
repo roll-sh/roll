@@ -6,7 +6,11 @@
 //! the local retention window; reads below the local range are served from object storage.
 //!
 //! The high watermark (what consumers may read) is the durable end of the log: data is visible
-//! only once it's fsynced, so a consumer never sees records a crash could lose.
+//! only once it's fsynced, so a consumer never sees records a crash could lose. With
+//! [`LogConfig::remote`] (the fleet, where a node's disk is only a cache) durable means in object
+//! storage instead: nothing is fsynced, appended batches queue for the owner's write-ahead log
+//! ([`Log::take_wal`]), and the high watermark moves when the caller says they're stored
+//! ([`Log::set_durable`], or an uploaded chunk).
 
 use crate::batch::{self, BatchError, Header};
 use crate::producer::{AbortedTxn, ProducerStates, SeqCheck};
@@ -38,6 +42,9 @@ pub struct LogConfig {
     /// …within a budget shared by every open log (each gets at most its fair share).
     pub tail_budget: Option<Arc<TailBudget>>,
     pub leader_epoch: i32,
+    /// Durability is object storage's, not the local disk's (see the module docs): `fsync` is
+    /// ignored and the high watermark only moves with [`Log::set_durable`] and uploads.
+    pub remote: bool,
 }
 
 /// Memory for tail caches shared by many logs, so thousands of open partitions can't add up to
@@ -83,8 +90,32 @@ impl Default for LogConfig {
             tail_cache_bytes: 4 << 20,
             tail_budget: None,
             leader_epoch: 0,
+            remote: false,
         }
     }
+}
+
+impl LogConfig {
+    /// Whether appends are fsynced locally, and only synced bytes are read.
+    fn local_sync(&self) -> bool {
+        self.fsync && !self.remote
+    }
+
+    /// Whether appended data is visible (durable) as soon as it's written.
+    fn visible_on_append(&self) -> bool {
+        !self.fsync && !self.remote
+    }
+}
+
+/// What [`Log::take_wal`] hands the write-ahead log: batches appended since the last take, as
+/// written (offsets assigned), and the offsets they cover.
+#[derive(Clone, Debug)]
+pub struct WalTake {
+    pub batches: Vec<Bytes>,
+    pub first: i64,
+    /// One past the last offset.
+    pub end: i64,
+    pub bytes: usize,
 }
 
 /// A run of batches in object storage.
@@ -359,6 +390,10 @@ struct Inner {
     aborted: Vec<AbortedTxn>,
     /// Offsets below this have been compacted.
     cleaned_to: i64,
+    /// Remote durability: batches appended since the last [`Log::take_wal`], and their bytes.
+    wal: Vec<Bytes>,
+    wal_bytes: usize,
+    wal_first: i64,
 }
 
 pub struct Log {
@@ -540,6 +575,9 @@ impl Log {
             producers,
             aborted,
             cleaned_to: 0,
+            wal: Vec::new(),
+            wal_bytes: 0,
+            wal_first: leo,
         };
         if let Some(b) = &inner.config.tail_budget {
             b.open.fetch_add(1, Ordering::Relaxed);
@@ -633,9 +671,9 @@ impl Log {
     /// Apply changed settings (segment size and age, index interval, cache size).
     pub fn set_config(&self, config: LogConfig) {
         let mut g = self.lock();
-        let fsync = g.config.fsync;
+        let (fsync, remote) = (g.config.fsync, g.config.remote);
         let tail_budget = g.config.tail_budget.clone();
-        g.config = LogConfig { fsync, tail_budget, ..config };
+        g.config = LogConfig { fsync, remote, tail_budget, ..config };
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -748,14 +786,15 @@ impl Log {
             h.base_offset = g.leo;
             h.leader_epoch = g.config.leader_epoch;
             let data = m.freeze();
-            g.write(&self.dir, h, data, opts.now_ms)?;
+            g.write(&self.dir, h, data.clone(), opts.now_ms)?;
+            g.queue_wal(data);
             bytes += h.size;
             records += h.last_offset_delta as i64 + 1;
             g.producers.update(h);
         }
         let last = g.leo - 1;
         let log_start = g.log_start;
-        if !g.config.fsync {
+        if g.config.visible_on_append() {
             g.high_watermark = g.leo;
             let hw = g.high_watermark;
             drop(g);
@@ -791,12 +830,14 @@ impl Log {
         let offset = g.leo;
         batch::assign_offset(&mut m, offset, g.config.leader_epoch);
         let mut h = batch::parse_header(&m)?;
-        g.write(&self.dir, &mut h, m.freeze(), now_ms)?;
+        let data = m.freeze();
+        g.write(&self.dir, &mut h, data.clone(), now_ms)?;
+        g.queue_wal(data);
         let aborted = g.producers.end_txn(&h, commit, coordinator_epoch);
         if let Some(a) = aborted {
             g.aborted.push(a);
         }
-        if !g.config.fsync {
+        if g.config.visible_on_append() {
             g.high_watermark = g.leo;
             let hw = g.high_watermark;
             drop(g);
@@ -835,7 +876,60 @@ impl Log {
     /// Whether data is waiting to be made durable.
     pub fn needs_flush(&self) -> bool {
         let g = self.lock();
-        g.config.fsync && g.high_watermark < g.leo
+        !g.config.visible_on_append() && g.high_watermark < g.leo
+    }
+
+    /// Remote durability: the batches appended since the last take, for the write-ahead log.
+    /// Once they're stored, [`Log::set_durable`] with `end` makes them visible.
+    pub fn take_wal(&self) -> Option<WalTake> {
+        let mut g = self.lock();
+        if g.wal.is_empty() {
+            return None;
+        }
+        let take = WalTake { batches: std::mem::take(&mut g.wal), first: g.wal_first, end: g.leo, bytes: std::mem::take(&mut g.wal_bytes) };
+        g.wal_first = g.leo;
+        Some(take)
+    }
+
+    /// Bytes appended and not yet taken by [`Log::take_wal`].
+    pub fn wal_bytes(&self) -> usize {
+        self.lock().wal_bytes
+    }
+
+    /// Everything below `end` is durable (remote durability): move the high watermark there.
+    pub fn set_durable(&self, end: i64) {
+        let mut g = self.lock();
+        let hw = end.min(g.leo);
+        if hw > g.high_watermark {
+            g.high_watermark = hw;
+            drop(g);
+            self.hw.send_replace(hw);
+        }
+    }
+
+    /// Put back a batch from the owner's write-ahead log (already offset-assigned, as appended
+    /// before), at the log end. A batch the log already has (object storage got it) only rebuilds
+    /// producer and transaction state. Replayed data is durable. Returns whether it was appended.
+    pub fn replay(&self, data: Bytes, now_ms: i64) -> Result<bool, AppendError> {
+        let mut h = batch::validate(&data)?;
+        let mut g = self.lock();
+        if h.base_offset < g.leo {
+            if h.last_offset() >= g.leo {
+                warn!(dir = %self.dir.display(), base = h.base_offset, leo = g.leo, "a replayed batch straddles the log end; keeping only its producer state");
+            }
+            g.observe(&h, &data);
+            return Ok(false);
+        }
+        if h.base_offset != g.leo {
+            return Err(AppendError::InvalidRecord("a gap before a replayed batch"));
+        }
+        g.write(&self.dir, &mut h, data.clone(), now_ms)?;
+        g.observe(&h, &data);
+        g.high_watermark = g.leo;
+        let hw = g.high_watermark;
+        drop(g);
+        self.hw.send_replace(hw);
+        Ok(true)
     }
 
     /// fsync everything appended so far and advance the high watermark. Blocking; concurrent
@@ -844,7 +938,7 @@ impl Log {
         let _serial = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
         let (files, target) = {
             let g = self.lock();
-            if !g.config.fsync || g.high_watermark >= g.leo {
+            if !g.config.local_sync() || g.high_watermark >= g.leo {
                 return Ok(g.high_watermark);
             }
             let files: Vec<(i64, Arc<File>, u64)> =
@@ -915,7 +1009,7 @@ impl Log {
             };
             return Ok(Read { plan: ReadPlan::Ready(data), ..base });
         }
-        let fsync = g.config.fsync;
+        let fsync = g.config.local_sync();
         if let Some(seg) = g.segments.iter().rev().find(|s| s.base <= offset && s.size > 0)
             && offset < seg.next
         {
@@ -963,7 +1057,7 @@ impl Log {
                 return Some(base(ReadPlan::Remote(c.clone()), c.first.max(g.log_start)));
             }
         }
-        let fsync = g.config.fsync;
+        let fsync = g.config.local_sync();
         for s in &g.segments {
             if s.size == 0 || s.max_timestamp < ts {
                 continue;
@@ -990,7 +1084,7 @@ impl Log {
             last_stable: g.last_stable(),
             log_start: g.log_start,
         };
-        let fsync = g.config.fsync;
+        let fsync = g.config.local_sync();
         let local_from = g.segments.first().map(|s| s.base).unwrap_or(g.leo);
         let mut best: Option<(i64, Read)> = None;
         for c in g.chunks.iter().filter(|c| c.last >= g.log_start && c.last < local_from) {
@@ -1023,7 +1117,7 @@ impl Log {
     /// active one once `min_bytes` accumulate or its oldest pending byte is `max_age_ms` old.
     pub fn upload_plan(&self, min_bytes: u64, max_bytes: u64, max_age_ms: i64, now_ms: i64) -> Option<UploadPlan> {
         let g = self.lock();
-        let fsync = g.config.fsync;
+        let fsync = g.config.local_sync();
         let n = g.segments.len();
         for (i, s) in g.segments.iter().enumerate() {
             let end = s.readable(fsync);
@@ -1063,9 +1157,17 @@ impl Log {
             s.pending_since_ms = now_ms;
         }
         g.uploaded_end = g.uploaded_end.max(chunk.last + 1);
+        let end = chunk.last + 1;
         if chunk.last >= g.log_start {
             let i = g.chunks.partition_point(|c| c.first < chunk.first);
             g.chunks.insert(i, chunk);
+        }
+        // Remote durability: what object storage has is durable.
+        if g.config.remote && end.min(g.leo) > g.high_watermark {
+            g.high_watermark = end.min(g.leo);
+            let hw = g.high_watermark;
+            drop(g);
+            self.hw.send_replace(hw);
         }
     }
 
@@ -1190,7 +1292,7 @@ impl Log {
         {
             let mut g = self.lock();
             let s = g.segments.last().unwrap();
-            if s.size > 0 && s.uploaded >= s.size && s.synced >= s.size && s.next <= g.keep_local_from() {
+            if s.size > 0 && s.uploaded >= s.size && (s.synced >= s.size || g.config.remote) && s.next <= g.keep_local_from() {
                 let seg = Segment::create(&self.dir, g.leo, now_ms)?;
                 g.segments.push(seg);
             }
@@ -1202,7 +1304,7 @@ impl Log {
     /// segments. Call when closing an idle log; the marker is consumed by the next open.
     pub fn mark_clean(&self) -> io::Result<()> {
         let g = self.lock();
-        if !g.config.fsync || g.high_watermark < g.leo || g.segments.iter().any(|s| s.synced < s.size) {
+        if !g.config.local_sync() || g.high_watermark < g.leo || g.segments.iter().any(|s| s.synced < s.size) {
             return Ok(());
         }
         let text: String = g.segments.iter().map(|s| format!("{} {}\n", s.base, s.size)).collect();
@@ -1348,6 +1450,27 @@ fn remove_from(dir: &Path, base: i64) -> io::Result<()> {
 }
 
 impl Inner {
+    /// Remote durability: queue a written batch for the write-ahead log.
+    fn queue_wal(&mut self, data: Bytes) {
+        if self.config.remote {
+            self.wal_bytes += data.len();
+            self.wal.push(data);
+        }
+    }
+
+    /// Producer and transaction state from a batch that's in the log (recovery, replay).
+    fn observe(&mut self, h: &Header, data: &Bytes) {
+        self.producers.update(h);
+        if h.is_control()
+            && let Some(commit) = batch::control_commits(data)
+            && let Some(a) = self.producers.end_txn(h, commit, 0)
+            && !self.aborted.contains(&a)
+        {
+            let i = self.aborted.partition_point(|x| x.first_offset < a.first_offset);
+            self.aborted.insert(i, a);
+        }
+    }
+
     /// Local segments from the start of the oldest open transaction on have to stay: transaction
     /// state is rebuilt from them when the log opens.
     fn keep_local_from(&self) -> i64 {
@@ -1815,5 +1938,49 @@ mod tests {
         log.clean(1_600, keep(500), None);
         assert!(log.next_due_ms(keep(500), None) > 1_500);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Remote durability: nothing is visible until the write-ahead log has it; a new owner
+    /// replays the log after what object storage has, and gets the producer and transaction
+    /// state of what it skipped.
+    #[test]
+    fn remote_durability_and_replay() {
+        let remote = || LogConfig { remote: true, ..cfg() };
+        let dir = tmp("remote");
+        let log = Log::open(&dir, remote(), Recovered::default(), 0).unwrap();
+        log.append(&[idem(7, 0, 2, 0)], AppendOptions::at(0)).unwrap();
+        log.append(&[idem(8, 0, 1, TRANSACTIONAL)], AppendOptions::at(0)).unwrap();
+        assert_eq!(log.high_watermark(), 0, "not durable before the write-ahead log has it");
+        assert!(log.needs_flush());
+        log.flush().unwrap();
+        assert_eq!(log.high_watermark(), 0, "the local disk doesn't count");
+        let w = log.take_wal().unwrap();
+        assert_eq!((w.first, w.end, w.batches.len()), (0, 3, 2));
+        assert!(log.take_wal().is_none());
+        log.set_durable(w.end);
+        assert_eq!(log.high_watermark(), 3);
+        let (marker, _) = log.append_marker(8, 0, false, 0, 0).unwrap();
+        let w2 = log.take_wal().unwrap();
+        assert_eq!((w2.first, w2.end), (marker, marker + 1));
+        // Object storage got the first batch as a chunk; a new owner starts after it.
+        let first = w.batches[0].clone();
+        let chunk = Chunk { first: 0, last: 1, max_timestamp: 0, bytes: first.len() as u64, key: "c".into() };
+        let dir2 = tmp("remote-new");
+        let new = Log::open(&dir2, remote(), Recovered { log_start: 0, chunks: vec![chunk], aborted: vec![] }, 0).unwrap();
+        assert_eq!(new.log_end(), 2);
+        let mut appended = vec![];
+        for b in w.batches.iter().chain(&w2.batches) {
+            appended.push(new.replay(b.clone(), 0).unwrap());
+        }
+        assert_eq!(appended, vec![false, true, true]);
+        assert_eq!((new.log_end(), new.high_watermark()), (4, 4));
+        assert!(new.append(&[idem(7, 0, 2, 0)], AppendOptions::at(0)).unwrap().duplicate, "a retry from before the move is a duplicate");
+        assert_eq!(new.aborted(), vec![AbortedTxn { producer_id: 8, first_offset: 2, last_offset: 3 }]);
+        let mut gap = BytesMut::from(&idem(9, 0, 1, 0)[..]);
+        batch::assign_offset(&mut gap, 10, 0);
+        assert!(matches!(new.replay(gap.freeze(), 0), Err(AppendError::InvalidRecord(_))), "a batch must continue the log");
+        for d in [dir, dir2] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
     }
 }

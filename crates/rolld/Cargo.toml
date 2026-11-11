@@ -10,11 +10,14 @@ publish.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 clap.workspace = true
-code-cluster.workspace = true
+roll-cluster.workspace = true
 code-control.workspace = true
 code-preview.workspace = true
 futures.workspace = true
+http-body.workspace = true
+kafka-protocol.workspace = true
 libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true
@@ -39,26 +42,40 @@ pg-control.workspace = true
 pg-proxy.workspace = true
 pg-storage.workspace = true
 redis-control.workspace = true
+code-sql.workspace = true
 redis-server.workspace = true
+roll-edge.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
+roll-auth.workspace = true
 s3-api.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
 serde_json.workspace = true
 stream-broker.workspace = true
-tasks.workspace = true
+tasks = { workspace = true, features = ["fleet"] }
 tokio.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 urlencoding.workspace = true
+# Only for the fleet end-to-end test (`--features fleet-e2e`), which drives Kafka with librdkafka:
+# Cargo has no optional dev-dependencies, and building librdkafka for every rolld test run costs
+# minutes.
+rdkafka = { workspace = true, optional = true }
+
+[features]
+fleet-e2e = ["dep:rdkafka"]
 
 [dev-dependencies]
+aws-sdk-s3.workspace = true
+aws-smithy-http-client.workspace = true
+aws-smithy-runtime-api.workspace = true
 aws-sdk-dynamodb.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 lapin.workspace = true
+rabbitmq-stream-client.workspace = true
 nosql-proto = { workspace = true, features = ["client"] }
 parking_lot.workspace = true
 rcgen.workspace = true
@@ -66,3 +83,10 @@ reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tower.workspace = true
+
+# scripts/test-fleet.sh (`pnpm test:fleet`): every product through a local fleet under kills and
+# rolling restarts.
+[[test]]
+name = "fleet_e2e"
+required-features = ["fleet-e2e"]

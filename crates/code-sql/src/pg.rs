@@ -91,12 +91,44 @@ fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-fn tls_config(ca: Option<&std::path::Path>) -> Result<rustls::ClientConfig> {
+/// A Postgres URL (or key=value string) as libpq reads it, for tokio-postgres, with the TLS that
+/// goes with its `sslmode` (`None` for `disable`) trusting the system's roots and `ca` (PEM).
+///
+/// tokio-postgres knows `sslmode` `disable`, `prefer` and `require` only and refuses parameters it
+/// doesn't know, while managed Postgres hands out `sslmode=verify-full&sslrootcert=system`
+/// (PlanetScale, Neon, libpq 16+). Our TLS always verifies the chain and the host name, so
+/// `verify-ca` and `verify-full` are `require` here; `sslrootcert=system` is the roots we load
+/// anyway, and `sslrootcert=<path>` is more CA certificates, like `ca`.
+pub fn pg_config(url: &str, ca: Option<&std::path::Path>) -> Result<(tokio_postgres::Config, Option<MakeRustlsConnect>)> {
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) if url.starts_with("postgres://") || url.starts_with("postgresql://") => (b, q),
+        _ => (url, ""),
+    };
+    let mut root_cert = None;
+    let mut kept = Vec::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("sslmode", "verify-ca" | "verify-full")) => kept.push("sslmode=require"),
+            Some(("sslrootcert", "system")) => {}
+            Some(("sslrootcert", path)) => root_cert = Some(std::path::PathBuf::from(path)),
+            _ => kept.push(pair),
+        }
+    }
+    let url = if kept.is_empty() { base.to_string() } else { format!("{base}?{}", kept.join("&")) };
+    let config: tokio_postgres::Config = url.parse().map_err(|e| Error::Other(format!("bad Postgres URL {}: {e}", redact(&url))))?;
+    let tls = match config.get_ssl_mode() {
+        SslMode::Disable => None,
+        _ => Some(MakeRustlsConnect::new(tls_config([ca, root_cert.as_deref()].into_iter().flatten())?)),
+    };
+    Ok((config, tls))
+}
+
+fn tls_config<'a>(cas: impl Iterator<Item = &'a std::path::Path>) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     for c in rustls_native_certs::load_native_certs().certs {
         let _ = roots.add(c);
     }
-    if let Some(ca) = ca {
+    for ca in cas {
         let certs = CertificateDer::pem_file_iter(ca).map_err(|e| Error::Other(format!("{}: reading CA certificates: {e}", ca.display())))?;
         for c in certs {
             let c = c.map_err(|e| Error::Other(format!("{}: bad CA certificate: {e}", ca.display())))?;
@@ -142,7 +174,7 @@ struct PoolState {
 
 impl Pool {
     pub(crate) fn connect(url: &str, schema: &str, opts: PgOptions) -> Result<Pool> {
-        let mut config: tokio_postgres::Config = url.parse().map_err(|e| Error::Other(format!("bad Postgres URL {}: {e}", redact(url))))?;
+        let (mut config, tls) = pg_config(url, opts.ca.as_deref())?;
         config
             .connect_timeout(Duration::from_secs(10))
             .keepalives(true)
@@ -150,10 +182,6 @@ impl Pool {
             .keepalives_interval(Duration::from_secs(5))
             .keepalives_retries(3)
             .tcp_user_timeout(Duration::from_secs(30));
-        let tls = match config.get_ssl_mode() {
-            SslMode::Disable => None,
-            _ => Some(MakeRustlsConnect::new(tls_config(opts.ca.as_deref())?)),
-        };
         if schema.is_empty() || schema.len() > 63 || !schema.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
             return Err(Error::Other(format!("bad schema name {schema:?}: use 1-63 letters, digits and _")));
         }
@@ -907,6 +935,18 @@ mod tests {
         // 12.5: one digit before the point (12), one after (5000), dscale 1.
         let raw = [0, 2, 0, 0, 0, 0, 0, 1, 0, 12, 0x13, 0x88];
         assert_eq!(numeric(&raw).unwrap(), ValueRef::Real(12.5));
+    }
+
+    #[test]
+    fn managed_postgres_urls_parse_with_verified_tls() {
+        // PlanetScale's and Neon's URLs, as their consoles give them.
+        let (c, tls) = pg_config("postgresql://u:p@db.example.com:5432/main?sslmode=verify-full&sslrootcert=system", None).unwrap();
+        assert_eq!(c.get_ssl_mode(), SslMode::Require);
+        assert_eq!(c.get_dbname(), Some("main"));
+        assert!(tls.is_some());
+        let (c, tls) = pg_config("postgres://u:p@localhost/main?sslmode=disable&application_name=x", None).unwrap();
+        assert_eq!((c.get_ssl_mode(), c.get_application_name()), (SslMode::Disable, Some("x")));
+        assert!(tls.is_none());
     }
 
     #[test]

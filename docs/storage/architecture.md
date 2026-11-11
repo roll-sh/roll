@@ -325,6 +325,10 @@ This is the same pattern as `crates/tasks/src/store/log.rs`, minus tenants.
     the node fences.
   - If the committer task panics, the node fences: waiting writes fail and reads stop, rather
     than hanging.
+  - A writer that hands the log to another node on purpose (`Store::hand_off`, see
+    [Many nodes](#many-nodes)) commits everything, then writes a `handoff` entry and stops; the
+    next writer's takeover entry follows it. A standby that kept a copy of the database
+    (`Follower`) takes over from it: it reads only the entries after its copy.
 - **Snapshots.** These are SQLite online backups, zstd-compressed, written every
   `snapshot_commits` (default 10 000) entries or `snapshot_bytes` (64 MiB) of log. They're
   copied a few pages at a time while serving, cut at an exact entry, then downloaded again
@@ -737,6 +741,14 @@ and `s3-store/src/cdn.rs`.
   so new public read APIs plug in by adding a route. Immutable routes keep a transformation's
   query in the cache key (a rendition of that one blob; the developer API's keep their whole
   query), and pass anything else uncached.
+- **Buckets by host** (`ROLL_BUCKET_DOMAIN`, `roll.site` in roll cloud): `<bucket>.<domain>/<key>`
+  is the `s3` route's `/<bucket>/<key>`, stored at the edge, sent to the origin and purged as the
+  path-style URL on the domain itself (`https://<domain>/<bucket>/<key>`), so one copy serves
+  both and roll's purges reach it when the CDN's `base_url` is `https://<domain>`. Only names
+  that are one DNS label qualify (names with dots use path style, as on S3); presigned URLs are
+  path style (the edge refuses them by host). Bucket names starting `chg-` are reserved
+  (`validate::new_bucket_name`, the Worker's `isBucketLabel` and the dashboard's form): those
+  hosts are code previews (`chg-<id>.roll.site`, `ROLL_PASS_HOSTS`), which share the zone.
 - **The developer API behind the CDN.** The default routes include its reads (`api: true`, origin
   `ROLL_API_ORIGIN`): `/storage/v1/object/public/`, `/object/sign/`, `/render/image/public/`,
   `/render/image/sign/` and `/v/` (immutable), and `/storage/v1/` itself as `none`, so
@@ -1622,13 +1634,123 @@ This means the margin is about 0% for data that is always hot, and 20–40% blen
 ages. It's never negative per line item. It doesn't depend on packing or compression, both of
 which we rejected for reliability.
 
-## Scaling beyond one node
+## Many nodes
 
-Version 1 runs in rolld: one node owns the metadata (one "cell"). The design scales out as
-follows; none of this is built yet:
+rolld runs storage on every node of a roll cluster (docs/cloud/README.md, docs/code/cluster.md).
+One node at a time owns the deployment's metadata; every node serves the APIs.
+`s3-server/src/cluster.rs` (`StorageNode`) is the whole of it; rolld's hook is
+`rolld/src/storage.rs`.
 
-- **Gateways.** `s3-server` instances are stateless and can run behind an NLB. They forward
-  metadata operations to the cell leader, while data goes straight between the gateway and S3.
-- **Cells.** Buckets are assigned to cells; each cell has its own log prefix and leader, with
-  a standby taking over through the fencing above.
-- **Recovery.** A cell can be restored from object storage alone.
+```
+ client ─▶ any node: S3 (--s3, the edge's s3.<region>.roll.site), developer API, /v1/storage
+             │ signed hop (roll-cluster), bodies streamed both ways
+             ▼
+       the owner of storage:meta ── writes s3/meta/wal/<seq> (create-only) ──▶ S3
+             ▲                                                    │
+       standbys follow the log (GET of the next entry) ◀──────────┘
+```
+
+- **Ownership.** The owner holds the lease `storage:meta` and is the only node with the store
+  open: it writes the metadata log, serves every request, and runs the sweeper, lifecycle,
+  metering, the event dispatcher, inventory and access logs. Placement is roll-cluster's: the
+  preferred node takes the lease (on the first request, or right away from its own loop), and
+  rebalancing moves it there when nodes join.
+- **Forwarding.** Every node's S3, developer-API and `/v1/storage` routes are a front
+  (`StorageNode::router`, `control_routes`) that runs the request on the owner through
+  `Cluster::dispatch`. The hop goes to `/internal/storage/{s3,api,control}` on the owner's API
+  port, signed; the client's path and query travel in `x-roll-storage-uri` and its
+  `Content-Length` in `x-roll-storage-content-length` (both signed by SigV4, and a hop's URL
+  parser or a buffered body would change them). The owner restores them, takes the client's
+  address from the hop (`ConnectInfo`, for policies' `aws:SourceIp` and egress metering) and
+  serves the request with its routers. Bodies stream both ways, never buffered beyond the
+  forwarder's 4 MiB: multipart parts up to 5 GiB and downloads of any size go through.
+- **Riding out a move.** The node a client reached keeps a body of up to 4 MiB and sends the
+  request again while the metadata has no owner that can serve it (a handoff, or an owner that
+  died and whose lease hasn't run out), for about a lease's length; a bigger body waits until
+  there's an owner to send it to and then gets one try. If that fails because the owner started
+  handing off at that moment, or the wait ran out, the client gets `503 ServiceUnavailable` with
+  `Retry-After` (S3's XML; the developer API's and the control plane's JSON), which every S3
+  SDK retries. A request that reached the owner when the owner died before answering may have
+  run: it gets `500 InternalError` (the developer API's JSON; `502` on the control plane), which
+  the SDKs retry too, and a retried write is safe (it writes the object again). A request that reaches the new owner while its store is still opening waits for
+  it (up to 10 s, `NodeConfig::open_wait`) with its body untouched.
+- **Reads aren't served by the node a client reached.** Every request, reads included, runs on
+  the owner. Serving immutable blobs from the receiving node would need the owner to authorize
+  the request (keys, policies, ACLs, Object Lock, SSE-C) and return a short-lived grant for the
+  blob, a second protocol on the hop for the price of one forward; it isn't built. The cost is
+  the bytes crossing nodes (cross-zone traffic on AWS) and the owner's network. The hot-object
+  cache is one per node, kept across tenures (it's keyed by blob).
+- **Standbys.** The two nodes placement prefers and the node `Cluster::standby` picks in another
+  zone keep a copy of the metadata current (`s3_store::Follower`): rebuilt from the newest
+  snapshot and the log once, then the next entry is read every 500 ms while nothing is new (one
+  GET, about $2 a month), and the pruned mark, gaps and snapshots every minute. A copy that
+  falls behind the pruning is rebuilt. So whoever takes the lease next (the next node by
+  placement when the owner dies or drains, the other zone's standby when its whole zone does)
+  reads only the entries since its last poll.
+- **A tenure** starts when the lease is granted: `Store::take_over` brings the standby's copy to
+  the end of the log (or rebuilds it from a snapshot), writes the takeover entry, and the
+  product's services are built on the store (`Open`: the S3 server with the events sink, the
+  control plane, the developer API). It holds the lease's guard for as long as it lasts, so a
+  handoff waits for it to close.
+- **Planned handoff** (a drain, rebalancing): routes stop granting guards for `storage:meta`, the
+  tenure stops taking requests and waits for the ones in flight (within 60% of the handoff
+  timeout), `Store::hand_off` flushes the meter, commits everything and writes a `handoff`
+  entry, then the guard goes, the lease is released and the next node takes it over from its
+  copy. Nothing acknowledged is lost and no request fails: requests that arrive meanwhile ride
+  it out (tested with a client that doesn't retry, `tests/cluster.rs`). Relaxed writes (usage,
+  key `last_used_at`, outbox bookkeeping) are committed too.
+- **Crash.** The owner's lease runs out (10 s past its last renewal, measured as roll-cluster
+  does), the next node takes it and its copy over. Acknowledged writes are in the log, so they're
+  all there; what was in flight and unacknowledged is lost, as on one node, and its blobs are the
+  orphan scan's. Clients see requests waiting (ridden out) and, past the wait, retryable 503s.
+- **Fencing doesn't depend on the lease.** A node that lost its lease but still runs (frozen,
+  partitioned) stops serving at its lease's local deadline (roll-cluster's self-fencing), and
+  even if it didn't, its store couldn't commit: the new owner's takeover entry takes the next
+  sequence number, so the old one's next commit fails its create-only write and it fences
+  itself; while idle it notices within `fence_check` (5 s). A tenure whose store fenced while the
+  lease is still held ends, and the node takes the log over again.
+- **Events across a takeover.** Notifications, replication and CDN purges are outbox rows written
+  in the change's own transaction, and the dispatcher only hands out rows whose batch is
+  durable. They're in the log, so the next owner's dispatcher delivers what the last one
+  hadn't; one delivered just before a crash, whose delete was still relaxed, goes again (at
+  least once, as on one node). A deposed owner can't deliver a row that isn't durable: its wait
+  for the batch fails once it's fenced.
+- **One node** (no cluster, the memory backend) owns the metadata from the start; opening it
+  fails rolld's startup as it always did, and nothing is forwarded or followed. A cluster node
+  refuses to start storage on a local object directory.
+- **Local files.** Each copy of the metadata lives in `<home>/storage/meta-<n>/`; a new copy
+  removes the others. The spool and the cache directories are unchanged.
+- Tested by `crates/s3-server/tests/cluster.rs` (several nodes in one process, on the memory
+  backend and on DynamoDB Local), the real tools (`tests/tools.rs`, through a node that doesn't
+  own the metadata, the AWS CLI uploading across a drain) and `s3-store/tests/durability.rs`
+  (`a_standby_follows_the_log_and_takes_over_from_its_copy`).
+
+### Per-account ownership (not built)
+
+`storage:meta` is one lease and one log for the deployment: one node serves all of storage, and
+a takeover moves all of it. Splitting it into `storage:account:<id>` (one metadata log per
+account, `s3/meta/<account>/…`) needs:
+
+- **A database per account.** Every table is keyed so it can split (`buckets.account_id`,
+  `keys.account_id`, `roles`, `iam`, `accounts`, `access_points`, `api_projects` …), and objects,
+  versions, trash, uploads and events follow their bucket. The `blobs` table and refcounts are
+  shared by copies and branches; both stay inside one account (cross-account `CopyObject` and
+  replication between roll buckets would copy the blob, or take a reference recorded on both
+  sides with a two-phase protocol).
+- **A catalog in the system database** (`code-sql`, `ROLL_SYSTEM_DATABASE`): bucket names, which
+  are unique across the deployment (S3's rule, and `<bucket>.roll.site`), mapped to their account;
+  access keys and access point aliases to their account, so any node can route a request by its
+  credential or its bucket before it reaches an owner; account aliases and emails for sign-in.
+  Creating a bucket reserves its name in the catalog (a compare-and-swap row) before the account's
+  log records it, and deleting it frees the name after.
+- **Routing by request.** The bucket (path or host) names the account for bucket requests;
+  `ListBuckets`, STS, IAM and anything else account-wide routes by the access key's account, an
+  anonymous request by the bucket. Requests that touch two accounts (a cross-account copy, a
+  bucket policy granting another account, replication) run on the destination's owner and read
+  the other side's state through it.
+- **The deployment's own state** (the canonical owner, the CDN settings, replication targets, STS
+  session keys) moves to the catalog or to the default account's log.
+- **Jobs per account** (sweeper, lifecycle, orphan scan, scrub, meter, inventory) run on each
+  account's owner. The orphan scan lists `s3/blobs/` for everyone: blob keys would carry the
+  account (`s3/blobs/<account>/…`), or the scan becomes a singleton that asks each owner.
+- A migration that splits the existing log by account at a cut-over point, recorded once.

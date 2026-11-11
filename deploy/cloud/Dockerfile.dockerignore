@@ -1,0 +1,25 @@
+# Build context of deploy/cloud/Dockerfile: the Rust workspace, the dashboard and its workspace
+# packages, and this directory. Nothing else.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!vendor
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!packages
+!apps/dashboard
+!deploy/cloud/entrypoint.sh
+!deploy/cloud/health.sh
+**/node_modules
+**/dist
+**/target
+**/.roll
+**/.test-build
+**/*.tsbuildinfo
+.env*
+**/*.pem
+**/*.key
+# Public CA certificates the code bundles (include_str!), not secrets.
+!crates/roll-edge/src/cloudflare-origin-pull-ca.pem

@@ -83,6 +83,8 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+ "url",
+ "urlencoding",
  "zeroize",
  "zip",
 ]
@@ -623,6 +625,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-cloudwatchlogs"
+version = "1.157.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f6e015fb4953ff5aa49982d62591ff395c130487d2748daadf6762c0d4f894d"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-dynamodb"
 version = "1.130.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -646,6 +674,31 @@ dependencies = [
  "regex-lite",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-ecs"
+version = "1.151.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef7404455f21861add58134ade0d617e1f3aaf40c646d1360ca96d82fb56bb8"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]
@@ -1555,30 +1608,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "code-cluster"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bytes",
- "code-sql",
- "futures",
- "hex",
- "hmac 0.12.1",
- "http-body-util",
- "hyper 1.12.0",
- "hyper-util",
- "libc",
- "parking_lot",
- "reqwest",
- "sha2 0.10.9",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "code-control"
 version = "0.1.0"
 dependencies = [
@@ -1593,7 +1622,6 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "code-chat",
- "code-cluster",
  "code-git",
  "code-github",
  "code-index",
@@ -1615,6 +1643,8 @@ dependencies = [
  "pg-storage",
  "rand 0.8.8",
  "reqwest",
+ "roll-auth",
+ "roll-cluster",
  "rsa",
  "serde",
  "serde_json",
@@ -1696,20 +1726,29 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-config",
+ "aws-sdk-cloudwatchlogs",
+ "aws-sdk-ecs",
  "axum",
  "code-control",
+ "code-review",
  "code-store",
  "futures",
  "getrandom 0.4.3",
+ "hex",
  "http-body-util",
  "hyper 1.12.0",
  "hyper-util",
+ "object_store",
  "parking_lot",
  "pg-control",
  "pg-storage",
  "redis-control",
+ "reqwest",
+ "roll-fetch",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "toml",
@@ -3315,6 +3354,7 @@ dependencies = [
  "hyper-util",
  "rustls 0.23.46",
  "rustls-native-certs",
+ "rustls-platform-verifier",
  "tokio",
  "tokio-rustls 0.26.6",
  "tower-service",
@@ -3541,6 +3581,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b5cf4372d022092674a83b8febf5865f7a573cc0c5baec5e49c879b6a20978f"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "instant-acme"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f05ad37c421b962354c358d347d4a6130151df9407978372d3ad7f0c8f71a64"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "httpdate",
+ "hyper 1.12.0",
+ "hyper-rustls 0.27.10",
+ "hyper-util",
+ "rcgen",
+ "ring",
+ "rustls 0.23.46",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -4245,16 +4311,25 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "bytes",
+ "code-sql",
  "futures",
  "futures-util",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
  "lapin",
+ "libc",
  "mq-amqp",
  "mq-core",
+ "mq-storage",
  "mq-stream",
+ "object_store",
  "parking_lot",
  "rabbitmq-stream-client",
  "rcgen",
+ "roll-cluster",
  "rustls-native-certs",
  "serde",
  "serde_json",
@@ -4384,28 +4459,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mq-proxy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "hex",
- "hmac 0.12.1",
- "lapin",
- "mimalloc",
- "mq-amqp",
- "mq-cluster",
- "mq-core",
- "parking_lot",
- "reqwest",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4606,13 +4659,16 @@ name = "nosql-control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-dynamodb",
  "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "code-sql",
  "flate2",
  "futures",
  "getrandom 0.4.3",
+ "http-body 1.1.0",
  "nosql-alternator",
  "nosql-engine",
  "nosql-proto",
@@ -4620,13 +4676,17 @@ dependencies = [
  "nosql-sstable-import",
  "nosql-storage",
  "nosql-types",
+ "rcgen",
  "reqwest",
+ "roll-cluster",
+ "roll-edge",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tower-http 0.7.1",
  "tracing",
  "url",
@@ -5239,6 +5299,7 @@ dependencies = [
  "pg-proxy",
  "pg-storage",
  "reqwest",
+ "roll-edge",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5984,19 +6045,25 @@ dependencies = [
  "anyhow",
  "axum",
  "bytes",
+ "code-sql",
  "futures",
  "getrandom 0.4.3",
+ "pg-storage",
  "redis-engine",
  "redis-proto",
  "redis-server",
  "reqwest",
- "rusqlite",
+ "roll-cluster",
+ "roll-edge",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6197,6 +6264,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-auth"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde_json",
+ "tower-http 0.7.1",
+]
+
+[[package]]
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
@@ -6213,6 +6289,7 @@ dependencies = [
  "code-chat",
  "code-control",
  "code-sql",
+ "getrandom 0.4.3",
  "libc",
  "model-gateway",
  "nosql-control",
@@ -6236,7 +6313,80 @@ dependencies = [
  "tokio-rustls 0.26.6",
  "tokio-util",
  "unicode-width",
+ "url",
  "urlencoding",
+]
+
+[[package]]
+name = "roll-cluster"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "axum",
+ "bytes",
+ "code-sql",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "roll-edge"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "instant-acme",
+ "ipnet",
+ "pg-proxy",
+ "pg-storage",
+ "rcgen",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tokio-tungstenite 0.30.0",
+ "tower",
+ "tracing",
+ "x509-parser",
+]
+
+[[package]]
+name = "roll-fetch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "reqwest",
+ "tar",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -6245,14 +6395,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-sdk-dynamodb",
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
  "axum",
  "bytes",
+ "chrono",
  "clap",
- "code-cluster",
  "code-control",
  "code-preview",
+ "code-sql",
  "futures",
  "futures-util",
+ "http-body 1.1.0",
+ "kafka-protocol",
  "lapin",
  "libc",
  "libmimalloc-sys",
@@ -6279,10 +6435,15 @@ dependencies = [
  "pg-control",
  "pg-proxy",
  "pg-storage",
+ "rabbitmq-stream-client",
  "rcgen",
+ "rdkafka",
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-auth",
+ "roll-cluster",
+ "roll-edge",
  "s3-api",
  "s3-control",
  "s3-server",
@@ -6293,6 +6454,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.6",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "urlencoding",
@@ -6620,6 +6782,7 @@ dependencies = [
  "getrandom 0.4.3",
  "image",
  "reqwest",
+ "roll-auth",
  "s3-image",
  "s3-proto",
  "s3-server",
@@ -6716,6 +6879,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "ring",
+ "roll-cluster",
  "rsa",
  "s3-image",
  "s3-proto",
@@ -6728,6 +6892,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -7305,10 +7470,13 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "code-sql",
  "futures",
  "getrandom 0.4.3",
  "hmac 0.12.1",
+ "http-body 1.1.0",
  "kafka-protocol",
+ "libc",
  "libmimalloc-sys",
  "mimalloc",
  "pbkdf2",
@@ -7316,12 +7484,14 @@ dependencies = [
  "rcgen",
  "rdkafka",
  "reqwest",
- "rusqlite",
+ "roll-auth",
+ "roll-cluster",
  "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "stream-log",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-rustls 0.26.6",
@@ -7534,6 +7704,8 @@ dependencies = [
  "lambda_http",
  "object_store",
  "reqwest",
+ "roll-auth",
+ "roll-cluster",
  "rusqlite",
  "serde",
  "serde_json",

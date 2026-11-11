@@ -398,8 +398,14 @@ async fn readme_is_rendered_and_sanitized() {
         .await
         .unwrap();
     assert_eq!(r.headers()["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(r.headers()["x-content-type-options"], "nosniff");
     assert!(r.headers()["content-security-policy"].to_str().unwrap().contains("sandbox"));
     assert!(r.headers()["x-roll-changeset"].to_str().unwrap().starts_with("cs_"));
+    // An SVG keeps its type (README images) but downloads when opened.
+    a.ok("POST", &format!("{p}/land"), Some(json!({ "message": "logo", "files": { "x.svg": { "content": "<svg onload=\"alert(1)\"/>" } } }))).await;
+    let r = a.router.clone().oneshot(axum::http::Request::get(format!("{p}/blob/main/x.svg")).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(r.headers()["content-type"], "image/svg+xml");
+    assert_eq!(r.headers()["content-disposition"], "attachment");
 }
 
 /// Postgres text can't hold NUL characters (SQLite's can): there, text with one is the caller's

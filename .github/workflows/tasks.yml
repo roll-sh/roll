@@ -14,6 +14,11 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: '0'
+  # Images pinned by digest (tag@multi-arch index digest), the same refs the scripts and tests use.
+  DYNAMODB_IMAGE: amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+  SEAWEEDFS_IMAGE: chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
+  MINIO_IMAGE: cgr.dev/chainguard/minio:latest@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+  MC_IMAGE: cgr.dev/chainguard/minio-client:latest@sha256:10388d580a724f356b94c9b2631b5a179039cabe8c76e9b37d86ed007d569b05
 
 jobs:
   # SQLite and the log store in memory.
@@ -44,6 +49,6 @@ jobs:
           cache-on-failure: true
       - name: Pull images
         run: |
-          docker pull -q amazon/dynamodb-local & docker pull -q chrislusf/seaweedfs &
-          docker pull -q cgr.dev/chainguard/minio & docker pull -q cgr.dev/chainguard/minio-client & wait
+          docker pull -q "$DYNAMODB_IMAGE" & docker pull -q "$SEAWEEDFS_IMAGE" &
+          docker pull -q "$MINIO_IMAGE" & docker pull -q "$MC_IMAGE" & wait
       - run: scripts/test-tasks.sh --force --e2e-only

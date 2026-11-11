@@ -353,6 +353,12 @@ impl QueueHandle {
         QueueHandle { meta, kind, shared, tx, wake_pending: AtomicBool::new(false), settle_lane: false, stream_tx: None }
     }
 
+    /// Take stream-protocol commands on `tx` too (a cluster's router for a stream queue).
+    pub fn with_stream(mut self, tx: mpsc::Sender<stream::StreamCmd>) -> Self {
+        self.stream_tx = Some(tx);
+        self
+    }
+
     /// Send settles through [`QueueShared::settles`]: for actors that drain it.
     pub(crate) fn with_settle_lane(mut self) -> Self {
         self.settle_lane = true;

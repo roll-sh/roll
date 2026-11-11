@@ -29,7 +29,7 @@ use crate::tier::{self, Cache, SegmentData};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use mq_core::log::{Log, LogStore, crc32};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
@@ -173,7 +173,14 @@ impl LogStore for S3ExpressStore {
     }
 
     fn describe(&self) -> String {
-        format!("S3 Express One Zone ({}/{})", self.ctx.cfg.store, self.ctx.cfg.prefix)
+        format!("object log ({}/{})", self.ctx.cfg.store, self.ctx.cfg.prefix)
+    }
+
+    async fn released(&self, key: &str) {
+        let closing = self.shared.lock().get(key).and_then(Weak::upgrade);
+        if let Some(sh) = closing {
+            sh.released().await;
+        }
     }
 }
 
@@ -587,20 +594,18 @@ async fn drain_stream(ctx: &Ctx, stream: u64) -> anyhow::Result<()> {
             }
         }
     }
+    // A busy stream holds an object per group commit since its logs last flushed (thousands):
+    // the new owner waits for this, so the requests go DRAIN_PARALLEL at a time.
     let mut by_log: BTreeMap<String, Vec<Record>> = BTreeMap::new();
-    for (&seq, _) in objects.range(..fence) {
-        ctx.requests.get();
-        let path = group::object_path(&ctx.streams, stream, seq);
-        let data = match store.get(&path).await {
-            Ok(r) => r.bytes().await?,
-            // Already materialized and deleted by its writer.
-            Err(object_store::Error::NotFound { .. }) => continue,
-            Err(e) => return Err(e).with_context(|| format!("get {path}")),
-        };
+    let paths: Vec<Path> = objects.range(..fence).map(|(&seq, _)| group::object_path(&ctx.streams, stream, seq)).collect();
+    let mut gets = futures_util::stream::iter(paths.into_iter().map(|path| get_stream_object(ctx, path))).buffered(DRAIN_PARALLEL);
+    while let Some(data) = gets.try_next().await? {
+        let Some(data) = data else { continue };
         for rec in group::decode_object(data)?.1 {
             by_log.entry(rec.key.clone()).or_default().push(rec);
         }
     }
+    drop(gets);
     let logs = by_log.len();
     for (key, mut recs) in by_log {
         recs.sort_by_key(|r| r.first);
@@ -608,14 +613,25 @@ async fn drain_stream(ctx: &Ctx, stream: u64) -> anyhow::Result<()> {
     }
     ctx.requests.put();
     store.put(&dir.clone().join("drained"), Bytes::new().into()).await.context("mark stream drained")?;
-    for (&seq, &size) in objects.range(..fence) {
-        if size as usize != group::STREAM_HEADER {
-            ctx.requests.delete();
-            let _ = store.delete(&group::object_path(&ctx.streams, stream, seq)).await;
-        }
-    }
+    let paths: Vec<Path> = objects.range(..fence).filter(|(_, size)| **size as usize != group::STREAM_HEADER).map(|(&seq, _)| group::object_path(&ctx.streams, stream, seq)).collect();
+    futures_util::stream::iter(paths.into_iter().map(|path| delete_stream_object(ctx, path))).buffer_unordered(DRAIN_PARALLEL).collect::<()>().await;
     info!(stream = format!("{stream:016x}"), fence, logs, "drained stream");
     Ok(())
+}
+
+/// A stream object's bytes, `None` if its writer already materialized and deleted it.
+async fn get_stream_object(ctx: &Ctx, path: Path) -> anyhow::Result<Option<Bytes>> {
+    ctx.requests.get();
+    match ctx.cfg.store.get(&path).await {
+        Ok(r) => Ok(Some(r.bytes().await?)),
+        Err(object_store::Error::NotFound { .. }) => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("get {path}"))),
+    }
+}
+
+async fn delete_stream_object(ctx: &Ctx, path: Path) {
+    ctx.requests.delete();
+    let _ = ctx.cfg.store.delete(&path).await;
 }
 
 /// Copy records of one log from a stream into the log's own objects, as their writer would
@@ -629,7 +645,18 @@ async fn materialize(ctx: &Ctx, key: &str, recs: Vec<Record>) -> anyhow::Result<
         // Destroyed (or never opened): nothing to bring back.
         return Ok(());
     }
-    for rec in recs {
+    // Each record goes to its own index, whatever the others do: put them DRAIN_PARALLEL at a time.
+    let puts: Vec<futures_util::future::BoxFuture<'_, anyhow::Result<()>>> = recs.iter().map(|rec| Box::pin(materialize_record(ctx, store, &dir, &listing, rec)) as _).collect();
+    futures_util::stream::iter(puts).buffer_unordered(DRAIN_PARALLEL).try_collect::<()>().await
+}
+
+/// How many requests draining a stream keeps in flight.
+const DRAIN_PARALLEL: usize = 32;
+
+/// One record of [`materialize`]: put-if-absent at its index, past whatever an object there (or
+/// one starting before it) already holds.
+async fn materialize_record(ctx: &Ctx, store: &dyn ObjectStore, dir: &Path, listing: &Listing, rec: &Record) -> anyhow::Result<()> {
+    {
         let mut at = rec.first;
         let mut rest = &rec.entries[..];
         // An object starting before the record may already cover its beginning.

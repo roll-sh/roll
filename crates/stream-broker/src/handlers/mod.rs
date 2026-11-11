@@ -51,6 +51,18 @@ pub struct Ctx {
     pub version: i16,
     pub client_id: String,
     pub client_host: String,
+    /// The broker address this connection is told ([`crate::server::Session::advertised`]).
+    pub advertised: Arc<(String, u16)>,
+}
+
+impl Ctx {
+    pub fn advertised_host(&self) -> &str {
+        &self.advertised.0
+    }
+
+    pub fn advertised_port(&self) -> u16 {
+        self.advertised.1
+    }
 }
 
 /// APIs and versions we serve (advertised by ApiVersions).
@@ -144,7 +156,7 @@ pub async fn handle(b: &Arc<Broker>, session: &mut Session, header: &RequestHead
         RequestKind::SaslAuthenticate(r) => sasl::authenticate(b, session, r),
         req => {
             let stream = session.stream.clone().expect("checked by the connection");
-            let ctx = Ctx { b: b.clone(), stream, version, client_id: session.client_id.clone(), client_host: format!("/{}", session.peer.ip()) };
+            let ctx = Ctx { b: b.clone(), stream, version, client_id: session.client_id.clone(), client_host: format!("/{}", session.peer.ip()), advertised: session.advertised.clone() };
             dispatch(ctx, req).await
         }
     }

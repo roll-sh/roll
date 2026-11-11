@@ -7,6 +7,10 @@ on:
   merge_group:
   push:
     branches: [main]
+  # Daily on main: keeps main's Rust cache alive (GitHub drops caches unused for 7 days), so
+  # pull requests start warm.
+  schedule:
+    - cron: "17 5 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -14,9 +18,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The Rust smoke tests, one job per dependency tree so the slowest cold build stays under a
+  # minute. Only main saves the cache; pull requests restore it.
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    strategy:
+      matrix:
+        include:
+          # Git framing and packs.
+          - name: git
+            packages: -p code-git
+          # Reviewer schemas, pricing and key sealing.
+          - name: review
+            packages: -p code-review
+          # RESP and S3 auth and parsing.
+          - name: protocols
+            packages: -p redis-proto -p s3-proto
+    name: rust (${{ matrix.name }})
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -26,9 +45,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ matrix.name }}
           cache-on-failure: true
-      # Git framing/packs, reviewer schemas/pricing/key sealing, RESP and S3 auth/parsing.
-      - run: cargo test --locked -p code-git -p code-review -p redis-proto -p s3-proto --lib
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked ${{ matrix.packages }} --lib
 
   # Every package's types (TypeScript 7, scripts/typecheck.mjs), the dashboard's node tests and the
   # desktop app's tests.
@@ -68,12 +88,12 @@ jobs:
           done
       - name: Validate workflows
         run: |
-          version=1.7.7
+          version=1.7.12
           if curl -fsSL --max-time 20 --retry 1 --retry-all-errors -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v$version/actionlint_${version}_linux_amd64.tar.gz"; then
             tar -xzf actionlint.tar.gz actionlint
             ./actionlint -shellcheck=
           else
-            docker run --rm -v "$PWD:/repo" -w /repo "rhysd/actionlint:$version" -shellcheck=
+            docker run --rm -v "$PWD:/repo" -w /repo "rhysd/actionlint:$version@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667" -shellcheck=
           fi
 
   ci:

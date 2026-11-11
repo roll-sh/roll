@@ -45,6 +45,8 @@ url.workspace = true
 x509-cert.workspace = true
 zeroize.workspace = true
 moka.workspace = true
+roll-cluster.workspace = true
+tower.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3control.workspace = true

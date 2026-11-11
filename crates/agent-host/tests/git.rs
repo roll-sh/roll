@@ -279,6 +279,7 @@ fn grant(url: &str) -> agent_proto::CodeGrant {
         write: true,
         branch: None,
         expires_at: u64::MAX,
+        github: None,
     }
 }
 

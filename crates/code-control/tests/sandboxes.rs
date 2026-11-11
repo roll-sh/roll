@@ -709,7 +709,7 @@ async fn the_docker_backend_runs_hardened_containers() {
     }
     let net = format!("roll-sandboxes-test{}", std::process::id());
     let d = Docker::new(DockerConfig {
-        image: "busybox:1.37".into(),
+        image: "busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec".into(),
         runtime: Runtime::Auto,
         command: vec!["sleep".into(), "3600".into()],
         dedicated_network: net.clone(),

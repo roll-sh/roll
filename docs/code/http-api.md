@@ -17,7 +17,8 @@ are listed in [architecture.md](architecture.md#http-api-v1code).
 ```
 GET /v1/code → {storage, git_url /* e.g. "https://roll.sh" or "http://127.0.0.1:7070/git" */, repos,
                 stats: {merges_today, merges_per_s, queue_depth}, github: {configured},
-                auth: {required: bool /* ROLL_CODE_TOKEN is set */,
+                auth: {required: bool /* ROLL_CODE_TOKEN or ROLL_ADMIN_TOKEN is set */,
+                       operator: bool /* the token is rolld's operator token (ROLL_ADMIN_TOKEN): every product's API takes it */,
                        caller: {kind: "admin" | "owner" | "app" | "anonymous" | "invalid", owner: string | null,
                                 app?: string /* kind app */,
                                 reviewer: {kind: "user" | "agent" | "app", name} | null /* who it reviews and comments as,
@@ -41,6 +42,10 @@ clients except for the following:
 - A repo that is moving between nodes (a handoff, or a dead node's lease that hasn't expired yet)
   makes the receiving node wait and try again for about a lease's length; past that the request
   answers `503 {error}` with `Retry-After` and `x-roll-code-unavailable`. Nothing ran: retry it.
+- A write already forwarded to the owner when that node dies answers `502` (`forwarding to node
+  … failed`, plain text): it may or may not have run, and the receiving node never sends a write
+  twice. Retry it in a way that is safe either way: a landing that did land conflicts on its own
+  paths when sent again (409 naming them).
 - An event stream ends when its repo starts moving to another node: reconnect (the dashboard and
   `roll code watch` do).
 - `x-roll-code-*` request headers belong to the cluster: a request carrying one that isn't signed
@@ -1101,12 +1106,16 @@ owner token could otherwise import another account's repositories.
 
 ## CORS
 
-The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. Allow any origin, plus
-`Authorization` and `Content-Type`, and set `Access-Control-Expose-Headers: x-roll-changeset`.
+The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. rolld answers CORS for
+every API at once: the dashboard's origins (`ROLL_DASHBOARD_ORIGIN`, by default any localhost
+port on loopback), any requested header (`Authorization`, `Content-Type`), every response header
+exposed (`x-roll-changeset`).
 
 ## Auth
 
-- The local daemon is open, like the rest of the local API, unless `ROLL_CODE_TOKEN` is set.
+- The local daemon is open, like the rest of the local API, unless `ROLL_CODE_TOKEN` or
+  `ROLL_ADMIN_TOKEN` (rolld's operator token) is set. Both are admin tokens and work side by side;
+  `GET /v1/code` says `auth.operator` for the operator's.
 - Owner tokens are created with `POST /v1/code/owners/{owner}/tokens {name}` →
   `{token /* rlc_…, shown once */, id /* tok_… */, prefix /* the token's first 8 characters */, name, owner, created_at}`
   (the owner or admin; 401 anonymous, 403 another owner).

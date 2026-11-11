@@ -24,9 +24,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+
+/// A connection's halves: a TCP socket's own, or a split TLS stream's (the edge).
+type ConnRead = Box<dyn AsyncRead + Send + Unpin>;
+type ConnWrite = Box<dyn AsyncWrite + Send + Unpin>;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -145,7 +148,7 @@ enum Flow {
 }
 
 struct FrameIn {
-    rd: OwnedReadHalf,
+    rd: ConnRead,
     buf: BytesMut,
 }
 
@@ -196,7 +199,7 @@ fn negotiate(client: u32, server: u32) -> u32 {
     }
 }
 
-async fn write_frame(wr: &mut OwnedWriteHalf, b: &mut BytesMut, at: usize) -> std::io::Result<()> {
+async fn write_frame(wr: &mut ConnWrite, b: &mut BytesMut, at: usize) -> std::io::Result<()> {
     finish(b, at);
     wr.write_all(b).await?;
     b.clear();
@@ -204,7 +207,7 @@ async fn write_frame(wr: &mut OwnedWriteHalf, b: &mut BytesMut, at: usize) -> st
 }
 
 /// Peer properties, SASL PLAIN, tune and open. `None`: the connection is to be closed.
-async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut OwnedWriteHalf, peer: SocketAddr) -> anyhow::Result<Option<Session>> {
+async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut ConnWrite, peer: SocketAddr, advertised: (&str, u16)) -> anyhow::Result<Option<Session>> {
     let broker = &server.broker;
     let mut b = BytesMut::with_capacity(512);
     let mut client_properties = Vec::new();
@@ -304,8 +307,8 @@ async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut OwnedWriteHalf, 
                     return Ok(None);
                 };
                 let at = response(&mut b, OPEN, corr, OK);
-                let port = server.config.advertised_port.to_string();
-                put_map(&mut b, [("advertised_host", server.config.advertised_host.as_str()), ("advertised_port", port.as_str())].into_iter());
+                let port = advertised.1.to_string();
+                put_map(&mut b, [("advertised_host", advertised.0), ("advertised_port", port.as_str())].into_iter());
                 write_frame(wr, &mut b, at).await?;
                 return Ok(Some(Session { user, vhost, vhost_name, frame_max, heartbeat, client_properties }));
             }
@@ -323,13 +326,23 @@ async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut OwnedWriteHalf, 
 
 /// Serve one accepted socket until it closes.
 pub(crate) async fn run(server: Arc<Server>, sock: TcpStream, peer: SocketAddr, local: SocketAddr) -> anyhow::Result<()> {
+    let (rd, wr) = sock.into_split();
+    run_split(server, Box::new(rd), Box::new(wr), peer, local, false, None).await
+}
+
+/// Serve one connection from its two halves; `tls` is reported to the management API. With
+/// `virtual_node`, the connection sees one node at that address, whatever node serves it.
+pub(crate) async fn run_split(server: Arc<Server>, rd: ConnRead, mut wr: ConnWrite, peer: SocketAddr, local: SocketAddr, tls: bool, virtual_node: Option<(String, u16)>) -> anyhow::Result<()> {
     let broker = server.broker.clone();
     if broker.draining.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let (rd, mut wr) = sock.into_split();
     let mut fin = FrameIn { rd, buf: BytesMut::with_capacity(64 << 10) };
-    let session = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(&server, &mut fin, &mut wr, peer)).await;
+    let advertised = match &virtual_node {
+        Some((host, port)) => (host.as_str(), *port),
+        None => (server.config.advertised_host.as_str(), server.config.advertised_port),
+    };
+    let session = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(&server, &mut fin, &mut wr, peer, advertised)).await;
     let Ok(Ok(Some(s))) = session else {
         let _ = wr.shutdown().await;
         return match session {
@@ -351,7 +364,7 @@ pub(crate) async fn run(server: Arc<Server>, sock: TcpStream, peer: SocketAddr, 
         local,
         client_properties: serde_json::Value::Object(props),
         connected_at_ms: mq_core::now_ms(),
-        tls: false,
+        tls,
         auth_mechanism: "PLAIN".into(),
         frame_max: s.frame_max.into(),
         channel_max: 0.into(),
@@ -389,6 +402,7 @@ pub(crate) async fn run(server: Arc<Server>, sock: TcpStream, peer: SocketAddr, 
         frame_max: s.frame_max,
         heartbeat: s.heartbeat,
         shared: shared.clone(),
+        virtual_node,
         sac_tx,
         publishers: HashMap::new(),
         pub_refs: HashSet::new(),
@@ -420,6 +434,8 @@ struct Conn {
     frame_max: u32,
     heartbeat: u32,
     shared: Arc<Shared>,
+    /// Behind the edge: the one node every node answers as, at the address the client used.
+    virtual_node: Option<(String, u16)>,
     sac_tx: mpsc::UnboundedSender<Notice>,
     publishers: HashMap<u8, Publisher>,
     pub_refs: HashSet<(String, Arc<str>)>,
@@ -1102,6 +1118,9 @@ impl Conn {
     fn metadata(&mut self, corr: u32, mut r: Rd<'_>) -> R<()> {
         let streams = r.strings()?;
         // Broker 0 is this node; streams owned by other cluster nodes name theirs as leader.
+        // Behind the edge it's the node the client connected to by name, which every node
+        // answers as: no node's own address leaves the fleet, and the stream's router reaches it
+        // wherever it runs.
         let mut brokers: Vec<(String, u32)> = Vec::new();
         let mut broker_ref = |host: String, port: u32| match brokers.iter().position(|b| b.0 == host && b.1 == port) {
             Some(i) => i as u16,
@@ -1110,7 +1129,11 @@ impl Conn {
                 (brokers.len() - 1) as u16
             }
         };
-        let here = (self.server.config.advertised_host.clone(), self.server.config.advertised_port as u32);
+        let here = match &self.virtual_node {
+            Some((host, port)) => (host.clone(), *port as u32),
+            None => (self.server.config.advertised_host.clone(), self.server.config.advertised_port as u32),
+        };
+        let virtual_node = self.virtual_node.is_some();
         // (code, leader, replica): a stream owned by another node lists that node as its replica
         // too, because clients read from a replica (or, with none, from the node they asked).
         let answers: Vec<(u16, u16, Option<u16>)> = streams
@@ -1119,8 +1142,14 @@ impl Conn {
                 if !self.check_read_or_write("queue", s) {
                     return (ACCESS_REFUSED, 0xffff, None);
                 }
+                if virtual_node {
+                    return match manage::lookup(&self.vhost, s) {
+                        Ok(_) => (OK, broker_ref(here.0.clone(), here.1), None),
+                        Err(c) => (c, 0xffff, None),
+                    };
+                }
                 match manage::find(&self.vhost, s) {
-                    Ok(manage::Found::Here(_)) => (OK, broker_ref(here.0.clone(), here.1), None),
+                    Ok(manage::Found::Here) => (OK, broker_ref(here.0.clone(), here.1), None),
                     Ok(manage::Found::Elsewhere(Some(addr))) => {
                         let r = broker_ref(addr.ip().to_string(), addr.port() as u32);
                         (OK, r, Some(r))
@@ -1417,7 +1446,7 @@ fn encode_out(buf: &mut BytesMut, item: Out, shared: &Shared) -> (usize, bool) {
     (0, false)
 }
 
-async fn writer_loop(mut wr: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Out>, shared: Arc<Shared>, heartbeat: u32) {
+async fn writer_loop(mut wr: ConnWrite, mut rx: mpsc::UnboundedReceiver<Out>, shared: Arc<Shared>, heartbeat: u32) {
     let mut buf = BytesMut::with_capacity(256 << 10);
     let idle = Duration::from_secs(heartbeat.max(1) as u64);
     loop {
@@ -1512,7 +1541,7 @@ mod tests {
     #[test]
     fn chunk_layout_and_crc() {
         let m = Arc::new(Message::new("", "s", Properties::default(), Bytes::from_static(b"abc")));
-        let c = Chunk { first: 10, entries: vec![Entry::Msg(m.clone()), Entry::Msg(m)], committed: 11 };
+        let c = Chunk { first: 10, entries: vec![Entry::Msg(m.clone()), Entry::Msg(m)], committed: 11, next: 12 };
         let mut b = BytesMut::new();
         encode_chunk(&mut b, 3, true, &c);
         let mut r = Rd::new(&b);

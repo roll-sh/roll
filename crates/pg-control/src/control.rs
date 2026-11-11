@@ -87,10 +87,13 @@ impl Control {
     }
 
     pub fn connection_uri(&self, project: &Project, endpoint_id: &str) -> String {
-        format!(
-            "postgres://roll:{}@{}:{}/main?options=endpoint%3D{endpoint_id}&sslmode=disable",
-            project.password, self.config.public_host, self.config.public_port
-        )
+        match &self.config.public_domain {
+            Some(domain) => format!("postgres://roll:{}@{endpoint_id}.{domain}:{}/main?sslmode=require", project.password, self.config.public_port),
+            None => format!(
+                "postgres://roll:{}@{}:{}/main?options=endpoint%3D{endpoint_id}&sslmode=disable",
+                project.password, self.config.public_host, self.config.public_port
+            ),
+        }
     }
 
     pub(crate) fn project_or_404(&self, id: &str) -> Result<Project> {

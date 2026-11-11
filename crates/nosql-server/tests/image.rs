@@ -88,6 +88,15 @@ fn env(e: &[(&'static str, &str)]) -> RunOpts<'static> {
     RunOpts { env: e.iter().map(|(k, v)| (*k, v.to_string())).collect(), ..Default::default() }
 }
 
+/// The container's roll API (`:7070`) with the operator token its entrypoint made.
+fn api_get(c: &Container, path: &str) -> String {
+    reqwest::blocking_get_with(&format!("http://{}:7070{path}", c.ip()), &admin_token(c))
+}
+
+fn admin_token(c: &Container) -> String {
+    String::from_utf8_lossy(&c.exec(&["cat", "/var/lib/roll/admin-token"]).stdout).trim().to_string()
+}
+
 fn tcp_open(ip: &str, port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&format!("{ip}:{port}").parse().unwrap(), Duration::from_millis(500)).is_ok()
 }
@@ -141,7 +150,7 @@ fn defaults_ports_logs_and_startup() {
     assert!(metrics.contains("scylla_transport_cql_errors_total"), "{metrics}");
     let rest = reqwest::blocking_get(&format!("http://{ip}:10000/storage_service/host_id"));
     assert!(rest.contains('-'), "{rest}");
-    let api = reqwest::blocking_get(&format!("http://{ip}:7070/v1/nosql"));
+    let api = api_get(&c, "/v1/nosql");
     assert!(api.contains("\"single\""), "{api}");
     // Health check, user, data directory, in-container cqlsh (Testcontainers' readiness probes).
     let end = Instant::now() + Duration::from_secs(20);
@@ -425,7 +434,8 @@ fn seed_from_branch() {
     for from in [format!("http://{sip}:7070/default"), format!("cql://{sip}:9042")] {
         let vol = docker::unique("roll-nosql-test-vol");
         let _cleanup = VolumeGuard(vol.clone());
-        let c = start(&image, RunOpts { volume: Some(vol.clone()), env: vec![("ROLL_NOSQL_FROM", from.clone()), ("ROLL_NOSQL_FROM_KEYSPACES", "app".into())], ..Default::default() });
+        let env = vec![("ROLL_NOSQL_FROM", from.clone()), ("ROLL_NOSQL_FROM_KEYSPACES", "app".into()), ("ROLL_NOSQL_FROM_TOKEN", admin_token(&src))];
+        let c = start(&image, RunOpts { volume: Some(vol.clone()), env, ..Default::default() });
         rt.block_on(async {
             let cl = connect(&c.ip(), None).await.unwrap();
             let r = row(&cl, "SELECT count(*), max(ttl(name)) FROM app.users").await;
@@ -460,7 +470,7 @@ fn memory_budgets() {
     let rt = rt();
     let memory = |c: &Container| -> serde_json::Value {
         c.wait_cql(Duration::from_secs(30));
-        let v: serde_json::Value = serde_json::from_str(&reqwest::blocking_get(&format!("http://{}:7070/v1/nosql", c.ip()))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&api_get(c, "/v1/nosql")).unwrap();
         v["memory"].clone()
     };
     let budgets = |m: &serde_json::Value| (m["memtable_budget_bytes"].as_u64().unwrap() >> 20, m["cache_memory_budget_bytes"].as_u64().unwrap() >> 20);
@@ -489,6 +499,10 @@ mod reqwest {
     //! Tiny blocking HTTP helpers over reqwest's async client.
     pub fn blocking_get(url: &str) -> String {
         super::rt().block_on(async { ::reqwest::get(url).await.unwrap().text().await.unwrap() })
+    }
+
+    pub fn blocking_get_with(url: &str, token: &str) -> String {
+        super::rt().block_on(async { ::reqwest::Client::new().get(url).bearer_auth(token).send().await.unwrap().text().await.unwrap() })
     }
 
     pub fn blocking_post(url: &str, headers: &[(&str, &str)], body: &str) -> (u16, String) {
@@ -579,13 +593,13 @@ cluster.shutdown()
 
     // Cassandra 5.0's cqlsh, validating the certificate.
     let o = docker::docker(&[
-        "run", "--rm", "--memory", "256m", "--add-host", &host, "-v", &tls_mount, "-e", "SSL_CERTFILE=/tls/tls.crt", "--entrypoint", "cqlsh", "cassandra:5.0.9",
+        "run", "--rm", "--memory", "256m", "--add-host", &host, "-v", &tls_mount, "-e", "SSL_CERTFILE=/tls/tls.crt", "--entrypoint", "cqlsh", common::CASSANDRA_IMAGE,
         "--ssl", "-u", "cassandra", "-p", "cassandra", "roll-tls", "-e", "SELECT v FROM tls.t WHERE k = 1",
     ]);
     let out = String::from_utf8_lossy(&o.stdout);
     assert!(o.status.success() && out.contains("secret"), "{out}{}", String::from_utf8_lossy(&o.stderr));
     // Without --ssl it can't connect.
-    let o = docker::docker(&["run", "--rm", "--memory", "256m", "--add-host", &host, "--entrypoint", "cqlsh", "cassandra:5.0.9", "-u", "cassandra", "-p", "cassandra", "--connect-timeout", "3", "roll-tls", "-e", "SELECT v FROM tls.t"]);
+    let o = docker::docker(&["run", "--rm", "--memory", "256m", "--add-host", &host, "--entrypoint", "cqlsh", common::CASSANDRA_IMAGE, "-u", "cassandra", "-p", "cassandra", "--connect-timeout", "3", "roll-tls", "-e", "SELECT v FROM tls.t"]);
     assert!(!o.status.success());
     // The image's cqlsh (Testcontainers runs it in the container).
     let o = c.exec(&["env", "SSL_CERTFILE=/tls/tls.crt", "cqlsh", "--ssl", "--server-name", "roll-tls", "-u", "cassandra", "-p", "cassandra", "-e", "SELECT v FROM tls.t WHERE k = 1"]);

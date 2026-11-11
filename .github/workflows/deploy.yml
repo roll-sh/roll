@@ -1,0 +1,65 @@
+name: deploy
+
+# roll cloud: every merge to main ships one arm64 image to the fleet through a canary
+# (deploy/cloud/README.md). The steps are deploy/cloud/deploy.sh, which also runs by hand.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An image tag already in ECR to deploy (a commit SHA). Empty builds this commit.
+        required: false
+        default: ""
+
+# One deploy at a time; a newer merge waits, and only the newest waiting one runs.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    # Skipped until the stack exists and the repository variable names its deploy role.
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-24.04-arm
+    environment: production
+    timeout-minutes: 240
+    env:
+      AWS_REGION: us-east-1
+      ROLL_CLOUD_STACK: roll-cloud
+      TAG: ${{ inputs.tag || github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 7200
+      - name: AWS CLI
+        run: |
+          if ! command -v aws >/dev/null; then
+            curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o "$RUNNER_TEMP/awscli.zip"
+            unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP"
+            sudo "$RUNNER_TEMP/aws/install"
+          fi
+          aws --version
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        if: inputs.tag == ''
+        run: deploy/cloud/deploy.sh push "$TAG"
+      - name: Canary, bake, roll
+        run: deploy/cloud/deploy.sh deploy "$TAG"
+      # deploy.sh rolls back on its own failures; this covers a cancelled job (or a runner that
+      # died mid-rollback). It's a no-op when the fleet already runs the previous revision.
+      - name: Roll back
+        if: failure() || cancelled()
+        run: |
+          if [ -s "$RUNNER_TEMP/roll-cloud-deploy-$ROLL_CLOUD_STACK" ]; then
+            deploy/cloud/deploy.sh rollback
+          else
+            echo "nothing was deployed"
+          fi

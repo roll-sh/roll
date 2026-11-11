@@ -86,6 +86,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Edition 2024. Declare dependencies in the root `Cargo.toml` `[workspace.dependencies]`.
   - `crates/pg-proxy` is the Postgres wire proxy. `crates/pg-control` is the control plane. `rolld` is the daemon and `roll-cli` is the `roll` CLI.
   - Run `cargo build`, `cargo test` and `cargo clippy` before you finish.
+  - rolld runs the products in `ROLL_PRODUCTS` (`crates/rolld/src/products.rs` decides; the old
+    `--no-*`/`--*-only` flags are shorthands). A product's new top-level API prefix goes in
+    `Product::prefixes`: off products' 404s and the metrics read it. Access lines and EMF metrics
+    are `crates/rolld/src/logs.rs`: log route patterns, never a path, query or header.
   - After touching anything Postgres-related, run `pnpm test:pg` (Docker e2e; it skips itself when nothing relevant changed). New Postgres features need an e2e test in `crates/pg-control/tests/e2e.rs`.
 - **Streams (Kafka-compatible):**
   - `crates/stream-log` is the partition log. It holds Kafka record batches v2 in segment files, group-commit fsync (the high watermark is the durable end), idempotent producer state and transactions, plus hooks for tiering. It does no network or object-storage I/O.
@@ -97,6 +101,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Produce and fetch never decode records: batches go to disk and back to clients as received. Only compaction, timestamp lookups, compacted-topic key checks and the HTTP API decode them, through `records.rs`.
   - Compaction rewrites uploaded chunks into new objects with `.c<generation>.kb` keys and swaps them in atomically, keeping offsets. Never reuse a chunk key.
   - Local disk is a cache: closed partitions drop their local copies (`evict_on_unload`), and `local_disk_bytes` caps open ones. Never drop a segment that isn't fully uploaded or that holds an open transaction (`keep_local_from`): transaction state is rebuilt from local segments.
+  - On the fleet (`fleet.rs`, the broker README's "On the fleet") a stream has one owner (lease `stream:cluster:<id>`) and only it opens the stream's partitions; connections are spliced to it after SASL and HTTP is forwarded. Every catalog write that belongs to a stream is fenced (`Store::fenced`: the stream's generation checked in the same transaction), and object keys written there carry the tenure. Acknowledgements wait for the owner's write-ahead log object in object storage (`LogConfig::remote`): never move a high watermark past what object storage has, and never trust a node's local copy of a stream it just took over.
   - Encoding fails if a response sets a field outside its version range. Gate every field on `ctx.version`. `tests/protocol.rs` encodes every API at every version.
   - Never size an allocation from a count or length a peer sent; bound it by the bytes actually present. `kafka-protocol` is vendored with bounded decoders (`vendor/kafka-protocol/ROLL.md`), and the broker tests fail any allocation over 1 GiB (`tests/common`).
   - After touching anything stream-related, run `pnpm test:stream`. It skips itself when nothing relevant changed and runs the Java tool tests in Docker (`apache/kafka:4.1.0`).
@@ -107,6 +112,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - HTTP: `tests/http.rs`
     - storage: `tests/storage.rs`
     - compaction: `tests/compaction.rs`
+    - the fleet (ownership, takeover, handoff, fencing): `tests/cluster.rs`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the broker tests against S3.
   - `roll stream …` in `crates/roll-cli` and `/dashboard/streams` both use the HTTP API.
 - **Code (source control, "keep the code rolling"):**
@@ -125,8 +131,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     after `write` returns. Never ignore a failed statement inside a write (it ends a Postgres
     transaction): use `ON CONFLICT`, or check first.
   - `crates/code-preview` runs `roll.toml` checks and previews in containers.
-  - `crates/code-cluster` is membership, repo leases and forwarding; `code-control/src/cluster.rs`
-    wires it in (docs/code/cluster.md). In a cluster every request naming a repo, change, thread
+  - `crates/roll-cluster` is membership, leases and forwarding for every product, on a backend
+    (Memory, Postgres on the database's clock, or DynamoDB with no clocks compared);
+    `code-control/src/cluster.rs` wires roll code in (docs/code/cluster.md). New products take
+    leases from rolld's handle (`crates/rolld/src/cluster.rs`). In a cluster every request naming a repo, change, thread
     or work item runs on the repo's owner: put new such routes under a routed prefix
     (`cluster::classify`). A repo's background work runs only on its owner: check
     `Code::owns_repo` before side effects, run long work under `Code::while_owner`, and resume it
@@ -227,7 +235,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     subsystem they cover:
     - `--docker`: the stores on Postgres (after touching SQL, `code-sql` or the cluster), checks
       and previews in real Docker (after touching `code-preview`), and the cluster as real
-      `rolld` containers (after touching `code-cluster` or `cluster.rs`)
+      `rolld` containers (after touching `roll-cluster` or `cluster.rs`)
     - `--stress`: 40,000 merges in release and 2,000 changes through the merge queue (after
       touching the lander, `Store::advance` or the queue)
   - Local gates share one cargo package set (`scripts/lib/gate.sh`) so nothing builds twice. A
@@ -362,12 +370,14 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`, `d3fk/s3cmd` for SigV2).
   - `pnpm test:storage-aws` runs `crates/s3-server/tests/aws.rs` against LocalStack in Docker (no AWS account): SSE-KMS with the backing bucket on LocalStack, notifications to SQS/SNS/Lambda/EventBridge, replication to buckets outside roll, Object Lambda. Run it after touching SSE, notifications, replication targets or Object Lambda.
   - `pnpm test:s3-conformance` runs the S3 conformance suite (ceph/s3-tests, pinned) in Docker against a fresh server (`crates/s3-server/examples/serve.rs`) and compares the outcome with `tests/s3-conformance/expected.txt`, which lists every test known not to pass and why. It fails on a regression and on an unexpected pass: after fixing something, remove its lines. Run it after changing S3 behaviour; it skips itself when nothing relevant changed. `pnpm test:s3-conformance-localstack` runs it with the backing bucket on LocalStack S3 and KMS (SSE-KMS, `ROLL_S3_SSE_S3_AT_REST`); a line whose category ends in `@local` or `@localstack` only applies to that backend.
+  - On many nodes (`s3-server/src/cluster.rs`, docs/storage/architecture.md "Many nodes") only the holder of the lease `storage:meta` opens the store; every node's S3, developer-API and `/v1/storage` routes forward to it, and its background jobs run only there. A forward carries the client's path, query and `Content-Length` untouched (SigV4 signs them) and never buffers a body past roll-cluster's 4 MiB. Takeovers start from a standby's `Follower` copy; fencing stays the log's create-only entries, never the lease.
   - The gateway cache (`s3-server/src/cache.rs`) is keyed by blob id and chunk: never invalidate it or add TTLs for correctness. The CDN (`s3-server/src/cdn.rs`, `s3-store/src/cdn.rs`, the Worker in `apps/cdn-worker`) purges through the outbox. After touching either, run `pnpm test:storage-cdn` (the Worker in workerd/Miniflare in Docker, purges to a mock Cloudflare API).
   - Put new tests in the matching place:
     - protocol vectors and parsers: unit tests in `s3-proto`
     - metadata, durability, branching and GC: `crates/s3-store/tests/`
     - the S3 API through the AWS SDK: `crates/s3-server/tests/` (notifications, replication and inventory: `tests/events.rs`)
-    - real tools: `crates/s3-server/tests/tools.rs`
+    - real tools: `crates/s3-server/tests/tools.rs` (through a node that doesn't own the metadata)
+    - several nodes (forwarding, takeover, handoff, fencing, events across a takeover): `crates/s3-server/tests/cluster.rs`
     - `/v1/storage`: `crates/s3-control/tests/`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the store and server tests against S3.
 - **NoSQL (ScyllaDB / Cassandra compatible):**
@@ -377,7 +387,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - You may read Apache Cassandra's source (Apache-2.0) and port it, naming the Cassandra class in the module doc. Never read ScyllaDB's source; learn its behaviour from its docs and the image.
   - ScyllaDB's `test/cqlpy` and `test/alternator` suites are downloaded at test time by `scripts/nosql-conformance.sh`. Never commit their content; only test ids go in the baselines.
   - After touching anything nosql-related, run `pnpm test:nosql`. A conformance test that passes on the reference must pass on roll, and the baseline may only shrink.
-  - Put new tests in the matching file: differential scripts in `crates/nosql-server/tests/compat/*.cql`, drivers in `tests/drivers.rs`, persistence in `tests/storage.rs`, `branches.rs` and `restore.rs`.
+  - Put new tests in the matching file: differential scripts in `crates/nosql-server/tests/compat/*.cql`, drivers in `tests/drivers.rs`, persistence in `tests/storage.rs`, `branches.rs` and `restore.rs`, several nodes sharing databases in `crates/nosql-control/tests/cluster.rs`.
+  - On a fleet a database is loaded only on the holder of its lease `nosql:db:<id>`, and every manifest write is a compare-and-swap (`nosql_storage::manifest::swap_manifest`): never `put` a manifest. The design is "On a fleet" in `docs/nosql/architecture.md`.
   - SSTable backup imports: format parsers are unit-tested in `crates/nosql-sstable-import`, imports end to end in `crates/nosql-control/tests/import_sstables.rs`. Its fixtures are made by `tests/fixtures/generate.sh` on the references (`imp_` keyspaces; `cleanup.sh` drops them and their snapshots).
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.

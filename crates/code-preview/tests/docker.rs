@@ -7,14 +7,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use code_control::model::{CheckStatus, LandPolicy, RepoRow, Visibility};
 use code_control::{Code, Config, Runner};
-use code_preview::{DockerRunner, PreviewConfig, Previews, docker, route};
+use code_preview::{CheckRunner, PreviewConfig, Previews, docker, route};
 use pg_storage::{Objects, StorageConfig};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
-const IMAGE: &str = "busybox:1.37";
+const IMAGE: &str = "busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec";
 
 /// Starting the service removes leftover containers: the tests take turns.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -63,8 +63,8 @@ async fn app() -> App {
     let dir = tempfile::tempdir().unwrap();
     let objects = Objects::new(&StorageConfig::Local(dir.path().join("objects"))).unwrap();
     let code = Code::open(Config::local(dir.path().to_path_buf()), objects).unwrap();
-    let previews = Previews::new(PreviewConfig::default(), None);
-    code_preview::start(&code, Arc::new(DockerRunner::new(2)), previews.clone());
+    let previews = Previews::new(PreviewConfig::default(), None, Arc::new(docker::Docker));
+    code_preview::start(&code, Arc::new(CheckRunner::new(Arc::new(docker::Docker), 2)), previews.clone());
     let router = code_control::api::router(code.clone()).layer(axum::middleware::from_fn_with_state(previews, route));
     App { code, router, _dir: dir }
 }
@@ -135,7 +135,7 @@ async fn runner_reports_success_failure_and_timeouts() {
         created_at: 0,
         updated_at: 0,
     };
-    let runner = DockerRunner::new(3);
+    let runner = CheckRunner::new(Arc::new(docker::Docker), 3);
     let plan = runner.plan(&repo, dir.path()).await.unwrap();
     assert_eq!(plan.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["bad", "ok", "slow"]);
     assert!(plan.iter().all(|k| k.status == CheckStatus::Queued));

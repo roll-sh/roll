@@ -116,11 +116,16 @@ A database looks like a healthy single-datacenter cluster:
 - **Events.** `TOPOLOGY_CHANGE` and `STATUS_CHANGE` are sent when a database moves between nodes,
   so drivers reconnect cleanly.
 
+This holds on a fleet too: a database is one virtual node, whichever fleet node serves it (see
+"On a fleet").
+
 ## Tenancy and routing
 
 A **node** (`nosql_server::Node`) serves many databases. A connection is routed to a database by:
 
-1. **TLS SNI**: `<db>.<domain>` (hosted endpoints always use TLS on 9042).
+1. **TLS SNI**: `<db>.<domain>` (hosted endpoints always use TLS on 9042). On roll cloud the
+   edge ends TLS and passes the name on: `<db>.nosql.us-east-1.roll.sh:9042`, and Alternator on
+   `https://<db>.nosql.us-east-1.roll.sh` (docs/cloud/README.md, "The edge in rolld").
 2. **The SASL PLAIN user name** `role@db`. The role inside the database is the part before `@`.
 3. **Single mode**: one default database, used by the Docker image and `rolld --nosql-single`.
    Auth defaults to `AllowAllAuthenticator`, as in the reference images.
@@ -138,6 +143,63 @@ An unload gives its memory back at once. Running compactions stop at their next 
 concurrency allows), the database's blocks leave both caches, and the allocator is told to
 return freed memory to the OS (`mi_collect`). Idle blocking-pool threads exit after 50 ms,
 because memory another thread frees stays with the allocating thread's heap until then.
+
+## On a fleet
+
+On roll cloud (docs/cloud/README.md) every node runs nosql, and each database is served by one
+node at a time: the holder of the lease `nosql:db:<id>` (roll-cluster; docs/code/cluster.md for
+the lease semantics). Any node accepts any connection or request and gets it to the owner. On a
+node alone (the memory backend) none of this changes anything.
+
+- **Catalog.** Databases, imports and usage are in the system database
+  (`ROLL_SYSTEM_DATABASE`, schema `nosql_control`) through `code-sql`, so every node sees one
+  catalog. A single node keeps them in `<home>/nosql/nosql.db` (SQLite) as before.
+- **Ownership.** A database is loaded only under a guard of its lease (`nosql_server::fleet`).
+  A database nobody owns is taken by the node rendezvous hashing picks, on its first connection
+  or request. An owner gives the lease up 2 minutes after the database was unloaded as idle, if
+  nothing runs for it; the next connection takes it again.
+- **CQL.** Through the edge (TLS on 9042), the server name `<id>.nosql.<region>.roll.sh` names
+  the database at the handshake: a node that isn't the owner splices the connection to it at
+  once over roll-edge's signed hop (product `cql`). Without SNI, the SASL user (`role@db`) names
+  it: the node answers OPTIONS and STARTUP itself, then hands the connection over when
+  AUTH_RESPONSE arrives, sending the owner everything the client sent so far and dropping the
+  owner's answers to the requests it already answered (both are legacy frames, before v5's
+  segments start). The owner serves the connection from its start, so protocol state,
+  compression and v5 framing are the owner's.
+- **HTTP.** `/v1/nosql/databases/{id}/…` runs on the owner (forwarded through roll-cluster,
+  retried for about a lease while the database moves). Alternator requests are routed by their
+  access key (`role@db`) or `Host`, and forwarded to the owner's `/internal/nosql/alternator/…`.
+  The database list and creating a database run where they arrive; in a cluster creating one
+  writes its first manifest without loading it (the superuser is created at its first load).
+  `diff` reads a parent another node serves through a throwaway zero-copy branch.
+- **Moves.** When the lease starts moving (rebalancing, a drain on SIGTERM) or is lost, the
+  owner releases the database: registered clients get `STATUS_CHANGE DOWN`, connections close
+  over a second (each at its own moment, so they don't all reconnect at once), requests in
+  flight finish, the commit log is shipped and the
+  manifest written (from here every acknowledged write is in object storage, `async` ones
+  included), the memtables are flushed, and only then is the lease released. Drivers see their
+  connection close and reconnect to the same host name, landing on the new owner: the driver
+  suites' `reconnect` check (`tests/drivers.rs`, Python, Java and Go drivers) is that.
+- **Crashes.** A dead owner's leases expire (10 s) and each database's preferred live node takes
+  its lease (its sweep, or the next connection) and, at the next load, replays the dead node's shipped segments. With
+  `durability = async` the writes of the last ship interval (~100 ms) are lost, as on a single
+  node's crash; `sync` loses nothing.
+- **Fencing.** Correctness doesn't rest on leases. Opening a database swaps its manifest
+  (compare-and-swap on the object's version: S3 `If-Match`, `If-None-Match: *` for a new one)
+  before reading the last owner's segments, and every later manifest write swaps over the
+  version its node wrote last. So once another node opened a database, the previous owner's
+  manifest writes fail (`Fenced`), it closes the database to writes and drops it without
+  writing anything. A `sync` write is acknowledged only after its segment is stored and the
+  manifest is still its node's (one HEAD per shipped generation), so no acknowledged `sync`
+  write is lost to a takeover. An `async` write a fenced node acknowledged after the takeover
+  is lost, as in a crash. Segments are created, never replaced, and a branch's first manifest
+  is create-only.
+- **Background work** runs on owners: a database's imports on its owner (claimed in the
+  catalog by node, taken over when that node is gone or lost the database; imports are
+  idempotent), expired branches deleted by their owner, garbage collection on one node per
+  bucket (`singleton:nosql-gc`). Metering is per node: each records what it served.
+- **Not on a fleet:** ScyllaDB's REST API (`nodetool`) and the local plain CQL and Alternator
+  listeners serve what this node owns; `--nosql-single` is a single-node mode.
 
 **Memory budgets** (`nosql_storage::memory`) keep a node's memory bounded whatever its tenants
 do. Every one of them is reported by `GET /v1/nosql` (`memory`):
@@ -224,7 +286,7 @@ The options themselves are stored and shown verbatim. The strategies are
 
 ```
 nosql/log/<node>/<seq>.zst                    commit log segments (all databases on a node)
-nosql/db/<db>/manifest.json                   the current manifest
+nosql/db/<db>/manifest.json                   the current manifest (replaced only by compare-and-swap)
 nosql/db/<db>/manifests/<version>.json        older versions, kept for point-in-time restore
 nosql/db/<db>/sst/<table-id>/<sst-id>.data    SSTable data, read by range
 nosql/db/<db>/sst/<table-id>/<sst-id>.index   SSTable index, filter and statistics
@@ -332,7 +394,8 @@ Cassandra's JMX `nodetool` is not supported. The CLI has equivalents.
 
 `nosql-control` follows `redis-control`:
 
-- It keeps its own SQLite file with tables for databases, branches and usage.
+- It keeps databases, branches, imports and usage in a `code-sql` catalog: a SQLite file on
+  one node, the system database on a fleet ("On a fleet").
 - It runs a `Node` with a catalog backed by that store, and applies settings live.
 - It meters storage, request units and connection-seconds, and estimates cost against AWS
   prices and the managed alternatives (ScyllaDB Cloud, Amazon Keyspaces, DynamoDB, Astra).

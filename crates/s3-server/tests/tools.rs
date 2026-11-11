@@ -1,14 +1,42 @@
 //! Real S3 tools in Docker against an in-process server: the AWS CLI (also with SSE-C), rclone,
 //! the MinIO client and s3cmd (SigV2). Skipped when Docker isn't available, unless
 //! `ROLL_COMPAT_REQUIRED=1`. Containers run one at a time, on the host network.
+//!
+//! The server is three storage nodes (docs/storage/architecture.md, "Many nodes"), and every tool
+//! talks to one that doesn't own the metadata, so each request is forwarded to the owner; the AWS
+//! CLI also uploads across a planned handoff.
 
 mod common;
 #[path = "common/samlkit.rs"]
 mod samlkit;
 
+use common::fleet::{Fleet, Kind};
 use common::*;
 use std::path::Path;
 use std::process::Command;
+
+/// The nodes, and a test server view of one that doesn't own the metadata.
+struct Through {
+    t: TestServer,
+    fleet: Fleet,
+}
+
+impl std::ops::Deref for Through {
+    type Target = TestServer;
+    fn deref(&self) -> &TestServer {
+        &self.t
+    }
+}
+
+async fn start() -> Through {
+    start_with(|_| {}).await
+}
+
+async fn start_with(tweak: impl Fn(&mut s3_server::Config) + Send + Sync + 'static) -> Through {
+    let fleet = Fleet::start_with(Kind::Memory, "tools", 3, tweak, None).await.expect("the memory backend is always there");
+    let t = fleet.server(fleet.non_owner(&[]));
+    Through { t, fleet }
+}
 
 fn docker_ok() -> bool {
     let ok = Command::new("docker").arg("info").output().is_ok_and(|o| o.status.success());
@@ -29,8 +57,14 @@ fn uid_gid() -> String {
 /// The MinIO client image: `minio/mc` is no longer on Docker Hub, so Bitnami's archived build by
 /// default (`ROLL_MC_IMAGE` to override; its entrypoint is overridden to `mc` either way).
 fn mc_image() -> String {
-    std::env::var("ROLL_MC_IMAGE").unwrap_or_else(|_| "bitnamilegacy/minio-client".into())
+    std::env::var("ROLL_MC_IMAGE").unwrap_or_else(|_| MC.into())
 }
+
+/// The tool images, pinned by digest (the multi-arch index); scripts/test-storage.sh pulls the same.
+const AWS_CLI: &str = "amazon/aws-cli:2.39.6@sha256:eccdb3ec77e159d43ca6a750a70738c546883138be7f094498294a1477ec7e42";
+const RCLONE: &str = "rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466";
+const MC: &str = "bitnamilegacy/minio-client:2025.5.21@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511";
+const S3CMD: &str = "d3fk/s3cmd:latest@sha256:04757666dffdb68311bc62eb9bdf13bb7f5aeb4a386a0c074cb39bd8f35cf5df";
 
 /// Run a container with `dir` mounted at `/data`; returns stdout, panics with stderr on failure.
 fn run(image: &str, env: &[(&str, String)], dir: &Path, args: &[&str]) -> String {
@@ -103,16 +137,31 @@ async fn aws_cli() {
     fixtures(dir.path());
     let endpoint = t.endpoint.clone();
     let path = dir.path().to_path_buf();
-    let presigned = blocking(move || {
-        let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
-        let aws = |args: &[&str]| {
+    let aws_at = |endpoint: String, path: std::path::PathBuf| {
+        move |args: &[&str]| {
+            let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
             let mut all = vec!["--endpoint-url", endpoint.as_str()];
             all.extend_from_slice(args);
-            run("amazon/aws-cli", &env, &path, &all)
-        };
+            run(AWS_CLI, &env, &path, &all)
+        }
+    };
+    let aws = aws_at(endpoint.clone(), path.clone());
+    blocking(move || {
         aws(&["s3", "mb", "s3://awscli"]);
         aws(&["s3", "cp", "/data/small.txt", "s3://awscli/small.txt"]);
-        aws(&["s3", "cp", "/data/big.bin", "s3://awscli/big.bin"]);
+    })
+    .await;
+    // A multipart upload while the metadata's owner is drained (a planned handoff).
+    let aws = aws_at(endpoint.clone(), path.clone());
+    let upload = blocking(move || aws(&["s3", "cp", "/data/big.bin", "s3://awscli/big.bin"]));
+    let drain = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        t.fleet.drain_owner().await
+    };
+    let (_, (old, new)) = tokio::join!(upload, drain);
+    assert_ne!(old, new);
+    let aws = aws_at(endpoint.clone(), path.clone());
+    let presigned = blocking(move || {
         aws(&["s3", "sync", "/data/tree", "s3://awscli/tree"]);
         let ls = aws(&["s3", "ls", "--recursive", "s3://awscli/"]);
         for k in ["small.txt", "big.bin", "tree/a.txt", "tree/b with space.txt", "tree/nested/c.json", "tree/nested/deeper/d+e.txt"] {
@@ -168,7 +217,7 @@ async fn aws_cli_bucket_configuration() {
         let aws = |args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str()];
             all.extend_from_slice(args);
-            run("amazon/aws-cli", &env, &path, &all)
+            run(AWS_CLI, &env, &path, &all)
         };
         aws(&["s3", "mb", "s3://awssite"]);
         aws(&["s3", "cp", "/data/index.html", "s3://awssite/index.html"]);
@@ -229,7 +278,7 @@ async fn versions_with_aws_cli_and_rclone() {
         let aws = |args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str()];
             all.extend_from_slice(args);
-            run("amazon/aws-cli", &env, &path, &all)
+            run(AWS_CLI, &env, &path, &all)
         };
         let json = |s: String| -> serde_json::Value { serde_json::from_str(&s).unwrap_or_else(|e| panic!("{e}: {s}")) };
         aws(&["s3api", "create-bucket", "--bucket", "awsver", "--object-lock-enabled-for-bucket"]);
@@ -280,7 +329,7 @@ async fn versions_with_aws_cli_and_rclone() {
             ("RCLONE_CONFIG_R_REGION", REGION.to_string()),
             ("RCLONE_CONFIG_R_FORCE_PATH_STYLE", "true".to_string()),
         ];
-        let ls = run("rclone/rclone", &renv, &path, &["lsf", "--s3-versions", "r:awsver"]);
+        let ls = run(RCLONE, &renv, &path, &["lsf", "--s3-versions", "r:awsver"]);
         let names: Vec<&str> = ls.lines().filter(|l| l.starts_with("doc")).collect();
         assert_eq!(names.len(), 2, "the current version and a dated old one: {ls}");
         assert!(names.contains(&"doc.txt") && names.iter().any(|n| n.starts_with("doc-v")), "{ls}");
@@ -308,7 +357,7 @@ async fn rclone() {
             ("RCLONE_CONFIG_R_REGION", REGION.to_string()),
             ("RCLONE_CONFIG_R_FORCE_PATH_STYLE", "true".to_string()),
         ];
-        let rclone = |args: &[&str]| run("rclone/rclone", &env, &path, args);
+        let rclone = |args: &[&str]| run(RCLONE, &env, &path, args);
         rclone(&["mkdir", "r:rclone"]);
         rclone(&["copy", "/data/tree", "r:rclone/tree"]);
         rclone(&["copy", "--s3-upload-cutoff", "5M", "--s3-chunk-size", "5M", "/data/big.bin", "r:rclone/"]);
@@ -396,8 +445,8 @@ async fn aws_cli_sse_c() {
             all.extend(a.iter().map(|s| s.to_string()));
             all
         };
-        let aws = |a: &[&str]| run("amazon/aws-cli", &env, &path, &with_endpoint(a).iter().map(String::as_str).collect::<Vec<_>>());
-        let aws_fails = |a: &[&str]| run_fails("amazon/aws-cli", &env, &path, &with_endpoint(a).iter().map(String::as_str).collect::<Vec<_>>());
+        let aws = |a: &[&str]| run(AWS_CLI, &env, &path, &with_endpoint(a).iter().map(String::as_str).collect::<Vec<_>>());
+        let aws_fails = |a: &[&str]| run_fails(AWS_CLI, &env, &path, &with_endpoint(a).iter().map(String::as_str).collect::<Vec<_>>());
         let k1 = ["--sse-c", "AES256", "--sse-c-key", "fileb:///data/key1.bin"];
         let k2 = ["--sse-c", "AES256", "--sse-c-key", "fileb:///data/key2.bin"];
         aws(&["s3", "mb", "s3://ssec"]);
@@ -440,7 +489,7 @@ async fn s3cmd_sigv2() {
         let s3cmd = |a: &[&str]| {
             let mut all = vec!["-c", "/data/s3cfg"];
             all.extend_from_slice(a);
-            run("d3fk/s3cmd", &[], &path, &all)
+            run(S3CMD, &[], &path, &all)
         };
         s3cmd(&["mb", "s3://s3cmd"]);
         s3cmd(&["put", "/data/small.txt", "s3://s3cmd/small.txt"]);
@@ -496,12 +545,12 @@ async fn aws_cli_sts() {
         let aws = |env: &[(&str, String)], args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
             all.extend_from_slice(args);
-            run("amazon/aws-cli", env, &path, &all)
+            run(AWS_CLI, env, &path, &all)
         };
         let fails = |env: &[(&str, String)], args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str()];
             all.extend_from_slice(args);
-            run_fails("amazon/aws-cli", env, &path, &all)
+            run_fails(AWS_CLI, env, &path, &all)
         };
         let long = [("AWS_ACCESS_KEY_ID", key.id.clone()), ("AWS_SECRET_ACCESS_KEY", key.secret.clone()), ("AWS_DEFAULT_REGION", REGION.to_string())];
         let session = |out: &str| {
@@ -568,7 +617,7 @@ async fn aws_cli_access_points() {
             for (k, v) in [("AWS_ACCESS_KEY_ID", ACCESS), ("AWS_SECRET_ACCESS_KEY", SECRET), ("AWS_DEFAULT_REGION", REGION)] {
                 cmd.arg("-e").arg(format!("{k}={v}"));
             }
-            cmd.args(["amazon/aws-cli", "--endpoint-url", &endpoint]).args(args);
+            cmd.args([AWS_CLI, "--endpoint-url", &endpoint]).args(args);
             let out = cmd.output().expect("docker run");
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             assert!(out.status.success(), "aws {args:?} failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
@@ -631,12 +680,12 @@ async fn aws_cli_iam() {
         let aws = |env: &[(&str, String)], args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
             all.extend_from_slice(args);
-            run("amazon/aws-cli", env, &path, &all)
+            run(AWS_CLI, env, &path, &all)
         };
         let fails = |env: &[(&str, String)], args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str()];
             all.extend_from_slice(args);
-            run_fails("amazon/aws-cli", env, &path, &all)
+            run_fails(AWS_CLI, env, &path, &all)
         };
         let json = |out: &str| serde_json::from_str::<serde_json::Value>(out).unwrap_or_else(|e| panic!("{e}: {out}"));
         let root = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
@@ -708,12 +757,12 @@ async fn aws_cli_express_select_and_torrent() {
         let aws = |args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
             all.extend_from_slice(args);
-            run("amazon/aws-cli", &env, &path, &all)
+            run(AWS_CLI, &env, &path, &all)
         };
         let fails = |args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str()];
             all.extend_from_slice(args);
-            run_fails("amazon/aws-cli", &env, &path, &all)
+            run_fails(AWS_CLI, &env, &path, &all)
         };
         aws(&["s3api", "create-bucket", "--bucket", bucket, "--create-bucket-configuration", "Location={Type=AvailabilityZone,Name=use1-az4},Bucket={DataRedundancy=SingleAvailabilityZone,Type=Directory}"]);
         let dirs = aws(&["s3api", "list-directory-buckets"]);
@@ -793,7 +842,7 @@ async fn aws_cli_simulation_and_saml() {
         let aws = |env: &[(&str, String)], args: &[&str]| {
             let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
             all.extend_from_slice(args);
-            run("amazon/aws-cli", env, &path, &all)
+            run(AWS_CLI, env, &path, &all)
         };
         let json = |out: &str| serde_json::from_str::<serde_json::Value>(out).unwrap_or_else(|e| panic!("{e}: {out}"));
         let root = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
@@ -832,7 +881,7 @@ async fn aws_cli_simulation_and_saml() {
         // A tampered assertion is refused.
         let tampered = String::from_utf8(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &assertion).unwrap()).unwrap().replace("alice@example.com</saml:NameID>", "admin@example.com</saml:NameID>");
         let tampered = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, tampered);
-        let err = run_fails("amazon/aws-cli", &[("AWS_DEFAULT_REGION", REGION.to_string())], &path, &["--endpoint-url", endpoint.as_str(), "sts", "assume-role-with-saml", "--no-sign-request", "--role-arn", &role, "--principal-arn", &provider, "--saml-assertion", &tampered]);
+        let err = run_fails(AWS_CLI, &[("AWS_DEFAULT_REGION", REGION.to_string())], &path, &["--endpoint-url", endpoint.as_str(), "sts", "assume-role-with-saml", "--no-sign-request", "--role-arn", &role, "--principal-arn", &provider, "--saml-assertion", &tampered]);
         assert!(err.contains("InvalidIdentityToken"), "{err}");
     })
     .await;

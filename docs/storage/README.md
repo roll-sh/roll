@@ -79,7 +79,9 @@ Other settings:
   (`https://storage.example.com/storage/v1`), for resumable upload URLs and the dashboard.
 - `--no-storage` / `ROLL_NO_STORAGE`: don't run roll storage.
 
-The roll API on `:7070` has no authentication. Keep it private.
+The roll API on `:7070` is open on loopback. Off loopback rolld needs `ROLL_ADMIN_TOKEN`, the
+operator token every control-plane API takes; `/v1/storage` also takes a dashboard console session
+(docs/cloud/README.md, "Security").
 
 ## Quickstart
 
@@ -296,9 +298,11 @@ What's guaranteed:
 
 What isn't (yet):
 
-- **One node owns the metadata.** If that node goes down, requests fail until it's back, and
-  data and acknowledged writes are safe meanwhile. Stateless gateways and standby takeover are
-  designed but not built ([architecture](architecture.md#scaling-beyond-one-node)).
+- **One node at a time serves storage.** In a cluster, every node accepts requests and passes
+  them to the node that owns the metadata; if it stops or dies, a standby that kept a copy takes
+  over within seconds (a drain fails no request; a crash makes requests wait, then retryable
+  503s) and every acknowledged write is there ([architecture](architecture.md#many-nodes)).
+  That node serves all of it: there's one metadata log for the deployment, not one per account.
 - **Writes take longer than on S3.** Every write waits for a metadata group commit, which is
   roughly one extra S3 PUT of latency.
 
@@ -320,11 +324,11 @@ The same as S3 Standard list prices (us-east-1):
 
 ## Limits
 
-These are the same as S3:
+These are the same as S3 (roll reserves bucket names starting `chg-` too):
 
 | limit | value |
 |---|---|
-| bucket name | 3–63 characters: lowercase letters, digits, `-` and `.` |
+| bucket name | 3–63 characters: lowercase letters, digits, `-` and `.`; not starting `chg-` (code previews' hostnames) |
 | key | up to 1024 bytes (UTF-8) |
 | user metadata (`x-amz-meta-*`) | 2 KB |
 | single `PUT` | 5 GiB |

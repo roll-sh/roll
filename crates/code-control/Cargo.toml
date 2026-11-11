@@ -19,7 +19,7 @@ chrono-tz.workspace = true
 code-git.workspace = true
 code-index.workspace = true
 code-review.workspace = true
-code-cluster.workspace = true
+roll-cluster.workspace = true
 code-sql.workspace = true
 code-github.workspace = true
 code-chat.workspace = true
@@ -35,6 +35,7 @@ http-body.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
 pg-storage.workspace = true
+roll-auth.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 serde.workspace = true
 serde_json.workspace = true

@@ -67,7 +67,10 @@ roll code cat acme/web src/app.js
 roll code log acme/web -n 20
 ```
 
-`roll code land` exits 2 on a conflict; any other failure, a usage error included, exits 1.
+`roll code land` exits 2 on a conflict; any other failure, a usage error included, exits 1. When
+roll can't be reached, `land` and `change create` on a GitHub-connected repo open a pull request
+on GitHub with your own GitHub login instead, and land it through roll once roll is back
+(`roll code queued` lists them).
 Every command takes `--json`.
 
 ### An agent loop

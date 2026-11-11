@@ -6,7 +6,7 @@
 //! `CheckpointRollbackService.ts` (restore files, mark later runs rolled back, roll the provider
 //! back natively or start it fresh with a summary).
 
-use super::{Fail, Host, NativeRef, Private, Res, Rt, Transfer, handoff, now, suffix};
+use super::{Fail, Host, NativeRef, Private, QueuedOnGithub, Res, Rt, Transfer, handoff, now, suffix};
 use crate::git;
 use crate::provider::{ForkAt, ForkFrom, RollbackStyle};
 use agent_proto::*;
@@ -599,7 +599,19 @@ impl Host {
         let identity = self.git_identity();
         let identity = identity.as_ref().map(|(n, e)| (n.as_str(), e.as_str()));
         let (published, change) = match &worktree {
-            Some(w) => (git::publish(Path::new(&w.path), &w.branch, message, to.as_ref(), identity).await.map_err(Fail::git)?, true),
+            Some(w) => match git::publish(Path::new(&w.path), &w.branch, message, to.as_ref(), identity).await {
+                Ok(p) => (p, true),
+                // roll can't be reached: a connected repo's branch goes to GitHub instead.
+                Err(e) if e.downcast_ref::<git::Network>().is_some() && to.as_ref().is_some_and(|g| g.github.is_some()) => {
+                    let g = to.as_ref().and_then(|g| g.github.clone()).expect("checked");
+                    let (published, queued) = publish_to_github(Path::new(&w.path), &w.branch, &g, message, land, &e).await?;
+                    rt.private.github_queued = Some(queued);
+                    rt.private.change_open = true;
+                    self.save_private(&rt)?;
+                    return Ok(Reply::Published(published));
+                }
+                Err(e) => return Err(Fail::git(e)),
+            },
             None => {
                 if self.busy_in(&project).map_err(Fail::Internal)? {
                     return Err(Fail::Conflict("another thread is working in the project folder: wait for it before publishing".into()));
@@ -616,12 +628,42 @@ impl Host {
                 (published?, remote != branch)
             }
         };
-        if to.is_some() && change && !rt.private.change_open {
+        if to.is_some() && change && (!rt.private.change_open || rt.private.github_queued.is_some()) {
             rt.private.change_open = true;
+            // It reached roll: whatever was queued on GitHub before is roll's now.
+            rt.private.github_queued = None;
             self.save_private(&rt)?;
         }
         Ok(Reply::Published(published))
     }
+}
+
+/// roll couldn't be reached (`why`): push the thread's branch (committed already) to the
+/// connected repo's GitHub side and open a pull request, both with the user's own GitHub
+/// credentials (`crate::github`; never sent to roll, never stored). The default branch is never
+/// pushed: a thread's branch is always its own. roll ingests the pull request as the branch's
+/// change once it's back; publishing again then links it (and lands it, with `land`).
+async fn publish_to_github(dir: &Path, branch: &str, g: &GrantGithub, message: &str, land: bool, why: &anyhow::Error) -> Res<(Published, QueuedOnGithub)> {
+    if branch == g.default_branch {
+        return Err(Fail::Invalid(format!("roll is unreachable, and {branch} is the default branch: only a thread's own branch goes to GitHub")));
+    }
+    let token = crate::github::token(&crate::github::host(&g.url)).await.map_err(|e| Fail::Invalid(format!("roll is unreachable ({why:#}), and {e:#}")))?;
+    let commit = git::head(dir).await.map_err(Fail::git)?.ok_or_else(|| Fail::Invalid("nothing to publish".into()))?;
+    git::push_to_github(dir, &format!("{}.git", g.url), branch, &token).await.map_err(Fail::git)?;
+    let title = message.lines().next().unwrap_or(message).trim();
+    let body = format!(
+        "roll was unreachable when this thread was published, so its branch came here. It {} through roll once roll is back.",
+        if land { "lands" } else { "becomes a change" }
+    );
+    let pr = crate::github::PullRequest { web_url: &g.url, owner: &g.owner, repo: &g.repo, head: branch, base: &g.default_branch, title, body: &body };
+    let (number, url) = crate::github::open_pull_request(&token, &pr).await.map_err(|e| Fail::Internal(e.context("opening the pull request on GitHub")))?;
+    let landing = land.then(|| Landing {
+        status: LandingStatus::Queued,
+        message: format!("roll is unreachable: queued on GitHub as pull request #{number}; publish again once roll is back and it lands through roll"),
+        blockers: Vec::new(),
+    });
+    let queued = QueuedOnGithub { pr: number, url: url.clone(), branch: branch.to_string(), land, at: now() };
+    Ok((Published { branch: branch.to_string(), commit, change: None, url: Some(url), landing }, queued))
 }
 
 /// Forgets `provider`'s native conversation of a thread: its next session starts fresh, and the

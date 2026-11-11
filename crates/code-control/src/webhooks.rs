@@ -277,6 +277,7 @@ impl Db {
     fn delete_repo_hooks(&self, repo_id: &str) -> Result<()> {
         Ok(self.write(|c| {
             c.execute("DELETE FROM review_deliveries WHERE app_id IN (SELECT id FROM repo_webhooks WHERE repo_id = ?)", [repo_id])?;
+            c.execute("DELETE FROM review_deliveries WHERE app_id = ?", [crate::github::outbox::target(repo_id)])?;
             c.execute("DELETE FROM repo_webhooks WHERE repo_id = ?", [repo_id])?;
             c.execute("DELETE FROM commit_statuses WHERE repo_id = ?", [repo_id])?;
             c.execute("DELETE FROM webhook_outbox WHERE repo_id = ?", [repo_id])?;
@@ -350,8 +351,8 @@ impl Promises {
     }
 }
 
-/// Whether the repo has an active webhook for `kind`, or an automation of its owner listens
-/// for it (read on `c`).
+/// Whether the repo has an active webhook for `kind`, an automation of its owner listens for it,
+/// or GitHub needs to hear of it (a connected repo; read on `c`).
 fn hooked_on(c: &Conn<'_>, repo_id: &str, kind: &str) -> code_sql::Result<bool> {
     let hooked = c
         .query_row(
@@ -360,11 +361,11 @@ fn hooked_on(c: &Conn<'_>, repo_id: &str, kind: &str) -> code_sql::Result<bool> 
             |r| r.get::<_, i64>(0),
         )
         .map(|n| n != 0)?;
-    Ok(hooked || crate::agents::automations::triggers::code_listens(c, repo_id, kind)?)
+    Ok(hooked || crate::agents::automations::triggers::code_listens(c, repo_id, kind)? || crate::github::outbox::listens(c, repo_id, kind)?)
 }
 
 /// Queue a `kind` event's deliveries to the repo's active webhooks for it (read on `c`, inside
-/// a write), and record it in the owner's automation inbox when an automation listens for it
+/// a write) and to GitHub (a connected repo, `github::outbox`), and record it in the owner's automation inbox when an automation listens for it
 /// (`event_id`: the event's own id, its idempotency key there). Returns how many deliveries.
 fn insert_hook_deliveries(c: &Conn<'_>, r: &RepoRow, kind: &str, data: &Value, event_id: &str) -> code_sql::Result<usize> {
     crate::agents::automations::triggers::record_code_event(c, r, kind, data, event_id)?;
@@ -383,7 +384,7 @@ fn insert_hook_deliveries(c: &Conn<'_>, r: &RepoRow, kind: &str, data: &Value, e
     if !rows.is_empty() {
         c.execute_many(crate::review::store::INSERT_DELIVERY, rows.iter())?;
     }
-    Ok(rows.len())
+    Ok(rows.len() + crate::github::outbox::queue(c, r, kind, data)?)
 }
 
 /// What a forwarding round did.

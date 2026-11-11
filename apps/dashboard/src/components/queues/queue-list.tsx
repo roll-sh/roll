@@ -238,7 +238,7 @@ function DeclareQueue({
         <Toggle checked={!replicated && autoDelete} onChange={setAutoDelete} disabled={replicated} label="Auto-delete" />
         <span className="text-[11px] text-subtle">
           {type === "quorum"
-            ? "Replicated to a keeper quorum in three AZs. Delivery limit 20 by default."
+            ? "Delivered only once durable (in S3, across three AZs, on roll cloud). Delivery limit 20 by default."
             : type === "stream"
               ? "Append-only log read by offset. Messages stay after they are consumed."
               : "Single-partition FIFO queue. Persistent messages are written to the replicated log."}

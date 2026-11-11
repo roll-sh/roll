@@ -11,12 +11,74 @@ an acknowledged write is never lost, and a node's work moves to the others withi
         node A              node B              node C        rolld --code-only
           │  repo requests are forwarded to the repo's owner  │
           └───────────────────┼───────────────────┘
-        Postgres: metadata, leases, the landing log      S3: file contents
+  Postgres: metadata, the landing log, leases (or DynamoDB)     S3: file contents
 ```
 
-The pieces: `crates/code-cluster` (membership, leases with self-fencing, placement, handoff,
-forwarding; generic over string keys) and `crates/code-control/src/cluster.rs` (which requests
-and which work belong to a repo, and starting and stopping that work as ownership moves).
+The pieces: `crates/roll-cluster` (membership, leases with self-fencing, placement, handoff,
+forwarding and singletons; generic over string keys, shared by every product) and
+`crates/code-control/src/cluster.rs` (which requests and which work belong to a repo, and
+starting and stopping that work as ownership moves).
+
+## Backends
+
+roll-cluster keeps membership and leases in one of three backends. The lease state machine
+(guards, handoff, fencing, sweeps, rebalancing, idle release, draining) is the same on all
+three; a backend only answers "who is alive", "which leases does this node hold", and takes,
+releases or deletes leases, each as one atomic step.
+
+| backend | `ROLL_CLUSTER_BACKEND` | where | liveness and expiry |
+| --- | --- | --- | --- |
+| Memory | `memory` (the default without a cluster secret) | in the process | a node alone owns whatever it asks for (nodes of one process can share a store: tests) |
+| Postgres | `postgres` (the default with a cluster secret) | `code_nodes` and `code_leases` in code's database (`code_control`) | heartbeats and `expires_at` on the database's clock |
+| DynamoDB | `dynamodb` | one table (`ROLL_CLUSTER_TABLE`, `roll-cluster`) | no clocks compared: a token each node rewrites, watched by the others (below) |
+
+Only leases and membership move to DynamoDB: code's data stays in Postgres, so a DynamoDB
+cluster still needs one (see "Code's database" below).
+
+### DynamoDB
+
+The table has `pk`/`sk` keys (docs/cloud/README.md, "Coordination: DynamoDB"): a node item
+(`node`/`<id>`: URL, zone, version, draining, incarnation `inc`, token `hb`, generation `gen`,
+release counter `rel`) and a lease item per key (`lease`/`<key>`: holder, holder's `inc`, epoch,
+`free`, record version `rvn`). Liveness follows the AWS DynamoDB lock client's record version
+number scheme, with one record per node instead of one per lock:
+
+- **Renewals are per node.** A node renews every lease it holds with one conditional write of
+  its node item: `hb` gets a new random token, on condition that `inc` and `gen` are the ones it
+  knows. The table sees nodes × renewal rate writes (every `renew_every`, 2 s), whatever the
+  number of leases. A lease is valid while its holder's `hb` keeps changing and its epoch is
+  unchanged.
+- **Liveness without clocks.** Every node reads the node items each heartbeat (one consistent
+  query) and remembers, on its own monotonic clock, when it first saw each `hb` value. A node
+  whose `hb` hasn't changed for `node_ttl` leaves placement; one silent for `lease_ttl` may lose
+  its leases.
+- **Taking a lease** reads it and writes it back on the `rvn` read (a compare-and-swap; two
+  contenders can't both win). Taking one from a silent holder is a transaction that also checks
+  the holder's `hb` is still the token that was watched and bumps its `gen`: if the holder renewed
+  meanwhile, the takeover fails. A holder whose item is gone (cleaned up after a minute of
+  silence) or names another incarnation is gone for good, and the lease's `rvn` alone decides.
+- **Self-fencing.** A holder acts on its leases until `sent + lease_ttl - lease_margin`, where
+  `sent` is when its last successful renewal was sent. A contender takes over only after
+  watching that renewal's token for `lease_ttl`, from a read made after the write, so the holder
+  has stopped `lease_margin` before (with clock rates within 30% of each other). A renewal that
+  lands after a takeover fails on `gen`; the node then re-reads which of its leases are still its
+  own before renewing again, so a late renewal never extends a lease that moved.
+- **Acquisitions** ride on the node's last confirmed renewal (contenders watch the same token) and
+  aren't attempted once it's past its validity.
+- **Sweeps** read the lease items only when something may have freed one (a node released some:
+  its `rel` changed; a node vanished or came back as a new incarnation; a node's token has stayed
+  unchanged for a lease length since the last look, decided at each sweep from what the
+  heartbeat's read saw; the last look found takeable leases) and every three lease lengths
+  regardless, so idle clusters cost reads of the node items only, and a dead node's leases are
+  taken within a lease length, one heartbeat and one sweep of its last renewal (2.8 s against a
+  3 s lease in roll-cluster's suite, where it was 7.8 s while silence was only noticed by the
+  periodic look).
+- Condition failures are outcomes, not errors. Throttling and network errors are retried by the
+  SDK with backoff (2 s per call at most); a failure leaves the deadline where the last success
+  put it, and a lease write whose outcome is unknown is read again at the next renewal (adopted
+  or released, as a lost answer is on Postgres).
+- A pinned node id registers a new incarnation only once the previous one's token stayed
+  unchanged for `lease_ttl`, as seen by the new process.
 
 ## What lives where
 
@@ -24,10 +86,18 @@ and which work belong to a repo, and starting and stopping that work as ownershi
 | --- | --- | --- |
 | changesets, refs, git mapping, path index, landing log (`code-store`) | SQLite `code/code.db` | Postgres schema `code_store` |
 | owners, repos, changes, reviews, work, queue, jobs, deliveries (`code-control`) | SQLite `code/control.db` | Postgres schema `code_control` |
-| nodes and leases (`code_nodes`, `code_leases`) | — | Postgres schema `code_control` |
+| nodes and leases (`code_nodes`, `code_leases`) | — | Postgres schema `code_control`, or the DynamoDB table |
 | file contents | object storage | S3 (required: a local directory isn't shared) |
 | code index (search, symbols) | `code/index/` | each repo's owner, rebuilt by a new owner |
 | work trees, check and preview containers | local | the repo's owner |
+
+### Code's database
+
+Code's Postgres is `--code-database` (`ROLL_CODE_DATABASE`) when it's set, else the system
+database every product shares (`--system-database`, `ROLL_SYSTEM_DATABASE`; docs/cloud/README.md,
+"Shared state"), else SQLite under `--home`. Code's two schemas (`code_store`, `code_control`)
+sit next to the other products' there. roll cloud's stack sets only `ROLL_SYSTEM_DATABASE`; set
+`ROLL_CODE_DATABASE` to keep code's data in a Postgres of its own.
 
 Both databases go through `crates/code-sql`: SQL is written once in SQLite's dialect and
 translated for Postgres. A write is one transaction (serializable on Postgres, re-run on
@@ -37,14 +107,15 @@ point-in-time recovery and backups. One node can also use Postgres without a clu
 
 ## Nodes
 
-Each node has an id (random per process, `--code-node-id` to pin it) and an internal URL that
-other nodes reach it at (`--code-advertise-url`, default `http://<--public-host>:<API port>`).
-It heartbeats a `code_nodes` row every second from a thread of its own, so a busy async runtime
-can't make it look dead. A node is alive while its heartbeat is younger than 5 s, measured on the
-database's clock, so node clocks don't matter.
+Each node has an id (random per process, `ROLL_NODE_ID` to pin it) and an internal URL that
+other nodes reach it at (`ROLL_ADVERTISE_URL`, default `http://<--public-host>:<API port>`).
+It heartbeats from a thread of its own, so a busy async runtime can't make it look dead. A node
+is alive while it heartbeated within 5 s: on Postgres, a `code_nodes` row measured on the
+database's clock; on DynamoDB, its node item's token as each node sees it change. Node clocks
+never matter.
 
 Nodes talk to each other over HTTP on the API port, under `/internal/code/`. Every internal
-request is signed with the cluster secret (`--code-cluster-secret`, HMAC-SHA256 over the node,
+request is signed with the cluster secret (`ROLL_CLUSTER_SECRET`, HMAC-SHA256 over the node,
 a timestamp, the method and the path; stale or unsigned requests are 401s). The body isn't
 signed and TLS between nodes is whatever the network provides: put the cluster on a private
 network.
@@ -61,14 +132,15 @@ while the request was on its way.
 
 ## Repo ownership
 
-Every repo with activity has one owner node, held through a lease row in `code_leases`
-(`key, node_id, epoch, expires_at`; the key is the repo id, so a rename keeps the owner). Leases
-last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHERE node_id = me`).
+Every repo with activity has one owner node, held through a lease (the key is the repo id, so a
+rename keeps the owner). Leases last 10 s past their holder's last renewal and are renewed every
+2 s with one write per node (on Postgres `UPDATE code_leases … WHERE node_id = me`; on DynamoDB
+the node item, above).
 
 - **Requests for a repo run on its owner.** Whichever node receives a request forwards it to the
   repo's owner, streaming in both directions (git pushes and packs, event streams), with the
   original path, method and headers, signed, carrying the client's address. The owner verifies
-  the signature (`code_cluster::accept_forwarded` on the router) and counts anonymous event
+  the signature (`roll_cluster::accept_forwarded` on the router) and counts anonymous event
   streams against that address. A node that isn't the owner never runs a repo's lander, queue,
   reviews, index, mirror or containers.
 
@@ -95,7 +167,8 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   away) is sent again; a write never is.
 - **Acquiring.** A request for a repo nobody owns (or whose owner's lease expired) is taken by the
   node the repo's rendezvous hash picks among the live nodes; the receiving node forwards it
-  there, and the winner acquires the lease with a compare-and-swap that bumps `epoch`.
+  there, and the winner acquires the lease with a compare-and-swap that bumps `epoch`. Placement
+  ignores zones (`ROLL_ZONE` is recorded and only spreads standbys, `Cluster::standby`).
 - **Riding out moves.** While a repo has no owner that can serve it (a handoff in progress, or
   its owner died and its lease hasn't expired), the node the client reached waits and routes the
   request again, for about a lease's length (13 s), so failovers and rebalancing don't fail
@@ -104,7 +177,7 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   and a `508` from two nodes briefly disagreeing about placement are retried, and a node never
   forwards a request back to the node it came from.
 - **Losing it.** A node only acts as an owner while its last successful renewal is younger than
-  the lease minus a safety margin, on its own monotonic clock. A node cut off from Postgres
+  the lease minus a safety margin, on its own monotonic clock. A node cut off from its backend
   stops serving its repos (503 with `Retry-After`) before anyone else can take them. Work in
   flight checks the lease it started under ten times a second and stops when it's gone.
 - **Correctness doesn't depend on leases.** Every ref update is a compare-and-swap on the ref
@@ -112,8 +185,8 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   believing they own a repo can't corrupt anything: the loser's landing finds the ref moved,
   reloads and rebases. Leases are about locality: caches, the lander's batching, the code index,
   containers.
-- **Taking over.** Each node sweeps for expired leases every second and takes the repos the
-  rendezvous hash gives it. A release (a handoff, a node leaving) expires a lease rather than
+- **Taking over.** Each node sweeps for takeable leases (expired, released, or held by a node
+  that's gone) every second and takes the repos the rendezvous hash gives it. A release (a handoff, a node leaving) expires a lease rather than
   deleting it, so a repo with work left always gets an owner again, and its background work is
   never stranded.
 - **Giving repos up.** A lease row is deleted, so no sweep takes the repo back, in two cases. A
@@ -130,12 +203,14 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   now gives it, a few at a time: the owner stops taking new requests for the repo (forwarders
   retry), waits for the ones in flight and for queue batches and reviews running under the
   repo's guard (up to 30 s), then expires its lease. A node shutting down (SIGTERM) fails its
-  health check, drains every repo it owns the same way (`--code-drain-timeout`, 30 s) while it
-  keeps serving, and only then exits, so rolling upgrades don't wait for lease expiry. Before it
+  health check, drains every repo it owns the same way (`ROLL_DRAIN_TIMEOUT`, 30 s) while it
+  keeps serving, and only then exits, so rolling upgrades don't wait for lease expiry. A cluster
+  node keeps serving for at least 15 s after SIGTERM, however fast the drain, so a load balancer
+  that deregisters it by health checks (the cloud's NLB) has stopped sending to it first. Before it
   exits it closes its listener and lets the requests it's still serving finish (those it was
   passing on to other nodes; for what's left of the drain timeout, between 5 and 10 s, after
   which open event streams are cut), so a request that reached it is answered rather than cut.
-  Set the stop timeout above the drain timeout plus 10 s.
+  Set the stop timeout above the drain timeout (at least 15 s) plus 10 s.
 
 ## A repo's work, on its owner
 
@@ -147,10 +222,10 @@ Taking a repo over (`Ownership::Acquired`) first drops everything the node cache
 | --- | --- | --- |
 | merge queue | a worker starts if entries are active; it first recovers the batch the last owner left (a batch that was landing counts as landed if its tip is on the branch; the rest is tested again) | the worker is aborted (each batch runs under the repo's guard, so a handoff waits for it first) |
 | roll's reviewer | jobs `running` under another node's claim are queued again; queued ones run here (each runs under the repo's guard) | running jobs are aborted and left `running` for the next owner |
-| GitHub | the import if it never finished, else the mirror | the mirror and import stop |
+| GitHub | the import if it never finished, else the mirror and the reconcile (at once, then every 10 minutes); its notifications for GitHub (`gh_…` deliveries) go out from here | the mirror, import and reconcile stop; its notifications wait for the next owner |
 | code index | an index this node still has catches up; a repo whose reviewer is on builds one in the background; others build on first use (search answers 503 until it's built, as on a fresh repo) | removed from disk if the repo hasn't come back after two lease lengths (a node that fenced itself through a slow database usually gets it straight back); a node starting in a cluster removes every index it finds (it owns nothing yet), and a single node those of repos that no longer exist; deleting a repo removes its index on its owner at once |
 | checks (code-preview) | checks that were queued or running on open changes run again; the default branch's head is checked unless it's the last green one (which opens or closes `broken-main` items) | results of checks still running are dropped |
-| previews (code-preview) | previews stored as running are asleep (their containers were elsewhere); the next visit starts one here | the containers stop |
+| previews (code-preview) | previews stored as running are asleep (their containers were elsewhere); the next visit starts one here, stopping a Fargate task of the preview still running first (an unvisited one stops by itself once idle) | the containers stop |
 
 `Lost` can come late (a node frozen past its deadline) or never (a killed process), so every
 piece of this also checks `Code::owns_repo` before its side effects, and long work runs under
@@ -276,6 +351,13 @@ node that dies mid-way leaves nothing behind that the others can't finish.
   leaves it due when its claim (20 s) lapses. Parts run at least once: one handled by a node that
   died before deleting its row runs again, and the handlers are idempotent (keyed by GitHub's
   ids).
+- **What roll tells GitHub** (PR comments and closes, issue closes, check runs, reviews) is a
+  `review_deliveries` row with the target `gh_<repo id>`, queued like a webhook's. Every node's
+  delivery worker takes only those of the repos it owns (claimed for 150 s, a send's 90 s plus a
+  margin); a node that sees one due for a repo it doesn't own kicks the repo's owner, and a repo
+  with one pending is never given up as idle.
+- **Redelivery of missed GitHub webhooks** runs on one node (`Code::singleton("github-catchup")`)
+  every 5 minutes; what it asks for arrives as ordinary webhooks.
 - **Event-stream limits** (`--code-max-streams-per-caller`, `--code-max-streams`) are per node.
 - **The git memory budget** (`--code-git-memory-budget`) is per node.
 
@@ -284,35 +366,43 @@ node that dies mid-way leaves nothing behind that the others can't finish.
 ```
 rolld --code-only \
   --code-database 'postgres://roll:…@db.internal:5432/roll?sslmode=require' \
-  --code-cluster-secret "$ROLL_CODE_CLUSTER_SECRET" \
-  --code-advertise-url "http://$(hostname -i):7070" \
+  --cluster-secret "$ROLL_CLUSTER_SECRET" \
+  --advertise-url "http://$(hostname -i):7070" \
   --s3-bucket roll-code --s3-region eu-west-1
 ```
 
+Add `--cluster-backend dynamodb --cluster-table roll-cluster` (with AWS credentials and
+`AWS_REGION`) to keep leases and membership in DynamoDB instead of that Postgres.
+
 | flag (env) | default | |
 | --- | --- | --- |
-| `--code-only` (`ROLL_CODE_ONLY`) | off | run only roll code: no Postgres control plane or proxy, Redis, streams, tasks or queues |
-| `--code-database` (`ROLL_CODE_DATABASE`) | SQLite under `--home` | Postgres for both databases (schemas `code_store`, `code_control`) |
-| `--code-db-connections` (`ROLL_CODE_DB_CONNECTIONS`) | 16 | connections per database per node (plus 4 for leases in a cluster) |
+| `--code-only` (`ROLL_CODE_ONLY`) | off | run only roll code (the same as `ROLL_PRODUCTS=code`): no Postgres control plane or proxy, Redis, streams, tasks or queues |
+| `--code-database` (`ROLL_CODE_DATABASE`) | the system database, else SQLite under `--home` | Postgres for both databases (schemas `code_store`, `code_control`) |
+| `--system-database` (`ROLL_SYSTEM_DATABASE`) | none | the database every product shares; code's when `--code-database` isn't set |
+| `--code-db-connections` (`ROLL_CODE_DB_CONNECTIONS`) | 16 | connections per database per node (plus 4 for leases in a cluster on Postgres) |
 | `--code-db-ca` (`ROLL_CODE_DB_CA`) | system roots | more CA certificates (PEM) for Postgres; TLS follows the URL's `sslmode` |
-| `--code-cluster-secret` (`ROLL_CODE_CLUSTER_SECRET`) | none: one node | join a cluster; at least 16 bytes, the same on every node; needs `--code-database` and S3 |
-| `--code-advertise-url` (`ROLL_CODE_ADVERTISE_URL`) | `http://<public host>:<API port>` | where the other nodes reach this one (`http://`, no path) |
-| `--code-node-id` (`ROLL_CODE_NODE_ID`) | random per process | a pinned id; a restarted process waits until the old one looks dead |
-| `--code-drain-timeout` (`ROLL_CODE_DRAIN_TIMEOUT`) | 30 | seconds SIGTERM waits for this node's repos to move before it exits |
+| `--cluster-secret` (`ROLL_CLUSTER_SECRET`; alias `--code-cluster-secret`, `ROLL_CODE_CLUSTER_SECRET`) | none: one node | join a cluster; at least 16 bytes, the same on every node; needs code's Postgres (`--code-database` or `--system-database`) and S3 |
+| `--cluster-backend` (`ROLL_CLUSTER_BACKEND`) | `postgres` with a secret, else `memory` | where leases and membership live (see "Backends") |
+| `--cluster-table` (`ROLL_CLUSTER_TABLE`) | `roll-cluster` | the DynamoDB table; region and credentials from the environment (`AWS_REGION`, the task role) |
+| `--cluster-dynamodb-endpoint` (`ROLL_CLUSTER_DYNAMODB_ENDPOINT`) | AWS | another endpoint (DynamoDB Local) |
+| `--advertise-url` (`ROLL_ADVERTISE_URL`; alias `--code-advertise-url`) | `http://<public host>:<API port>` | where the other nodes reach this one (`http://`, no path) |
+| `--node-id` (`ROLL_NODE_ID`; alias `--code-node-id`) | random per process | a pinned id; a restarted process waits until the old one looks dead |
+| `--zone` (`ROLL_ZONE`) | none | the availability zone, recorded with the node |
+| `--drain-timeout` (`ROLL_DRAIN_TIMEOUT`; alias `--code-drain-timeout`, `ROLL_CODE_DRAIN_TIMEOUT`) | 30 | seconds SIGTERM waits for this node's leases to move before it exits |
 | `--code-git-memory-budget` (`ROLL_CODE_GIT_MEMORY_BUDGET`) | 1024 | MiB every git request together may hold |
 | `--code-git-max-request-memory` (`ROLL_CODE_GIT_MAX_REQUEST_MEMORY`) | ¾ of the budget | MiB one git request may hold |
 | `--code-git-memory-wait-secs` (`ROLL_CODE_GIT_MEMORY_WAIT_SECS`) | 30 | how long a git request waits for memory before it fails as busy |
 
 - A cluster node refuses to start on SQLite or on a local object directory: neither is shared
   between nodes.
-- `GET /v1/code/health` answers 200 while the node's database answers and (in a cluster) it holds
-  its leases and isn't draining; else 503 with `Retry-After: 1` (docs/code/http-api.md). Point
+- `GET /v1/code/health` answers 200 while the node's database answers and (in a cluster) its
+  last renewal is within the lease's validity and it isn't draining; else 503 with `Retry-After: 1` (docs/code/http-api.md). Point
   the load balancer's health check at it.
 - Postgres sizing: each node opens at most `--code-db-connections` connections per database (16
-  by default) and 4 for its leases. Use a session-mode pooler or none: prepared statements and
+  by default) and, with leases on Postgres, 4 for them. Use a session-mode pooler or none: prepared statements and
   `SET search_path` need session state.
 - Every node must use the same object storage, the same `ROLL_SECRET_KEY` (sealed owner keys) and
-  the same `ROLL_CODE_TOKEN`.
+  the same `ROLL_ADMIN_TOKEN` (and `ROLL_CODE_TOKEN`, if set).
 
 ## Limits
 

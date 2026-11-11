@@ -472,7 +472,7 @@ async fn github_webhook_statuses() {
     let mut config = code_github::AppConfig::new(1, key, SECRET, "roll-test");
     config.api_base = "http://127.0.0.1:9/api".into();
     config.web_base = "http://127.0.0.1:9/git".into();
-    let options = code_control::github::Options { mirror: code_github::MirrorConfig::default(), client: code_github::ClientOptions::default() };
+    let options = code_control::github::Options::default();
     code_control::github::enable(&a.code, config, options).unwrap();
     assert_eq!(a.ok("GET", "/v1/code/github", None).await["configured"], true);
     let hook = |event: &str, delivery: &str, body: &[u8], secret: &str| {

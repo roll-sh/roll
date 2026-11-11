@@ -7,6 +7,6 @@ pub mod producer;
 
 pub use log::{
     AppendError, AppendOptions, Appended, Chunk, Cleaned, CompactionPlan, CompactionPolicy, LocalRead, TailBudget, Log, LogConfig, LogStats, Read, ReadError,
-    ReadPlan, Recovered, Retention, UploadPlan, read_local,
+    ReadPlan, Recovered, Retention, UploadPlan, WalTake, read_local,
 };
 pub use producer::AbortedTxn;

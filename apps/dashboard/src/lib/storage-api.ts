@@ -5,7 +5,7 @@
  */
 
 import { ROLL_API } from "./roll-api";
-import { accountQuery, assertSessionLive, clearSession, storageCall as call, storageHeaders, StorageError } from "./storage-session";
+import { accountQuery, assertSessionLive, clearSession, getSession, storageCall as call, storageHeaders, StorageError } from "./storage-session";
 
 export interface StoragePricing {
   usd_per_gb_month: number;
@@ -698,6 +698,7 @@ export function uploadObject(
     xhr.open("PUT", `${ROLL_API}${bucket(name)}/upload${q({ key })}`);
     if (file.type) xhr.setRequestHeader("content-type", file.type);
     let auth: Record<string, string>;
+    const signedIn = Boolean(getSession());
     try {
       assertSessionLive();
       auth = storageHeaders();
@@ -716,7 +717,7 @@ export function uploadObject(
       }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data as ObjectInfo);
       else {
-        if (xhr.status === 401 && "authorization" in auth) clearSession(true);
+        if (xhr.status === 401 && signedIn) clearSession(true);
         const code = (data as { code?: string } | null)?.code ?? null;
         reject(new StorageError(data?.error ?? `${xhr.status} ${xhr.statusText}`, xhr.status, code));
       }
@@ -728,7 +729,8 @@ export function uploadObject(
   });
 }
 
-const RESERVED_PREFIXES = ["xn--", "sthree-", "amzn-s3-demo-"];
+// `chg-`: code previews' hostnames on the user-content domain, which serves buckets as `<bucket>.roll.site`.
+const RESERVED_PREFIXES = ["xn--", "sthree-", "amzn-s3-demo-", "chg-"];
 const RESERVED_SUFFIXES = ["-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"];
 
 /** A dotted-quad IPv4 address, as Rust's `Ipv4Addr` parses it: 0–255, no leading zeros. */

@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[derive(thiserror::Error, Debug)]
@@ -47,6 +47,11 @@ fn engine_err(e: eng::Error) -> ControlError {
 #[derive(Clone)]
 pub struct NosqlConfig {
     pub home: PathBuf,
+    /// The catalog: `None` keeps it in `<home>/nosql.db` (one node); a Postgres URL (the system
+    /// database, `ROLL_SYSTEM_DATABASE`) shares it between the nodes of a cluster.
+    pub database: Option<String>,
+    /// Connections the catalog's pool opens at most, when it's in Postgres.
+    pub database_connections: usize,
     /// This node's name in object storage (commit log segments are per node).
     pub node_name: String,
     /// Host written into endpoints (without a domain).
@@ -113,6 +118,8 @@ impl NosqlConfig {
     pub fn local(home: PathBuf) -> Self {
         NosqlConfig {
             home,
+            database: None,
+            database_connections: 16,
             node_name: "local".into(),
             public_host: "127.0.0.1".into(),
             cql_port: 59042,
@@ -170,6 +177,8 @@ pub struct Control {
     seen: Mutex<HashMap<String, Seen>>,
     /// The single-mode database's id.
     pub single_id: Option<String>,
+    /// The cluster databases are shared with ([`Control::join`]); none on a single node.
+    pub(crate) cluster: OnceLock<Arc<roll_cluster::Cluster>>,
 }
 
 const ID_ALPHABET: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
@@ -332,8 +341,22 @@ fn masking_policy(m: &Map<String, Value>) -> Result<std::collections::BTreeMap<(
 impl Control {
     pub async fn new(cfg: NosqlConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.home)?;
-        let store = Arc::new(Store::open(&cfg.home.join("nosql.db"))?);
-        store.fail_running_imports(now())?;
+        let store = Arc::new(match &cfg.database {
+            Some(url) => Store::on(code_sql::Db::connect(url, crate::store::PG_SCHEMA, code_sql::PgOptions { max_connections: cfg.database_connections.max(1), ..Default::default() })?)?,
+            None => Store::open(&code_sql::Target::Sqlite(cfg.home.join("nosql.db")))?,
+        });
+        if cfg.database.is_none() {
+            // One node: whatever it was importing stopped with it. (A shared catalog's imports
+            // are taken over by their database's owner instead.)
+            store.fail_running_imports(now())?;
+        }
+        Self::with_catalog(cfg, objects, store).await
+    }
+
+    /// A control plane on a catalog that's already open (the nodes of a cluster in one process,
+    /// in tests, share one).
+    pub async fn with_catalog(cfg: NosqlConfig, objects: Objects, store: Arc<Store>) -> anyhow::Result<Arc<Self>> {
+        std::fs::create_dir_all(&cfg.home)?;
         let storage_cfg = StoreConfig { node: cfg.node_name.clone(), tmp_dir: Some(cfg.home.join("tmp")), ..cfg.storage.clone() };
         let storage = Storage::start(objects, storage_cfg).await?;
         let single_id = match &cfg.single {
@@ -366,6 +389,7 @@ impl Control {
             running_imports: Mutex::default(),
             seen: Mutex::default(),
             single_id,
+            cluster: OnceLock::new(),
         });
         if let Some(id) = &control.single_id
             && let Some(d) = control.store.db(id)?
@@ -415,7 +439,7 @@ impl Control {
             loop {
                 tokio::time::sleep(every).await;
                 let Some(c) = weak.upgrade() else { return };
-                if let Err(e) = c.clone().run_due_imports() {
+                if let Err(e) = c.clone().run_due_imports().await {
                     tracing::warn!(error = %e, "nosql import scheduling failed");
                 }
             }
@@ -426,6 +450,11 @@ impl Control {
                 loop {
                     tokio::time::sleep(every).await;
                     let Some(c) = weak.upgrade() else { return };
+                    // One node per bucket: a second collector could count an object another
+                    // node is about to reference as unreferenced twice.
+                    if !c.singleton("nosql-gc").await {
+                        continue;
+                    }
                     match c.collect_garbage(every).await {
                         Ok((archives, st)) => tracing::info!(archives, deleted = st.deleted, bytes = st.deleted_bytes, pending = st.unreferenced - st.deleted, "nosql storage gc"),
                         Err(e) => tracing::warn!(error = %e, "nosql storage gc failed"),
@@ -478,7 +507,12 @@ impl Control {
     /// The Alternator endpoint of a database: `https://<id>.<alternator domain>` when hosted
     /// (the `Host` names the database), else the node's address.
     pub fn alternator_endpoint(&self, id: &str) -> Option<String> {
-        let host = |h: &str, p: u16| if h.contains(':') { format!("[{h}]:{p}") } else { format!("{h}:{p}") };
+        let host = |h: &str, p: u16| match (h.contains(':'), p) {
+            // HTTPS on its own port (behind the edge) needs none.
+            (false, 443) => h.to_string(),
+            (true, _) => format!("[{h}]:{p}"),
+            (false, _) => format!("{h}:{p}"),
+        };
         match (&self.cfg.alternator_domain, self.cfg.alternator_https_port, self.cfg.alternator_port) {
             (Some(domain), Some(p), _) => Some(format!("https://{}", host(&format!("{id}.{domain}"), p))),
             (Some(domain), None, Some(p)) => Some(format!("http://{}", host(&format!("{id}.{domain}"), p))),
@@ -649,15 +683,29 @@ impl Control {
         };
         self.check(&d)?;
         self.name_free(&d.name, None)?;
-        self.store.insert_db(&d)?;
+        self.insert(&d)?;
         // Load it now: storage writes its first manifest as a numbered version (so it can be
-        // branched and restored at once) and the engine creates the initial superuser.
-        if let Err(e) = self.lease(&d).await {
+        // branched and restored at once) and the engine creates the initial superuser. In a
+        // cluster another node may be the one to serve it: only the manifest is written, and
+        // the superuser is created when it's first loaded.
+        let created = match self.cluster() {
+            None => self.lease(&d).await.map(drop),
+            Some(_) => self.storage.create(&d.id).await.map(drop).map_err(ControlError::from),
+        };
+        if let Err(e) = created {
             let _ = self.store.delete_db(&d.id);
             let _ = self.storage.delete_database(&d.id).await;
             return Err(e);
         }
         Ok(d)
+    }
+
+    /// Insert a catalog row; a name another node took meanwhile is a conflict.
+    fn insert(&self, d: &NosqlDb) -> Result<()> {
+        self.store.insert_db(d).map_err(|e| match e.downcast_ref::<code_sql::Error>() {
+            Some(se) if se.is_unique_violation() => ControlError::Conflict(format!("a database named {} already exists", d.name)),
+            _ => ControlError::Internal(e),
+        })
     }
 
     /// Change settings. On a loaded database durability, the restore window, the idle timeout,
@@ -734,6 +782,7 @@ impl Control {
         }
         self.store.delete_db(&d.id)?;
         self.sizes.lock().unwrap_or_else(|e| e.into_inner()).remove(&d.id);
+        self.retire(&d.id);
         Ok(())
     }
 
@@ -762,10 +811,14 @@ impl Control {
         Ok(())
     }
 
-    /// A database that was never loaded has no manifest yet: load it once.
+    /// A database that was never loaded has no manifest yet: load it once (in a cluster, where
+    /// another node may own it, write its first manifest).
     async fn ensure_stored(&self, d: &NosqlDb) -> Result<()> {
         if self.node.get_loaded(&d.id).is_none() && manifest::read_manifest(self.objects(), &d.id).await?.is_none() {
-            drop(self.lease(d).await?);
+            match self.cluster() {
+                None => drop(self.lease(d).await?),
+                Some(_) => drop(self.storage.create(&d.id).await?),
+            }
         }
         Ok(())
     }
@@ -799,7 +852,7 @@ impl Control {
         self.name_free(&d.name, None)?;
         self.ensure_stored(&p).await?;
         self.storage.branch(&p.id, &d.id, r.at.map(|t| t * 1000)).await.map_err(history_err)?;
-        self.store.insert_db(&d)?;
+        self.insert(&d)?;
         if d.schema_only
             && let Err(e) = self.drop_rows(&d).await
         {
@@ -925,10 +978,12 @@ impl Control {
         Ok(tables.len())
     }
 
-    /// Delete databases whose `expires_at` has passed. Returns how many.
+    /// Delete databases whose `expires_at` has passed. Returns how many. In a cluster each is
+    /// deleted by its owner (or, when nobody owns it, by the node it belongs on).
     pub async fn expire_now(&self) -> Result<usize> {
         let mut n = 0;
         for d in self.store.expired(now())? {
+            let Some(_guard) = self.take_for_work(&d.id).await else { continue };
             match self.delete(&d.id).await {
                 Ok(()) => {
                     tracing::info!(db = d.id, name = d.name, "nosql database expired");

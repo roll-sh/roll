@@ -2,7 +2,7 @@
 //! owner, a repo's background work starts and stops as its ownership moves, events and GitHub
 //! deliveries reach the owner from any node, and the health check.
 //!
-//! On a single node (no [`code_cluster::Cluster`]) none of this does anything: every repo is
+//! On a single node (no [`roll_cluster::Cluster`]) none of this does anything: every repo is
 //! this node's and every request runs where it arrives.
 //!
 //! - **Routing** ([`route`], a layer on the API and git routers): a request naming a repo
@@ -32,7 +32,7 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use code_cluster::{Cluster, ClusterConfig, Guard, Ownership};
+use roll_cluster::{Backend, Cluster, ClusterConfig, Guard, Ownership};
 use code_sql::OptionalExtension;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -74,8 +74,6 @@ pub(crate) struct Duties {
 const EVENT_BATCH: usize = 256;
 /// Tries a kick gets (backing off up to 5 s between them: about two minutes in all).
 const KICK_ATTEMPTS: u32 = 30;
-/// How often work in flight checks that the lease it started under is still held.
-const OWNER_CHECK: Duration = Duration::from_millis(100);
 
 /// A cluster needs a database and object storage every node shares.
 pub(crate) fn check_config(config: &Config, objects: &pg_storage::Objects, control: &code_sql::Db) -> anyhow::Result<()> {
@@ -94,14 +92,24 @@ pub(crate) fn check_config(config: &Config, objects: &pg_storage::Objects, contr
     Ok(())
 }
 
-/// Join the cluster and start following ownership.
+/// Join the cluster (on the configured backend; `db` is code's own database) and start
+/// following ownership.
 pub(crate) fn join(code: &Arc<Code>, db: code_sql::Db, cfg: ClusterConfig) -> anyhow::Result<()> {
     let rt = tokio::runtime::Handle::try_current().map_err(|_| anyhow::anyhow!("a roll code cluster node needs a Tokio runtime"))?;
-    let cluster = match rt.runtime_flavor() {
-        tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| Cluster::join(db, cfg))?,
-        _ => Cluster::join(db, cfg)?,
+    let backend = code.config.cluster_backend.clone();
+    let join = move || -> anyhow::Result<Arc<Cluster>> {
+        let backend: Box<dyn Backend> = match backend {
+            crate::ClusterBackend::Database => Box::new(roll_cluster::Postgres::new(db)),
+            crate::ClusterBackend::DynamoDb(c) => Box::new(roll_cluster::DynamoDb::connect(c)?),
+            crate::ClusterBackend::Memory(store) => Box::new(roll_cluster::Memory::new(store)),
+        };
+        Ok(Cluster::join(backend, cfg)?)
     };
-    let ownership = cluster.subscribe();
+    let cluster = match rt.runtime_flavor() {
+        tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(join)?,
+        _ => join()?,
+    };
+    let ownership = cluster.subscribe_ownership();
     code.cluster.set(cluster).map_err(|_| anyhow::anyhow!("already part of a cluster"))?;
     let (tx, rx) = mpsc::unbounded_channel();
     let _ = code.duties.events.set(tx);
@@ -123,7 +131,8 @@ async fn release_idle_repos(code: Weak<Code>) {
         tokio::time::sleep(every).await;
         let Some(code) = code.upgrade() else { return };
         let Some(cluster) = code.cluster().cloned() else { return };
-        for key in cluster.idle(idle).into_iter().filter(|k| !k.starts_with("singleton:")) {
+        // Repos and owners' agents; other products' leases are theirs to give up.
+        for key in cluster.idle(idle).into_iter().filter(|k| is_repo_key(k) || k.starts_with(AGENTS_KEY)) {
             let (c, code) = (cluster.clone(), code.clone());
             let released = tokio::task::spawn_blocking(move || c.release_if_idle(&key, idle, || !code.repo_busy(&key))).await;
             if let Err(e) = released {
@@ -164,9 +173,11 @@ async fn follow_ownership(code: Weak<Code>, mut rx: mpsc::UnboundedReceiver<Owne
 /// and its machines' links run on the node holding it.
 pub(crate) const AGENTS_KEY: &str = "agents:";
 
-/// Whether a lease key is a repo's (not a singleton's or an owner's agents).
+/// Whether a lease key is a repo's: a bare repo id. Every other key on the shared cluster names
+/// what it's for before a colon (singletons, an owner's agents, other products' resources such
+/// as `storage:meta`); repo ids never hold one.
 pub(crate) fn is_repo_key(key: &str) -> bool {
-    !key.starts_with("singleton:") && !key.starts_with(AGENTS_KEY)
+    !key.contains(':')
 }
 
 impl Code {
@@ -211,8 +222,8 @@ impl Code {
     }
 
     /// Whether a repo has work its owner must not walk away from: merge-queue entries, reviewer
-    /// jobs, checks queued or running, previews running, promised webhook events, or a GitHub
-    /// connection (its mirror). On any doubt (an error), busy.
+    /// jobs, checks queued or running, previews running, promised webhook events, notifications
+    /// for GitHub, or a GitHub connection (its mirror). On any doubt (an error), busy.
     pub(crate) fn repo_busy(&self, repo_id: &str) -> bool {
         // An owner's agents stay while any of its machines is connected here, or it has sandboxes
         // (their reconciler runs here; on any doubt, busy).
@@ -243,7 +254,8 @@ impl Code {
              OR (EXISTS (SELECT 1 FROM checks k JOIN changes c ON c.id = k.change_id \
                          WHERE c.repo_id = ?1 AND c.state IN ('open', 'queued', 'conflict') AND k.status IN ('queued', 'running'))) \
              OR (EXISTS (SELECT 1 FROM changes WHERE repo_id = ?1 AND preview LIKE '%\"state\":\"running\"%')) \
-             OR (EXISTS (SELECT 1 FROM webhook_outbox WHERE repo_id = ?1))",
+             OR (EXISTS (SELECT 1 FROM webhook_outbox WHERE repo_id = ?1)) \
+             OR (EXISTS (SELECT 1 FROM review_deliveries WHERE app_id = 'gh_' || ?1 AND state = 'pending'))",
             [repo_id],
             |r| r.get::<_, bool>(0),
         );
@@ -379,33 +391,15 @@ impl Code {
     pub(crate) async fn while_owner<T>(&self, repo_id: &str, fut: impl Future<Output = T>) -> Option<T> {
         match self.cluster() {
             None => Some(fut.await),
-            Some(c) => {
-                let g = c.guard(repo_id)?;
-                self.while_owner_guarded(repo_id, &g, fut).await
-            }
+            Some(c) => c.while_owner(repo_id, fut).await,
         }
     }
 
     /// [`Code::while_owner`] under a guard already held.
     pub(crate) async fn while_owner_guarded<T>(&self, repo_id: &str, g: &Guard, fut: impl Future<Output = T>) -> Option<T> {
         let Some(c) = self.cluster() else { return Some(fut.await) };
-        let epoch = g.epoch();
-        let mut fut = std::pin::pin!(fut);
-        let mut tick = tokio::time::interval(OWNER_CHECK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                biased;
-                v = &mut fut => return Some(v),
-                _ = tick.tick() => {
-                    // Held through a handoff (which waits for this guard), gone once it's lost,
-                    // fenced, or the process stopped taking part.
-                    if c.epoch(repo_id) != Some(epoch) {
-                        return None;
-                    }
-                }
-            }
-        }
+        debug_assert_eq!(g.key(), repo_id);
+        c.while_guarded(g, fut).await
     }
 
     /// Reviewer jobs that may run now, of the repos this node owns.
@@ -641,17 +635,17 @@ pub(crate) async fn route(State(code): State<Arc<Code>>, req: Request, next: Nex
     let Some(cluster) = code.cluster().cloned() else { return next.run(req).await };
     let key = code.agent_link_key(&req).or_else(|| classify(req.uri().path()).and_then(|t| code.route_key(&t)));
     let Some(key) = key else { return next.run(req).await };
-    if let Some(from) = req.extensions().get::<code_cluster::Forwarded>().map(|f| f.node.clone()) {
+    if let Some(from) = req.extensions().get::<roll_cluster::Forwarded>().map(|f| f.node.clone()) {
         // Never send a request back where it came from: the two nodes disagree about the repo
         // right now. Unavailable makes the first node try again shortly.
-        if let Ok(code_cluster::Route::Remote(n)) = cluster.route_async(&key).await
+        if let Ok(roll_cluster::Route::Forward(n)) = cluster.route_async(&key).await
             && n.id == from
         {
             cluster.forget(&key);
-            return code_cluster::unavailable(Duration::from_millis(50));
+            return roll_cluster::unavailable(Duration::from_millis(50));
         }
     }
-    let first_node = code_cluster::hops(&req) == 0;
+    let first_node = roll_cluster::hops(&req) == 0;
     let small = http_body::Body::size_hint(req.body()).exact().is_some_and(|n| n <= RETRY_BODY);
     let local = move |code: Arc<Code>, next: Next| {
         move |req: Request, guard: Guard| async move {
@@ -745,7 +739,7 @@ pub(crate) fn internal_routes(code: Arc<Code>, cluster: Arc<Cluster>) -> Router 
         .route("/internal/code/repos/{id}/kick", post(internal_kick))
         .route("/internal/code/repos/{id}/github", post(internal_github))
         .layer(axum::extract::DefaultBodyLimit::max(32 << 20))
-        .route_layer(axum::middleware::from_fn_with_state(cluster, code_cluster::require_signed))
+        .route_layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed))
         .with_state(code)
 }
 

@@ -51,6 +51,9 @@ aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
 # Tests only: endpoints that make the SDK sign with SigV4a.
 aws-smithy-types = "1"
+# Tests only: an S3 client with a test CA and pinned addresses (crates/rolld/tests/fleet_e2e.rs).
+aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
+aws-smithy-runtime-api = "1"
 lambda_http = { version = "1", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
 tasks = { path = "crates/tasks" }
 kafka-protocol = { version = "0.18", features = ["messages_enums"] }
@@ -70,6 +73,10 @@ x509-parser = "0.18"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
+# roll cloud's edge: TLS, SNI and Host routing, PROXY protocol, ACME.
+roll-edge = { path = "crates/roll-edge" }
+# ACME (DNS-01) for the edge's certificates; ring, like the rest of the workspace's rustls.
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 stream-log = { path = "crates/stream-log" }
 stream-broker = { path = "crates/stream-broker" }
 crc32fast = "1"
@@ -84,7 +91,6 @@ mq-core = { path = "crates/mq-core" }
 mq-amqp = { path = "crates/mq-amqp" }
 mq-storage = { path = "crates/mq-storage" }
 mq-control = { path = "crates/mq-control" }
-mq-proxy = { path = "crates/mq-proxy" }
 mq-cluster = { path = "crates/mq-cluster" }
 mq-mqtt = { path = "crates/mq-mqtt" }
 mq-stomp = { path = "crates/mq-stomp" }
@@ -138,13 +144,18 @@ diffy = "0.5"
 serde_yaml_ng = "0.10"
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 code-sql = { path = "crates/code-sql" }
-code-cluster = { path = "crates/code-cluster" }
+roll-cluster = { path = "crates/roll-cluster" }
+roll-auth = { path = "crates/roll-auth" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }
 code-chat = { path = "crates/code-chat" }
 code-control = { path = "crates/code-control" }
 code-preview = { path = "crates/code-preview" }
+# Isolated work: checks, previews and sandboxes as their own Fargate tasks (docs/cloud/README.md).
+roll-fetch = { path = "crates/roll-fetch" }
+aws-sdk-ecs = "1"
+aws-sdk-cloudwatchlogs = "1"
 code-index = { path = "crates/code-index" }
 code-review = { path = "crates/code-review" }
 agent-proto = { path = "crates/agent-proto" }

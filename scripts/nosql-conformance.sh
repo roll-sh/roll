@@ -62,8 +62,8 @@ cd "$(dirname "$0")/.."
 # scylla-2026.3.3, the same build as the scylla reference image.
 COMMIT=${ROLL_CONFORMANCE_COMMIT:-d80b3d6ca26b5457c1b59b47046fab27fa1953f3}
 REPO=${ROLL_CONFORMANCE_REPO:-https://github.com/scylladb/scylladb}
-SCYLLA_IMAGE=${ROLL_SCYLLA_IMAGE:-scylladb/scylla:2026.3.3}
-CASSANDRA_IMAGE=${ROLL_CASSANDRA_IMAGE:-cassandra:5.0.9}
+SCYLLA_IMAGE=${ROLL_SCYLLA_IMAGE:-scylladb/scylla:2026.3.3@sha256:f96119dbbfa8bad4abe6161f11ac4f6d5a5c34fdc297fd23cf32626791ed2e59}
+CASSANDRA_IMAGE=${ROLL_CASSANDRA_IMAGE:-cassandra:5.0.9@sha256:7e2afd76d5afb991f64c5d9be7d1f8abf749e7ab0e9daaccfd6e865efcece7cc}
 RUNNER_IMAGE=roll-nosql-conformance:$(cat scripts/nosql-conformance/* | shasum -a 256 | cut -c1-12)
 NETWORK=nosql-conformance
 WORK=target/nosql-conformance

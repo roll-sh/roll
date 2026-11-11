@@ -4,7 +4,7 @@
 use crate::backend::{Backend, BlobAttrs, ByteStream, Uploaded};
 use crate::error::{Result, StoreError};
 use crate::ids;
-use crate::log::{LogConfig, LogStats, MetaLog};
+use crate::log::{LogConfig, LogStats, MetaLog, Recovered};
 use crate::meter::Meter;
 use crate::model::*;
 use crate::rows::{self, Row};
@@ -299,22 +299,84 @@ pub(crate) fn insert_key(c: &Connection, k: &AccessKey) -> Result<()> {
     Ok(())
 }
 
+/// A standby's copy of the metadata: rebuilt from object storage without writing anything, and
+/// kept current by following the log the writer commits, so taking over
+/// ([`Store::take_over`]) only has to read what's new. It works in `StoreConfig::dir`, as the
+/// store it may become does.
+pub struct Follower {
+    rec: Recovered,
+    log: LogConfig,
+    backend: Arc<dyn Backend>,
+}
+
+impl Follower {
+    /// Rebuild the metadata from the newest snapshot and the log after it.
+    pub async fn start(cfg: &StoreConfig, backend: Arc<dyn Backend>) -> Result<Follower> {
+        std::fs::create_dir_all(&cfg.dir)?;
+        let log = log_config(cfg);
+        let rec = MetaLog::recover(&backend, &log).await?;
+        Ok(Follower { rec, log, backend })
+    }
+
+    /// Apply what the writer committed since the last call: one GET when nothing is new.
+    /// `check` also looks at the pruned mark, gaps and new snapshots (a few more requests; do it
+    /// now and then). Returns how many entries were applied. After an error, start again.
+    pub async fn poll(&mut self, check: bool) -> Result<u64> {
+        MetaLog::follow(&self.backend, &self.log, &mut self.rec, check).await
+    }
+
+    /// The last log entry applied.
+    pub fn seq(&self) -> u64 {
+        self.rec.last
+    }
+
+    /// Read the copy (tests: what a standby has).
+    pub fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.rec.db.read(f)
+    }
+}
+
+fn log_config(cfg: &StoreConfig) -> LogConfig {
+    LogConfig {
+        prefix: "s3/meta".into(),
+        dir: cfg.dir.clone(),
+        node: cfg.node.clone(),
+        commit_ms: cfg.commit_ms,
+        snapshot_commits: cfg.snapshot_commits,
+        snapshot_bytes: cfg.snapshot_bytes,
+        snapshot_step_pages: cfg.snapshot_step_pages,
+        fence_check_ms: cfg.fence_check.as_millis() as u64,
+    }
+}
+
 impl Store {
     /// Rebuild the metadata from object storage, take over writing it, and start the
     /// background jobs.
     pub async fn open(cfg: StoreConfig, backend: Arc<dyn Backend>) -> Result<Arc<Self>> {
+        Self::take_over(cfg, backend, None).await
+    }
+
+    /// [`Store::open`] from a standby's copy: bring it up to the end of the log (or, if that
+    /// fails, rebuild from a snapshot), then take over writing the log. Any previous writer's
+    /// next commit fails, and it fences itself.
+    pub async fn take_over(cfg: StoreConfig, backend: Arc<dyn Backend>, follower: Option<Follower>) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.dir)?;
-        let log_cfg = LogConfig {
-            prefix: "s3/meta".into(),
-            dir: cfg.dir.clone(),
-            node: cfg.node.clone(),
-            commit_ms: cfg.commit_ms,
-            snapshot_commits: cfg.snapshot_commits,
-            snapshot_bytes: cfg.snapshot_bytes,
-            snapshot_step_pages: cfg.snapshot_step_pages,
-            fence_check_ms: cfg.fence_check.as_millis() as u64,
+        let log_cfg = log_config(&cfg);
+        let rec = match follower {
+            Some(mut f) => match MetaLog::follow(&backend, &log_cfg, &mut f.rec, true).await {
+                Ok(_) => Some(f.rec),
+                Err(e) => {
+                    tracing::warn!(error = %e, "the standby's metadata can't be brought up to date; rebuilding it from object storage");
+                    None
+                }
+            },
+            None => None,
         };
-        let log = MetaLog::open(backend.clone(), log_cfg).await?;
+        let rec = match rec {
+            Some(r) => r,
+            None => MetaLog::recover(&backend, &log_cfg).await?,
+        };
+        let log = MetaLog::take_over(backend.clone(), log_cfg, rec).await?;
         let now = (cfg.clock)();
         let scrub = log.db.read(|c| {
             let v: Option<String> = c.query_row("SELECT v FROM state WHERE k = 'scrub'", [], |r| r.get(0)).optional()?;
@@ -357,7 +419,21 @@ impl Store {
         if let Err(e) = self.flush_meter() {
             tracing::warn!(error = %e, "flushing storage usage at close failed");
         }
-        self.log.close().await;
+        self.log.close(false).await;
+    }
+
+    /// [`Store::close`] for another node to take over next: the log's last entry from this
+    /// writer says so. True if everything written was committed.
+    pub async fn hand_off(&self) -> bool {
+        if let Err(e) = self.flush_meter() {
+            tracing::warn!(error = %e, "flushing storage usage at handoff failed");
+        }
+        self.log.close(true).await
+    }
+
+    /// Whether the store still serves (not closed, fenced or failed).
+    pub fn is_open(&self) -> bool {
+        self.log.check_open().is_ok()
     }
 
     /// Take a metadata snapshot now (normally they happen as the log grows).
@@ -421,6 +497,7 @@ impl Store {
     pub async fn create_bucket_in(&self, account: &str, name: &str, opts: BucketOptions) -> Result<Bucket> {
         // A directory bucket (S3 Express) by its name: no versioning, so no Object Lock.
         let directory = crate::express::is_directory_bucket(name);
+        validate::new_bucket_name(name)?;
         if directory {
             crate::express::validate_name(name)?;
             if opts.object_lock == Some(true) {
@@ -537,6 +614,7 @@ impl Store {
 
     /// A new bucket that sees `parent`'s objects as of now (copy-on-write; nothing is copied).
     pub async fn branch_bucket(&self, parent: &str, name: &str) -> Result<Bucket> {
+        validate::new_bucket_name(name)?;
         // A branch of a directory bucket is a directory bucket, and only theirs are.
         match (crate::express::is_directory_bucket(parent), crate::express::is_directory_bucket(name)) {
             (true, true) => crate::express::validate_name(name)?,

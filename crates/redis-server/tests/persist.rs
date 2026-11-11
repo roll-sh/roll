@@ -97,9 +97,50 @@ async fn crash_recovery_uses_segments_after_the_manifest() {
     persist::restore(&o, &b2, None).await.unwrap();
     assert_eq!(b2.total_keys(), 100);
 
-    // A restarted node continues the segment numbering.
-    let s2 = Shipper::start("n1", o.clone(), cfg()).await.unwrap();
-    assert_eq!(s2.last_seq(), 5);
+}
+
+/// A node that takes a database over while its previous owner still runs (a lease that moved
+/// under a stalled node) fences the old owner's log: the old owner can't make another write of
+/// that database durable, drops it, and keeps shipping its other databases on a new log.
+#[tokio::test]
+async fn a_takeover_fences_the_previous_owner() {
+    let o = objects("fence");
+    let old = Shipper::start("n1", o.clone(), cfg()).await.unwrap();
+    let fenced = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let f = fenced.clone();
+    old.on_fenced(move |id| f.lock().push(id.to_string()));
+    let (a, b) = (Database::new("a", Config::default(), 1), Database::new("b", Config::default(), 1));
+    for d in [&a, &b] {
+        let m = persist::restore(&o, d, None).await.unwrap();
+        old.attach(d, m).await.unwrap();
+    }
+    let mut c = Client::new(1);
+    run(&a, &mut c, "SET k 1");
+    run(&b, &mut c, "SET k 1");
+    old.flush().await.unwrap();
+
+    let new = Shipper::start("n2", o.clone(), cfg()).await.unwrap();
+    let a2 = Database::new("a", Config::default(), 1);
+    let m = persist::restore(&o, &a2, None).await.unwrap();
+    new.attach(&a2, m).await.unwrap();
+    assert_eq!(run(&a2, &mut c, "GET k"), Reply::bulk(b"1"));
+
+    // The old owner goes on writing both.
+    run(&a, &mut c, "SET k 2");
+    run(&b, &mut c, "SET k 2");
+    old.flush().await.unwrap();
+    assert_eq!(*fenced.lock(), ["a"]);
+    assert!(old.durable("a").is_none());
+    assert_eq!(*old.durable("b").unwrap().borrow(), b.stream_offset());
+    run(&a2, &mut c, "SET j 1");
+    new.flush().await.unwrap();
+
+    let b3 = Database::new("b", Config::default(), 1);
+    persist::restore(&o, &b3, None).await.unwrap();
+    assert_eq!(run(&b3, &mut c, "GET k"), Reply::bulk(b"2"));
+    let a3 = Database::new("a", Config::default(), 1);
+    persist::restore(&o, &a3, None).await.unwrap();
+    assert_eq!(run(&a3, &mut c, "MGET k j"), Reply::Array(vec![Reply::bulk(b"1"), Reply::bulk(b"1")]));
 }
 
 #[tokio::test]

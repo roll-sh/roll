@@ -4,6 +4,7 @@
 use super::{Ctx, Handled, Reply, later};
 use crate::broker::{Broker, Partition, Stream, Topic};
 use crate::error::KafkaError;
+use crate::fleet::Serving;
 use crate::ids::now_ms;
 use bytes::Bytes;
 use kafka_protocol::ResponseError;
@@ -28,18 +29,42 @@ pub fn append_error(e: &AppendError) -> KafkaError {
     KafkaError::new(code, e.to_string())
 }
 
-/// Something to await before the append is acknowledged.
-pub struct Durable(Option<(watch::Receiver<i64>, i64)>);
+/// Something to await before the append is acknowledged: the high watermark reaching it, and
+/// on the fleet the stream staying here meanwhile.
+pub struct Durable(Option<(watch::Receiver<i64>, i64)>, Option<watch::Receiver<Serving>>);
 
 impl Durable {
-    pub async fn wait(self, timeout: Duration) -> bool {
-        let Some((mut rx, target)) = self.0 else { return true };
-        matches!(tokio::time::timeout(timeout, rx.wait_for(|hw| *hw >= target)).await, Ok(Ok(_)))
+    /// `REQUEST_TIMED_OUT` if it isn't durable in time; `NOT_LEADER_OR_FOLLOWER` if the stream
+    /// left this node first (the client retries on the new owner).
+    pub async fn wait(self, timeout: Duration) -> Result<(), ResponseError> {
+        let Some((mut rx, target)) = self.0 else { return Ok(()) };
+        let moved = async {
+            match self.1 {
+                Some(mut s) => {
+                    let now = *s.borrow();
+                    let _ = s.wait_for(|v| *v != now).await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            r = tokio::time::timeout(timeout, rx.wait_for(|hw| *hw >= target)) => match r {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(_)) => Err(ResponseError::NotLeaderOrFollower),
+                Err(_) => Err(ResponseError::RequestTimedOut),
+            },
+            _ = moved => Err(ResponseError::NotLeaderOrFollower),
+        }
     }
 }
 
 /// Append batches to a partition. Returns the result and what to wait on for `acks=all`.
 pub fn append(b: &Broker, stream: &Stream, topic: &Topic, p: &Arc<Partition>, batches: &[Bytes]) -> Result<(Appended, Durable), KafkaError> {
+    if b.fleet.is_some() && !stream.tenure.has_room() {
+        // Object storage isn't taking the write-ahead log: don't pile up what can't be acknowledged.
+        return Err(KafkaError::new(ResponseError::NotEnoughReplicas, "object storage is not keeping up; retry"));
+    }
     let log = b.log(topic, p)?;
     let e = topic.effective();
     if e.compact {
@@ -63,11 +88,14 @@ pub fn append(b: &Broker, stream: &Stream, topic: &Topic, p: &Arc<Partition>, ba
     if !appended.duplicate {
         stream.usage.record_in(appended.bytes as u64, appended.records as u64);
     }
-    let durable = if b.config.fsync {
-        b.request_flush(p, &log);
-        Durable(Some((log.subscribe(), appended.last_offset + 1)))
+    let durable = if b.acks_wait() {
+        // A retry of a batch the log has is acknowledged once the original is durable.
+        if !appended.duplicate {
+            b.request_flush(p, &log, appended.bytes);
+        }
+        Durable(Some((log.subscribe(), appended.last_offset + 1)), b.fleet.as_ref().map(|_| stream.tenure.subscribe()))
     } else {
-        Durable(None)
+        Durable(None, None)
     };
     Ok((appended, durable))
 }
@@ -153,9 +181,9 @@ pub async fn produce(ctx: Ctx, req: ProduceRequest) -> Handled {
     let timeout = Duration::from_millis(req.timeout_ms.max(1) as u64);
     let mut h = later(async move {
         for (t, p, durable) in waits {
-            if !durable.wait(timeout).await {
+            if let Err(e) = durable.wait(timeout).await {
                 let pr = &mut resp.responses[t].partition_responses[p];
-                pr.error_code = ResponseError::RequestTimedOut.code();
+                pr.error_code = e.code();
                 pr.base_offset = -1;
             }
         }

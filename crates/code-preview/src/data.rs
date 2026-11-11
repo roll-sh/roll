@@ -21,16 +21,27 @@ pub trait DataBranches: Send + Sync {
     async fn delete_redis(&self, id: &str) -> anyhow::Result<()>;
 }
 
-/// The daemon's own Postgres and Redis control planes.
+/// The daemon's own Postgres and Redis control planes (`None`: that product is off on this
+/// node, and previews that ask for its data fail saying so).
 pub struct RollData {
-    pub postgres: Arc<pg_control::Control>,
-    pub redis: Arc<redis_control::Control>,
+    pub postgres: Option<Arc<pg_control::Control>>,
+    pub redis: Option<Arc<redis_control::Control>>,
+}
+
+impl RollData {
+    fn postgres(&self) -> anyhow::Result<&Arc<pg_control::Control>> {
+        self.postgres.as_ref().ok_or_else(|| anyhow::anyhow!("roll postgres is off on this node (ROLL_PRODUCTS)"))
+    }
+
+    fn redis(&self) -> anyhow::Result<&Arc<redis_control::Control>> {
+        self.redis.as_ref().ok_or_else(|| anyhow::anyhow!("roll redis is off on this node (ROLL_PRODUCTS)"))
+    }
 }
 
 #[async_trait]
 impl DataBranches for RollData {
     async fn postgres_branch(&self, project_id: &str, name: &str) -> anyhow::Result<DataBranch> {
-        let pg = &self.postgres;
+        let pg = self.postgres()?;
         let project = pg.store.project(project_id)?.ok_or_else(|| anyhow::anyhow!("Postgres project {project_id} not found"))?;
         let branch = match pg.store.branch_by_name(project_id, name)? {
             Some(b) => b,
@@ -41,21 +52,22 @@ impl DataBranches for RollData {
     }
 
     async fn delete_postgres(&self, project_id: &str, branch_id: &str) -> anyhow::Result<()> {
-        self.postgres.delete_branch(project_id, branch_id).await.map_err(|e| anyhow::anyhow!("deleting Postgres branch: {e}"))
+        self.postgres()?.delete_branch(project_id, branch_id).await.map_err(|e| anyhow::anyhow!("deleting Postgres branch: {e}"))
     }
 
     async fn redis_branch(&self, db: &str, name: &str) -> anyhow::Result<DataBranch> {
-        let d = match self.redis.store.db_by_name(name)? {
+        let redis = self.redis()?;
+        let d = match redis.store.db_by_name(name)? {
             Some(d) => d,
-            None => self.redis.branch(db, name, None).await.map_err(|e| anyhow::anyhow!("branching Redis: {e}"))?,
+            None => redis.branch(db, name, None).await.map_err(|e| anyhow::anyhow!("branching Redis: {e}"))?,
         };
-        let conn = self.redis.connection(&d.id, &d.password);
+        let conn = redis.connection(&d.id, &d.password);
         let url = conn["redis_url"].as_str().unwrap_or_default().to_string();
         Ok(DataBranch { id: d.id, url })
     }
 
     async fn delete_redis(&self, id: &str) -> anyhow::Result<()> {
-        self.redis.delete(id).await.map_err(|e| anyhow::anyhow!("deleting Redis branch: {e}"))
+        self.redis()?.delete(id).await.map_err(|e| anyhow::anyhow!("deleting Redis branch: {e}"))
     }
 }
 
