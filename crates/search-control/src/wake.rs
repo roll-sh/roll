@@ -242,6 +242,9 @@ pub(crate) struct ControlHooks {
 impl LifecycleHooks for ControlHooks {
     async fn loaded(&self, cluster: &Arc<Cluster>) {
         self.meter.loaded(cluster).await;
+        if let Some(c) = self.control.get().and_then(Weak::upgrade) {
+            c.note_loaded(&cluster.name, true).await;
+        }
         let token = self.wakes.claim(&cluster.name);
         match self.control.get().and_then(Weak::upgrade) {
             // The node publishes the instance after this hook returns, so the reconcile waits
@@ -259,5 +262,8 @@ impl LifecycleHooks for ControlHooks {
 
     async fn unloading(&self, cluster: &Arc<Cluster>) {
         self.meter.unloading(cluster).await;
+        if let Some(c) = self.control.get().and_then(Weak::upgrade) {
+            c.note_loaded(&cluster.name, false).await;
+        }
     }
 }

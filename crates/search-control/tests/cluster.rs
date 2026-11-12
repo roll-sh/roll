@@ -91,6 +91,10 @@ async fn a_cluster_runs_on_its_owner_and_moves_on_a_drain() {
     assert!(other.control.node.loaded().is_empty(), "and nowhere else");
     let (s, v) = call(&http, reqwest::Method::GET, format!("{}/items/_count", other.rest), auth, None).await;
     assert_eq!((s, v["count"].as_i64()), (200, Some(4)), "{v}");
+    // A list on the other node shows where it's loaded, from the catalog.
+    let (_, list) = call(&http, reqwest::Method::GET, format!("{}/v1/search/clusters", other.api), None, None).await;
+    let shop = list.as_array().unwrap().iter().find(|c| c["name"] == "shop").unwrap().clone();
+    assert_eq!((shop["status"]["state"].as_str(), shop["status"]["node"].as_str()), (Some("loaded"), Some(owner.cluster.node_id())), "{shop}");
     // A wrong password is refused on the owner, wherever it came in.
     let (s, _) = call(&http, reqwest::Method::GET, format!("{}/items/_count", other.rest), Some(("shop", "nope")), None).await;
     assert_eq!(s, 401);

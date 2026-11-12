@@ -295,6 +295,7 @@ mod tests {
                 indices: 0,
                 docs: 0,
                 stored_bytes: 1000,
+                loaded_on: None,
             })
             .await
             .unwrap();

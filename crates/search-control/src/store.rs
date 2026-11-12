@@ -54,6 +54,10 @@ pub struct SearchCluster {
     pub indices: i64,
     pub docs: i64,
     pub stored_bytes: i64,
+    /// On a fleet, the node it's loaded on (set as it loads, cleared as it unloads there): what
+    /// lists show without asking the cluster's lease.
+    #[serde(skip)]
+    pub loaded_on: Option<String>,
 }
 
 /// One metering interval of a loaded cluster.
@@ -105,6 +109,9 @@ CREATE INDEX IF NOT EXISTS search_storage_cluster ON search_storage (cluster_id,
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
                     parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes";
+/// What lookups read: [`COLS`] and where the cluster is loaded.
+const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, loaded_on";
 
 fn row(r: &Row) -> code_sql::Result<SearchCluster> {
     Ok(SearchCluster {
@@ -124,6 +131,7 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         indices: r.get(13)?,
         docs: r.get(14)?,
         stored_bytes: r.get(15)?,
+        loaded_on: r.get(16)?,
     })
 }
 
@@ -155,6 +163,7 @@ impl Store {
 
     fn with_db(db: Db) -> anyhow::Result<Self> {
         db.ensure_schema(SCHEMA)?;
+        db.add_column("search_clusters", "loaded_on", "TEXT")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db })
@@ -205,7 +214,7 @@ impl Store {
     }
 
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
-        Ok(self.db.read(|x| x.query_row(&format!("SELECT {COLS} FROM search_clusters WHERE {filter} = ?1 AND deleting = 0"), params![arg], row).optional())?)
+        Ok(self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND deleting = 0"), params![arg], row).optional())?)
     }
 
     pub async fn get(&self, id: &str) -> anyhow::Result<Option<SearchCluster>> {
@@ -218,7 +227,7 @@ impl Store {
     }
 
     async fn many(&self, filter: &str, arg: Option<&str>) -> anyhow::Result<Vec<SearchCluster>> {
-        let sql = format!("SELECT {COLS} FROM search_clusters WHERE deleting = 0 {filter} ORDER BY created_at, rowid");
+        let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE deleting = 0 {filter} ORDER BY created_at, rowid");
         Ok(self.db.read(|x| match arg {
             Some(a) => x.query(&sql, params![a], row),
             None => x.query(&sql, params![], row),
@@ -238,6 +247,16 @@ impl Store {
     /// Clusters branched from `id`.
     pub async fn children(&self, id: &str) -> anyhow::Result<Vec<SearchCluster>> {
         self.many("AND parent_id = ?1", Some(id)).await
+    }
+
+    /// Records that cluster `name` is loaded on `node` (`Some`), or no longer there (`None`:
+    /// cleared only if it still names `me`, so a late unload never erases the next owner's).
+    pub async fn set_loaded_on(&self, name: &str, node: Option<&str>, me: &str) -> anyhow::Result<()> {
+        self.db.write(|x| match node {
+            Some(n) => x.execute("UPDATE search_clusters SET loaded_on = ?2 WHERE name = ?1", params![name, n]),
+            None => x.execute("UPDATE search_clusters SET loaded_on = NULL WHERE name = ?1 AND loaded_on = ?2", params![name, me]),
+        })?;
+        Ok(())
     }
 
     /// Hides a cluster from lookups while its data is deleted (`on`), or shows it again (the
@@ -354,6 +373,7 @@ mod tests {
             indices: 0,
             docs: 0,
             stored_bytes: 0,
+            loaded_on: None,
         }
     }
 

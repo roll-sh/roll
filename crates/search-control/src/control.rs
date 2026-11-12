@@ -414,6 +414,16 @@ impl Control {
         Ok(())
     }
 
+    /// On a fleet, records in the catalog that `name` is loaded here (or no longer is), so lists
+    /// show where without reading leases. Best effort: a failure only makes lists less exact.
+    pub(crate) async fn note_loaded(&self, name: &str, loaded: bool) {
+        let Some(l) = self.cluster_leases() else { return };
+        let me = l.cluster().node_id();
+        if let Err(e) = self.store.set_loaded_on(name, loaded.then_some(me), me).await {
+            tracing::debug!(cluster = name, error = %e, "recording where a search cluster is loaded failed");
+        }
+    }
+
     /// The fleet's leases, when this node is in one ([`Control::join`]).
     pub fn cluster_leases(&self) -> Option<&Arc<crate::cluster::ClusterLeases>> {
         self.leases.get()
@@ -534,6 +544,7 @@ impl Control {
             indices: 0,
             docs: 0,
             stored_bytes: 0,
+            loaded_on: None,
         }
     }
 
@@ -953,8 +964,8 @@ impl Control {
     }
 
     /// Loaded or asleep, with live figures when loaded here. On a fleet a cluster's own page
-    /// asks its owner (`crate::cluster::on_owner`); a list shows the clusters loaded here, and
-    /// those whose lease another node holds as `loaded` there (`node`).
+    /// asks its owner (`crate::cluster::on_owner`); a list shows a cluster loaded on another
+    /// live node as `loaded` there (`node`), from the catalog (no lease read per cluster).
     pub async fn status(&self, c: &SearchCluster) -> Value {
         match self.node.get_loaded(&c.name) {
             Some(l) => {
@@ -971,11 +982,13 @@ impl Control {
                 v
             }
             None => {
+                // Loaded on another live node, as it recorded (a node that died is no longer live).
                 if let Some(l) = self.cluster_leases()
-                    && let Ok(Some(o)) = search_server::lease::Leases::owner(l.as_ref(), &c.name).await
-                    && o.node != l.cluster().node_id()
+                    && let Some(n) = c.loaded_on.as_deref()
+                    && n != l.cluster().node_id()
+                    && l.cluster().nodes().iter().any(|x| x.id == n)
                 {
-                    return json!({ "state": "loaded", "node": o.node });
+                    return json!({ "state": "loaded", "node": n });
                 }
                 json!({ "state": "asleep" })
             }
@@ -1350,6 +1363,7 @@ mod tests {
             indices: 0,
             docs: 0,
             stored_bytes: 0,
+            loaded_on: None,
         };
         let s = spec_for(&c);
         assert_eq!(s.name, "app");
