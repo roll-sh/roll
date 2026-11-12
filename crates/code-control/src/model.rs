@@ -284,6 +284,10 @@ pub struct PreviewEnvironment {
     /// What the pull request gets (the project's `github` rules).
     #[serde(default)]
     pub github: PreviewGithub,
+    /// The changeset the preview runs: statuses and deployments are about it, not whatever the
+    /// change's head is when they're sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

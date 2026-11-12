@@ -126,6 +126,9 @@ pub struct Row {
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Bumped by every write that asks for a converge (`next_at = 0`): a converge settles a
+    /// row only if nothing asked for another one meanwhile.
+    pub generation: i64,
 }
 
 /// What a new preview is made from.
@@ -170,7 +173,7 @@ pub struct Store {
 }
 
 const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, title, github_pr, head, trusted, desired, state, error, attempts, \
-     next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at";
+     next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at, generation";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let desired: String = r.get(11)?;
@@ -201,6 +204,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         created_by: r.get(21)?,
         created_at: r.get(22)?,
         updated_at: r.get(23)?,
+        generation: r.get(24)?,
     })
 }
 
@@ -263,6 +267,16 @@ impl Store {
         db.ensure_schema(SCHEMA)?;
         if !db.has_column("previews", "token")? {
             db.add_column("previews", "token", "TEXT")?;
+        }
+        if !db.has_column("previews", "generation")? {
+            db.add_column("previews", "generation", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        // Rows from before access tokens: each gets one (a missing token never lets a request
+        // through).
+        let untokened: Vec<String> = db.read(|c| c.query("SELECT id FROM previews WHERE token IS NULL OR token = ''", (), |r| r.get(0)))?;
+        for id in untokened {
+            let t = new_token();
+            db.write(|c| c.execute("UPDATE previews SET token = ? WHERE id = ? AND (token IS NULL OR token = '')", params![t, id]).map(drop))?;
         }
         if !db.has_column("previews", "idled")? {
             db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
@@ -337,7 +351,7 @@ impl Store {
                 }
             }
             c.execute(
-                &format!("INSERT INTO previews ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?)"),
+                &format!("INSERT INTO previews ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, 0)"),
                 params![
                     id,
                     n.project_id,
@@ -396,9 +410,12 @@ impl Store {
                 return Ok(old);
             }
             new.updated_at = now;
+            if new.next_at == 0 {
+                new.generation = old.generation + 1;
+            }
             c.execute(
                 "UPDATE previews SET title = ?, head = ?, trusted = ?, github_pr = ?, desired = ?, state = ?, error = ?, attempts = ?, next_at = ?, \
-                 asleep = ?, reset_requested = ?, last_reset_at = ?, last_active_at = ?, expires_at = ?, updated_at = ? WHERE id = ?",
+                 asleep = ?, reset_requested = ?, last_reset_at = ?, last_active_at = ?, expires_at = ?, updated_at = ?, generation = ? WHERE id = ?",
                 params![
                     new.title,
                     new.head,
@@ -415,6 +432,7 @@ impl Store {
                     new.last_active_at,
                     new.expires_at,
                     new.updated_at,
+                    new.generation,
                     id
                 ],
             )?;

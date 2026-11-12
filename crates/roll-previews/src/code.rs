@@ -88,7 +88,9 @@ impl CodeSource {
         let web = self.code.config.web_url.trim_end_matches('/');
         code_control::model::Preview {
             state,
-            url: p.share_url.clone().or_else(|| p.url.clone()),
+            // Plain URLs: the change, its pull request and repo webhooks can be public, so the
+            // access token never goes there (roll's own surfaces hand out `share_url`).
+            url: p.url.clone(),
             postgres: pg,
             redis,
             error: p.error.clone(),
@@ -100,13 +102,14 @@ impl CodeSource {
                 services: p
                     .services
                     .iter()
-                    .map(|x| PreviewServiceLink { name: x.name.clone(), url: x.share_url.clone().unwrap_or_else(|| x.url.clone()), state: x.state.as_str().to_string() })
+                    .map(|x| PreviewServiceLink { name: x.name.clone(), url: x.url.clone(), state: x.state.as_str().to_string() })
                     .collect(),
                 resources: p.resources.iter().map(|x| PreviewResourceLink { kind: x.kind.as_str().to_string(), parent: x.parent.clone(), r#ref: x.r#ref.clone() }).collect(),
                 sleeping_usd_month: p.cost.sleeping_usd_month,
                 active_usd_hour: p.cost.active_usd_hour,
                 dashboard_url: (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{}/previews?preview={}", p.project, p.id)),
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
+                head: Some(p.head.clone()),
             }),
         }
     }

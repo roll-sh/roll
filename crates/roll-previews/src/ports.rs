@@ -59,6 +59,12 @@ pub trait Brancher: Send + Sync {
 
     async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage>;
 
+    /// The branch of `parent` named `name`, if one exists (a branch made just before a crash,
+    /// whose ref was never recorded).
+    async fn find(&self, _parent: &str, _name: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+
     /// The preview has been idle a while: drop what the branch keeps for a quick start (a
     /// Postgres branch's local data directory, to object storage). Its next use brings it back.
     async fn idle(&self, _parent: &str, _branch: &str) -> anyhow::Result<()> {

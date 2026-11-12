@@ -76,6 +76,8 @@ pub struct Engine {
     /// Whether this node runs the reconciler (`singleton("previews")` in a cluster).
     leader: Box<dyn Fn() -> bool + Send + Sync>,
     kick: Notify,
+    /// In a cluster: requests that act on running services go to the reconciler's node.
+    pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
     usage_read: Mutex<HashMap<String, i64>>,
     /// One pass at a time.
     passing: tokio::sync::Mutex<()>,
@@ -121,6 +123,7 @@ impl Engine {
             secrets,
             leader,
             kick: Notify::new(),
+            cluster: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
         })
@@ -166,9 +169,16 @@ impl Engine {
     /// One pass: discover, then converge every preview that's due.
     pub async fn pass(self: &Arc<Self>) -> Result<()> {
         let _one = self.passing.lock().await;
-        for (project, settings) in self.store.enabled_projects()? {
-            if let Err(e) = self.discover(&project, &settings).await {
+        let enabled = self.store.enabled_projects()?;
+        for (project, settings) in &enabled {
+            if let Err(e) = self.discover(project, settings).await {
                 warn!(%project, error = %e, "previews: discovering");
+            }
+        }
+        // Previews turned off: the project's previews go.
+        for r in self.store.rows(None)? {
+            if r.desired == Desired::Active && !enabled.iter().any(|(p, _)| *p == r.project_id) {
+                self.mark_deleted(&r.id, "previews were turned off for the project")?;
             }
         }
         let now = self.store.now_ms()?;
@@ -208,10 +218,16 @@ impl Engine {
         let mut open: HashMap<String, ChangeInfo> = HashMap::new();
         let mut heads: HashMap<String, Option<String>> = HashMap::new();
         for repo in &repos {
+            // A repo gone from roll code (the workspace still names it) has no changes; it must
+            // not stop the project's other previews from being followed and deleted.
+            let Some(head) = self.source.head(repo, None).await? else {
+                heads.insert(repo.clone(), None);
+                continue;
+            };
             for c in self.source.open_changes(repo).await? {
                 open.insert(c.id.clone(), c);
             }
-            heads.insert(repo.clone(), self.source.head(repo, None).await?);
+            heads.insert(repo.clone(), Some(head));
         }
         let existing = self.store.rows(Some(project_id))?;
         // Changes that match the rules and have no preview yet.
@@ -355,7 +371,8 @@ impl Engine {
         }
         // Slots: the oldest queued previews start as others go.
         let rows = self.store.rows(Some(project_id))?;
-        let busy = rows.iter().filter(|r| r.desired == Desired::Active && r.state != State::Queued).count();
+        // A fork waiting for approval holds no slot: spam PRs can't block the project's previews.
+        let busy = rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
         let mut free = (s.max_previews as usize).saturating_sub(busy);
         let mut queued: Vec<&Row> = rows.iter().filter(|r| r.desired == Desired::Active && r.state == State::Queued).collect();
         queued.sort_by_key(|r| r.created_at);
@@ -371,7 +388,7 @@ impl Engine {
         }
         // New previews beyond the limit wait.
         let rows = self.store.rows(Some(project_id))?;
-        let mut active: Vec<&Row> = rows.iter().filter(|r| r.desired == Desired::Active && r.state != State::Queued).collect();
+        let mut active: Vec<&Row> = rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).collect();
         active.sort_by_key(|r| r.created_at);
         for r in active.iter().skip(s.max_previews as usize) {
             if r.state == State::Creating && self.store.resources(&r.id)?.iter().all(|x| x.r#ref.is_none()) {
@@ -405,7 +422,8 @@ impl Engine {
                 let now = self.store.now_ms().unwrap_or_default();
                 let updated = self.store.update(&id, |row| {
                     row.attempts += 1;
-                    row.next_at = now + (BACKOFF_MS << (row.attempts - 1).clamp(0, 10)).min(MAX_BACKOFF_MS);
+                    // Asked for again meanwhile (deleted, reset): now, not after the backoff.
+                    row.next_at = if row.generation == r.generation { now + (BACKOFF_MS << (row.attempts - 1).clamp(0, 10)).min(MAX_BACKOFF_MS) } else { 0 };
                     row.error = Some(msg.chars().take(4000).collect());
                     if !deleting {
                         row.state = State::Failed;
@@ -434,6 +452,12 @@ impl Engine {
                 self.mark_deleted(&r.id, "the change was deleted")?;
                 return Ok(());
             };
+            // The change moved on since this pass read it: converge again on its new head (the
+            // next pass records it), never deploying a head nobody checked.
+            if c.head != r.head && c.open {
+                self.store.update(&r.id, |row| row.next_at = 0)?;
+                return Ok(());
+            }
             if !c.may_run() {
                 for svc in self.store.services(&r.id)? {
                     self.apps.sleep(&r.id, &svc.name).await;
@@ -441,7 +465,7 @@ impl Engine {
                 }
                 let row = self.store.update(&r.id, |row| {
                     row.state = State::AwaitingApproval;
-                    row.next_at = SETTLED;
+                    row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
                     row.attempts = 0;
                     row.error = None;
                 })?;
@@ -450,7 +474,7 @@ impl Engine {
             }
         }
         if r.state == State::Queued {
-            self.store.update(&r.id, |row| row.next_at = SETTLED)?;
+            self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { SETTLED } else { 0 })?;
             return Ok(());
         }
         if r.state == State::AwaitingApproval {
@@ -560,7 +584,7 @@ impl Engine {
             let row = self.store.update(&r.id, |row| {
                 row.state = State::Sleeping;
                 row.error = Some(msg.clone());
-                row.next_at = SETTLED;
+                row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
             })?;
             self.report(row).await;
             return Ok(());
@@ -682,7 +706,7 @@ impl Engine {
             row.state = if running || row.state != State::Sleeping { State::Ready } else { State::Sleeping };
             row.error = error.clone();
             row.attempts = 0;
-            row.next_at = SETTLED;
+            row.next_at = if row.generation == r.generation { SETTLED } else { 0 };
         })?;
         if was != row.state || was == State::Creating || was == State::Updating {
             self.store.log(&r.id, row.state.as_str())?;
@@ -718,7 +742,22 @@ impl Engine {
     }
 
     async fn delete_branch(&self, id: &str, res: &ResourceRow, name: &str) -> anyhow::Result<()> {
-        let Some(branch) = &res.r#ref else { return Ok(()) };
+        // No ref recorded: a branch made just before a crash (or a timeout) may still exist under
+        // the preview's name. Find it, so nothing outlives the preview.
+        let found;
+        let branch = match &res.r#ref {
+            Some(b) => b,
+            None => match self.brancher(res.kind) {
+                Ok(b) => match b.find(&res.parent, name).await? {
+                    Some(f) => {
+                        found = f;
+                        &found
+                    }
+                    None => return Ok(()),
+                },
+                Err(_) => return Ok(()),
+            },
+        };
         // A branch must never be its parent: refuse rather than delete production.
         if branch == &res.parent {
             anyhow::bail!("refusing to delete {} {branch}: it's the preview's parent", res.kind.as_str());
@@ -774,7 +813,10 @@ impl Engine {
             return Err(Error::NotFound(format!("{repo} isn't in project {}", project.name)));
         }
         let s = self.store.settings(project_id)?;
-        let busy = self.store.rows(Some(project_id))?.iter().filter(|r| r.desired == Desired::Active && r.state != State::Queued).count();
+        if !s.enabled {
+            return Err(Error::Conflict(format!("previews are off for project {}: turn them on in its preview rules", project.name)));
+        }
+        let busy = self.store.rows(Some(project_id))?.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
         let n = match (change, branch) {
             (Some(id), _) => {
                 let c = self.source.change(id).await.map_err(|e| Error::Internal(e.to_string()))?.ok_or_else(|| Error::NotFound(format!("no change {id}")))?;
@@ -968,6 +1010,14 @@ impl EnvSource for Engine {
         let services = self.store.services(preview)?;
         let svc = services.iter().find(|x| x.name == service).ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
         let rev = svc.revision.clone().ok_or_else(|| anyhow::anyhow!("{service} isn't deployed yet"))?;
+        // The change's own repo runs only the head that was checked (and approved, for a fork).
+        if svc.repo == r.repo && rev != r.head {
+            anyhow::bail!("{service} is being redeployed at the change's new head");
+        }
+        let bytes: i64 = self.store.resources(preview)?.iter().map(|x| x.bytes).sum();
+        if bytes as u64 > s.max_bytes {
+            anyhow::bail!("its branches hold {bytes} bytes, over the project's max_bytes: reset it to start again");
+        }
         let spec = self
             .source
             .services(&svc.repo, &rev)

@@ -44,6 +44,8 @@ enum Phase {
 
 struct Live {
     phase: watch::Sender<Phase>,
+    /// Bumped by every stop: a start that began before it must not leave a container running.
+    stops: std::sync::atomic::AtomicU64,
     container: Mutex<Option<String>>,
     last_request: Mutex<Instant>,
     started: Mutex<Option<Instant>>,
@@ -132,6 +134,7 @@ impl Runtime {
             .or_insert_with(|| {
                 Arc::new(Live {
                     phase: watch::channel(Phase::Stopped).0,
+                    stops: std::sync::atomic::AtomicU64::new(0),
                     container: Mutex::new(None),
                     last_request: Mutex::new(Instant::now()),
                     started: Mutex::new(None),
@@ -142,6 +145,7 @@ impl Runtime {
     }
 
     async fn stop(&self, preview: &str, service: &str, live: &Live, why: Option<String>) {
+        live.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let name = live.container.lock().take();
         if let Some(name) = name {
             self.iso.release(&name).await;
@@ -243,6 +247,7 @@ impl Runtime {
     }
 
     async fn start_inner(&self, preview: &str, service: &str, live: &Live) -> anyhow::Result<SocketAddr> {
+        let stops = live.stops.load(std::sync::atomic::Ordering::SeqCst);
         let engine = self.engine()?;
         let (t, env) = engine.env(preview, service).await?;
         *live.sleep_after.lock() = t.sleep_after;
@@ -266,6 +271,11 @@ impl Runtime {
         };
         self.trees.prepare(&*self.iso, &job, &t.repo, &t.revision).await?;
         let addr = self.iso.start(&name, t.spec.port).await?;
+        // Stopped (slept, redeployed, removed) while it was starting: don't leave it running.
+        if live.stops.load(std::sync::atomic::Ordering::SeqCst) != stops {
+            self.iso.release(&name).await;
+            anyhow::bail!("stopped while starting");
+        }
         loop {
             if !self.iso.running(&name).await {
                 anyhow::bail!("the service's command exited");
@@ -299,7 +309,7 @@ impl Runtime {
             Ok(None) => return None,
             Err(_) => return Some((StatusCode::SERVICE_UNAVAILABLE, "try again").into_response()),
         };
-        if !required || token.is_empty() {
+        if !required {
             return None;
         }
         let cookie = format!("roll_access_{preview}");
@@ -310,15 +320,17 @@ impl Runtime {
             .filter_map(|v| v.to_str().ok())
             .flat_map(|v| v.split(';'))
             .filter_map(|kv| kv.trim().split_once('='))
-            .any(|(k, v)| k == cookie && same(v, &token));
+            .any(|(k, v)| k == cookie && !token.is_empty() && same(v, &token));
         if has_cookie {
             return None;
         }
         let query = req.uri().query().unwrap_or("");
         let given = query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "roll_access").map(|(_, v)| v);
-        if given.is_some_and(|v| same(v, &token)) {
+        if !token.is_empty() && given.is_some_and(|v| same(v, &token)) {
             let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_access=") && !kv.is_empty()).collect();
-            let location = if rest.is_empty() { req.uri().path().to_string() } else { format!("{}?{}", req.uri().path(), rest.join("&")) };
+            // Only a path on this host: `//evil.example/` would be another site.
+            let path = format!("/{}", req.uri().path().trim_start_matches(['/', '\\']));
+            let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
             let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
             let set = format!("{cookie}={token}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax{secure}");
             let mut r = (StatusCode::FOUND, "").into_response();

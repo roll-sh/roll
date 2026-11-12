@@ -22,14 +22,36 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews", get(list).post(create))
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
-        .route("/v1/previews/{id}/sleep", post(sleep))
-        .route("/v1/previews/{id}/wake", post(wake))
         .route("/v1/previews/{id}/reset", post(reset))
-        .route("/v1/previews/{id}/logs", get(logs))
+        // These act on running services, which live on the reconciler's node in a cluster.
+        .merge(
+            Router::new()
+                .route("/v1/previews/{id}/sleep", post(sleep))
+                .route("/v1/previews/{id}/wake", post(wake))
+                .route("/v1/previews/{id}/logs", get(logs))
+                .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
+                .with_state(engine.clone()),
+        )
         .route("/v1/previews/{id}/activity", get(activity))
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
         .with_state(engine)
+}
+
+/// Run on the node that runs the reconciler (`singleton:previews`), forwarding if need be.
+async fn on_leader(AxState(e): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    match e.cluster.get().cloned() {
+        Some(cluster) => {
+            cluster
+                .dispatch(crate::engine::LEADER_KEY, req, move |req, guard| async move {
+                    let resp = next.run(req).await;
+                    drop(guard);
+                    resp
+                })
+                .await
+        }
+        None => next.run(req).await,
+    }
 }
 
 impl IntoResponse for Error {

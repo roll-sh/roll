@@ -91,6 +91,13 @@ impl Kind {
         })
     }
 
+    /// Whether a branch of this kind can hold the structure without the data (`Mode::Schema`).
+    /// The others only branch everything, so a `schema` rule for them is refused rather than
+    /// silently copying production.
+    pub fn has_schema_mode(self) -> bool {
+        matches!(self, Kind::Nosql | Kind::Stream | Kind::Queue | Kind::Tasks)
+    }
+
     /// The data kind of a workspace resource (`None` for a repo).
     pub fn of_workspace(k: roll_workspace::Kind) -> Option<Kind> {
         Kind::parse(k.as_str()).ok()

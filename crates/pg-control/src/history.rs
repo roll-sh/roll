@@ -383,9 +383,8 @@ impl Control {
         let parent = self.branch_in(project_id, &parent_id)?;
         let ep = self.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
         let parent_ep = self.store.endpoint_for_branch(&parent.id)?.ok_or_else(|| ControlError::NotFound("parent endpoint".into()))?;
-        self.suspend(&ep.id).await?;
-        self.stop_receiver(&branch.id).await;
-        // The parent's state, into a fresh directory: on failure the branch keeps its old data.
+        // The parent's state, into a fresh directory, while the branch keeps serving its old
+        // data: on failure nothing changed.
         let name = new_id(&branch.id);
         let dir = self.config.data_path(&name);
         let recover = {
@@ -409,8 +408,17 @@ impl Control {
                 }
             }
         };
+        // Stop and swap under the endpoint's lock, so no connection can start the compute (or its
+        // receiver) on the old directory in between.
         let lock = self.lock(&ep.id);
         let held = lock.lock().await;
+        if let Err(e) = self.driver.stop(&ep.id).await {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e.into());
+        }
+        self.stop_receiver(&branch.id).await;
+        self.store.set_endpoint_state(&ep.id, EndpointState::Suspended, None)?;
+        self.store.close_segment(&ep.id)?;
         let old = self.branch_path(&branch);
         self.store.set_branch_data_dir(&branch.id, &name)?;
         self.store.set_local_state(&branch.id, LocalState::Local)?;

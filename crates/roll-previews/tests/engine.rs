@@ -113,6 +113,10 @@ impl Brancher for FakeData {
         };
         Ok(vec![(var.into(), format!("fake://{branch}"))])
     }
+    async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        let id = format!("{parent}~{name}");
+        Ok(self.branches.lock().contains(&id).then_some(id))
+    }
     async fn usage(&self, _parent: &str, _branch: &str) -> anyhow::Result<Usage> {
         Ok(Usage { bytes: 1 << 20, storage_usd_month: 0.001, active_usd_hour: 0.04, month_to_date_usd: 0.0 })
     }
@@ -125,11 +129,16 @@ struct FakeApps {
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     seeds: Mutex<Vec<String>>,
     seed_exit: std::sync::atomic::AtomicI32,
+    /// Runs inside a deploy (an API call landing while the reconciler works).
+    on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 #[async_trait]
 impl Apps for FakeApps {
     async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>> {
+        if let Some(f) = self.on_deploy.lock().as_ref() {
+            f();
+        }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
         Ok(None)
     }
@@ -339,4 +348,34 @@ async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
     e.engine.reset(&p.id, Vec::new()).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.apps.seeds.lock().len(), 3, "reset data is seeded again");
+}
+
+#[tokio::test]
+async fn a_delete_during_a_converge_and_an_unrecorded_branch_leave_nothing_behind() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_d", 4));
+    // DELETE lands while the reconciler deploys: the converge mustn't settle over it.
+    let engine = Arc::downgrade(&e.engine);
+    *e.apps.on_deploy.lock() = Some(Box::new(move || {
+        let en = engine.upgrade().unwrap();
+        let r = en.store.row_by_change("chg_d").unwrap().unwrap();
+        if r.desired == Desired::Active {
+            en.delete(&r.id).unwrap();
+        }
+    }));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_d").unwrap().is_none(), "deleted, not settled as ready");
+    assert!(e.pg.branches.lock().is_empty() && e.apps.deployed.lock().is_empty());
+
+    // A branch the product made whose ref never got recorded (a crash, a timeout) is found by
+    // its name and deleted with the preview.
+    *e.apps.on_deploy.lock() = None;
+    e.code.open(change("chg_o", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_o").unwrap().unwrap();
+    e.engine.store.set_resource(&p.id, Kind::Postgres, "prj_db", |r| r.r#ref = None).unwrap();
+    e.engine.delete(&p.id).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.pg.branches.lock().is_empty(), "{:?}", e.pg.branches.lock());
 }

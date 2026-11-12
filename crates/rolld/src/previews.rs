@@ -97,6 +97,9 @@ pub fn start(
         leader,
     );
     runtime.attach(&engine);
+    if clustered {
+        let _ = engine.cluster.set(cluster.clone());
+    }
     let backend = roll_previews::code::Backend::new(code.previews.clone(), workspace, source);
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
@@ -241,9 +244,17 @@ impl Brancher for Postgres {
         Kind::Postgres
     }
 
-    async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
-        // Structure-only Postgres branches are in docs/previews.md's `## Next`: `schema` branches
-        // everything for now.
+    async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        match self.find(parent, name).await {
+            Ok(b) => Ok(b.and_then(|b| s(&b["id"]))),
+            Err(e) if is_404(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        // Structure-only Postgres branches are in docs/previews.md's `## Next`.
+        anyhow::ensure!(mode == Mode::Branch, "a Postgres branch can't be structure-only yet");
         if let Some(b) = self.find(parent, name).await? {
             return Ok(Branched::plain(s(&b["id"]).unwrap_or_default()));
         }
@@ -322,7 +333,18 @@ impl Brancher for Redis {
         Kind::Redis
     }
 
-    async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
+    async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        let d = match self.0.get(&format!("/v1/redis/databases/{}", seg(name))).await {
+            Ok(d) => d,
+            Err(e) if is_404(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let parent_id = self.0.get(&format!("/v1/redis/databases/{}", seg(parent))).await.map(|p| p["id"].clone()).unwrap_or(Value::Null);
+        Ok((d["parent_id"] == parent_id && !parent_id.is_null()).then(|| s(&d["id"])).flatten())
+    }
+
+    async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        anyhow::ensure!(mode == Mode::Branch, "a Redis branch can't be structure-only");
         match self.0.post(&format!("/v1/redis/databases/{}/branches", seg(parent)), json!({ "name": name })).await {
             Ok(v) => Ok(Branched::plain(s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a database without an id"))?)),
             Err(e) if conflict_is_ours(&e) => {
@@ -385,6 +407,16 @@ pub struct Nosql(pub Api);
 impl Brancher for Nosql {
     fn kind(&self) -> Kind {
         Kind::Nosql
+    }
+
+    async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        let d = match self.0.get(&format!("/v1/nosql/databases/{}", seg(name))).await {
+            Ok(d) => d,
+            Err(e) if is_404(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let parent_id = self.0.get(&format!("/v1/nosql/databases/{}", seg(parent))).await.map(|p| p["id"].clone()).unwrap_or(Value::Null);
+        Ok((d["parent_id"] == parent_id && !parent_id.is_null()).then(|| s(&d["id"])).flatten())
     }
 
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
@@ -482,7 +514,18 @@ impl Brancher for Bucket {
         Kind::Bucket
     }
 
-    async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
+    async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        let child = bucket_name(parent, name);
+        match self.0.get(&format!("/v1/storage/buckets/{}", seg(&child))).await {
+            Ok(b) if b["parent"]["name"] == parent => Ok(Some(child)),
+            Ok(_) => Ok(None),
+            Err(e) if is_404(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        anyhow::ensure!(mode == Mode::Branch, "a bucket branch can't be structure-only");
         // Bucket names are global: the parent's name keeps it readable, the preview's makes it
         // unique (63 characters at most).
         let child = bucket_name(parent, name);
@@ -544,6 +587,15 @@ pub struct Stream(pub Api);
 impl Brancher for Stream {
     fn kind(&self) -> Kind {
         Kind::Stream
+    }
+
+    async fn find(&self, _parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        match self.0.get(&format!("/v1/streams/{}", seg(name))).await {
+            Ok(v) if v["name"] == name => Ok(s(&v["id"])),
+            Ok(_) => Ok(None),
+            Err(e) if is_404(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
@@ -615,6 +667,11 @@ impl Brancher for Queue {
         Kind::Queue
     }
 
+    async fn find(&self, _parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        let vhosts = self.0.get("/v1/queues/vhosts").await?;
+        Ok(vhosts.as_array().is_some_and(|a| a.iter().any(|v| v["name"] == name)).then(|| name.to_string()))
+    }
+
     async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
         let vhosts = self.0.get("/v1/queues/vhosts").await?;
         let parent_v = vhosts.as_array().and_then(|a| a.iter().find(|v| v["name"] == parent).cloned()).ok_or_else(|| anyhow::anyhow!("no vhost {parent}"))?;
@@ -636,9 +693,17 @@ impl Brancher for Queue {
                 .into_iter()
                 .flatten()
                 .filter(|i| i["vhost"] == parent)
+                // Shovels and federation move messages in from elsewhere (production, with its
+                // credentials): a branch never gets them.
+                .filter(|i| !(key == "parameters" && i["component"].as_str().is_some_and(|c| c.starts_with("shovel") || c.starts_with("federation"))))
                 .map(|i| {
                     let mut i = i.clone();
                     i["vhost"] = json!(name);
+                    if key == "policies"
+                        && let Some(def) = i["definition"].as_object_mut()
+                    {
+                        def.retain(|k, _| !k.starts_with("federation-upstream"));
+                    }
                     i
                 })
                 .collect();
@@ -683,6 +748,11 @@ pub struct Tasks {
 impl Brancher for Tasks {
     fn kind(&self) -> Kind {
         Kind::Tasks
+    }
+
+    async fn find(&self, _parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        let t = self.api.get("/_roll/tenants").await?;
+        Ok(t["tenants"].as_array().is_some_and(|a| a.iter().any(|x| x == name)).then(|| name.to_string()))
     }
 
     async fn branch(&self, _parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
@@ -736,6 +806,15 @@ impl Search {
 impl Brancher for Search {
     fn kind(&self) -> Kind {
         Kind::Search
+    }
+
+    async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {
+        match self.0.get(&format!("/v1/search/clusters/{}", seg(name))).await {
+            Ok(c) if c["name"] == name && (c["parent_id"] == parent || c["parent_name"] == parent) => Ok(s(&c["id"])),
+            Ok(_) => Ok(None),
+            Err(e) if is_404(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
@@ -991,8 +1070,16 @@ impl roll_previews::ports::Secrets for Secrets {
         let body = json!({ "slug": env, "name": env, "kind": "ephemeral", "base": base, "labels": { "preview": env }, "secrets": set_ops(vars) });
         match self.0.post(&envs, body).await {
             Ok(_) => Ok(()),
-            // It exists: bring its overrides up to date (one change).
+            // It exists. A changed base (the project's rules moved off production, say) means a new
+            // environment; otherwise bring its overrides up to date (one change).
             Err(e) if conflict_is_ours(&e) => {
+                let current = self.0.get(&format!("{envs}/{}", seg(env))).await?;
+                if current["base"].as_str().is_some_and(|b| b != base) {
+                    self.0.delete(&format!("{envs}/{}?confirm={}", seg(env), seg(env))).await?;
+                    let body = json!({ "slug": env, "name": env, "kind": "ephemeral", "base": base, "labels": { "preview": env }, "secrets": set_ops(vars) });
+                    self.0.post(&envs, body).await?;
+                    return Ok(());
+                }
                 self.0.post(&format!("{envs}/{}/changes", seg(env)), json!({ "message": "roll preview", "ops": set_ops(vars) })).await?;
                 Ok(())
             }

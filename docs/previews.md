@@ -120,6 +120,10 @@ state. A pass of the reconciler:
    6. Every service whose revision is not the one it should run is redeployed (the change's head
       for its repo, the default head for the others).
    7. The preview becomes `ready` (or `sleeping`), and the change and the PR hear about it.
+   Every write that asks for a converge (a push, a delete, a reset, a refresh) bumps the row's
+   `generation`. A converge settles a row only if its generation hasn't moved since it started,
+   so a delete or reset that lands mid-converge is never lost. A branch the product made whose
+   id never got recorded (a crash, a timeout) is found by its name when the preview is deleted.
 3. A step that fails records its error on the preview (`failed`) and is retried with backoff
    (15 s × 2ⁿ, at most 10 minutes). Nothing else is undone.
 
@@ -236,6 +240,19 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   writer approved (`approve-run`, roll code's rule). A new push un-approves it. Its services
   stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
   code's own previews: the container started for a visit now refuses an unapproved head.
+- **Structure-only means structure-only.** `schema` is accepted only for kinds that can do it:
+  NoSQL, streams, queues and tasks. A `schema` rule for Postgres, Redis or a bucket is refused.
+  With `data: "schema"` those kinds are left out unless a rule says `branch`, so a project that
+  asked for no rows never gets a full copy by default.
+- **Queues branch without what moves messages in.** Shovels and federation upstreams (and the
+  `federation-upstream*` keys of policies) aren't copied, so a branch can't pull production
+  messages or carry the production broker's credentials.
+- **A fork's head is checked where it runs.** A converge deploys only when the change's head is
+  still the head it read (else it converges again on the new one), and a container starts only
+  at the head that was checked.
+- **Production by name, conservatively.** Any base containing `prod`, or named `prd`, `live`,
+  `main` or `master`, counts as production. Changing the base re-creates the preview's secrets
+  environment on the new one.
 - **Data.** A branch is a child of the parent. Deleting the branch never touches the parent (the
   products' refcounts and garbage collection guarantee it, and the adapter checks parentage
   before it deletes).
@@ -249,6 +266,10 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   - Anything else gets a 401 page. `access: "public"` opens a project's previews to anyone who
     can reach the domain.
   - The token is 120 random bits per preview, compared in constant time.
+  - The token never goes where people outside roll can read it. The change, the pull request
+    comment, statuses, deployments and repo webhooks get the plain URL (which answers 401 to
+    anyone without the link). The dashboard and `roll preview` hand out `share_url`.
+  - The redirect only ever goes to a path on the preview's own host.
   - Services on roll apps are reached through roll apps' own hostnames and are protected by its
     rules, not this one (see `## Next`).
 - **Who.** `/v1/previews` sits behind the operator token like every product's API. Scoped tokens

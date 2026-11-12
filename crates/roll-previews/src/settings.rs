@@ -125,8 +125,11 @@ impl Default for GithubRule {
 }
 
 /// Whether an environment name is production's.
+/// Whether an environment name looks like production's. Errs on the side of yes: `prod`,
+/// `production-eu`, `prd`, `live`, `main`, `master`.
 pub fn is_production(env: &str) -> bool {
-    matches!(env.to_ascii_lowercase().as_str(), "production" | "prod" | "live")
+    let e = env.to_ascii_lowercase();
+    e.contains("prod") || e.split(['-', '_']).any(|w| matches!(w, "prd" | "live" | "main" | "master"))
 }
 
 impl Settings {
@@ -150,7 +153,10 @@ impl Settings {
         }
         for key in self.resources.keys() {
             let Some((kind, r)) = key.split_once(':') else { return bad(format!("resources: {key:?} isn't \"<kind>:<ref>\"")) };
-            Kind::parse(kind)?;
+            let kind = Kind::parse(kind)?;
+            if self.resources[key] == ResourceRule::Schema && !kind.has_schema_mode() {
+                return bad(format!("resources: {key}: a {} branch can't be structure-only yet; branch it or skip it", kind.as_str()));
+            }
             if r.is_empty() {
                 return bad(format!("resources: {key:?} has no ref"));
             }
@@ -209,12 +215,15 @@ impl Settings {
         Ok(())
     }
 
-    /// How a project resource is branched, or `None` to leave it out.
+    /// How a project resource is branched, or `None` to leave it out. With `data: "schema"`,
+    /// a kind that can't be structure-only is left out unless a rule says to branch it: a
+    /// project that asked for no rows never gets a full copy by default.
     pub fn mode_of(&self, kind: Kind, r#ref: &str) -> Option<Mode> {
         match self.resources.get(&format!("{}:{}", kind.as_str(), r#ref)) {
             Some(ResourceRule::Skip) => None,
-            Some(ResourceRule::Schema) => Some(Mode::Schema),
+            Some(ResourceRule::Schema) => kind.has_schema_mode().then_some(Mode::Schema),
             Some(ResourceRule::Branch) => Some(Mode::Branch),
+            None if self.data == Mode::Schema && !kind.has_schema_mode() => None,
             None => Some(self.data),
         }
     }
@@ -252,9 +261,14 @@ mod tests {
         assert_eq!(p.secrets.base, "production");
         assert!(Settings::default().patched(&json!({ "nope": 1 })).is_err());
         assert!(Settings::default().patched(&json!({ "env": { "ROLL_X": "1" } })).is_err());
-        let r = Settings::default().patched(&json!({ "resources": { "redis:rdb_1": "skip", "postgres:prj_1": "schema" } })).unwrap();
+        let r = Settings::default().patched(&json!({ "resources": { "redis:rdb_1": "skip", "nosql:n1": "schema" } })).unwrap();
         assert_eq!(r.mode_of(Kind::Redis, "rdb_1"), None);
-        assert_eq!(r.mode_of(Kind::Postgres, "prj_1"), Some(Mode::Schema));
+        assert_eq!(r.mode_of(Kind::Nosql, "n1"), Some(Mode::Schema));
         assert_eq!(r.mode_of(Kind::Bucket, "b"), Some(Mode::Branch));
+        // Structure-only where a kind can't do it: refused, never a silent full copy.
+        assert!(Settings::default().patched(&json!({ "resources": { "postgres:prj_1": "schema" } })).is_err());
+        let schema = Settings::default().patched(&json!({ "data": "schema" })).unwrap();
+        assert_eq!(schema.mode_of(Kind::Postgres, "prj_1"), None);
+        assert_eq!(schema.mode_of(Kind::Stream, "st_1"), Some(Mode::Schema));
     }
 }

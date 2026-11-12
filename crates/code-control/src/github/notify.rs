@@ -175,7 +175,8 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         }
         _ => {}
     }
-    let sha = code.store.resolve(&r.id, &c.head).ok().flatten().and_then(|cs| code.store.git_of(&r.id, &cs).ok().flatten()).map(|(commit, _)| commit.hex());
+    let head = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.head.clone()).unwrap_or_else(|| c.head.clone());
+    let sha = code.store.resolve(&r.id, &head).ok().flatten().and_then(|cs| code.store.git_of(&r.id, &cs).ok().flatten()).map(|(commit, _)| commit.hex());
     let Some(sha) = sha else { return Ok(()) };
     let env = c.preview.as_ref().and_then(|p| p.environment.as_ref());
     let url = c.preview.as_ref().and_then(|p| p.url.clone());
@@ -332,6 +333,7 @@ mod preview_tests {
             active_usd_hour: 0.0143,
             dashboard_url: Some("https://roll.sh/dashboard/projects/prj_x/previews".into()),
             github: PreviewGithub::default(),
+            head: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
