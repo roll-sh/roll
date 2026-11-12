@@ -35,7 +35,10 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
         r.by_kind.insert("endpoint", Arc::new(ResolveFn(move |id: &str| pg.endpoint_or_404(id).ok().map(|e| e.project_id))));
     }
     if let Some(redis) = p.redis {
-        r.by_kind.insert("database", Arc::new(ResolveFn(move |id: &str| redis.get(id).ok().map(|d| d.id))));
+        let r2 = redis.clone();
+        r.by_kind.insert("database", Arc::new(ResolveFn(move |id: &str| r2.get(id).ok().map(|d| d.id))));
+        // A replica is checked as its database.
+        r.by_kind.insert("replica", Arc::new(ResolveFn(move |id: &str| redis.store.replica(id).ok().flatten().map(|r| r.db_id))));
     }
     if let Some(nosql) = p.nosql {
         // NoSQL's `{id}` is "database" too, under its own product: one resolver per product kind.

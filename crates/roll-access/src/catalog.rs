@@ -787,6 +787,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A change request's current and proposed values, for its approvers.
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
@@ -935,6 +937,12 @@ mod tests {
         // Static segments beat parameters; production decides deploy.
         let env = find("PUT", "/v1/secrets/projects/{project}/environments/order", "x").unwrap();
         assert_eq!(env.row.action("PUT", &[], None), Action::Admin);
+        // Every route that answers secret values is reveal.
+        for r in ["values", "secrets/{name}/value", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
+            let route = format!("/v1/secrets/projects/{{project}}/environments/{{env}}/{r}");
+            let f = by_path("GET", &route.replace('{', "x").replace('}', "")).unwrap();
+            assert_eq!(f.row.action("GET", &[], None), Action::Reveal, "{route}");
+        }
         let dep = find("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "x").unwrap();
         assert_eq!(dep.row.action("POST", &[("env".into(), "production".into())], None), Action::Deploy);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
