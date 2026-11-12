@@ -263,20 +263,21 @@ type Approval = {
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
-### Approvals in chat (designed, next)
+### Approvals in chat
 
-roll code's chat ops (docs/code/chatops.md) already post an agent's requests to Slack and
-Discord as cards with buttons, recorded durably and answered as the automation that bound them.
-Access approvals will use the same machinery rather than a second one:
+Approvals can also go to a Slack channel, through roll code's chat ops (docs/code/chatops.md) and
+its install's bot, rather than a second Slack integration:
 
-- The operator picks an install and a channel for approvals (`PUT /v1/access/notify
-  {chat: {install, channel}}`). roll-access raises an event for each new approval and each
-  decision; rolld hands it to chat ops, which posts or edits an approval card (what would run,
-  the token, the resource, the link) through its existing outbound queue.
-- A button press arrives as a chat action like any other (verified, recorded by the platform's id,
-  claimed by a worker). Only the install's members may decide; the decision is made through
-  `/v1/access/approvals/{id}/approve|deny` as the operator, with `decided_by` naming the platform
-  user (`slack:U123`). A card for an approval already decided, used or expired says so.
+- The operator picks an install and a channel (`PUT /v1/access/notify {"chat": {"install":
+  "chi_…", "channel": "C…"}}`, or the approvals page). Each new approval is posted there as a card:
+  who asks to do what, what would run (route, tool, arguments redacted), and the link. When it's
+  decided, anywhere, the card is edited to say who decided what, and loses its buttons.
+- A press arrives like every Slack action (verified, recorded once by its id, handled by a worker;
+  `code-control/src/chatops/access.rs`). Only the install's members may decide (others are told so),
+  and roll-access checks the press came from the install approvals go to. `decided_by` is the
+  person (`slack:U123`).
+- Posting is best effort: an approval lives in roll (the dashboard, the API, `roll mcp approvals`);
+  chat is one more place to decide it. Discord is next.
 - Nothing about an approval's binding changes: it still runs exactly the request it was asked
   for, once, within ten minutes of the decision.
 
@@ -356,6 +357,8 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel} \| null}` |
+| `PUT /v1/access/notify` | operator | `{chat: {install, channel} \| null}` |
 | `GET /v1/access/oauth/clients` | access read | MCP clients with a live connection |
 | `GET /v1/access/oauth/clients/{id}` | access read | a registered client (the consent screen shows it) |
 | `POST /v1/access/oauth/authorize` | operator | the consent screen's answer: `{client_id, redirect_uri, code_challenge, state, resource, name, rules, expires_at?}` → `{redirect}` |
@@ -381,6 +384,6 @@ this list:
 | `/v1/code/agents/shares/{id}`, `/v1/code/names` | public pages |
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
-| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize` | the operator decides |
+| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify` | the operator decides |
 
 The rest of the work list is in [mcp.md](mcp.md#next).

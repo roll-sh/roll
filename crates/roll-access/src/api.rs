@@ -30,6 +30,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/approvals/{id}/approve", post(approve))
         .route("/v1/access/approvals/{id}/deny", post(deny))
         .route("/v1/access/audit", get(audit))
+        .route("/v1/access/notify", get(notify).put(set_notify))
         .route("/v1/access/oauth/clients", get(clients))
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
@@ -311,14 +312,38 @@ struct Decision {
 
 async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "approve a request")?;
-    Ok(Json(json!(blocking(a, move |a| a.store.decide(&id, true, "operator", None)).await?)))
+    let decided = blocking(a.clone(), move |a| a.store.decide(&id, true, "operator", None)).await?;
+    a.changed(&decided);
+    Ok(Json(json!(decided)))
 }
 
 async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "deny a request")?;
     let d: Decision = if body.iter().all(u8::is_ascii_whitespace) { Decision::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let reason = d.reason.map(|r| r.chars().take(500).collect::<String>());
-    Ok(Json(json!(blocking(a, move |a| a.store.decide(&id, false, "operator", reason.as_deref())).await?)))
+    let decided = blocking(a.clone(), move |a| a.store.decide(&id, false, "operator", reason.as_deref())).await?;
+    a.changed(&decided);
+    Ok(Json(json!(decided)))
+}
+
+/// Where approvals are posted: `{chat: {install, channel} | null}` (docs/permissions.md,
+/// "Approvals in chat").
+async fn notify(State(a): S) -> crate::Result<Json<Value>> {
+    let v = blocking(a, |a| a.store.setting("notify")).await?;
+    Ok(Json(v.unwrap_or_else(|| json!({ "chat": null }))))
+}
+
+async fn set_notify(State(a): S, ext: Extensions, Json(v): Json<Value>) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "choose where approvals go")?;
+    let chat = &v["chat"];
+    let ok = chat.is_null()
+        || (chat["install"].as_str().is_some_and(|i| i.len() <= 64 && !i.is_empty()) && chat["channel"].as_str().is_some_and(|c| c.len() <= 64 && !c.is_empty()));
+    if !ok || v.as_object().is_none_or(|o| o.keys().any(|k| k != "chat")) {
+        return Err(Error::BadRequest("expected {\"chat\": {\"install\": \"chi_…\", \"channel\": \"C…\"}} or {\"chat\": null}".into()));
+    }
+    let v2 = json!({ "chat": chat });
+    blocking(a, move |a| a.store.set_setting("notify", &v2)).await?;
+    Ok(Json(json!({ "chat": chat })))
 }
 
 /// The audit log; `?format=jsonl`: one event per line, as a download (what a SIEM or `jq` reads).

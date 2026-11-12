@@ -180,6 +180,9 @@ export const accessApi = {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
+  /** Where approvals are posted (Slack through roll code's chat ops), or `{chat: null}`. */
+  notify: () => call<{ chat: { install: string; channel: string } | null }>("GET", "/v1/access/notify"),
+  setNotify: (chat: { install: string; channel: string } | null) => call<{ chat: unknown }>("PUT", "/v1/access/notify", { chat }),
   client: (id: string) => call<OAuthClient>("GET", `/v1/access/oauth/clients/${encodeURIComponent(id)}`),
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),

@@ -413,7 +413,8 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                 })
             })
             .await
-            .map_err(|e| Box::new(e.into_response()))?
+            .map_err(|e| Box::new(e.into_response()))
+            .inspect(|a| access.announce(a))?
         }
     };
     let decided = wait(access, &approval.id, access.config.approval_wait).await.map_err(|e| Box::new(e.into_response()))?;

@@ -1,6 +1,9 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
 import { accessApi, productName, type Approval } from "@/lib/access-api";
+import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
+import { call } from "@/lib/roll-api";
+import { useShownOwner } from "../agents/use-connection";
 import { btn, Connecting, danger, EmptyPanel, ErrorNote, input, Panel, primary } from "../ui";
 import { AccessShell, relative, usePoll } from "./shell";
 
@@ -21,6 +24,7 @@ export function Approvals({ focus }: { focus?: string }) {
     <AccessShell tab="approvals">
       <div className="space-y-6">
         <NotifyMe />
+        <ChatSetting />
         <ErrorNote error={pending.error} />
         {pending.data === null && !pending.error ? (
           <Connecting />
@@ -141,5 +145,94 @@ function NotifyMe() {
         Notify me
       </button>
     </p>
+  );
+}
+
+const integrations = createIntegrationsApi(call);
+
+/**
+ * Post approvals to a Slack channel too (roll code's chat ops: docs/permissions.md, "Approvals in
+ * chat"); the people the install allows can then approve or deny from Slack.
+ */
+function ChatSetting() {
+  const shown = useShownOwner();
+  const [current, setCurrent] = useState<{ install: string; channel: string } | null | undefined>(undefined);
+  const [installs, setInstalls] = useState<ChatInstall[]>([]);
+  const [install, setInstall] = useState("");
+  const [channel, setChannel] = useState("");
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accessApi
+      .notify()
+      .then((n) => {
+        setCurrent(n.chat);
+        setInstall(n.chat?.install ?? "");
+        setChannel(n.chat?.channel ?? "");
+      })
+      .catch(() => setCurrent(null));
+  }, []);
+  useEffect(() => {
+    if (!shown?.owner) return;
+    integrations
+      .list(shown.owner)
+      .then((i) => setInstalls(i.slack.installs))
+      .catch(() => setInstalls([]));
+  }, [shown?.owner]);
+  const save = async (chat: { install: string; channel: string } | null) => {
+    setError(null);
+    try {
+      await accessApi.setNotify(chat);
+      setCurrent(chat);
+      setOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  if (current === undefined) return null;
+  const name = (id: string) => installs.find((i) => i.id === id)?.team_name ?? id;
+  return (
+    <div className="space-y-2 text-[12px] text-muted">
+      <p className="flex flex-wrap items-center gap-2">
+        {current ? (
+          <>
+            Approvals are also posted to <b className="font-medium text-fg">#{current.channel}</b> in {name(current.install)}.
+          </>
+        ) : (
+          "Approvals can be posted to a Slack channel, where the people you allow approve or deny them."
+        )}
+        <button onClick={() => setOpen((o) => !o)} className={btn}>
+          {current ? "Change" : "Post to Slack"}
+        </button>
+        {current && (
+          <button onClick={() => void save(null)} className={btn}>
+            Stop
+          </button>
+        )}
+      </p>
+      {open && (
+        <form
+          className="rise flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (install && channel.trim()) void save({ install, channel: channel.trim().replace(/^#/, "") });
+          }}
+        >
+          <select value={install} onChange={(e) => setInstall(e.target.value)} className={input} aria-label="Slack workspace">
+            <option value="">{installs.length ? "Slack workspace…" : "Connect Slack in the agents' integrations first"}</option>
+            {installs.map((i) => (
+              <option key={i.id} value={i.id}>
+                {i.team_name}
+              </option>
+            ))}
+          </select>
+          <input value={channel} onChange={(e) => setChannel(e.target.value)} placeholder="Channel id (C0123…)" className={`${input} font-mono text-[12px]`} aria-label="Channel id" />
+          <button type="submit" disabled={!install || !channel.trim()} className={primary}>
+            Save
+          </button>
+        </form>
+      )}
+      <ErrorNote error={error} />
+    </div>
   );
 }

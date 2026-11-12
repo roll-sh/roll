@@ -91,6 +91,64 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     Ok(access)
 }
 
+/// Approvals in chat: roll code's chat ops post and edit the cards, and send presses back to
+/// roll-access (docs/permissions.md, "Approvals in chat").
+pub fn chat(access: &Arc<Access>, code: &Arc<code_control::Code>) {
+    let web = access.config.web_url.clone();
+    let _ = access.chat.set(Arc::new(ChatCards { code: code.clone(), web }));
+    let a = access.clone();
+    code.on_access_decision(Arc::new(move |d: code_control::chatops::access::AccessDecision| {
+        let a = a.clone();
+        Box::pin(async move { a.decide_from_chat(d.approval, d.approve, d.by, d.install).await })
+    }));
+}
+
+struct ChatCards {
+    code: Arc<code_control::Code>,
+    web: String,
+}
+
+/// An approval as a chat card: who asks to do what, what would run, and the link.
+fn card(web: &str, a: &roll_access::store::Approval) -> code_control::chatops::access::AccessCard {
+    let what = a.resource.as_deref().map_or_else(|| a.product.clone(), |r| format!("{} {r}", a.product));
+    let mut detail = format!("{} {}", a.method, a.route);
+    if let Some(t) = &a.tool {
+        detail.push_str(&format!("  (MCP tool {t})"));
+    }
+    if !a.args.is_null() {
+        let args = serde_json::to_string_pretty(&a.args).unwrap_or_default();
+        let cut: String = args.chars().take(1500).collect();
+        detail.push_str(&format!("\n{cut}"));
+    }
+    detail.push_str(&format!("\n{}/dashboard/access/approvals?id={}", web.trim_end_matches('/'), a.id));
+    let decided = match a.state.as_str() {
+        "pending" => None,
+        "approved" | "used" => Some((a.decided_by.clone().unwrap_or_else(|| "someone".into()), "approved".into())),
+        "denied" => Some((a.decided_by.clone().unwrap_or_else(|| "someone".into()), "denied".into())),
+        other => Some(("roll".into(), other.to_string())),
+    };
+    let decided = decided.map(|(by, what)| (by.strip_prefix("slack:").map_or(by.clone(), |u| format!("<@{u}>")), what));
+    code_control::chatops::access::AccessCard {
+        approval: a.id.clone(),
+        title: format!("{} wants to {} {what}", a.grant_name, a.action),
+        detail,
+        destructive: matches!(a.action.as_str(), "delete" | "deploy"),
+        decided,
+    }
+}
+
+impl roll_access::ApprovalChat for ChatCards {
+    fn post(&self, install: String, channel: String, a: roll_access::store::Approval) -> futures::future::BoxFuture<'static, Result<String, String>> {
+        let (code, c) = (self.code.clone(), card(&self.web, &a));
+        Box::pin(async move { code.post_access_card(&install, &channel, &c).await })
+    }
+
+    fn update(&self, install: String, channel: String, ts: String, a: roll_access::store::Approval) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let (code, c) = (self.code.clone(), card(&self.web, &a));
+        Box::pin(async move { code.update_access_card(&install, &channel, &ts, &c).await })
+    }
+}
+
 /// roll code's MCP tools, fronted by `/v1/mcp` under product-prefixed names (`code_…`, `agents_…`).
 pub struct CodeTools;
 
