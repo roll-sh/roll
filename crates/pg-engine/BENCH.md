@@ -437,6 +437,102 @@ The kernel send at ReadyForQuery is the same work in both servers: round 3's str
 `sendto` and one `recvfrom` per query on the engine (2.0 system calls per query) against
 PostgreSQL's 8.5.
 
+## Bulk writes, round 12 (2026-11-12, agent 217)
+
+HANDOFF.md, "Bulk writes, round 12", has what changed. Method as round 11's (agent 208's
+harness, copied to `~/.cache/a217/bench`), on lane C: dist builds with line tables, each server
+a fresh container on CPUs 14,15,32,33 (two whole cores; 8 GiB, `--cpu-shares 2`, host network),
+psql and perf in containers on CPUs 16,17,34,35, 1M rows (`bulk1m.tsv`), autovacuum off; per
+step the server cgroup's CPU and bytes written, `perf stat -e instructions:u,cycles:u` of the
+server cgroup, VmHWM; rows checked equal on every run (count and sums of every column of both
+tables). **base** is `d6e642356`, **new** base with the one change kept. Gated on user
+instructions of settled rounds, interleaved, three or more rounds a pair.
+
+New in the harness: **a settle is measured too**, as a step `bg_<step before it>`. Settled
+rounds waited out the background work a step left (its flush and compaction) and counted it
+nowhere: after DELETE that is a compaction of 7.7-9.0 G instructions and 45.7 MB written,
+more than DELETE itself (6.5 G), which the step table (unsettled) puts in VACUUM's row. Gating
+on user steps alone would have passed changes that only move work into the background.
+
+### The step table against PostgreSQL 18.6 (unsettled, medians of three runs per arm, `u1`)
+
+| step | PostgreSQL wall / CPU s / G ins | base wall / CPU s / G ins | new wall / CPU s / G ins | CPU / PG base -> new | instructions / PG base -> new | written MB PG / base / new |
+|---|---|---|---|---|---|---|
+| COPY in | 0.99 / 0.82 / 6.48 | 1.30 / 1.16 / 10.17 | 1.30 / 1.15 / 10.17 | 1.42 -> 1.40 | 1.57 -> 1.57 | 189 / 32 / 32 |
+| CREATE INDEX | 0.46 / 0.79 / 3.13 | 0.66 / 1.06 / 7.09 | 0.66 / 1.07 / 7.08 | 1.34 -> 1.35 | 2.27 -> 2.26 | 48 / 18 / 18 |
+| CREATE UNIQUE INDEX | 0.34 / 0.45 / 2.24 | 0.49 / 0.71 / 7.12 | 0.49 / 0.71 / 6.58 | 1.60 -> 1.58 | 3.17 -> 2.93 | 71 / 9 / 9 |
+| COPY out | 0.47 / 0.37 / 3.21 | 0.51 / 0.39 / 4.37 | 0.45 / 0.34 / 4.14 | 1.05 -> 0.91 | 1.36 -> 1.29 | 0 / 0 / 0 |
+| INSERT … SELECT | 0.92 / 0.70 / 4.31 | 0.95 / 0.81 / 7.04 | 0.97 / 0.80 / 7.06 | 1.15 -> 1.13 | 1.63 -> 1.64 | 376 / 34 / 34 |
+| UPDATE half | 4.30 / 4.23 / 27.50 | 1.97 / 1.84 / 13.43 | 2.05 / 1.89 / 13.43 | 0.43 -> 0.45 | 0.49 -> 0.49 | 642 / 56 / 56 |
+| DELETE a quarter | 0.32 / 0.21 / 1.67 | 1.01 / 0.88 / 6.46 | 1.01 / 0.86 / 6.38 | 4.11 -> 4.00 | 3.87 -> 3.83 | 62 / 34 / 34 |
+| VACUUM | 0.33 / 0.31 / 2.53 | 0.48 / 0.69 / 11.21 | 0.46 / 0.51 / 9.37 | 2.21 -> 1.63 | 4.44 -> **3.71** | 14 / 48 / 48 |
+| ANALYZE | 0.26 / 0.14 / 0.50 | 0.31 / 0.21 / 1.69 | 0.37 / 0.23 / 1.69 | 1.52 -> 1.68 | 3.38 -> 3.38 | 0 / 0 / 0 |
+| count(*) after | 0.16 / 0.15 / 0.49 | 0.26 / 0.23 / 1.34 | 0.19 / 0.24 / 1.34 | 1.56 -> 1.61 | 2.75 -> 2.75 | 0 / 0 / 0 |
+| TRUNCATE | 0.13 / 0.03 / 0.02 | 0.11 / 0.01 / 0.58 | 0.11 / 0.01 / 0.60 | | | 0 / 0 / 0 |
+| DROP TABLE | 0.15 / 0.05 / 0.04 | 0.11 / 0.03 / 4.65 | 0.11 / 0.05 / 4.63 | | | 0 / 0 / 45 |
+| **all steps** | 8.26 CPU s / 52.1 G | 8.03 / 75.2 | 7.85 / 72.5 | 0.97 -> 0.95 | 1.44 -> **1.39** | |
+
+(VACUUM's row unsettled is mostly DELETE's background compaction: settled VACUUM is 2.44 G.
+DROP TABLE's 45 MB: the compaction running after it, now faster, finished its fsyncs inside
+the step's window in one run; the files written are the same, the data dirs end at 27 MB in
+every run of both. Per round, new against base: VACUUM -17.2 / -17.4 / -15.2% instructions,
+CPU -26 / -26 / -28%; DELETE -1.1% median; every other step's median within 0.3%, but CREATE
+UNIQUE INDEX -7.6% and COPY out -5.1%, which carry the index builds' background compactions.)
+
+### The change, gated on settled rounds (per round %, user instructions, new against base)
+
+| step | `s2` (three rounds) |
+|---|---|
+| compaction after DELETE (`bg_delete_quarter`) | **-17.5 / -17.8 / -12.9** |
+| compaction after CREATE INDEX (`bg_create_index`) | **-30.8 / -32.6 / -34.4** |
+| DELETE | -1.7 / -0.4 / -3.5 |
+| every other step | within 1.3%; TRUNCATE's 0.3-0.65 G moves as much between runs of one binary (base 0.28-0.65, new 0.47-0.64 over nine runs) |
+| all steps with background work | 73.8 / 73.9 / 72.7 -> 70.8 / 70.3 / 71.2 G |
+
+- Peak RSS (VmHWM) 252-256 MB both, container peaks 289-317 MB both; PostgreSQL's 952-956.
+  Bytes written per step equal (230.2-230.7 MB over the script in the runs where no
+  compaction's fsync fell into the last step's window, both arms).
+- Point reads and short transactions (`smoke.sh`: pgbench scale 10, prepared, 8 clients, 20 s,
+  three interleaved rounds, with the compaction run change also in): select-only 54,142-54,216
+  user instructions per transaction base, 54,177-54,213 new; tpcb-like 901-940 k base,
+  899-934 k new; tps within 3% both ways.
+
+### Measured and not kept
+
+Patches and a note of each in `~/.cache/a217/patches/` (HANDOFF lists them):
+
+- **Folding a bulk UPDATE's new versions into the table's file at its commit** (agent 208's
+  lead; `fold-at-commit.patch`: `Store::fold_if_due` at the end of `Txn::commit`, a
+  compaction when an L0 file of 64k entries or more holds a quarter as many entries as the L1
+  files it overlaps). Settled, three rounds (`s1`): DELETE -13.1 / -15.1 / -13.9%, VACUUM
+  -6.7 / -6.9 / -6.9%, the compaction after DELETE gone (-7.8 G), but UPDATE +27.5 / +27.5 /
+  +27.6% (the fold: 3.7 G), ANALYZE +51.8 / +48.4 / +51.5% and count(*) +45.9% x3. All steps
+  with background work 73.3 -> 64.2 G and 13 MB less written, mostly because DELETE's
+  tombstones then stay in L0 (two files, under the L0 trigger), so the compaction that folds
+  them never runs within the script (DROP TABLE discards them); the scans after DELETE pay
+  for that, merging a deleted row's tombstone against its row (+0.5 G each in ANALYZE and
+  count(*)). Folding the tombstones as well costs a compaction of the table and both indexes
+  (~7 G) in DELETE. So the fold moves the compaction's cost, it doesn't remove it.
+- **VACUUM's and ANALYZE's scans a batch at a time** (`batch-vacuum-analyze-scans.patch`):
+  VACUUM +5.9% x3, ANALYZE +11.8 to +14.2%. Their scans put out-of-line values back
+  (`TxnScan` with a TOAST source), so `TxnScan::fill_batch` falls back to one row a call
+  through `next` and copies it into the batch.
+- **Compaction taking a block's entries below the other inputs' heads in a loop of its own**
+  (`compaction-block-runs.patch`, on top of the change kept): the compaction after DELETE
+  -7.8 / -3.2 / -3.3 (`s3`), then -4.8 / -3.1 / -0.8 (`s4`): under 3% in every round.
+
+### Where the instructions still go
+
+- DELETE (3.8x PostgreSQL's instructions): unchanged in kind from round 11. The fold above
+  shows what merging the UPDATE's versions with the table's rows costs it: 13-15% (0.9 G).
+- The compaction after DELETE (6.3-6.9 G now, in VACUUM's row unsettled): zstd compression
+  about a third, the merge's per-entry `min`/`fill`/`head` and `SstWriter::add` most of the
+  rest. It rewrites the table and both indexes to drop 250k rows and 500k index entries.
+- ANALYZE (3.4x) and VACUUM settled: the scan by `Iterator::next`, a row copied out per row
+  (`Cursor::take`), and VACUUM's reads of the compacted file cold (zstd decompression 22%).
+- count(*) (2.75x): `parscan::partial_row` and `LazyBuf::read`, a row decoded lazily per
+  row; the storage scan is 14% of it.
+
 ## Short write transactions, round 4 (2026-11-11/12, agent 216)
 
 Nothing kept: four steps measured, none met the keep gate (user cycles per transaction down in

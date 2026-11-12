@@ -10257,6 +10257,69 @@ private PostgreSQL 18.6 reference 51,148 / 51,150 units, none newly differing; i
 121/122 specs, 1647/1648 permutations (the known one); pg_dump_tap 14,609 passed. No format
 change: the stored bytes are the same.
 
+## Bulk writes, round 12 (agent 217)
+
+BENCH.md "Bulk writes, round 12" has the measurements: on the 1M-row bulk sequence the
+compaction after DELETE takes 12.9-17.8% fewer user instructions (every round), the one after
+CREATE INDEX 31-34%; unsettled, where that compaction runs beside VACUUM, VACUUM's
+instructions are -15 to -17% (4.44x -> 3.71x PostgreSQL's) and its CPU -26%; all steps 1.44x
+-> 1.39x PostgreSQL's instructions, 0.97x -> 0.95x its CPU. Peak RSS and bytes written
+unchanged. One change:
+
+- **A merge puts the source it moved back in its place among the others' heads**
+  (`storage::Merge::rank`; agent 208's `merge-rank.patch` from round 11, applied as it was).
+  Every time the source it reads from passes the bound (the next source's head), `Merge::min`
+  filled and compared every source's head again. Now it keeps the sources ranked by head and
+  only the one that moved goes back in its place. In a scan of two sources this saves little
+  (DELETE -1 to -4%, round 11's reason for dropping it), but a compaction merges every L0 file
+  and L1: after DELETE five to seven sources whose keys alternate row by row (the table, the
+  UPDATE's versions, DELETE's tombstones of rows and of index entries).
+  - Round 11 measured it on DELETE alone in settled rounds, which wait out the compaction and
+    count it nowhere. **The harness now measures each settle as a step `bg_<step>`**
+    (`~/.cache/a217/bench/bulk2.sh`): gate on those too, or a change that moves work into the
+    background looks free.
+
+Measured and not kept (patches and a note of each in `~/.cache/a217/patches/`):
+- **The fold** (agent 208's lead 1: a bulk UPDATE's new versions compacted into the table's
+  file at its commit, `fold-at-commit.patch`, with a kill-during-fold crash test in
+  `tests/crash_bulk.rs`). DELETE -13 to -15%, VACUUM -7%, the compaction after DELETE gone,
+  but UPDATE +27.5% (the fold, 3.7 G) and ANALYZE and count(*) +46 to +52%: DELETE's
+  tombstones stay in L0 below the trigger, and the scans after it merge each deleted row's
+  tombstone against the row. All steps with background work -12%, but mostly because the
+  tombstones' compaction is deferred past the script's DROP TABLE. The fold moves compaction
+  cost between statements; it does not remove it. Folding the tombstones too puts a ~7 G
+  compaction of the table and both indexes into DELETE.
+- VACUUM's and ANALYZE's table scans through `TxnScan::fill_batch` (+6% / +14%: a resolving
+  `TxnScan` with a TOAST source fills one row a call and copies it).
+- Compaction taking a block's run of entries below the other inputs' heads in its own loop
+  (`compaction-block-runs.patch`: -0.8 to -7.8% on the compaction, not 3% in every round).
+
+Not done, for the next round (BENCH.md has the profiles):
+- DELETE (3.8x): the scan merging the UPDATE's versions with the table's rows is 13-15% of
+  it (what the fold took away); a cheaper home for the fold's cost would be the compaction the
+  L0 trigger runs anyway, e.g. trigger it when an L0 file overlaps much of L1 *and* the next
+  writer is a scan (not at UPDATE's commit), or make compaction cheap enough to run twice.
+  The tombstones (18%) and the filter over lazily decoded rows (25%) are the rest.
+- The compaction after DELETE (6.3-6.9 G, VACUUM's row unsettled): a third zstd level 1
+  compression, which can't get cheaper without writing more bytes; the merge's per-entry
+  work and `SstWriter::add` the rest.
+- ANALYZE (3.4x) reads every row through `TxnScan::next` (a key and value copied per row);
+  a batch fill would need `TxnScan::fill_batch` to resolve out-of-line values in the batch
+  path, as `storage::Scan::fill_batch` already does.
+- count(*) (2.75x): per-row lazy decode in `parscan::partial_row`.
+
+Verification: before the push, on `7354939dc` (the change on `abfa993e5`), release lib tests
+(214), big_tables, txn_spill, crash_bulk, golden, the storage tests, compact_locks,
+crash_random seeds 1-30; release Clippy 19 warnings, none in the file changed (as on the base).
+After the push, the full `tools/verification-train.sh` on `eee0e86d0`: release crate tests 526
+passed, 0 failed; Clippy 19 warnings; crash_random seeds 1-30 x 4; the power stage (power_cut 4
+passed, `CRASH_POWER=1` seeds 1-30 x 4, with and without `CRASH_ASYNC=1`); debug crate tests
+526 passed; the full regression suite against a private PostgreSQL 18.6 reference 51,148 /
+51,150 units, none newly differing; isolation 121/122 specs, 1647/1648 permutations (the known
+one); pg_dump_tap 14,609 passed (run again after recreating the dump client container with
+`--user 1000:1000`: as root, its directory dumps are root-owned 0700 and the test's glob checks,
+run as the user, fail 4). No format change: the files written are byte for byte the same.
+
 ## Short write transactions, round 1 (agent 197)
 
 BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients
