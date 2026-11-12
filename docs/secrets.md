@@ -336,7 +336,7 @@ roll secrets ls      [-p project] [-e env] [--path /]          # keys, masked
 roll secrets get     KEY [--plain]
 roll secrets set     KEY=VALUE… | KEY (value from stdin) [--comment] [--tag]
 roll secrets rm      KEY…
-roll secrets import  .env [--overwrite]                         # one change
+roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets export  [--format dotenv|json|shell|yaml]
@@ -434,6 +434,18 @@ the change`. The blocker names keys and environments, never the value or the lin
 - **Way around.** Rotate the secret and remove the value from the change. For a false positive, an
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
+
+### Moving from another manager
+
+`roll secrets import` takes a `.env` file or JSON: an object of `KEY: value` (numbers and booleans
+as their text) or an array of `{key, value, comment?}`. Export from the old manager, then import
+into each environment:
+
+```
+infisical export --env=prod --format=json > prod.json   &&  roll secrets import prod.json -e production
+doppler secrets download --no-file --format json > prod.json  &&  roll secrets import prod.json -e production
+vercel env pull .env.production --environment=production  &&  roll secrets import .env.production -e production
+```
 
 ### Sharing a value once
 
@@ -724,7 +736,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
-| `POST /environments/{env}/import` | `{dotenv, path?, overwrite?, replace?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
+| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
@@ -877,7 +889,5 @@ Ranked:
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
 3. **A TypeScript client** (`packages/secrets`): `resolve` for services (with the sealed box opened
    in process), `values`, `digest`-based watching; documented in the getting-started guide.
-4. **JSON import** (`{"KEY": "value"}` and arrays of `{key, value}`), and notes on moving from
-   Infisical, Doppler and Vercel (their CLIs export `.env` or JSON).
-5. **Approval notifications**: when a change request opens on a protected environment, its
+4. **Approval notifications**: when a change request opens on a protected environment, its
    approvers hear about it (a `notify` sync on the environment, or roll's chat ops).

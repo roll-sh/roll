@@ -486,7 +486,10 @@ async fn values_are_sealed_for_services_and_never_appear_in_the_audit_log() {
     assert_eq!(audit[0]["summary"], "resolved 2 values for app:web");
     assert!(!audit.to_string().contains("sk_live_123"));
 
-    // `replace` makes the folder match the file, deletions included, in one change.
+    // Other managers' JSON exports import too.
+    let j = api.ok(Method::POST, "/environments/staging/import", Some(json!({ "json": [{ "key": "FROM_DOPPLER", "value": "d" }, { "key": "PORT", "value": 8080 }] }))).await;
+    assert_eq!(j["items"].as_array().unwrap().len(), 2);
+        // `replace` makes the folder match the file, deletions included, in one change.
     let r = api.ok(Method::POST, "/environments/production/import", Some(json!({ "dotenv": "STRIPE_KEY=sk_live_123\n", "replace": true }))).await;
     assert_eq!((r["items"][0]["key"].as_str(), r["items"][0]["what"][0].as_str()), (Some("PORT"), Some("deleted")));
 }

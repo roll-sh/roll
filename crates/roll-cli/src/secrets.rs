@@ -140,7 +140,8 @@ pub enum Secrets {
         #[arg(long)]
         request: bool,
     },
-    /// Import a `.env` file (`-` for stdin) as one change.
+    /// Import a `.env` or JSON file (`-` for stdin) as one change. JSON is an object of
+    /// `KEY: value` or an array of `{key, value}` (Infisical's and Doppler's exports).
     Import {
         file: String,
         /// Replace keys that exist (default: only add new ones).
@@ -529,7 +530,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
             let v = c
-                .call(Method::POST, &format!("{env}/import"), Some(json!({ "dotenv": text, "path": c.at.path, "overwrite": overwrite, "request": request })))
+                .call(Method::POST, &format!("{env}/import"), Some(import_body(&text, &c.at.path, overwrite, request)?))
                 .await
                 .map_err(approval_hint)?;
             if json_out {
@@ -837,6 +838,17 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
         println!("{} ({})", s(&v["slug"]), s(&v["name"]));
     }
     Ok(())
+}
+
+/// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
+/// other managers export) when it parses as one, else a `.env` file.
+fn import_body(text: &str, path: &str, overwrite: bool, request: bool) -> anyhow::Result<Value> {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        let j: Value = serde_json::from_str(text).context("the file looks like JSON but doesn't parse")?;
+        return Ok(json!({ "json": j, "path": path, "overwrite": overwrite, "request": request }));
+    }
+    Ok(json!({ "dotenv": text, "path": path, "overwrite": overwrite, "request": request }))
 }
 
 /// A random value of `n` letters and digits (62 symbols, rejection-sampled: no bias).

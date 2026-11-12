@@ -447,8 +447,12 @@ async fn promote(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportBody {
-    /// A `.env` file's text.
-    dotenv: String,
+    /// A `.env` file's text…
+    #[serde(default)]
+    dotenv: Option<String>,
+    /// …or JSON: `{"KEY": "value"}` or `[{key, value, comment?}]` (other managers' exports).
+    #[serde(default)]
+    json: Option<serde_json::Value>,
     #[serde(default)]
     path: Option<String>,
     /// Replace keys that exist (default: only add new ones).
@@ -468,7 +472,11 @@ struct ImportBody {
 /// A `.env` file as one change (bulk paste, `roll secrets import`).
 async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
     let i: ImportBody = body(&b)?;
-    let entries = dotenv::parse(&i.dotenv).map_err(Error::BadRequest)?;
+    let entries = match (&i.dotenv, &i.json) {
+        (Some(text), None) => dotenv::parse(text).map_err(Error::BadRequest)?,
+        (None, Some(j)) => dotenv::from_json(j).map_err(Error::BadRequest)?,
+        _ => return Err(Error::BadRequest("import takes dotenv (a .env file's text) or json".into())),
+    };
     let path = crate::names::path(i.path.as_deref().unwrap_or("/"))?;
     let v = blocking(s, move |s| {
         let own: Vec<crate::Secret> = s.secrets(&project, &env, &path, &c)?.into_iter().filter(|x| x.source == crate::read::Source::Own && x.kind == crate::SecretType::Shared).collect();
