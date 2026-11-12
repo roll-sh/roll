@@ -14,7 +14,7 @@ fn main() {
     let project = ws.create("bench", "", None).unwrap().id;
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
     let backend = format!("{:?}", db.backend());
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), deliver: None, open: true, trust_forwarded_for: false, web_url: None, grants: None };
     let s = Secrets::new(db, ws, opts).unwrap();
     let c = Caller::operator();
     let time = |what: &str, f: &mut dyn FnMut()| {
