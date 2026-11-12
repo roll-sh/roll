@@ -506,7 +506,7 @@ pub fn preview_env(
 
 /// Whether something answers HTTP there. A published port (Docker's proxy, a Fargate task's
 /// guard) accepts connections before the app listens, so wait for actual bytes back.
-async fn answers(addr: SocketAddr) -> bool {
+pub async fn answers(addr: SocketAddr) -> bool {
     let attempt = async {
         let mut s = tokio::net::TcpStream::connect(addr).await.ok()?;
         s.write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n").await.ok()?;
@@ -516,12 +516,12 @@ async fn answers(addr: SocketAddr) -> bool {
     tokio::time::timeout(Duration::from_secs(2), attempt).await.ok().flatten().is_some()
 }
 
-fn is_upgrade(h: &HeaderMap) -> bool {
+pub fn is_upgrade(h: &HeaderMap) -> bool {
     h.contains_key(header::UPGRADE)
         && h.get(header::CONNECTION).and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("upgrade")))
 }
 
-fn strip_hop_by_hop(h: &mut HeaderMap, keep_upgrade: bool) {
+pub fn strip_hop_by_hop(h: &mut HeaderMap, keep_upgrade: bool) {
     for name in ["keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding"] {
         h.remove(name);
     }
@@ -552,7 +552,7 @@ impl IntoResponse for Unavailable {
 }
 
 /// A plain page for preview states: dark first, light when the browser asks.
-fn page(status: StatusCode, title: &str, detail: &str, refresh: bool) -> Response {
+pub fn page(status: StatusCode, title: &str, detail: &str, refresh: bool) -> Response {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let meta = if refresh { "<meta http-equiv=\"refresh\" content=\"2\">" } else { "" };
     let html = format!(
@@ -611,8 +611,9 @@ impl PreviewBackend for Previews {
                 redis: stored.as_ref().and_then(|p| p.redis.clone()),
                 error: None,
                 created_at,
+                environment: None,
             },
-            Err(e) => Preview { state: PreviewState::Failed, url: None, postgres: None, redis: None, error: Some(e), created_at },
+            Err(e) => Preview { state: PreviewState::Failed, url: None, postgres: None, redis: None, error: Some(e), created_at, environment: None },
         })
     }
 
@@ -806,7 +807,7 @@ mod tests {
         let write = |f: &str| serde_json::from_value(json!({ "message": "m", "files": { f: { "content": "x" } } })).unwrap();
         code.land_api(&repo, &Caller::Admin, &write("a"), None, false).await.unwrap();
         let c = code.create_change(&repo, &Caller::Admin, &json!({ "title": "t", "message": "t", "files": { "b": { "content": "b" } } }), None).await.unwrap();
-        let stored = Preview { state: PreviewState::Running, url: Some("http://x".into()), postgres: None, redis: None, error: None, created_at: 1 };
+        let stored = Preview { state: PreviewState::Running, url: Some("http://x".into()), postgres: None, redis: None, error: None, created_at: 1, environment: None };
         code.db.set_change_preview(&c.id, Some(&stored)).unwrap();
 
         // A restarted daemon has no containers: a stored "running" preview is asleep.

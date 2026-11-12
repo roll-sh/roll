@@ -258,6 +258,59 @@ pub struct Preview {
     pub redis: Option<PreviewRedis>,
     pub error: Option<String>,
     pub created_at: i64,
+    /// A preview environment of the change's workspace project (roll previews,
+    /// docs/previews.md): every service and a branch of every data resource. `None` for roll
+    /// code's own single-container preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<PreviewEnvironment>,
+}
+
+/// What a change shows of its preview environment (roll previews' `Preview`, summed up).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewEnvironment {
+    /// `pv_…`.
+    pub id: String,
+    pub slug: String,
+    /// roll previews' state: `queued`, `awaiting_approval`, `creating`, `ready`, `sleeping`,
+    /// `updating`, `failed` or `deleting`.
+    pub state: String,
+    pub services: Vec<PreviewServiceLink>,
+    pub resources: Vec<PreviewResourceLink>,
+    /// A month asleep, and an hour in use, in USD.
+    pub sleeping_usd_month: f64,
+    pub active_usd_hour: f64,
+    /// The preview on the dashboard.
+    pub dashboard_url: Option<String>,
+    /// What the pull request gets (the project's `github` rules).
+    #[serde(default)]
+    pub github: PreviewGithub,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewGithub {
+    pub comment: bool,
+    pub status: bool,
+    pub deployment: bool,
+}
+
+impl Default for PreviewGithub {
+    fn default() -> Self {
+        PreviewGithub { comment: true, status: true, deployment: true }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewServiceLink {
+    pub name: String,
+    pub url: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewResourceLink {
+    pub kind: String,
+    pub parent: String,
+    pub r#ref: Option<String>,
 }
 
 /// Why a change can't land (or be queued) right now.
