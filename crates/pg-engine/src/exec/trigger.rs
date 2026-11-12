@@ -118,7 +118,7 @@ impl TransData {
     /// The rows as a trigger reads them; reading closes it.
     fn read(&self, close: bool, ctx: &ExecCtx) -> Transition {
         if close && !self.closed.replace(true) {
-            ctx.stmt_fired.borrow_mut().remove(&(self.table, self.event));
+            ctx.stmt_fired.borrow_mut().retain(|f| *f != (self.table, self.event));
         }
         Transition {
             old: Rc::new(self.old.borrow().clone()),
@@ -1420,7 +1420,7 @@ pub fn statement(
     // (before_stmt_triggers_fired).
     if before
         && event != tt::TRUNCATE
-        && !ctx.stmt_fired.borrow_mut().insert((t.oid, event))
+        && !super::note_fired(&mut ctx.stmt_fired.borrow_mut(), (t.oid, event))
     {
         return Ok(());
     }

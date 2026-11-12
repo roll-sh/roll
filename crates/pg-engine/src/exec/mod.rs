@@ -498,7 +498,8 @@ pub struct ExecCtx<'a> {
     pub after_running: Cell<bool>,
     /// (table, event)s whose BEFORE STATEMENT triggers fired in this statement: referential
     /// actions on the table don't fire them again.
-    pub stmt_fired: RefCell<std::collections::HashSet<(u32, u16)>>,
+    /// (A statement touches a table or two: a short list, no hashing or allocation.)
+    pub stmt_fired: RefCell<smallvec::SmallVec<[(u32, u16); 4]>>,
     /// The statement's transition table data (AfterTriggersTableData), shared by its
     /// commands and their referential actions until a trigger reads one.
     pub trans_data: RefCell<Vec<Rc<trigger::TransData>>>,
@@ -2176,4 +2177,13 @@ impl ExecCtx<'_> {
         }
         Ok(None)
     }
+}
+
+/// `stmt_fired`'s insert: false when `f` was there already.
+pub(crate) fn note_fired(fired: &mut smallvec::SmallVec<[(u32, u16); 4]>, f: (u32, u16)) -> bool {
+    if fired.contains(&f) {
+        return false;
+    }
+    fired.push(f);
+    true
 }

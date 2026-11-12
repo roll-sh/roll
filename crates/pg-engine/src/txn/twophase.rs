@@ -511,6 +511,7 @@ pub fn recover(db: &Arc<Database>, b: &[u8]) -> Result<Option<(Info, Txn)>> {
         let k = d.bytes()?.to_vec();
         let mode = LockMode::from_number(d.u8()? as i32).ok_or_else(corrupt)?;
         db.locks.acquire(&k, id, id, mode, &nowait, &String::new)?;
+        let k = super::LockKey::from_vec(k);
         t.lock_journal.push((k.clone(), mode));
         t.locks_held.insert((k, mode), 0);
     }

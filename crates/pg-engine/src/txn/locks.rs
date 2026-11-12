@@ -290,8 +290,14 @@ pub fn tuple_key(db: u32, rel: u32, row: &[u8]) -> Vec<u8> {
 
 /// A (sub)transaction's own lock (LOCKTAG_TRANSACTION), by its lock id.
 pub fn xact_key(id: u64) -> Vec<u8> {
-    let mut k = prefixed(TRANSACTION);
-    k.extend_from_slice(&id.to_be_bytes());
+    xact_key_bytes(id).to_vec()
+}
+
+/// `xact_key`, on the stack.
+pub fn xact_key_bytes(id: u64) -> [u8; 16] {
+    let mut k = [0u8; 16];
+    k[7] = TRANSACTION;
+    k[8..].copy_from_slice(&id.to_be_bytes());
     k
 }
 
@@ -1309,7 +1315,7 @@ impl LockManager {
 
     /// Release everything `owner` holds of these heavyweight locks.
     pub fn release_all(&self, owner: u64, keys: impl IntoIterator<Item = Vec<u8>>) {
-        self.release_with_rows(owner, keys, std::iter::empty());
+        self.release_with_rows(owner, keys, std::iter::empty::<Vec<u8>>());
     }
 
     /// A transaction ending: its row locks on `rows`, then its heavyweight locks (its
@@ -1317,8 +1323,8 @@ impl LockManager {
     pub fn release_with_rows(
         &self,
         owner: u64,
-        keys: impl IntoIterator<Item = Vec<u8>>,
-        rows: impl IntoIterator<Item = Vec<u8>>,
+        keys: impl IntoIterator<Item = impl AsRef<[u8]>>,
+        rows: impl IntoIterator<Item = impl AsRef<[u8]>>,
     ) {
         let mut s = self.state.lock();
         if let Some(b) = s.bulk.remove(&owner) {
@@ -1327,18 +1333,20 @@ impl LockManager {
             }
         }
         for r in rows {
-            if let Some(holds) = s.rows.get_mut(&r) {
+            let r = r.as_ref();
+            if let Some(holds) = s.rows.get_mut(r) {
                 holds.retain(|h| h.owner != owner);
                 if holds.is_empty() {
-                    s.rows.remove(&r);
+                    s.rows.remove(r);
                 }
             }
         }
         for k in keys {
-            if let Some(e) = s.locks.get_mut(&k) {
+            let k = k.as_ref();
+            if let Some(e) = s.locks.get_mut(k) {
                 e.holds.retain(|h| h.owner != owner);
-                Self::wakeup(&mut s, &k);
-                Self::drop_empty(&mut s, &k);
+                Self::wakeup(&mut s, k);
+                Self::drop_empty(&mut s, k);
             }
         }
         drop(s);

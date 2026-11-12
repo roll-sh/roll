@@ -461,6 +461,7 @@ impl Database {
             None => self.store.pin_visible(),
         };
         let ts = pin.ts;
+        let room = LockRoom::take();
         Txn {
             id,
             xid: 0,
@@ -495,13 +496,13 @@ impl Database {
             catalog_base_cat: None,
             stmt_catalog: None,
             read_catalog: None,
-            locks_held: hashbrown::HashMap::new(),
+            locks_held: room.held,
             table_used: false,
-            lock_journal: Vec::new(),
+            lock_journal: room.journal,
             fast_slot: std::sync::OnceLock::new(),
-            row_locks: Vec::new(),
+            row_locks: room.rows,
             unique_keys_taken: 0,
-            xact_locks: Vec::new(),
+            xact_locks: room.xacts,
             spec_token: 0,
             savepoints: Vec::new(),
             cancel,
@@ -907,8 +908,12 @@ pub struct DeferredFk {
     pub stmt: bool,
 }
 
+/// A heavyweight lock key as a transaction keeps it: inline up to 24 bytes (a relation's,
+/// a transaction's and most unique keys' locks), so taking one allocates nothing.
+pub type LockKey = smallvec::SmallVec<[u8; 24]>;
+
 /// A heavyweight lock a transaction holds: its key and mode.
-pub type HeldLock = (Vec<u8>, LockMode);
+pub type HeldLock = (LockKey, LockMode);
 
 /// A `HeldLock` looked up by a borrowed key (hashes as the tuple does).
 #[derive(Hash)]
@@ -3056,7 +3061,7 @@ impl Txn {
 
     /// Whether this transaction holds heavyweight lock `key` in `mode`.
     pub fn holds_lock_mode(&self, key: &[u8], mode: LockMode) -> bool {
-        self.locks_held.contains_key(&(key.to_vec(), mode))
+        self.locks_held.contains_key(&HeldKey(key, mode))
     }
 
     /// The backend this transaction's locks belong to.
@@ -3106,7 +3111,7 @@ impl Txn {
                 self.lock_journal.reserve(8);
                 self.locks_held.reserve(8);
             }
-            let k = (key.to_vec(), mode);
+            let k = (LockKey::from_slice(key), mode);
             self.lock_journal.push(k.clone());
             self.locks_held.insert(k, self.savepoints.len());
             // A new lock may have waited for DDL that then committed: the statement reads the
@@ -3240,11 +3245,10 @@ impl Txn {
 
     /// Release one heavyweight lock this transaction took (`lock`) before it ends.
     pub fn unlock(&mut self, key: &[u8], mode: LockMode) {
-        let k = (key.to_vec(), mode);
-        if self.locks_held.remove(&k).is_none() {
+        if self.locks_held.remove(&HeldKey(key, mode)).is_none() {
             return;
         }
-        if let Some(i) = self.lock_journal.iter().rposition(|j| *j == k) {
+        if let Some(i) = self.lock_journal.iter().rposition(|j| j.0.as_slice() == key && j.1 == mode) {
             self.lock_journal.remove(i);
         }
         self.release_key(key, mode);
@@ -3285,7 +3289,7 @@ impl Txn {
         if token.is_none()
             && row.is_none()
             && self.unique_keys_taken >= bulklocks::compact_after()
-            && !self.locks_held.contains_key(&(key.to_vec(), LockMode::Exclusive))
+            && !self.locks_held.contains_key(&HeldKey(key, LockMode::Exclusive))
         {
             let holder = self.holder();
             let xid = self.cur_xid();
@@ -3318,7 +3322,7 @@ impl Txn {
     pub fn expand_compact_locks(&mut self) {
         let (keys, rows) = self.db.locks.expand_compact(self.id);
         for k in keys {
-            let k = (k, LockMode::Exclusive);
+            let k = (LockKey::from_vec(k), LockMode::Exclusive);
             if !self.locks_held.contains_key(&k) {
                 self.lock_journal.push(k.clone());
                 self.locks_held.insert(k, 0);
@@ -4132,13 +4136,13 @@ impl Txn {
             self.lock_journal.clear();
             return;
         }
-        let mut keys: Vec<Vec<u8>> = self.locks_held.drain().map(|((k, _), _)| k).collect();
-        keys.sort();
+        // (A key held in several modes is released once.)
+        let mut keys: smallvec::SmallVec<[LockKey; 8]> = self.locks_held.drain().map(|((k, _), _)| k).collect();
+        keys.sort_unstable();
         keys.dedup();
-        keys.extend(self.xact_locks.drain(..).map(locks::xact_key));
+        keys.extend(self.xact_locks.drain(..).map(|x| LockKey::from_slice(&locks::xact_key_bytes(x))));
         self.lock_journal.clear();
-        let rows: Vec<Vec<u8>> = self.row_locks.drain(..).map(|(k, _)| k).collect();
-        self.db.locks.release_with_rows(self.id, keys, rows);
+        self.db.locks.release_with_rows(self.id, keys, self.row_locks.drain(..).map(|(k, _)| k));
     }
 
     /// pg_export_snapshot(): export this transaction's current snapshot under a new
@@ -4270,6 +4274,57 @@ impl Drop for Txn {
         if std::mem::take(&mut self.exported) {
             self.db.xids().unexport(self.db.instance, self.id);
         }
+        LockRoom::keep(self);
+    }
+}
+
+/// A transaction's lock bookkeeping, empty, kept by its thread for the next transaction
+/// there: a write transaction takes a few locks, and its tables and lists were allocated
+/// (and grown) again for every one.
+#[derive(Default)]
+struct LockRoom {
+    held: hashbrown::HashMap<HeldLock, usize>,
+    journal: Vec<HeldLock>,
+    rows: Vec<(Vec<u8>, usize)>,
+    xacts: Vec<u64>,
+}
+
+thread_local! {
+    static LOCK_ROOM: RefCell<Option<LockRoom>> = const { RefCell::new(None) };
+}
+
+impl LockRoom {
+    /// (Kept only while small: a transaction that took thousands of locks gives its
+    /// room back.)
+    const KEEP: usize = 64;
+
+    fn take() -> LockRoom {
+        LOCK_ROOM.try_with(|r| r.borrow_mut().take()).ok().flatten().unwrap_or_default()
+    }
+
+    fn keep(t: &mut Txn) {
+        if t.locks_held.capacity() > Self::KEEP
+            || t.lock_journal.capacity() > Self::KEEP
+            || t.row_locks.capacity() > Self::KEEP
+            || t.xact_locks.capacity() > Self::KEEP
+        {
+            return;
+        }
+        let mut room = LockRoom {
+            held: std::mem::take(&mut t.locks_held),
+            journal: std::mem::take(&mut t.lock_journal),
+            rows: std::mem::take(&mut t.row_locks),
+            xacts: std::mem::take(&mut t.xact_locks),
+        };
+        room.held.clear();
+        room.journal.clear();
+        room.rows.clear();
+        room.xacts.clear();
+        let _ = LOCK_ROOM.try_with(|r| {
+            if let Ok(mut r) = r.try_borrow_mut() {
+                *r = Some(room);
+            }
+        });
     }
 }
 
