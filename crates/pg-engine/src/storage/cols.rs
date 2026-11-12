@@ -94,15 +94,16 @@ impl ColData {
         }
     }
 
-    fn push_default(&mut self) {
+    /// `n` slots, each a default (a NULL's, an odd row's).
+    fn fill_default(&mut self, n: usize) {
         match self {
-            ColData::I32(v) | ColData::Date(v) => v.push(0),
-            ColData::I64(v) => v.push(0),
-            ColData::F64(v) => v.push(0.0),
-            ColData::Num(v) => v.push((0, 0)),
-            ColData::Bool(v) => v.push(false),
-            ColData::Bytes(v) => v.push((0, 0, 0)),
-            ColData::Values(v) => v.push(Value::Null),
+            ColData::I32(v) | ColData::Date(v) => v.resize(n, 0),
+            ColData::I64(v) => v.resize(n, 0),
+            ColData::F64(v) => v.resize(n, 0.0),
+            ColData::Num(v) => v.resize(n, (0, 0)),
+            ColData::Bool(v) => v.resize(n, false),
+            ColData::Bytes(v) => v.resize(n, (0, 0, 0)),
+            ColData::Values(v) => v.resize(n, Value::Null),
         }
     }
 }
@@ -164,18 +165,41 @@ fn row_values(bytes: &[u8]) -> Option<&[u8]> {
     bytes.get(pos..)
 }
 
-/// The value at `data[*pos]` into `col`'s typed slot, `*pos` moved past it (false: it doesn't
-/// fit, `*pos` unchanged: odd). A string's bytes stay where they are: in `buf` (the block
-/// buffer `data` is in, at `base`), else copied into `own` (buffer 0).
+/// A numeric's unscaled value from its stored bytes at `data[at..at + n]` (two's
+/// complement, little-endian, as `to_signed_bytes_le` wrote it; None past an i128's 16).
+/// Up to 8 bytes with 8 of the row from there are one word load, sign-extended.
 #[inline]
-fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: &mut usize, buf: Option<(u32, usize)>) -> bool {
+fn num_bytes(data: &[u8], at: usize, n: usize) -> Option<i128> {
+    if n == 0 {
+        return Some(0);
+    }
+    if n <= 8
+        && let Some(w) = data.get(at..at + 8)
+    {
+        let sh = 64 - 8 * n as u32;
+        return Some(((u64::from_le_bytes(w.try_into().unwrap()) << sh) as i64 >> sh) as i128);
+    }
+    let x = data.get(at..at + n)?;
+    if n > 16 {
+        return None;
+    }
+    let fill = if x[n - 1] & 0x80 != 0 { 0xFF } else { 0 };
+    let mut w = [fill; 16];
+    w[..n].copy_from_slice(x);
+    Some(i128::from_le_bytes(w))
+}
+
+/// The value at `data[*pos]` (tag `t`, not NULL) into `col`'s slot `r`, `*pos` moved past it
+/// (false: it doesn't fit, `*pos` unchanged: odd). A string's bytes stay where they are: in
+/// `buf` (the block buffer `data` is in, at `base`), else copied into `own` (buffer 0).
+#[inline(always)]
+fn put_typed(col: &mut Col, r: usize, own: &mut Vec<u8>, data: &[u8], pos: &mut usize, buf: Option<(u32, usize)>) -> bool {
     let p = *pos;
     let t = data[p];
     macro_rules! fixed {
         ($v:expr, $ty:ty, $n:expr, $conv:expr) => {{
             let Some(x) = data.get(p + 1..p + 1 + $n) else { return false };
-            let x = <$ty>::from_le_bytes(x.try_into().unwrap());
-            $v.push($conv(x));
+            $v[r] = $conv(<$ty>::from_le_bytes(x.try_into().unwrap()));
             *pos = p + 1 + $n;
         }};
     }
@@ -187,13 +211,17 @@ fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: &mut usize, bu
         (ColData::F64(v), tag::FLOAT8) => fixed!(v, f64, 8, |x| x),
         (ColData::F64(v), tag::FLOAT4) => fixed!(v, f32, 4, |x: f32| x as f64),
         (ColData::Bool(v), tag::TRUE | tag::FALSE) => {
-            v.push(t == tag::TRUE);
+            v[r] = t == tag::TRUE;
             *pos = p + 1;
         }
         (ColData::Num(v), tag::NUMERIC) => {
             // (Scale and length in a byte each, the common case; `peek_num` otherwise.)
-            let (sc, n) = match (data.get(p + 1), data.get(p + 2)) {
-                (Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 => (sc as u32, n as usize),
+            match (data.get(p + 1), data.get(p + 2)) {
+                (Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 && p + 3 + n as usize <= data.len() => {
+                    let Some(x) = num_bytes(data, p + 3, n as usize) else { return false };
+                    v[r] = (x, sc as u32);
+                    *pos = p + 3 + n as usize;
+                }
                 _ => {
                     let Some(Some(x)) = super::row::peek_num(data, p) else { return false };
                     let mut q = p + 1;
@@ -201,43 +229,41 @@ fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: &mut usize, bu
                         return false;
                     }
                     let Ok(len) = get_varint(data, &mut q) else { return false };
-                    v.push(x);
+                    v[r] = x;
                     *pos = q + len as usize;
-                    return true;
                 }
-            };
-            let Some(x) = data.get(p + 3..p + 3 + n) else { return false };
-            // (Two's complement, little-endian, none longer than an i128's.)
-            if n > 16 {
-                return false;
             }
-            let fill = if n > 0 && x[n - 1] & 0x80 != 0 { 0xFF } else { 0 };
-            let mut w = [fill; 16];
-            w[..n].copy_from_slice(x);
-            v.push((i128::from_le_bytes(w), sc));
-            *pos = p + 3 + n;
         }
         (ColData::Bytes(v), tag::TEXT | tag::BYTEA) => {
             let mut q = p + 1;
-            let Ok(n) = get_varint(data, &mut q) else { return false };
+            let n = match data.get(q) {
+                Some(&l) if l < 0x80 => {
+                    q += 1;
+                    l as u64
+                }
+                _ => match get_varint(data, &mut q) {
+                    Ok(n) => n,
+                    Err(_) => return false,
+                },
+            };
             let e = q + n as usize;
             if e > data.len() {
                 return false;
             }
-            match buf {
-                Some((b, base)) => v.push((b, (base + q) as u32, (base + e) as u32)),
+            v[r] = match buf {
+                Some((b, base)) => (b, (base + q) as u32, (base + e) as u32),
                 None => {
                     let s = own.len() as u32;
                     own.extend_from_slice(&data[q..e]);
-                    v.push((0, s, own.len() as u32));
+                    (0, s, own.len() as u32)
                 }
-            }
+            };
             *pos = e;
         }
         (ColData::Values(v), _) => {
             let mut q = p;
             match super::row::decode_value(data, &mut q) {
-                Ok(x) => v.push(x),
+                Ok(x) => v[r] = x,
                 Err(_) => return false,
             }
             *pos = q;
@@ -247,20 +273,29 @@ fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: &mut usize, bu
     true
 }
 
-/// `row::skip_value_fast` with numerics stepped over in place too.
-#[inline]
+/// `row::skip_value_fast` with numerics and short strings stepped over in place too.
+#[inline(always)]
 fn skip(data: &[u8], pos: &mut usize) -> Result<()> {
     let p = *pos;
-    if data.get(p) == Some(&tag::NUMERIC)
-        && let (Some(&sc), Some(&n)) = (data.get(p + 1), data.get(p + 2))
-        && sc < 0x80
-        && n < 0x80
-        && p + 3 + (n as usize) <= data.len()
-    {
-        *pos = p + 3 + n as usize;
-        return Ok(());
+    let n = match data.get(p) {
+        Some(&tag::INT4 | &tag::DATE | &tag::FLOAT4) => 4,
+        Some(&tag::NUMERIC) => match (data.get(p + 1), data.get(p + 2)) {
+            (Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 => 2 + n as usize,
+            _ => return super::row::skip_value_fast(data, pos),
+        },
+        Some(&tag::TEXT) => match data.get(p + 1) {
+            Some(&l) if l < 0x80 => 1 + l as usize,
+            _ => return super::row::skip_value_fast(data, pos),
+        },
+        Some(&(tag::INT8 | tag::FLOAT8 | tag::TIMESTAMP | tag::TIMESTAMPTZ)) => 8,
+        Some(&tag::NULL) => 0,
+        _ => return super::row::skip_value_fast(data, pos),
+    };
+    if p + 1 + n > data.len() {
+        return super::row::skip_value_fast(data, pos);
     }
-    super::row::skip_value_fast(data, pos)
+    *pos = p + 1 + n;
+    Ok(())
 }
 
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
@@ -274,7 +309,9 @@ pub fn decode_cols(
     out: &mut ColBatch,
 ) -> Result<()> {
     let ncols = need.len().min(types.len());
+    let len = rows.len();
     out.cols.resize_with(ncols.max(out.cols.len()), || None);
+    // (Every needed column's slots made at once, a default in each: a row writes its own.)
     for (c, slot) in out.cols.iter_mut().enumerate() {
         if c >= ncols || !need[c] {
             *slot = None;
@@ -289,8 +326,11 @@ pub fn decode_cols(
             }
             _ => *slot = Some(Col { data: want, nulls: Vec::new(), odd: Vec::new() }),
         }
+        let col = slot.as_mut().unwrap();
+        col.data.fill_default(len);
+        col.nulls.resize(len, false);
     }
-    out.len = rows.len();
+    out.len = len;
     out.bufs.clear();
     out.ext.clear();
     out.own.clear();
@@ -298,52 +338,66 @@ pub fn decode_cols(
     // each once while consecutive rows share it.)
     out.bufs.push(Bytes::new());
     let upto = need.iter().take(ncols).rposition(|b| *b).map_or(0, |c| c + 1);
+    // (The batch's parts borrowed apart: the loop keeps them in registers.)
+    let ColBatch { cols, bufs, ext: exts, own, .. } = out;
+    let cols = &mut cols[..upto];
     for (r, i) in rows.enumerate() {
         let (bytes, inbuf) = batch.value_in(i);
         let ext = matches!(bytes.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)));
         if ext {
-            out.ext.push(r as u32);
+            exts.push(r as u32);
         }
         let data = row_values(bytes).ok_or_else(|| crate::error::internal("stored row without a header"))?;
         let buf = inbuf.map(|(b, _)| {
-            let last = out.bufs.last().unwrap();
-            if out.bufs.len() == 1 || last.as_ptr() != b.as_ptr() || last.len() != b.len() {
-                out.bufs.push(b.clone());
+            let last = bufs.last().unwrap();
+            if bufs.len() == 1 || last.as_ptr() != b.as_ptr() || last.len() != b.len() {
+                bufs.push(b.clone());
             }
-            ((out.bufs.len() - 1) as u32, data.as_ptr() as usize - b.as_ptr() as usize)
+            ((bufs.len() - 1) as u32, data.as_ptr() as usize - b.as_ptr() as usize)
         });
         let mut pos = 0;
-        let n = get_varint(data, &mut pos)? as usize;
-        for c in 0..upto {
-            let Some(col) = out.cols[c].as_mut() else {
+        let n = match data.first() {
+            Some(&b) if b < 0x80 => {
+                pos = 1;
+                b as usize
+            }
+            _ => get_varint(data, &mut pos)? as usize,
+        };
+        for (c, slot) in cols.iter_mut().enumerate() {
+            let Some(col) = slot.as_mut() else {
                 if c < n {
                     skip(data, &mut pos)?;
                 }
                 continue;
             };
             let present = c < n;
-            if present && !ext && data.get(pos) != Some(&tag::NULL) && push_typed(col, &mut out.own, data, &mut pos, buf) {
-                col.nulls.push(false);
-                continue;
+            if present && !ext {
+                let t = data.get(pos).copied();
+                if t == Some(tag::NULL) {
+                    pos += 1;
+                    col.nulls[r] = true;
+                    continue;
+                }
+                if put_typed(col, r, own, data, &mut pos, buf) {
+                    continue;
+                }
             }
             if ext || (present && data.get(pos) == Some(&tag::NULL)) {
                 if present {
                     skip(data, &mut pos)?;
                 }
-                col.nulls.push(true);
-                col.data.push_default();
+                col.nulls[r] = true;
                 continue;
             }
             let v = match present {
                 true => super::row::decode_value(data, &mut pos)?,
                 false => missing.get(c).cloned().unwrap_or(Value::Null),
             };
-            col.nulls.push(v.is_null());
-            col.data.push_default();
+            col.nulls[r] = v.is_null();
             col.odd.push((r as u32, v));
         }
     }
-    out.bufs[0] = Bytes::from(std::mem::take(&mut out.own));
+    bufs[0] = Bytes::from(std::mem::take(own));
     Ok(())
 }
 
@@ -411,6 +465,36 @@ mod tests {
                     let want = r.get(c).cloned().unwrap_or_else(|| missing[c].clone());
                     assert_eq!(format!("{:?}", col.value(&out, i, ty).unwrap()), format!("{want:?}"), "row {i} col {c}");
                 }
+            }
+        }
+    }
+
+    /// Numerics of every stored length (one word or more, at the row's end or not) decode
+    /// to their values, both signs at each length's limits.
+    #[test]
+    fn numerics_of_every_length() {
+        let mut vals: Vec<String> = ["0", "-0.01", "1", "-1", "127", "-128", "128", "-129", "0.00"].map(String::from).to_vec();
+        for k in 1..=40 {
+            for s in ["", "-"] {
+                vals.push(format!("{s}{}", "9".repeat(k)));
+                vals.push(format!("{s}1{}.5", "0".repeat(k)));
+            }
+        }
+        let num = |s: &str| Value::numeric(Numeric::parse_pg(s).unwrap());
+        let types = [DataType::Numeric(-1), DataType::Int4];
+        for last in [false, true] {
+            let mut batch = RowBatch::default();
+            for v in &vals {
+                let r: Vec<Value> = if last { vec![num(v)] } else { vec![num(v), Value::Int4(1)] };
+                let mut b = vec![row::ROW_HEADER, 5];
+                b.extend(row::encode_row(&r));
+                batch.push_copy(b"k", &b);
+            }
+            let mut out = ColBatch::default();
+            decode_cols(&batch, 0..batch.len(), &[true, false], &types, &[Value::Null, Value::Null], &mut out).unwrap();
+            let col = out.cols[0].as_ref().unwrap();
+            for (i, v) in vals.iter().enumerate() {
+                assert_eq!(format!("{:?}", col.value(&out, i, &types[0]).unwrap()), format!("{:?}", num(v)), "{v} last={last}");
             }
         }
     }

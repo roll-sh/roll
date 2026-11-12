@@ -350,6 +350,8 @@ struct Pre<'a> {
     /// The rows the filter passes (`tri` T, not odd), and per aggregate argument their
     /// numbers as a lane (`aggregate`).
     live: Vec<u32>,
+    /// `live` is the decoded run's (`fill_live`).
+    live_set: bool,
     lanes: Option<super::vector::Lanes>,
     /// Rows decoded, and of them the ones the batch did (dropped or aggregated): the rest
     /// are decoded again by the row path, so a chunk where the batch does too few stops
@@ -393,6 +395,7 @@ impl<'a> Pre<'a> {
             tri: Vec::new(),
             nums: Vec::new(),
             live: Vec::new(),
+            live_set: false,
             lanes: None,
             seen: 0,
             done: 0,
@@ -445,8 +448,17 @@ impl<'a> Pre<'a> {
         if let Some(f) = &self.plan.filter {
             f.eval(&self.cols, &self.sel, &mut self.tri);
         }
-        self.live.clear();
-        self.live.extend(self.sel.iter().copied().filter(|r| self.tri[*r as usize] == Tri::T));
+        self.live_set = false;
+    }
+
+    /// `live` for the run `decode` decoded (made only where read: `aggregate`, `eval_nums`).
+    fn fill_live(&mut self) {
+        use super::vector::Tri;
+        if !self.live_set {
+            self.live.clear();
+            self.live.extend(self.sel.iter().copied().filter(|r| self.tri[*r as usize] == Tri::T));
+            self.live_set = true;
+        }
     }
 
     /// The run `decode` decoded aggregated into `pa` a batch at a time (`batch_run`):
@@ -457,6 +469,7 @@ impl<'a> Pre<'a> {
         if self.plan.probe.is_some() || self.sel.len() != self.odd.len() || self.tri.contains(&Tri::Out) {
             return false;
         }
+        self.fill_live();
         let lanes = self.lanes.get_or_insert_with(|| super::vector::Lanes::new(&self.plan.args));
         lanes.eval(&self.cols, &self.live) && pa.batch_run(&self.plan, &self.cols, &self.live, lanes)
     }
@@ -465,6 +478,7 @@ impl<'a> Pre<'a> {
     fn eval_nums(&mut self) {
         let n = self.odd.len();
         if self.plan.args.iter().any(|a| matches!(a, super::vector::AggArg::Num(_))) {
+            self.fill_live();
             self.nums.resize_with(self.plan.args.len(), Vec::new);
             for (a, v) in self.plan.args.iter().zip(&mut self.nums) {
                 if let super::vector::AggArg::Num(k) = a {

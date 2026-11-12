@@ -96,6 +96,7 @@ impl RowBatch {
 
     /// Row `i`'s value with the buffer holding it and where in it (None: a copied value, in
     /// the batch's own buffer, valid until it is cleared).
+    #[inline]
     pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
         let e = self.ents[i];
         let (o, l) = (e.off as usize, e.len as usize);
