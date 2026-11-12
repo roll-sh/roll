@@ -1,10 +1,10 @@
 //! Durable history in object storage: WAL safekeeping, base images, point-in-time restore,
 //! eviction of idle branches and retention.
 
-use crate::compute::{container_name, has_cluster};
+use crate::compute::{clone_dir, container_name, has_cluster};
 use crate::control::{Control, ControlError, Result};
 use crate::ids::{new_id, now};
-use crate::store::{BaseImage, Branch, Endpoint, LocalState, Project};
+use crate::store::{BaseImage, Branch, Endpoint, EndpointState, LocalState, Project};
 use bytes::Bytes;
 use pg_storage::lsn::{Lsn, parse_segment_file};
 use pg_storage::objects::{base_key, branch_prefix, wal_key};
@@ -372,6 +372,58 @@ impl Control {
 
     /// Restore a branch in place to an earlier point. The current state is kept as a new branch
     /// (`<name>_old_<unix time>`), and the endpoint — and connection string — stay the same.
+    /// Make a branch its parent's current state again, keeping its id, endpoint and connection
+    /// string (a preview's `DATABASE_URL` stays the same). The branch's own history goes: it
+    /// starts a new one from the parent's state. The parent never stops serving, as for
+    /// [`Control::create_branch`].
+    pub async fn reset_branch(self: &Arc<Self>, project_id: &str, branch_id: &str) -> Result<Branch> {
+        let project = self.project_or_404(project_id)?;
+        let branch = self.branch_in(project_id, branch_id)?;
+        let parent_id = branch.parent_id.clone().ok_or_else(|| ControlError::Invalid("the root branch has no parent to reset from".into()))?;
+        let parent = self.branch_in(project_id, &parent_id)?;
+        let ep = self.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
+        let parent_ep = self.store.endpoint_for_branch(&parent.id)?.ok_or_else(|| ControlError::NotFound("parent endpoint".into()))?;
+        self.suspend(&ep.id).await?;
+        self.stop_receiver(&branch.id).await;
+        // The parent's state, into a fresh directory: on failure the branch keeps its old data.
+        let name = new_id(&branch.id);
+        let dir = self.config.data_path(&name);
+        let recover = {
+            let lock = self.lock(&parent_ep.id);
+            let _held = lock.lock().await;
+            let parent_ep = self.endpoint_or_404(&parent_ep.id)?;
+            let parent_local = has_cluster(&self.branch_path(&parent), project.pg_version) && !parent.pending_recovery;
+            let result = if !parent_local {
+                self.restore_into(&dir, &project, &parent.id, Target::Latest, None).await
+            } else if parent_ep.state == EndpointState::Running {
+                let image = self.config.image(project.pg_version);
+                self.driver.basebackup(&parent_ep.id, &image, project.pg_version, &project.password, &dir).await.map(|_| false).map_err(Into::into)
+            } else {
+                clone_dir(&self.branch_path(&parent), &dir).await.map(|_| false).map_err(Into::into)
+            };
+            match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            }
+        };
+        let lock = self.lock(&ep.id);
+        let held = lock.lock().await;
+        let old = self.branch_path(&branch);
+        self.store.set_branch_data_dir(&branch.id, &name)?;
+        self.store.set_local_state(&branch.id, LocalState::Local)?;
+        self.store.set_pending_recovery(&branch.id, recover)?;
+        // Its old history is another timeline's: the receiver starts again with a base backup.
+        self.store.forget_history(&branch.id)?;
+        self.objects.delete_prefix(&pg_storage::objects::branch_prefix(&branch.id)).await?;
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(self.config.spool_dir(&branch.id));
+        drop(held);
+        self.branch_in(project_id, &branch.id)
+    }
+
     pub async fn restore_branch(self: &Arc<Self>, project_id: &str, branch_id: &str, target: Target) -> Result<Branch> {
         let project = self.project_or_404(project_id)?;
         let branch = self.branch_in(project_id, branch_id)?;

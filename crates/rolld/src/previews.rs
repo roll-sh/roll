@@ -247,10 +247,17 @@ impl Brancher for Postgres {
         }
     }
 
-    async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
-        self.delete(parent, branch, name).await?;
-        let _ = kept;
-        self.branch(parent, name, mode).await
+    /// In place: same branch, endpoint and `DATABASE_URL`.
+    async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        match self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(branch)), json!({})).await {
+            Ok(_) => Ok(Branched::plain(branch)),
+            // Gone (or an older node without the route): branch again.
+            Err(e) if is_404(&e) => {
+                self.delete(parent, branch, name).await?;
+                self.branch(parent, name, mode).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {

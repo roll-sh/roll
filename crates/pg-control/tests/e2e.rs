@@ -466,12 +466,23 @@ async fn branches_are_isolated_copies() {
     assert_eq!(count(&d, "SELECT count(*) FROM t").await, 501);
     assert_eq!(count(&c, "SELECT count(*) FROM t").await, 400);
 
+    // A reset (roll previews) brings back the parent's current state on the same endpoint, so
+    // the connection string doesn't change; the branch's own history starts again.
+    drop(d);
+    let reset = h.control.reset_branch(&db.project.id, &dev.id).await.unwrap();
+    assert_eq!((reset.id.as_str(), h.primary(&reset).id.as_str()), (dev.id.as_str(), dev_ep.id.as_str()));
+    let d = h.connect(&db, &dev_ep.id).await;
+    assert_eq!(count(&d, "SELECT count(*) FROM t").await, 400, "the parent's rows, not the branch's old ones");
+    d.batch_execute("INSERT INTO t VALUES (100002, 'after reset')").await.unwrap();
+    h.wait_for_base(&dev.id).await;
+    assert!(h.control.reset_branch(&db.project.id, "main").await.is_err(), "the root branch has no parent");
+
     // From a suspended parent (copy of its data directory), and a branch of a branch.
     drop(d);
     h.control.suspend(&dev_ep.id).await.unwrap();
     let feature = h.control.create_branch(&db.project.id, "feature/x", Some("dev"), None).await.unwrap();
     let f = h.connect(&db, &h.primary(&feature).id).await;
-    assert_eq!(count(&f, "SELECT count(*) FROM t").await, 501);
+    assert_eq!(count(&f, "SELECT count(*) FROM t").await, 401);
     assert_eq!(feature.parent_id.as_deref(), Some(dev.id.as_str()));
 
     // Names are validated and unique.

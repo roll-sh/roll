@@ -134,7 +134,7 @@ database's or a stream's lease, storage's metadata owner) wherever the reconcile
 
 | Kind | Branch | Reset | Sleeping cost | Notes |
 | --- | --- | --- | --- | --- |
-| `postgres` | `pg_control::Control::create_branch` from the project's `main` | Delete and branch again, on the same branch name. The URL changes, and the services are redeployed with it | Its local data directory until eviction (24 h), then its own base backup in object storage | The weakest copy-on-write here: a branch is a full data directory on ext4 (reflinks on btrfs/XFS). See `## Next`. |
+| `postgres` | `pg_control::Control::create_branch` from the project's `main` | In place (`POST /v1/projects/{id}/branches/{branch}/reset`): the same branch, endpoint and `DATABASE_URL`, its own history started again | Its local data directory until eviction (24 h), then its own base backup in object storage | The weakest copy-on-write here: a branch is a full data directory on ext4 (reflinks on btrfs/XFS). See `## Next`. |
 | `redis` | `redis_control::Control::branch` | Delete and branch again | Nothing in memory; its manifest and the segments it pins | Copy-on-write in storage. Loading replays the parent into memory. |
 | `bucket` | `s3_store::Store::branch_bucket` | Delete and branch again | The objects it wrote, plus the parent's writes pushed down to it | One row to create. Credentials are a write key scoped to the branch. |
 | `nosql` | `nosql_control::Control::branch` (`schema_only` for `schema`) | `nosql_control::Control::reset`: same id, endpoint and credentials | The SSTables it wrote | Zero copy. Masking policies are inherited. |
@@ -412,8 +412,7 @@ and its cost.
    built) merged here. Then the dashboard's workspace kinds for `queue` and `tasks`.
 2. **Postgres in the measured run**, and Postgres branches that don't copy the data directory on
    ext4. A branch could start from the parent's latest base backup in object storage plus WAL
-   (lazy pages), not `pg_basebackup`. Also: `schema` mode for Postgres (structure only), and a
-   reset that keeps the endpoint, so `DATABASE_URL` doesn't change.
+   (lazy pages), not `pg_basebackup`. Also: `schema` mode for Postgres (structure only).
 3. **Stream data branches** that share the parent's uploaded chunks (refcounted chunks in the
    broker's retention, compaction and `delete_stream`). Today a stream branch gets the topics,
    not the records.

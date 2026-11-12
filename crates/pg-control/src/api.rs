@@ -40,6 +40,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/projects/{id}/branches/{branch}", axum::routing::delete(delete_branch))
         .route("/v1/projects/{id}/branches/{branch}/history", get(branch_history))
         .route("/v1/projects/{id}/branches/{branch}/restore", post(restore_branch))
+        .route("/v1/projects/{id}/branches/{branch}/reset", post(reset_branch))
         .route("/v1/projects/{id}/branches/{branch}/backup", post(backup_branch))
         .route("/v1/projects/{id}/branches/{branch}/evict", post(evict_branch))
         .route("/v1/projects/{id}/branches/{branch}/replicas", post(create_replica))
@@ -266,6 +267,14 @@ async fn restore_branch(
     let branch = c.branch_in(&id, &branch)?;
     let backup = c.restore_branch(&id, &branch.id, target).await?;
     Ok(Json(json!({ "backup_branch": backup, "took_ms": started.elapsed().as_millis() as u64 })))
+}
+
+/// Back to the parent's current state, same endpoint and connection string.
+async fn reset_branch(State(c): State<AppState>, Path((id, branch)): Path<(String, String)>) -> ApiResult<Value> {
+    let started = std::time::Instant::now();
+    let branch = c.branch_in(&id, &branch)?;
+    let branch = c.reset_branch(&id, &branch.id).await?;
+    Ok(Json(json!({ "branch": branch, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 
 async fn backup_branch(
