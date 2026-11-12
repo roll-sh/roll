@@ -56,6 +56,9 @@ impl Broker {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        // No transaction between its marker and its `aborted_txns` row while the cut is taken and
+        // the catalog (which copies the aborted index) is written.
+        let _cutting = self.markers.write().await;
         let cuts: HashMap<(uuid::Uuid, i32), Cut> = logs
             .iter()
             .map(|(topic, index, log, _)| {
@@ -71,6 +74,7 @@ impl Broker {
             .await
             .map_err(|e| stream_exists(e, name))?
             .ok_or_else(|| KafkaError::not_found(format!("stream {}", parent.id)))?;
+        drop(_cutting);
 
         let stream = self.add_stream(row, topics);
         // Retention has to see its data while it has no local files (as `load` does).

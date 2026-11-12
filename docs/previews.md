@@ -521,23 +521,19 @@ Ranked by what a person notices first. Done so far:
 - NoSQL column masks per preview;
 - copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode;
 - a monthly budget per project, `roll preview open`, and following logs in the dashboard;
-- a second adversarial review and its fixes.
+- a second adversarial review and its fixes (and a stream branch's cut that waits for aborting
+  transactions' index rows);
+- search branches' cost from roll search's `own_bytes`.
 
 1. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. The fleet's XFS volumes already
    share blocks through reflinks.
 2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **roll search's `own_bytes`** (asked for), so a search branch's cost counts only what it
-   wrote; the adapter already reads it.
-4. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+3. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page, and the comment shows it (Vercel does). Store it in roll storage and
    drop it with the preview.
-5. **Live logs as a stream** (`…/logs?follow=1`, SSE) rather than the dashboard's 3-second
+4. **Live logs as a stream** (`…/logs?follow=1`, SSE) rather than the dashboard's 3-second
    re-read.
-6. **A cost alert**: tell the project's owners when its previews pass a share of
+5. **A cost alert**: tell the project's owners when its previews pass a share of
    `max_usd_month`.
-7. **A stream branch's cut and an aborting transaction**: a transaction that aborts between its
-   abort marker and its `aborted_txns` row, while a branch is cut, shows its records as
-   committed in the branch. Record the abort before the marker is visible, or hold the log
-   lock across both.

@@ -37,6 +37,10 @@ pub struct Broker {
     pub tail_budget: Arc<TailBudget>,
     flush_tx: mpsc::UnboundedSender<FlushJob>,
     flush_rx: Mutex<Option<mpsc::UnboundedReceiver<FlushJob>>>,
+    /// Read-held across a transaction's marker and its `aborted_txns` row, write-held while a
+    /// branch takes its cut: a branch never sees an abort marker without its row
+    /// (`branch.rs`).
+    pub(crate) markers: tokio::sync::RwLock<()>,
     producer_ids: Mutex<(i64, i64)>,
     pub started: Instant,
     /// On the fleet: one owner per stream (`fleet.rs`). `None` on one node, which owns everything.
@@ -340,6 +344,7 @@ impl Broker {
             streams: RwLock::default(),
             flush_tx,
             flush_rx: Mutex::new(Some(flush_rx)),
+            markers: tokio::sync::RwLock::new(()),
             producer_ids: Mutex::new((0, 0)),
             started: Instant::now(),
             config,
