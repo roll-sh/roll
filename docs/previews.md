@@ -489,7 +489,8 @@ Ranked by what a person notices first. Done so far:
 - per-repo build caches;
 - a running parent's Postgres copied by reflinks;
 - roll apps end to end;
-- previews spread across a cluster's nodes, a lease each.
+- previews spread across a cluster's nodes, a lease each (tested);
+- roll apps' `pv-…` environments private, their 401 page linked through roll.
 
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
@@ -497,8 +498,5 @@ Ranked by what a person notices first. Done so far:
    backup plus WAL with lazy pages (no full copy on ext4). Also `schema` mode for Postgres.
 3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **A cluster test of previews' leases**: several nodes in one process (like
-   `code-control/tests/cluster.rs`): a preview converged and served on its holder, moved on a
-   node's loss.
-5. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
+4. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
    `own_bytes` from roll search so a search branch's cost counts only what it wrote.
