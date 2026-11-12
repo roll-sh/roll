@@ -25,7 +25,7 @@ import { useAgentsConnection, useDemoParam } from "./use-connection";
  * open it from a link. It also drives the shared logo (thinking while anything runs, success when
  * a run completes) and, by the owner's settings, the browser's notifications.
  */
-export function AgentsControl() {
+export function AgentsControl({ pill = true }: { pill?: boolean } = {}) {
   const demo = useDemoParam();
   const conn = useAgentsConnection({ demo });
   // The page's own surface (`/dashboard/agents`) may show another owner: follow it.
@@ -70,13 +70,14 @@ export function AgentsControl() {
 
   return (
     <>
-      {client ? <Counts client={client} services={conn.services ?? undefined} /> : <Pill count={0} waiting={0} />}
+      {/* Without the pill (the dashboard's sidebar shows the agents), Counts still drives the logo and the notifications. */}
+      {client ? <Counts client={client} services={conn.services ?? undefined} pill={pill} /> : pill && <Pill count={0} waiting={0} />}
       <Popup client={conn.client} services={conn.services} error={conn.error} need={conn.need} admin={conn.admin} retry={conn.retry} demo={demo} />
     </>
   );
 }
 
-function Counts({ client, services }: { client: AgentsClient; services: AgentsServices | undefined }) {
+function Counts({ client, services, pill }: { client: AgentsClient; services: AgentsServices | undefined; pill: boolean }) {
   useHold(client);
   const snap = useAgentsSnapshot(client);
   useMarkDriver(snap);
@@ -86,6 +87,7 @@ function Counts({ client, services }: { client: AgentsClient; services: AgentsSe
   // The tray, badge and notifications of the desktop app's main window (a no-op in a browser).
   const inMain = typeof window !== "undefined" && desktop()?.window === "main";
   useDesktop(snap && inMain && client.owner !== DEMO_OWNER ? snap.data : null, (key) => key.startsWith("t:") && showAgents({ kind: "thread", thread: key.slice(2) }));
+  if (!pill) return null;
   if (!snap) return <Pill count={0} waiting={0} />;
   const { busy, requests } = rolling(snap.data);
   // Waiting on you isn't running: those show as the waiting count.
@@ -201,9 +203,19 @@ export function PopupFrame({ children }: { children: ReactNode }) {
     String(reduced),
   );
   return (
-    <div className={`fixed inset-0 z-50 ${present ? "" : "pointer-events-none"}`} data-state={present ? "open" : "closing"} inert={!present} aria-hidden={!present || undefined}>
-      <motion.div className="absolute inset-0 bg-(--scrim) backdrop-blur-[2px]" style={{ opacity: scrim }} onMouseDown={hideAgents} aria-hidden />
-      <motion.div role="dialog" aria-modal="true" aria-label="Agents" data-surface data-agents className="absolute inset-0 overflow-hidden bg-bg text-fg" style={{ opacity: fade, scale, y }}>
+    <div className={`pointer-events-none fixed inset-0 z-50 *:pointer-events-auto ${present ? "" : "*:pointer-events-none"}`} data-state={present ? "open" : "closing"} inert={!present} aria-hidden={!present || undefined}>
+      {/* From md up it sits beside the dashboard's sidebar (projects, running agents), which stays
+          in reach: the agents are part of the page, not another one. */}
+      <motion.div className="absolute inset-0 bg-(--scrim) backdrop-blur-[2px] md:left-56" style={{ opacity: scrim }} onMouseDown={hideAgents} aria-hidden />
+      <motion.div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Agents"
+        data-surface
+        data-agents
+        className="absolute inset-0 overflow-hidden bg-bg text-fg md:inset-y-2 md:right-2 md:left-56 md:rounded-xl md:border md:border-line-2 md:shadow-sheet"
+        style={{ opacity: fade, scale, y }}
+      >
         {children}
       </motion.div>
     </div>

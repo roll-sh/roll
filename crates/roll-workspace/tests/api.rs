@@ -60,6 +60,18 @@ async fn projects_are_created_listed_renamed_and_deleted() {
     let (s, p) = api.call(Method::GET, &format!("/v1/workspace/projects/{id}"), None).await;
     assert_eq!((s, p["name"].as_str()), (StatusCode::OK, Some("payments")));
 
+    // Its look: a description and an icon, changed alone; `null` brings the default back.
+    assert_eq!((a["description"].as_str(), &a["icon"]), (Some(""), &Value::Null));
+    let icon = json!({ "kind": "emoji", "emoji": "🧾", "color": "teal" });
+    let (s, p) = api.call(Method::PATCH, &format!("/v1/workspace/projects/{id}"), Some(json!({ "description": "Invoices", "icon": icon }))).await;
+    assert_eq!((s, p["name"].as_str(), p["description"].as_str(), &p["icon"]), (StatusCode::OK, Some("payments"), Some("Invoices"), &icon));
+    let (s, p) = api.call(Method::PATCH, &format!("/v1/workspace/projects/{id}"), Some(json!({ "icon": null }))).await;
+    assert_eq!((s, p["description"].as_str(), &p["icon"]), (StatusCode::OK, Some("Invoices"), &Value::Null));
+    for bad in [json!({ "kind": "image", "url": "data:image/svg+xml;base64,PHN2Zz4=" }), json!({ "kind": "monogram", "color": "orange" })] {
+        let (s, _) = api.call(Method::PATCH, &format!("/v1/workspace/projects/{id}"), Some(json!({ "icon": bad }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
     let (s, _) = api.call(Method::DELETE, &format!("/v1/workspace/projects/{id}"), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (s, e) = api.call(Method::GET, &format!("/v1/workspace/projects/{id}"), None).await;

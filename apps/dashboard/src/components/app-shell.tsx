@@ -8,6 +8,7 @@ import { useShownOwner } from "./agents/use-connection";
 import { AskPanel } from "./ask";
 import { SignIn } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
+import { NewProjectDialog } from "./workspace/new-project";
 import { Sidebar } from "./workspace/sidebar";
 
 /**
@@ -78,7 +79,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
                 {/* A page's buttons (Review, Land, Deploy) scroll sideways on a phone rather than widen the page. */}
                 {actions}
               </span>
-              <AgentsControl />
+              <AgentsControl pill={false} />
               <SignIn />
             </header>
 
@@ -96,6 +97,8 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
             <aside className="rise absolute inset-y-0 left-0 w-64 border-r border-line-2 bg-bg shadow-sheet">{sidebar}</aside>
           </div>
         )}
+
+        <NewProjectDialog />
 
         {paletteOpen && (
           <div
