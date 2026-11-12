@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS oauth_codes (
     hash TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
@@ -241,6 +245,8 @@ pub struct AuditEvent {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AuditQuery {
+    /// Answer format (`jsonl`), read by the route; not a filter.
+    pub format: Option<String>,
     pub grant: Option<String>,
     pub product: Option<String>,
     pub decision: Option<String>,
@@ -346,7 +352,37 @@ fn check_rules(rules: &Scope) -> Result<()> {
 impl Store {
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
+        // Where an approval's chat card is (`{install, channel, ts}`), once posted.
+        if !db.has_column("approvals", "chat")? {
+            db.add_column("approvals", "chat", "TEXT")?;
+        }
         Ok(Store { db, touched: Default::default() })
+    }
+
+    /// A setting (JSON), by key: `notify` (where approvals are posted).
+    pub fn setting(&self, key: &str) -> Result<Option<Value>> {
+        let v: Option<String> = self.db.read(|c| c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional())?;
+        Ok(v.and_then(|v| serde_json::from_str(&v).ok()))
+    }
+
+    pub fn set_setting(&self, key: &str, value: &Value) -> Result<()> {
+        let v = value.to_string();
+        self.db.write(|c| {
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, v])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Where an approval's chat card was posted.
+    pub fn set_approval_chat(&self, id: &str, chat: &Value) -> Result<()> {
+        let v = chat.to_string();
+        self.db.write(|c| c.execute("UPDATE approvals SET chat = ? WHERE id = ?", params![v, id]))?;
+        Ok(())
+    }
+
+    pub fn approval_chat(&self, id: &str) -> Result<Option<Value>> {
+        let v: Option<Option<String>> = self.db.read(|c| c.query_row("SELECT chat FROM approvals WHERE id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(v.flatten().and_then(|v| serde_json::from_str(&v).ok()))
     }
 
     // ── grants ──
@@ -674,6 +710,28 @@ impl Store {
                 })
             })
         })?)
+    }
+
+    /// Each grant's requests in the last day, by decision: `grant id → (allowed, denied, asked)`.
+    pub fn activity(&self) -> Result<std::collections::HashMap<String, (i64, i64, i64)>> {
+        let since = code_sql::now_ms() - 24 * 3600 * 1000;
+        let rows = self.db.read(|c| {
+            c.query(
+                "SELECT grant_id, decision, COUNT(*) FROM audit WHERE at >= ? AND grant_id IS NOT NULL GROUP BY grant_id, decision",
+                [since],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            )
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for (g, d, n) in rows {
+            let e: &mut (i64, i64, i64) = out.entry(g).or_default();
+            match d.as_str() {
+                "allow" => e.0 += n,
+                "deny" => e.1 += n,
+                _ => e.2 += n,
+            }
+        }
+        Ok(out)
     }
 
     /// Drop audit rows older than `days`, approvals decided or expired a day ago, spent codes and

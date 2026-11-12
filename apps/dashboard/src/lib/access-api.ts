@@ -4,7 +4,7 @@
  * the OAuth consent screen's answer. Change both together.
  */
 
-import { call, ROLL_API } from "./roll-api";
+import { apiHeaders, call, ROLL_API } from "./roll-api";
 
 export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] as const;
 export type Action = (typeof ACTIONS)[number];
@@ -45,6 +45,8 @@ export interface Grant {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: OAuthClient;
+  /** Its requests over the last day (in the list). */
+  activity?: { allowed: number; denied: number; asked: number };
 }
 
 export interface NewGrant {
@@ -172,6 +174,15 @@ export const accessApi = {
   approve: (id: string) => call<Approval>("POST", `${approval(id)}/approve`),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
+  /** The log as JSON lines (one event per line), for a download. */
+  auditExport: async (f: AuditFilter = {}) => {
+    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format: "jsonl" })}`, { headers: apiHeaders(), cache: "no-store" });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.blob();
+  },
+  /** Where approvals are posted (Slack through roll code's chat ops), or `{chat: null}`. */
+  notify: () => call<{ chat: { install: string; channel: string } | null }>("GET", "/v1/access/notify"),
+  setNotify: (chat: { install: string; channel: string } | null) => call<{ chat: unknown }>("PUT", "/v1/access/notify", { chat }),
   client: (id: string) => call<OAuthClient>("GET", `/v1/access/oauth/clients/${encodeURIComponent(id)}`),
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),

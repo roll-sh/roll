@@ -463,6 +463,10 @@ async fn run() -> anyhow::Result<()> {
         workspace,
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // Approvals can be posted to a Slack channel through roll code's chat ops.
+    if let Some(c) = &code {
+        access::chat(&access, &c.code);
+    }
     // roll's MCP server: each tool call is a request through the gated API.
     let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
     if on.on(Product::Code) {

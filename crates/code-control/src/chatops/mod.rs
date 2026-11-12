@@ -25,6 +25,7 @@
 //!   connected repos come in from the App's durable delivery inbox; steps comment, label, open
 //!   pull requests and set statuses.
 
+pub mod access;
 pub(crate) mod api;
 mod cards;
 pub mod discord;

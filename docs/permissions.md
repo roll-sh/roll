@@ -266,6 +266,24 @@ type Approval = {
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
+### Approvals in chat
+
+Approvals can also go to a Slack or Discord channel, through roll code's chat ops
+(docs/code/chatops.md) and its install's bot, rather than a second integration:
+
+- The operator picks an install and a channel (`PUT /v1/access/notify {"chat": {"install":
+  "chi_…", "channel": "C…"}}`, or the approvals page). Each new approval is posted there as a card:
+  who asks to do what, what would run (route, tool, arguments redacted), and the link. When it's
+  decided, anywhere, the card is edited to say who decided what, and loses its buttons.
+- A press arrives like every chat action (verified, recorded once by its id, handled by a worker;
+  `code-control/src/chatops/access.rs`). Only the install's members may decide (others are told so),
+  and roll-access checks the press came from the install approvals go to. `decided_by` is the
+  person (`slack:U123`, `discord:123…`).
+- Posting is best effort: an approval lives in roll (the dashboard, the API, `roll mcp approvals`);
+  chat is one more place to decide it.
+- Nothing about an approval's binding changes: it still runs exactly the request it was asked
+  for, once, within ten minutes of the decision.
+
 ## Audit
 
 Every request made with a grant, and every MCP tool call by anyone, writes one audit row:
@@ -331,7 +349,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
-| `GET /v1/access/tokens` | access read | grants, newest first (no secrets) |
+| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}` |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?}`: narrow or widen (within the caller's own) |
@@ -341,7 +359,9 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&decision=&before=&limit=` |
+| `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel} \| null}` |
+| `PUT /v1/access/notify` | operator | `{chat: {install, channel} \| null}` |
 | `GET /v1/access/oauth/clients` | access read | MCP clients with a live connection |
 | `GET /v1/access/oauth/clients/{id}` | access read | a registered client (the consent screen shows it) |
 | `POST /v1/access/oauth/authorize` | operator | the consent screen's answer: `{client_id, redirect_uri, code_challenge, state, resource, name, rules, expires_at?}` → `{redirect}` |
@@ -368,6 +388,6 @@ this list:
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/accounts` | people's accounts (docs/accounts.md): sign-in, sessions and invites are a person's, never a token's |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
-| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize` | the operator decides |
+| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify` | the operator decides |
 
 The rest of the work list is in [mcp.md](mcp.md#next).

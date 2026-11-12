@@ -163,6 +163,10 @@ pub(super) async fn handle(code: &Arc<Code>, install: &Install, action: &str, _k
                 Err(e) => Handled::Retry(e.to_string()),
             }
         }
+        Interaction::Component { custom_id, user_id, .. } if super::access::parse(&custom_id).is_some() => {
+            let (approval, approve) = super::access::parse(&custom_id).unwrap_or_default();
+            super::access::pressed_in_discord(code, install, approval, approve, &user_id).await
+        }
         Interaction::Component { custom_id, values, user_id, user_name, .. } => {
             if let Some((submit, qid)) = wire::question_id(&custom_id) {
                 // A select: remembered until Submit (Discord sends one component at a time).

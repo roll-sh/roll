@@ -24,6 +24,7 @@ impl Resolver for Endpoints {
 
 struct Daemon {
     router: Router,
+    access: Arc<Access>,
     workspace: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
 }
@@ -71,7 +72,8 @@ impl Daemon {
             .merge(roll_access::api::router(access.clone()))
             .layer(axum::middleware::from_fn_with_state(gate, roll_auth::check));
         let router = roll_access::oauth::public_router(access.clone()).merge(gated);
-        Daemon { router, workspace, _dir: dir }
+        let access = access.clone();
+        Daemon { router, access, workspace, _dir: dir }
     }
 
     async fn call(&self, token: &str, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -189,6 +191,10 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let decisions: Vec<_> = log.as_array().unwrap().iter().map(|e| e["decision"].as_str().unwrap()).collect();
     assert!(decisions.contains(&"allow") && decisions.contains(&"deny"), "{log}");
     assert!(log.as_array().unwrap().iter().all(|e| e["route"].as_str().unwrap().starts_with('/')), "routes, not paths: {log}");
+    // The list says what each token did lately.
+    let (_, grants) = d.call(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    let mine = grants.as_array().unwrap().iter().find(|g| g["id"] == grant.as_str()).unwrap();
+    assert!(mine["activity"]["allowed"].as_i64().unwrap() > 0 && mine["activity"]["denied"].as_i64().unwrap() > 0, "{mine}");
 }
 
 /// The ways around a token's rules stay shut: pulling another resource into its project, a list
@@ -321,6 +327,55 @@ async fn a_token_never_makes_a_stronger_one() {
     let (s, made) = d.send(&scoped, Method::POST, "/v1/projects", Some(json!({ "name": "x" })), &[("x-roll-project", &project.id)]).await;
     assert_eq!((s, made["password"].as_str()), (StatusCode::CREATED, Some("[redacted]")));
     assert_eq!(d.workspace.projects_of("postgres", "pnew").unwrap(), vec![project.id.clone()]);
+}
+
+/// Records what would be posted to chat.
+#[derive(Default)]
+struct FakeChat(std::sync::Mutex<Vec<String>>);
+
+impl roll_access::ApprovalChat for FakeChat {
+    fn post(&self, install: String, channel: String, a: roll_access::store::Approval) -> futures::future::BoxFuture<'static, Result<String, String>> {
+        self.0.lock().unwrap().push(format!("post {install} {channel} {} {}", a.id, a.state));
+        Box::pin(async { Ok("1700.1".to_string()) })
+    }
+    fn update(&self, install: String, channel: String, ts: String, a: roll_access::store::Approval) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        self.0.lock().unwrap().push(format!("update {install} {channel} {ts} {} {}", a.id, a.state));
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// With approvals going to a chat channel, a new approval is posted there; a press from another
+/// workspace decides nothing; one from that workspace decides it, and the card follows.
+#[tokio::test(flavor = "multi_thread")]
+async fn approvals_are_posted_to_chat_and_decided_there() {
+    let d = Daemon::new(50);
+    let chat = Arc::new(FakeChat::default());
+    let _ = d.access.chat.set(chat.clone());
+    let (s, _) = d.call(OPERATOR, Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": "chi_a", "channel": "C9" } }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (asker, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask", "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&asker, Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await.0, StatusCode::FORBIDDEN, "a token never moves approvals");
+    let (_, pending) = d.call(&asker, Method::DELETE, "/v1/projects/pa", None).await;
+    let id = pending["approval"].as_str().unwrap().to_string();
+    let seen = |what: String| {
+        let chat = chat.clone();
+        async move {
+            for _ in 0..100 {
+                if chat.0.lock().unwrap().iter().any(|l| l.starts_with(&what)) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            panic!("never {what}: {:?}", chat.0.lock().unwrap());
+        }
+    };
+    seen(format!("post chi_a C9 {id} pending")).await;
+    let other = d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_other".into()).await;
+    assert!(other.is_err());
+    d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_a".into()).await.unwrap();
+    seen(format!("update chi_a C9 1700.1 {id} approved")).await;
+    let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+    assert_eq!((a["state"].as_str(), a["decided_by"].as_str()), (Some("approved"), Some("slack:U1")));
 }
 
 /// An MCP client connects with OAuth: it registers, the operator consents (narrowing what it

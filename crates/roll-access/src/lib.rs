@@ -187,11 +187,22 @@ impl Resolvers {
     }
 }
 
+/// Posts and edits approval cards in chat (rolld: roll code's chat ops, docs/permissions.md
+/// "Approvals in chat"). Best effort: the dashboard and the API are where approvals live.
+pub trait ApprovalChat: Send + Sync + 'static {
+    /// Post a card; its message id.
+    fn post(&self, install: String, channel: String, a: store::Approval) -> futures::future::BoxFuture<'static, std::result::Result<String, String>>;
+    /// Edit a posted card to what the approval is now.
+    fn update(&self, install: String, channel: String, ts: String, a: store::Approval) -> futures::future::BoxFuture<'static, std::result::Result<(), String>>;
+}
+
 /// The access service: the store, the catalogue and the resolvers.
 pub struct Access {
     pub store: Store,
     pub config: Config,
     pub resolvers: Resolvers,
+    /// Approvals in chat, when rolld wires them.
+    pub chat: std::sync::OnceLock<Arc<dyn ApprovalChat>>,
 }
 
 impl Access {
@@ -200,7 +211,7 @@ impl Access {
             code_sql::Target::Sqlite(path) => code_sql::Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
             code_sql::Target::Postgres { url, schema } => code_sql::Db::connect(url, schema, pg)?,
         };
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -212,6 +223,71 @@ impl Access {
         let mut projects = if kind == "project" { vec![id.clone()] } else { catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default() };
         let project = (!projects.is_empty()).then(|| projects.remove(0));
         Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), path: None }
+    }
+}
+
+impl Access {
+    /// Where approvals are posted (`notify.chat`: `{install, channel}`), if anywhere.
+    fn chat_target(&self) -> Option<(String, String)> {
+        let n = self.store.setting("notify").ok()??;
+        let (i, c) = (n["chat"]["install"].as_str()?, n["chat"]["channel"].as_str()?);
+        Some((i.to_string(), c.to_string()))
+    }
+
+    /// A new approval: posted to chat, when approvals go there (in the background).
+    pub fn announce(self: &Arc<Self>, a: &store::Approval) {
+        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
+        let (me, a) = (self.clone(), a.clone());
+        tokio::spawn(async move {
+            match chat.post(install.clone(), channel.clone(), a.clone()).await {
+                Ok(ts) => {
+                    let _ = tokio::task::spawn_blocking(move || me.store.set_approval_chat(&a.id, &serde_json::json!({ "install": install, "channel": channel, "ts": ts }))).await;
+                }
+                Err(e) => tracing::warn!(error = %e, "posting an approval to chat"),
+            }
+        });
+    }
+
+    /// An approval changed (decided, used, expired): its chat card follows.
+    pub fn changed(self: &Arc<Self>, a: &store::Approval) {
+        let Some(chat) = self.chat.get().cloned() else { return };
+        let (me, a) = (self.clone(), a.clone());
+        tokio::spawn(async move {
+            let id = a.id.clone();
+            let Ok(Ok(Some(at))) = tokio::task::spawn_blocking(move || me.store.approval_chat(&id)).await else { return };
+            let (Some(i), Some(c), Some(ts)) = (at["install"].as_str(), at["channel"].as_str(), at["ts"].as_str()) else { return };
+            if let Err(e) = chat.update(i.into(), c.into(), ts.into(), a).await {
+                tracing::warn!(error = %e, "editing an approval's chat card");
+            }
+        });
+    }
+
+    /// A press in chat: decide, when it came from the install approvals go to. `Err` is what the
+    /// person who pressed is told.
+    pub async fn decide_from_chat(self: &Arc<Self>, approval: String, approve: bool, by: String, install: String) -> std::result::Result<(), String> {
+        let me = self.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            if me.chat_target().is_none_or(|(i, _)| i != install) {
+                return Err(Error::Forbidden("approvals aren't decided from this workspace".into()));
+            }
+            let r = me.store.decide(&approval, approve, &by, None);
+            // Already decided or expired: bring the card up to date as well.
+            if r.is_err()
+                && let Ok(a) = me.store.approval(&approval)
+            {
+                me.changed(&a);
+            }
+            r
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        match result {
+            Ok(a) => {
+                self.changed(&a);
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 

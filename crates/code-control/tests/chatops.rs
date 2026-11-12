@@ -617,6 +617,59 @@ async fn slack_status_buttons_answer_requests_and_replies_steer() {
     assert!(notice.to_string().contains("Fix the flaky login test"), "the notice is the event's thread's: {notice}");
 }
 
+/// An access approval (docs/permissions.md, "Approvals in chat") is posted to a Slack channel as
+/// a card, and an allowed person's press goes to roll's access service to decide; a stranger's
+/// decides nothing. The decided card loses its buttons.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_approvals_are_decided_from_slack() {
+    use code_control::chatops::access::{AccessCard, AccessDecision};
+    let w = world().await;
+    let install = w.install("T1").await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AccessDecision>();
+    w.a.code.on_access_decision(Arc::new(move |d| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            let _ = tx.send(d);
+            Ok(())
+        })
+    }));
+    let mut card = AccessCard {
+        approval: "apr_abcdefghijklmnop".into(),
+        title: "ci wants to delete postgres prj_x".into(),
+        detail: "DELETE /v1/projects/{id}".into(),
+        destructive: true,
+        decided: None,
+    };
+    let ts = w.a.code.post_access_card(&install, "C9", &card).await.unwrap();
+    let posted = w.mock.calls_to("chat.postMessage");
+    let approve = posted.last().unwrap()["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["elements"].as_array().cloned().unwrap_or_default())
+        .find(|e| e["text"]["text"] == "Approve")
+        .expect("an Approve button");
+    assert_eq!(approve["value"], "x:apr_abcdefghijklmnop:y");
+    let press = |user: &str| {
+        let payload = json!({
+            "type": "block_actions", "team": { "id": "T1" }, "user": { "id": user, "username": "ada" }, "channel": { "id": "C9" },
+            "message": { "ts": ts }, "container": { "type": "message" }, "trigger_id": format!("trig-{user}"),
+            "actions": [{ "type": "button", "action_id": approve["action_id"], "block_id": "roll.choices", "value": approve["value"] }], "state": { "values": {} }
+        });
+        signed("/v1/code/chat/slack/interactions", &form(&[("payload", &payload.to_string())]), "application/x-www-form-urlencoded", now_s())
+    };
+    assert_eq!(send(&w.a, press("UEVE")).await.0, StatusCode::OK);
+    until("the stranger's notice", || w.mock.calls_to("chat.postEphemeral").iter().any(|c| c["user"] == "UEVE")).await;
+    tokio::time::timeout(Duration::from_millis(300), rx.recv()).await.expect_err("no decision from a stranger");
+    assert_eq!(send(&w.a, press("UADA")).await.0, StatusCode::OK);
+    let d = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+    assert_eq!((d.approval.as_str(), d.approve, d.by.as_str(), d.install.as_str()), ("apr_abcdefghijklmnop", true, "slack:UADA", install.as_str()));
+    card.decided = Some(("<@UADA>".into(), "approved".into()));
+    w.a.code.update_access_card(&install, "C9", &ts, &card).await.unwrap();
+    let updated = w.mock.calls_to("chat.update");
+    assert!(updated.iter().any(|u| u["ts"] == ts.as_str() && !u.to_string().contains("x:apr_")), "{updated:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discord_interactions_are_verified_and_reach_the_inbox() {
     let w = world().await;
