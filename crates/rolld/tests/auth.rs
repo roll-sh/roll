@@ -64,7 +64,8 @@ fn concrete(pattern: &str) -> String {
     // is probed at a real route behind it, so the check is the product's, not a 404 for a path
     // that doesn't exist.
     match pattern {
-        "/v1/storage/{*rest}" => return "/v1/storage/buckets".into(),
+        // Storage is nested (`nest_service`): `/v1/storage/` is the nest itself.
+        "/v1/storage/{*rest}" | "/v1/storage/" => return "/v1/storage/buckets".into(),
         // Tasks forwards to the cell's leader: a tenant that doesn't exist answers like a bad key.
         "/v1/tasks/{*rest}" => return "/v1/tasks/queues".into(),
         "/t/{tenant}/v1/tasks/{*rest}" => return "/t/0/v1/tasks/queues".into(),
@@ -122,17 +123,21 @@ async fn every_control_plane_route_needs_the_operator_token() {
     let mut child = rolld(home.path(), &loopback_args(api_port), &env).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("rolld starts");
     // Startup lists every route with its access: `host=api route=/v1/projects access=operator`.
     let routes = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    // And how the permission catalogue classifies it for scoped tokens: `scoped=postgres`.
+    let scoped = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     let output = Arc::new(Mutex::new(String::new()));
     for pipe in [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())] {
-        let (routes, output) = (routes.clone(), output.clone());
+        let (routes, scoped, output) = (routes.clone(), scoped.clone(), output.clone());
         std::thread::spawn(move || {
             for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                 if line.contains("rolld::auth")
                     && let Some((_, rest)) = line.split_once(" host=")
                     && let Some((host, rest)) = rest.split_once(" route=")
-                    && let Some((route, access)) = rest.split_once(" access=")
+                    && let Some((route, rest)) = rest.split_once(" scoped=")
+                    && let Some((class, access)) = rest.split_once(" access=")
                 {
                     routes.lock().unwrap().push((host.to_string(), route.to_string(), access.trim().to_string()));
+                    scoped.lock().unwrap().push((host.to_string(), route.to_string(), class.trim().to_string()));
                 }
                 output.lock().unwrap().push_str(&format!("{line}\n"));
             }
@@ -231,6 +236,52 @@ async fn every_control_plane_route_needs_the_operator_token() {
     assert_eq!((code["auth"]["caller"]["kind"].as_str(), code["auth"]["operator"].as_bool()), (Some("admin"), Some(true)), "{code}");
     let code: serde_json::Value = http.get(format!("{api}/v1/code")).send().await.unwrap().json().await.unwrap();
     assert_eq!((code["auth"]["required"].as_bool(), code["auth"]["operator"].as_bool(), code["auth"]["caller"]["kind"].as_str()), (Some(true), Some(false), Some("anonymous")), "{code}");
+
+    // Scoped tokens (docs/permissions.md): every route a token could call has a row in the
+    // permission catalogue, except these, which stay the operator's (or answer their own
+    // credentials) on purpose.
+    const UNSCOPED: &[(&str, &str)] = &[
+        ("/t/", "hosted tasks tenants: their own API keys"),
+        ("/_roll/tenants", "hosted tasks tenants: the tasks token"),
+        ("/kafka/v3", "Confluent REST: stream API keys"),
+        ("/git", "git: roll code tokens"),
+        ("/internal", "signed hops between nodes"),
+        ("/v1/code/chat/", "Slack and Discord: signed by the platform"),
+        ("/v1/code/github", "the GitHub App: signed webhooks and the installation flow"),
+        ("/v1/code/linear", "Linear: signed webhooks and OAuth"),
+        ("/v1/code/agents/connect", "machines' relay link: machine tokens"),
+        ("/v1/code/agents/login", "device login: its own codes"),
+        ("/v1/code/agents/shares/{id}", "public shares"),
+        ("/v1/code/mcp", "roll code's own MCP server: grants use /v1/mcp"),
+        ("/v1/code/review-apps", "review apps: their own tokens"),
+        ("/v1/code/names", "public name lookups"),
+    ];
+    let unscoped: Vec<_> = scoped
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(h, r, class)| h == "api" && class == "none" && !UNSCOPED.iter().any(|(p, _)| r.starts_with(p)))
+        .map(|(_, r, _)| r.clone())
+        .collect();
+    assert!(unscoped.is_empty(), "routes no scoped token can be classified for (add catalogue rows in roll-access): {unscoped:#?}");
+    // A token with every action on everything works where the operator's does.
+    let made: serde_json::Value = http
+        .post(format!("{api}/v1/access/tokens"))
+        .header("authorization", &operator)
+        .json(&serde_json::json!({ "name": "all", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "allow", "reveal": "allow", "deploy": "allow", "admin": "allow" } }] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let full = format!("Bearer {}", made["token"].as_str().expect("a token"));
+    for path in ["/v1/projects", "/v1/redis/databases", "/v1/streams", "/v1/queues/vhosts", "/v1/storage/buckets", "/v1/nosql/databases", "/v1/tasks/queues", "/v1/code/repos", "/v1/workspace/projects", "/v1/access"] {
+        let resp = http.get(format!("{api}{path}")).header("authorization", &full).send().await.unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        assert_eq!(status, 200, "GET {path} with a full scoped token: {body}");
+    }
 
     // CORS: the dashboard's origin, nobody else's.
     let preflight = |origin: &'static str| {

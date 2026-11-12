@@ -121,6 +121,16 @@ impl fmt::Debug for Grant {
     }
 }
 
+/// Prefixes of the tokens a grant opens requests with: scoped tokens and OAuth access tokens.
+pub const GRANT_PREFIXES: [&str; 2] = ["rlt_", "rlo_"];
+
+/// Whether `token` is a grant's (it's decided by the [`Authorizer`], never by a product). A
+/// request a node forwards over a signed hop already passed that node's gate: the node it lands
+/// on may take such a token as decided.
+pub fn is_grant_token(token: &str) -> bool {
+    GRANT_PREFIXES.iter().any(|p| token.starts_with(p))
+}
+
 /// The evaluator for scoped tokens (`roll-access`).
 pub trait Authorizer: Send + Sync + 'static {
     /// Whether `token` is one of its own (by its prefix): then it alone decides the request.

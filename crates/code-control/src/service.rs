@@ -645,6 +645,23 @@ impl Code {
         Ok(c)
     }
 
+    /// The repo (`owner/name`) a change, review thread or work item is in: what roll's permission
+    /// evaluator checks a scoped token's rules against (docs/permissions.md, "Resources").
+    pub fn repo_of(&self, kind: &str, id: &str) -> Option<String> {
+        // "owner/repo#N" names its repo.
+        if let Some((repo, _)) = id.split_once('#') {
+            return Some(repo.to_string());
+        }
+        let repo_id = match kind {
+            "change" => self.db.change(id).ok()??.repo_id,
+            "thread" => self.readable_thread(&Caller::Admin, id).ok()?.0.id,
+            "work" => self.db.work(id).ok()??.repo_id,
+            _ => return None,
+        };
+        let r = self.db.repo_by_id(&repo_id).ok()??;
+        Some(format!("{}/{}", r.owner, r.name))
+    }
+
     pub fn change_or_404(&self, id: &str) -> Result<Change> {
         let c = self.db.change(id)?.ok_or_else(|| Error::NotFound(format!("change {id}")))?;
         self.change_view(c)

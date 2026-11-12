@@ -189,11 +189,16 @@ pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
     if let Some((_, row)) = prefix {
         return Some(Found { row, params: None });
     }
-    if !route.contains("{*") && !is_nest(route) {
+    // A nested service (storage) has no matched route at all: its path decides.
+    let nested = route == "unmatched" && NESTS.iter().any(|n| path == *n || path.starts_with(&format!("{n}/")));
+    if !route.contains("{*") && !is_nest(route) && !nested {
         return None;
     }
     by_path(method, path)
 }
+
+/// Products mounted with `nest_service`: axum gives their requests no matched route.
+pub const NESTS: &[&str] = &["/v1/storage"];
 
 /// The row for a request by its path alone (what a catch-all hides, or a tool's route).
 pub fn by_path(method: &str, path: &str) -> Option<Found> {
@@ -222,9 +227,31 @@ pub fn by_path(method: &str, path: &str) -> Option<Found> {
         .map(|(_, row, params)| Found { row, params: Some(params) })
 }
 
-/// Storage mounts its router with `nest_service`: the matched route is the mount itself.
+/// How a route pattern is classified for grants, whatever the method: its product, `by path` (a
+/// catch-all whose real routes have rows), `operator only` (on purpose), or `None`: no row, so no
+/// grant can call it. rolld logs it for every route at startup; `rolld/tests/auth.rs` reads it.
+pub fn classified(route: &str) -> Option<&'static str> {
+    if OPERATOR_ONLY.iter().any(|(r, _)| *r == route) {
+        return Some("operator only");
+    }
+    if let Some(r) = ROWS.iter().find(|r| r.route == route) {
+        return Some(r.product);
+    }
+    if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && route.starts_with(r.route)).max_by_key(|r| r.route.len()) {
+        return Some(r.product);
+    }
+    if route.contains("{*") || is_nest(route) {
+        let base = route.split("{*").next().unwrap_or(route);
+        if ROWS.iter().any(|r| r.route.starts_with(base) && r.route != base) {
+            return Some("by path");
+        }
+    }
+    None
+}
+
+/// A route listed for a nest (`/v1/storage`, `/v1/storage/`): its rows are matched by path.
 fn is_nest(route: &str) -> bool {
-    route == "/v1/storage" || route.starts_with("/v1/storage/{")
+    NESTS.iter().any(|n| route == *n || route.starts_with(&format!("{n}/")))
 }
 
 fn decode(s: &str) -> String {
@@ -589,24 +616,24 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/nosql", "nosql", R, Tgt::AnyGrant),
     row("GET", "/v1/nosql/databases", "nosql", R, list("id")).reveals(NOSQL_SECRETS),
     row("POST", "/v1/nosql/databases", "nosql", W, create("nosql", "id")).reveals(NOSQL_SECRETS),
-    row("GET", "/v1/nosql/databases/{id}", "nosql", R, one(PG, "database")).reveals(NOSQL_SECRETS),
-    row("PATCH", "/v1/nosql/databases/{id}", "nosql", W, one(PG, "database")).reveals(NOSQL_SECRETS),
-    row("DELETE", "/v1/nosql/databases/{id}", "nosql", D, one(PG, "database")),
-    row("POST", "/v1/nosql/databases/{id}/branches", "nosql", W, one(PG, "database")).reveals(NOSQL_SECRETS),
-    row("POST", "/v1/nosql/databases/{id}/reset", "nosql", D, one(PG, "database")).reveals(NOSQL_SECRETS),
-    row("POST", "/v1/nosql/databases/{id}/restore", "nosql", D, one(PG, "database")),
-    row("GET", "/v1/nosql/databases/{id}/diff", "nosql", R, one(PG, "database")),
-    row("GET", "/v1/nosql/databases/{id}/imports", "nosql", R, one(PG, "database")),
-    row("POST", "/v1/nosql/databases/{id}/imports", "nosql", D, one(PG, "database")),
-    row("POST", "/v1/nosql/databases/{id}/password", "nosql", REVEAL, one(PG, "database")),
-    row("POST", "/v1/nosql/databases/{id}/cql", "nosql", Act::Body(cql_action), one(PG, "database")),
-    row("GET", "/v1/nosql/databases/{id}/schema", "nosql", R, one(PG, "database")),
-    row("GET", "/v1/nosql/databases/{id}/usage", "nosql", R, one(PG, "database")),
-    row("GET", "/v1/nosql/databases/{id}/alternator", "nosql", REVEAL, one(PG, "database")),
-    row("GET", "/v1/nosql/databases/{id}/activity", "nosql", R, one(PG, "database")),
-    row("POST", "/v1/nosql/databases/{id}/flush", "nosql", W, one(PG, "database")),
-    row("POST", "/v1/nosql/databases/{id}/compact", "nosql", W, one(PG, "database")),
-    row("POST", "/v1/nosql/databases/{id}/unload", "nosql", W, one(PG, "database")),
+    row("GET", "/v1/nosql/databases/{id}", "nosql", R, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
+    row("PATCH", "/v1/nosql/databases/{id}", "nosql", W, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
+    row("DELETE", "/v1/nosql/databases/{id}", "nosql", D, one(PG, "nosql-database")),
+    row("POST", "/v1/nosql/databases/{id}/branches", "nosql", W, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
+    row("POST", "/v1/nosql/databases/{id}/reset", "nosql", D, one(PG, "nosql-database")).reveals(NOSQL_SECRETS),
+    row("POST", "/v1/nosql/databases/{id}/restore", "nosql", D, one(PG, "nosql-database")),
+    row("GET", "/v1/nosql/databases/{id}/diff", "nosql", R, one(PG, "nosql-database")),
+    row("GET", "/v1/nosql/databases/{id}/imports", "nosql", R, one(PG, "nosql-database")),
+    row("POST", "/v1/nosql/databases/{id}/imports", "nosql", D, one(PG, "nosql-database")),
+    row("POST", "/v1/nosql/databases/{id}/password", "nosql", REVEAL, one(PG, "nosql-database")),
+    row("POST", "/v1/nosql/databases/{id}/cql", "nosql", Act::Body(cql_action), one(PG, "nosql-database")),
+    row("GET", "/v1/nosql/databases/{id}/schema", "nosql", R, one(PG, "nosql-database")),
+    row("GET", "/v1/nosql/databases/{id}/usage", "nosql", R, one(PG, "nosql-database")),
+    row("GET", "/v1/nosql/databases/{id}/alternator", "nosql", REVEAL, one(PG, "nosql-database")),
+    row("GET", "/v1/nosql/databases/{id}/activity", "nosql", R, one(PG, "nosql-database")),
+    row("POST", "/v1/nosql/databases/{id}/flush", "nosql", W, one(PG, "nosql-database")),
+    row("POST", "/v1/nosql/databases/{id}/compact", "nosql", W, one(PG, "nosql-database")),
+    row("POST", "/v1/nosql/databases/{id}/unload", "nosql", W, one(PG, "nosql-database")),
     // ── search (feature/roll-search) ──
     row("GET", "/v1/search", "search", R, Tgt::AnyGrant),
     row("GET", "/v1/search/clusters", "search", R, list("id")).reveals(SEARCH_SECRETS),

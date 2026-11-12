@@ -3,7 +3,7 @@
 //! on as the operator's, with the [`roll_auth::Grant`] in its extensions.
 
 use crate::catalog::{self, EnvFrom, Row, Tgt};
-use crate::store::{Ask, AuditEvent, Grant, ACCESS_PREFIX, REFRESH_PREFIX, TOKEN_PREFIX};
+use crate::store::{Ask, AuditEvent, Grant, REFRESH_PREFIX};
 use crate::{Access, Error, hash, new_id, redact};
 use axum::body::Body;
 use axum::extract::{MatchedPath, RawPathParams, Request};
@@ -41,7 +41,7 @@ pub struct Evaluator(pub Arc<Access>);
 
 impl roll_auth::Authorizer for Evaluator {
     fn claims(&self, token: &str) -> bool {
-        [TOKEN_PREFIX, ACCESS_PREFIX, REFRESH_PREFIX].iter().any(|p| token.starts_with(p))
+        roll_auth::is_grant_token(token) || token.starts_with(REFRESH_PREFIX)
     }
 
     fn handle(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
@@ -204,7 +204,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             return deny(StatusCode::FORBIDDEN, "ip_not_allowed", format!("this token can't be used from {shown}"), json!({}));
         }
     }
-    let Some(found) = catalog::find(&ctx.method, &ctx.route, req.uri().path()) else {
+    // A nested service (storage) sees its path without the prefix: the original has it.
+    let original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
+    let Some(found) = catalog::find(&ctx.method, &ctx.route, original.path()) else {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
         return deny(StatusCode::FORBIDDEN, "operator_only", format!("{} {} is the operator's: no token can call it", ctx.method, ctx.route), json!({}));
     };
@@ -222,7 +224,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     };
     let target = {
-        let (a, q, h) = (access.clone(), parts.uri.query().map(str::to_string), parts.headers.clone());
+        let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
         let params = params.clone();
         match tokio::task::spawn_blocking(move || target(&a, row, &params, q.as_deref(), &h)).await {
             Ok(t) => t,
@@ -262,8 +264,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 }
             }
             let bytes = buffered.clone().unwrap_or_default();
-            let request_hash = hash(&format!("{}\n{}\n{}", ctx.method, parts.uri.path_and_query().map_or("", |p| p.as_str()), hex::encode(sha2_of(&bytes))));
-            match ask(&ctx, row, action, resource.clone(), &parts, &bytes, request_hash).await {
+            let request_hash = hash(&format!("{}\n{}\n{}", ctx.method, original.path_and_query().map_or("", |p| p.as_str()), hex::encode(sha2_of(&bytes))));
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash };
+            match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
                 Err(resp) => return *resp,
             }
@@ -310,18 +313,19 @@ fn percent_decode(s: &str) -> String {
     percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
 }
 
-/// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
-async fn ask(
-    ctx: &Ctx,
-    row: &Row,
-    action: Action,
-    resource: Option<String>,
-    parts: &axum::http::request::Parts,
-    body: &[u8],
+/// The request an approval is for.
+struct Asked<'a> {
+    headers: &'a axum::http::HeaderMap,
+    path: &'a str,
+    body: &'a [u8],
     request_hash: String,
-) -> Result<String, Box<Response>> {
+}
+
+/// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
+async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
+    let Asked { headers, path, body, request_hash } = req;
     let access = &ctx.access;
-    let existing = parts.headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
+    let existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     let approval = match existing {
         Some(id) => {
             let a = access.clone();
@@ -338,7 +342,7 @@ async fn ask(
             let a = access.clone();
             let grant = ctx.grant.clone();
             let (product, method, route, path, tool) =
-                (row.product.to_string(), ctx.method.clone(), ctx.route.clone(), parts.uri.path().to_string(), ctx.mcp.as_ref().map(|m| m.tool.to_string()));
+                (row.product.to_string(), ctx.method.clone(), ctx.route.clone(), path.to_string(), ctx.mcp.as_ref().map(|m| m.tool.to_string()));
             let res = resource.clone();
             blocking(move || {
                 a.store.ask(Ask {
