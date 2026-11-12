@@ -158,8 +158,53 @@ function EnvRow({ env: e, first, last, onMove, onDelete, onError }: { env: Envir
           </button>
         </div>
       )}
+      <MaxAge env={e} onError={onError} />
       {renaming && <Rename env={e} onDone={() => setRenaming(false)} onError={onError} />}
     </div>
+  );
+}
+
+/** "Flag keys unchanged for N days": insights mark them stale (only a flag; nothing stops). */
+function MaxAge({ env, onError }: { env: Environment; onError: (e: string) => void }) {
+  const { api, reloadEnvs } = useSecrets();
+  const [days, setDays] = useState(env.max_age_days?.toString() ?? "");
+  const [busy, setBusy] = useState(false);
+  const n = Number(days);
+  const ok = days === "" || (Number.isInteger(n) && n >= 1 && n <= 3650);
+  const next = days === "" ? null : n;
+  const save = async (v: number | null) => {
+    setBusy(true);
+    try {
+      await api.updateEnvironment(env.slug, { max_age_days: v });
+      setDays(v?.toString() ?? "");
+      reloadEnvs();
+    } catch (e) {
+      onError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form
+      className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-12 text-[11.5px] text-muted"
+      onSubmit={(ev) => {
+        ev.preventDefault();
+        if (ok && next !== env.max_age_days) void save(next);
+      }}
+    >
+      <label className="flex items-center gap-1.5" title="Insights flag a key whose value hasn't changed for longer; nothing stops using it">
+        Flag keys unchanged for
+        <input value={days} onChange={(ev) => setDays(ev.target.value.trim())} inputMode="numeric" placeholder="—" aria-label={`Days before a key in ${env.name} is flagged stale`} className={`${sized} h-6 w-14 px-1.5 text-center font-mono text-[11.5px]`} />
+        days
+      </label>
+      {next !== env.max_age_days && ok && (
+        <button type="submit" className={`${button} h-6`} disabled={busy}>
+          {next === null ? "Turn off" : "Save"}
+        </button>
+      )}
+      {!ok && <span className="text-[11px] text-danger">1–3650 days, or blank for never</span>}
+      {env.max_age_days === null && days === "" && <span className="text-subtle">(off)</span>}
+    </form>
   );
 }
 

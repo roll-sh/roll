@@ -260,7 +260,7 @@ export function secretsApi(project: string) {
     deleteByLabel: (label: string) => req<{ deleted: string[] }>("DELETE", `${P}/environments${qs({ label })}`),
     order: (order: string[]) => req<Environment[]>("PUT", `${P}/environments/order`, { order }),
     environment: (env: string) => req<Environment>("GET", E(env)),
-    updateEnvironment: (env: string, patch: { slug?: string; name?: string; expires_at?: number | null }) => req<Environment>("PATCH", E(env), patch),
+    updateEnvironment: (env: string, patch: { slug?: string; name?: string; expires_at?: number | null; max_age_days?: number | null }) => req<Environment>("PATCH", E(env), patch),
     deleteEnvironment: (env: string, confirm?: string) => req<null>("DELETE", `${E(env)}${qs({ confirm })}`),
     policy: (env: string, p: { protected: boolean; approvals?: number; approvers?: string[] }) => req<Environment>("PUT", `${E(env)}/policy`, p),
 

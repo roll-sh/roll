@@ -1,7 +1,7 @@
-import { Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
+import { Clock, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
-import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
+import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
 import { childPath, folderName } from "@/lib/secrets-grid";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../agents/ui/menu";
 import { Segmented } from "../agents/ui/toggle-group";
@@ -19,6 +19,7 @@ import { secretsHref, useSecrets } from "./secrets-page";
 import {
   ago,
   button,
+  Chip,
   CommentMark,
   dangerButton,
   ErrorNote,
@@ -33,6 +34,7 @@ import {
   primary,
   RefMark,
   Reveal,
+  saveText,
   SourceMark,
   Teach,
   until,
@@ -49,6 +51,10 @@ export function EnvView({ env }: { env: Environment }) {
   const folders = useLoad(() => api.folders(env.slug, path), [api, env.slug, path]);
   const open = useLoad(() => api.requests(env.slug, "open"), [api, env.slug]);
   const imports = useLoad(() => api.imports(env.slug, path), [api, env.slug, path]);
+  // Last changes and reads (from the audit log): one call per folder view.
+  const insights = useLoad(() => api.insights(env.slug, path), [api, env.slug, path]);
+  const insightOf = useMemo(() => new Map((insights.data?.keys ?? []).map((k) => [k.key, k])), [insights.data]);
+  const [unread, setUnread] = useState(false);
   /** The imports panel, open with one import picked out (an imported key's source was clicked). */
   const [importsOpen, setImportsOpen] = useState<{ highlight: Import | null } | null>(null);
   const [query, setQuery] = useState("");
@@ -85,7 +91,9 @@ export function EnvView({ env }: { env: Environment }) {
   const keys = useMemo(() => new Set(secrets.map((s) => s.key)), [secrets]);
   const refSource = useRefSource(env.slug, keys);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const shown = secrets.filter((s) => words.every((w) => s.key.toLowerCase().includes(w) || s.comment.toLowerCase().includes(w) || s.tags.some((t) => t.includes(w))));
+  const isUnread = (s: Secret) => insightOf.get(s.key)?.last_read_at === null;
+  const unreadCount = secrets.filter(isUnread).length;
+  const shown = secrets.filter((s) => (!unread || isUnread(s)) && words.every((w) => s.key.toLowerCase().includes(w) || s.comment.toLowerCase().includes(w) || s.tags.some((t) => t.includes(w))));
   const childFolders = folders.data?.folders ?? [];
   const rowId = (s: Secret) => `${s.key}:${s.type}`;
   const selectable = shown.filter((s) => s.source.kind === "own");
@@ -111,6 +119,7 @@ export function EnvView({ env }: { env: Environment }) {
   const refresh = () => {
     list.reload();
     folders.reload();
+    insights.reload();
     reloadEnvs();
   };
 
@@ -132,14 +141,7 @@ export function EnvView({ env }: { env: Environment }) {
   const exportAs = async (format: ExportFormat) => {
     setError(null);
     try {
-      const text = await api.exportText(env.slug, format, path);
-      const blob = new Blob([text], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${project.name}.${env.slug}${format === "dotenv" ? ".env" : format === "shell" ? ".sh" : `.${format}`}`;
-      a.click();
-      URL.revokeObjectURL(url);
+      saveText(`${project.name}.${env.slug}${format === "dotenv" ? ".env" : format === "shell" ? ".sh" : `.${format}`}`, await api.exportText(env.slug, format, path));
     } catch (e) {
       setError(errorText(e));
     }
@@ -235,6 +237,11 @@ export function EnvView({ env }: { env: Environment }) {
               </button>
               <NewFolder path={path} onCreate={(np) => api.createFolder(env.slug, np).then(() => go({ env: env.slug, path: np }), (e) => setError(errorText(e)))} />
               <span className="ml-auto" />
+              {insights.data && (unreadCount > 0 || unread) && (
+                <Chip on={unread} onClick={() => setUnread((u) => !u)} title="Keys nobody revealed, exported, resolved or synced in 90 days: candidates to clean up">
+                  Not read in 90 days <span className="font-mono text-[10px] text-subtle">{unreadCount}</span>
+                </Chip>
+              )}
               <label className="flex h-7 w-52 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 px-2 text-subtle focus-within:border-accent/60 max-sm:w-full">
                 <Search className="size-3.5" />
                 <input ref={filter} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter" aria-label="Filter secrets" className="min-w-0 flex-1 bg-transparent font-mono text-[12px] text-fg outline-none placeholder:font-sans placeholder:text-subtle" />
@@ -350,6 +357,8 @@ export function EnvView({ env }: { env: Environment }) {
                     path={path}
                     keys={keys}
                     refs={refSource}
+                    insight={insightOf.get(s.key)}
+                    maxAge={insights.data?.max_age_days ?? env.max_age_days}
                     selected={selected.has(rowId(s))}
                     onSelect={s.source.kind === "own" ? (on, range) => select(s, on, range) : undefined}
                     focus={search.key === s.key}
@@ -359,7 +368,7 @@ export function EnvView({ env }: { env: Environment }) {
                     onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
-                {list.data && shown.length === 0 && secrets.length > 0 && <p className="px-2 py-6 text-center text-[12px] text-subtle">Nothing matches "{query}".</p>}
+                {list.data && shown.length === 0 && secrets.length > 0 && <p className="px-2 py-6 text-center text-[12px] text-subtle">{unread && !query ? "Every key here was read in the last 90 days." : `Nothing matches "${query}".`}</p>}
               </div>
             )}
           </div>
@@ -488,6 +497,8 @@ function SecretRow({
   path,
   keys,
   refs,
+  insight,
+  maxAge,
   selected,
   onSelect,
   focus,
@@ -501,6 +512,8 @@ function SecretRow({
   path: string;
   keys: Set<string>;
   refs: RefSource;
+  insight: KeyInsight | undefined;
+  maxAge: number | null;
   selected: boolean;
   /** Imported and inherited rows aren't selectable. */
   onSelect?: (on: boolean, range: boolean) => void;
@@ -548,6 +561,11 @@ function SecretRow({
               overridden for you
             </span>
           )}
+          {insight?.stale && own && (
+            <span className="inline-flex shrink-0 text-danger" title={`Unchanged since ${ago(insight.updated_at)}: longer than this environment's ${maxAge ?? "?"}-day limit`} aria-label="Stale">
+              <Clock className="size-3" />
+            </span>
+          )}
           {s.references.length > 0 && <RefMark refs={s.references} />}
           <SourceMark source={s.source} onOpen={s.source.kind === "own" ? undefined : () => s.source.kind !== "own" && onSource(s.source)} />
         </div>
@@ -576,6 +594,14 @@ function SecretRow({
             </span>
           ))}
           {!s.comment && !s.tags.length && <span className="truncate text-faint" title={`by ${s.updated_by}`}>v{s.version} · {ago(s.updated_at)}</span>}
+          {insight && (
+            <span
+              className={`ml-auto shrink-0 pl-2 text-[11px] ${insight.last_read_at ? "text-faint" : "text-subtle"}`}
+              title={insight.last_read_at ? `Last read by ${insight.last_read_by ?? "?"} · ${insight.reads_30d} ${insight.reads_30d === 1 ? "read" : "reads"} in 30 days` : "Nobody revealed, exported, resolved or synced it in 90 days"}
+            >
+              {insight.last_read_at ? `read ${ago(insight.last_read_at)}` : "never in 90 days"}
+            </span>
+          )}
         </div>
         <div role="cell" className="flex items-center justify-end gap-0.5">
           {confirming ? (
