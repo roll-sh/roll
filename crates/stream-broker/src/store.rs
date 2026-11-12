@@ -9,6 +9,13 @@
 //! [`Store::claim`]) is still the stream's, so an owner that lost its lease can't change
 //! anything once another node took over (docs/cloud/README.md, "Correctness never depends on
 //! leases").
+//!
+//! **Shared chunks.** A branch ([`Store::branch_stream`]) copies its parent's chunk rows, object
+//! keys included, so one object can back rows of several streams. A chunk row's key is its
+//! reference: whatever deletes rows (retention, compaction, deleting a topic or a stream) gets
+//! back, from the same transaction, only the keys no row references any more, and only those
+//! objects may go. Keys are never reused and references are only ever copied from an existing
+//! row, so a key nobody references stays that way.
 
 use code_sql::{Conn, Db, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -206,6 +213,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   first INTEGER NOT NULL, last INTEGER NOT NULL, max_ts INTEGER NOT NULL, bytes INTEGER NOT NULL,
   key TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (topic_id, partition, first)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS chunks_key ON chunks (key);
 CREATE TABLE IF NOT EXISTS aborted_txns (
   topic_id TEXT NOT NULL, partition INTEGER NOT NULL,
   producer_id INTEGER NOT NULL, first INTEGER NOT NULL, last INTEGER NOT NULL
@@ -241,6 +249,9 @@ CREATE INDEX IF NOT EXISTS storage_samples_stream ON storage_samples (stream_id,
 CREATE TABLE IF NOT EXISTS stream_owners (
   stream_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, node TEXT NOT NULL, claimed_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS branches (
+  stream_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, created_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS wal (
   stream_id TEXT NOT NULL, seq INTEGER NOT NULL, key TEXT NOT NULL, ends TEXT NOT NULL,
   bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (stream_id, seq)
@@ -248,7 +259,7 @@ CREATE TABLE IF NOT EXISTS wal (
 "#;
 
 /// The tables keyed by `stream_id` that a stream's deletion empties.
-const STREAM_TABLES: &[&str] = &["topics", "credentials", "offsets", "groups", "txns", "usage", "storage_samples", "wal", "stream_owners"];
+const STREAM_TABLES: &[&str] = &["topics", "credentials", "offsets", "groups", "txns", "usage", "storage_samples", "wal", "stream_owners", "branches"];
 /// The tables keyed by `topic_id`.
 const TOPIC_TABLES: &[&str] = &["partitions", "chunks", "aborted_txns"];
 
@@ -342,6 +353,66 @@ const UPSERT_CHUNK: &str = "INSERT INTO chunks (topic_id, partition, first, last
      ON CONFLICT (topic_id, partition, first) DO UPDATE SET last = excluded.last, max_ts = excluded.max_ts,
        bytes = excluded.bytes, key = excluded.key, created_at = excluded.created_at";
 const DELETE_CHUNK: &str = "DELETE FROM chunks WHERE topic_id = ?1 AND partition = ?2 AND first = ?3";
+
+/// Delete a partition's chunk rows starting at `firsts`; returns their keys.
+fn delete_chunk_rows(c: &Conn<'_>, topic: &str, partition: i32, firsts: &[i64]) -> Res<Vec<String>> {
+    let mut keys = Vec::with_capacity(firsts.len());
+    for f in firsts {
+        let key: Option<String> =
+            c.query_row("SELECT key FROM chunks WHERE topic_id = ?1 AND partition = ?2 AND first = ?3", params![topic, partition, f], |r| r.get(0)).optional()?;
+        c.execute(DELETE_CHUNK, params![topic, partition, f])?;
+        keys.extend(key);
+    }
+    Ok(keys)
+}
+
+/// Of `keys` (of rows just deleted), those no chunk row references: their objects may go.
+fn unreferenced(c: &Conn<'_>, keys: Vec<String>) -> Res<Vec<String>> {
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        let used: Option<i64> = c.query_row("SELECT 1 FROM chunks WHERE key = ?1 LIMIT 1", [&k], |r| r.get(0)).optional()?;
+        if used.is_none() {
+            out.push(k);
+        }
+    }
+    Ok(out)
+}
+
+/// Delete everything of a topic's partitions; returns the keys of its chunk rows.
+fn delete_topic_rows(c: &Conn<'_>, topic: &str) -> Res<Vec<String>> {
+    let keys = c.query("SELECT key FROM chunks WHERE topic_id = ?1", [topic], |r| r.get(0))?;
+    for table in TOPIC_TABLES {
+        c.execute(&format!("DELETE FROM {table} WHERE topic_id = ?1"), [topic])?;
+    }
+    Ok(keys)
+}
+
+/// Where a branch cuts one of the parent's partitions ([`stream_log::BranchPoint`]).
+#[derive(Clone, Debug)]
+pub struct Cut {
+    pub log_start: i64,
+    /// One past the last offset the branch gets.
+    pub end: i64,
+    /// `(producer id, first offset)` of the transactions open at the cut: aborted in the branch.
+    pub open_txns: Vec<(i64, i64)>,
+}
+
+/// A stream's bytes in object storage: everything it reads, and what's its own (it wrote it,
+/// or no other stream references it any more). The rest is shared with a parent or branch.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct RemoteBytes {
+    pub remote_bytes: i64,
+    pub own_bytes: i64,
+    pub shared_bytes: i64,
+}
+
+fn insert_credential(c: &Conn<'_>, k: &Credential) -> Res<()> {
+    c.execute(
+        &format!("INSERT INTO credentials ({CREDENTIAL_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
+        params![k.username, k.stream_id, k.label, k.created_at, k.salt, k.iterations, k.keys.stored_256, k.keys.server_256, k.keys.stored_512, k.keys.server_512],
+    )
+    .map(drop)
+}
 
 fn json<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v).expect("serialisable")
@@ -448,33 +519,110 @@ impl Store {
         self.fenced(id, |c| c.execute("UPDATE streams SET settings = ?2 WHERE id = ?1", params![id, json(settings)]).map(drop))
     }
 
-    /// Delete a stream and everything that belongs to it.
-    pub fn delete_stream(&self, id: &str) -> anyhow::Result<()> {
-        self.fenced(id, |c| {
+    /// Delete a stream and everything that belongs to it. Returns the keys of its chunks no
+    /// other stream references (the objects to delete).
+    pub fn delete_stream(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        let free = self.fenced(id, |c| {
+            let mut keys = vec![];
             for t in c.query("SELECT id FROM topics WHERE stream_id = ?1", [id], |r| r.get::<_, String>(0))? {
-                for table in TOPIC_TABLES {
-                    c.execute(&format!("DELETE FROM {table} WHERE topic_id = ?1"), [&t])?;
-                }
+                keys.extend(delete_topic_rows(c, &t)?);
             }
             for table in STREAM_TABLES {
                 c.execute(&format!("DELETE FROM {table} WHERE stream_id = ?1"), [id])?;
             }
-            c.execute("DELETE FROM streams WHERE id = ?1", [id]).map(drop)
+            c.execute("DELETE FROM streams WHERE id = ?1", [id])?;
+            unreferenced(c, keys)
         })?;
         self.end_tenure(id);
-        Ok(())
+        Ok(free)
+    }
+
+    /// Copy `parent` into a new stream `child` (with its first key `cred`), sharing its chunks:
+    /// topics (new ids, same names, partitions and configs), each partition's log start, chunk
+    /// rows below its [`Cut`] (the parent's object keys), aborted transactions (and the ones
+    /// open at the cut, as aborted), and committed group offsets (never past the branch's end).
+    /// One transaction, fenced on the parent. `None` if the parent is gone.
+    pub fn branch_stream(&self, parent: &str, child: &StreamRow, cred: &Credential, cuts: &HashMap<(Uuid, i32), Cut>, now: i64) -> anyhow::Result<Option<Vec<TopicRow>>> {
+        self.fenced(parent, |c| {
+            if c.query_row("SELECT 1 FROM streams WHERE id = ?1", [parent], |r| r.get::<_, i64>(0)).optional()?.is_none() {
+                return Ok(None);
+            }
+            c.execute(&format!("INSERT INTO streams ({STREAM_COLS}) VALUES (?1, ?2, ?3, ?4, ?5)"), params![child.id, child.name, child.region, child.created_at, json(&child.settings)])?;
+            insert_credential(c, cred)?;
+            c.execute("INSERT INTO branches (stream_id, parent_id, created_at) VALUES (?1, ?2, ?3)", params![child.id, parent, now])?;
+            let mut topics = vec![];
+            // `(topic name, partition) → (log start, end)` in the branch.
+            let mut ranges: HashMap<(String, i32), (i64, i64)> = HashMap::new();
+            for t in c.query(&format!("SELECT {TOPIC_COLS} FROM topics WHERE stream_id = ?1 ORDER BY created_at, name"), [parent], topic_row)? {
+                let row = TopicRow { id: crate::ids::new_uuid(), stream_id: child.id.clone(), name: t.name.clone(), partitions: t.partitions, configs: t.configs.clone(), created_at: now };
+                c.execute(
+                    &format!("INSERT INTO topics ({TOPIC_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"),
+                    params![row.id.to_string(), row.stream_id, row.name, row.partitions, json(&row.configs), row.created_at],
+                )?;
+                let (from, to) = (t.id.to_string(), row.id.to_string());
+                for p in 0..t.partitions {
+                    // A partition the cut doesn't know (added since) starts empty.
+                    let Some(cut) = cuts.get(&(t.id, p)) else { continue };
+                    let catalog_start: i64 =
+                        c.query_row("SELECT log_start FROM partitions WHERE topic_id = ?1 AND partition = ?2", params![from, p], |r| r.get(0)).optional()?.unwrap_or(0);
+                    let start = cut.log_start.max(catalog_start).min(cut.end);
+                    c.execute("INSERT INTO partitions (topic_id, partition, log_start) VALUES (?1, ?2, ?3)", params![to, p, start])?;
+                    c.execute(
+                        "INSERT INTO chunks (topic_id, partition, first, last, max_ts, bytes, key, created_at)
+                         SELECT ?1, partition, first, last, max_ts, bytes, key, ?2 FROM chunks
+                         WHERE topic_id = ?3 AND partition = ?4 AND last < ?5 AND last >= ?6",
+                        params![to, now, from, p, cut.end, start],
+                    )?;
+                    c.execute(
+                        "INSERT INTO aborted_txns (topic_id, partition, producer_id, first, last)
+                         SELECT ?1, partition, producer_id, first, last FROM aborted_txns
+                         WHERE topic_id = ?2 AND partition = ?3 AND first < ?4 AND last >= ?5",
+                        params![to, from, p, cut.end, start],
+                    )?;
+                    // `last` is where the abort marker would be: the branch's end.
+                    for &(producer, first) in &cut.open_txns {
+                        if first < cut.end {
+                            c.execute(
+                                "INSERT INTO aborted_txns (topic_id, partition, producer_id, first, last) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                params![to, p, producer, first.max(start), cut.end],
+                            )?;
+                        }
+                    }
+                    ranges.insert((t.name.clone(), p), (start, cut.end));
+                }
+                topics.push(row);
+            }
+            let offsets = c.query(&format!("SELECT group_id, {OFFSET_COLS} FROM offsets WHERE stream_id = ?1"), [parent], |r| Ok((r.get::<_, String>(0)?, offset_row(r, 1)?)))?;
+            for (group, o) in offsets {
+                let Some(&(_, end)) = ranges.get(&(o.topic.clone(), o.partition)) else { continue };
+                c.execute(
+                    &format!(r#"INSERT INTO offsets (stream_id, group_id, {OFFSET_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#),
+                    params![child.id, group, o.topic, o.partition, o.offset.min(end), o.leader_epoch, o.metadata, o.committed_at],
+                )?;
+            }
+            c.execute(
+                "INSERT INTO groups (stream_id, group_id, protocol_type, generation, updated_at)
+                 SELECT ?1, group_id, protocol_type, generation, updated_at FROM groups WHERE stream_id = ?2",
+                params![child.id, parent],
+            )?;
+            Ok(Some(topics))
+        })
+    }
+
+    /// The stream `stream` was branched from, and when: `(parent id, created at)`.
+    pub fn branch_of(&self, stream: &str) -> anyhow::Result<Option<(String, i64)>> {
+        self.read(|c| c.query_row("SELECT parent_id, created_at FROM branches WHERE stream_id = ?1", [stream], |r| Ok((r.get(0)?, r.get(1)?))).optional())
+    }
+
+    /// Every stream that is a branch.
+    pub fn branches(&self) -> anyhow::Result<Vec<String>> {
+        self.read(|c| c.query("SELECT stream_id FROM branches", (), |r| r.get(0)))
     }
 
     // ── credentials ──
 
     pub fn insert_credential(&self, k: &Credential) -> anyhow::Result<()> {
-        self.write(|c| {
-            c.execute(
-                &format!("INSERT INTO credentials ({CREDENTIAL_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
-                params![k.username, k.stream_id, k.label, k.created_at, k.salt, k.iterations, k.keys.stored_256, k.keys.server_256, k.keys.stored_512, k.keys.server_512],
-            )
-            .map(drop)
-        })
+        self.write(|c| insert_credential(c, k))
     }
 
     pub fn credential(&self, username: &str) -> anyhow::Result<Option<Credential>> {
@@ -517,15 +665,15 @@ impl Store {
         self.fenced(stream, |c| c.execute("UPDATE topics SET configs = ?2 WHERE id = ?1", params![topic.to_string(), json(configs)]).map(drop))
     }
 
-    /// Delete a topic, its partitions' state and its committed offsets.
-    pub fn delete_topic(&self, stream: &str, topic: &Uuid, name: &str) -> anyhow::Result<()> {
+    /// Delete a topic, its partitions' state and its committed offsets. Returns the keys of its
+    /// chunks no other stream references (the objects to delete).
+    pub fn delete_topic(&self, stream: &str, topic: &Uuid, name: &str) -> anyhow::Result<Vec<String>> {
         let id = topic.to_string();
         self.fenced(stream, |c| {
-            for table in TOPIC_TABLES {
-                c.execute(&format!("DELETE FROM {table} WHERE topic_id = ?1"), [&id])?;
-            }
+            let keys = delete_topic_rows(c, &id)?;
             c.execute("DELETE FROM offsets WHERE stream_id = ?1 AND topic = ?2", [stream, name])?;
-            c.execute("DELETE FROM topics WHERE id = ?1", [&id]).map(drop)
+            c.execute("DELETE FROM topics WHERE id = ?1", [&id])?;
+            unreferenced(c, keys)
         })
     }
 
@@ -577,28 +725,61 @@ impl Store {
         self.fenced(stream, |c| c.execute(UPSERT_CHUNK, params![id, partition, ch.first, ch.last, ch.max_timestamp, ch.bytes as i64, ch.key, now]).map(drop))
     }
 
-    /// Replace the chunks starting at `firsts` with `added`, atomically (compaction).
-    pub fn replace_chunks(&self, stream: &str, topic: &Uuid, partition: i32, firsts: &[i64], added: &[Chunk], now: i64) -> anyhow::Result<()> {
+    /// Replace the chunks starting at `firsts` with `added`, atomically (compaction). Returns
+    /// the replaced keys no other stream references (the objects to delete).
+    pub fn replace_chunks(&self, stream: &str, topic: &Uuid, partition: i32, firsts: &[i64], added: &[Chunk], now: i64) -> anyhow::Result<Vec<String>> {
         let id = topic.to_string();
         self.fenced(stream, |c| {
-            for f in firsts {
-                c.execute(DELETE_CHUNK, params![id, partition, f])?;
-            }
+            let keys = delete_chunk_rows(c, &id, partition, firsts)?;
             for ch in added {
                 c.execute(UPSERT_CHUNK, params![id, partition, ch.first, ch.last, ch.max_timestamp, ch.bytes as i64, ch.key, now])?;
             }
-            Ok(())
+            unreferenced(c, keys)
         })
     }
 
-    pub fn delete_chunks(&self, stream: &str, topic: &Uuid, partition: i32, firsts: &[i64]) -> anyhow::Result<()> {
+    /// Delete the chunks starting at `firsts` (retention). Returns the keys no other stream
+    /// references (the objects to delete).
+    pub fn delete_chunks(&self, stream: &str, topic: &Uuid, partition: i32, firsts: &[i64]) -> anyhow::Result<Vec<String>> {
         let id = topic.to_string();
         self.fenced(stream, |c| {
-            for f in firsts {
-                c.execute(DELETE_CHUNK, params![id, partition, f])?;
-            }
-            Ok(())
+            let keys = delete_chunk_rows(c, &id, partition, firsts)?;
+            unreferenced(c, keys)
         })
+    }
+
+    /// Of `keys`, the ones some chunk row references.
+    pub fn referenced(&self, keys: &[String]) -> anyhow::Result<std::collections::HashSet<String>> {
+        self.read(|c| {
+            let mut out = std::collections::HashSet::new();
+            for k in keys {
+                if c.query_row("SELECT 1 FROM chunks WHERE key = ?1 LIMIT 1", [k], |r| r.get::<_, i64>(0)).optional()?.is_some() {
+                    out.insert(k.clone());
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// `stream`'s bytes in object storage, split into its own and shared ([`RemoteBytes`]).
+    pub fn remote_bytes_of(&self, stream: &str) -> anyhow::Result<RemoteBytes> {
+        let prefix = crate::config::stream_prefix(stream);
+        let rows: Vec<(String, i64, i64)> = self.read(|c| {
+            c.query(
+                "SELECT c.key, c.bytes, (SELECT COUNT(*) FROM chunks o WHERE o.key = c.key) FROM chunks c JOIN topics t ON t.id = c.topic_id WHERE t.stream_id = ?1",
+                [stream],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })?;
+        let mut b = RemoteBytes::default();
+        for (key, bytes, refs) in rows {
+            b.remote_bytes += bytes;
+            if key.starts_with(&prefix) || refs <= 1 {
+                b.own_bytes += bytes;
+            }
+        }
+        b.shared_bytes = b.remote_bytes - b.own_bytes;
+        Ok(b)
     }
 
     /// Bytes in object storage per stream.

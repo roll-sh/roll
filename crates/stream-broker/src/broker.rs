@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 pub struct Broker {
     pub config: Config,
-    pub store: Store,
+    pub store: Arc<Store>,
     pub objects: Objects,
     streams: RwLock<HashMap<String, Arc<Stream>>>,
     pub groups: Groups,
@@ -238,6 +238,15 @@ pub fn validate_topic_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// A failed insert of a new stream: its name was taken at the same moment (another node), or
+/// something else.
+pub(crate) fn stream_exists(e: anyhow::Error, name: &str) -> KafkaError {
+    match crate::store::is_duplicate(&e) {
+        true => KafkaError::new(ResponseError::DuplicateResource, format!("stream {name} already exists")),
+        false => KafkaError::internal(e),
+    }
+}
+
 fn cluster_id_for(stream_id: &str) -> String {
     use base64::Engine;
     use sha2::Digest;
@@ -334,7 +343,7 @@ impl Broker {
             producer_ids: Mutex::new((0, 0)),
             started: Instant::now(),
             config,
-            store,
+            store: Arc::new(store),
             objects,
             fleet,
         });
@@ -353,6 +362,17 @@ impl Broker {
                 let mut m = s.topics.write().unwrap();
                 m.by_id.insert(topic.id, topic.clone());
                 m.by_name.insert(topic.name.clone(), topic);
+            }
+        }
+        // A branch's partitions have data in object storage before they have local files, and
+        // retention has to see them while they're closed.
+        for id in self.store.branches()? {
+            if let Some(s) = streams.get(&id) {
+                for (topic, index) in self.store.partitions_with_chunks(&id)? {
+                    if let Some(p) = s.topic_by_id(&topic).and_then(|t| t.partition(index)) {
+                        p.remote_data.store(true, Ordering::Relaxed);
+                    }
+                }
             }
         }
         info!(streams = streams.len(), "stream catalog loaded");
@@ -493,6 +513,19 @@ impl Broker {
 
     /// Create a stream and its first API key: `(stream, credential, secret)`.
     pub fn create_stream(&self, name: &str, settings: Settings) -> Result<(Arc<Stream>, Credential, String)> {
+        let name = self.new_stream_name(name)?;
+        let row = StreamRow { id: new_id("st"), name: name.into(), region: "local".into(), created_at: now(), settings };
+        self.store.insert_stream(&row).map_err(|e| stream_exists(e, name))?;
+        let (cred, secret) = auth::new_credential(&row.id, "default");
+        self.store.insert_credential(&cred).map_err(KafkaError::internal)?;
+        let stream = Arc::new(self.stream_from(row));
+        self.streams.write().unwrap().insert(stream.id.clone(), stream.clone());
+        info!(stream = %stream.id, name, "stream created");
+        Ok((stream, cred, secret))
+    }
+
+    /// A legal name for a new stream that no stream has yet.
+    pub(crate) fn new_stream_name<'a>(&self, name: &'a str) -> Result<&'a str> {
         let name = name.trim();
         if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err(KafkaError::invalid_request("stream names are 1-64 letters, digits, '-' or '_'"));
@@ -500,18 +533,15 @@ impl Broker {
         if self.find_stream(name).is_some() {
             return Err(KafkaError::new(ResponseError::DuplicateResource, format!("stream {name} already exists")));
         }
-        let row = StreamRow { id: new_id("st"), name: name.into(), region: "local".into(), created_at: now(), settings };
-        self.store.insert_stream(&row).map_err(|e| match crate::store::is_duplicate(&e) {
-            // Another node created it at the same moment.
-            true => KafkaError::new(ResponseError::DuplicateResource, format!("stream {name} already exists")),
-            false => KafkaError::internal(e),
-        })?;
-        let (cred, secret) = auth::new_credential(&row.id, "default");
-        self.store.insert_credential(&cred).map_err(KafkaError::internal)?;
+        Ok(name)
+    }
+
+    /// The fleet and one node alike: put a stream made in the catalog in memory too.
+    pub(crate) fn add_stream(&self, row: StreamRow, topics: Vec<TopicRow>) -> Arc<Stream> {
         let stream = Arc::new(self.stream_from(row));
+        *stream.topics.write().unwrap() = self.topic_map(topics);
         self.streams.write().unwrap().insert(stream.id.clone(), stream.clone());
-        info!(stream = %stream.id, name, "stream created");
-        Ok((stream, cred, secret))
+        stream
     }
 
     pub fn update_settings(&self, stream: &Stream, f: impl FnOnce(&mut Settings)) -> Result<Settings> {
@@ -531,7 +561,7 @@ impl Broker {
         for t in stream.topics() {
             self.delete_topic(&stream, &t).await?;
         }
-        self.store.delete_stream(&stream.id).map_err(KafkaError::internal)?;
+        let free = self.store.delete_stream(&stream.id).map_err(KafkaError::internal)?;
         self.groups.drop_stream(&stream.id);
         self.txns.drop_stream(&stream.id);
         self.streams.write().unwrap().remove(&stream.id);
@@ -540,13 +570,7 @@ impl Broker {
             stream.tenure.set_gone();
             f.cluster.retire(&crate::fleet::key(&stream.id));
         }
-        let objects = self.objects.clone();
-        let prefix = config::stream_prefix(&stream.id);
-        tokio::spawn(async move {
-            if let Err(e) = objects.delete_prefix(&prefix).await {
-                warn!(%prefix, error = %e, "deleting stream objects");
-            }
-        });
+        self.sweep(config::stream_prefix(&stream.id), free);
         info!(stream = %stream.id, "stream deleted");
         Ok(())
     }
@@ -641,7 +665,7 @@ impl Broker {
         if topic.deleted.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.store.delete_topic(&stream.id, &topic.id, &topic.name).map_err(KafkaError::internal)?;
+        let free = self.store.delete_topic(&stream.id, &topic.id, &topic.name).map_err(KafkaError::internal)?;
         if topic.deleted.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -656,15 +680,42 @@ impl Broker {
         }
         let dir = self.config.topic_dir(&topic.id);
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
-        let objects = self.objects.clone();
-        let prefix = config::topic_prefix(&stream.id, &topic.id);
-        tokio::spawn(async move {
-            if let Err(e) = objects.delete_prefix(&prefix).await {
-                warn!(%prefix, error = %e, "deleting topic objects");
-            }
-        });
+        self.sweep(config::topic_prefix(&stream.id, &topic.id), free);
         debug!(stream = %stream.id, topic = %topic.name, "topic deleted");
         Ok(())
+    }
+
+    /// Delete the objects of something deleted from the catalog: `free` (its chunks no other
+    /// stream references, wherever they are), then whatever is under `prefix` that no chunk row
+    /// references (write-ahead log objects, leftovers). A branch may still read chunks under
+    /// `prefix`; those stay until their last reference goes.
+    fn sweep(&self, prefix: String, free: Vec<String>) {
+        let (objects, store) = (self.objects.clone(), self.store.clone());
+        tokio::spawn(async move {
+            for k in &free {
+                if let Err(e) = objects.delete(k).await {
+                    warn!(key = %k, error = %e, "deleting a chunk");
+                }
+            }
+            let keys: Vec<String> = match objects.list(&prefix).await {
+                Ok(l) => l.into_iter().map(|(k, _)| k).collect(),
+                Err(e) => return warn!(%prefix, error = %e, "listing deleted objects"),
+            };
+            let used = match crate::fleet::blocking({
+                let keys = keys.clone();
+                move || store.referenced(&keys)
+            })
+            .await
+            {
+                Ok(u) => u,
+                Err(e) => return warn!(%prefix, error = %e, "checking which deleted objects are still shared"),
+            };
+            for k in keys.iter().filter(|k| !used.contains(*k)) {
+                if let Err(e) = objects.delete(k).await {
+                    warn!(key = %k, error = %e, "deleting objects");
+                }
+            }
+        });
     }
 
     pub fn add_partitions(&self, stream: &Stream, topic: &Topic, count: i32, validate_only: bool) -> Result<()> {
@@ -834,11 +885,12 @@ impl Broker {
         }
         if !cleaned.removed_chunks.is_empty() {
             let firsts: Vec<i64> = cleaned.removed_chunks.iter().map(|c| c.first).collect();
-            self.store.delete_chunks(&stream.id, &topic.id, p.index, &firsts).map_err(KafkaError::storage)?;
-            for c in &cleaned.removed_chunks {
-                self.remote.remove(&c.key);
-                if let Err(e) = self.objects.delete(&c.key).await {
-                    warn!(key = %c.key, error = %e, "deleting expired chunk");
+            // A branch may still read some of them: only the ones nobody references go.
+            let free = self.store.delete_chunks(&stream.id, &topic.id, p.index, &firsts).map_err(KafkaError::storage)?;
+            for key in &free {
+                self.remote.remove(key);
+                if let Err(e) = self.objects.delete(key).await {
+                    warn!(%key, error = %e, "deleting expired chunk");
                 }
             }
             debug!(stream = %stream.id, topic = %topic.name, partition = p.index, chunks = firsts.len(), "retention removed chunks");
