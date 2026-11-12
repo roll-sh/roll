@@ -16,6 +16,7 @@ import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
 import { Route as DashboardDatabasesRouteImport } from './routes/dashboard/databases'
 import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams'
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
+import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
 import { Route as OwnerRepoGitReceivePackRouteImport } from './routes/$owner/$repo/git-receive-pack'
 import { Route as OwnerRepoGitUploadPackRouteImport } from './routes/$owner/$repo/git-upload-pack'
@@ -94,6 +95,11 @@ const DashboardStreamsRoute = DashboardStreamsRouteImport.update({
 const DashboardTasksRoute = DashboardTasksRouteImport.update({
   id: '/dashboard/tasks',
   path: '/dashboard/tasks',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ShareIdRoute = ShareIdRouteImport.update({
+  id: '/share/$id',
+  path: '/share/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OwnerRepoIndexRoute = OwnerRepoIndexRouteImport.update({
@@ -336,6 +342,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
+  '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -388,6 +395,7 @@ export interface FileRoutesByTo {
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
+  '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -442,6 +450,7 @@ export interface FileRoutesById {
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
+  '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
@@ -497,6 +506,7 @@ export interface FileRouteTypes {
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
+    | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
     | '/$owner/$repo/git-receive-pack'
@@ -549,6 +559,7 @@ export interface FileRouteTypes {
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
+    | '/share/$id'
     | '/$owner'
     | '/dashboard'
     | '/$owner/$repo/git-receive-pack'
@@ -602,6 +613,7 @@ export interface FileRouteTypes {
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
+    | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
     | '/$owner/$repo/git-receive-pack'
@@ -656,6 +668,7 @@ export interface RootRouteChildren {
   DashboardDatabasesRoute: typeof DashboardDatabasesRoute
   DashboardStreamsRoute: typeof DashboardStreamsRoute
   DashboardTasksRoute: typeof DashboardTasksRoute
+  ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
   DashboardAgentsConnectRoute: typeof DashboardAgentsConnectRoute
@@ -741,6 +754,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard/tasks'
       fullPath: '/dashboard/tasks'
       preLoaderRoute: typeof DashboardTasksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/share/$id': {
+      id: '/share/$id'
+      path: '/share/$id'
+      fullPath: '/share/$id'
+      preLoaderRoute: typeof ShareIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$owner/$repo/': {
@@ -1094,6 +1114,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardDatabasesRoute: DashboardDatabasesRoute,
   DashboardStreamsRoute: DashboardStreamsRoute,
   DashboardTasksRoute: DashboardTasksRoute,
+  ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,
   DashboardAgentsConnectRoute: DashboardAgentsConnectRoute,

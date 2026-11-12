@@ -129,6 +129,10 @@ export type Token = {
   last_used_at: number | null;
   prefix: string;
 };
+/** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
+export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
+/** `ciphertext` is `sealShare`'s (lib/secrets-share.ts); `views` 1–10, `ttl_minutes` 5–10080. */
+export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
 export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; limit?: number };
@@ -268,6 +272,10 @@ export function secretsApi(project: string) {
     tokens: () => req<Token[]>("GET", `${P}/tokens`),
     createToken: (t: NewToken) => req<Token & { token: string }>("POST", `${P}/tokens`, t),
     revokeToken: (id: string) => req<null>("DELETE", `${P}/tokens/${enc(id)}`),
+
+    shares: () => req<Share[]>("GET", `${P}/shares`),
+    createShare: (s: NewShare) => req<Share>("POST", `${P}/shares`, s),
+    revokeShare: (id: string) => req<null>("DELETE", `${P}/shares/${enc(id)}`),
 
     audit: (f: AuditFilter = {}) => req<AuditEntry[]>("GET", `${P}/audit${qs(f)}`),
   };
