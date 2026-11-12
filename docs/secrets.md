@@ -355,7 +355,8 @@ don't change what the secret is, only its credential.
 ### Audit log
 
 Every read of values and every write is recorded: time, principal (`operator`, `token:rls_…`,
-`app:…`), action, environment, path, keys, a summary and the client address. A value never is.
+`app:…`), action, environment, path, keys, a summary and the client address (the peer's, or the
+first `X-Forwarded-For` one with `ROLL_CODE_TRUST_FORWARDED_FOR`). A value never is.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
 `GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
 days.
@@ -504,8 +505,9 @@ and `roll run`, checks and sandboxes. Ranked:
 1. **The dashboard's Secrets surface** in each project: overview grid, inline edit, reveal, bulk
    `.env` paste, history and rollback, compare and promote, environments, requests, links, tokens,
    audit. In progress.
-2. **Prove it on Postgres**: run `crates/roll-secrets/tests/api.rs` with `ROLL_CODE_TEST_DATABASE`
-   (the system database's dialect), and two nodes sharing one schema.
+2. **Two nodes on one schema**: the store's tests pass on Postgres
+   (`ROLL_CODE_TEST_DATABASE=postgres://… cargo test -p roll-secrets`); add a test of two stores on
+   one schema racing on the same environment (seq, credentials, sweeps).
 3. **Postgres roles for real**: issue and revoke a dynamic role against a running compute
    (`pnpm test:pg`), and check `VALID UNTIL` and the grants.
 4. **Open the PR to `main`** with screenshots, after 1–3.

@@ -251,6 +251,9 @@ pub struct Options {
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
+    /// Record the first X-Forwarded-For address in the audit log, not the peer's (behind a proxy
+    /// that sets it: `ROLL_CODE_TRUST_FORWARDED_FOR`).
+    pub trust_forwarded_for: bool,
 }
 
 /// The secrets store.
@@ -261,6 +264,7 @@ pub struct Secrets {
     workspace: Arc<roll_workspace::Workspace>,
     links: Links,
     open: bool,
+    trust_forwarded_for: bool,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -280,7 +284,7 @@ impl Secrets {
 
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, open: opts.open })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for })
     }
 
     pub fn links(&self) -> &Links {

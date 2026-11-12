@@ -95,7 +95,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         tracing::error!("roll secrets is unavailable: {why}");
     }
     let pg = code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() };
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api), open };
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api), open, trust_forwarded_for: args.code_trust_forwarded_for };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // A deleted project's secrets go with it.

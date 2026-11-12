@@ -65,13 +65,12 @@ impl Secrets {
     /// Who a request is: a scoped token in `Authorization: Bearer rls_…`, else the operator if
     /// the gate let it through as the operator (or rolld has no operator token).
     pub fn caller(&self, parts: &axum::http::request::Parts) -> Result<Caller> {
-        let ip = parts
-            .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|s| s.trim().chars().take(64).collect())
-            .filter(|s: &String| !s.is_empty());
+        // The peer's address, or the first X-Forwarded-For one behind a proxy rolld trusts.
+        let forwarded = || {
+            parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).map(|s| s.trim().chars().take(64).collect::<String>()).filter(|s| !s.is_empty())
+        };
+        let peer = || parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
+        let ip = if self.trust_forwarded_for { forwarded().or_else(peer) } else { peer() };
         if let Some(t) = roll_auth::bearer(&parts.headers).filter(|t| t.starts_with(PREFIX)) {
             let mut caller = self.token_caller(t)?;
             caller.ip = ip;

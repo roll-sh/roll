@@ -70,7 +70,7 @@ impl Api {
         let fake = Arc::new(Fake::default());
         let mut links = Links::default();
         links.register(fake.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, open: true };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, open: true, trust_forwarded_for: false };
         let secrets = Arc::new(Secrets::new(db, ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
         let mut api = Api { router, secrets, fake, project: String::new(), _dir: dir };
