@@ -148,6 +148,7 @@ roll-cluster = { path = "crates/roll-cluster" }
 roll-auth = { path = "crates/roll-auth" }
 roll-workspace = { path = "crates/roll-workspace" }
 roll-access = { path = "crates/roll-access" }
+roll-net = { path = "crates/roll-net" }
 roll-mcp = { path = "crates/roll-mcp" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
