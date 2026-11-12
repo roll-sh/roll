@@ -259,19 +259,20 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **Green runs and review findings.** The read-only SQL e2e (`pnpm test:pg`,
-   `read_only_sql_cannot_write`), then fix what an independent security review of the evaluator,
-   OAuth and MCP finds.
-2. **Edit and rotate tokens.** Change a token's rules, name, expiry and addresses from the
-   dashboard (the builder, prefilled) and `roll token edit`; `POST /v1/access/tokens/{id}/rotate`
-   for a new secret with the same rules (GitHub's "regenerate"). Expiring-soon shown in the list.
-3. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
+1. **The agents relay through the gate.** `roll code`'s relay (`agents/code.rs`) calls roll code's
+   own router for `thread.publish`, landing, `link_work` and `take_work`; with a scoped token those
+   fail closed today (401). Route them through rolld's gated router, so each is decided as the same
+   request would be, and check a command that names a repo against the token's `code` rules.
+2. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
    and tools from their contracts; check them against the merged routes, and wire previews'
    `Store::environment_of` (a Postgres branch's environment comes from its `{branch}`) and search's
-   name → id resolver.
-4. **Approvals where people are:** browser notifications from the dashboard, and pending
-   approvals posted to the owner's Slack/Discord install with approve/deny buttons
-   (docs/code/chatops.md).
+   `resolve_id` (async: through the runtime handle). Whichever of secrets and this lands second
+   makes `Secrets::caller` read `roll_auth::Grant` first.
+3. **Approvals in chat ops:** pending approvals posted to the owner's Slack/Discord install with
+   approve/deny buttons (docs/code/chatops.md). Browser notifications are done.
+4. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
+   reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
+   branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
 5. **Storage on a fleet:** check the operator's marker (and a grant's) survives the hop to the
    metadata owner, as tasks now does.
 6. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
