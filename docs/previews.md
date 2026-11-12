@@ -457,29 +457,29 @@ ready, `error` on failure, and `sleep` for a sleeping preview.
 Ranked by what a person notices first. Done so far:
 
 - the crate;
-- rolld's adapters for every product (Postgres resets in place), the secrets, roll apps and
-  search adapters;
-- roll code and GitHub reporting;
+- rolld's adapters for every product (Postgres resets in place and goes cold after an idle
+  hour), the secrets, roll apps and search adapters;
+- seeds;
 - link access;
+- roll code and GitHub reporting;
 - `roll preview`;
 - the dashboard's Previews tab and canvas overlay;
-- the end-to-end run and its cost.
+- the end-to-end run and its cost;
+- an adversarial review and its fixes.
 
-1. **Stream data branches** (being built on `feature/roll-previews-streams`): see 3.
-2. **Postgres in the measured run**, and Postgres branches that don't copy the data directory on
-   ext4. A branch could start from the parent's latest base backup in object storage plus WAL
-   (lazy pages), not `pg_basebackup`. Also: `schema` mode for Postgres (structure only).
-3. **Stream data branches** that share the parent's uploaded chunks (refcounted chunks in the
-   broker's retention, compaction and `delete_stream`). Today a stream branch gets the topics,
-   not the records.
+1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
+   refcounted in the broker's retention, compaction and deletes), once its suite is green.
+2. **Opening a private preview from GitHub**: a short-lived signed link (or roll sign-in) behind
+   the plain URL the pull request shows, so reviewers who only use GitHub get in without the
+   token ever being public.
+3. **Postgres branches that don't copy the data directory on ext4**: start from the parent's
+   latest base backup plus WAL with lazy pages, or use reflinks with
+   `pg_backup_start`/`pg_backup_stop` on XFS and btrfs. Also `schema` mode for Postgres.
 4. **roll apps end to end**: run `scripts/preview-cost.sh` against a rolld with roll apps (once
-   `feature/roll-apps` lands) and measure a built service's cold start and cost. Several
-   services per repo come from roll apps' catalog (a service per `root`).
-5. **Build caches.** Keep a service's package caches between starts, in a per-repo volume shared
-   by every preview of the repo. This cuts the cold start of real apps.
-6. **Spread preview services across nodes** (a lease per preview rather than one leader). Today
-   one node serves every preview host in a cluster.
-7. **Search branches** (roll search, `search_control::Control::branch`) when it lands.
-8. **Link access for roll apps services**: hand roll apps the preview's token (or a check hook)
-   so `pv-…` environments are private like `roll.toml` services.
-9. **NoSQL masking in the settings** (masking policies are inherited from the parent today).
+   `feature/roll-apps` lands), and measure a built service's cold start and cost. Also link
+   access for its `pv-…` environments.
+5. **Build caches**: keep a `roll.toml` service's package caches between starts, in a per-repo
+   volume shared by every preview of the repo.
+6. **Spread preview services across nodes**, with a lease per preview rather than one leader.
+7. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
+   `own_bytes` from roll search so a search branch's cost counts only what it wrote.
