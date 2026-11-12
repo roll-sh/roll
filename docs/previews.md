@@ -150,7 +150,7 @@ database's or a stream's lease, storage's metadata owner) wherever the reconcile
 | `redis` | `redis_control::Control::branch` | Delete and branch again | Nothing in memory; its manifest and the segments it pins | Copy-on-write in storage. Loading replays the parent into memory. |
 | `bucket` | `s3_store::Store::branch_bucket` | Delete and branch again | The objects it wrote, plus the parent's writes pushed down to it | One row to create. Credentials are a write key scoped to the branch. |
 | `nosql` | `nosql_control::Control::branch` (`schema_only` for `schema`) | `nosql_control::Control::reset`: same id, endpoint and credentials | The SSTables it wrote | Zero copy. Masking policies are inherited. |
-| `stream` | A new stream with the parent's topics and their configs (`schema`). `branch` also copies each topic's committed offsets so consumers resume where the parent was | Delete and branch again | Its own chunks | A data fork that shares the parent's chunks needs reference counting in the broker's retention and compaction first. See `## Next`. |
+| `stream` | `branch`: `POST /v1/streams/{s}/branches` on the parent's owner, a new stream with the parent's topics and configs whose partitions share the parent's chunks as of the branch (same offsets, nothing copied) and its committed group offsets. `schema`: a new stream with the parent's topics and configs, no records | Delete and branch again | The chunks it wrote (`own_bytes`; what it shares stays the parent's) | Zero copy. Retention, compaction and deletes on either side delete only objects no stream references, so a branch outlives its parent. A transaction open at the branch is aborted in it. See the broker's README, "Branches". |
 | `queue` | A vhost with the parent vhost's definitions (exchanges, queues, bindings, policies), no messages | Delete and branch again | Nothing (a vhost suspends after 5 minutes) | A branch never holds production messages. |
 | `tasks` | A new tenant with no messages and no schedules | Delete and create again | Its own SQLite file | Copied schedules would call production endpoints, so they never are. |
 | `search` | `search_control::Control::branch` (zero copy) | Delete and branch again | Segments it wrote | Joins when roll search lands (`feature/serverless-search`). Its adapter is behind the same trait. |
@@ -357,7 +357,8 @@ next connection restores it). That's what keeps a sleeping preview's Postgres ch
   (see `## Next`).
 - **The service's container while it runs.**
 - **A Redis branch.** It reports its loaded dataset, which includes the parent's keys.
-- **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those.
+- **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those
+  (streams included: a stream branch shares its parent's chunks).
 
 ## Data model
 
@@ -497,14 +498,13 @@ Ranked by what a person notices first. Done so far:
 - roll apps end to end;
 - previews spread across a cluster's nodes, a lease each (tested);
 - roll apps' `pv-…` environments private, their 401 page linked through roll;
-- NoSQL column masks per preview.
+- NoSQL column masks per preview;
+- copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode.
 
-1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
-   refcounted in the broker's retention, compaction and deletes), once its suite is green.
-2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+1. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. The fleet's XFS volumes already
    share blocks through reflinks.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **roll search's `own_bytes`** (asked for), so a search branch's cost counts only what it
+3. **roll search's `own_bytes`** (asked for), so a search branch's cost counts only what it
    wrote; the adapter already reads it.

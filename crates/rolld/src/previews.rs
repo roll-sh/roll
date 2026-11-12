@@ -597,7 +597,7 @@ pub fn bucket_name(parent: &str, name: &str) -> String {
     format!("{}-{name}", head.trim_end_matches(['-', '.']))
 }
 
-// ── Streams: a stream with the parent's topics (no records yet; docs/previews.md `## Next`) ──
+// ── Streams: a copy-on-write branch (`branch`), or a stream with the parent's topics (`schema`) ──
 
 pub struct Stream(pub Api);
 
@@ -616,9 +616,15 @@ impl Brancher for Stream {
         }
     }
 
-    async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
+    async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         let p = self.0.get(&format!("/v1/streams/{}", seg(parent))).await?;
-        let made = match self.0.post("/v1/streams", json!({ "name": name, "settings": p["settings"] })).await {
+        // `branch`: the parent's records (shared chunks) and committed offsets, on the parent's
+        // owner. `schema`: a new stream, then the parent's topics.
+        let made = match mode {
+            Mode::Branch => self.0.post(&format!("/v1/streams/{}/branches", seg(parent)), json!({ "name": name })).await,
+            Mode::Schema => self.0.post("/v1/streams", json!({ "name": name, "settings": p["settings"] })).await,
+        };
+        let made = match made {
             Ok(v) => v,
             Err(e) if conflict_is_ours(&e) => {
                 // From before a crash: a fresh key, since the first secret is gone.
@@ -629,6 +635,8 @@ impl Brancher for Stream {
             Err(e) => return Err(e),
         };
         let id = s(&made["id"]).ok_or_else(|| anyhow::anyhow!("a stream without an id"))?;
+        // A branch has its topics already (and a stream from before a crash is either whole or
+        // gets the missing ones here).
         for t in self.0.get(&format!("/v1/streams/{}/topics", seg(parent))).await?.as_array().into_iter().flatten() {
             let body = json!({ "name": t["name"], "partitions": t["partitions"], "configs": t["configs"] });
             match self.0.post(&format!("/v1/streams/{}/topics", seg(&id)), body).await {
@@ -659,6 +667,13 @@ impl Brancher for Stream {
             Err(e) => return Err(e),
         };
         anyhow::ensure!(v["name"] == name && branch != parent, "refusing to delete stream {branch}: it isn't the preview's stream {name}");
+        if let Some(of) = s(&v["branch_of"]["stream"]) {
+            match self.0.get(&format!("/v1/streams/{}", seg(parent))).await {
+                Ok(p) => anyhow::ensure!(p["id"] == of.as_str(), "refusing to delete stream {branch}: it's a branch of {of}, not of {parent}"),
+                Err(e) if is_404(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
         self.0.delete(&format!("/v1/streams/{}", seg(branch))).await
     }
 
@@ -668,9 +683,11 @@ impl Brancher for Stream {
     }
 
     async fn usage(&self, _parent: &str, branch: &str) -> anyhow::Result<Usage> {
+        // Object storage counts only the branch's own bytes: what it shares with its parent is
+        // the parent's.
         let u = self.0.get(&format!("/v1/streams/{}/usage?hours=24", seg(branch))).await?;
         let last = u["storage"].as_array().and_then(|a| a.last()).cloned().unwrap_or(Value::Null);
-        let bytes = last["local_bytes"].as_i64().unwrap_or(0) + last["remote_bytes"].as_i64().unwrap_or(0);
+        let bytes = last["local_bytes"].as_i64().unwrap_or(0) + u["remote"]["own_bytes"].as_i64().unwrap_or(0);
         Ok(Usage { bytes, storage_usd_month: gb(bytes) * 0.023, active_usd_hour: 0.0, month_to_date_usd: 0.0 })
     }
 }
