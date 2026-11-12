@@ -662,6 +662,12 @@ impl Code {
         Some(format!("{}/{}", r.owner, r.name))
     }
 
+    /// A repo's default branch, for `owner/name` (a scoped token's push to it is `deploy`).
+    pub fn default_branch_of(&self, full_name: &str) -> Option<String> {
+        let (owner, name) = full_name.split_once('/')?;
+        self.find_repo(owner, name.trim_end_matches(".git")).ok().map(|r| r.default_branch)
+    }
+
     pub fn change_or_404(&self, id: &str) -> Result<Change> {
         let c = self.db.change(id)?.ok_or_else(|| Error::NotFound(format!("change {id}")))?;
         self.change_view(c)

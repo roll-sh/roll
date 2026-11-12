@@ -154,6 +154,15 @@ pub fn router(code: Arc<Code>) -> Router {
         .with_state(code.clone());
     let git_config = code_git::ServerConfig { memory_budget: Some(code.git_budget.clone()), ..code_git::ServerConfig::default() };
     let git = code_git::router(GitAdapter::new(code.clone()), git_config);
+    // A scoped token's git request, decided by rolld's gate: roll code's git server takes the
+    // gate's word for it (code_git::Vouched), named for the token.
+    let git = git.layer(axum::middleware::from_fn(|mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+        if let Some(g) = roll_auth::Grant::on(req.extensions()) {
+            let name = format!("token:{}", g.name);
+            req.extensions_mut().insert(code_git::Vouched(name));
+        }
+        next.run(req).await
+    }));
     let mut all = api.merge(git);
     // In a cluster every repo-scoped request runs on the repo's owner (crate::cluster).
     if code.cluster().is_some() {

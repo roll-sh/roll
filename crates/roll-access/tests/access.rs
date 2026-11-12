@@ -50,6 +50,7 @@ fn postgres() -> Router {
         .route("/v1/endpoints/{id}/query", post(|body: String| async move { axum::Json(json!({ "ran": body })) }))
         .route("/v1/queues/overview", get(|| async { "{}" }))
         .route("/v1/unclassified", get(|| async { "{}" }))
+        .route("/v1/open", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/internal/tasks", axum::routing::any(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
@@ -65,7 +66,8 @@ impl Daemon {
         resolvers.workspace = Some(Arc::new(WorkspaceResolver(workspace.clone())));
         let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), ..Config::default() };
         let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
-        let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), Vec::new());
+        let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
+        let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
         let gated = postgres()
             .merge(roll_workspace::router(workspace.clone()))
@@ -147,6 +149,10 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     // A signed hop to the tasks leader is decided as the request it carries.
     let hop = d.send(&token, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", "/v1/tasks/queues")]).await;
     assert_eq!(hop.1["needs"]["product"], "tasks", "{}", hop.1);
+
+    // A public route is public for it too, as anyone (no grant, not the operator).
+    let (s, open) = d.call(&token, Method::GET, "/v1/open", None).await;
+    assert_eq!((s, open["operator"].as_bool(), open["grant"].is_null()), (StatusCode::OK, Some(false), true));
 
     // It can ask what it may do without doing it.
     let (_, c) = d.call(&token, Method::POST, "/v1/access/check", Some(json!({ "method": "DELETE", "path": "/v1/projects/pa" }))).await;

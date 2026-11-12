@@ -216,6 +216,8 @@ impl Access {
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
     pub fn resource(&self, product: &str, kind: &str, id: &str) -> Resource {
+        // A git URL names its repo with or without `.git`.
+        let (product, kind, id) = if kind == "git-repo" { (product, "repo", id.trim_end_matches(".git")) } else { (product, kind, id) };
         let resolved = self.resolvers.resolve(kind, id);
         let id = resolved.as_ref().map_or_else(|| id.to_string(), |r| r.id.clone());
         // A workspace project (kind `project`) is in itself, and so is what a product keeps per
@@ -288,6 +290,13 @@ impl Access {
             }
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+impl roll_auth::Grants for Access {
+    fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
+        let g = self.store.get(id).ok()?;
+        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.rules) })
     }
 }
 

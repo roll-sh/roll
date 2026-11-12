@@ -273,6 +273,4 @@ Ranked; the top item is in progress. A watchdog reads this list.
    branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
 4. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
    the public-only client.
-5. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
-   `deploy`.
-6. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+5. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
