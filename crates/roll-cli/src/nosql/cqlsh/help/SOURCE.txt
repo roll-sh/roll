@@ -1,0 +1,19 @@
+
+SOURCE [cqlsh only]
+
+Executes a file containing CQL statements. Gives the output for each
+statement in turn, if any, or any errors that occur along the way.
+
+Errors do NOT abort execution of the CQL source file.
+
+Usage:
+
+  SOURCE '<file>';
+
+That is, the path to the file to be executed must be given inside a
+string literal. The path is interpreted relative to the current working
+directory. The tilde shorthand notation ('~/mydir') is supported for
+referring to $HOME.
+
+See also the --file option to cqlsh.
+

@@ -1,5 +1,3 @@
-"use client";
-
 import { Send } from "lucide-react";
 import { useMemo, useState } from "react";
 import { formatUsd } from "@/lib/roll-api";

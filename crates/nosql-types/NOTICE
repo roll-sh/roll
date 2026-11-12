@@ -1,0 +1,12 @@
+This crate contains code ported from Apache Cassandra (https://cassandra.apache.org/).
+
+Apache Cassandra
+Copyright 2009- The Apache Software Foundation
+
+This product includes software developed by The Apache Software
+Foundation (http://www.apache.org/).
+
+The ported code is used under the Apache License, Version 2.0; a copy is in
+LICENSE-APACHE-CASSANDRA next to this file. Each Rust file that follows a Cassandra source file
+names it (org.apache.cassandra...) in its module documentation, and those files were changed
+from the original: translated to Rust and adapted to roll.

@@ -12,6 +12,9 @@ pub struct Config {
     /// Host and port clients use to reach the proxy (written into connection strings).
     pub public_host: String,
     pub public_port: u16,
+    /// Behind roll cloud's edge: connection strings name `<endpoint>.<domain>` over TLS (the
+    /// server name picks the endpoint) instead of `public_host` and `options=endpoint=`.
+    pub public_domain: Option<String>,
     /// How computes reach this daemon's internal API (WAL for restores and replicas).
     pub internal_url: String,
     /// Shared secret for the internal API.
@@ -58,6 +61,7 @@ impl Config {
             image: "postgres:{v}-alpine".into(),
             default_pg_version: 18,
             public_host: "127.0.0.1".into(),
+            public_domain: None,
             public_port: 55432,
             internal_url: "http://host.docker.internal:7070".into(),
             internal_token: String::new(),

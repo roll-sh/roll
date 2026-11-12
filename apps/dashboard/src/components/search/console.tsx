@@ -1,5 +1,3 @@
-"use client";
-
 import { Play, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { parseConsole, searchApi, type ConsoleResponse, type SearchCluster } from "@/lib/search-api";

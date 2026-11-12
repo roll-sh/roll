@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Docker HEALTHCHECK: healthy once the CQL port accepts connections. rolld opens its listeners
+# only after the database is loaded (and seeded, with ROLL_NOSQL_FROM), so that means ready.
+addr=$(cat /tmp/roll-nosql-cql 2>/dev/null || echo 127.0.0.1:9042)
+exec 3<>"/dev/tcp/${addr%:*}/${addr##*:}"

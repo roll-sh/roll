@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The Java driver suite: DataStax/Apache java-driver 4.x (-Pdatastax) or ScyllaDB's fork
+     (-Pscylla). Both keep the com.datastax.oss.driver API, so one Suite.java serves both. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>sh.roll.nosql</groupId>
+  <artifactId>driver-suite</artifactId>
+  <version>1</version>
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <profiles>
+    <profile>
+      <id>datastax</id>
+      <dependencies>
+        <dependency><groupId>org.apache.cassandra</groupId><artifactId>java-driver-core</artifactId><version>4.19.4</version></dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>scylla</id>
+      <dependencies>
+        <dependency><groupId>com.scylladb</groupId><artifactId>java-driver-core</artifactId><version>4.19.2.3</version></dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+  <dependencies>
+    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-nop</artifactId><version>1.7.36</version></dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution><id>libs</id><phase>package</phase><goals><goal>copy-dependencies</goal></goals>
+            <configuration><outputDirectory>${project.build.directory}/lib</outputDirectory></configuration></execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

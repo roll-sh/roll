@@ -1,6 +1,12 @@
 /** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; streams: crates/stream-broker/src/http; Redis: redis-api.ts). */
 
-export const ROLL_API = process.env.NEXT_PUBLIC_ROLL_API ?? "http://127.0.0.1:7070";
+import { operatorHeaders, requestSignIn } from "./code-token";
+
+/** The API as browsers reach it (`VITE_ROLL_API`, built in), and the server's default. */
+export const ROLL_API = import.meta.env?.VITE_ROLL_API ?? "http://127.0.0.1:7070";
+
+/** rolld as the server reaches it: `ROLL_API_URL` at runtime, else the public address. Server code only. */
+export const serverApi = () => process.env.ROLL_API_URL ?? ROLL_API;
 
 export type EndpointState = "starting" | "running" | "suspended";
 
@@ -60,26 +66,55 @@ export interface Health {
   proxy: string;
 }
 
+/** A product rolld can run; `GET /v1/info` lists the ones this node runs (`ROLL_PRODUCTS`). */
+export type Product = "postgres" | "redis" | "streams" | "tasks" | "storage" | "nosql" | "queues" | "code" | "search";
+
+export interface Info {
+  version: string;
+  node: string;
+  products: Product[];
+}
+
 export interface QueryResult {
   columns: string[];
   rows: (string | null)[][];
   affected: number;
 }
 
+/** Headers for a product's API: the operator token, plus a JSON content type when there's a body. */
+export function apiHeaders(body?: unknown): Record<string, string> | undefined {
+  const headers: Record<string, string> = { ...operatorHeaders() };
+  if (body !== undefined) headers["content-type"] = "application/json";
+  return Object.keys(headers).length ? headers : undefined;
+}
+
+/** A product's API said 401: rolld wants the operator token. */
+export function onApiStatus(status: number) {
+  if (status === 401) requestSignIn();
+}
+
 export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${ROLL_API}${path}`, {
     method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers: apiHeaders(body),
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
   });
+  onApiStatus(res.status);
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`);
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // Not the API (a proxy's error page, say): report the status, not a JSON syntax error.
+    if (res.ok) throw new Error(`${method} ${path}: the response isn't JSON`);
+  }
+  if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
   return data as T;
 }
 
 export const api = {
+  info: () => call<Info>("GET", "/v1/info"),
   health: () => call<Health>("GET", "/v1/health"),
   projects: () => call<Project[]>("GET", "/v1/projects"),
   createProject: (name: string, pg_version?: number) =>

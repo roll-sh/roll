@@ -1,0 +1,379 @@
+> CreateTable {"TableName":"alt_upd_parse","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_parse","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# empty and blank expressions
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression '': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"   "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression '   ': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"\t\n"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression '\t\n': syntax error at char 0"}
+# clause keywords are case-insensitive; whitespace (spaces, tabs, newlines) is ignored
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"set b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"sEt b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"Set b=:v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"  set   b=:v  ","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET\tb\n=\r:v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"remove b"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"ReMoVe b"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"add n :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"Delete s :v","ExpressionAttributeValues":{":v":{"SS":["x"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x"},"n":{"N":"1"}}}
+# keyword not separated by whitespace / glued to the path
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SETb = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SETb = :v': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET b = :vREMOVE c","ExpressionAttributeValues":{":vREMOVE":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET b = :vREMOVE c': syntax error at char 17"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVEb"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVEb': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET b = :v,c = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+# unknown or missing clause keyword
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"HELLO b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'HELLO b = :v': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'b = :v': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"UPDATE b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'UPDATE b = :v': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"ADD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'ADD': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"DELETE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'DELETE': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET REMOVE a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET REMOVE a': syntax error at char 4"}
+# incomplete or malformed actions (syntax error positions)
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a ="}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a =': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = ': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v,","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v,': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET , a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET , a = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v,, b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v,, b = :v': syntax error at char 11"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v b = :v': syntax error at char 11"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v xyz","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v xyz': syntax error at char 11"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v;","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v;': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a == :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a == :v': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a := :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a := :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a,"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE a,': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE a b': syntax error at char 9"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE a = :v': syntax error at char 9"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE :v': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a."}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE a.': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE .a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE .a': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a..b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE a..b': syntax error at char 9"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a. = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a. = :v': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.[0] = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a.[0] = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a[0 = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[0 = :v': syntax error at char 8"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a]0[ = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a]0[ = :v': syntax error at char 5"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.0 = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a.0 = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = b."}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = b.': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v)': syntax error at char 10"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = (:v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = (:v': syntax error at char 8"}
+# repeated clause keywords
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v SET b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v SET b = :v': Each of SET, REMOVE, ADD, DELETE may only appear once in UpdateExpression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v REMOVE c SET b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v REMOVE c SET b = :v': Each of SET, REMOVE, ADD, DELETE may only appear once in UpdateExpression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a REMOVE b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE a REMOVE b': Each of SET, REMOVE, ADD, DELETE may only appear once in UpdateExpression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"set a = :v SET b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'set a = :v SET b = :v': Each of SET, REMOVE, ADD, DELETE may only appear once in UpdateExpression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v SET b = :undefined","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v SET b = :undefined': Each of SET, REMOVE, ADD, DELETE may only appear once in UpdateExpression"}
+# several clauses, no commas between clauses, a comma between clauses is an error
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a SET b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET c = :v REMOVE b","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET c = :v, REMOVE b","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET c = :v, REMOVE b': syntax error at char 12"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE b, SET c = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE b, SET c = :v': syntax error at char 10"}
+> GetItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x"},"c":{"N":"1"},"n":{"N":"1"}}}
+# bare attribute names: alphanumeric and underscore, must start with a letter
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET alnum = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET Alpha_Numeric_123 = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET A123_ = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET _123 = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET _123 = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET _abc = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET _abc = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET 123a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET 123a = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET 123 = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET 123 = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET hi-there = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET hi-there = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET hi$there = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET hi$there = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET \"hithere\" = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET \"hithere\" = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET !hithere = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET !hithere = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET hi there = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET hi there = :v': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET été = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET été = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET aé = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET aé = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a:b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a:b = :v': syntax error at char 5"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a#b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a#b = :v': syntax error at char 5"}
+> GetItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x"},"A123_":{"N":"1"},"Alpha_Numeric_123":{"N":"1"},"alnum":{"N":"1"},"c":{"N":"1"},"n":{"N":"1"}}}
+# #name tokens: any alphanumerics/underscore after #, the target can contain anything
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #Alpha_Numeric_123 = :v","ExpressionAttributeNames":{"#Alpha_Numeric_123":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #123a = :v","ExpressionAttributeNames":{"#123a":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #123 = :v","ExpressionAttributeNames":{"#123":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #_ = :v","ExpressionAttributeNames":{"#_":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #hi-there = :v","ExpressionAttributeNames":{"#hi-there":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET #hi-there = :v': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #!hi = :v","ExpressionAttributeNames":{"#!hi":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET #!hi = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET # = :v","ExpressionAttributeNames":{"#":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET # = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET # = :v","ExpressionAttributeNames":{"#a":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET # = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET ## = :v","ExpressionAttributeNames":{"##":"3can include any character!.#="},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET ## = :v': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#a":""},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a.#b = :v","ExpressionAttributeNames":{"#a":"m","#b":""},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> GetItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x"},"3can include any character!.#=":{"N":"1"},"A123_":{"N":"1"},"Alpha_Numeric_123":{"N":"1"},"alnum":{"N":"1"},"c":{"N":"1"},"n":{"N":"1"}}}
+# :value tokens; :value on the left side; bare ':'
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :Alpha_Numeric_123","ExpressionAttributeValues":{":Alpha_Numeric_123":{"N":"8"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :123a","ExpressionAttributeValues":{":123a":{"N":"8"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :123","ExpressionAttributeValues":{":123":{"N":"8"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :_","ExpressionAttributeValues":{":_":{"N":"8"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :hi!there","ExpressionAttributeValues":{":hi!there":{"N":"12"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :hi!there': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :","ExpressionAttributeValues":{":":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :","ExpressionAttributeValues":{":a":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET :a = :b","ExpressionAttributeValues":{":a":{"N":"1"},":b":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET :a = :b': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE #a","ExpressionAttributeNames":{"#a":"a"}}
+< 200 {}
+# literal constants are not allowed in update expressions
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = 1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = 1': syntax error at char 8"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = 'x'"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = 'x'': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = \"x\""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = \"x\"': syntax error"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = true"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An item can contain only one attribute definition: null"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a[0] = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute a"}
+# reserved words as bare names (DynamoDB forbids them; what does Alternator do?)
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET size = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET name = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET data = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET set = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET set = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET SET = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET SET = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET remove = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET remove = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET add = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET add = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET delete = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET delete = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET value = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET if_not_exists = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET list_append = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET AND = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET AND = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET and = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET and = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET not = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET not = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET between = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET between = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"SET in = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET in = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"REMOVE remove"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE remove': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"UpdateExpression":"REMOVE set, add, delete"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'REMOVE set, add, delete': syntax error at char 7"}
+> GetItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"rw"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"rw"},"data":{"N":"1"},"if_not_exists":{"N":"1"},"list_append":{"N":"1"},"name":{"N":"1"},"size":{"N":"1"},"value":{"N":"1"}}}
+# undefined value / name references
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":w":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':v' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET b = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing, entry ':v' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #n = :v","ExpressionAttributeNames":{"#wrong":"hello"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #n = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing, entry '#n' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = #n","ExpressionAttributeNames":{"#x":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a.#n"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing, entry '#n' required by expression"}
+# unused value / name entries
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"3"},":w":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':w', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#a":"hello","#b":"hi"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#b', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#a":"hello","#b":"hi"},"ExpressionAttributeValues":{":v":{"N":"3"},":w":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#b', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#a":"hello","#b":"hi","#c":"x"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#b', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"3"},":w":{"N":"4"},":x":{"N":"5"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':w', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a","ExpressionAttributeValues":{":w":{"N":"4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':w', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a","ExpressionAttributeNames":{"#w":"w"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#w', not used in UpdateItem"}
+# precedence: undefined vs unused, names vs values, syntax error vs references
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :undefined","ExpressionAttributeNames":{"#a":"a","#b":"b"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':undefined' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #undefined = :v","ExpressionAttributeNames":{"#a":"a"},"ExpressionAttributeValues":{":v":{"N":"1"},":w":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#undefined' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #undefined = :undefined","ExpressionAttributeNames":{"#a":"a"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#undefined' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v SET","ExpressionAttributeNames":{"#a":"a"},"ExpressionAttributeValues":{":w":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = :v SET': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = f(:v)","ExpressionAttributeValues":{":w":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':v' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :u, #n = :v","ExpressionAttributeNames":{},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':u' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :u, b = :w","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':u' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #m = :v, #n = :v","ExpressionAttributeNames":{"#x":"x"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#m' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeNames":{"#b":"b","#a":"a"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#b', not used in UpdateItem"}
+# the first spurious entry in request (JSON) order is reported
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#z":"z","#b":"b","#a":"a"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#z', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":z":{"N":"1"},":v":{"N":"1"},":b":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':z', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v, b = :w","ExpressionAttributeValues":{":w":{"SS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':v' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"SS":[]},":w":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+# empty ExpressionAttributeNames / ExpressionAttributeValues maps
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeNames":{},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a","ExpressionAttributeValues":{}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a","ExpressionAttributeNames":{},"ExpressionAttributeValues":{}}
+< 200 {}
+# malformed entries in ExpressionAttributeNames / ExpressionAttributeValues
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#a":5},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#a' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":5}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":5}'"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"abc"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: abc"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: unknown type X for value {\"X\":\"1\"}"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{}'"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"a","N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":\"a\",\"N\":\"1\"}'"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":"str"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '\"str\"'"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"SS":["a","a"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"NS":["1","1.0"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"NS":["x"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"B":"not base64!"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"NULL":false}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"L":{"a":1}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"M":[1]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{"v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':v' required by expression"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"a":"a","#a":"a"},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious 'a', not used in UpdateItem"}
+# wrong JSON types for the expression parameters
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression must be a string"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression must be a string"}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"x"}},"UpdateExpression":["SET a = :v"],"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression must be a string"}
+# expression length limit (4096 bytes): exactly at the limit, and one over
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"len"}},"UpdateExpression":"SET$repeat( ,4085)a = :val","ExpressionAttributeValues":{":val":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"len"}},"UpdateExpression":"SET $repeat( ,4085)a = :val","ExpressionAttributeValues":{":val":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression expression size 4097 exceeds allowed maximum 4096."}
+> GetItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"len"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"len"},"a":{"N":"1"}}}
+# very many actions in one expression
+> UpdateItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"many"}},"UpdateExpression":"SET a0 = :v, a1 = :v, a2 = :v, a3 = :v, a4 = :v, a5 = :v, a6 = :v, a7 = :v, a8 = :v, a9 = :v, a10 = :v, a11 = :v, a12 = :v, a13 = :v, a14 = :v, a15 = :v, a16 = :v, a17 = :v, a18 = :v, a19 = :v, a20 = :v, a21 = :v, a22 = :v, a23 = :v, a24 = :v, a25 = :v, a26 = :v, a27 = :v, a28 = :v, a29 = :v, a30 = :v, a31 = :v, a32 = :v, a33 = :v, a34 = :v, a35 = :v, a36 = :v, a37 = :v, a38 = :v, a39 = :v, a40 = :v, a41 = :v, a42 = :v, a43 = :v, a44 = :v, a45 = :v, a46 = :v, a47 = :v, a48 = :v, a49 = :v, a50 = :v, a51 = :v, a52 = :v, a53 = :v, a54 = :v, a55 = :v, a56 = :v, a57 = :v, a58 = :v, a59 = :v, a60 = :v, a61 = :v, a62 = :v, a63 = :v, a64 = :v, a65 = :v, a66 = :v, a67 = :v, a68 = :v, a69 = :v, a70 = :v, a71 = :v, a72 = :v, a73 = :v, a74 = :v, a75 = :v, a76 = :v, a77 = :v, a78 = :v, a79 = :v, a80 = :v, a81 = :v, a82 = :v, a83 = :v, a84 = :v, a85 = :v, a86 = :v, a87 = :v, a88 = :v, a89 = :v, a90 = :v, a91 = :v, a92 = :v, a93 = :v, a94 = :v, a95 = :v, a96 = :v, a97 = :v, a98 = :v, a99 = :v, a100 = :v, a101 = :v, a102 = :v, a103 = :v, a104 = :v, a105 = :v, a106 = :v, a107 = :v, a108 = :v, a109 = :v, a110 = :v, a111 = :v, a112 = :v, a113 = :v, a114 = :v, a115 = :v, a116 = :v, a117 = :v, a118 = :v, a119 = :v, a120 = :v, a121 = :v, a122 = :v, a123 = :v, a124 = :v, a125 = :v, a126 = :v, a127 = :v, a128 = :v, a129 = :v, a130 = :v, a131 = :v, a132 = :v, a133 = :v, a134 = :v, a135 = :v, a136 = :v, a137 = :v, a138 = :v, a139 = :v, a140 = :v, a141 = :v, a142 = :v, a143 = :v, a144 = :v, a145 = :v, a146 = :v, a147 = :v, a148 = :v, a149 = :v, a150 = :v, a151 = :v, a152 = :v, a153 = :v, a154 = :v, a155 = :v, a156 = :v, a157 = :v, a158 = :v, a159 = :v, a160 = :v, a161 = :v, a162 = :v, a163 = :v, a164 = :v, a165 = :v, a166 = :v, a167 = :v, a168 = :v, a169 = :v, a170 = :v, a171 = :v, a172 = :v, a173 = :v, a174 = :v, a175 = :v, a176 = :v, a177 = :v, a178 = :v, a179 = :v, a180 = :v, a181 = :v, a182 = :v, a183 = :v, a184 = :v, a185 = :v, a186 = :v, a187 = :v, a188 = :v, a189 = :v, a190 = :v, a191 = :v, a192 = :v, a193 = :v, a194 = :v, a195 = :v, a196 = :v, a197 = :v, a198 = :v, a199 = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_parse","Key":{"p":{"S":"many"}},"ConsistentRead":true,"ProjectionExpression":"a0, a199"}
+< 200 {"Item":{"a0":{"N":"1"},"a199":{"N":"1"}}}
+> DeleteTable {"TableName":"alt_upd_parse"}
+< 200 {"TableDescription":{"TableName":"alt_upd_parse","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_parse:scylla:table/alt_upd_parse","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

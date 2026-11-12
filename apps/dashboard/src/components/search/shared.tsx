@@ -1,5 +1,3 @@
-"use client";
-
 import { KeyRound } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {

@@ -1,0 +1,269 @@
+# Setup: item a=1, b='x', plus attributes named like reserved words
+> CreateTable {"TableName":"alt_cond_sy_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_sy_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}}}
+< 200 {}
+# Syntax errors: exact messages (with and without a char position)
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":" "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression ' ': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a': Single value must be a function"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a ="}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a =': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"= :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression '= :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v :v': syntax error at char 7"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v AND","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v AND': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"AND a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'AND a = :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v OR OR a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v OR OR a = :v': syntax error at char 10"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a < = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a => :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a => :v': syntax error at char 3"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a =< :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a =< :v': syntax error at char 3"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a ! :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a ! :v': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = 'x'"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = 'x'': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = 1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = 1': syntax error at char 4"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = \"x\""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = \"x\"': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v;","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v;': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = #"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = #': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":":v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression ':v': Single value must be a function"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'attribute_exists': Single value must be a function"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists("}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'attribute_exists(': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'attribute_exists(a': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a.b. = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a.b. = :v': syntax error at char 5"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a[x] = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a[x] = :v': syntax error at char 2"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v-1","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v-1': syntax error at char 6"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"ä = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'ä = :v': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"_a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression '_a = :v': syntax error"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"1a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression '1a = :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v :v :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v :v :v': syntax error at char 7"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v AND (b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v AND (b = :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a.#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing, entry '#n' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a. b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v\u0000","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"NOT"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'NOT': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a NOT = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a NOT = :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = NOT :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = NOT :v': syntax error at char 4"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a BETWEEN"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a BETWEEN': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":":v BETWEEN :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression ':v BETWEEN :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a IN"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a IN': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"("}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression '(': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":")"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression ')': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v,","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = :v,': syntax error at char 6"}
+# Valid but unusual tokens: names with digits/underscores, keywords and function names as attribute names
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a_1 = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"A = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"name = :v","ExpressionAttributeValues":{":v":{"S":"n"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"size = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"and = :v","ExpressionAttributeValues":{":v":{"S":"kw"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'and = :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"between = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'between = :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"in = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'in = :v': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"not = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'not = :v': syntax error at char 4"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"S":"kw"}},"ExpressionAttributeNames":{"#n":"and"}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"x.y = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#n":"x.y"}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"  a = :v  ","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a=:v AND(b=:w)","ExpressionAttributeValues":{":v":{"N":"1"},":w":{"S":"x"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v_1","ExpressionAttributeValues":{":v_1":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :V","ExpressionAttributeValues":{":V":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#A_1 = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#A_1":"a"}}
+< 200 {}
+# ExpressionAttributeValues: missing entry, unused entry (condition true / false / short-circuited), empty map
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :w","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':w' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"},":unused":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':unused', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"},":unused":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':unused', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v OR a = :w","ExpressionAttributeValues":{":v":{"N":"1"},":w":{"N":"2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v AND a = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':v' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(a)","ExpressionAttributeValues":{}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(a)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':v', not used in PutItem"}
+# ExpressionAttributeNames: missing entry, unused entry, empty map, non-string value, empty name
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#m":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#n":"a","#unused":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#unused', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ExpressionAttributeNames":{"#n":"a","#unused":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#unused', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(a)","ExpressionAttributeNames":{}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(a)","ExpressionAttributeNames":{"#n":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#n', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#n":5}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#n":""}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#n":null}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+# Which error wins: missing name vs missing value vs unused entries vs syntax
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :w","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#m":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"},":u":{"N":"1"}},"ExpressionAttributeNames":{"#n":"a","#u":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#u', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"},":u":{"N":"1"}},"ExpressionAttributeNames":{"#u":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#u', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = = :w","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"#u":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = = :w': syntax error at char 4"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :w"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing, entry '#n' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"size(:v) = :w","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':w' required by expression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"X":"1"},":u":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: unknown type X for value {\"X\":\"1\"}"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_type(a, :t)","ExpressionAttributeValues":{":t":{"S":"DOG"},":u":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':u', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a BETWEEN :x AND :y","ExpressionAttributeValues":{":x":{"N":"2"},":y":{"N":"1"},":u":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':u', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a BETWEEN :x AND :y","ExpressionAttributeValues":{":x":{"N":"2"},":y":{"N":"1"}},"ExpressionAttributeNames":{"#u":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#u', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a < :v AND attribute_type(a, :t)","ExpressionAttributeValues":{":v":{"L":[]},":t":{"S":"DOG"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"LT operator allow only the types String, Number, or Binary"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_type(a, :t) AND a < :v","ExpressionAttributeValues":{":v":{"L":[]},":t":{"S":"DOG"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: attribute_types()'s second parameter, \"DOG\", is not a known type"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"dog(a) AND a < :v","ExpressionAttributeValues":{":v":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: unknown function 'dog' called."}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a < :v AND dog(a)","ExpressionAttributeValues":{":v":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"LT operator allow only the types String, Number, or Binary"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(:v) AND dog(a)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: attribute_exists()'s parameter must be a path"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"dog(a) AND attribute_exists(:v)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: unknown function 'dog' called."}
+# ExpressionAttributeValues entries that are not valid attribute values
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":5}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '5'"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":1}'"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"X":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: unknown type X for value {\"X\":\"a\"}"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{}'"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"S":"a","N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":\"a\",\"N\":\"1\"}'"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"SS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"NS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"abc"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"B":"!!"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"BOOL":"true"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"NULL":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"SS":["a","a"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"L":[{"N":"x"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"M":5}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"L":5}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"NS":["x"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"SS":[1]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"S":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":null}'"}
+# Invalid number value in an ordering comparison and in arithmetic-free functions
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a < :v","ExpressionAttributeValues":{":v":{"N":"abc"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: abc"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a BETWEEN :v AND :w","ExpressionAttributeValues":{":v":{"N":"abc"},":w":{"N":"5"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: abc"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"contains(b, :v)","ExpressionAttributeValues":{":v":{"N":"abc"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# Key forms in the maps: value key without ':', name key without '#'
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{"v":{"N":"1"},":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious 'v', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"#n = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ExpressionAttributeNames":{"n":"a","#n":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious 'n', not used in PutItem"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":":{"N":"1"},":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':', not used in PutItem"}
+# ConditionExpression of the wrong JSON type, empty, whitespace-only; expression size limit 4096
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must be a string"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must be a string"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must be a string"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must not be empty"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must not be empty"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(a)$repeat( ,4077)"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ConditionExpression":"attribute_exists(a)$repeat( ,4078)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression expression size 4097 exceeds allowed maximum 4096."}
+# ExpressionAttributeValues with a bad entry when the expression is empty / missing
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ExpressionAttributeValues":{":v":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues cannot be used without ConditionExpression"}
+> PutItem {"TableName":"alt_cond_sy_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"S":"x"},"name":{"S":"n"},"and":{"S":"kw"},"x.y":{"N":"1"},"m":{"M":{"q":{"N":"1"}}}},"ExpressionAttributeNames":{"#n":5}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames cannot be used without ConditionExpression"}
+> DeleteTable {"TableName":"alt_cond_sy_s"}
+< 200 {"TableDescription":{"TableName":"alt_cond_sy_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_sy_s:scylla:table/alt_cond_sy_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

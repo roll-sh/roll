@@ -1,5 +1,3 @@
-"use client";
-
 import { Ban, RotateCcw, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import {

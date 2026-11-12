@@ -1,0 +1,25 @@
+[package]
+name = "code-git"
+description = "git wire protocol for roll code: pkt-line, packs, smart HTTP server and client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+futures.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+sha1.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

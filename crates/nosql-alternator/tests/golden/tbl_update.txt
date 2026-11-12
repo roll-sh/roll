@@ -1,0 +1,182 @@
+# UpdateTable request validation without a table
+> UpdateTable {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> UpdateTable {"TableName":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> UpdateTable {"TableName":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> UpdateTable {"TableName":"a@bc"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> UpdateTable []
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> UpdateTable {"TableName":"alt_tbl_up_missing"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_up_missing not found"}
+> UpdateTable {"TableName":"alt_tbl_up_missing","BillingMode":"PAY_PER_REQUEST"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_up_missing not found"}
+> UpdateTable {"TableName":"alt_tbl_up_missing","BillingMode":"bad"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> UpdateTable {"TableName":"alt_tbl_up_missing","GlobalSecondaryIndexUpdates":[{"Delete":{"IndexName":"gsi"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_up_missing not found"}
+> CreateTable {"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# nothing to update
+> UpdateTable {"TableName":"alt_tbl_up"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","GlobalSecondaryIndexUpdates":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","Foo":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+# BillingMode
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}]}}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"bad"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for attribute BillingMode, got: {\"TableName\":\"alt_tbl_up\",\"BillingMode\":5}"}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PROVISIONED"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"When BillingMode=PROVISIONED, ProvisionedThroughput must be specified."}
+> UpdateTable {"TableName":"alt_tbl_up","ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":2}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":2}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PROVISIONED","ProvisionedThroughput":{"ReadCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PROVISIONED","ProvisionedThroughput":{"ReadCapacityUnits":"1","WriteCapacityUnits":2}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PROVISIONED","ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":2}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}]}}
+> UpdateTable {"TableName":"alt_tbl_up","ProvisionedThroughput":{"ReadCapacityUnits":5,"WriteCapacityUnits":6}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}]}}
+> UpdateTable {"TableName":"alt_tbl_up","ProvisionedThroughput":{"ReadCapacityUnits":5}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","ProvisionedThroughput":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PROVISIONED"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"When BillingMode=PROVISIONED, ProvisionedThroughput must be specified."}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}]}}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}]}}
+# StreamSpecification: enable, re-enable, change view type, disable, disable again
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table has no stream to disable: TableName: alt_tbl_up"}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":true}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table already has an enabled stream: TableName: alt_tbl_up"}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table already has an enabled stream: TableName: alt_tbl_up"}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":false}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*"}}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Table has no stream to disable: TableName: alt_tbl_up"}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":false}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"NEW_AND_OLD_IMAGES"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*"}}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"StreamSpecification needs boolean StreamEnabled"}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"BAD"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamViewType : \"BAD\""}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","StreamSpecification":{"StreamEnabled":"yes"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"StreamSpecification needs boolean StreamEnabled"}
+# other UpdateTable parameters
+> UpdateTable {"TableName":"alt_tbl_up","SSESpecification":{"Enabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"SSESpecification not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","SSESpecification":{"Enabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"SSESpecification not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","SSESpecification":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"SSESpecification not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","TableClass":"STANDARD_INFREQUENT_ACCESS"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","TableClass":"bad"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","DeletionProtectionEnabled":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","DeletionProtectionEnabled":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","OnDemandThroughput":{"MaxReadRequestUnits":5}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","WarmThroughput":{"ReadUnitsPerSecond":12240,"WriteUnitsPerSecond":4080}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+> UpdateTable {"TableName":"alt_tbl_up","WarmThroughput":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","WarmThroughput":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","ReplicaUpdates":[{"Create":{"RegionName":"us-west-2"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ReplicaUpdates not supported"}
+> UpdateTable {"TableName":"alt_tbl_up","AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","AttributeDefinitions":[{"AttributeName":"z","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_tbl_up","AttributeDefinitions":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+# combinations
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"PROVISIONED","ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":1},"StreamSpecification":{"StreamEnabled":false}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProvisionedThroughput not supported"}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 200 {"Table":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"bad","StreamSpecification":{"StreamEnabled":"x"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> UpdateTable {"TableName":"alt_tbl_up","BillingMode":"bad","GlobalSecondaryIndexUpdates":[{}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> UpdateTable {"TableName":"alt_tbl_up_missing","StreamSpecification":{"StreamEnabled":"x"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_up_missing not found"}
+# DeleteTable / DescribeTable errors
+> DeleteTable {"TableName":"alt_tbl_up"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}}
+> DeleteTable {"TableName":"alt_tbl_up"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_up not found"}
+> DescribeTable {"TableName":"alt_tbl_up"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_up not found"}
+> DeleteTable {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> DeleteTable {"TableName":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> DeleteTable {"TableName":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> DeleteTable {"TableName":"a b c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> DescribeTable {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> DescribeTable {"TableName":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> DescribeTable {"TableName":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> DescribeTable {"TableName":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> DescribeTable {"TableName":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> DescribeTable {"TableName":"a b c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> DescribeTable x
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 0"}
+# operation names: unknown, missing target, wrong prefix are covered elsewhere; table name case sensitivity
+> CreateTable {"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"ALT_TBL_UP"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: ALT_TBL_UP not found"}
+> DeleteTable {"TableName":"alt_tbl_up"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_up","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_up:scylla:table/alt_tbl_up","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

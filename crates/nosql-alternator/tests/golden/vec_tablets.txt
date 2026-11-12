@@ -1,0 +1,241 @@
+# default (tablets_mode_for_new_keyspaces=enabled): tablets with initial_tablets 0
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"0"}}]}
+> Query {"TableName":".scylla.alternator.system_schema.keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"durable_writes":{"BOOL":"true"},"replication":{"S":"({class : org.apache.cassandra.locator.NetworkTopologyStrategy}, {datacenter1 : 1})"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# system:initial_tablets values: integers (parsed like strtol, negative -> 0, truncated to 32 bits) mean tablets; anything else means vnodes (no scylla_keyspaces row)
+# value '0'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"0"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '4'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"4"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"4"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"4"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '-1'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"-1"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"-1"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"0"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '-5'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"-5"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"-5"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"0"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value ' 5'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":" 5"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":" 5"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"5"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '+3'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"+3"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"+3"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"3"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '07'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"07"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"07"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"7"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '1e3'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"1e3"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"1e3"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"1"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '3.7'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"3.7"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"3.7"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"3"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '5abc'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"5abc"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"5abc"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"5"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '0x10'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0x10"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0x10"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"0"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '99999999999'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"99999999999"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"99999999999"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"1215752191"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '2147483648'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"2147483648"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"2147483648"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"-2147483648"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '4294967296'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"4294967296"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"4294967296"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"0"}}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '99999999999999999999'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"99999999999999999999"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"99999999999999999999"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value '-99999999999999999999'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"-99999999999999999999"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"-99999999999999999999"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value 'abc'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"abc"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"abc"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value ''
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":""}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":""}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value 'none'
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# value ' '
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":" "}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":" "}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# the tag is kept as a normal visible tag and can be changed later (no effect)
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"},{"Key":"k","Value":"v"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"},{"Key":"k","Value":"v"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb"}
+< 200 {"Tags":[{"Key":"k","Value":"v"},{"Key":"system:initial_tablets","Value":"none"}]}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","Tags":[{"Key":"system:initial_tablets","Value":"0"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","Tags":[{"Key":"system:initial_tablets","Value":"bogus"}]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb"}
+< 200 {"Tags":[{"Key":"k","Value":"v"},{"Key":"system:initial_tablets","Value":"bogus"}]}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TagKeys":["system:initial_tablets"]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb"}
+< 200 {"Tags":[{"Key":"k","Value":"v"}]}
+# vnodes tables support streams and LWT but not vector indexes
+> UpdateTable {"TableName":"alt_vec_tb","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"}}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*"}}
+> PutItem {"TableName":"alt_vec_tb","Item":{"p":{"S":"a"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 200 {}
+> PutItem {"TableName":"alt_vec_tb","Item":{"p":{"S":"a"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateTable {"TableName":"alt_vec_tb","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":2}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector indexes are not supported on tables using vnodes."}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_IMAGE"}}}
+# the pre-2025 tag name experimental:initial_tablets is now just an ordinary tag
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"experimental:initial_tablets","Value":"none"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"experimental:initial_tablets","Value":"none"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> Query {"TableName":".scylla.alternator.system_schema.scylla_keyspaces","KeyConditionExpression":"keyspace_name = :k","ExpressionAttributeValues":{":k":{"S":"alternator_alt_vec_tb"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"keyspace_name":{"S":"alternator_alt_vec_tb"},"initial_tablets":{"S":"0"}}]}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb"}
+< 200 {"Tags":[{"Key":"experimental:initial_tablets","Value":"none"}]}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# tablets table with every write isolation mode (LWT on tablets works)
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"always_use_lwt"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"always_use_lwt"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_vec_tb","Item":{"p":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"attribute_exists(p)","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"hello"},"a":{"N":"1"}}}
+> GetItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"hello"},"a":{"N":"1"}}}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"only_rmw_uses_lwt"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"only_rmw_uses_lwt"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_vec_tb","Item":{"p":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"attribute_exists(p)","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"hello"},"a":{"N":"1"}}}
+> GetItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"hello"},"a":{"N":"1"}}}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"unsafe_rmw"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"unsafe_rmw"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_vec_tb","Item":{"p":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"attribute_exists(p)","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"hello"},"a":{"N":"1"}}}
+> GetItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"hello"},"a":{"N":"1"}}}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"forbid_rmw"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"0"},{"Key":"system:write_isolation","Value":"forbid_rmw"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_vec_tb","Item":{"p":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"attribute_exists(p)","ReturnValues":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> GetItem {"TableName":"alt_vec_tb","Key":{"p":{"S":"hello"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"hello"}}}
+> DeleteTable {"TableName":"alt_vec_tb"}
+< 200 {"TableDescription":{"TableName":"alt_vec_tb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_tb:scylla:table/alt_vec_tb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# invalid tag combos at CreateTable: which error wins
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"},{"Key":"system:write_isolation","Value":"bad"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag bad. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"}],"VectorIndexes":[{"IndexName":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexes IndexName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"},{"Key":"system:write_isolation","Value":"bad"}],"VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":2}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag bad. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:other","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:other' is reserved for internal use"}
+> CreateTable {"TableName":"alt_vec_tb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"}],"VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":2}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector indexes are not supported on tables using vnodes."}
+> DescribeTable {"TableName":"alt_vec_tb"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_vec_tb not found"}

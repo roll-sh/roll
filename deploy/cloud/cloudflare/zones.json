@@ -1,0 +1,61 @@
+{
+  "$comment": [
+    "roll cloud's Cloudflare zones: records, zone settings and Worker routes (docs/cloud/README.md, 'Hostnames').",
+    "Apply with: node deploy/cloud/cloudflare/apply.mjs [--dry-run] --stack roll-cloud (deploy/cloud/README.md).",
+    "{region} in a name, content or the comment is `region` below. A second region is a copy of this file with another region, its own stack, and only the regional records (the global ones, without {region}, stay in this file).",
+    "Records apply.mjs creates carry `comment` (it names the region, so two regions' files never touch each other's records); it only ever changes or deletes those. Any other record in the way is a conflict: reported, never overwritten.",
+    "type 'origin' is the region's NLB: a CNAME to its DNS name, or one A record per Elastic IP.",
+    "*.roll.site also covers chg-<id>.roll.site (previews): the CDN Worker hands chg-* hosts to the origin untouched (ROLL_PASS_HOSTS in apps/cdn-worker/wrangler.toml). Every other <bucket>.roll.site is the bucket (ROLL_BUCKET_DOMAIN), and roll.site itself serves buckets by path (roll.site/<bucket>/<key>); bucket names starting chg- are reserved.",
+    "s3.{region}.roll.site and *.s3.{region}.roll.site are DNS only, so the Worker never runs there (a more specific record wins over the wildcard)."
+  ],
+  "region": "us-east-1",
+  "comment": "managed by roll: deploy/cloud/cloudflare ({region})",
+  "zones": {
+    "roll.sh": {
+      "settings": {
+        "ssl": "strict",
+        "always_use_https": "on",
+        "min_tls_version": "1.2",
+        "tls_1_3": "on",
+        "tls_client_auth": "on",
+        "security_header": {
+          "strict_transport_security": {
+            "enabled": true,
+            "max_age": 31536000,
+            "include_subdomains": false,
+            "preload": false,
+            "nosniff": true
+          }
+        }
+      },
+      "records": [
+        { "name": "origin.{region}.roll.sh", "type": "origin" },
+        { "name": "roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": true },
+        { "name": "api.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": true },
+        { "name": "git.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.pg.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.redis.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.kafka.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.nosql.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.mq.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "tasks.{region}.roll.sh", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false }
+      ]
+    },
+    "roll.site": {
+      "settings": {
+        "ssl": "strict",
+        "always_use_https": "on",
+        "min_tls_version": "1.2",
+        "tls_1_3": "on",
+        "tls_client_auth": "on"
+      },
+      "records": [
+        { "name": "s3.{region}.roll.site", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.s3.{region}.roll.site", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": false },
+        { "name": "*.roll.site", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": true },
+        { "name": "roll.site", "type": "CNAME", "content": "origin.{region}.roll.sh", "proxied": true }
+      ],
+      "workerRoutes": [{ "pattern": "*.roll.site/*", "script": "roll-cdn" }, { "pattern": "roll.site/*", "script": "roll-cdn" }]
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{"native_thread":"01a0d5ee-87e4-7461-9ab7-5c316b503107"}
+{"model":"gpt-6-luna"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":"I"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":"’ll"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" check"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" current"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" ticket"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" pricing"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" sources"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" on"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" the"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" web"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":","}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" then"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" return"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" the"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" exact"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" requested"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":" phrase"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","text":"."}}
+{"item":{"body":{"text":"I’ll check current ticket pricing sources on the web, then return the exact requested phrase.","type":"message"},"id":"msg_03bceefdcc0be4af016ab5be1abc7887d09187d9bc35241854","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"query":""},"kind":"web","name":"webSearch","title":"Web search","type":"tool"},"id":"exec-f0a0c7db-02b9-449e-9981-9d588f7509ad","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"queries":null,"query":"FIFA World Cup 2026 ticket prices official","type":"search"},"kind":"web","name":"webSearch","title":"FIFA World Cup 2026 ticket prices official","type":"tool"},"id":"exec-f0a0c7db-02b9-449e-9981-9d588f7509ad","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":21248,"input_tokens":21428,"output_tokens":71}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21499,"used_tokens":21499}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":"web"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":" search"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":" fixture"}}
+{"text_delta":{"item":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","text":" complete"}}
+{"item":{"body":{"text":"web search fixture complete","type":"message"},"id":"msg_03bceefdcc0be4af016ab5be1f494887d080c69010f9873eec","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":42496,"input_tokens":46848,"output_tokens":79}}
+{"context":{"max_tokens":258400,"total_processed_tokens":46927,"used_tokens":25428}}
+{"turn_ref":"01a0d5ee-8888-7d30-8f2b-68fe28f521bc"}
+{"turn_ended":"completed"}
+{"exited":null}

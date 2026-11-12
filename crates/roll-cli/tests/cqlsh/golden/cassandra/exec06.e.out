@@ -1,0 +1,15 @@
+
+ k | v
+---+-----
+ 1 | one
+
+(1 rows)
+EXPAND set to ON
+
+@ Row 1
+---+-----
+ k | 1
+ v | one
+
+
+(1 rows)

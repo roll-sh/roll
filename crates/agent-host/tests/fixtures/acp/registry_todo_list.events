@@ -1,0 +1,22 @@
+{"native_thread":"grok-replay-session-1"}
+{"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"I'll track the three steps and inspect both files."}}
+{"item":{"body":{"text":"I'll track the three steps and inspect both files.","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"items":[{"status":"in_progress","text":"Inspect package.json"},{"status":"pending","text":"Inspect tsconfig.json"},{"status":"pending","text":"Report completion"}],"type":"todos"},"id":"plan:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"I'll track the three steps and inspect both files.","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"path":"package.json"},"kind":"read","name":"read","title":"Read package.json","type":"tool"},"id":"read-package","parent":null,"status":"running"}}
+{"output_delta":{"item":"read-package","text":"{\"name\":\"t3\"}"}}
+{"item":{"body":{"input":{"path":"package.json"},"kind":"read","name":"read","output":"{\"name\":\"t3\"}","title":"Read package.json","type":"tool"},"id":"read-package","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"path":"tsconfig.json"},"kind":"read","name":"read","title":"Read tsconfig.json","type":"tool"},"id":"read-tsconfig","parent":null,"status":"running"}}
+{"output_delta":{"item":"read-tsconfig","text":"{\"compilerOptions\":{}}"}}
+{"item":{"body":{"input":{"path":"tsconfig.json"},"kind":"read","name":"read","output":"{\"compilerOptions\":{}}","title":"Read tsconfig.json","type":"tool"},"id":"read-tsconfig","parent":null,"status":"completed"}}
+{"item":{"body":{"items":[{"status":"completed","text":"Inspect package.json"},{"status":"completed","text":"Inspect tsconfig.json"},{"status":"completed","text":"Report completion"}],"type":"todos"},"id":"plan:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:2","text":"todo list fixture complete"}}
+{"item":{"body":{"text":"todo list fixture complete","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"item":{"body":{"text":"todo list fixture complete","type":"message"},"id":"msg:1:2","parent":null,"status":"completed"}}
+{"item":{"body":{"items":[{"status":"completed","text":"Inspect package.json"},{"status":"completed","text":"Inspect tsconfig.json"},{"status":"completed","text":"Report completion"}],"type":"todos"},"id":"plan:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

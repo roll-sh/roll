@@ -825,6 +825,8 @@ pub static PARAMS: &[Param] = &[
     signed("cluster-announce-bus-port", None, MODIFIABLE, 0, 65535, 0, INTEGER),
     signed("cluster-announce-port", None, MODIFIABLE, 0, 65535, 0, INTEGER),
     signed("cluster-announce-tls-port", None, MODIFIABLE, 0, 65535, 0, INTEGER),
+    signed("repl-compression", None, IMMUTABLE, 0, INT_MAX, 0, INTEGER),
+    signed("repl-compression-max-latency", None, MODIFIABLE, 0, INT_MAX, 100, INTEGER),
     signed("repl-timeout", None, MODIFIABLE, 1, INT_MAX, 60, INTEGER),
     signed("repl-ping-replica-period", Some("repl-ping-slave-period"), MODIFIABLE, 1, INT_MAX, 10, INTEGER),
     at!(signed("list-compress-depth", None, DEBUG | MODIFIABLE, 0, INT_MAX, 0, INTEGER), n!(list_compress_depth)),
@@ -1630,8 +1632,8 @@ impl ConfigDict {
                 load(&mut d, &mut module);
                 if section.starts_with("the core") {
                     // `dictExpand(configs, sizeof(static_configs) / sizeof(standardConfig))`: the
-                    // 217 entries of this build and the terminator.
-                    d.expand(218);
+                    // 219 entries of this build and the terminator.
+                    d.expand(220);
                 } else {
                     in_core = false;
                 }
@@ -1831,7 +1833,7 @@ mod tests {
     fn config_dict_holds_every_config_once() {
         let d = ConfigDict::default();
         let keys = d.dict().keys();
-        assert_eq!(keys.len(), 316);
+        assert_eq!(keys.len(), 318);
         for k in &keys {
             assert!(find(std::str::from_utf8(k).unwrap()).is_some(), "{}", String::from_utf8_lossy(k));
         }

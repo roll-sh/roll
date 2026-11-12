@@ -1,0 +1,17 @@
+
+EXPAND [cqlsh]
+
+  Enables or disables expanded (vertical) output.
+
+EXPAND ON
+
+  Enables expanded (vertical) output.
+
+EXPAND OFF
+
+  Disables expanded (vertical) output.
+
+EXPAND
+
+  EXPAND with no arguments shows the current value of expand setting.
+

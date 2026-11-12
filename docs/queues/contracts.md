@@ -79,7 +79,8 @@ Use `mq_core::AmqpError` codes and RabbitMQ's exact texts where clients or tests
 
 ## roll API (`/v1/queues`, served by `mq-control` on the rolld API port)
 
-No auth (like the rest of the local rolld API). JSON. Errors: `{"error": "..."}` with 4xx/5xx.
+The operator token (`Authorization: Bearer $ROLL_ADMIN_TOKEN`) when rolld has one; open on a
+loopback daemon without one (docs/cloud/README.md "Security"). JSON. Errors: `{"error": "..."}` with 4xx/5xx.
 `{vhost}` is URL-encoded (`%2F` for `/`).
 
 ```
@@ -91,7 +92,9 @@ GET    /v1/queues/usage?days=30                 → Usage                       
 GET    /v1/queues/vhosts                        → VHost[]
 POST   /v1/queues/vhosts                        { name, description?, default_queue_type?, credentials?, user? } → VHost & { credentials? }
        (credentials: true or user: also creates a user with rights on this vhost only, and returns
-        { user, password, urls: { amqp, amqps, stream, stomp, mqtt, http, management } }; null for disabled listeners)
+        { user, password, urls: { amqp, amqps, stream, stomp, mqtt, http, management } }; null for disabled listeners;
+        behind roll cloud's edge they name the vhost's host, `<label>.mq.<region>.<domain>`, over TLS
+        (amqps, mqtts, stomp+ssl, rabbitmq-stream+tls, https) and amqp and management are null)
 POST   /v1/queues/vhosts/{vhost}/credentials    { user? } → { user, password, urls }   (issue or rotate; 409 for a user with other vhosts)
 DELETE /v1/queues/vhosts/{vhost}
 POST   /v1/queues/vhosts/{vhost}/suspend        (scale to zero now)    POST .../wake
@@ -158,7 +161,7 @@ Types (TypeScript notation; numbers are JSON numbers, times are unix seconds unl
 ```ts
 interface Overview {
   version: string; node: string; cluster_name: string; uptime_s: number;
-  endpoints: { amqp?: string; amqps?: string; mqtt?: string; stomp?: string; stream?: string; http?: string; management?: string };
+  endpoints: { amqp?: string; amqps?: string; mqtt?: string; stomp?: string; stream?: string; http?: string; management?: string };  // the default vhost's
   totals: { vhosts: number; sleeping_vhosts: number; connections: number; channels: number; exchanges: number; queues: number; consumers: number;
             messages_ready: number; messages_unacked: number; stored_bytes: number };   // sleeping vhosts count with their last-known totals
   rates: { publish: number; deliver: number; ack: number };            // msg/s, last 5s window
@@ -168,7 +171,8 @@ interface RatePoint { t: number; publish: number; deliver: number; ack: number; 
 interface VHost { name: string; description: string; default_queue_type: string; state: "running" | "sleeping";
   sleeping: boolean;    // scaled to zero: queues, messages and bytes are its last-known totals (kept on disk)
   connections: number; queues: number; messages_ready: number; messages_unacked: number; stored_bytes: number;
-  rates: { publish: number; deliver: number }; limits: Record<string, number>; amqp_url: string }
+  rates: { publish: number; deliver: number }; limits: Record<string, number>;
+  amqp_url: string }    // the admin user's; amqps:// behind the edge
 interface Queue { name: string; vhost: string; type: "classic" | "quorum" | "stream"; durable: boolean; auto_delete: boolean;
   exclusive: boolean; arguments: Record<string, unknown>; policy: string | null; state: "running";
   messages_ready: number; messages_unacked: number; messages: number; consumers: number; bytes: number;

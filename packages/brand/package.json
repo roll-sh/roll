@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./geometry": "./src/geometry.ts",
     "./tokens": "./src/tokens.ts"
   },
   "scripts": {

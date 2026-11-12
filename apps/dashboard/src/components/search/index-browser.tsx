@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Columns3, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, X } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";

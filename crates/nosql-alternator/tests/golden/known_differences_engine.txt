@@ -1,0 +1,7 @@
+# Golden responses the engine backend does not reproduce: what ScyllaDB orders by a hash we
+# can't derive. tests/golden.rs reports them separately; a listed response that starts matching
+# fails the test (remove it here).
+#
+# map-order: ScyllaDB's internal-table rows print a vector index's `options` map in its own hash
+#   order (`dimensions, similarity_function, target, class_name`); CQL and roll print it sorted.
+map-order vec_system_tables.txt:15

@@ -1,5 +1,3 @@
-"use client";
-
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { esJson, type SearchCluster } from "@/lib/search-api";
 import { applyCompletion, complete, mappingFields, type Completion, type FieldInfo } from "@/lib/search-console";

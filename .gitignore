@@ -5,6 +5,7 @@ out
 dist
 build
 coverage
+.test-build
 .turbo
 .vercel
 *.tsbuildinfo
@@ -29,3 +30,6 @@ next-env.d.ts
 .idea
 .vscode/*
 !.vscode/extensions.json
+# Public CA certificates the code bundles (not secrets).
+!crates/roll-edge/src/cloudflare-origin-pull-ca.pem
+__pycache__/

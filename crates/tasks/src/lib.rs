@@ -15,6 +15,8 @@ pub mod cost;
 pub mod dispatch;
 pub mod engine;
 pub mod expr;
+#[cfg(feature = "fleet")]
+pub mod fleet;
 pub mod flow;
 pub mod ids;
 pub mod model;

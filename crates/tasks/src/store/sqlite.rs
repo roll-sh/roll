@@ -250,14 +250,16 @@ impl SqliteStore {
 
     /// Copy up to `pages` more pages. Writes made meanwhile reach the copy too, so when the
     /// copy completes it is exactly the current state; at that instant the recorded changes
-    /// are cut and returned: the snapshot is the state after them.
-    pub fn snapshot_step(&self, pages: i32) -> Result<Option<Vec<u8>>> {
+    /// are cut and returned: the snapshot is the state after them. `on_cut` advances the log
+    /// batch while the database lock still excludes writes.
+    pub fn snapshot_step(&self, pages: i32, on_cut: impl FnOnce()) -> Result<Option<Vec<u8>>> {
         let mut db = self.db();
         let Some(backup) = db.backup.as_ref() else { anyhow::bail!("no snapshot in progress") };
         match backup.step(pages)? {
             StepResult::Done => {
                 db.backup = None;
                 db.snapshot = None;
+                on_cut();
                 Ok(Some(db.cut()?))
             }
             StepResult::More | StepResult::Busy | StepResult::Locked => Ok(None),
@@ -303,6 +305,166 @@ fn expect_clause(expect: Expect) -> (&'static str, i64) {
     }
 }
 
+fn msg_insert_on(c: &Connection, m: &Message, body: &[u8]) -> Result<bool> {
+    let stored = Message { version: 1, ..m.clone() };
+    let n = c.execute(
+        "INSERT INTO messages (id, lane, state, due_at, kind, queue, topic, schedule_id, run_id, label, url,
+                               group_key, expires_at, version, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14)
+         ON CONFLICT DO NOTHING",
+        params![
+            m.id,
+            m.lane,
+            m.state.as_str(),
+            m.due_at,
+            m.target.kind(),
+            m.queue,
+            m.topic,
+            m.schedule_id,
+            m.run_id,
+            m.label,
+            m.target.url(),
+            m.group,
+            m.expires_at,
+            serde_json::to_string(&stored)?
+        ],
+    )?;
+    if n == 0 {
+        return Ok(false);
+    }
+    c.execute("INSERT INTO bodies (id, body) VALUES (?1, ?2) ON CONFLICT (id) DO UPDATE SET body = excluded.body", params![m.id, body])?;
+    Ok(true)
+}
+
+fn kv_put_on(c: &Connection, key: &str, value: &Value, expect: Expect, expires_at: Option<Ms>) -> Result<bool> {
+        let now = now_ms();
+        let db = c;
+        let current: Option<(i64, Option<i64>)> = db
+            .query_row("SELECT version, expires_at FROM kv WHERE key = ?1", [key], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let live = current.filter(|(_, exp)| exp.is_none_or(|e| e > now));
+        let next = match (expect, live) {
+            (Expect::Absent, Some(_)) => return Ok(false),
+            (Expect::Version(v), Some((cur, _))) if cur as u64 != v => return Ok(false),
+            (Expect::Version(_), None) => return Ok(false),
+            (_, Some((cur, _))) => cur + 1,
+            // An expired record is replaced; versions keep counting so stale CAS can't win.
+            (_, None) => current.map(|(v, _)| v + 1).unwrap_or(1),
+        };
+        db.execute(
+            "INSERT INTO kv (key, value, version, expires_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value, version = excluded.version, expires_at = excluded.expires_at",
+            params![key, serde_json::to_string(value)?, next, expires_at],
+        )?;
+        Ok(true)
+    }
+
+fn kv_delete_on(c: &Connection, key: &str, expect: Expect) -> Result<bool> {
+        let (clause, v) = expect_clause(expect);
+        let n = c.execute(&format!("DELETE FROM kv WHERE key = ?2 AND ({clause})"), params![v, key])?;
+        Ok(n == 1)
+    }
+
+fn run_put_on(c: &Connection, run: &Run, expect: Expect) -> Result<bool> {
+        let db = c;
+        let n = match expect {
+            Expect::Absent => {
+                let stored = Run { version: 1, ..run.clone() };
+                db.execute(
+                    "INSERT INTO runs (id, function_id, status, expires_at, version, data) VALUES (?1, ?2, ?3, ?4, 1, ?5)
+                     ON CONFLICT DO NOTHING",
+                    params![run.id, run.function_id, run.status.as_str(), run.expires_at, serde_json::to_string(&stored)?],
+                )?
+            }
+            Expect::Version(v) => {
+                let stored = Run { version: v + 1, ..run.clone() };
+                db.execute(
+                    "UPDATE runs SET status = ?2, expires_at = ?3, version = ?4, data = ?5 WHERE id = ?1 AND version = ?6",
+                    params![run.id, run.status.as_str(), run.expires_at, (v + 1) as i64, serde_json::to_string(&stored)?, v as i64],
+                )?
+            }
+            Expect::Any => {
+                let stored = Run { version: run.version + 1, ..run.clone() };
+                db.execute(
+                    "INSERT INTO runs (id, function_id, status, expires_at, version, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT (id) DO UPDATE SET status = excluded.status, expires_at = excluded.expires_at,
+                         version = excluded.version, data = excluded.data",
+                    params![
+                        run.id,
+                        run.function_id,
+                        run.status.as_str(),
+                        run.expires_at,
+                        stored.version as i64,
+                        serde_json::to_string(&stored)?
+                    ],
+                )?
+            }
+        };
+        Ok(n == 1)
+    }
+
+fn step_put_on(c: &Connection, step: &Step) -> Result<()> {
+        c.execute(
+            "INSERT INTO steps (run_id, id, data) VALUES (?1, ?2, ?3)
+             ON CONFLICT (run_id, id) DO UPDATE SET data = excluded.data",
+            params![step.run_id, step.id, serde_json::to_string(step)?],
+        )?;
+        Ok(())
+    }
+
+fn event_put_on(c: &Connection, e: &Event) -> Result<()> {
+        c.execute(
+            "INSERT INTO events (id, name, expires_at, data) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (id) DO UPDATE SET data = excluded.data",
+            params![e.id, e.name, e.expires_at, serde_json::to_string(e)?],
+        )?;
+        Ok(())
+    }
+
+fn wait_put_on(c: &Connection, w: &Wait) -> Result<()> {
+        c.execute(
+            "INSERT INTO waits (event, key, id, expires_at, data) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT DO UPDATE SET expires_at = excluded.expires_at, data = excluded.data",
+            params![w.event, w.key.as_deref().unwrap_or(""), w.id, w.expires_at, serde_json::to_string(w)?],
+        )?;
+        Ok(())
+    }
+
+fn doc_put_on(c: &Connection, kind: &str, id: &str, value: &Value, expect: Expect) -> Result<bool> {
+        let db = c;
+        let body = serde_json::to_string(value)?;
+        let n = match expect {
+            Expect::Any => db.execute(
+                "INSERT INTO docs (kind, id, value, version) VALUES (?1, ?2, ?3, 1)
+                 ON CONFLICT (kind, id) DO UPDATE SET value = excluded.value, version = docs.version + 1",
+                params![kind, id, body],
+            )?,
+            Expect::Absent => db.execute(
+                "INSERT INTO docs (kind, id, value, version) VALUES (?1, ?2, ?3, 1) ON CONFLICT DO NOTHING",
+                params![kind, id, body],
+            )?,
+            Expect::Version(v) => db.execute(
+                "UPDATE docs SET value = ?3, version = version + 1 WHERE kind = ?1 AND id = ?2 AND version = ?4",
+                params![kind, id, body, v as i64],
+            )?,
+        };
+        Ok(n == 1)
+    }
+
+/// One write of a group, on the group's transaction. `false`: its condition failed.
+fn write_on(c: &Connection, w: &Write) -> Result<bool> {
+    Ok(match w {
+        Write::Kv { key, value, expect, expires_at } => kv_put_on(c, key, value, *expect, *expires_at)?,
+        Write::KvDelete { key, expect } => kv_delete_on(c, key, *expect)?,
+        Write::Doc { kind, id, value, expect } => doc_put_on(c, kind, id, value, *expect)?,
+        Write::Msg { message, body } => msg_insert_on(c, message, body)?,
+        Write::NewRun(run) => run_put_on(c, run, Expect::Absent)?,
+        Write::Step(step) => step_put_on(c, step).map(|_| true)?,
+        Write::Event(e) => event_put_on(c, e).map(|_| true)?,
+        Write::Wait(w) => wait_put_on(c, w).map(|_| true)?,
+    })
+}
+
 #[async_trait]
 impl Store for SqliteStore {
     fn describe(&self) -> String {
@@ -313,32 +475,24 @@ impl Store for SqliteStore {
         self.shards
     }
 
+    async fn write_all(&self, writes: &[Write]) -> Result<bool> {
+        let db = self.db();
+        // One transaction under the connection's lock: the log store's cuts take the same lock,
+        // so a group is in one commit or none.
+        let tx = db.unchecked_transaction()?;
+        for w in writes {
+            if !write_on(&tx, w)? {
+                return Ok(false);
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     async fn msg_insert(&self, m: &Message, body: &[u8]) -> Result<()> {
         let db = self.db();
         let tx = db.unchecked_transaction()?;
-        let stored = Message { version: 1, ..m.clone() };
-        tx.execute(
-            "INSERT INTO messages (id, lane, state, due_at, kind, queue, topic, schedule_id, run_id, label, url,
-                                   group_key, expires_at, version, data)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14)",
-            params![
-                m.id,
-                m.lane,
-                m.state.as_str(),
-                m.due_at,
-                m.target.kind(),
-                m.queue,
-                m.topic,
-                m.schedule_id,
-                m.run_id,
-                m.label,
-                m.target.url(),
-                m.group,
-                m.expires_at,
-                serde_json::to_string(&stored)?
-            ],
-        )?;
-        tx.execute("INSERT INTO bodies (id, body) VALUES (?1, ?2)", params![m.id, body])?;
+        anyhow::ensure!(msg_insert_on(&tx, m, body)?, "message {} already exists", m.id);
         tx.commit()?;
         Ok(())
     }
@@ -500,32 +654,11 @@ impl Store for SqliteStore {
     }
 
     async fn kv_put(&self, key: &str, value: &Value, expect: Expect, expires_at: Option<Ms>) -> Result<bool> {
-        let now = now_ms();
-        let db = self.db();
-        let current: Option<(i64, Option<i64>)> = db
-            .query_row("SELECT version, expires_at FROM kv WHERE key = ?1", [key], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?;
-        let live = current.filter(|(_, exp)| exp.is_none_or(|e| e > now));
-        let next = match (expect, live) {
-            (Expect::Absent, Some(_)) => return Ok(false),
-            (Expect::Version(v), Some((cur, _))) if cur as u64 != v => return Ok(false),
-            (Expect::Version(_), None) => return Ok(false),
-            (_, Some((cur, _))) => cur + 1,
-            // An expired record is replaced; versions keep counting so stale CAS can't win.
-            (_, None) => current.map(|(v, _)| v + 1).unwrap_or(1),
-        };
-        db.execute(
-            "INSERT INTO kv (key, value, version, expires_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value, version = excluded.version, expires_at = excluded.expires_at",
-            params![key, serde_json::to_string(value)?, next, expires_at],
-        )?;
-        Ok(true)
+        kv_put_on(&self.db(), key, value, expect, expires_at)
     }
 
     async fn kv_delete(&self, key: &str, expect: Expect) -> Result<bool> {
-        let (clause, v) = expect_clause(expect);
-        let n = self.db().execute(&format!("DELETE FROM kv WHERE key = ?2 AND ({clause})"), params![v, key])?;
-        Ok(n == 1)
+        kv_delete_on(&self.db(), key, expect)
     }
 
     async fn doc_get(&self, kind: &str, id: &str) -> Result<Option<Versioned<Value>>> {
@@ -538,24 +671,7 @@ impl Store for SqliteStore {
     }
 
     async fn doc_put(&self, kind: &str, id: &str, value: &Value, expect: Expect) -> Result<bool> {
-        let db = self.db();
-        let body = serde_json::to_string(value)?;
-        let n = match expect {
-            Expect::Any => db.execute(
-                "INSERT INTO docs (kind, id, value, version) VALUES (?1, ?2, ?3, 1)
-                 ON CONFLICT (kind, id) DO UPDATE SET value = excluded.value, version = docs.version + 1",
-                params![kind, id, body],
-            )?,
-            Expect::Absent => db.execute(
-                "INSERT INTO docs (kind, id, value, version) VALUES (?1, ?2, ?3, 1) ON CONFLICT DO NOTHING",
-                params![kind, id, body],
-            )?,
-            Expect::Version(v) => db.execute(
-                "UPDATE docs SET value = ?3, version = version + 1 WHERE kind = ?1 AND id = ?2 AND version = ?4",
-                params![kind, id, body, v as i64],
-            )?,
-        };
-        Ok(n == 1)
+        doc_put_on(&self.db(), kind, id, value, expect)
     }
 
     async fn doc_delete(&self, kind: &str, id: &str) -> Result<bool> {
@@ -582,41 +698,7 @@ impl Store for SqliteStore {
     }
 
     async fn run_put(&self, run: &Run, expect: Expect) -> Result<bool> {
-        let db = self.db();
-        let n = match expect {
-            Expect::Absent => {
-                let stored = Run { version: 1, ..run.clone() };
-                db.execute(
-                    "INSERT INTO runs (id, function_id, status, expires_at, version, data) VALUES (?1, ?2, ?3, ?4, 1, ?5)
-                     ON CONFLICT DO NOTHING",
-                    params![run.id, run.function_id, run.status.as_str(), run.expires_at, serde_json::to_string(&stored)?],
-                )?
-            }
-            Expect::Version(v) => {
-                let stored = Run { version: v + 1, ..run.clone() };
-                db.execute(
-                    "UPDATE runs SET status = ?2, expires_at = ?3, version = ?4, data = ?5 WHERE id = ?1 AND version = ?6",
-                    params![run.id, run.status.as_str(), run.expires_at, (v + 1) as i64, serde_json::to_string(&stored)?, v as i64],
-                )?
-            }
-            Expect::Any => {
-                let stored = Run { version: run.version + 1, ..run.clone() };
-                db.execute(
-                    "INSERT INTO runs (id, function_id, status, expires_at, version, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT (id) DO UPDATE SET status = excluded.status, expires_at = excluded.expires_at,
-                         version = excluded.version, data = excluded.data",
-                    params![
-                        run.id,
-                        run.function_id,
-                        run.status.as_str(),
-                        run.expires_at,
-                        stored.version as i64,
-                        serde_json::to_string(&stored)?
-                    ],
-                )?
-            }
-        };
-        Ok(n == 1)
+        run_put_on(&self.db(), run, expect)
     }
 
     async fn run_list(&self, q: &RunQuery) -> Result<Page<Run>> {
@@ -663,21 +745,11 @@ impl Store for SqliteStore {
     }
 
     async fn step_put(&self, step: &Step) -> Result<()> {
-        self.db().execute(
-            "INSERT INTO steps (run_id, id, data) VALUES (?1, ?2, ?3)
-             ON CONFLICT (run_id, id) DO UPDATE SET data = excluded.data",
-            params![step.run_id, step.id, serde_json::to_string(step)?],
-        )?;
-        Ok(())
+        step_put_on(&self.db(), step)
     }
 
     async fn event_put(&self, e: &Event) -> Result<()> {
-        self.db().execute(
-            "INSERT INTO events (id, name, expires_at, data) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (id) DO UPDATE SET data = excluded.data",
-            params![e.id, e.name, e.expires_at, serde_json::to_string(e)?],
-        )?;
-        Ok(())
+        event_put_on(&self.db(), e)
     }
 
     async fn event_get(&self, id: &str) -> Result<Option<Event>> {
@@ -702,12 +774,7 @@ impl Store for SqliteStore {
     }
 
     async fn wait_put(&self, w: &Wait) -> Result<()> {
-        self.db().execute(
-            "INSERT INTO waits (event, key, id, expires_at, data) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT DO UPDATE SET expires_at = excluded.expires_at, data = excluded.data",
-            params![w.event, w.key.as_deref().unwrap_or(""), w.id, w.expires_at, serde_json::to_string(w)?],
-        )?;
-        Ok(())
+        wait_put_on(&self.db(), w)
     }
 
     async fn wait_delete(&self, w: &Wait) -> Result<()> {

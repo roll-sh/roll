@@ -1,9 +1,7 @@
-"use client";
-
 import { ArrowDown, ArrowUp, Plus, Search } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "@/components/link";
 import { formatBytes, formatNum, formatRate, qapi, type Queue, queueHref, type QueueType } from "@/lib/queues-api";
 import { ArgumentsEditor, argsFromRows, type ArgRow, QUEUE_ARGS } from "./args-editor";
 import { useAction, usePoll } from "./hooks";
@@ -189,7 +187,7 @@ function DeclareQueue({
   onCancel: () => void;
   onDeclared: () => void;
 }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { busy, error, setError, run } = useAction();
   const [vhost, setVhost] = useState(initialVhost);
   const [name, setName] = useState("");
@@ -212,7 +210,7 @@ function DeclareQueue({
       }),
     );
     if (out === undefined) return;
-    if (open) router.push(queueHref(vhost, out?.name ?? name.trim()));
+    if (open) navigate({ href: queueHref(vhost, out?.name ?? name.trim()) });
     else onDeclared();
   };
 
@@ -240,7 +238,7 @@ function DeclareQueue({
         <Toggle checked={!replicated && autoDelete} onChange={setAutoDelete} disabled={replicated} label="Auto-delete" />
         <span className="text-[11px] text-subtle">
           {type === "quorum"
-            ? "Replicated to a keeper quorum in three AZs. Delivery limit 20 by default."
+            ? "Delivered only once durable (in S3, across three AZs, on roll cloud). Delivery limit 20 by default."
             : type === "stream"
               ? "Append-only log read by offset. Messages stay after they are consumed."
               : "Single-partition FIFO queue. Persistent messages are written to the replicated log."}

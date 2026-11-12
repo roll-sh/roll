@@ -1,0 +1,11 @@
+{"native_thread":"agy-session-1"}
+{"item":{"body":{"input":null,"kind":"read","name":"client_view_file","title":"a.txt","type":"tool"},"id":"call_late","parent":null,"status":"completed"}}
+{"item":{"body":{"input":null,"kind":"read","name":"client_view_file","title":"a.txt","type":"tool"},"id":"call_late","parent":null,"status":"completed"}}
+{"item":{"body":{"input":null,"kind":"read","name":"client_view_file","title":"b.txt","type":"tool"},"id":"call_now","parent":null,"status":"running"}}
+{"item":{"body":{"input":null,"kind":"read","name":"client_view_file","title":"b.txt","type":"tool"},"id":"call_now","parent":null,"status":"completed"}}
+{"item":{"body":{"input":null,"kind":"read","name":"client_view_file","title":"b.txt","type":"tool"},"id":"call_now","parent":null,"status":"completed"}}
+{"item":{"body":{"input":null,"kind":"read","name":"client_view_file","title":"/etc/hostname","type":"tool"},"id":"call_refused","parent":null,"status":"running"}}
+{"output_delta":{"item":"call_refused","text":"Tool execution failed"}}
+{"item":{"body":{"input":null,"kind":"read","name":"client_view_file","output":"Tool execution failed","title":"/etc/hostname","type":"tool"},"id":"call_refused","parent":null,"status":"failed"}}
+{"turn_ended":"completed"}
+{"exited":null}

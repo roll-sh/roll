@@ -1,0 +1,5 @@
+
+Warnings :
+Using Replication Factor replication_factor=1 lower than the minimum_replication_factor_warn_threshold=3 is not recommended.
+
+Current consistency level is ONE.

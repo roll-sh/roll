@@ -3,10 +3,9 @@
  * JSON is snake_case and every time is unix milliseconds.
  */
 
-import { ROLL_API } from "./roll-api";
+import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 export const TASKS_API = `${ROLL_API}/v1/tasks`;
-const TOKEN = process.env.NEXT_PUBLIC_ROLL_TASKS_TOKEN || undefined;
 
 // --- model (crates/tasks/src/model.rs) ---
 
@@ -439,15 +438,13 @@ function qs(params: object) {
 const enc = encodeURIComponent;
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (body !== undefined) headers["content-type"] = "application/json";
-  if (TOKEN) headers.authorization = `Bearer ${TOKEN}`;
   const res = await fetch(`${TASKS_API}${path}`, {
     method,
-    headers,
+    headers: apiHeaders(body),
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
   });
+  onApiStatus(res.status);
   const text = await res.text();
   let data: unknown = null;
   try {

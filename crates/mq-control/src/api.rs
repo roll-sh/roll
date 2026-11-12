@@ -101,7 +101,6 @@ pub fn router(c: Arc<QueuesControl>) -> Router {
         .route("/v1/queues/migrate", get(migrate_status).post(migrate).delete(stop_migration))
         .layer(axum::middleware::from_fn_with_state(c.clone(), awake))
         .with_state(c)
-        .layer(tower_http::cors::CorsLayer::permissive())
 }
 
 /// Dashboard and API requests (publishing a test message, replaying a DLQ) keep the broker out
@@ -132,12 +131,14 @@ fn table(v: &Option<Value>) -> FieldTable {
     v.as_ref().filter(|v| v.is_object()).map(FieldTable::from_json).unwrap_or_default()
 }
 
+/// The vhost's AMQP URL with the admin user: AMQPS where nothing listens in the clear (the edge).
 fn amqp_url(c: &QueuesControl, vhost: &str) -> String {
-    let base = c.endpoints.amqp.clone().unwrap_or_else(|| "amqp://127.0.0.1:5672".into());
+    let e = c.endpoints.for_vhost(vhost);
+    let base = e.amqp.or(e.amqps).unwrap_or_else(|| "amqp://127.0.0.1:5672".into());
     let cfg = &c.broker.config;
     let creds = if cfg.default_pass == "guest" { format!("{}:{}@", enc(&cfg.default_user), enc(&cfg.default_pass)) } else { format!("{}@", enc(&cfg.default_user)) };
-    let rest = base.trim_start_matches("amqp://");
-    format!("amqp://{creds}{rest}/{}", enc(vhost))
+    let (scheme, rest) = base.split_once("://").unwrap_or(("amqp", &base));
+    format!("{scheme}://{creds}{rest}/{}", enc(vhost))
 }
 
 fn policy_name(c: &QueuesControl, vhost: &str, target: Target, name: &str) -> Option<String> {
@@ -257,7 +258,7 @@ fn x_death(msg: &Message) -> Option<Value> {
 // ── overview, rates, usage ──
 
 async fn health(State(c): State<AppState>) -> Json<Value> {
-    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "node": c.broker.config.node_name, "endpoints": c.endpoints }))
+    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "node": c.broker.config.node_name, "endpoints": c.endpoints.for_vhost("/") }))
 }
 
 async fn overview(State(c): State<AppState>) -> Json<Value> {
@@ -295,7 +296,7 @@ async fn overview(State(c): State<AppState>) -> Json<Value> {
         "node": b.config.node_name,
         "cluster_name": b.config.cluster_name,
         "uptime_s": mq_core::now_ms().saturating_sub(b.started_ms) / 1000,
-        "endpoints": c.endpoints,
+        "endpoints": c.endpoints.for_vhost("/"),
         "totals": {
             "vhosts": infos.len(),
             "sleeping_vhosts": sleeping,
@@ -419,7 +420,7 @@ fn with_creds(base: &str, user: &str, pass: &str) -> String {
 /// changes nothing else. MQTT has no vhost in its URL, so it goes in the username as
 /// `vhost:user` (RabbitMQ's convention).
 fn connection_urls(c: &QueuesControl, vhost: &str, user: &str, pass: &str) -> Value {
-    let e = &c.endpoints;
+    let e = &c.endpoints.for_vhost(vhost);
     let vh = enc(vhost);
     let with_vhost = |base: &Option<String>| base.as_deref().map(|b| format!("{}/{vh}", with_creds(b, user, pass)));
     json!({

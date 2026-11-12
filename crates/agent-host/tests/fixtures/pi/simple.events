@@ -1,0 +1,19 @@
+{"native_thread":"/pi-sessions/session-1.jsonl"}
+{"model":"openrouter/deepseek/deepseek-v4-flash"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c0","text":"The"}}
+{"text_delta":{"item":"t1:m1:c0","text":" user wants me to respond with"}}
+{"text_delta":{"item":"t1:m1:c0","text":" a specific text: \"fi"}}
+{"text_delta":{"item":"t1:m1:c0","text":"xture simple ok\". Let"}}
+{"text_delta":{"item":"t1:m1:c0","text":" me do that."}}
+{"item":{"body":{"text":"","type":"message"},"id":"t1:m1:c1","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c1","text":"fi"}}
+{"text_delta":{"item":"t1:m1:c1","text":"xture simple ok"}}
+{"context":{"max_tokens":1048576,"used_tokens":1814}}
+{"item":{"body":{"text":"The user wants me to respond with a specific text: \"fixture simple ok\". Let me do that.","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"fixture simple ok","type":"message"},"id":"t1:m1:c1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"cost_usd":0.00007710612,"input_tokens":1786,"output_tokens":28}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":1814,"used_tokens":1814}}
+{"turn_ref":"ac4aa63e"}
+{"turn_ended":"completed"}
+{"exited":null}

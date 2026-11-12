@@ -1,0 +1,126 @@
+> CreateTable {"TableName":"alt_upd_cond","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_cond","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# condition on an attribute that the update modifies is evaluated on the old item
+> PutItem {"TableName":"alt_upd_cond","Item":{"p":{"S":"a"},"n":{"N":"1"},"s":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"a"}},"UpdateExpression":"SET n = n + :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"n = :one"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"a"}},"UpdateExpression":"SET n = n + :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"n = :one"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"a"}},"UpdateExpression":"SET n = :v","ExpressionAttributeValues":{":v":{"N":"5"}},"ConditionExpression":"n < :v","ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"a"},"n":{"N":"2"},"s":{"S":"dog"}}}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"a"}},"UpdateExpression":"REMOVE s","ConditionExpression":"attribute_exists(s)","ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"s":{"S":"dog"}}}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"a"}},"UpdateExpression":"REMOVE s","ConditionExpression":"attribute_exists(s)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"n":{"N":"5"}}}
+# upsert-only / update-only idioms
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"b"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"b"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"c"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"attribute_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"b"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"b"},"v":{"N":"1"}}}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"c"}},"ConsistentRead":true}
+< 200 {}
+# condition on a missing item: comparisons fail, negations succeed
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"m1"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"v <> :v"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"m2"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"NOT (v = :v)"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"m3"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"v = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"m4"}},"UpdateExpression":"REMOVE v","ConditionExpression":"attribute_not_exists(v)"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"m1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"m1"},"v":{"N":"1"}}}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"m2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"m2"},"v":{"N":"1"}}}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"m4"}},"ConsistentRead":true}
+< 200 {}
+# names and values shared between UpdateExpression and ConditionExpression count as used
+> PutItem {"TableName":"alt_upd_cond","Item":{"p":{"S":"s"},"x":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET #x = :v","ExpressionAttributeNames":{"#x":"x"},"ExpressionAttributeValues":{":v":{"N":"2"},":old":{"N":"1"}},"ConditionExpression":"#x = :old"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeNames":{"#x":"x"},"ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"#x = :v"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET #y = :v","ExpressionAttributeNames":{"#x":"x","#y":"y"},"ExpressionAttributeValues":{":v":{"N":"3"}},"ConditionExpression":"attribute_exists(#x)"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"s"},"x":{"N":"2"},"y":{"N":"3"}}}
+# unused / undefined references across the two expressions
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"N":"3"}},"ConditionExpression":"x = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':w', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeNames":{"#z":"z"},"ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#z', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = :w"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':w' required by expression"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :w","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':w' required by expression"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET #y = :v","ExpressionAttributeNames":{"#y":"y"},"ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"#x = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#x' required by expression"}
+# which expression's error wins: syntax errors in update vs condition
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v SET","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET y = :v SET': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'x = = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v SET","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET y = :v SET': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v, y = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at y"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v, y = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = :w"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at y"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET p = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'x = = :v': syntax error at char 4"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must not be empty"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ConditionExpression":"x = :v","ReturnValues":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BAD"}
+# condition fails AND update would fail: which is reported
+> PutItem {"TableName":"alt_upd_cond","Item":{"p":{"S":"f"},"s":{"S":"str"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f"}},"UpdateExpression":"SET n = s + :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f"}},"UpdateExpression":"SET n = s + :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"attribute_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"S\"'"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f"}},"UpdateExpression":"SET q.r = :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f"}},"UpdateExpression":"SET q.r = :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"attribute_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute q"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f"}},"UpdateExpression":"ADD s :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f"}},"UpdateExpression":"SET n = zz","ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f"}},"UpdateExpression":"SET n = list_append(s, :l)","ExpressionAttributeValues":{":l":{"L":[{"N":"1"}]}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"f-missing"}},"UpdateExpression":"SET q.r = :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"attribute_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# condition referencing nested paths that the update changes
+> PutItem {"TableName":"alt_upd_cond","Item":{"p":{"S":"n"},"m":{"M":{"c":{"N":"1"},"l":{"L":[{"N":"1"},{"N":"2"}]}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"n"}},"UpdateExpression":"SET m.c = m.c + :one","ExpressionAttributeValues":{":one":{"N":"1"},":two":{"N":"2"}},"ConditionExpression":"m.c = :one AND size(m.l) = :two","ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"m":{"M":{"c":{"N":"2"}}}}}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"n"}},"UpdateExpression":"SET m.c = m.c + :one","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"m.c = :one","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"n"},"m":{"M":{"c":{"N":"2"},"l":{"L":[{"N":"1"},{"N":"2"}]}}}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"n"}},"UpdateExpression":"REMOVE m.l[0]","ExpressionAttributeValues":{":one":{"N":"1"}},"ConditionExpression":"m.l[0] = :one","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"n"},"m":{"M":{"c":{"N":"2"},"l":{"L":[{"N":"2"}]}}}}}
+# ConditionExpression together with no update at all
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"e1"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"e1"}},"ConditionExpression":"attribute_not_exists(p)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> GetItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"e1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"e1"}}}
+# functions in the condition that are not allowed in update and vice versa
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"if_not_exists(x, :v) = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: if_not_exists() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionExpression":"list_append(x, :v) = :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: list_append() not allowed here"}
+> UpdateItem {"TableName":"alt_upd_cond","Key":{"p":{"S":"s"}},"UpdateExpression":"SET y = size(x)","ConditionExpression":"attribute_exists(x)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: size() not allowed here"}
+> DeleteTable {"TableName":"alt_upd_cond"}
+< 200 {"TableDescription":{"TableName":"alt_upd_cond","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_cond:scylla:table/alt_upd_cond","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

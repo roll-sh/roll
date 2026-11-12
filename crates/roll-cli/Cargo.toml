@@ -10,18 +10,63 @@ publish.workspace = true
 name = "roll"
 path = "src/main.rs"
 
+[features]
+# `tests/cqlsh_roll.rs`: the golden corpus against an in-process roll server.
+roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"]
+
 [dependencies]
+agent-host.workspace = true
+agent-proto.workspace = true
+libc.workspace = true
+# `roll gateway`: the standalone model gateway.
+model-gateway.workspace = true
 anyhow.workspace = true
 base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+getrandom.workspace = true
 clap.workspace = true
-reqwest.workspace = true
+nosql-engine = { workspace = true, optional = true }
+nosql-proto = { workspace = true, features = ["client"] }
+nosql-server = { workspace = true, optional = true }
+nosql-storage = { workspace = true, optional = true }
+nosql-types.workspace = true
+# rustls: the released CLI talks to https://api.roll.sh (dev-dependencies hid that it had no TLS).
+reqwest = { workspace = true, features = ["stream", "rustls"] }
+rustls-pemfile.workspace = true
+rustyline.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+unicode-width.workspace = true
+url.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
-# `tests/search.rs` runs the `roll` binary against an in-process search control plane.
 axum.workspace = true
+code-chat.workspace = true
+code-control.workspace = true
+code-sql.workspace = true
+pg-storage.workspace = true
+tempfile.workspace = true
+aws-sdk-s3.workspace = true
+# `tests/nosql_api.rs`: the real control API in process.
+nosql-control.workspace = true
+nosql-server.workspace = true
+nosql-storage.workspace = true
+regex.workspace = true
+s3-control.workspace = true
+s3-server.workspace = true
+s3-store.workspace = true
+# `tests/search.rs` runs the `roll` binary against an in-process search control plane.
 search-control.workspace = true
 search-server.workspace = true
 search-store.workspace = true
+
+[[test]]
+name = "cqlsh_roll"
+required-features = ["roll-server-tests"]

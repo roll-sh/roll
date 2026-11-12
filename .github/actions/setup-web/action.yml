@@ -1,0 +1,37 @@
+name: Set up the web workspace
+description: Node 24, pnpm (the packageManager version, standalone), the pnpm store cache and an install.
+inputs:
+  filter:
+    description: Install only these projects (a pnpm --filter), or everything when empty.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 24
+        package-manager-cache: false
+    # The standalone build is one download (pnpm/action-setup installs it through npm: ~7 s).
+    - shell: bash
+      run: |
+        version=$(jq -r '.packageManager | sub("^pnpm@"; "")' package.json)
+        mkdir -p "$RUNNER_TEMP/pnpm"
+        if curl -fsSL --max-time 20 --retry 1 --retry-all-errors -o "$RUNNER_TEMP/pnpm.tar.gz" "https://github.com/pnpm/pnpm/releases/download/v$version/pnpm-linux-x64.tar.gz"; then
+          tar -xzf "$RUNNER_TEMP/pnpm.tar.gz" -C "$RUNNER_TEMP/pnpm"
+          echo "$RUNNER_TEMP/pnpm" >> "$GITHUB_PATH"
+          pnpm="$RUNNER_TEMP/pnpm/pnpm"
+        else
+          # GitHub's release downloads can 503/504 or hang for minutes at a time; npm has the same version.
+          npm install -g --no-fund --no-audit "pnpm@$version"
+          pnpm=pnpm
+        fi
+        echo "PNPM_STORE=$("$pnpm" store path)" >> "$GITHUB_ENV"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ env.PNPM_STORE }}
+        key: pnpm-store-${{ inputs.filter || 'all' }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: pnpm-store-${{ inputs.filter || 'all' }}-
+    - shell: bash
+      env:
+        FILTER: ${{ inputs.filter }}
+      run: pnpm install --frozen-lockfile --prefer-offline ${FILTER:+--filter "$FILTER"}

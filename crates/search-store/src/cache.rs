@@ -806,7 +806,7 @@ impl Cache {
             loop {
                 let permit = self.parts.acquire().await?;
                 let Some((k, range)) = dl.parts.lock().as_mut().and_then(|p| p.take().map(|k| (k, p.range(k)))) else { return anyhow::Ok(()) };
-                let (data, now) = self.objects.get_range(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+                let (data, now) = self.objects.get_range_sized(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
                 self.throttled(data.len() as u64).await;
                 anyhow::ensure!(now == size && data.len() as u64 == range.end - range.start, "{key} changed while being read");
                 write_at(file, data, range.start).await?;

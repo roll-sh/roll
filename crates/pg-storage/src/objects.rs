@@ -34,17 +34,63 @@ pub enum StorageConfig {
 pub struct Objects {
     store: Arc<dyn ObjectStore>,
     pub description: String,
+    durable: bool,
+    /// A local directory: conditional replaces are emulated ([`Objects::put_if`]).
+    local: bool,
+}
+
+/// Which version of an object a conditional write expects to replace (its ETag, and its version
+/// id on a versioned bucket).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectVersion {
+    pub e_tag: Option<String>,
+    pub version: Option<String>,
+}
+
+impl ObjectVersion {
+    fn of_put(r: object_store::PutResult) -> Self {
+        Self { e_tag: r.e_tag, version: r.version }
+    }
+
+    fn update(&self) -> object_store::UpdateVersion {
+        object_store::UpdateVersion { e_tag: self.e_tag.clone(), version: self.version.clone() }
+    }
+}
+
+/// Serialises a local directory's emulated compare-and-swap: as strong as one process.
+fn local_cas_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 const PART_SIZE: usize = 8 * 1024 * 1024;
 
 impl Objects {
+    /// A store over `config`. A local directory doesn't fsync: a blob can be lost on a crash or
+    /// power loss after its write returned. See [`Objects::new_durable`].
     pub fn new(config: &StorageConfig) -> anyhow::Result<Self> {
+        Self::open(config, false)
+    }
+
+    /// Like [`Objects::new`], but a local directory fsyncs every blob it writes, and the
+    /// directories it creates, before the write returns, so whatever references a blob after a
+    /// successful write can rely on it surviving power loss. S3 is unchanged: its writes are
+    /// durable when they return.
+    pub fn new_durable(config: &StorageConfig) -> anyhow::Result<Self> {
+        Self::open(config, true)
+    }
+
+    /// Whether a write is on stable storage when it returns.
+    pub fn durable(&self) -> bool {
+        self.durable
+    }
+
+    fn open(config: &StorageConfig, fsync: bool) -> anyhow::Result<Self> {
         Ok(match config {
             StorageConfig::Local(dir) => {
                 std::fs::create_dir_all(dir)?;
-                let store = LocalFileSystem::new_with_prefix(dir)?.with_automatic_cleanup(true);
-                Self { store: Arc::new(store), description: format!("file://{}", dir.display()) }
+                let store = LocalFileSystem::new_with_prefix(dir)?.with_automatic_cleanup(true).with_fsync(fsync);
+                Self { store: Arc::new(store), description: format!("file://{}", dir.display()), durable: fsync, local: true }
             }
             StorageConfig::S3 { bucket, region, endpoint, prefix } => {
                 let mut b = AmazonS3Builder::from_env().with_bucket_name(bucket);
@@ -71,7 +117,7 @@ impl Objects {
                     Some(p) => Arc::new(PrefixStore::new(s3, p.as_str())),
                     None => Arc::new(s3),
                 };
-                Self { store, description }
+                Self { store, description, durable: true, local: false }
             }
         })
     }
@@ -79,6 +125,69 @@ impl Objects {
     pub async fn put(&self, key: &str, data: Bytes) -> anyhow::Result<()> {
         self.store.put(&ObjPath::from(key), PutPayload::from_bytes(data)).await?;
         Ok(())
+    }
+
+    /// An object and its version (for [`Objects::put_if`]).
+    pub async fn get_versioned(&self, key: &str) -> anyhow::Result<Option<(Bytes, ObjectVersion)>> {
+        match self.store.get(&ObjPath::from(key)).await {
+            Ok(r) => {
+                let v = ObjectVersion { e_tag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
+                Ok(Some((r.bytes().await?, v)))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The current version of an object (one HEAD), `None` when it doesn't exist.
+    pub async fn version(&self, key: &str) -> anyhow::Result<Option<ObjectVersion>> {
+        match self.store.head(&ObjPath::from(key)).await {
+            Ok(m) => Ok(Some(ObjectVersion { e_tag: m.e_tag, version: m.version })),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Create `key` only if no object is there (S3 `If-None-Match: *`). `None` when another
+    /// object is there. A retried request that finds its own earlier attempt stored (same bytes)
+    /// counts as created.
+    pub async fn put_new(&self, key: &str, data: Bytes) -> anyhow::Result<Option<ObjectVersion>> {
+        let opts = object_store::PutOptions { mode: object_store::PutMode::Create, ..Default::default() };
+        match self.store.put_opts(&ObjPath::from(key), PutPayload::from_bytes(data.clone()), opts).await {
+            Ok(r) => Ok(Some(ObjectVersion::of_put(r))),
+            Err(object_store::Error::AlreadyExists { .. }) => self.same_bytes(key, &data).await,
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Compare-and-swap: replace `key` only if it's still at version `expected` (S3 `If-Match`),
+    /// or, with `None`, create it only where nothing is (as [`Objects::put_new`]). `None` back
+    /// when it changed, is gone or appeared meanwhile. A retried request whose earlier attempt
+    /// went through (the object holds these bytes) counts as written.
+    ///
+    /// A local directory has no conditional replace; it's emulated under a lock, which makes it a
+    /// compare-and-swap between the writers of one process only.
+    pub async fn put_if(&self, key: &str, data: Bytes, expected: Option<&ObjectVersion>) -> anyhow::Result<Option<ObjectVersion>> {
+        let Some(expected) = expected else { return self.put_new(key, data).await };
+        if self.local {
+            let _cas = local_cas_lock().lock().await;
+            if self.version(key).await?.is_none_or(|v| v.e_tag != expected.e_tag) {
+                return Ok(None);
+            }
+            let r = self.store.put(&ObjPath::from(key), PutPayload::from_bytes(data)).await?;
+            return Ok(Some(ObjectVersion::of_put(r)));
+        }
+        let opts = object_store::PutOptions { mode: object_store::PutMode::Update(expected.update()), ..Default::default() };
+        match self.store.put_opts(&ObjPath::from(key), PutPayload::from_bytes(data.clone()), opts).await {
+            Ok(r) => Ok(Some(ObjectVersion::of_put(r))),
+            Err(object_store::Error::Precondition { .. } | object_store::Error::NotFound { .. }) => self.same_bytes(key, &data).await,
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The object's version if it holds exactly `data` (an earlier attempt of this write).
+    async fn same_bytes(&self, key: &str, data: &Bytes) -> anyhow::Result<Option<ObjectVersion>> {
+        Ok(self.get_versioned(key).await?.filter(|(b, _)| b == data).map(|(_, v)| v))
     }
 
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<Bytes>> {
@@ -89,9 +198,27 @@ impl Objects {
         }
     }
 
+    /// Bytes `range` of an object (one ranged GET). `None` when the object doesn't exist.
+    pub async fn get_range(&self, key: &str, range: std::ops::Range<u64>) -> anyhow::Result<Option<Bytes>> {
+        match self.store.get_range(&ObjPath::from(key), range).await {
+            Ok(b) => Ok(Some(b)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The size of an object, `None` when it doesn't exist.
+    pub async fn size(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        match self.store.head(&ObjPath::from(key)).await {
+            Ok(m) => Ok(Some(m.size)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Bytes `range` of an object (clamped to its end) and the object's total size. `None` if it
     /// doesn't exist. The range must be non-empty and start inside the object.
-    pub async fn get_range(&self, key: &str, range: std::ops::Range<u64>) -> anyhow::Result<Option<(Bytes, u64)>> {
+    pub async fn get_range_sized(&self, key: &str, range: std::ops::Range<u64>) -> anyhow::Result<Option<(Bytes, u64)>> {
         self.get_with(key, GetRange::Bounded(range)).await
     }
 
@@ -276,22 +403,46 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn conditional_writes() {
+        let (o, _) = temp_objects("cas");
+        let v1 = o.put_new("m", Bytes::from_static(b"one")).await.unwrap().expect("created");
+        assert!(o.put_new("m", Bytes::from_static(b"other")).await.unwrap().is_none(), "create-only");
+        assert_eq!(o.put_new("m", Bytes::from_static(b"one")).await.unwrap(), Some(v1.clone()), "a retry of the same create");
+        let v2 = o.put_if("m", Bytes::from_static(b"two"), Some(&v1)).await.unwrap().expect("swapped");
+        assert!(o.put_if("m", Bytes::from_static(b"three"), Some(&v1)).await.unwrap().is_none(), "stale version");
+        assert_eq!(o.get_versioned("m").await.unwrap().unwrap(), (Bytes::from_static(b"two"), v2.clone()));
+        assert_eq!(o.version("m").await.unwrap(), Some(v2.clone()));
+        o.delete("m").await.unwrap();
+        assert!(o.put_if("m", Bytes::from_static(b"four"), Some(&v2)).await.unwrap().is_none(), "gone");
+    }
+
+    #[tokio::test]
+    async fn ranges_and_sizes() {
+        let (o, _) = temp_objects("range");
+        o.put("r", Bytes::from_static(b"0123456789")).await.unwrap();
+        assert_eq!(o.get_range("r", 2..5).await.unwrap().unwrap(), "234");
+        assert_eq!(o.size("r").await.unwrap(), Some(10));
+        assert_eq!(o.size("missing").await.unwrap(), None);
+        assert!(o.get_range("missing", 0..1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn ranged_reads() {
         let (o, _) = temp_objects("range");
         let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
         o.put("r", Bytes::from(data.clone())).await.unwrap();
-        let (b, size) = o.get_range("r", 10..20).await.unwrap().unwrap();
+        let (b, size) = o.get_range_sized("r", 10..20).await.unwrap().unwrap();
         assert_eq!((&b[..], size), (&data[10..20], 1000));
         // Clamped to the end.
-        let (b, size) = o.get_range("r", 990..2000).await.unwrap().unwrap();
+        let (b, size) = o.get_range_sized("r", 990..2000).await.unwrap().unwrap();
         assert_eq!((&b[..], size), (&data[990..], 1000));
         let (b, size) = o.get_suffix("r", 24).await.unwrap().unwrap();
         assert_eq!((&b[..], size), (&data[976..], 1000));
         let (b, _) = o.get_suffix("r", 5000).await.unwrap().unwrap();
         assert_eq!(&b[..], &data[..]);
-        assert!(o.get_range("missing", 0..10).await.unwrap().is_none());
+        assert!(o.get_range_sized("missing", 0..10).await.unwrap().is_none());
         assert!(o.get_suffix("missing", 10).await.unwrap().is_none());
-        assert!(o.get_range("r", 1000..1010).await.is_err(), "a range past the end is an error");
+        assert!(o.get_range_sized("r", 1000..1010).await.is_err(), "a range past the end is an error");
     }
 
     #[tokio::test]
@@ -314,6 +465,48 @@ pub(crate) mod tests {
         assert!(stored < raw / 100, "repetitive data should compress well");
         let back = zstd::decode_all(&o.get("z.zst").await.unwrap().unwrap()[..]).unwrap();
         assert_eq!(back, data);
+    }
+
+    #[tokio::test]
+    async fn durable_local_store_fsyncs_and_works_the_same() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("roll-objects-durable-{n}"));
+        let o = Objects::new_durable(&StorageConfig::Local(dir.clone())).unwrap();
+        assert!(o.durable());
+        assert!(!Objects::new(&StorageConfig::Local(dir.clone())).unwrap().durable(), "plain local stores don't fsync");
+        // Puts into new directories, multipart uploads and zstd uploads all go through the
+        // fsyncing paths and read back the same.
+        o.put("code/blobs/ab/cdef", Bytes::from_static(b"blob")).await.unwrap();
+        assert_eq!(o.get("code/blobs/ab/cdef").await.unwrap().unwrap(), "blob");
+        let data: Vec<u8> = (0..(PART_SIZE as u32 * 2 + 12345)).map(|i| (i % 253) as u8).collect();
+        assert_eq!(o.upload("code/packs/big", &data[..]).await.unwrap(), data.len() as u64);
+        let mut out = Vec::new();
+        o.download("code/packs/big", &mut out).await.unwrap();
+        assert_eq!(out, data);
+        o.upload_zstd("z.zst", &data[..], |_| {}).await.unwrap();
+        assert_eq!(zstd::decode_all(&o.get("z.zst").await.unwrap().unwrap()[..]).unwrap(), data);
+        // Overwrites replace atomically; nothing staged is left behind.
+        o.put("code/blobs/ab/cdef", Bytes::from_static(b"again")).await.unwrap();
+        assert_eq!(o.get("code/blobs/ab/cdef").await.unwrap().unwrap(), "again");
+        let mut listed: Vec<String> = o.list("").await.unwrap().into_iter().map(|(k, _)| k).collect();
+        listed.sort();
+        assert_eq!(listed, ["code/blobs/ab/cdef", "code/packs/big", "z.zst"]);
+        o.delete_prefix("code/").await.unwrap();
+        assert!(o.get("code/packs/big").await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn s3_is_durable_either_way() {
+        let config = StorageConfig::S3 {
+            bucket: "b".into(),
+            region: Some("us-east-1".into()),
+            endpoint: Some("http://[IP]:9".into()),
+            prefix: Some("p".into()),
+        };
+        let (plain, durable) = (Objects::new(&config).unwrap(), Objects::new_durable(&config).unwrap());
+        assert!(plain.durable() && durable.durable());
+        assert_eq!(plain.description, durable.description);
     }
 
     #[test]

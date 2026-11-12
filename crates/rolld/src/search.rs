@@ -14,10 +14,8 @@
 //! the proxy resends to the next owner), lets those in flight finish, flushes and hands each
 //! cluster's lease back, then leaves. See `docs/search/deploy-aws.md`.
 //!
-//! With TLS on the REST port (`--search-tls-cert`, or `--search-tls-self-signed` behind the
-//! proxies), a `--search-only` node serves its control API with the same certificate too, and
-//! publishes that in its record (`Beat::api_tls`), so proxies and other nodes reach both over
-//! TLS pinned to it. The full rolld shares its API port with other services and keeps it plain.
+//! `/v1/search` is served on rolld's API port with every other product's routes, behind its
+//! operator gate (auth.rs).
 
 use clap::Args;
 use pg_storage::StorageConfig;
@@ -33,6 +31,9 @@ pub struct SearchArgs {
     /// Disable roll search.
     #[arg(long = "no-search", env = "ROLL_SEARCH_DISABLED", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_disabled: bool,
+    /// Run only roll search (`ROLL_PRODUCTS=search`).
+    #[arg(long = "search-only", env = "ROLL_SEARCH_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_only: bool,
     /// Elasticsearch REST (HTTP/HTTPS) listener.
     #[arg(long = "search-http", env = "ROLL_SEARCH_HTTP", default_value = "127.0.0.1:59200")]
     pub search_http: SocketAddr,
@@ -90,9 +91,6 @@ pub struct SearchArgs {
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_test_features: bool,
-    /// Require `Authorization: Bearer <token>` on the `/v1/search` API.
-    #[arg(long = "search-api-token", env = "ROLL_SEARCH_API_TOKEN", hide_env_values = true)]
-    pub search_api_token: Option<String>,
     /// Join a fleet whose catalog, leases and node records live here: `postgres://…` (roll
     /// postgres or RDS), or a SQLite file shared by the nodes of one host.
     #[arg(long = "search-meta", env = "ROLL_SEARCH_META")]
@@ -122,8 +120,6 @@ pub struct Search {
     pub control: Arc<Control>,
     listener: tokio::sync::Mutex<Option<tokio::net::TcpListener>>,
     opts: search_server::ListenOptions,
-    /// Serve the control API over TLS (a `--search-only` node with TLS).
-    api_tls: Option<tokio_rustls::TlsAcceptor>,
     stop: search_server::Shutdown,
     timeout: Duration,
 }
@@ -136,9 +132,7 @@ fn advertise(host: Option<&str>, bind: SocketAddr) -> String {
 }
 
 impl Search {
-    /// `own_api`: the API listener at `api` serves only search (`--search-only`), so it serves
-    /// TLS when the REST listener does ([`Search::serve_api`]).
-    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, api: SocketAddr, own_api: bool) -> anyhow::Result<Self> {
+    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, api: SocketAddr) -> anyhow::Result<Self> {
         let mut cfg = SearchConfig::local(home.join("search"));
         cfg.node_name = node.to_string();
         cfg.public_host = public_host.to_string();
@@ -169,7 +163,8 @@ impl Search {
             Some((cert, _)) => Some(search_proxy::upstream::pem_fingerprint(cert)?),
             None => None,
         };
-        cfg.api_token = args.search_api_token.clone().filter(|t| !t.is_empty());
+        // `/v1/search` sits behind rolld's operator gate (auth.rs), like every product's API.
+        cfg.api_token = None;
         if let Some(meta) = args.search_meta.clone().filter(|m| !m.is_empty()) {
             let node_id = match args.search_node_id.clone().filter(|n| !n.is_empty()) {
                 Some(n) => n,
@@ -186,7 +181,6 @@ impl Search {
             f.meta_password = args.search_meta_password.clone();
             f.az = az;
             f.advertise_api = Some(advertise(host, api));
-            f.api_tls = own_api && tls_pin.is_some();
             f.tls_pin = tls_pin;
             cfg.fleet = Some(f);
         }
@@ -195,7 +189,6 @@ impl Search {
             opts.tls = Some(search_server::net::tls_acceptor(cert, key)?);
         }
         cfg.tls = opts.tls.is_some();
-        let api_tls = if own_api { opts.tls.clone() } else { None };
         let wal = match args.search_wal_bucket.as_deref().filter(|b| !b.is_empty()) {
             Some(bucket) => {
                 let region = match storage {
@@ -224,7 +217,6 @@ impl Search {
             control,
             listener: tokio::sync::Mutex::new(Some(listener)),
             opts,
-            api_tls,
             stop: search_server::Shutdown::new(),
             timeout: Duration::from_secs(args.search_shutdown_timeout_s.max(1)),
         })
@@ -232,22 +224,6 @@ impl Search {
 
     pub fn router(&self) -> axum::Router {
         search_control::api::router(self.control.clone())
-    }
-
-    /// Serves the control API on its own listener (`--search-only`): TLS with the REST
-    /// listener's certificate when that serves TLS (and plain HTTP too while the fleet still
-    /// has a node from before `api_tls`), else plain HTTP.
-    pub async fn serve_api(&self, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-        match &self.api_tls {
-            Some(acceptor) => axum::serve(search_control::api::TlsListener::for_fleet(listener, acceptor.clone(), self.control.clone())?, self.router()).await?,
-            None => axum::serve(listener, self.router()).await?,
-        }
-        Ok(())
-    }
-
-    /// Whether [`Search::serve_api`] serves TLS.
-    pub fn api_tls(&self) -> bool {
-        self.api_tls.is_some()
     }
 
     /// Serves the REST listener until it fails or [`Search::shutdown`] has handed everything

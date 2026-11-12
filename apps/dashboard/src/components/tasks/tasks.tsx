@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
 import { useCallback, useEffect, useState } from "react";
 import { tasks, TASKS_API, TasksApiError, type TasksHealth } from "@/lib/tasks-api";
@@ -179,7 +177,7 @@ function Offline() {
         <pre className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">cargo run -p rolld</pre>
         <p className="max-w-md text-[12px] text-subtle">
           Or run tasks on its own with <code className="font-mono">cargo run -p tasks --bin roll-tasks</code> and point{" "}
-          <code className="font-mono">NEXT_PUBLIC_ROLL_API</code> at it.
+          <code className="font-mono">VITE_ROLL_API</code> at it.
         </p>
       </div>
     </section>
@@ -194,12 +192,11 @@ function Unauthorized() {
         <HorizonMark state="error" size={40} />
         <h2 className="text-[15px] font-medium">The tasks API wants a token</h2>
         <p className="max-w-md text-[13px] text-muted">
-          rolld was started with <code className="font-mono text-fg">ROLL_TASKS_TOKEN</code>. Give the dashboard the
-          same token (or an API key) and restart it:
+          The dashboard signs in with rolld&apos;s operator token. Start rolld with{" "}
+          <code className="font-mono text-fg">ROLL_ADMIN_TOKEN</code> (it takes the place of{" "}
+          <code className="font-mono text-fg">ROLL_TASKS_TOKEN</code> here, which keeps working for API clients) and sign in
+          with it from the header.
         </p>
-        <pre className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">
-          NEXT_PUBLIC_ROLL_TASKS_TOKEN=… pnpm dev
-        </pre>
       </div>
     </section>
   );

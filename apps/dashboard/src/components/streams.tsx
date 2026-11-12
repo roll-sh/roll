@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
 import { Check, Copy, KeyRound, Pause, Play, Plus, Send, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -16,6 +14,8 @@ import {
   type StreamUsage,
   type TopicDetail,
 } from "@/lib/roll-api";
+import { operatorHeaders } from "@/lib/code-token";
+import { streamSse } from "@/lib/sse";
 import { AppShell } from "./app-shell";
 import { useMarkState } from "./mark-state";
 
@@ -558,15 +558,20 @@ function TopicView({ streamId, name, busy, run }: { streamId: string; name: stri
     };
   }, [streamId, name]);
 
-  // Live tail over SSE; the browser resumes from the last event id after a drop.
+  // Live tail over SSE (with the operator token, which EventSource can't send); a reconnect
+  // resumes from the last event id.
   useEffect(() => {
     if (!live) return;
-    const es = new EventSource(streams.tailUrl(streamId, name));
-    es.addEventListener("record", (e) => {
-      const r = JSON.parse((e as MessageEvent).data) as StreamRecord;
-      setRecords((rs) => [r, ...rs].slice(0, TAIL_ROWS));
+    let last: string | undefined;
+    return streamSse(streams.tailUrl(streamId, name), {
+      headers: () => ({ ...operatorHeaders(), ...(last ? { "last-event-id": last } : {}) }),
+      onEvent: (e) => {
+        if (e.event !== "record") return;
+        if (e.id) last = e.id;
+        const r = JSON.parse(e.data) as StreamRecord;
+        setRecords((rs) => [r, ...rs].slice(0, TAIL_ROWS));
+      },
     });
-    return () => es.close();
   }, [streamId, name, live]);
 
   const send = async () => {

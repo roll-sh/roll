@@ -29,6 +29,8 @@ pub(crate) struct Inflight {
 /// How a delivery went.
 pub(crate) enum Done {
     Ok(Outcome),
+    /// Another invocation is still being published; hand back without charging an attempt.
+    Deferred(Ms),
     Failed {
         outcome: Outcome,
         /// Server-requested delay (`Retry-After`).
@@ -671,6 +673,13 @@ async fn finish(t: &Arc<Tasks>, cell: &Arc<Mutex<Message>>, done: Done) -> anyho
     next.updated_at = now;
     next.deferrals = 0;
     let (outcome, log) = match done {
+        Done::Deferred(wait_ms) => {
+            next.state = MsgState::Pending;
+            next.attempts = next.attempts.saturating_sub(1);
+            next.deferrals = c.deferrals + 1;
+            next.due_at = now + wait_ms.max(1);
+            (c.last.clone(), false)
+        }
         Done::Ok(o) => {
             next.state = MsgState::Delivered;
             next.expires_at = Some(now + t.config.retention_ms);
@@ -737,7 +746,9 @@ async fn finish(t: &Arc<Tasks>, cell: &Arc<Mutex<Message>>, done: Done) -> anyho
             }
         }
         MsgState::Pending => {
-            t.count(|u| u.failed_attempts += 1);
+            if log {
+                t.count(|u| u.failed_attempts += 1);
+            }
             t.nudge_lane(&next.lane, next.due_at);
         }
         MsgState::Failed => {

@@ -1,9 +1,7 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, GitBranch, KeyRound, Moon, RefreshCw, Trash2 } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { Link } from "@/components/link";
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 import { formatBytes, formatUsd } from "@/lib/roll-api";
 import {
@@ -38,7 +36,7 @@ export function SearchClusterLoading() {
 }
 
 export function SearchClusterPage({ id }: { id: string }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { info, clusters, offline, refresh } = useSearchClusters();
   const { busy, error, setError, run } = useAction(refresh);
   const [tab, setTabRaw] = useState<Tab>("overview");
@@ -199,7 +197,7 @@ export function SearchClusterPage({ id }: { id: string }) {
             busy={busy}
             run={run}
             onRotated={setRevealed}
-            onDeleted={() => router.push("/dashboard/search")}
+            onDeleted={() => navigate({ href: "/dashboard/search" })}
           />
         )}
       </div>

@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 PATHS=(crates/stream-log crates/stream-broker crates/pg-storage crates/rolld crates/roll-cli vendor/kafka-protocol
        Cargo.toml Cargo.lock scripts/test-stream.sh .github/workflows/stream.yml)
 STAMP=target/.test-stream.hash
-KAFKA_IMAGE=${ROLL_E2E_KAFKA_IMAGE:-apache/kafka:4.1.0}
+KAFKA_IMAGE=${ROLL_E2E_KAFKA_IMAGE:-apache/kafka:4.1.0@sha256:bff074a5d0051dbc0bbbcd25b045bb1fe84833ec0d3c7c965d1797dd289ec88f}
 
 force=0 unit_only=0 args=()
 for a in "$@"; do

@@ -1,0 +1,1201 @@
+{
+  "steps": [
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "Where to tell",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 1
+          },
+          "guild": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
+            "type": "string",
+            "x-order": 0
+          },
+          "machine": {
+            "description": "Unset: the agent event's",
+            "format": "roll-machine",
+            "title": "Machine",
+            "type": "string",
+            "x-order": 3
+          },
+          "thread": {
+            "description": "Unset: the agent event's",
+            "format": "roll-thread",
+            "title": "Thread",
+            "type": "string",
+            "x-order": 4
+          },
+          "user": {
+            "description": "Or DM them",
+            "format": "lookup",
+            "lookup": {
+              "kind": "members",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Person",
+            "type": "string",
+            "x-order": 2
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "description": "Tell a channel or person about an agent, with buttons to answer what it waits on.",
+      "integration": "discord",
+      "kind": "discord.notify",
+      "output": [
+        "channel",
+        "ts",
+        "status"
+      ],
+      "title": "Notify in Discord"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 1
+          },
+          "guild": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
+            "type": "string",
+            "x-order": 0
+          },
+          "text": {
+            "description": "The message (a template).",
+            "type": "string",
+            "x-order": 3
+          },
+          "user": {
+            "description": "DM them instead",
+            "format": "lookup",
+            "lookup": {
+              "kind": "members",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Person",
+            "type": "string",
+            "x-order": 2
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "description": "Post a message to a channel, or DM a user.",
+      "integration": "discord",
+      "kind": "discord.post",
+      "output": [
+        "channel",
+        "id"
+      ],
+      "title": "Post to Discord"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 3
+          },
+          "guild": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
+            "type": "string",
+            "x-order": 0
+          },
+          "machine": {
+            "description": "The agent's machine (steps.<start>.machine)",
+            "format": "roll-machine",
+            "title": "Machine",
+            "type": "string",
+            "x-order": 1
+          },
+          "message": {
+            "description": "Reply to this message.",
+            "type": "string",
+            "x-order": 4
+          },
+          "thread": {
+            "description": "The agent thread (steps.<start>.thread)",
+            "format": "roll-thread",
+            "title": "Thread",
+            "type": "string",
+            "x-order": 2
+          }
+        },
+        "required": [
+          "machine",
+          "thread"
+        ],
+        "type": "object"
+      },
+      "description": "Follow an agent thread in Discord: a status message that updates, buttons and selects for its requests, and a Reply button to steer it.",
+      "integration": "discord",
+      "kind": "discord.status",
+      "output": [
+        "channel",
+        "ts",
+        "status",
+        "title",
+        "change.url"
+      ],
+      "title": "Live status in Discord"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "Markdown (a template).",
+            "type": "string",
+            "x-order": 2
+          },
+          "number": {
+            "description": "Issue or pull request number; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "issues",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Issue or pull request",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "x-order": 1
+          },
+          "repo": {
+            "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      },
+      "description": "Comment on an issue or pull request.",
+      "integration": "github",
+      "kind": "github.comment",
+      "output": [
+        "id",
+        "url"
+      ],
+      "title": "Comment on GitHub"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "add": {
+            "description": "Labels to add.",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "create": true,
+              "kind": "labels",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Add labels",
+            "type": "array",
+            "x-order": 2
+          },
+          "number": {
+            "description": "Issue or pull request number; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "issues",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Issue or pull request",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "x-order": 1
+          },
+          "remove": {
+            "description": "Labels to take off.",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "kind": "labels",
+              "parent": "repo",
+              "source": "github"
+            },
+            "title": "Remove labels",
+            "type": "array",
+            "x-order": 3
+          },
+          "repo": {
+            "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "description": "Add or remove labels on an issue or pull request.",
+      "integration": "github",
+      "kind": "github.label",
+      "output": [
+        "labels"
+      ],
+      "title": "Label on GitHub"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "Unset: the change's description.",
+            "type": "string",
+            "x-order": 3
+          },
+          "change": {
+            "description": "The roll change (steps.<publish>.change).",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "x-order": 1
+          },
+          "draft": {
+            "type": [
+              "boolean",
+              "string"
+            ],
+            "x-order": 4
+          },
+          "repo": {
+            "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
+            "type": "string",
+            "x-order": 0
+          },
+          "title": {
+            "description": "Unset: the change's title.",
+            "type": "string",
+            "x-order": 2
+          }
+        },
+        "required": [
+          "change"
+        ],
+        "type": "object"
+      },
+      "description": "Open a GitHub pull request from a roll change (its head pushed as a branch).",
+      "integration": "github",
+      "kind": "github.pr",
+      "output": [
+        "number",
+        "url",
+        "branch"
+      ],
+      "title": "Open a pull request"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "description": "The status's name (default roll/automation).",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "roll/automation",
+                  "label": "roll/automation"
+                }
+              ]
+            },
+            "title": "Context",
+            "type": "string",
+            "x-order": 3
+          },
+          "description": {
+            "description": "One line.",
+            "type": "string",
+            "x-order": 4
+          },
+          "repo": {
+            "description": "A GitHub-connected repo of the owner; unset: the event's.",
+            "format": "lookup",
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repo",
+            "type": "string",
+            "x-order": 0
+          },
+          "sha": {
+            "description": "The commit; unset: the event's.",
+            "type": "string",
+            "x-order": 1
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "success",
+              "failure",
+              "error"
+            ],
+            "type": "string",
+            "x-order": 2
+          },
+          "target_url": {
+            "description": "A link.",
+            "type": "string",
+            "x-order": 5
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "description": "Set a commit status on GitHub.",
+      "integration": "github",
+      "kind": "github.status",
+      "output": [
+        "state",
+        "context"
+      ],
+      "title": "Set a commit status"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "description": "Block Kit blocks (strings in them are templates); text is the fallback.",
+            "type": "array",
+            "x-order": 3
+          },
+          "team": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          },
+          "text": {
+            "description": "The message (a template; Slack mrkdwn).",
+            "type": "string",
+            "x-order": 2
+          },
+          "user": {
+            "description": "Who gets the message",
+            "format": "lookup",
+            "lookup": {
+              "kind": "users",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Person",
+            "type": "string",
+            "x-order": 1
+          }
+        },
+        "required": [
+          "user",
+          "text"
+        ],
+        "type": "object"
+      },
+      "description": "Send a direct message.",
+      "integration": "slack",
+      "kind": "slack.dm",
+      "output": [
+        "channel",
+        "ts"
+      ],
+      "title": "DM a Slack user"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "machine": {
+            "description": "Unset: the agent event's",
+            "format": "roll-machine",
+            "title": "Machine",
+            "type": "string",
+            "x-order": 2
+          },
+          "team": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          },
+          "text": {
+            "description": "A line above the card (a template).",
+            "type": "string",
+            "x-order": 4
+          },
+          "thread": {
+            "description": "Unset: the agent event's",
+            "format": "roll-thread",
+            "title": "Thread",
+            "type": "string",
+            "x-order": 3
+          },
+          "to": {
+            "description": "A channel, or a person (a DM)",
+            "format": "lookup",
+            "lookup": {
+              "kind": "targets",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "To",
+            "type": "string",
+            "x-order": 1
+          }
+        },
+        "required": [
+          "to"
+        ],
+        "type": "object"
+      },
+      "description": "Tell a channel or a person about an agent (waiting on you, failed, done), with buttons to answer what it waits on.",
+      "integration": "slack",
+      "kind": "slack.notify",
+      "output": [
+        "channel",
+        "ts",
+        "status",
+        "title"
+      ],
+      "title": "Notify in Slack"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "description": "Block Kit blocks (strings in them are templates); text is the fallback.",
+            "type": "array",
+            "x-order": 3
+          },
+          "channel": {
+            "description": "Where to post",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 1
+          },
+          "team": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          },
+          "text": {
+            "description": "The message (a template; Slack mrkdwn).",
+            "type": "string",
+            "x-order": 2
+          },
+          "thread_ts": {
+            "description": "Post in this thread.",
+            "type": "string",
+            "x-order": 4
+          }
+        },
+        "required": [
+          "channel",
+          "text"
+        ],
+        "type": "object"
+      },
+      "description": "Post a message (text or Block Kit) to a channel or thread.",
+      "integration": "slack",
+      "kind": "slack.post",
+      "output": [
+        "channel",
+        "ts",
+        "thread_ts"
+      ],
+      "title": "Post to Slack"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "description": "Block Kit blocks (strings in them are templates); text is the fallback.",
+            "type": "array",
+            "x-order": 4
+          },
+          "channel": {
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 1
+          },
+          "team": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          },
+          "text": {
+            "description": "The message (a template; Slack mrkdwn).",
+            "type": "string",
+            "x-order": 3
+          },
+          "thread_ts": {
+            "description": "Unset: the event's thread.",
+            "type": "string",
+            "x-order": 2
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "description": "Reply in the thread the event came from.",
+      "integration": "slack",
+      "kind": "slack.reply",
+      "output": [
+        "channel",
+        "ts",
+        "thread_ts"
+      ],
+      "title": "Reply in the Slack thread"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 3
+          },
+          "machine": {
+            "description": "The agent's machine (steps.<start>.machine)",
+            "format": "roll-machine",
+            "title": "Machine",
+            "type": "string",
+            "x-order": 1
+          },
+          "team": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          },
+          "thread": {
+            "description": "The agent thread (steps.<start>.thread)",
+            "format": "roll-thread",
+            "title": "Thread",
+            "type": "string",
+            "x-order": 2
+          },
+          "thread_ts": {
+            "description": "Unset: the event's thread; none: the status starts one.",
+            "type": "string",
+            "x-order": 4
+          },
+          "ts": {
+            "description": "Edit this status message instead of posting one.",
+            "type": "string",
+            "x-order": 5
+          }
+        },
+        "required": [
+          "machine",
+          "thread"
+        ],
+        "type": "object"
+      },
+      "description": "Follow an agent thread in Slack: one status message that updates (running, steps, done with the PR), buttons for its approvals and questions, and replies in the thread steer it. Ends when the thread's work does.",
+      "integration": "slack",
+      "kind": "slack.status",
+      "output": [
+        "channel",
+        "ts",
+        "thread_ts",
+        "status",
+        "title",
+        "change.url",
+        "failed"
+      ],
+      "title": "Live status in Slack"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "description": "Block Kit blocks (strings in them are templates); text is the fallback.",
+            "type": "array",
+            "x-order": 4
+          },
+          "channel": {
+            "description": "Where the message is",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 1
+          },
+          "team": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          },
+          "text": {
+            "description": "The message (a template; Slack mrkdwn).",
+            "type": "string",
+            "x-order": 3
+          },
+          "ts": {
+            "description": "The message to edit (an earlier step's ts).",
+            "type": "string",
+            "x-order": 2
+          }
+        },
+        "required": [
+          "channel",
+          "ts",
+          "text"
+        ],
+        "type": "object"
+      },
+      "description": "Change a message an earlier step posted.",
+      "integration": "slack",
+      "kind": "slack.update",
+      "output": [
+        "channel",
+        "ts"
+      ],
+      "title": "Edit a Slack message"
+    }
+  ],
+  "triggers": [
+    {
+      "config": {
+        "properties": {
+          "channels": {
+            "description": "Only /roll in these; unset: any",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channels",
+            "type": "array",
+            "x-order": 1
+          },
+          "guild": {
+            "description": "Unset: the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "type": "object"
+      },
+      "description": "/roll in a Discord server.",
+      "events": [
+        {
+          "fields": [
+            "prompt",
+            "user",
+            "user_name",
+            "channel",
+            "guild"
+          ],
+          "kind": "command",
+          "sample": {
+            "channel": "1100000000000000002",
+            "guild": "1100000000000000001",
+            "prompt": "fix the build",
+            "text": "fix the build",
+            "user": "1100000000000000003",
+            "user_name": "ada"
+          },
+          "title": "/roll <prompt>"
+        }
+      ],
+      "source": "discord",
+      "title": "Discord"
+    },
+    {
+      "config": {
+        "properties": {
+          "anyone": {
+            "description": "Issues from anyone, not just people who can push.",
+            "type": "boolean",
+            "x-order": 3
+          },
+          "branches": {
+            "description": "check.failed: on these branches.",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "kind": "branches",
+              "parent": "repos",
+              "source": "github"
+            },
+            "title": "Branches",
+            "type": "array",
+            "x-order": 2
+          },
+          "labels": {
+            "description": "issue.labeled: one of these labels; issue.opened: having one.",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "kind": "labels",
+              "parent": "repos",
+              "source": "github"
+            },
+            "title": "Labels",
+            "type": "array",
+            "x-order": 1
+          },
+          "repos": {
+            "description": "Repos (names); unset: every connected repo.",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "kind": "repos",
+              "source": "github"
+            },
+            "title": "Repos",
+            "type": "array",
+            "x-order": 0
+          }
+        },
+        "type": "object"
+      },
+      "description": "Issues, @roll comments, review requests and failing checks on the owner's GitHub-connected repos.",
+      "events": [
+        {
+          "fields": [
+            "repo",
+            "number",
+            "title",
+            "body",
+            "labels",
+            "author",
+            "trusted_author"
+          ],
+          "kind": "issue.opened",
+          "sample": {
+            "author": "ada",
+            "author_association": "MEMBER",
+            "body": "Steps: …",
+            "github": "acme/app",
+            "label": null,
+            "labels": [
+              "bug"
+            ],
+            "number": 12,
+            "repo": "acme/app",
+            "repo_name": "app",
+            "title": "Login 500s on Safari",
+            "trusted_author": true,
+            "url": "https://github.com/acme/app/issues/12"
+          },
+          "title": "An issue is opened"
+        },
+        {
+          "fields": [
+            "repo",
+            "number",
+            "title",
+            "label",
+            "labels"
+          ],
+          "kind": "issue.labeled",
+          "sample": {
+            "author": "ada",
+            "author_association": "MEMBER",
+            "body": "Steps: …",
+            "github": "acme/app",
+            "label": "roll",
+            "labels": [
+              "bug",
+              "roll"
+            ],
+            "number": 12,
+            "repo": "acme/app",
+            "repo_name": "app",
+            "sender": "ada",
+            "title": "Login 500s on Safari",
+            "trusted_author": true,
+            "url": "https://github.com/acme/app/issues/12"
+          },
+          "title": "An issue is labelled"
+        },
+        {
+          "fields": [
+            "repo",
+            "number",
+            "is_pr",
+            "prompt",
+            "body",
+            "author",
+            "change.number"
+          ],
+          "kind": "comment.mention",
+          "sample": {
+            "author": "ada",
+            "author_association": "MEMBER",
+            "body": "@roll fix this and open a PR",
+            "change": null,
+            "github": "acme/app",
+            "is_pr": false,
+            "issue_url": "https://github.com/acme/app/issues/12",
+            "labels": [
+              "bug"
+            ],
+            "number": 12,
+            "prompt": "fix this and open a PR",
+            "repo": "acme/app",
+            "repo_name": "app",
+            "title": "Login 500s on Safari",
+            "url": "https://github.com/acme/app/issues/12#issuecomment-1"
+          },
+          "title": "@roll in a comment"
+        },
+        {
+          "fields": [
+            "repo",
+            "number",
+            "title",
+            "reviewer",
+            "head_ref"
+          ],
+          "kind": "review.requested",
+          "sample": {
+            "author": "ada",
+            "base_ref": "main",
+            "body": "",
+            "github": "acme/app",
+            "head_ref": "cache-sessions",
+            "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+            "number": 7,
+            "repo": "acme/app",
+            "repo_name": "app",
+            "reviewer": "roll-reviewers",
+            "title": "Cache sessions",
+            "url": "https://github.com/acme/app/pull/7"
+          },
+          "title": "A review is requested"
+        },
+        {
+          "fields": [
+            "repo",
+            "check",
+            "branch",
+            "on_default",
+            "sha",
+            "pr",
+            "url"
+          ],
+          "kind": "check.failed",
+          "sample": {
+            "branch": "main",
+            "check": "ci / test",
+            "conclusion": "failure",
+            "github": "acme/app",
+            "on_default": true,
+            "pr": null,
+            "pull_requests": [],
+            "repo": "acme/app",
+            "repo_name": "app",
+            "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+            "url": "https://github.com/acme/app/actions/runs/1",
+            "via": "check_run"
+          },
+          "title": "A check fails"
+        }
+      ],
+      "source": "github",
+      "title": "GitHub"
+    },
+    {
+      "config": {
+        "properties": {
+          "channels": {
+            "description": "Listen in these; unset: any channel the bot is in. Needed for message.",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channels",
+            "type": "array",
+            "x-order": 1
+          },
+          "reactions": {
+            "description": "Reaction names (no colons); unset: robot_face.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Reactions",
+            "type": "array",
+            "x-order": 2
+          },
+          "team": {
+            "description": "Unset: the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "type": "object"
+      },
+      "description": "/roll, a mention of the roll bot, a message in a watched channel, or a reaction on a message.",
+      "events": [
+        {
+          "fields": [
+            "prompt",
+            "user",
+            "user_name",
+            "channel",
+            "team"
+          ],
+          "kind": "command",
+          "sample": {
+            "channel": "C0123",
+            "prompt": "fix the flaky login test",
+            "team": "T0123",
+            "text": "fix the flaky login test",
+            "thread_ts": null,
+            "user": "U0123",
+            "user_name": "ada"
+          },
+          "title": "/roll <prompt>"
+        },
+        {
+          "fields": [
+            "prompt",
+            "text",
+            "user",
+            "channel",
+            "thread_ts",
+            "team"
+          ],
+          "kind": "mention",
+          "sample": {
+            "channel": "C0123",
+            "prompt": "why is checkout slow?",
+            "team": "T0123",
+            "text": "<@U0BOT> why is checkout slow?",
+            "thread_ts": "1700000000.000100",
+            "ts": "1700000000.000100",
+            "user": "U0123"
+          },
+          "title": "The roll bot is mentioned"
+        },
+        {
+          "fields": [
+            "text",
+            "user",
+            "channel",
+            "thread_ts",
+            "in_thread",
+            "team"
+          ],
+          "kind": "message",
+          "sample": {
+            "channel": "C0INCIDENTS",
+            "in_thread": false,
+            "team": "T0123",
+            "text": "deploy failed: migration 42 timed out",
+            "thread_ts": "1700000000.000200",
+            "ts": "1700000000.000200",
+            "user": "U0123"
+          },
+          "title": "A message in a watched channel"
+        },
+        {
+          "fields": [
+            "reaction",
+            "text",
+            "user",
+            "author",
+            "channel",
+            "thread_ts",
+            "team"
+          ],
+          "kind": "reaction",
+          "sample": {
+            "author": "U0456",
+            "channel": "C0123",
+            "reaction": "robot_face",
+            "team": "T0123",
+            "text": "the login page 500s on Safari",
+            "thread_ts": "1700000000.000300",
+            "ts": "1700000000.000300",
+            "user": "U0123"
+          },
+          "title": "A reaction on a message"
+        }
+      ],
+      "source": "slack",
+      "title": "Slack"
+    }
+  ]
+}

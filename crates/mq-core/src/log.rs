@@ -59,6 +59,10 @@ pub trait LogStore: Send + Sync {
     fn describe(&self) -> String;
     /// Make everything written durable and release background work, after every log is done.
     async fn close(&self) {}
+    /// Wait until a log this process dropped has finished closing in the background (staged
+    /// entries moved, closing marker written), so the next opener (on another node) finds it
+    /// closed cleanly.
+    async fn released(&self, _key: &str) {}
 }
 
 // ── memory ──

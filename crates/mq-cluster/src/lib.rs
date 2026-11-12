@@ -1,99 +1,66 @@
-//! roll queues clustering: many stateless brokers acting as one RabbitMQ node.
+//! roll queues on many nodes: every node of a roll fleet acting as one RabbitMQ node.
 //!
-//! - **Shared state.** Topology lives in one metadata store (roll postgres via [`pg::PgMeta`])
-//!   and message logs in shared, replicated storage (`mq-storage`). Every node follows the
-//!   store's change feed and applies it ([`Broker::apply_change`]).
-//! - **Membership.** Nodes heartbeat a `mq_node` record; a node whose heartbeat stops changing
-//!   for `node_ttl` is dead. One record per node, so liveness costs nothing per queue.
-//! - **Ownership.** Each queue partition has a `mq_owner` record `{node, epoch}`, valid while that
-//!   node is alive. Claims and moves are compare-and-set; the new owner opens the log with a
-//!   higher epoch, which fences the old one out of the storage layer.
-//! - **Routing.** Every node has a [`router`] per queue that forwards to the owner (in process or
-//!   over [`rpc`]). Ownership moves without client connections moving: routers retarget and
-//!   re-register consumers.
-//! - **Failover.** When an owner dies, the surviving node that wins rendezvous hashing for the
-//!   queue claims it and replays its log; confirmed messages are on the storage quorum, so none
-//!   are lost. **Rebalance** moves queues to their rendezvous node as nodes join; **drain**
-//!   hands everything off before a node leaves (rolling upgrades).
-//! - **AZ affinity.** Traffic between availability zones is billed, so each queue has a home
-//!   AZ (in its owner record) and lives on the rendezvous node among that AZ's nodes. The home
-//!   starts as the AZ where the queue was first used and follows its clients: the owner counts
-//!   where each queue's publishes and deliveries come from, and when another AZ clearly
-//!   dominates for a while, the home moves there and the queue follows (see
-//!   [`Cluster::place_by_traffic`]). A home AZ without live nodes falls back to any node.
+//! - **Shared state.** Topology lives in one metadata store (the system database, through
+//!   [`pg::PgMeta`]) and message logs in shared storage (`mq-storage`: S3 on the fleet). Every
+//!   node follows the store's change feed and applies it ([`Broker::apply_change`]).
+//! - **Membership and ownership** are roll-cluster's (docs/cloud/README.md): each durable queue
+//!   partition has one owner, the holder of the lease [`queue_key`] (`mq:<vhost>/<queue>`).
+//!   The owner opens the partition's log with the lease's epoch, which fences every older owner
+//!   out of the log store: correctness never depends on the lease.
+//! - **Routing.** Every node has a [`router`] per queue that forwards to the owner, in process
+//!   or over [`rpc`] (an upgraded, signed connection on the internal API). Ownership moves
+//!   without client connections moving: routers retarget and re-register their consumers.
+//! - **Moves.** roll-cluster hands leases off (rebalancing, a drain) and takes over a dead
+//!   node's. A handoff ends the owner's guard: the router pauses deliveries, lets in-flight acks
+//!   land, stops the actor (every write flushed, the log closed), and only then lets go of the
+//!   lease. A dead owner's queues come back on whichever node takes its leases, replayed from
+//!   the log; confirmed messages are durable there, so none are lost.
 
-pub mod aws;
 pub mod pg;
 pub use pg::PgMeta;
 mod router;
 pub mod rpc;
 
 use async_trait::async_trait;
+use axum::extract::Request;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
 use mq_core::cluster::{Placement, QueueStart};
 use mq_core::log::LogStore;
 use mq_core::meta::MetaStore;
+use mq_core::queue::stream::{ChunkSubscription, NativePublish};
 use mq_core::queue::{ConfirmTicket, ConsumerSpec, Outcome, PublishResult, QueueCmd, QueueRef};
-use mq_core::transport::{Stream, Transport};
 use mq_core::{AmqpError, Broker, FieldTable, Message};
 use parking_lot::{Mutex, RwLock};
-use router::{Ctl, RemoteSink, Router, RouterRef};
+use roll_cluster::{Guard, Ownership, Route};
+use router::{Ctl, RemoteChunkSink, RemoteSink, Router, RouterRef};
 use rpc::{Frame, Peer, Push, Req};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-pub const NODE: &str = "mq_node";
-pub const OWNER: &str = "mq_owner";
+/// How queue leases start: `mq:<vhost>/<queue>` (docs/cloud/README.md, "Ownership keys").
+pub const KEY_PREFIX: &str = "mq:";
 
 #[derive(Clone, Debug)]
 pub struct ClusterConfig {
-    /// Unique and stable per node (a hostname or instance id).
-    pub node_id: String,
-    /// Internal RPC listener.
-    pub listen: SocketAddr,
-    /// Address other nodes dial (defaults to `listen`).
-    pub advertise: Option<SocketAddr>,
-    pub az: Option<String>,
-    pub heartbeat: Duration,
-    /// A node is dead after its heartbeat hasn't changed for this long.
-    pub node_ttl: Duration,
+    /// Client-facing addresses by protocol (`amqp`, `stream`, …): stream clients are sent to a
+    /// stream's owner by them.
+    pub listeners: BTreeMap<String, SocketAddr>,
     /// How often to read the metadata change feed.
     pub follow: Duration,
-    /// Move queues to their rendezvous node this often (`None`: never). Each pass also
-    /// reconsiders home AZs from the traffic since the last one.
-    pub rebalance: Option<Duration>,
-    /// Operations (publishes and deliveries) a queue needs in one rebalance period before its
-    /// traffic can move its home AZ.
-    pub place_min_ops: u64,
-    /// Client-facing addresses by protocol (`amqp`, `mqtt`, …), published for `mq-proxy`.
-    pub listeners: std::collections::BTreeMap<String, SocketAddr>,
-    /// TLS and the shared secret between nodes (see [`mq_core::transport`]).
-    pub transport: Arc<Transport>,
 }
 
 impl Default for ClusterConfig {
     fn default() -> Self {
-        ClusterConfig {
-            node_id: std::env::var("HOSTNAME").unwrap_or_else(|_| format!("node-{:x}", mq_core::rand_u64())),
-            listen: "127.0.0.1:0".parse().expect("addr"),
-            advertise: None,
-            az: None,
-            heartbeat: Duration::from_millis(1000),
-            node_ttl: Duration::from_millis(5000),
-            follow: Duration::from_millis(100),
-            rebalance: Some(Duration::from_secs(10)),
-            place_min_ops: PLACE_MIN_OPS,
-            listeners: Default::default(),
-            transport: Transport::plain("cluster"),
-        }
+        ClusterConfig { listeners: BTreeMap::new(), follow: Duration::from_millis(100) }
     }
 }
 
@@ -101,51 +68,13 @@ impl Default for ClusterConfig {
 pub(crate) struct OwnedQueue {
     pub inner: QueueRef,
     /// Set during handoff: consumers stop receiving.
-    pub paused: Arc<std::sync::atomic::AtomicBool>,
-    #[allow(dead_code)]
-    pub epoch: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Owner {
-    pub node: String,
-    pub epoch: u64,
-    /// The queue's home AZ (see the module docs).
-    pub az: Option<String>,
-}
-
-/// Default for [`ClusterConfig::place_min_ops`].
-const PLACE_MIN_OPS: u64 = 1000;
-/// Share of a queue's traffic another AZ needs before the queue moves there...
-const PLACE_SHARE: f64 = 2.0 / 3.0;
-/// ...in this many rebalance periods in a row.
-const PLACE_STREAK: u32 = 2;
-
-/// Operations on one queue, by the AZ they came from.
-#[derive(Default)]
-struct Traffic {
-    /// Publishes and deliveries for other nodes, by AZ (shared with their sinks).
-    remote: HashMap<String, Arc<AtomicU64>>,
-    /// Totals at the end of the last period: all operations, and the remote ones by AZ.
-    last_total: Option<u64>,
-    last_remote: HashMap<String, u64>,
-    /// An AZ that has dominated recent periods, and for how many.
-    streak: Option<(String, u32)>,
-}
-
-#[derive(Clone, Debug)]
-struct NodeState {
-    addr: SocketAddr,
-    listeners: std::collections::BTreeMap<String, SocketAddr>,
-    az: Option<String>,
-    draining: bool,
-    hb: u64,
-    last_seen: Instant,
+    pub paused: Arc<AtomicBool>,
 }
 
 pub(crate) enum Decision {
-    Local(u64),
-    Remote(String),
+    /// This node owns the queue: run it under the lease's guard.
+    Local(Guard),
+    Remote(Arc<Peer>),
     Wait,
 }
 
@@ -165,117 +94,104 @@ fn outcome_of(c: u8) -> Outcome {
     }
 }
 
-/// Cluster key of a queue partition.
-pub fn queue_key(vhost: &str, name: &str, partition: u32) -> String {
-    mq_core::meta::key(&[vhost, name, &partition.to_string()])
-}
-
-fn fnv(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+/// `%`, `/` and `#` (and control characters) escaped: they separate the key's parts.
+fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '/' | '#') || c.is_control() {
+            let mut b = [0u8; 4];
+            for byte in c.encode_utf8(&mut b).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
     }
-    h
+    out
 }
 
-/// The node a queue belongs on: highest rendezvous score.
-fn rendezvous<'a>(key: &str, nodes: impl Iterator<Item = &'a String>) -> Option<&'a String> {
-    nodes.max_by_key(|n| fnv(&format!("{key}\u{1f}{n}")))
+fn unescape(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(s.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The lease of a queue partition: `mq:<vhost>/<queue>`, then `#<n>` for partitions after the
+/// first, with `%`, `/` and `#` in names escaped (the default vhost is `%2F`).
+pub fn queue_key(vhost: &str, name: &str, partition: u32) -> String {
+    match partition {
+        0 => format!("{KEY_PREFIX}{}/{}", escape(vhost), escape(name)),
+        p => format!("{KEY_PREFIX}{}/{}#{p}", escape(vhost), escape(name)),
+    }
+}
+
+/// `(vhost, queue, partition)` of a [`queue_key`].
+pub fn parse_key(key: &str) -> Option<(String, String, u32)> {
+    let rest = key.strip_prefix(KEY_PREFIX)?;
+    let (vhost, rest) = rest.split_once('/')?;
+    let (name, partition) = match rest.split_once('#') {
+        Some((n, p)) => (n, p.parse().ok()?),
+        None => (rest, 0),
+    };
+    Some((unescape(vhost)?, unescape(name)?, partition))
 }
 
 pub struct Cluster {
-    pub node_id: String,
+    /// The node's membership and leases (shared with every product on the node).
+    pub nodes: Arc<roll_cluster::Cluster>,
     pub config: ClusterConfig,
     pub meta: Arc<dyn MetaStore>,
     logs: Arc<dyn LogStore>,
+    /// Namespaces this process's channel and connection ids at owners on other nodes.
     num: u16,
-    advertise: SocketAddr,
     broker: OnceLock<Weak<Broker>>,
-    nodes: RwLock<HashMap<String, NodeState>>,
-    owners: RwLock<HashMap<String, Owner>>,
-    /// Where the traffic of owned queues comes from (AZ affinity).
-    traffic: Mutex<HashMap<String, Traffic>>,
     pub(crate) owned: RwLock<HashMap<String, Arc<OwnedQueue>>>,
     pub(crate) routers: RwLock<HashMap<String, Arc<RouterRef>>>,
     peers: Mutex<HashMap<String, Arc<Peer>>>,
     connecting: tokio::sync::Mutex<()>,
     conns: Mutex<Vec<Weak<ServerConn>>>,
     next_sub: AtomicU64,
-    draining: AtomicBool,
     stopped: AtomicBool,
-    hb: AtomicU64,
     version: AtomicU64,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Cluster {
-    /// Join the cluster: bind the RPC listener, load membership and ownership, start
-    /// heartbeating. Then start the broker with [`Cluster::placement`] and call
-    /// [`Cluster::attach`].
-    pub async fn join(config: ClusterConfig, meta: Arc<dyn MetaStore>, logs: Arc<dyn LogStore>) -> anyhow::Result<Arc<Cluster>> {
-        let listener = TcpListener::bind(config.listen).await?;
-        let bound = listener.local_addr()?;
-        let advertise = config.advertise.unwrap_or(bound);
+    /// Take part in serving queues on `nodes`. Then start the broker with
+    /// [`Cluster::placement`], call [`Cluster::attach`], and serve [`Cluster::routes`] on the
+    /// node's internal API (where `nodes` advertises it).
+    pub async fn join(nodes: Arc<roll_cluster::Cluster>, config: ClusterConfig, meta: Arc<dyn MetaStore>, logs: Arc<dyn LogStore>) -> anyhow::Result<Arc<Cluster>> {
         let (_, version) = meta.changes_since(i64::MAX).await?;
-        let num = ((mq_core::rand_u64() % 0xfffe) + 1) as u16;
         let c = Arc::new(Cluster {
-            node_id: config.node_id.clone(),
-            config: config.clone(),
-            meta: meta.clone(),
+            nodes,
+            config,
+            meta,
             logs,
-            num,
-            advertise,
+            num: ((mq_core::rand_u64() % 0xfffe) + 1) as u16,
             broker: OnceLock::new(),
-            nodes: RwLock::new(HashMap::new()),
-            owners: RwLock::new(HashMap::new()),
-            traffic: Mutex::new(HashMap::new()),
             owned: RwLock::new(HashMap::new()),
             routers: RwLock::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             connecting: tokio::sync::Mutex::new(()),
             conns: Mutex::new(Vec::new()),
             next_sub: AtomicU64::new(1),
-            draining: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
-            hb: AtomicU64::new(0),
             version: AtomicU64::new(version.max(0) as u64),
             tasks: Mutex::new(Vec::new()),
         });
-        for (k, v) in meta.list(NODE).await? {
-            if let Some(n) = node_state(&v)
-                && k != c.node_id
-            {
-                c.nodes.write().insert(k, n);
-            }
-        }
-        for (k, v) in meta.list(OWNER).await? {
-            if let Some(o) = owner_of(&v) {
-                c.owners.write().insert(k, o);
-            }
-        }
-        c.heartbeat().await?;
-        let mut tasks = vec![];
         let cc = c.clone();
-        tasks.push(tokio::spawn(async move { cc.serve(listener).await }));
-        let cc = c.clone();
-        tasks.push(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(cc.config.heartbeat).await;
-                if cc.stopped() {
-                    return;
-                }
-                if let Err(e) = cc.heartbeat().await {
-                    warn!(error = %e, "cluster heartbeat failed");
-                }
-            }
-        }));
-        let cc = c.clone();
-        tasks.push(tokio::spawn(async move { cc.monitor().await }));
-        let cc = c.clone();
-        tasks.push(tokio::spawn(async move { cc.stats_loop().await }));
-        *c.tasks.lock() = tasks;
-        info!(node = %c.node_id, rpc = %advertise, "joined cluster");
+        c.tasks.lock().push(tokio::spawn(async move { cc.stats_loop().await }));
+        info!(node = %c.nodes.node_id(), "queues: cluster node");
         Ok(c)
     }
 
@@ -284,26 +200,30 @@ impl Cluster {
         Arc::new(ClusterPlacement(self.clone()))
     }
 
-    /// Follow the change feed into `broker` and start rebalancing.
+    /// Follow the change feed into `broker`, and start queues as this node takes their leases.
     pub fn attach(self: &Arc<Self>, broker: &Arc<Broker>) {
         let _ = self.broker.set(Arc::downgrade(broker));
+        // Subscribe now: leases taken from here on reach the loop.
+        let events = self.nodes.subscribe_ownership();
+        let (c, c2) = (self.clone(), self.clone());
+        let mut tasks = self.tasks.lock();
+        tasks.push(tokio::spawn(async move { c.follow().await }));
+        tasks.push(tokio::spawn(async move { c2.ownership(events).await }));
+    }
+
+    /// `/internal/queues/rpc`, for the node's internal API: other nodes open their RPC
+    /// connection to this one there (signed).
+    pub fn routes(self: &Arc<Self>) -> axum::Router {
         let c = self.clone();
-        let follow = tokio::spawn(async move { c.follow().await });
-        self.tasks.lock().push(follow);
-        if let Some(every) = self.config.rebalance {
-            let c = self.clone();
-            let t = tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(every).await;
-                    if c.stopped() {
-                        return;
-                    }
-                    c.place_by_traffic().await;
-                    c.rebalance(64).await;
-                }
-            });
-            self.tasks.lock().push(t);
-        }
+        axum::Router::new()
+            .route(
+                rpc::PATH,
+                axum::routing::get(move |req: Request| {
+                    let c = c.clone();
+                    async move { c.accept(req) }
+                }),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(self.nodes.clone(), roll_cluster::require_signed))
     }
 
     fn broker(&self) -> Option<Arc<Broker>> {
@@ -336,162 +256,69 @@ impl Cluster {
         self.owned.read().keys().cloned().collect()
     }
 
-    /// Live nodes (including this one).
-    pub fn members(&self) -> Vec<Value> {
-        let mut out = vec![json!({ "node": self.node_id, "addr": self.advertise.to_string(), "az": self.config.az, "alive": true, "draining": self.draining.load(Ordering::Relaxed), "owned": self.owned_count(), "me": true })];
-        for (id, n) in self.nodes.read().iter() {
-            out.push(json!({ "node": id, "addr": n.addr.to_string(), "az": n.az, "alive": n.last_seen.elapsed() < self.config.node_ttl, "draining": n.draining, "me": false }));
-        }
-        out
-    }
-
-    async fn heartbeat(&self) -> anyhow::Result<()> {
-        let hb = self.hb.fetch_add(1, Ordering::Relaxed) + 1;
-        let v = json!({ "addr": self.advertise.to_string(), "az": self.config.az, "num": self.num, "draining": self.draining.load(Ordering::Relaxed), "hb": hb, "listeners": self.config.listeners });
-        self.meta.put(NODE, &self.node_id, &v).await?;
-        Ok(())
-    }
-
-    pub(crate) fn alive(&self, node: &str) -> bool {
-        node == self.node_id || self.nodes.read().get(node).is_some_and(|n| n.last_seen.elapsed() < self.config.node_ttl)
-    }
-
-    /// Nodes that should own queues: alive and not draining.
-    fn candidates(&self) -> Vec<String> {
-        let ttl = self.config.node_ttl;
-        let mut v: Vec<String> = self.nodes.read().iter().filter(|(_, n)| n.last_seen.elapsed() < ttl && !n.draining).map(|(k, _)| k.clone()).collect();
-        if !self.draining.load(Ordering::Relaxed) {
-            v.push(self.node_id.clone());
-        }
-        v
-    }
-
-    pub(crate) fn owner_cached(&self, key: &str) -> Option<Owner> {
-        self.owners.read().get(key).cloned()
-    }
-
-    /// Claim `key` for this node. `home` is the queue's home AZ (this node's for a new queue).
-    async fn claim(&self, key: &str, expected: Option<i64>, epoch: u64, home: Option<String>) -> anyhow::Result<bool> {
-        let az = home.or_else(|| self.config.az.clone());
-        let v = owner_json(&self.node_id, epoch, az.as_deref());
-        let won = self.meta.cas(OWNER, key, expected, &v).await?.is_some();
-        if won {
-            self.owners.write().insert(key.into(), Owner { node: self.node_id.clone(), epoch, az });
-        }
-        Ok(won)
-    }
-
-    fn node_az(&self, node: &str) -> Option<String> {
-        if node == self.node_id {
-            return self.config.az.clone();
-        }
-        self.nodes.read().get(node).and_then(|n| n.az.clone())
-    }
-
-    /// The node `key` belongs on: the rendezvous winner among the live nodes of its home AZ,
-    /// or among all live nodes when that AZ has none (or the queue has no home).
-    fn target(&self, key: &str, candidates: &[String]) -> Option<String> {
-        let home = self.owner_cached(key).and_then(|o| o.az);
-        if let Some(home) = home {
-            let local: Vec<&String> = candidates.iter().filter(|n| self.node_az(n).as_deref() == Some(home.as_str())).collect();
-            if let Some(n) = rendezvous(key, local.into_iter()) {
-                return Some(n.clone());
-            }
-        }
-        rendezvous(key, candidates.iter()).cloned()
-    }
-
-    pub(crate) async fn owner_decision(&self, key: &str, waited: Duration) -> anyhow::Result<Decision> {
-        match self.meta.get_versioned(OWNER, key).await? {
-            None => {
-                if self.draining.load(Ordering::Relaxed)
-                    && let Some(to) = rendezvous(key, self.candidates().iter())
-                    && to != &self.node_id
-                {
-                    // Don't take new queues while draining; the rendezvous node will.
-                    return Ok(if waited > self.config.node_ttl { Decision::Local(1) } else { Decision::Wait });
+    /// Where a queue runs: here (with the lease's guard), on another node, or nowhere yet (the
+    /// lease is moving, or its holder died and the lease hasn't lapsed).
+    pub(crate) async fn decide(&self, key: &str) -> Decision {
+        match self.nodes.route_async(key).await {
+            Ok(Route::Local(g)) => Decision::Local(g),
+            Ok(Route::Forward(node)) => match self.peer(&node).await {
+                Some(p) => Decision::Remote(p),
+                None => {
+                    self.nodes.forget(key);
+                    Decision::Wait
                 }
-                Ok(if self.claim(key, None, 1, None).await? { Decision::Local(1) } else { Decision::Wait })
-            }
-            Some((v, ver)) => {
-                let Some(o) = owner_of(&v) else { return Ok(Decision::Wait) };
-                self.owners.write().insert(key.into(), o.clone());
-                if o.node == self.node_id {
-                    // Ours on record (adopted, or from before a restart): bump the epoch to fence
-                    // any older incarnation, then run it.
-                    let epoch = o.epoch + 1;
-                    return Ok(if self.claim(key, Some(ver), epoch, o.az).await? { Decision::Local(epoch) } else { Decision::Wait });
-                }
-                if self.alive(&o.node) {
-                    return Ok(Decision::Remote(o.node));
-                }
-                // The dead node's successor stays in the queue's home AZ when it can.
-                let winner = self.target(key, &self.candidates());
-                if winner.as_deref() == Some(self.node_id.as_str()) || waited > self.config.node_ttl * 2 {
-                    let epoch = o.epoch + 1;
-                    if self.claim(key, Some(ver), epoch, o.az.clone()).await? {
-                        info!(queue = %key, from = %o.node, epoch, "took over queue from dead node");
-                        return Ok(Decision::Local(epoch));
-                    }
-                }
-                Ok(Decision::Wait)
+            },
+            Ok(Route::Unavailable { .. }) => Decision::Wait,
+            Err(e) => {
+                debug!(queue = %key, error = %e, "routing a queue failed");
+                Decision::Wait
             }
         }
     }
 
-    /// Give up a claim we couldn't act on.
-    pub(crate) async fn release(&self, key: &str) {
-        if let Ok(Some((v, ver))) = self.meta.get_versioned(OWNER, key).await
-            && owner_of(&v).is_some_and(|o| o.node == self.node_id)
-        {
-            let gone = owner_json("", v["epoch"].as_u64().unwrap_or(0), v["az"].as_str());
-            let _ = self.meta.cas(OWNER, key, Some(ver), &gone).await;
-        }
-    }
-
-    /// Pass ownership of a stopped queue to `to`.
-    pub(crate) async fn transfer(&self, key: &str, to: &str) -> bool {
-        let Ok(Some((v, ver))) = self.meta.get_versioned(OWNER, key).await else { return false };
-        let Some(o) = owner_of(&v) else { return false };
-        if o.node != self.node_id {
-            return false;
-        }
-        let next = owner_json(to, o.epoch + 1, o.az.as_deref());
-        if !matches!(self.meta.cas(OWNER, key, Some(ver), &next).await, Ok(Some(_))) {
-            return false;
-        }
-        self.owners.write().insert(key.into(), Owner { node: to.into(), epoch: o.epoch + 1, az: o.az });
-        if let Some(p) = self.peer(to).await {
-            let _ = p.call(&Req::Adopt { q: key.into() }, vec![]).await;
-        }
-        true
-    }
-
-    pub(crate) async fn peer(&self, node: &str) -> Option<Arc<Peer>> {
-        if let Some(p) = self.peers.lock().get(node).filter(|p| !p.is_closed()) {
+    pub(crate) async fn peer(&self, node: &roll_cluster::Node) -> Option<Arc<Peer>> {
+        if let Some(p) = self.peers.lock().get(&node.id).filter(|p| !p.is_closed()) {
             return Some(p.clone());
         }
         let _g = self.connecting.lock().await;
-        if let Some(p) = self.peers.lock().get(node).filter(|p| !p.is_closed()) {
+        if let Some(p) = self.peers.lock().get(&node.id).filter(|p| !p.is_closed()) {
             return Some(p.clone());
         }
-        let addr = self.nodes.read().get(node).map(|n| n.addr)?;
-        match Peer::connect(node, addr, &self.config.transport, &self.node_id, self.num).await {
+        match Peer::connect(node, &self.nodes).await {
             Ok(p) => {
-                self.peers.lock().insert(node.into(), p.clone());
+                self.peers.lock().insert(node.id.clone(), p.clone());
                 Some(p)
             }
             Err(e) => {
-                let e = format!("{e:#}");
-                // A secret mismatch is a misconfiguration, not a node going away.
-                if e.contains("secret") {
-                    warn!(%node, error = %e, "node refused the cluster handshake");
-                } else {
-                    debug!(%node, error = %e, "can't reach node");
-                }
+                debug!(node = %node.id, error = format!("{e:#}"), "can't reach node");
                 None
             }
         }
+    }
+
+    /// Get `key`'s actor running if this node should own it: its router routes again, or (no
+    /// router: the vhost is asleep here) the vhost wakes and starts its routers. A lease taken
+    /// for a queue that no longer exists is given up.
+    fn kick(self: &Arc<Self>, key: &str) {
+        if let Some(r) = self.routers.read().get(key) {
+            let _ = r.ctl.send(Ctl::Retarget);
+            return;
+        }
+        let Some((vhost, name, _)) = parse_key(key) else { return };
+        let Some(broker) = self.broker() else { return };
+        let (c, key) = (self.clone(), key.to_string());
+        tokio::spawn(async move {
+            broker.open_vhost(&vhost).await;
+            if c.routers.read().contains_key(&key) || !c.nodes.owns(&key) {
+                return;
+            }
+            // Deleted queues only: a queue's log refuses lease epochs older than its last owner's,
+            // and a deleted lease starts over at 1 (a new queue of that name has a new log).
+            if let Ok(None) = c.meta.get(mq_core::meta::kind::QUEUE, &mq_core::meta::key(&[&vhost, &name])).await {
+                debug!(queue = %key, "giving up the lease of a deleted queue");
+                c.nodes.retire(&key);
+            }
+        });
     }
 
     /// Tell consumers subscribed from other nodes that `key` moved.
@@ -503,6 +330,22 @@ impl Cluster {
                 c.subs.lock().remove(&sub);
                 c.push(Push::Moved { sub });
             }
+            let subs: Vec<u64> = c.chunk_subs.lock().iter().filter(|(_, s)| s.key == key).map(|(id, _)| *id).collect();
+            for sub in subs {
+                c.chunk_subs.lock().remove(&sub);
+                c.push(Push::Moved { sub });
+            }
+        }
+    }
+
+    /// Stop background work (after the node's leases were handed off, or it was killed). Call it
+    /// before `Broker::stop`: until then a router whose queue was handed off keeps waiting for the
+    /// next owner (riding out the move), which never comes when this is the last node, and the
+    /// broker's stop waits on that router.
+    pub async fn leave(&self) {
+        self.stopped.store(true, Ordering::Release);
+        for t in self.tasks.lock().drain(..) {
+            t.abort();
         }
     }
 
@@ -525,66 +368,33 @@ impl Cluster {
             let Some(broker) = self.broker() else { return };
             let mut seen = HashSet::new();
             for ch in changes {
-                match ch.kind.as_str() {
-                    NODE => {
-                        if ch.key == self.node_id {
-                            continue;
-                        }
-                        match ch.value.as_ref().and_then(node_state) {
-                            Some(n) => {
-                                let mut nodes = self.nodes.write();
-                                let changed = nodes.get(&ch.key).is_none_or(|o| o.hb != n.hb || o.draining != n.draining);
-                                if changed {
-                                    nodes.insert(ch.key.clone(), n);
-                                }
-                            }
-                            None => {
-                                self.nodes.write().remove(&ch.key);
-                            }
-                        }
-                    }
-                    OWNER => {
-                        if let Some(o) = ch.value.as_ref().and_then(owner_of) {
-                            self.owners.write().insert(ch.key.clone(), o);
-                        }
-                        if let Some(r) = self.routers.read().get(&ch.key) {
-                            let _ = r.ctl.send(Ctl::Retarget);
-                        }
-                    }
-                    kind => {
-                        // Reconcile each key once per batch; it reads the current value anyway.
-                        if seen.insert((kind.to_string(), ch.key.clone()))
-                            && let Err(e) = broker.apply_change(kind, &ch.key).await
-                        {
-                            warn!(kind, key = %ch.key, error = %e, "failed to apply metadata change");
-                        }
-                    }
+                // Reconcile each key once per batch; it reads the current value anyway.
+                if seen.insert((ch.kind.clone(), ch.key.clone()))
+                    && let Err(e) = broker.apply_change(&ch.kind, &ch.key).await
+                {
+                    warn!(kind = %ch.kind, key = %ch.key, error = %e, "failed to apply metadata change");
                 }
             }
             self.version.store(latest.max(from) as u64, Ordering::Release);
         }
     }
 
-    /// Notice dead nodes and wake the routers of their queues.
-    async fn monitor(self: Arc<Self>) {
-        let mut dead: HashSet<String> = HashSet::new();
-        loop {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+    /// Start queues whose leases this node takes (a dead node's, or one handed to it), and stop
+    /// the ones it loses.
+    async fn ownership(self: Arc<Self>, mut events: mpsc::UnboundedReceiver<Ownership>) {
+        while let Some(ev) = events.recv().await {
             if self.stopped() {
                 return;
             }
-            let now_dead: HashSet<String> = self.nodes.read().iter().filter(|(_, n)| n.last_seen.elapsed() >= self.config.node_ttl).map(|(k, _)| k.clone()).collect();
-            for n in now_dead.difference(&dead) {
-                warn!(node = %n, "node is gone; taking over its queues");
-                self.peers.lock().remove(n);
-                let keys: Vec<String> = self.owners.read().iter().filter(|(_, o)| &o.node == n).map(|(k, _)| k.clone()).collect();
-                for k in keys {
-                    if let Some(r) = self.routers.read().get(&k) {
+            match ev {
+                Ownership::Acquired { key, .. } if key.starts_with(KEY_PREFIX) => self.kick(&key),
+                Ownership::Lost { key } if key.starts_with(KEY_PREFIX) => {
+                    if let Some(r) = self.routers.read().get(&key) {
                         let _ = r.ctl.send(Ctl::Retarget);
                     }
                 }
+                _ => {}
             }
-            dead = now_dead;
         }
     }
 
@@ -595,14 +405,17 @@ impl Cluster {
             if self.stopped() {
                 return;
             }
-            let mut by_node: HashMap<String, Vec<(String, Weak<mq_core::queue::QueueHandle>)>> = HashMap::new();
+            type Queues = Vec<(String, Weak<mq_core::queue::QueueHandle>)>;
+            let mut by_node: HashMap<String, (Arc<Peer>, Queues)> = HashMap::new();
             for r in self.routers.read().values() {
-                if let Some(n) = r.remote_node.lock().clone() {
-                    by_node.entry(n).or_default().push((r.key.clone(), r.handle.clone()));
+                if let Some(p) = r.remote.lock().clone() {
+                    by_node.entry(p.node.clone()).or_insert_with(|| (p, Vec::new())).1.push((r.key.clone(), r.handle.clone()));
                 }
             }
-            for (node, qs) in by_node {
-                let Some(peer) = self.peer(&node).await else { continue };
+            for (_, (peer, qs)) in by_node {
+                if peer.is_closed() {
+                    continue;
+                }
                 let keys = qs.iter().map(|q| q.0.clone()).collect();
                 if let rpc::Reply::Ok(v, _) = peer.call(&Req::Stats { qs: keys }, vec![]).await {
                     for ((_, h), s) in qs.iter().zip(v.as_array().cloned().unwrap_or_default()) {
@@ -616,173 +429,33 @@ impl Cluster {
         }
     }
 
-    /// Counter of operations on `key` for clients of `peer` (`None` without AZs).
-    fn remote_ops(&self, key: &str, peer: Option<&str>) -> Option<Arc<AtomicU64>> {
-        self.config.az.as_ref()?;
-        let az = self.node_az(peer?)?;
-        Some(self.traffic.lock().entry(key.into()).or_default().remote.entry(az).or_default().clone())
-    }
-
-    /// Reconsider owned queues' home AZs from the traffic since the last call: a queue whose
-    /// operations came mostly (two thirds) from another AZ for [`PLACE_STREAK`] periods in a row
-    /// gets that AZ as its home, and the next rebalance moves it there.
-    pub async fn place_by_traffic(&self) {
-        let Some(my_az) = self.config.az.clone() else { return };
-        let owned: HashMap<String, Arc<OwnedQueue>> = self.owned.read().iter().map(|(k, o)| (k.clone(), o.clone())).collect();
-        let mut moves = Vec::new();
-        {
-            let mut traffic = self.traffic.lock();
-            traffic.retain(|k, _| owned.contains_key(k));
-            for (key, q) in &owned {
-                let s = &q.inner.shared;
-                let total = s.published.load(Ordering::Relaxed) + s.delivered.load(Ordering::Relaxed);
-                let t = traffic.entry(key.clone()).or_default();
-                let remote: HashMap<String, u64> = t.remote.iter().map(|(az, n)| (az.clone(), n.load(Ordering::Relaxed))).collect();
-                let last_remote = std::mem::replace(&mut t.last_remote, remote.clone());
-                let Some(last) = t.last_total.replace(total) else { continue };
-                // Everything that didn't come through another node came from clients here.
-                let mut by_az: HashMap<String, u64> = HashMap::new();
-                for (az, n) in remote {
-                    *by_az.entry(az.clone()).or_default() += n.saturating_sub(last_remote.get(&az).copied().unwrap_or(0));
-                }
-                let from_others: u64 = by_az.values().sum();
-                *by_az.entry(my_az.clone()).or_default() += total.saturating_sub(last).saturating_sub(from_others);
-                let sum: u64 = by_az.values().sum();
-                let home = self.owner_cached(key).and_then(|o| o.az);
-                match by_az.into_iter().max_by_key(|(_, n)| *n) {
-                    Some((az, n)) if sum >= self.config.place_min_ops && n as f64 >= sum as f64 * PLACE_SHARE && home.as_deref() != Some(az.as_str()) => {
-                        let streak = match t.streak.take() {
-                            Some((a, k)) if a == az => k + 1,
-                            _ => 1,
-                        };
-                        if streak >= PLACE_STREAK {
-                            moves.push((key.clone(), az));
-                        } else {
-                            t.streak = Some((az, streak));
-                        }
-                    }
-                    _ => t.streak = None,
-                }
-            }
-        }
-        let candidates = self.candidates();
-        for (key, az) in moves {
-            if candidates.iter().any(|n| self.node_az(n).as_deref() == Some(az.as_str())) {
-                self.set_home(&key, &az).await;
-            }
-        }
-    }
-
-    /// Give an owned queue a new home AZ.
-    async fn set_home(&self, key: &str, az: &str) -> bool {
-        let Ok(Some((v, ver))) = self.meta.get_versioned(OWNER, key).await else { return false };
-        let Some(o) = owner_of(&v) else { return false };
-        if o.node != self.node_id {
-            return false;
-        }
-        if !matches!(self.meta.cas(OWNER, key, Some(ver), &owner_json(&o.node, o.epoch, Some(az))).await, Ok(Some(_))) {
-            return false;
-        }
-        info!(queue = %key, from = o.az.as_deref().unwrap_or("-"), to = %az, "queue follows its clients to another AZ");
-        self.owners.write().insert(key.into(), Owner { az: Some(az.into()), ..o });
-        true
-    }
-
-    /// The home AZ of a queue partition (`None` without AZs, or for queues nobody owns yet).
-    pub fn home_az(&self, key: &str) -> Option<String> {
-        self.owner_cached(key).and_then(|o| o.az)
-    }
-
-    /// Move up to `max` owned queues to the node rendezvous hashing assigns them.
-    pub async fn rebalance(&self, max: usize) -> usize {
-        let nodes = self.candidates();
-        if nodes.is_empty() {
-            return 0;
-        }
-        let mut moves = Vec::new();
-        for key in self.owned_keys() {
-            if let Some(to) = self.target(&key, &nodes)
-                && to != self.node_id
-            {
-                moves.push((key, to));
-                if moves.len() >= max {
-                    break;
-                }
-            }
-        }
-        let mut waits = Vec::new();
-        for (key, to) in moves {
-            if let Some(r) = self.routers.read().get(&key) {
-                let (tx, rx) = oneshot::channel();
-                if r.ctl.send(Ctl::Handoff { to, reply: tx }).is_ok() {
-                    waits.push(rx);
-                }
-            }
-        }
-        let mut n = 0;
-        for w in waits {
-            if w.await.unwrap_or(false) {
-                n += 1;
-            }
-        }
-        if n > 0 {
-            info!(moved = n, "rebalanced queues");
-        }
-        n
-    }
-
-    /// Stop taking queues and hand every owned queue to other nodes (rolling upgrade). Returns
-    /// how many queues are still here after `timeout`.
-    pub async fn drain(&self, timeout: Duration) -> usize {
-        self.draining.store(true, Ordering::Release);
-        let _ = self.heartbeat().await;
-        let deadline = Instant::now() + timeout;
-        while self.owned_count() > 0 && Instant::now() < deadline {
-            if self.candidates().is_empty() {
-                warn!("no other node to drain to");
-                break;
-            }
-            if self.rebalance(256).await == 0 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-        self.owned_count()
-    }
-
-    /// Leave the cluster: stop background work and remove our membership record so others take
-    /// over at once.
-    pub async fn leave(&self) {
-        self.stopped.store(true, Ordering::Release);
-        for t in self.tasks.lock().drain(..) {
-            t.abort();
-        }
-        let _ = self.meta.delete(NODE, &self.node_id).await;
-    }
-
     // ── RPC server ──
 
-    async fn serve(self: Arc<Self>, listener: TcpListener) {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(error = %e, "rpc accept failed");
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                }
-            };
-            let c = self.clone();
-            tokio::spawn(async move {
-                match c.config.transport.accept(stream).await {
-                    Ok(s) => c.serve_conn(s).await,
-                    Err(e) => warn!(%peer, error = format!("{e:#}"), "rpc connection refused"),
-                }
-            });
+    fn accept(self: Arc<Self>, mut req: Request) -> Response {
+        let upgrade = req.headers().get(header::UPGRADE).and_then(|v| v.to_str().ok());
+        if !upgrade.is_some_and(|u| u.eq_ignore_ascii_case(rpc::PROTOCOL)) {
+            return (StatusCode::BAD_REQUEST, "expected an upgrade\n").into_response();
         }
+        let on = hyper::upgrade::on(&mut req);
+        let c = self.clone();
+        tokio::spawn(async move {
+            match on.await {
+                Ok(up) => c.serve_conn(hyper_util::rt::TokioIo::new(up)).await,
+                Err(e) => debug!(error = %e, "queues rpc: upgrade failed"),
+            }
+        });
+        let mut resp = StatusCode::SWITCHING_PROTOCOLS.into_response();
+        let h = resp.headers_mut();
+        h.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+        h.insert(header::UPGRADE, HeaderValue::from_static(rpc::PROTOCOL));
+        if let Ok(v) = HeaderValue::from_str(&serde_json::to_string(&self.config.listeners).unwrap_or_default()) {
+            h.insert(rpc::LISTENERS_HEADER, v);
+        }
+        resp
     }
 
-    async fn serve_conn(self: Arc<Self>, stream: Stream) {
-        let (r, mut w) = stream.into_split();
+    async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(self: Arc<Self>, stream: S) {
+        let (r, mut w) = tokio::io::split(stream);
         let (tx, mut rx) = mpsc::channel::<Frame>(16384);
         tokio::spawn(async move {
             let mut buf = BytesMut::with_capacity(64 << 10);
@@ -800,10 +473,22 @@ impl Cluster {
                 buf.clear();
             }
         });
-        let conn = Arc::new(ServerConn { tx, peer: Mutex::new(None), subs: Mutex::new(HashMap::new()), channels: Mutex::new(HashSet::new()) });
+        let conn = Arc::new(ServerConn { tx, subs: Mutex::new(HashMap::new()), chunk_subs: Mutex::new(HashMap::new()), channels: Mutex::new(HashSet::new()) });
         self.conns.lock().push(Arc::downgrade(&conn));
         let mut r = BufReader::with_capacity(256 << 10, r);
-        while let Ok(Some(f)) = Frame::read(&mut r).await {
+        // Once the other node pings, a connection silent for longer than it pings is dead.
+        let mut pinged = false;
+        loop {
+            let f = tokio::select! {
+                f = Frame::read(&mut r) => match f {
+                    Ok(Some(f)) => f,
+                    _ => break,
+                },
+                _ = tokio::time::sleep(rpc::DEAD_AFTER), if pinged => {
+                    warn!("queues rpc: a node stopped pinging; dropping its connection");
+                    break;
+                }
+            };
             if f.kind != rpc::REQ {
                 continue;
             }
@@ -811,9 +496,18 @@ impl Cluster {
                 conn.reply(rpc::err_frame(f.id, &AmqpError::command_invalid("bad request")));
                 continue;
             };
+            if let Req::Ping = req {
+                pinged = true;
+                conn.reply(rpc::ok_frame(f.id, Value::Null, vec![]));
+                continue;
+            }
             self.handle(&conn, f.id, req, f.blobs).await;
         }
-        // The other node is gone: requeue what its channels held.
+        // The other node is gone: drop its stream subscriptions, and requeue what its channels held.
+        let chunk_subs: Vec<ChunkServerSub> = conn.chunk_subs.lock().drain().map(|(_, s)| s).collect();
+        for s in chunk_subs {
+            s.queue.stream_unsubscribe(s.reg).await;
+        }
         let chans: Vec<(String, u64)> = conn.channels.lock().drain().collect();
         for (key, ch) in chans {
             let o = self.owned.read().get(&key).cloned();
@@ -824,35 +518,30 @@ impl Cluster {
         self.conns.lock().retain(|w| w.strong_count() > 0 && !std::ptr::eq(w.as_ptr(), Arc::as_ptr(&conn)));
     }
 
-    async fn handle(&self, conn: &Arc<ServerConn>, id: u64, req: Req, blobs: Vec<Bytes>) {
+    async fn handle(self: &Arc<Self>, conn: &Arc<ServerConn>, id: u64, req: Req, blobs: Vec<Bytes>) {
         let key = match &req {
-            Req::Hello { node, .. } => {
-                *conn.peer.lock() = Some(node.clone());
-                conn.reply(rpc::ok_frame(id, Value::Null, vec![]));
-                return;
-            }
             Req::Credit { sub, n } => {
                 if let Some(s) = conn.subs.lock().get(sub) {
+                    s.sink.credit.fetch_add(*n, Ordering::AcqRel);
+                    s.queue.wake();
+                } else if let Some(s) = conn.chunk_subs.lock().get(sub) {
                     s.sink.credit.fetch_add(*n, Ordering::AcqRel);
                     s.queue.wake();
                 }
                 return;
             }
+            Req::Ping => return,
             Req::Stats { qs } => {
                 let owned = self.owned.read();
                 let v: Vec<Value> = qs.iter().map(|k| owned.get(k).map(|o| json!(router::stats_of(&o.inner.shared))).unwrap_or(Value::Null)).collect();
                 conn.reply(rpc::ok_frame(id, Value::Array(v), vec![]));
                 return;
             }
-            Req::Adopt { q } => {
-                if let Some(r) = self.routers.read().get(q) {
-                    let _ = r.ctl.send(Ctl::Retarget);
+            Req::StreamUnsubscribe { sub, .. } => {
+                let s = conn.chunk_subs.lock().remove(sub);
+                if let Some(s) = s {
+                    s.queue.stream_unsubscribe(s.reg).await;
                 }
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while !self.owned.read().contains_key(q) && Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                conn.reply(rpc::ok_frame(id, json!(self.owned.read().contains_key(q)), vec![]));
                 return;
             }
             Req::Publish { q, .. }
@@ -871,9 +560,17 @@ impl Cluster {
             | Req::ExtendLease { q, .. }
             | Req::Peek { q, .. }
             | Req::Touch { q }
-            | Req::Consumers { q } => q.clone(),
+            | Req::Consumers { q }
+            | Req::StreamPublish { q, .. }
+            | Req::StreamSubscribe { q, .. }
+            | Req::StreamResolve { q, .. }
+            | Req::StreamWriterSequence { q, .. }
+            | Req::StreamStats { q } => q.clone(),
         };
         let Some(owned) = self.owned.read().get(&key).cloned() else {
+            // Not running here: the sender routes again, and this node starts the queue if it
+            // should own it now (a free lease placement gives it, or one it just took).
+            self.kick(&key);
             conn.reply(rpc::moved_frame(id));
             return;
         };
@@ -882,9 +579,6 @@ impl Cluster {
         match req {
             Req::Publish { wait, confirm, .. } => {
                 let Some(mut b) = blobs.into_iter().next() else { return };
-                if let Some(n) = self.remote_ops(&key, conn.peer.lock().as_deref()) {
-                    n.fetch_add(1, Ordering::Relaxed);
-                }
                 let Ok(msg) = Message::decode(&mut b) else {
                     conn.reply(rpc::err_frame(id, &AmqpError::command_invalid("bad message")));
                     return;
@@ -920,8 +614,7 @@ impl Cluster {
             }
             Req::Consume { sub, channel, conn: cid, tag, no_ack, exclusive, priority, credit, .. } => {
                 let args = blobs.into_iter().next().and_then(|mut b| FieldTable::decode(&mut b).ok()).unwrap_or_default();
-                let ops = self.remote_ops(&key, conn.peer.lock().as_deref());
-                let sink = Arc::new(RemoteSink { sub, tx: conn.tx.clone(), credit: AtomicU32::new(credit), paused: owned.paused.clone(), ops });
+                let sink = Arc::new(RemoteSink { sub, tx: conn.tx.clone(), credit: AtomicU32::new(credit), paused: owned.paused.clone() });
                 let spec = ConsumerSpec { tag: Arc::from(tag.as_str()), channel, conn: cid, no_ack, exclusive, priority, args, sink: sink.clone() };
                 conn.channels.lock().insert((key.clone(), channel));
                 match q.consume(spec).await {
@@ -1034,7 +727,67 @@ impl Cluster {
                     reply.reply(rpc::ok_frame(id, serde_json::to_value(cs).unwrap_or(Value::Null), vec![]));
                 });
             }
-            Req::Hello { .. } | Req::Credit { .. } | Req::Stats { .. } | Req::Adopt { .. } => {}
+            Req::StreamPublish { writer, ids, .. } => {
+                if ids.len() != blobs.len() {
+                    conn.reply(rpc::err_frame(id, &AmqpError::command_invalid("bad stream publish")));
+                    return;
+                }
+                let (ctx, crx) = oneshot::channel();
+                let confirm = ConfirmTicket::new(move |ok| {
+                    let _ = ctx.send(ok);
+                });
+                let entries = ids.into_iter().zip(blobs).collect();
+                if q.stream_publish(NativePublish { writer: writer.map(Arc::from), entries, confirm }).await.is_err() {
+                    conn.reply(rpc::moved_frame(id));
+                    return;
+                }
+                tokio::spawn(async move {
+                    let confirmed = crx.await.unwrap_or(false);
+                    reply.reply(rpc::ok_frame(id, json!({ "confirmed": confirmed }), vec![]));
+                });
+            }
+            Req::StreamSubscribe { sub, conn: cid, tag, offset, filtered, match_unfiltered, credit, max_bytes, .. } => {
+                let mut blobs = blobs.into_iter();
+                let properties = blobs.next().and_then(|mut b| FieldTable::decode(&mut b).ok()).unwrap_or_default();
+                let filters = filtered.then(|| blobs.collect());
+                let Some(broker) = self.broker() else { return };
+                let reg = broker.next_id();
+                let sink = Arc::new(RemoteChunkSink { sub, tx: conn.tx.clone(), credit: AtomicU32::new(credit), max_bytes, paused: owned.paused.clone() });
+                let cs = ChunkSubscription { id: reg, conn: cid, tag: Arc::from(tag.as_str()), offset: offset.into(), filters, match_unfiltered, properties, sink: sink.clone() };
+                match q.stream_subscribe(cs).await {
+                    Ok(next) => {
+                        conn.chunk_subs.lock().insert(sub, ChunkServerSub { key, queue: q.clone(), reg, sink });
+                        conn.reply(rpc::ok_frame(id, json!({ "next": next }), vec![]));
+                        q.wake();
+                    }
+                    Err(_) => conn.reply(rpc::moved_frame(id)),
+                }
+            }
+            Req::StreamResolve { offset, .. } => {
+                tokio::spawn(async move {
+                    match q.stream_resolve(offset.into()).await {
+                        Ok(n) => reply.reply(rpc::ok_frame(id, json!(n), vec![])),
+                        Err(_) => reply.reply(rpc::moved_frame(id)),
+                    }
+                });
+            }
+            Req::StreamWriterSequence { writer, seed, .. } => {
+                tokio::spawn(async move {
+                    match q.stream_writer_sequence(&writer, seed).await {
+                        Ok(n) => reply.reply(rpc::ok_frame(id, json!(n), vec![])),
+                        Err(_) => reply.reply(rpc::moved_frame(id)),
+                    }
+                });
+            }
+            Req::StreamStats { .. } => {
+                tokio::spawn(async move {
+                    match q.stream_stats().await {
+                        Ok(s) => reply.reply(rpc::ok_frame(id, json!({ "first": s.first, "next": s.next }), vec![])),
+                        Err(_) => reply.reply(rpc::moved_frame(id)),
+                    }
+                });
+            }
+            Req::Credit { .. } | Req::Stats { .. } | Req::StreamUnsubscribe { .. } | Req::Ping => {}
         }
     }
 }
@@ -1045,32 +798,6 @@ fn encode_msg(m: &Message) -> Bytes {
     b.freeze()
 }
 
-fn node_state(v: &Value) -> Option<NodeState> {
-    Some(NodeState {
-        addr: v["addr"].as_str()?.parse().ok()?,
-        listeners: v["listeners"].as_object().map(|m| m.iter().filter_map(|(k, a)| Some((k.clone(), a.as_str()?.parse().ok()?))).collect()).unwrap_or_default(),
-        az: v["az"].as_str().map(String::from),
-        draining: v["draining"].as_bool().unwrap_or(false),
-        hb: v["hb"].as_u64().unwrap_or(0),
-        last_seen: Instant::now(),
-    })
-}
-
-fn owner_of(v: &Value) -> Option<Owner> {
-    let node = v["node"].as_str()?;
-    if node.is_empty() {
-        return None;
-    }
-    Some(Owner { node: node.into(), epoch: v["epoch"].as_u64().unwrap_or(0), az: v["az"].as_str().filter(|a| !a.is_empty()).map(String::from) })
-}
-
-fn owner_json(node: &str, epoch: u64, az: Option<&str>) -> Value {
-    match az {
-        Some(az) => json!({ "node": node, "epoch": epoch, "az": az }),
-        None => json!({ "node": node, "epoch": epoch }),
-    }
-}
-
 struct ServerSub {
     key: String,
     channel: u64,
@@ -1078,12 +805,20 @@ struct ServerSub {
     sink: Arc<RemoteSink>,
 }
 
+/// A stream-protocol subscription from another node, registered with the stream's actor.
+struct ChunkServerSub {
+    key: String,
+    queue: QueueRef,
+    /// Its id at the actor.
+    reg: u64,
+    sink: Arc<RemoteChunkSink>,
+}
+
 /// A connection from another node.
 struct ServerConn {
     tx: mpsc::Sender<Frame>,
-    /// The node on the other end, from its hello.
-    peer: Mutex<Option<String>>,
     subs: Mutex<HashMap<u64, ServerSub>>,
+    chunk_subs: Mutex<HashMap<u64, ChunkServerSub>>,
     channels: Mutex<HashSet<(String, u64)>>,
 }
 
@@ -1111,39 +846,48 @@ impl Placement for ClusterPlacement {
         let c = &self.0;
         let key = queue_key(&start.meta.vhost, &start.meta.name, start.partition);
         if let Some(old) = c.routers.write().remove(&key) {
-            let _ = old.ctl.send(Ctl::Forget);
+            let _ = old.ctl.send(Ctl::Forget { deleted: false });
         }
-        let (handle, rref) = Router::spawn(c, key.clone(), start).await?;
-        c.routers.write().insert(key, rref);
-        Ok(handle)
+        Router::spawn(c, key, start).await
     }
 
     fn forget(&self, vhost: &str, name: &str) {
-        let prefix = format!("{}\u{1f}", mq_core::meta::key(&[vhost, name]));
+        let key = queue_key(vhost, name, 0);
+        let partitions = format!("{key}#");
         let gone: Vec<Arc<RouterRef>> = {
             let mut r = self.0.routers.write();
-            let keys: Vec<String> = r.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+            let keys: Vec<String> = r.keys().filter(|k| **k == key || k.starts_with(&partitions)).cloned().collect();
             keys.iter().filter_map(|k| r.remove(k)).collect()
         };
         for r in gone {
-            let _ = r.ctl.send(Ctl::Forget);
+            let _ = r.ctl.send(Ctl::Forget { deleted: true });
         }
     }
 
     fn locate(&self, vhost: &str, name: &str) -> Option<mq_core::cluster::Located> {
         let c = &self.0;
         let key = queue_key(vhost, name, 0);
-        if !c.routers.read().contains_key(&key) {
-            return None;
-        }
+        let remote = c.routers.read().get(&key)?.remote.lock().clone();
         if let Some(o) = c.owned.read().get(&key) {
             return Some(mq_core::cluster::Located::Local(o.inner.clone()));
         }
-        let owner = c.owner_cached(&key)?;
-        if owner.node == c.node_id {
-            return None;
+        let p = remote?;
+        Some(mq_core::cluster::Located::Remote { node: p.node.clone(), listeners: p.listeners.clone() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_keys_round_trip_whatever_the_names() {
+        assert_eq!(queue_key("/", "orders", 0), "mq:%2F/orders");
+        assert_eq!(queue_key("shop", "a/b#c%", 2), "mq:shop/a%2Fb%23c%25#2");
+        for (v, n, p) in [("/", "orders", 0), ("a/b", "c", 0), ("a", "b/c", 3), ("ü", "%41\n", 1)] {
+            assert_eq!(parse_key(&queue_key(v, n, p)), Some((v.to_string(), n.to_string(), p)));
         }
-        let listeners = c.nodes.read().get(&owner.node).map(|n| n.listeners.clone()).unwrap_or_default();
-        Some(mq_core::cluster::Located::Remote { node: owner.node, listeners })
+        assert_ne!(queue_key("a/b", "c", 0), queue_key("a", "b/c", 0));
+        assert_eq!(parse_key("storage:meta"), None);
     }
 }

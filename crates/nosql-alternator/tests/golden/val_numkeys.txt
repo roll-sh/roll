@@ -1,0 +1,222 @@
+# Numbers as key attributes: validation, canonical output and representation quirks.
+> CreateTable {"TableName":"alt_val_nk_h","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_nk_h","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_nk_r","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_nk_r","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# N hash key: accepted forms; GetItem with the same text finds the item and returns the canonical form
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"1.50"},"src":{"S":"1.50"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1.50"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"1.5"},"src":{"S":"1.50"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"1e5"},"src":{"S":"1e5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1e5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"100000"},"src":{"S":"1e5"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"-0"},"src":{"S":"-0"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"-0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"0"},"src":{"S":"-0"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"0.000"},"src":{"S":"0.000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"0.000"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"0"},"src":{"S":"0.000"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"1E+2"},"src":{"S":"1E+2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1E+2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"100"},"src":{"S":"1E+2"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"100e-2"},"src":{"S":"100e-2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"100e-2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"1"},"src":{"S":"100e-2"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"12345678901234567890123456789012345678e10"},"src":{"S":"12345678901234567890123456789012345678e10"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"12345678901234567890123456789012345678e10"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"123456789012345678901234567890123456780000000000"},"src":{"S":"12345678901234567890123456789012345678e10"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"-1e-130"},"src":{"S":"-1e-130"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"-1e-130"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"},"src":{"S":"-1e-130"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"9.9999999999999999999999999999999999999e125"},"src":{"S":"9.9999999999999999999999999999999999999e125"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"9.9999999999999999999999999999999999999e125"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"999999999999999999999999999999999999990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},"src":{"S":"9.9999999999999999999999999999999999999e125"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"+7"},"src":{"S":"+7"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"+7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"7"},"src":{"S":"+7"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":".5"},"src":{"S":".5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":".5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"0.5"},"src":{"S":".5"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"00012"},"src":{"S":"00012"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"00012"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"12"},"src":{"S":"00012"}}}
+# Quirk: the hash key's partition is derived from the decimal as written (unscaled value and scale), so different spellings of one number are different items
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1.5"}},"ConsistentRead":true}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"15e-1"}},"ConsistentRead":true}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"100000"}},"ConsistentRead":true}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"0"},"src":{"S":"-0"}}}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"+0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"0"},"src":{"S":"-0"}}}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"0.0"}},"ConsistentRead":true}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1"}},"ConsistentRead":true}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"7"},"src":{"S":"+7"}}}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"12"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"12"},"src":{"S":"00012"}}}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"1.5"},"src":{"S":"1.5"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"15e-1"},"src":{"S":"15e-1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1.50"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"1.5"},"src":{"S":"1.50"}}}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1.5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"N":"1.5"},"src":{"S":"15e-1"}}}
+# Scan order follows the token of the serialised decimal; equal numbers appear more than once
+> Scan {"TableName":"alt_val_nk_h","ConsistentRead":true}
+< 200 {"Count":13,"ScannedCount":13,"Items":[{"p":{"N":"12"},"src":{"S":"00012"}},{"p":{"N":"1.5"},"src":{"S":"1.50"}},{"p":{"N":"0.5"},"src":{"S":".5"}},{"p":{"N":"1"},"src":{"S":"100e-2"}},{"p":{"N":"999999999999999999999999999999999999990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},"src":{"S":"9.9999999999999999999999999999999999999e125"}},{"p":{"N":"100"},"src":{"S":"1E+2"}},{"p":{"N":"0"},"src":{"S":"-0"}},{"p":{"N":"0"},"src":{"S":"0.000"}},{"p":{"N":"7"},"src":{"S":"+7"}},{"p":{"N":"1.5"},"src":{"S":"15e-1"}},{"p":{"N":"100000"},"src":{"S":"1e5"}},{"p":{"N":"123456789012345678901234567890123456780000000000"},"src":{"S":"12345678901234567890123456789012345678e10"}},{"p":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"},"src":{"S":"-1e-130"}}]}
+> Query {"TableName":"alt_val_nk_h","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"N":"1.50"}},"ConsistentRead":true}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"N":"1.5"},"src":{"S":"1.50"}}]}
+> Query {"TableName":"alt_val_nk_h","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"N":"1.500"}},"ConsistentRead":true}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+# DeleteItem / UpdateItem with a different spelling address a different item
+> DeleteItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1.500"}},"ReturnValues":"ALL_OLD"}
+< 200 {}
+> DeleteItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1.50"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"N":"1.5"},"src":{"S":"1.50"}}}
+> UpdateItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1E5"}},"UpdateExpression":"SET src = :v","ExpressionAttributeValues":{":v":{"S":"upd"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"N":"100000"},"src":{"S":"1e5"}}}
+> UpdateItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1e5"}},"UpdateExpression":"SET src = :v","ExpressionAttributeValues":{":v":{"S":"upd"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"N":"100000"},"src":{"S":"upd"}}}
+# N hash key validation
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":" 1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value:  1"}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":" 1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value:  1"}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"1e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"1e-131"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-131. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1e-131"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-131. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"123456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"123456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"1e00001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e00001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"1e00001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e00001. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":"NaN"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: NaN"}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":"NaN"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: NaN"}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"N\":1}"}
+> GetItem {"TableName":"alt_val_nk_h","Key":{"p":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"N\":1}"}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column p, got type \"S\""}
+> PutItem {"TableName":"alt_val_nk_h","Item":{"p":{"NS":["1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column p, got type \"NS\""}
+# N range key: compared by value, so different spellings are the same item; the stored spelling is the first one written
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"1000"},"src":{"S":"1000"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"1e3"},"src":{"S":"1e3"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"1000.00"},"src":{"S":"1000.00"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"-0"},"src":{"S":"-0"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"0.000"},"src":{"S":"0.000"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"0"},"src":{"S":"0"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"1E+2"},"src":{"S":"1E+2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"12345678901234567890123456789012345678e10"},"src":{"S":"12345678901234567890123456789012345678e10"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"-1e-130"},"src":{"S":"-1e-130"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"1e125"},"src":{"S":"1e125"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"-1e125"},"src":{"S":"-1e125"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":".5"},"src":{"S":".5"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"5e-1"},"src":{"S":"5e-1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_nk_r","Key":{"p":{"S":"a"},"c":{"N":"1000"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"c":{"N":"1000"},"src":{"S":"1000.00"}}}
+> GetItem {"TableName":"alt_val_nk_r","Key":{"p":{"S":"a"},"c":{"N":"10e2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"c":{"N":"1000"},"src":{"S":"1000.00"}}}
+> GetItem {"TableName":"alt_val_nk_r","Key":{"p":{"S":"a"},"c":{"N":"0.5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"c":{"N":"0.5"},"src":{"S":"5e-1"}}}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Count":8,"ScannedCount":8,"Items":[{"p":{"S":"a"},"c":{"N":"-100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},"src":{"S":"-1e125"}},{"p":{"S":"a"},"c":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"},"src":{"S":"-1e-130"}},{"p":{"S":"a"},"c":{"N":"0"},"src":{"S":"0"}},{"p":{"S":"a"},"c":{"N":"0.5"},"src":{"S":"5e-1"}},{"p":{"S":"a"},"c":{"N":"100"},"src":{"S":"1E+2"}},{"p":{"S":"a"},"c":{"N":"1000"},"src":{"S":"1000.00"}},{"p":{"S":"a"},"c":{"N":"123456789012345678901234567890123456780000000000"},"src":{"S":"12345678901234567890123456789012345678e10"}},{"p":{"S":"a"},"c":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},"src":{"S":"1e125"}}]}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"a"}},"ConsistentRead":true,"ScanIndexForward":false}
+< 200 {"Count":8,"ScannedCount":8,"Items":[{"p":{"S":"a"},"c":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},"src":{"S":"1e125"}},{"p":{"S":"a"},"c":{"N":"123456789012345678901234567890123456780000000000"},"src":{"S":"12345678901234567890123456789012345678e10"}},{"p":{"S":"a"},"c":{"N":"1000"},"src":{"S":"1000.00"}},{"p":{"S":"a"},"c":{"N":"100"},"src":{"S":"1E+2"}},{"p":{"S":"a"},"c":{"N":"0.5"},"src":{"S":"5e-1"}},{"p":{"S":"a"},"c":{"N":"0"},"src":{"S":"0"}},{"p":{"S":"a"},"c":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"},"src":{"S":"-1e-130"}},{"p":{"S":"a"},"c":{"N":"-100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},"src":{"S":"-1e125"}}]}
+# Range conditions on N use numeric order
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c = :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"1e3"}},"ConsistentRead":true,"ProjectionExpression":"c"}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"c":{"N":"1000"}}]}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c > :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"1e2"}},"ConsistentRead":true,"ProjectionExpression":"c"}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"c":{"N":"1000"}},{"c":{"N":"123456789012345678901234567890123456780000000000"}},{"c":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}]}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c >= :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"100"}},"ConsistentRead":true,"ProjectionExpression":"c"}
+< 200 {"Count":4,"ScannedCount":4,"Items":[{"c":{"N":"100"}},{"c":{"N":"1000"}},{"c":{"N":"123456789012345678901234567890123456780000000000"}},{"c":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}]}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c < :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"0"}},"ConsistentRead":true,"ProjectionExpression":"c"}
+< 200 {"Count":2,"ScannedCount":2,"Items":[{"c":{"N":"-100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}},{"c":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}]}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c <= :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"-0.0"}},"ConsistentRead":true,"ProjectionExpression":"c"}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"c":{"N":"-100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}},{"c":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}},{"c":{"N":"0"}}]}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c BETWEEN :x AND :y","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"1E2"},":y":{"N":"1000.0"}},"ConsistentRead":true,"ProjectionExpression":"c"}
+< 200 {"Count":2,"ScannedCount":2,"Items":[{"c":{"N":"100"}},{"c":{"N":"1000"}}]}
+# N range key validation, in items and in key conditions
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c > :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c > :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"1e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c > :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"1e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"1e-131"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-131. Attempting to store a number with magnitude lower than supported range."}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c > :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"1e-131"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-131. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":"123456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c > :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"N":"123456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column c: {\"N\":1}"}
+> PutItem {"TableName":"alt_val_nk_r","Item":{"p":{"S":"a"},"c":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> Query {"TableName":"alt_val_nk_r","KeyConditionExpression":"p = :p AND c > :x","ExpressionAttributeValues":{":p":{"S":"a"},":x":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+# Arithmetic on a key attribute is refused
+> UpdateItem {"TableName":"alt_val_nk_r","Key":{"p":{"S":"a"},"c":{"N":"1000"}},"UpdateExpression":"SET c = c + :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column c"}
+> DeleteTable {"TableName":"alt_val_nk_h"}
+< 200 {"TableDescription":{"TableName":"alt_val_nk_h","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_nk_h:scylla:table/alt_val_nk_h","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_nk_r"}
+< 200 {"TableDescription":{"TableName":"alt_val_nk_r","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_nk_r:scylla:table/alt_val_nk_r","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

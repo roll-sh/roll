@@ -1,5 +1,3 @@
-"use client";
-
 import { Eye, EyeOff, KeyRound, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { rel, tasks, TASKS_API, type ApiKey } from "@/lib/tasks-api";
@@ -193,7 +191,7 @@ function Connect() {
         </div>
       </div>
       <p className="border-t border-line px-5 py-3 text-[12px] text-subtle">
-        Without <code className="font-mono">ROLL_TASKS_TOKEN</code> on rolld the local API is open and the Authorization header is ignored.
+        Use <code className="font-mono">ROLL_TASKS_TOKEN</code>, an API key, or rolld&apos;s operator token (<code className="font-mono">ROLL_ADMIN_TOKEN</code>). Without any on rolld the local API is open and the Authorization header is ignored.
       </p>
     </Panel>
   );

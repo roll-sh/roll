@@ -1,0 +1,118 @@
+/**
+ * The agents' command palette (⌘K inside the agents surface): whether it's open and what it opened
+ * to, one store for the surface's header, its keyboard shortcut and the canvas's prompt bar (T3's
+ * `commandPaletteBus`). Also the thread-open history its search ranks with (T3 keeps it on its
+ * server, `OrchestrationV2ThreadOpens`; roll keeps it per device).
+ */
+
+import { lastInputWasKeyboard } from "./input-modality";
+import { useSyncExternalStore } from "react";
+import { recordThreadOpen, type ThreadOpenStats } from "./palette-search";
+
+/** What the palette opens to: a search (with a query), or straight into one of its views. */
+export type PaletteIntent =
+  | { kind: "search"; query?: string }
+  /** "What should the agents get done?" with the goal so far. */
+  | { kind: "orchestrate"; goal?: string }
+  | { kind: "add-project" }
+  | { kind: "new-in" }
+  /** "Focus a project…" (F). */
+  | { kind: "focus-project" };
+
+export interface PaletteState {
+  open: boolean;
+  intent: PaletteIntent;
+  /** Bumped by every open, so an open palette starts over from the new intent. */
+  session: number;
+}
+
+let state: PaletteState = { open: false, intent: { kind: "search" }, session: 0 };
+const listeners = new Set<() => void>();
+
+function set(next: PaletteState) {
+  state = next;
+  for (const l of listeners) l();
+}
+
+export const agentsPalette = {
+  subscribe(fn: () => void) {
+    listeners.add(fn);
+    return () => void listeners.delete(fn);
+  },
+  get: () => state,
+};
+
+/** What had focus when the palette opened: it gets focus back when the palette closes. */
+let opener: HTMLElement | null = null;
+
+export function openPalette(intent: PaletteIntent = { kind: "search" }) {
+  if (!state.open && typeof document !== "undefined") {
+    const a = document.activeElement;
+    opener = a instanceof HTMLElement && a !== document.body ? a : null;
+  }
+  set({ open: true, intent, session: state.session + 1 });
+}
+
+export function closePalette() {
+  if (!state.open) return;
+  set({ ...state, open: false });
+  // Back where the keyboard was (Linear's palette does), unless what was picked took focus
+  // itself (a conversation's composer).
+  const back = opener;
+  opener = null;
+  if (back)
+    setTimeout(() => {
+      const a = document.activeElement;
+      // Focus left in the palette as it fades out (inert) is lost too.
+      const lost = !a || a === document.body || !!a.closest("[data-palette][data-state=closing]");
+      if (back.isConnected && lost && lastInputWasKeyboard()) back.focus({ preventScroll: true });
+    }, 0);
+}
+
+/** ⌘K: open on a search, or close. */
+export function togglePalette() {
+  if (state.open) closePalette();
+  else openPalette();
+}
+
+export function usePalette(): PaletteState {
+  return useSyncExternalStore(agentsPalette.subscribe, agentsPalette.get, agentsPalette.get);
+}
+
+// ── thread opens ──
+
+const OPENS = "roll:agents:opens";
+/** Threads remembered; the least recently opened go first. */
+const OPENS_MAX = 400;
+
+type Opens = Record<string, ThreadOpenStats>;
+
+export function threadOpens(): Opens {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OPENS) ?? "{}") as unknown;
+    return raw && typeof raw === "object" ? (raw as Opens) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** A thread was opened, from the palette's search for `query` or any other way. */
+export function noteThreadOpen(thread: string, query?: string, at = Date.now()) {
+  const opens = threadOpens();
+  opens[thread] = recordThreadOpen(opens[thread] ?? null, at, query);
+  const kept = Object.entries(opens)
+    .sort((a, b) => b[1].openedAt - a[1].openedAt)
+    .slice(0, OPENS_MAX);
+  try {
+    localStorage.setItem(OPENS, JSON.stringify(Object.fromEntries(kept)));
+  } catch {
+    // Not remembered.
+  }
+}
+
+/** For tests. */
+export function resetPalette() {
+  // Sessions keep counting, so a closing palette from before never closes a new one.
+  state = { open: false, intent: { kind: "search" }, session: state.session };
+  for (const l of listeners) l();
+}

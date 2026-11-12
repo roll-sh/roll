@@ -1,0 +1,2 @@
+<stdin>:1:User defined type 'nope' not found in 'cli_g_exec'
+<stdin>:1:'nope' not found in keyspace 'cli_g_exec'

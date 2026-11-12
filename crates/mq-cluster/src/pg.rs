@@ -1,9 +1,11 @@
-//! Metadata store on Postgres (roll postgres in production). Writes are serialised through a
-//! single version row, so the change log is gap-free and every node can follow it in order.
+//! Metadata store on Postgres: the system database every product shares (`ROLL_SYSTEM_DATABASE`),
+//! in its own schema, `mq`. Writes are serialised through a single version row, so the change log
+//! is gap-free and every node can follow it in order.
 //!
-//! TLS follows the URL's `sslmode`: `disable` never, `prefer` (the default) when the server
-//! offers it, `require` always. Certificates are always verified, against the system roots plus
-//! the CA bundle given to [`PgMeta::connect_with`] (RDS needs its own bundle). A lost
+//! TLS follows the URL's `sslmode` as [`code_sql::pg_config`] reads it: `disable` never, `prefer`
+//! (the default) when the server offers it, `require`, `verify-ca` and `verify-full` always.
+//! Certificates are always verified, against the system roots plus the CA bundle given to
+//! [`PgMeta::connect_with`] (RDS needs its own bundle) and the URL's `sslrootcert`. A lost
 //! connection (a Postgres restart, a Multi-AZ failover) is re-established on the next call.
 
 use async_trait::async_trait;
@@ -12,12 +14,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, MutexGuard};
-use tokio_postgres::config::SslMode;
 use tokio_postgres::{Client, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
-use tokio_rustls::rustls;
-use tokio_rustls::rustls::pki_types::CertificateDer;
-use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tracing::{info, warn};
 
 pub struct PgMeta {
@@ -28,12 +26,24 @@ pub struct PgMeta {
 }
 
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS mq_meta (kind TEXT NOT NULL, key TEXT NOT NULL, value JSONB NOT NULL, version BIGINT NOT NULL, PRIMARY KEY (kind, key));
-CREATE INDEX IF NOT EXISTS mq_meta_vhost ON mq_meta (kind, split_part(key, E'\\x1f', 1));
-CREATE TABLE IF NOT EXISTS mq_meta_log (version BIGINT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, value JSONB);
-CREATE TABLE IF NOT EXISTS mq_meta_version (id INT PRIMARY KEY CHECK (id = 1), version BIGINT NOT NULL);
-INSERT INTO mq_meta_version (id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS mq.mq_meta (kind TEXT NOT NULL, key TEXT NOT NULL, value JSONB NOT NULL, version BIGINT NOT NULL, PRIMARY KEY (kind, key));
+CREATE INDEX IF NOT EXISTS mq_meta_vhost ON mq.mq_meta (kind, split_part(key, E'\\x1f', 1));
+CREATE TABLE IF NOT EXISTS mq.mq_meta_log (version BIGINT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, value JSONB);
+CREATE TABLE IF NOT EXISTS mq.mq_meta_version (id INT PRIMARY KEY CHECK (id = 1), version BIGINT NOT NULL);
+INSERT INTO mq.mq_meta_version (id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
+DELETE FROM mq.mq_meta WHERE kind IN ('mq_node', 'mq_owner')
 ";
+
+/// Once: the tables of a metadata database from before the system database (in `public`) move
+/// into the schema. Membership and queue ownership were rows here then (`mq_node`, `mq_owner`);
+/// they're roll-cluster's now, and the schema's last statement drops them.
+const MIGRATE: &str = "DO $$ BEGIN
+  IF to_regclass('mq.mq_meta') IS NULL AND to_regclass('public.mq_meta') IS NOT NULL THEN
+    ALTER TABLE public.mq_meta SET SCHEMA mq;
+    ALTER TABLE public.mq_meta_log SET SCHEMA mq;
+    ALTER TABLE public.mq_meta_version SET SCHEMA mq;
+  END IF;
+END $$";
 
 impl PgMeta {
     /// Connect (e.g. `postgres://user:pass@host:5432/db`) and create the tables if needed.
@@ -43,19 +53,15 @@ impl PgMeta {
 
     /// [`PgMeta::connect`], also trusting the CA certificates in `ca` (PEM).
     pub async fn connect_with(url: &str, ca: Option<&Path>) -> anyhow::Result<Arc<Self>> {
-        let config: tokio_postgres::Config = url.parse()?;
-        let tls = match config.get_ssl_mode() {
-            SslMode::Disable => None,
-            _ => Some(MakeRustlsConnect::new(tls_config(ca)?)),
-        };
+        let (config, tls) = code_sql::pg_config(url, ca)?;
         let client = open(&config, tls.as_ref()).await?;
-        // One statement per transaction. As one batch (a single transaction) the index's table
-        // lock (taken even when the index exists) would be held while the version row waits for
-        // another node's running write, and that write's insert into the table would deadlock
-        // with it.
-        for statement in SCHEMA.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            client.batch_execute(statement).await?;
-        }
+        // Nodes starting together would race their `IF NOT EXISTS` statements (Postgres fails the
+        // loser on a catalog unique index): they take turns on a session advisory lock. Writers
+        // never take it, so it can't deadlock with them.
+        client.batch_execute(&format!("SELECT pg_advisory_lock({SCHEMA_LOCK})")).await?;
+        let created = create_schema(&client).await;
+        client.batch_execute(&format!("SELECT pg_advisory_unlock({SCHEMA_LOCK})")).await?;
+        created?;
         Ok(Arc::new(PgMeta { client: Mutex::new(client), config, tls, url: redact(url) }))
     }
 
@@ -74,39 +80,54 @@ impl PgMeta {
         let mut c = self.client().await?;
         let tx = c.transaction().await?;
         if let Some(exp) = expected {
-            let cur: Option<i64> = tx.query_opt("SELECT version FROM mq_meta WHERE kind = $1 AND key = $2 FOR UPDATE", &[&kind, &key]).await?.map(|r| r.get(0));
+            let cur: Option<i64> = tx.query_opt("SELECT version FROM mq.mq_meta WHERE kind = $1 AND key = $2 FOR UPDATE", &[&kind, &key]).await?.map(|r| r.get(0));
             if cur != exp {
                 tx.rollback().await?;
                 return Ok(None);
             }
         } else if value.is_none() {
-            let exists = tx.query_opt("SELECT 1 FROM mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?.is_some();
+            let exists = tx.query_opt("SELECT 1 FROM mq.mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?.is_some();
             if !exists {
                 tx.rollback().await?;
                 return Ok(None);
             }
         }
-        let v: i64 = tx.query_one("UPDATE mq_meta_version SET version = version + 1 WHERE id = 1 RETURNING version", &[]).await?.get(0);
+        let v: i64 = tx.query_one("UPDATE mq.mq_meta_version SET version = version + 1 WHERE id = 1 RETURNING version", &[]).await?.get(0);
         match value {
             Some(val) => {
                 tx.execute(
-                    "INSERT INTO mq_meta (kind, key, value, version) VALUES ($1, $2, $3, $4)
+                    "INSERT INTO mq.mq_meta (kind, key, value, version) VALUES ($1, $2, $3, $4)
                      ON CONFLICT (kind, key) DO UPDATE SET value = EXCLUDED.value, version = EXCLUDED.version",
                     &[&kind, &key, val, &v],
                 )
                 .await?;
             }
             None => {
-                tx.execute("DELETE FROM mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?;
+                tx.execute("DELETE FROM mq.mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?;
             }
         }
-        tx.execute("INSERT INTO mq_meta_log (version, kind, key, value) VALUES ($1, $2, $3, $4)", &[&v, &kind, &key, &value]).await?;
+        tx.execute("INSERT INTO mq.mq_meta_log (version, kind, key, value) VALUES ($1, $2, $3, $4)", &[&v, &kind, &key, &value]).await?;
         if v % 10_000 == 0 {
-            tx.execute("DELETE FROM mq_meta_log WHERE version < $1", &[&(v - 200_000)]).await?;
+            tx.execute("DELETE FROM mq.mq_meta_log WHERE version < $1", &[&(v - 200_000)]).await?;
         }
         tx.commit().await?;
         Ok(Some(v))
     }
+}
+
+/// The advisory lock nodes take turns on while they create the schema ("mq" in ASCII).
+const SCHEMA_LOCK: i64 = 0x6d71_5f73_6368;
+
+async fn create_schema(client: &Client) -> anyhow::Result<()> {
+    client.batch_execute("CREATE SCHEMA IF NOT EXISTS mq").await?;
+    client.batch_execute(MIGRATE).await?;
+    // One statement per transaction. As one batch (a single transaction) the index's table lock
+    // (taken even when the index exists) would be held while the version row waits for another
+    // node's running write, and that write's insert into the table would deadlock with it.
+    for statement in SCHEMA.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        client.batch_execute(statement).await?;
+    }
+    Ok(())
 }
 
 async fn open(config: &tokio_postgres::Config, tls: Option<&MakeRustlsConnect>) -> anyhow::Result<Client> {
@@ -131,21 +152,6 @@ async fn open(config: &tokio_postgres::Config, tls: Option<&MakeRustlsConnect>) 
     })
 }
 
-fn tls_config(ca: Option<&Path>) -> anyhow::Result<rustls::ClientConfig> {
-    use anyhow::Context;
-    let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_native_certs::load_native_certs().certs {
-        let _ = roots.add(c);
-    }
-    if let Some(ca) = ca {
-        for c in CertificateDer::pem_file_iter(ca).with_context(|| format!("{}: reading CA certificates", ca.display()))? {
-            roots.add(c.with_context(|| format!("{}: bad CA certificate", ca.display()))?)?;
-        }
-    }
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    Ok(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions()?.with_root_certificates(roots).with_no_client_auth())
-}
-
 fn redact(url: &str) -> String {
     match (url.find("://"), url.rfind('@')) {
         (Some(s), Some(at)) if at > s => format!("{}://…@{}", &url[..s], &url[at + 1..]),
@@ -157,7 +163,7 @@ fn redact(url: &str) -> String {
 impl MetaStore for PgMeta {
     async fn get(&self, kind: &str, key: &str) -> anyhow::Result<Option<Value>> {
         let c = self.client().await?;
-        Ok(c.query_opt("SELECT value FROM mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?.map(|r| r.get(0)))
+        Ok(c.query_opt("SELECT value FROM mq.mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?.map(|r| r.get(0)))
     }
 
     async fn put(&self, kind: &str, key: &str, value: &Value) -> anyhow::Result<i64> {
@@ -171,13 +177,13 @@ impl MetaStore for PgMeta {
 
     async fn list(&self, kind: &str) -> anyhow::Result<Vec<(String, Value)>> {
         let c = self.client().await?;
-        Ok(c.query("SELECT key, value FROM mq_meta WHERE kind = $1 ORDER BY key", &[&kind]).await?.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+        Ok(c.query("SELECT key, value FROM mq.mq_meta WHERE kind = $1 ORDER BY key", &[&kind]).await?.into_iter().map(|r| (r.get(0), r.get(1))).collect())
     }
 
     async fn list_vhost(&self, kind: &str, vhost: &str) -> anyhow::Result<Vec<(String, Value)>> {
         // Matches the `mq_meta_vhost` index; unlike a key range it doesn't depend on collation.
         let c = self.client().await?;
-        let rows = c.query("SELECT key, value FROM mq_meta WHERE kind = $1 AND split_part(key, E'\\x1f', 1) = $2 ORDER BY key", &[&kind, &vhost]).await?;
+        let rows = c.query("SELECT key, value FROM mq.mq_meta WHERE kind = $1 AND split_part(key, E'\\x1f', 1) = $2 ORDER BY key", &[&kind, &vhost]).await?;
         Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
     }
 
@@ -187,16 +193,16 @@ impl MetaStore for PgMeta {
 
     async fn get_versioned(&self, kind: &str, key: &str) -> anyhow::Result<Option<(Value, i64)>> {
         let c = self.client().await?;
-        Ok(c.query_opt("SELECT value, version FROM mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?.map(|r| (r.get(0), r.get(1))))
+        Ok(c.query_opt("SELECT value, version FROM mq.mq_meta WHERE kind = $1 AND key = $2", &[&kind, &key]).await?.map(|r| (r.get(0), r.get(1))))
     }
 
     async fn changes_since(&self, version: i64) -> anyhow::Result<(Vec<Change>, i64)> {
         let c = self.client().await?;
-        let latest: i64 = c.query_one("SELECT version FROM mq_meta_version WHERE id = 1", &[]).await?.get(0);
+        let latest: i64 = c.query_one("SELECT version FROM mq.mq_meta_version WHERE id = 1", &[]).await?.get(0);
         if version >= latest {
             return Ok((vec![], latest));
         }
-        let rows = c.query("SELECT version, kind, key, value FROM mq_meta_log WHERE version > $1 ORDER BY version LIMIT 10000", &[&version]).await?;
+        let rows = c.query("SELECT version, kind, key, value FROM mq.mq_meta_log WHERE version > $1 ORDER BY version LIMIT 10000", &[&version]).await?;
         let changes: Vec<Change> = rows.into_iter().map(|r| Change { version: r.get(0), kind: r.get(1), key: r.get(2), value: r.get(3) }).collect();
         let upto = changes.last().map(|c| c.version).unwrap_or(latest);
         Ok((changes, upto))
@@ -211,6 +217,7 @@ impl MetaStore for PgMeta {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls;
 
     /// A fake server that records how the client starts: the SSLRequest, then (over TLS when
     /// it said yes) the startup message.
@@ -282,6 +289,12 @@ mod tests {
         let _ = PgMeta::connect_with(&url(port, "require"), Some(&ca)).await;
         let (asked, startup) = server.await.unwrap();
         assert!(asked && sent_user(&startup), "startup over TLS: {startup:?}");
+
+        // A managed Postgres URL (PlanetScale, Neon): verify-full, the CA named in the URL.
+        let (port, server) = fake_server(Some(acceptor.clone())).await;
+        let _ = PgMeta::connect_with(&format!("{}&sslrootcert={}", url(port, "verify-full"), ca.display()), None).await;
+        let (asked, startup) = server.await.unwrap();
+        assert!(asked && sent_user(&startup), "verify-full with sslrootcert: {startup:?}");
 
         // An untrusted server certificate is refused before anything is sent.
         let (port, server) = fake_server(Some(acceptor)).await;

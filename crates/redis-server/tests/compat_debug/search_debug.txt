@@ -130,6 +130,8 @@ _FT.DEBUG DISK_FLUSH nosuch
 FT.DROPINDEX g
 # Many values: blocks, splits and their dumps.
 FT.CREATE big PREFIX 1 big: SCHEMA n NUMERIC t TAG
+# Finish the initial scan before writes; otherwise the reference can index a hash twice.
+@until 10000 not\sinitialized _FT.DEBUG BG_SCAN_CONTROLLER GET_DEBUG_SCANNER_STATUS big
 EVAL "for i=1,300 do redis.call('HSET', 'big:'..i, 'n', i % 37, 't', 'v'..(i % 7)) end" 0
 _FT.DEBUG NUMIDX_SUMMARY big n
 !mask uniqueId _FT.DEBUG DUMP_NUMIDXTREE big n MINIMAL

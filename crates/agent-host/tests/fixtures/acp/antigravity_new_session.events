@@ -1,0 +1,15 @@
+{"native_thread":"agy-session-1"}
+{"model":"gemini-3-flash"}
+{"catalog":[{"default":true,"id":"gemini-3-flash","name":"Gemini 3 Flash","options":[{"choices":[{"id":"low","label":"Low"},{"id":"high","label":"High"}],"default":"low","id":"effort","label":"Reasoning","role":"reasoning","type":"select"}]},{"default":false,"id":"gemini-3-pro-preview","name":"Gemini 3 Pro","options":[{"choices":[{"id":"low","label":"Low"},{"id":"high","label":"High"}],"default":"low","id":"effort","label":"Reasoning","role":"reasoning","type":"select"}]},{"default":false,"id":"claude-sonnet-4-5","name":"Claude Sonnet 4.5","options":[{"choices":[{"id":"low","label":"Low"},{"id":"high","label":"High"}],"default":"low","id":"effort","label":"Reasoning","role":"reasoning","type":"select"}]}]}
+{"model":"gemini-3-pro-preview"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"thought:1:1","text":"A greeting."}}
+{"item":{"body":{"text":"A greeting.","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"A greeting.","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:2","text":"hi"}}
+{"item":{"body":{"text":"hi","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"item":{"body":{"text":"hi","type":"message"},"id":"msg:1:2","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":40,"input_tokens":140,"output_tokens":15}}
+{"turn_ended":"completed"}
+{"exited":null}

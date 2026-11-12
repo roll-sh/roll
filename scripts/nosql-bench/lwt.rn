@@ -1,0 +1,29 @@
+// LWT: conditional updates of existing rows (always applied), uniform over ROWS keys.
+use latte::*;
+
+const ROWS = latte::param!("rows", 100000);
+const KS = "bench_lwt";
+
+pub async fn schema(ctx) {
+    ctx.execute(`CREATE KEYSPACE IF NOT EXISTS ${KS} WITH replication = {'class': 'NetworkTopologyStrategy', 'datacenter1': 1}`).await?;
+    ctx.execute(`CREATE TABLE IF NOT EXISTS ${KS}.accounts (id bigint PRIMARY KEY, balance bigint, owner text)`).await?;
+}
+
+pub async fn erase(ctx) {
+    ctx.execute(`TRUNCATE TABLE ${KS}.accounts`).await?;
+}
+
+pub async fn prepare(ctx) {
+    ctx.load_cycle_count = ROWS;
+    ctx.prepare("insert", `INSERT INTO ${KS}.accounts (id, balance, owner) VALUES (?, 0, 'bench')`).await?;
+    ctx.prepare("cas", `UPDATE ${KS}.accounts SET balance = ? WHERE id = ? IF EXISTS`).await?;
+}
+
+pub async fn load(ctx, i) {
+    ctx.execute_prepared("insert", [i]).await?;
+}
+
+pub async fn run(ctx, i) {
+    let id = hash(i) % ROWS;
+    ctx.execute_prepared("cas", [i, id]).await?;
+}

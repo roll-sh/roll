@@ -1,87 +1,109 @@
 name: ci
 
-# The one required check for pull requests and the merge queue: runs the workflows for whatever
-# changed, and passes when they all pass (or weren't needed).
+# The merge gate is a bounded smoke check that finishes in under a minute. Docker, compatibility
+# and stress suites remain available through the individual workflows' manual triggers.
 on:
   pull_request:
   merge_group:
+  push:
+    branches: [main]
+  # Daily on main: keeps main's Rust cache alive (GitHub drops caches unused for 7 days), so
+  # pull requests start warm.
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  changes:
+  # The Rust smoke tests, one job per dependency tree so the slowest cold build stays under a
+  # minute. Only main saves the cache; pull requests restore it.
+  rust:
     runs-on: ubuntu-latest
-    outputs:
-      postgres: ${{ steps.diff.outputs.postgres }}
-      queues: ${{ steps.diff.outputs.queues }}
-      redis: ${{ steps.diff.outputs.redis }}
-      search: ${{ steps.diff.outputs.search }}
-      stream: ${{ steps.diff.outputs.stream }}
-      tasks: ${{ steps.diff.outputs.tasks }}
-      web: ${{ steps.diff.outputs.web }}
+    timeout-minutes: 2
+    strategy:
+      matrix:
+        include:
+          # Git framing and packs.
+          - name: git
+            packages: -p code-git
+          # Reviewer schemas, pricing and key sealing.
+          - name: review
+            packages: -p code-review
+          # RESP and S3 auth and parsing.
+          - name: protocols
+            packages: -p redis-proto -p s3-proto
+    name: rust (${{ matrix.name }})
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          fetch-depth: 0
-      - id: diff
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-        run: |
-          files=$(git diff --name-only "$BASE" HEAD)
-          echo "$files"
-          match() { if grep -qE "$2" <<< "$files"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
-          match postgres '^(crates/(pg-proxy|pg-storage|pg-control|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-postgres\.sh$|\.github/workflows/(postgres|ci)\.yml$)'
-          match queues '^(crates/(mq-[a-z0-9-]+|rolld|roll-cli)/|tests/queues/|deploy/queues/|Cargo\.(toml|lock)$|scripts/test-queues(-clients)?\.sh$|\.github/workflows/(queues|ci)\.yml$)'
-          match redis '^(crates/(redis-[a-z]+|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-redis\.sh$|\.github/workflows/(redis|ci)\.yml$)'
-          match search '^(crates/(search-[a-z]+|snowball|pg-storage|rolld|roll-cli)/|docs/search/compatibility\.md$|Cargo\.(toml|lock)$|scripts/(test-search|search-yaml-suites)\.sh$|\.github/workflows/(search|ci)\.yml$|apps/dashboard/src/lib/search-|tests/search/)'
-          match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
-          match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
-          match web '^(apps/|packages/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'
+          key: ${{ matrix.name }}
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked ${{ matrix.packages }} --lib
 
-  postgres:
-    needs: changes
-    if: needs.changes.outputs.postgres == 'true'
-    uses: ./.github/workflows/postgres.yml
-
-  queues:
-    needs: changes
-    if: needs.changes.outputs.queues == 'true'
-    uses: ./.github/workflows/queues.yml
-
-  redis:
-    needs: changes
-    if: needs.changes.outputs.redis == 'true'
-    uses: ./.github/workflows/redis.yml
-
-  search:
-    needs: changes
-    if: needs.changes.outputs.search == 'true'
-    uses: ./.github/workflows/search.yml
-
-  stream:
-    needs: changes
-    if: needs.changes.outputs.stream == 'true'
-    uses: ./.github/workflows/stream.yml
-
-  tasks:
-    needs: changes
-    if: needs.changes.outputs.tasks == 'true'
-    uses: ./.github/workflows/tasks.yml
-
+  # Every package's types (TypeScript 7, scripts/typecheck.mjs), the dashboard's node tests and the
+  # desktop app's tests.
   web:
-    needs: changes
-    if: needs.changes.outputs.web == 'true'
-    uses: ./.github/workflows/web.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-web
+      - run: pnpm typecheck
+      - run: pnpm --filter dashboard test:node
+      - run: pnpm --filter @roll/desktop test
+
+  # The dashboard's vitest suite, split across runners.
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    strategy:
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-web
+        with:
+          filter: dashboard...
+      - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
+
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate test scripts
+        run: |
+          for script in scripts/test-*.sh scripts/lib/*.sh scripts/nosql-conformance.sh; do
+            bash -n "$script"
+          done
+      - name: Validate workflows
+        run: |
+          version=1.7.12
+          if curl -fsSL --max-time 20 --retry 1 --retry-all-errors -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v$version/actionlint_${version}_linux_amd64.tar.gz"; then
+            tar -xzf actionlint.tar.gz actionlint
+            ./actionlint -shellcheck=
+          else
+            docker run --rm -v "$PWD:/repo" -w /repo "rhysd/actionlint:$version@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667" -shellcheck=
+          fi
 
   ci:
-    needs: [changes, postgres, queues, redis, search, stream, tasks, web]
+    needs: [rust, web, dashboard, scripts]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null

@@ -133,8 +133,19 @@ async fn a_crashed_leader_is_replaced_and_nothing_acknowledged_is_lost() {
     a.stop.send(Stop::Crash).unwrap();
     assert_eq!(a.done.await.unwrap().unwrap(), Exit::Stopped);
 
-    // Sent while nobody leads: held by the proxy, then served by the new leader.
-    let during = publish(&http, &proxy, json!({ "url": recv.url("/during"), "body": "x" })).await;
+    // A proxy may still have the crashed leader cached. Retry an ambiguous response with
+    // the same dedup key, so neither a lost response nor the retry creates a second message.
+    let body = json!({ "url": recv.url("/during"), "body": "x", "dedup_id": "during-failover" });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let during = loop {
+        let (status, reply) = call(&http, &proxy, reqwest::Method::POST, "/publish", Some(body.clone())).await;
+        if status.is_success() {
+            break reply["message_id"].as_str().unwrap().to_string();
+        }
+        assert!(matches!(status, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE), "publish: {status} {reply}");
+        assert!(std::time::Instant::now() < deadline, "failover publish: {status} {reply}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     let second = wait_leader(&*objects, Some("node-a")).await;
     assert_eq!(second.node, b.id);
     assert!(second.epoch > first.epoch);
@@ -326,8 +337,9 @@ async fn a_cell_hosts_isolated_tenants_that_survive_a_hand_over() {
     assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
     let (s, _) = req(&http, Method::GET, format!("{proxy}/v1/tasks/messages"), Some(&acme_key), None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "a tenant key works on the default tenant");
+    // A tenant that doesn't exist answers like a bad key (only the operator learns which exist).
     let (s, _) = req(&http, Method::GET, format!("{proxy}/t/nope/v1/tasks/messages"), Some(&acme_key), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // Hand over: tenants, their keys and their data move with the cell.
     let b = start_node_with(objects.clone(), "node-b", Some(ADMIN)).await;
@@ -351,7 +363,7 @@ async fn a_cell_hosts_isolated_tenants_that_survive_a_hand_over() {
     let (s, _) = req(&http, Method::DELETE, format!("{tenants}/acme"), Some(ADMIN), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = req(&http, Method::GET, format!("{acme_api}/messages/{acme_msg}"), Some(&acme_key), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "a deleted tenant answers like a bad key");
     let (s, again) = req(&http, Method::POST, tenants.clone(), Some(ADMIN), Some(json!({ "id": "acme" }))).await;
     assert_eq!(s, StatusCode::CREATED);
     let (s, _) = req(&http, Method::GET, format!("{acme_api}/messages/{acme_msg}"), Some(&acme_key), None).await;

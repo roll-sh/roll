@@ -29,7 +29,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tower_http::cors::CorsLayer;
 
 pub struct Api {
     pub b: Arc<Broker>,
@@ -40,9 +39,127 @@ pub struct Api {
 
 type S = State<Arc<Api>>;
 
+/// Produce one record to a topic from inside the process (roll storage's event notifications),
+/// exactly as the HTTP data plane does: a keyed record goes to its key's partition, and this
+/// returns once it's durable. On the fleet it runs on the stream's owner.
+pub async fn produce_one(b: &Arc<Broker>, stream: &Arc<Stream>, topic: &Arc<Topic>, key: Option<bytes::Bytes>, value: bytes::Bytes, headers: Vec<(String, bytes::Bytes)>, timeout: std::time::Duration) -> Result<(), String> {
+    let one = OneRecord { key: key.map(|k| B64.encode(k)), value: B64.encode(&value), headers: headers.into_iter().map(|(k, v)| (k, B64.encode(v))).collect(), timeout_ms: timeout.as_millis() as u64 };
+    let Some(fleet) = &b.fleet else { return produce_here(b, stream, topic, one).await };
+    let uri = format!("/internal/streams/{}/topics/{}/record", stream.id, topic.name);
+    let body = serde_json::to_vec(&one).map_err(|e| e.to_string())?;
+    let req = axum::http::Request::post(uri).header(header::CONTENT_TYPE, "application/json").body(axum::body::Body::from(body)).map_err(|e| e.to_string())?;
+    let (b2, s2, t2) = (b.clone(), stream.clone(), topic.clone());
+    let resp = fleet
+        .cluster
+        .dispatch(&crate::fleet::key(&stream.id), req, move |_, guard| async move {
+            if !b2.wait_serving(&s2, guard.epoch(), std::time::Instant::now() + crate::fleet::RIDE_OUT).await {
+                return roll_cluster::unavailable(std::time::Duration::from_millis(500));
+            }
+            match produce_here(&b2, &s2, &t2, one).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+            }
+        })
+        .await;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let status = resp.status();
+    let text = axum::body::to_bytes(resp.into_body(), 64 << 10).await.unwrap_or_default();
+    Err(format!("{status}: {}", String::from_utf8_lossy(&text).trim()))
+}
+
+/// One record for [`produce_one`], as it crosses to the stream's owner.
+#[derive(serde::Serialize, Deserialize)]
+struct OneRecord {
+    key: Option<String>,
+    value: String,
+    headers: Vec<(String, String)>,
+    timeout_ms: u64,
+}
+
+async fn produce_here(b: &Arc<Broker>, stream: &Arc<Stream>, topic: &Arc<Topic>, one: OneRecord) -> Result<(), String> {
+    let bytes = |s: &str| B64.decode(s).map(bytes::Bytes::from).map_err(|e| e.to_string());
+    let key = one.key.as_deref().map(bytes).transpose()?;
+    let headers = one.headers.iter().map(|(k, v)| Ok((k.clone(), Some(bytes(v)?)))).collect::<Result<Vec<_>, String>>()?;
+    let api = Api { b: b.clone(), leases: leases::Leases::default(), rr: AtomicUsize::new(0) };
+    let record = stream_log::batch::NewRecord { key, value: Some(bytes(&one.value)?), headers, timestamp: None };
+    let timeout = std::time::Duration::from_millis(one.timeout_ms);
+    let out = data::produce_records(&api, stream, topic, vec![data::Incoming { partition: None, record }], data::Acks::All, timeout).await;
+    match out.into_iter().next() {
+        Some(Ok(_)) => Ok(()),
+        Some(Err(e)) => Err(e.message),
+        None => Err("nothing was produced".into()),
+    }
+}
+
+/// `POST /internal/streams/{s}/topics/{t}/record`: [`produce_one`] from another node (signed).
+async fn internal_record(State(api): S, Path((s, t)): Path<(String, String)>, Json(one): Json<OneRecord>) -> Response {
+    let Some(stream) = api.b.find_stream(&s) else { return ApiError::not_found(format!("stream {s} not found")).into_response() };
+    let Some(topic) = stream.topic(&t) else { return ApiError::not_found(format!("topic {t} not found")).into_response() };
+    match produce_here(&api.b, &stream, &topic, one).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    }
+}
+
+/// The stream a request is about, for routing it to the stream's owner: `/v1/streams/{s}/…`,
+/// `/kafka/v3/clusters/{cluster id}/…` and the internal routes. `None` for everything else
+/// (listing and creating streams run anywhere) and for streams that don't exist (their 404).
+fn routed_stream(b: &Broker, path: &str) -> Option<Arc<Stream>> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("v1" | "internal"), Some("streams"), Some(s)) if !s.is_empty() => b.find_stream(s),
+        (Some("kafka"), Some("v3"), Some("clusters")) => {
+            let c = parts.next().filter(|c| !c.is_empty())?;
+            let found = |b: &Broker| b.streams().into_iter().find(|s| s.cluster_id == c);
+            found(b).or_else(|| b.refresh_streams().ok().and_then(|_| found(b))).or_else(|| b.find_stream(c))
+        }
+        _ => None,
+    }
+}
+
+/// The fleet: run a request about a stream on the stream's owner (forwarded there if that's
+/// another node; riding out a move), holding the stream's lease until the answer is sent.
+async fn route_to_owner(State(api): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let (Some(fleet), Some(stream)) = (&api.b.fleet, routed_stream(&api.b, req.uri().path())) else { return next.run(req).await };
+    let b = api.b.clone();
+    fleet
+        .cluster
+        .dispatch(&crate::fleet::key(&stream.id), req, move |req, guard| async move {
+            if !b.wait_serving(&stream, guard.epoch(), std::time::Instant::now() + crate::fleet::RIDE_OUT).await {
+                return roll_cluster::unavailable(std::time::Duration::from_millis(500));
+            }
+            let lease = crate::fleet::Lease::new(guard, stream);
+            held(next.run(req).await, lease)
+        })
+        .await
+}
+
+/// Keep `lease` until the body is sent. A streamed body (server-sent events, a long read) ends
+/// when the stream starts moving, and the client reconnects to the new owner.
+fn held(resp: Response, lease: crate::fleet::Lease) -> Response {
+    use futures::StreamExt;
+    use http_body::Body as _;
+    let (parts, body) = resp.into_parts();
+    let streamed = body.size_hint().exact().is_none();
+    let ending = lease.guard.ending();
+    let data = body.into_data_stream();
+    let data = match streamed {
+        true => data.take_until(ending).boxed(),
+        false => data.boxed(),
+    };
+    let data = data.map(move |chunk| {
+        let _ = &lease;
+        chunk
+    });
+    Response::from_parts(parts, axum::body::Body::from_stream(data))
+}
+
 pub fn router(b: Arc<Broker>) -> Router {
     let api = Arc::new(Api { b, leases: leases::Leases::default(), rr: AtomicUsize::new(0) });
-    Router::new()
+    let fleet = api.b.fleet.as_ref().map(|f| f.cluster.clone());
+    let router = Router::new()
         .route("/v1/kafka", get(info))
         .route("/v1/streams", get(list_streams).post(create_stream))
         .route("/v1/streams/{s}", get(get_stream).patch(update_stream).delete(delete_stream))
@@ -55,8 +172,15 @@ pub fn router(b: Arc<Broker>) -> Router {
         .route("/v1/streams/{s}/groups/{g}/reset", post(reset_group))
         .route("/v1/streams/{s}/usage", get(usage))
         .merge(data::routes())
-        .merge(confluent::routes())
-        .layer(CorsLayer::permissive())
+        .merge(confluent::routes());
+    let Some(cluster) = fleet else { return router.with_state(api) };
+    let internal = Router::new()
+        .route("/internal/streams/{s}/topics/{t}/record", post(internal_record))
+        .route_layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::require_signed));
+    router
+        .merge(internal)
+        .layer(axum::middleware::from_fn_with_state(api.clone(), route_to_owner))
+        .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::accept_forwarded))
         .with_state(api)
 }
 
@@ -130,8 +254,35 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 // ── auth ──
 
-/// The API key in `Authorization` (Basic `user:secret`, or Bearer `user:secret`), verified.
-fn principal(api: &Api, headers: &HeaderMap) -> ApiResult<Option<Credential>> {
+/// A data-plane request's headers, and whether rolld's gate found the operator's token in them
+/// (`roll_auth::Operator`): the operator reaches every stream.
+pub struct Caller {
+    headers: HeaderMap,
+    pub operator: bool,
+}
+
+impl<St: Send + Sync> axum::extract::FromRequestParts<St> for Caller {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &St) -> Result<Self, Self::Rejection> {
+        Ok(Self { headers: parts.headers.clone(), operator: roll_auth::Operator::on(&parts.extensions) })
+    }
+}
+
+impl std::ops::Deref for Caller {
+    type Target = HeaderMap;
+
+    fn deref(&self) -> &HeaderMap {
+        &self.headers
+    }
+}
+
+/// The API key in `Authorization` (Basic `user:secret`, or Bearer `user:secret`), verified. None
+/// for the operator.
+fn principal(api: &Api, headers: &Caller) -> ApiResult<Option<Credential>> {
+    if headers.operator {
+        return Ok(None);
+    }
     let Some(h) = headers.get(header::AUTHORIZATION) else { return Ok(None) };
     let unauthorized = || ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "invalid API key");
     let h = h.to_str().map_err(|_| unauthorized())?;
@@ -151,13 +302,13 @@ fn principal(api: &Api, headers: &HeaderMap) -> ApiResult<Option<Credential>> {
 }
 
 /// The stream a data-plane request targets, checked against its API key.
-pub fn data_stream(api: &Api, headers: &HeaderMap, key: &str) -> ApiResult<Arc<Stream>> {
+pub fn data_stream(api: &Api, headers: &Caller, key: &str) -> ApiResult<Arc<Stream>> {
     let cred = principal(api, headers)?;
     let stream = api.b.find_stream(key).ok_or_else(|| ApiError::not_found(format!("stream {key} not found")))?;
     match cred {
         Some(c) if c.stream_id == stream.id => {}
         Some(_) => return Err(ApiError::new(StatusCode::FORBIDDEN, "forbidden", "this API key belongs to another stream")),
-        None if api.b.config.http_require_auth => {
+        None if api.b.config.http_require_auth && !headers.operator => {
             return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "an API key is required"));
         }
         None => {}
@@ -176,12 +327,30 @@ fn topic_of(stream: &Stream, name: &str) -> ApiResult<Arc<Topic>> {
 
 // ── views ──
 
+/// Where clients of `stream` connect (`None`: the node's listener): its hostname behind the
+/// edge, else the advertised address.
+fn bootstrap_of(b: &Broker, stream: Option<&str>) -> String {
+    match (&b.config.public_domain, stream) {
+        (Some(domain), Some(id)) => format!("{id}.{domain}:{}", b.config.advertised_port),
+        (Some(domain), None) => format!("<stream>.{domain}:{}", b.config.advertised_port),
+        (None, _) => format!("{}:{}", b.config.advertised_host, b.config.advertised_port),
+    }
+}
+
 fn bootstrap(b: &Broker) -> String {
-    format!("{}:{}", b.config.advertised_host, b.config.advertised_port)
+    bootstrap_of(b, None)
 }
 
 fn security_protocol(b: &Broker) -> &'static str {
-    if b.config.tls.is_some() { "SASL_SSL" } else { "SASL_PLAINTEXT" }
+    if b.config.tls.is_some() || b.config.public_domain.is_some() { "SASL_SSL" } else { "SASL_PLAINTEXT" }
+}
+
+/// The HTTP API's base URL for `stream`'s clients: `https://<stream id>.<domain>` behind the edge.
+fn http_base(b: &Broker, stream: &str) -> String {
+    match &b.config.public_domain {
+        Some(domain) => format!("https://{stream}.{domain}"),
+        None => b.config.http_url.clone(),
+    }
 }
 
 fn stream_view(api: &Api, s: &Stream) -> Value {
@@ -194,8 +363,9 @@ fn stream_view(api: &Api, s: &Stream) -> Value {
         "created_at": row.created_at,
         "cluster_id": s.cluster_id,
         "settings": row.settings,
-        "bootstrap": bootstrap(&api.b),
-        "http": format!("{}/v1/streams/{}", api.b.config.http_url, row.id),
+        "bootstrap": bootstrap_of(&api.b, Some(&row.id)),
+        "security_protocol": security_protocol(&api.b),
+        "http": format!("{}/v1/streams/{}", http_base(&api.b, &row.id), row.id),
         "topics": topics.len(),
         "partitions": topics.iter().map(|t| t.partition_count()).sum::<i32>(),
         "throughput": {
@@ -208,7 +378,7 @@ fn stream_view(api: &Api, s: &Stream) -> Value {
 /// Client settings for a key: Kafka properties plus the HTTP endpoints.
 fn connect_view(api: &Api, s: &Stream, username: &str, secret: &str) -> Value {
     let b = &api.b;
-    let boot = bootstrap(b);
+    let boot = bootstrap_of(b, Some(&s.id));
     let proto = security_protocol(b);
     json!({
         "bootstrap": boot,
@@ -227,7 +397,7 @@ fn connect_view(api: &Api, s: &Stream, username: &str, secret: &str) -> Value {
             "sasl.password": secret,
         },
         "http": {
-            "produce": format!("{}/v1/streams/{}/topics/{{topic}}/records", b.config.http_url, s.id),
+            "produce": format!("{}/v1/streams/{}/topics/{{topic}}/records", http_base(b, &s.id), s.id),
             "authorization": format!("Bearer {username}:{secret}"),
         },
     })
@@ -312,6 +482,10 @@ async fn info(State(api): S) -> Json<Value> {
 }
 
 async fn list_streams(State(api): S) -> Json<Value> {
+    // The fleet: streams other nodes created or deleted.
+    if let Err(e) = api.b.refresh_streams() {
+        tracing::warn!(error = %e, "reading the stream catalog");
+    }
     let mut streams = api.b.streams();
     streams.sort_by_key(|s| s.row.read().unwrap().created_at);
     Json(Value::Array(streams.iter().map(|s| stream_view(&api, s)).collect()))

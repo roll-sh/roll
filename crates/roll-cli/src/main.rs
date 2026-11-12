@@ -1,13 +1,19 @@
+mod agent;
+mod automation;
+mod code;
+mod gateway;
 mod stream;
 mod tasks;
 
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, parser::ValueSource};
 use serde_json::{Value, json};
 
-mod redis;
+mod nosql;
 mod queues;
 mod search;
+mod storage;
+mod redis;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -19,7 +25,8 @@ struct Cli {
     /// roll tasks API (default: `<api>/v1/tasks`, served by rolld).
     #[arg(long, env = "ROLL_TASKS_URL", global = true)]
     tasks_url: Option<String>,
-    /// roll tasks token (admin token or API key).
+    /// roll tasks token (admin token or API key). For `roll code`, an owner or admin token
+    /// (default: `ROLL_CODE_TOKEN`).
     #[arg(long, env = "ROLL_TASKS_TOKEN", global = true, hide_env_values = true)]
     token: Option<String>,
     /// Print raw JSON.
@@ -28,12 +35,25 @@ struct Cli {
     /// API key (`username:secret`) for streams that require one.
     #[arg(long, env = "ROLL_API_KEY", global = true, hide_env_values = true)]
     api_key: Option<String>,
+    /// The operator token of a daemon that requires one (`ROLL_ADMIN_TOKEN`): every API takes it,
+    /// and it's the default for `roll code` and `roll tasks`.
+    #[arg(long, env = "ROLL_ADMIN_TOKEN", global = true, hide_env_values = true)]
+    admin_token: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run coding agents on this machine and drive them from roll (`login`, `up`, `status`, `logout`).
+    #[command(subcommand)]
+    Agent(agent::Agent),
+    /// Source control for agents: repos, changes, work items, landing.
+    #[command(subcommand)]
+    Code(code::Code),
+    /// roll's model gateway from a config file, on a machine without `roll agent up` (`serve`,
+    /// `client add|list|revoke`).
+    Gateway(gateway::Gateway),
     /// Serverless Postgres.
     #[command(subcommand, alias = "pg")]
     Db(Db),
@@ -46,12 +66,18 @@ enum Cmd {
     /// Kafka-compatible streams.
     #[command(subcommand, alias = "kafka")]
     Stream(stream::Stream),
+    /// ScyllaDB / Cassandra-compatible databases (with a built-in cqlsh).
+    #[command(subcommand, alias = "cql")]
+    Nosql(Box<nosql::Nosql>),
     /// RabbitMQ-compatible message queues.
     #[command(alias = "q")]
     Queues(queues::Queues),
     /// Elasticsearch-compatible search.
     #[command(subcommand, alias = "es")]
     Search(search::Search),
+    /// S3-compatible object storage.
+    #[command(subcommand, alias = "s3")]
+    Storage(storage::Storage),
 }
 
 #[derive(Subcommand)]
@@ -158,6 +184,8 @@ struct Api {
     base: String,
     http: reqwest::Client,
     key: Option<String>,
+    /// Sent with every request (`roll storage` sends the account it acts in).
+    headers: Vec<(String, String)>,
 }
 
 impl Api {
@@ -166,6 +194,9 @@ impl Api {
         if let Some(k) = &self.key {
             req = req.bearer_auth(k);
         }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
         if let Some(b) = body {
             req = req.json(&b);
         }
@@ -173,20 +204,20 @@ impl Api {
         let status = res.status();
         let text = res.text().await?;
         if !status.is_success() {
-            // Errors are JSON from the control planes, but not always from what sits in front of
-            // them (a body limit, a proxy): report those as they came.
+            // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
             let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             // Batch endpoints report per-record errors.
             let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
             match value["error"].as_str().or(per_record) {
                 Some(e) => bail!("{e}"),
-                None if text.trim().is_empty() => bail!("HTTP {status}"),
-                None if value.is_null() => bail!("HTTP {status}: {}", text.trim()),
-                None => bail!("{text}"),
+                None if text.trim().is_empty() => bail!("{status}"),
+                None => bail!("{status}: {}", text.trim()),
             }
         }
-        let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
-        Ok(value)
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
     }
     /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
     /// (`…/t/<tenant>/v1/tasks`).
@@ -197,7 +228,7 @@ impl Api {
         {
             base = root;
         }
-        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone() }
+        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone() }
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
@@ -223,7 +254,7 @@ fn bytes(n: f64) -> String {
         n /= 1024.0;
         i += 1;
     }
-    format!("{n:.1} {}", units[i])
+    if i == 0 { format!("{n:.0} B") } else { format!("{n:.1} {}", units[i]) }
 }
 
 fn print_project(p: &Value) {
@@ -286,12 +317,58 @@ async fn project(api: &Api, key: &str) -> anyhow::Result<Value> {
         .with_context(|| format!("no database named {key}"))
 }
 
+/// Exit quietly when the reader goes away (`roll code queue … | head`) instead of panicking in
+/// `println!`: Rust ignores SIGPIPE by default, which turns a closed pipe into a write error.
+fn reset_sigpipe() {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+/// The subcommand `roll` was asked for (`code`, `db`, …): the first argument that isn't a
+/// global flag or a global flag's value.
+fn subcommand_name() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a.starts_with('-') {
+            if matches!(a.as_str(), "--api" | "--tasks-url" | "--token" | "--api-key") {
+                args.next();
+            }
+            continue;
+        }
+        return Some(a);
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key };
+    reset_sigpipe();
+    let matches = match Cli::command().try_get_matches() {
+        Ok(m) => m,
+        // `roll code` promises agents 2 = land conflict and 3 = no work, so its usage errors
+        // exit 1 like every other failure instead of clap's 2. Help and --version still exit 0.
+        Err(e) if e.use_stderr() && subcommand_name().as_deref() == Some("code") => {
+            let _ = e.print();
+            std::process::exit(1);
+        }
+        Err(e) => e.exit(),
+    };
+    let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches(&matches)?;
+    let admin = cli.admin_token.filter(|t| !t.trim().is_empty());
+    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
+        Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
+        Cmd::Gateway(cmd) => return gateway::run(cli.json, cmd).await,
+        Cmd::Code(cmd) => {
+            // `--token` on the command line wins; otherwise ROLL_CODE_TOKEN (not the tasks token).
+            let token = if token_flag { cli.token } else { std::env::var("ROLL_CODE_TOKEN").ok() };
+            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()).or(admin), headers: api.headers.clone() };
+            return code::run(&code_api, cli.json, cmd).await;
+        }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
         Cmd::Stream(cmd) => {
             if let Some(out) = stream::run(&api, cli.json, cmd).await? {
@@ -301,11 +378,21 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Tasks(cmd) => {
             let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{}/v1/tasks", api.base));
-            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()) };
+            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()).or(admin), headers: Vec::new() };
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
+        Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Nosql(cmd) => {
+            let r = nosql::run(&api, cli.json, *cmd).await;
+            if let Err(e) = &r
+                && let Some(nosql::Exit(code)) = e.downcast_ref::<nosql::Exit>()
+            {
+                std::process::exit(*code);
+            }
+            return r;
+        }
     };
     let out = match cmd {
         Db::List => {
@@ -474,4 +561,37 @@ async fn main() -> anyhow::Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `roll code` command (and subcommand) has a row with tests in
+    /// docs/code/test-coverage.md, like the routes and MCP tools do (code-control's
+    /// `tests/coverage_map.rs`).
+    #[test]
+    fn every_code_command_is_in_the_coverage_map() {
+        fn walk(c: &clap::Command, path: String, out: &mut Vec<String>) {
+            for s in c.get_subcommands().filter(|s| s.get_name() != "help") {
+                let p = format!("{path} {}", s.get_name());
+                // A group that needs a subcommand (`roll code change`) runs nothing itself.
+                if !s.is_subcommand_required_set() || !s.has_subcommands() {
+                    out.push(p.clone());
+                }
+                walk(s, p, out);
+            }
+        }
+        let cli = Cli::command();
+        let code = cli.find_subcommand("code").expect("roll code");
+        let mut commands = Vec::new();
+        walk(code, "roll code".into(), &mut commands);
+        assert!(commands.len() > 60, "{commands:?}");
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/code/test-coverage.md")).unwrap();
+        let missing: Vec<&String> = commands
+            .iter()
+            .filter(|c| !doc.lines().any(|l| l.starts_with(&format!("| `{c}`")) && l.contains("::")))
+            .collect();
+        assert!(missing.is_empty(), "no row with tests in docs/code/test-coverage.md for: {missing:?}");
+    }
 }

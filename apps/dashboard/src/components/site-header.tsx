@@ -1,7 +1,5 @@
-"use client";
-
 import { RollLogo } from "@roll/brand";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useMarkState } from "./mark-state";
 
 export function SiteHeader() {

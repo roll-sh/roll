@@ -33,6 +33,7 @@ use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, DeleteRequest, GlobalSecondaryIndex, KeySchemaElement, KeyType, KeysAndAttributes,
     Projection, ProjectionType, ReturnValue, ScalarAttributeType, Select, TimeToLiveSpecification, WriteRequest,
 };
+use aws_sdk_dynamodb::types::{Delete as TxDelete, Put as TxPut, TransactWriteItem, Update as TxUpdate};
 use object_store::{ObjectStore, ObjectStoreExt};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -405,6 +406,23 @@ impl DynamoStore {
         Ok(Some((pk, sk)))
     }
 
+    /// Write what a new message needs besides its own item (its body, its group entry, its due
+    /// index entry), and return that item. Nothing reads these before the message item exists:
+    /// if it never does (a failed insert or group), they're left over like an interrupted
+    /// insert's, and expire.
+    async fn msg_insert_parts(&self, m: &Message, body: &[u8]) -> Result<Item> {
+        self.put_body(&m.id, body, m.due_at.max(m.created_at) + BODY_GRACE_MS).await?;
+        if let Some(g) = &m.group {
+            let mut item = key(format!("g#{g}"), m.id.clone());
+            item.insert("at".into(), n(now_ms()));
+            self.db.put_item().table_name(&self.table).set_item(Some(item)).send().await?;
+        }
+        self.put_index(m, 1).await?;
+        let mut item = Self::message_item(m, 1)?;
+        Self::static_attrs(m, &mut item);
+        Ok(item)
+    }
+
     fn message_item(m: &Message, version: u64) -> Result<Item> {
         let stored = Message { version, ..m.clone() };
         let mut item = key(msg_pk(&m.id), "m");
@@ -445,6 +463,86 @@ impl DynamoStore {
 
 type Filter = (String, HashMap<String, String>, HashMap<String, AttributeValue>);
 
+/// A `kv_put` as an update: for `update_item` and for a transaction.
+struct KvUpdate {
+    key: Item,
+    update: String,
+    condition: Option<String>,
+    names: HashMap<String, String>,
+    values: Item,
+}
+
+fn kv_update(k: &str, value: &Value, expect: Expect, expires_at: Option<Ms>) -> Result<KvUpdate> {
+    let now = now_ms();
+    let mut values: Item = HashMap::from([(":val".to_string(), s(serde_json::to_string(value)?)), (":one".to_string(), n(1)), (":zero".to_string(), n(0))]);
+    let names = HashMap::from([("#ttl".to_string(), "ttl".to_string())]);
+    let update = match expires_at {
+        Some(e) => {
+            values.insert(":exp".into(), n(e));
+            values.insert(":ttl".into(), ttl_s(e + 60_000));
+            "SET val = :val, v = if_not_exists(v, :zero) + :one, exp = :exp, #ttl = :ttl".to_string()
+        }
+        None => "SET val = :val, v = if_not_exists(v, :zero) + :one REMOVE exp, #ttl".to_string(),
+    };
+    let condition = match expect {
+        Expect::Any => None,
+        Expect::Absent => {
+            values.insert(":now".into(), n(now));
+            Some("attribute_not_exists(pk) OR exp <= :now".to_string())
+        }
+        Expect::Version(ver) => {
+            values.insert(":expect".into(), n(ver as i64));
+            values.insert(":now".into(), n(now));
+            Some("v = :expect AND (attribute_not_exists(exp) OR exp > :now)".to_string())
+        }
+    };
+    Ok(KvUpdate { key: key(format!("k#{k}"), "k"), update, condition, names, values })
+}
+
+fn run_item(run: &Run, version: u64) -> Result<Item> {
+    let stored = Run { version, ..run.clone() };
+    let mut item = key(format!("r#{}", run.id), "r");
+    item.insert("d".into(), s(serde_json::to_string(&stored)?));
+    item.insert("v".into(), n(version as i64));
+    item.insert("st".into(), s(run.status.as_str()));
+    item.insert("fn".into(), s(run.function_id.clone()));
+    item.insert("g1pk".into(), s(format!("rl#{}", shard_of(&run.id, LIST_SHARDS))));
+    item.insert("g1sk".into(), s(run.id.clone()));
+    item.insert("g2pk".into(), s(format!("rf#{}#{}", run.function_id, shard_of(&run.id, OWNER_SHARDS))));
+    item.insert("g2sk".into(), s(run.id.clone()));
+    if let Some(e) = run.expires_at {
+        item.insert("ttl".into(), ttl_s(e));
+    }
+    Ok(item)
+}
+
+fn step_item(step: &Step) -> Result<Item> {
+    let mut item = key(format!("r#{}", step.run_id), format!("s#{}", step.id));
+    item.insert("d".into(), s(serde_json::to_string(step)?));
+    Ok(item)
+}
+
+fn event_item(e: &Event) -> Result<Item> {
+    let mut item = key(format!("e#{}", e.id), "e");
+    item.insert("d".into(), s(serde_json::to_string(e)?));
+    item.insert("g1pk".into(), s(format!("el#{}", shard_of(&e.id, LIST_SHARDS))));
+    item.insert("g1sk".into(), s(e.id.clone()));
+    item.insert("g2pk".into(), s(format!("en#{}#{}", e.name, shard_of(&e.id, OWNER_SHARDS))));
+    item.insert("g2sk".into(), s(e.id.clone()));
+    if let Some(x) = e.expires_at {
+        item.insert("ttl".into(), ttl_s(x));
+    }
+    Ok(item)
+}
+
+fn wait_item(w: &Wait) -> Result<Item> {
+    let mut item = key(format!("w#{}#{}", w.event, w.key.as_deref().unwrap_or("")), w.id.clone());
+    item.insert("d".into(), s(serde_json::to_string(w)?));
+    item.insert("exp".into(), n(w.expires_at));
+    item.insert("ttl".into(), ttl_s(w.expires_at + 60_000));
+    Ok(item)
+}
+
 fn message_filter(q: &MessageQuery, skip: &[&str]) -> Option<Filter> {
     let mut parts = Vec::new();
     let mut names = HashMap::new();
@@ -476,6 +574,91 @@ fn message_filter(q: &MessageQuery, skip: &[&str]) -> Option<Filter> {
 
 #[async_trait]
 impl Store for DynamoStore {
+    async fn write_all(&self, writes: &[Write]) -> Result<bool> {
+        // One write is atomic by itself: no transaction (they cost twice the write units, and
+        // are slower).
+        if let [w] = writes {
+            return match w {
+                Write::Kv { key: k, value, expect, expires_at } => self.kv_put(k, value, *expect, *expires_at).await,
+                Write::KvDelete { key: k, expect } => self.kv_delete(k, *expect).await,
+                Write::Doc { kind, id, value, expect } => self.doc_put(kind, id, value, *expect).await,
+                Write::NewRun(run) => self.run_put(run, Expect::Absent).await,
+                Write::Step(step) => self.step_put(step).await.map(|_| true),
+                Write::Event(e) => self.event_put(e).await.map(|_| true),
+                Write::Wait(wait) => self.wait_put(wait).await.map(|_| true),
+                Write::Msg { message, body } => {
+                    let item = self.msg_insert_parts(message, body).await?;
+                    match self.db.put_item().table_name(&self.table).set_item(Some(item)).condition_expression("attribute_not_exists(pk)").send().await {
+                        Ok(_) => Ok(true),
+                        Err(e) if cond_failed(&e) => Ok(false),
+                        Err(e) => Err(anyhow::anyhow!("inserting message {}: {}", message.id, e.into_service_error())),
+                    }
+                }
+            };
+        }
+        let put =|item: Item, condition: Option<&str>| -> Result<TransactWriteItem> {
+            let p = TxPut::builder().table_name(&self.table).set_item(Some(item)).set_condition_expression(condition.map(String::from)).build()?;
+            Ok(TransactWriteItem::builder().put(p).build())
+        };
+        let mut items = Vec::with_capacity(writes.len());
+        for w in writes {
+            items.push(match w {
+                Write::Kv { key: k, value, expect, expires_at } => {
+                    let u = kv_update(k, value, *expect, *expires_at)?;
+                    let up = TxUpdate::builder()
+                        .table_name(&self.table)
+                        .set_key(Some(u.key))
+                        .update_expression(u.update)
+                        .set_condition_expression(u.condition)
+                        .set_expression_attribute_names(Some(u.names))
+                        .set_expression_attribute_values(Some(u.values))
+                        .build()?;
+                    TransactWriteItem::builder().update(up).build()
+                }
+                Write::Doc { kind, id, value, expect } => {
+                    let mut up = TxUpdate::builder()
+                        .table_name(&self.table)
+                        .set_key(Some(key(format!("doc#{kind}"), id.clone())))
+                        .update_expression("SET val = :val, v = if_not_exists(v, :zero) + :one")
+                        .expression_attribute_values(":val", s(serde_json::to_string(value)?))
+                        .expression_attribute_values(":one", n(1))
+                        .expression_attribute_values(":zero", n(0));
+                    up = match expect {
+                        Expect::Any => up,
+                        Expect::Absent => up.condition_expression("attribute_not_exists(pk)"),
+                        Expect::Version(v) => up.condition_expression("v = :expect").expression_attribute_values(":expect", n(*v as i64)),
+                    };
+                    TransactWriteItem::builder().update(up.build()?).build()
+                }
+                Write::KvDelete { key: k, expect } => {
+                    let mut d = TxDelete::builder().table_name(&self.table).set_key(Some(key(format!("k#{k}"), "k")));
+                    d = match expect {
+                        Expect::Version(ver) => d.condition_expression("v = :expect").expression_attribute_values(":expect", n(*ver as i64)),
+                        _ => d.condition_expression("attribute_exists(pk)"),
+                    };
+                    TransactWriteItem::builder().delete(d.build()?).build()
+                }
+                Write::Msg { message, body } => put(self.msg_insert_parts(message, body).await?, Some("attribute_not_exists(pk)"))?,
+                Write::NewRun(run) => put(run_item(run, 1)?, Some("attribute_not_exists(pk)"))?,
+                Write::Step(step) => put(step_item(step)?, None)?,
+                Write::Event(e) => put(event_item(e)?, None)?,
+                Write::Wait(wait) => put(wait_item(wait)?, None)?,
+            });
+        }
+        anyhow::ensure!(items.len() <= 100, "{} writes in one group; DynamoDB takes 100", items.len());
+        match self.db.transact_write_items().set_transact_items(Some(items)).send().await {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let failed = matches!(
+                    e.as_service_error(),
+                    Some(aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError::TransactionCanceledException(c))
+                        if c.cancellation_reasons().iter().any(|r| r.code() == Some("ConditionalCheckFailed"))
+                );
+                if failed { Ok(false) } else { Err(anyhow::anyhow!("writing a group: {}", e.into_service_error())) }
+            }
+        }
+    }
+
     fn describe(&self) -> String {
         match &self.s3 {
             Some((_, b)) => format!("dynamodb {} + s3://{b}", self.table),
@@ -488,15 +671,7 @@ impl Store for DynamoStore {
     }
 
     async fn msg_insert(&self, m: &Message, body: &[u8]) -> Result<()> {
-        self.put_body(&m.id, body, m.due_at.max(m.created_at) + BODY_GRACE_MS).await?;
-        if let Some(g) = &m.group {
-            let mut item = key(format!("g#{g}"), m.id.clone());
-            item.insert("at".into(), n(now_ms()));
-            self.db.put_item().table_name(&self.table).set_item(Some(item)).send().await?;
-        }
-        self.put_index(m, 1).await?;
-        let mut item = Self::message_item(m, 1)?;
-        Self::static_attrs(m, &mut item);
+        let item = self.msg_insert_parts(m, body).await?;
         self.db
             .put_item()
             .table_name(&self.table)
@@ -871,33 +1046,16 @@ impl Store for DynamoStore {
     }
 
     async fn kv_put(&self, k: &str, value: &Value, expect: Expect, expires_at: Option<Ms>) -> Result<bool> {
-        let now = now_ms();
-        let mut req = self
+        let u = kv_update(k, value, expect, expires_at)?;
+        let req = self
             .db
             .update_item()
             .table_name(&self.table)
-            .set_key(Some(key(format!("k#{k}"), "k")))
-            .expression_attribute_values(":val", s(serde_json::to_string(value)?))
-            .expression_attribute_values(":one", n(1))
-            .expression_attribute_values(":zero", n(0));
-        req = match expires_at {
-            Some(e) => req
-                .update_expression("SET val = :val, v = if_not_exists(v, :zero) + :one, exp = :exp, #ttl = :ttl")
-                .expression_attribute_names("#ttl", "ttl")
-                .expression_attribute_values(":exp", n(e))
-                .expression_attribute_values(":ttl", ttl_s(e + 60_000)),
-            None => req
-                .update_expression("SET val = :val, v = if_not_exists(v, :zero) + :one REMOVE exp, #ttl")
-                .expression_attribute_names("#ttl", "ttl"),
-        };
-        req = match expect {
-            Expect::Any => req,
-            Expect::Absent => req.condition_expression("attribute_not_exists(pk) OR exp <= :now").expression_attribute_values(":now", n(now)),
-            Expect::Version(ver) => req
-                .condition_expression("v = :expect AND (attribute_not_exists(exp) OR exp > :now)")
-                .expression_attribute_values(":expect", n(ver as i64))
-                .expression_attribute_values(":now", n(now)),
-        };
+            .set_key(Some(u.key))
+            .update_expression(u.update)
+            .set_condition_expression(u.condition)
+            .set_expression_attribute_names(Some(u.names))
+            .set_expression_attribute_values(Some(u.values));
         match req.send().await {
             Ok(_) => Ok(true),
             Err(e) if cond_failed(&e) => Ok(false),
@@ -990,19 +1148,7 @@ impl Store for DynamoStore {
             Expect::Version(v) => v + 1,
             Expect::Any => run.version + 1,
         };
-        let stored = Run { version, ..run.clone() };
-        let mut item = key(format!("r#{}", run.id), "r");
-        item.insert("d".into(), s(serde_json::to_string(&stored)?));
-        item.insert("v".into(), n(version as i64));
-        item.insert("st".into(), s(run.status.as_str()));
-        item.insert("fn".into(), s(run.function_id.clone()));
-        item.insert("g1pk".into(), s(format!("rl#{}", shard_of(&run.id, LIST_SHARDS))));
-        item.insert("g1sk".into(), s(run.id.clone()));
-        item.insert("g2pk".into(), s(format!("rf#{}#{}", run.function_id, shard_of(&run.id, OWNER_SHARDS))));
-        item.insert("g2sk".into(), s(run.id.clone()));
-        if let Some(e) = run.expires_at {
-            item.insert("ttl".into(), ttl_s(e));
-        }
+        let item = run_item(run, version)?;
         let mut req = self.db.put_item().table_name(&self.table).set_item(Some(item));
         req = match expect {
             Expect::Absent => req.condition_expression("attribute_not_exists(pk)"),
@@ -1088,22 +1234,13 @@ impl Store for DynamoStore {
     }
 
     async fn step_put(&self, step: &Step) -> Result<()> {
-        let mut item = key(format!("r#{}", step.run_id), format!("s#{}", step.id));
-        item.insert("d".into(), s(serde_json::to_string(step)?));
+        let item = step_item(step)?;
         self.db.put_item().table_name(&self.table).set_item(Some(item)).send().await?;
         Ok(())
     }
 
     async fn event_put(&self, e: &Event) -> Result<()> {
-        let mut item = key(format!("e#{}", e.id), "e");
-        item.insert("d".into(), s(serde_json::to_string(e)?));
-        item.insert("g1pk".into(), s(format!("el#{}", shard_of(&e.id, LIST_SHARDS))));
-        item.insert("g1sk".into(), s(e.id.clone()));
-        item.insert("g2pk".into(), s(format!("en#{}#{}", e.name, shard_of(&e.id, OWNER_SHARDS))));
-        item.insert("g2sk".into(), s(e.id.clone()));
-        if let Some(x) = e.expires_at {
-            item.insert("ttl".into(), ttl_s(x));
-        }
+        let item = event_item(e)?;
         self.db.put_item().table_name(&self.table).set_item(Some(item)).send().await?;
         Ok(())
     }
@@ -1139,10 +1276,7 @@ impl Store for DynamoStore {
     }
 
     async fn wait_put(&self, w: &Wait) -> Result<()> {
-        let mut item = key(format!("w#{}#{}", w.event, w.key.as_deref().unwrap_or("")), w.id.clone());
-        item.insert("d".into(), s(serde_json::to_string(w)?));
-        item.insert("exp".into(), n(w.expires_at));
-        item.insert("ttl".into(), ttl_s(w.expires_at + 60_000));
+        let item = wait_item(w)?;
         self.db.put_item().table_name(&self.table).set_item(Some(item)).send().await?;
         Ok(())
     }

@@ -10,6 +10,7 @@ pub mod http;
 pub mod net;
 pub mod node;
 pub mod persist;
+pub mod preauth;
 pub mod repl;
 pub mod snapshot;
 

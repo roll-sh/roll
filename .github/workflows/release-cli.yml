@@ -1,0 +1,102 @@
+name: release-cli
+
+# Builds the `roll` CLI for Linux and macOS (x86_64 and aarch64) when a `cli-v*` tag is pushed,
+# and publishes the tarballs and their SHA256SUMS as a GitHub release, which
+# apps/dashboard/public/install.sh (https://roll.sh/install.sh) installs from.
+
+on:
+  push:
+    tags: ['cli-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'An existing cli-v* tag to (re)build'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p roll-cli --bin roll --target ${{ matrix.target }}
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/roll
+          "$bin" --version
+          "$bin" agent --help >/dev/null
+          if [[ "$("$bin" --version)" != *" ${TAG#cli-v}" ]]; then
+            echo "::warning::$TAG builds $("$bin" --version) (the workspace version); the release is named after the tag"
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/roll dist/roll
+          strip dist/roll || true
+          tar -C dist -czf roll-${{ matrix.target }}.tar.gz roll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roll-${{ matrix.target }}
+          path: roll-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: roll-*
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum roll-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* --title "roll CLI ${TAG#cli-v}" \
+              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\` (checks SHA256SUMS), or download a tarball below."
+          fi

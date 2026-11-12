@@ -1,0 +1,496 @@
+
+Warnings :
+Using Replication Factor replication_factor=1 lower than the minimum_replication_factor_warn_threshold=3 is not recommended.
+
+
+Warnings :
+Creating an index in a keyspace that uses tablets requires the keyspace to remain RF-rack-valid while the index exists. Some operations will be restricted to enforce this: altering the keyspace's replication factor, adding a node in a new rack, and removing or decommissioning a node that would eliminate a rack.
+
+
+CREATE KEYSPACE cli_g_desc WITH replication = {'class': 'org.apache.cassandra.locator.NetworkTopologyStrategy', 'datacenter1': '1'} AND durable_writes = true AND tablets = {'enabled': true};
+
+CREATE TYPE cli_g_desc.pt (
+    x int,
+    y text
+);
+
+CREATE TYPE cli_g_desc.addr (
+    street text,
+    "Zip" int,
+    p frozen<pt>
+);
+
+CREATE TABLE cli_g_desc."Mixed" (
+    k int,
+    c int,
+    PRIMARY KEY (k, c)
+) WITH CLUSTERING ORDER BY (c ASC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.t (
+    k int,
+    "Quoted" text,
+    a ascii,
+    ad frozen<addr>,
+    m map<text, int>,
+    PRIMARY KEY (k)
+) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE INDEX t_a ON cli_g_desc.t(a) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.wide (
+    p int,
+    c1 text,
+    c2 int,
+    s int STATIC,
+    v text,
+    PRIMARY KEY ((p, c1), c2)
+) WITH CLUSTERING ORDER BY (c2 DESC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = 'it''s wide'
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 60
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.t (
+    k int,
+    "Quoted" text,
+    a ascii,
+    ad frozen<addr>,
+    m map<text, int>,
+    PRIMARY KEY (k)
+) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE INDEX t_a ON cli_g_desc.t(a) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.wide (
+    p int,
+    c1 text,
+    c2 int,
+    s int STATIC,
+    v text,
+    PRIMARY KEY ((p, c1), c2)
+) WITH CLUSTERING ORDER BY (c2 DESC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = 'it''s wide'
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 60
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc."Mixed" (
+    k int,
+    c int,
+    PRIMARY KEY (k, c)
+) WITH CLUSTERING ORDER BY (c ASC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TYPE cli_g_desc.addr (
+    street text,
+    "Zip" int,
+    p frozen<pt>
+);
+
+CREATE INDEX t_a ON cli_g_desc.t(a) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.t (
+    k int,
+    "Quoted" text,
+    a ascii,
+    ad frozen<addr>,
+    m map<text, int>,
+    PRIMARY KEY (k)
+) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE INDEX t_a ON cli_g_desc.t(a) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE KEYSPACE cli_g_desc WITH replication = {'class': 'org.apache.cassandra.locator.NetworkTopologyStrategy', 'datacenter1': '1'} AND durable_writes = true AND tablets = {'enabled': true};
+
+CREATE TYPE cli_g_desc.pt (
+    x int,
+    y text
+);
+
+CREATE TYPE cli_g_desc.addr (
+    street text,
+    "Zip" int,
+    p frozen<pt>
+);
+
+CREATE TABLE cli_g_desc."Mixed" (
+    k int,
+    c int,
+    PRIMARY KEY (k, c)
+) WITH CLUSTERING ORDER BY (c ASC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.t (
+    k int,
+    "Quoted" text,
+    a ascii,
+    ad frozen<addr>,
+    m map<text, int>,
+    PRIMARY KEY (k)
+) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE INDEX t_a ON cli_g_desc.t(a) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.wide (
+    p int,
+    c1 text,
+    c2 int,
+    s int STATIC,
+    v text,
+    PRIMARY KEY ((p, c1), c2)
+) WITH CLUSTERING ORDER BY (c2 DESC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = 'it''s wide'
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 60
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+"Mixed"  t  wide
+
+
+pt  addr
+
+
+CREATE KEYSPACE cli_g_desc WITH replication = {'class': 'org.apache.cassandra.locator.NetworkTopologyStrategy', 'datacenter1': '1'} AND durable_writes = true AND tablets = {'enabled': true};
+
+CREATE TYPE cli_g_desc.pt (
+    x int,
+    y text
+);
+
+CREATE TYPE cli_g_desc.addr (
+    street text,
+    "Zip" int,
+    p frozen<pt>
+);
+
+CREATE TABLE cli_g_desc."Mixed" (
+    k int,
+    c int,
+    PRIMARY KEY (k, c)
+) WITH CLUSTERING ORDER BY (c ASC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.t (
+    k int,
+    "Quoted" text,
+    a ascii,
+    ad frozen<addr>,
+    m map<text, int>,
+    PRIMARY KEY (k)
+) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE INDEX t_a ON cli_g_desc.t(a) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.wide (
+    p int,
+    c1 text,
+    c2 int,
+    s int STATIC,
+    v text,
+    PRIMARY KEY ((p, c1), c2)
+) WITH CLUSTERING ORDER BY (c2 DESC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = 'it''s wide'
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 60
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TABLE cli_g_desc.wide (
+    p int,
+    c1 text,
+    c2 int,
+    s int STATIC,
+    v text,
+    PRIMARY KEY ((p, c1), c2)
+) WITH CLUSTERING ORDER BY (c2 DESC)
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = 'it''s wide'
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 60
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE TYPE cli_g_desc.pt (
+    x int,
+    y text
+);
+
+CREATE TABLE cli_g_desc.t (
+    k int,
+    "Quoted" text,
+    a ascii,
+    ad frozen<addr>,
+    m map<text, int>,
+    PRIMARY KEY (k)
+) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+
+
+CREATE INDEX t_a ON cli_g_desc.t(a) WITH bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'ALL'}
+    AND comment = ''
+    AND compaction = {'class': 'IncrementalCompactionStrategy'}
+    AND compression = {'sstable_compression': 'LZ4WithDictsCompressor'}
+    AND crc_check_chance = 1
+    AND default_time_to_live = 0
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND speculative_retry = '99.0PERCENTILE'
+    AND tombstone_gc = {'mode': 'repair', 'propagation_delay_in_seconds': '3600'};
+

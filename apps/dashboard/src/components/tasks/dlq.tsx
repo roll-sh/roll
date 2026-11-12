@@ -1,5 +1,3 @@
-"use client";
-
 import { RotateCcw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { tasks } from "@/lib/tasks-api";

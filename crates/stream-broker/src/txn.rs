@@ -44,9 +44,26 @@ impl Txns {
         self.by_pid.lock().unwrap().retain(|(s, _), _| s != stream);
     }
 
-    /// Load persisted transactions and finish any that were mid-commit/abort.
+    /// Load persisted transactions and finish any that were mid-commit/abort. On the fleet
+    /// nothing is loaded at startup: each stream's are, by its owner ([`Txns::recover_stream`]).
     pub async fn recover(&self, b: &Broker) -> anyhow::Result<()> {
-        let rows = b.store.txns()?;
+        if b.fleet.is_some() {
+            return Ok(());
+        }
+        let unfinished = self.load(b.store.txns()?);
+        self.finish(b, unfinished).await;
+        Ok(())
+    }
+
+    /// Taking a stream over: load its transactions. Returns those the last owner left
+    /// mid-commit/abort, for [`Txns::finish`] once the stream is served (their markers need its
+    /// write-ahead log). Until then requests for them wait.
+    pub fn recover_stream(&self, b: &Broker, stream: &str) -> anyhow::Result<Vec<(String, String)>> {
+        self.drop_stream(stream);
+        Ok(self.load(b.store.txns_of(stream)?))
+    }
+
+    fn load(&self, rows: Vec<TxnRow>) -> Vec<Key> {
         let mut unfinished = Vec::new();
         for row in rows {
             let key = (row.stream_id.clone(), row.txn_id.clone());
@@ -56,6 +73,11 @@ impl Txns {
             }
             self.map.lock().unwrap().insert(key, Arc::new(tokio::sync::Mutex::new(row)));
         }
+        unfinished
+    }
+
+    /// Write the markers of transactions left mid-commit/abort, and complete them.
+    pub async fn finish(&self, b: &Broker, unfinished: Vec<Key>) {
         for (stream, id) in unfinished {
             if let Some(e) = self.entry(&stream, &id) {
                 let mut t = e.lock().await;
@@ -66,7 +88,6 @@ impl Txns {
                 }
             }
         }
-        Ok(())
     }
 
     /// InitProducerId. Without a transactional id this just allocates (or bumps) an idempotent
@@ -285,16 +306,16 @@ impl Txns {
                     .append_marker(t.producer_id, t.epoch, commit, 0, now_ms())
                     .map_err(|e| anyhow::anyhow!("marker on {topic_name}-{i}: {e}"))?;
                 if let Some(a) = aborted {
-                    b.store.insert_aborted(&topic.id, i, &a)?;
+                    b.store.insert_aborted(&stream.id, &topic.id, i, &a)?;
                 }
-                b.request_flush(&p, &log);
+                b.request_flush(&p, &log, 0);
                 waits.push((log.subscribe(), offset + 1));
             }
         }
         for g in &t.groups {
             b.groups.end_txn_offsets(b, &t.stream_id, g, t.producer_id, commit)?;
         }
-        if b.config.fsync {
+        if b.acks_wait() {
             for (mut rx, target) in waits {
                 let _ = tokio::time::timeout(Duration::from_secs(30), rx.wait_for(|hw| *hw >= target)).await;
             }

@@ -1,0 +1,17 @@
+{"native_thread":"/pi-sessions/session-1.jsonl"}
+{"model":"openrouter/deepseek/deepseek-v4-flash"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c0","text":"The"}}
+{"text_delta":{"item":"t1:m1:c0","text":" user wants me to run a"}}
+{"text_delta":{"item":"t1:m1:c0","text":" specific command and wait"}}
+{"text_delta":{"item":"t1:m1:c0","text":" for it to complete. Let"}}
+{"text_delta":{"item":"t1:m1:c0","text":" me execute it."}}
+{"context":{"max_tokens":1048576,"used_tokens":1932}}
+{"item":{"body":{"text":"The user wants me to run a specific command and wait for it to complete. Let me execute it.","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"cost_usd":0.00008514324,"input_tokens":1830,"output_tokens":102}}
+{"item":{"body":{"input":{"command":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","timeout":35},"kind":"command","name":"bash","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"call_9726ad99cc114832996228eb","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","timeout":35},"kind":"command","name":"bash","output":"Command aborted","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"call_9726ad99cc114832996228eb","parent":null,"status":"interrupted"}}
+{"usage":{"cached_tokens":0,"cost_usd":0.00008514324,"input_tokens":1830,"output_tokens":102}}
+{"turn_ref":"206b2637"}
+{"turn_ended":"interrupted"}
+{"exited":null}

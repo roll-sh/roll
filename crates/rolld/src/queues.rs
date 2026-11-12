@@ -1,9 +1,11 @@
 //! roll queues inside rolld: the broker, its protocol listeners and its control-plane routes.
 //!
-//! Alone, a node keeps metadata in SQLite and queue logs on local disk. With
-//! `--queues-cluster-meta postgres://…` it joins a cluster: metadata (and queue ownership) live in
-//! Postgres, every node accepts every client, and queues move between nodes without clients
-//! reconnecting.
+//! Alone (the memory cluster backend), a node keeps metadata in SQLite and queue logs on local
+//! disk. On a cluster (docs/queues/architecture.md, "Many nodes") every node accepts every
+//! client; each durable queue runs on the holder of its roll-cluster lease (`mq:<vhost>/<queue>`)
+//! and the others reach it over the internal API. Metadata is in the system database
+//! (`ROLL_SYSTEM_DATABASE`) and logs in S3 (the node's bucket, under `queues/logs`), so queues
+//! move between nodes without clients reconnecting and without losing a confirmed message.
 
 use clap::Args;
 use mq_cluster::{Cluster, ClusterConfig, PgMeta};
@@ -13,9 +15,11 @@ use mq_core::meta::{MetaStore, SqliteMeta};
 use mq_core::transport::{Transport, TransportConfig};
 use mq_core::{Broker, BrokerConfig};
 use mq_shovel::Shovels;
+use pg_storage::StorageConfig;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -54,6 +58,10 @@ pub struct QueuesArgs {
     pub user: String,
     #[arg(long = "queues-password", env = "ROLL_QUEUES_PASSWORD", default_value = "guest")]
     pub password: String,
+    /// Allow the default guest/guest login on listeners off loopback (RabbitMQ's
+    /// `loopback_users = none`, as its Docker image sets): client test matrices in containers only.
+    #[arg(long = "queues-remote-guest", env = "ROLL_QUEUES_REMOTE_GUEST", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub remote_guest: bool,
     /// Default queue type for new vhosts (classic, quorum or stream).
     #[arg(long = "queues-default-type", env = "ROLL_QUEUES_DEFAULT_QUEUE_TYPE", default_value = "classic")]
     pub default_queue_type: String,
@@ -68,53 +76,27 @@ pub struct QueuesArgs {
     /// The same in message bytes per second (`max-publish-bytes-rate`).
     #[arg(long = "queues-vhost-publish-bytes-rate", env = "ROLL_QUEUES_VHOST_PUBLISH_BYTES_RATE", default_value_t = 0)]
     pub vhost_publish_bytes_rate: u64,
-    /// Availability zone of this node (AZ-aware placement).
-    #[arg(long = "queues-az", env = "ROLL_QUEUES_AZ")]
-    pub az: Option<String>,
-    /// Join a cluster whose metadata lives in this Postgres database.
-    #[arg(long = "queues-cluster-meta", env = "ROLL_QUEUES_CLUSTER_META")]
-    pub cluster_meta: Option<String>,
-    /// Stable node id (defaults to the hostname).
-    #[arg(long = "queues-node-id", env = "ROLL_QUEUES_NODE_ID")]
-    pub node_id: Option<String>,
-    /// Internal broker-to-broker RPC listener (cluster mode).
-    #[arg(long = "queues-rpc", env = "ROLL_QUEUES_RPC", default_value = "0.0.0.0:55679")]
-    pub rpc: SocketAddr,
-    /// Address other nodes dial for RPC (defaults to `--queues-rpc`).
-    #[arg(long = "queues-rpc-advertise", env = "ROLL_QUEUES_RPC_ADVERTISE")]
-    pub rpc_advertise: Option<SocketAddr>,
-    /// Host other nodes and `mq-proxy` reach this node's listeners on (defaults to the RPC
-    /// advertise address, then `--public-host`).
+    /// Host clients reach this node's listeners on, as stream clients are told (`Metadata`)
+    /// (default: `--public-host`).
     #[arg(long = "queues-advertise-host", env = "ROLL_QUEUES_ADVERTISE_HOST")]
     pub advertise_host: Option<String>,
     /// Where queue logs live:
-    /// - `file:<dir>` (default `<home>/queues/logs`), one node (group-commits through a shared
-    ///   WAL unless clustered);
-    /// - `quorum:<ip:port>@<az>,<ip:port>@<az>,<ip:port>@<az>`: replicated keepers, 2 of 3;
-    /// - `s3express:<directory-bucket>[/prefix]`: S3 Express One Zone, no keepers.
+    /// - `file:<dir>` (default `<home>/queues/logs` on a node alone), group-committed through a
+    ///   shared WAL unless clustered;
+    /// - `s3:<bucket>[/prefix]`: objects in S3 Standard (any bucket with conditional writes),
+    ///   group-committed; what a cluster uses by default, in the node's bucket (`--s3-bucket`)
+    ///   under `queues/logs`;
+    /// - `s3express:<directory-bucket>[/prefix]`: the same in S3 Express One Zone (one zone);
+    /// - `quorum:<ip:port>@<az>,<ip:port>@<az>,<ip:port>@<az>`: self-hosted `roll-keeper`s, 2 of 3.
     #[arg(long = "queues-storage", env = "ROLL_QUEUES_STORAGE")]
     pub storage: Option<String>,
     /// Tier sealed log segments to S3 (`s3://bucket/prefix`), with `quorum:` storage.
     #[arg(long = "queues-tier", env = "ROLL_QUEUES_TIER")]
     pub tier: Option<String>,
-    /// More CA certificates (PEM) to verify the metadata Postgres with, besides the system roots
+    /// More CA certificates (PEM) to verify the system database with, besides the system roots
     /// (e.g. the RDS bundle; the image ships it). TLS itself follows the URL's `sslmode`.
-    #[arg(long = "queues-cluster-meta-ca", env = "ROLL_QUEUES_CLUSTER_META_CA")]
-    pub cluster_meta_ca: Option<PathBuf>,
-    /// Shared secret every node must know to talk to the others (cluster RPC).
-    #[arg(long = "queues-cluster-secret", env = "ROLL_QUEUES_CLUSTER_SECRET", hide_env_values = true)]
-    pub cluster_secret: Option<String>,
-    /// Cluster RPC over TLS: this node's certificate chain (PEM). Needs the key and the CA.
-    #[arg(long = "queues-cluster-tls-cert", env = "ROLL_QUEUES_CLUSTER_TLS_CERT", requires_all = ["cluster_tls_key", "cluster_tls_ca"])]
-    pub cluster_tls_cert: Option<PathBuf>,
-    #[arg(long = "queues-cluster-tls-key", env = "ROLL_QUEUES_CLUSTER_TLS_KEY", requires = "cluster_tls_cert")]
-    pub cluster_tls_key: Option<PathBuf>,
-    /// CA that signed the nodes' certificates.
-    #[arg(long = "queues-cluster-tls-ca", env = "ROLL_QUEUES_CLUSTER_TLS_CA", requires = "cluster_tls_cert")]
-    pub cluster_tls_ca: Option<PathBuf>,
-    /// Name the nodes' certificates are issued for (default: each node's IP address).
-    #[arg(long = "queues-cluster-tls-name", env = "ROLL_QUEUES_CLUSTER_TLS_NAME")]
-    pub cluster_tls_name: Option<String>,
+    #[arg(long = "queues-database-ca", env = "ROLL_QUEUES_DATABASE_CA")]
+    pub database_ca: Option<PathBuf>,
     /// Shared secret the keepers expect (`quorum:` storage; the keepers' `ROLL_KEEPER_SECRET`).
     #[arg(long = "queues-keeper-secret", env = "ROLL_QUEUES_KEEPER_SECRET", hide_env_values = true)]
     pub keeper_secret: Option<String>,
@@ -130,14 +112,11 @@ pub struct QueuesArgs {
     /// bytes are billed; turn it off only for keepers in the broker's own AZ.
     #[arg(long = "queues-keeper-compress", env = "ROLL_QUEUES_KEEPER_COMPRESS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = true, num_args = 0..=1, default_missing_value = "true")]
     pub keeper_compress: bool,
-    /// With `s3express:` storage, write the appends of every queue on this node into one shared
-    /// stream (a few PUTs per batch window instead of one per queue append) and move them to each
-    /// queue's own objects later in large batches.
+    /// With `s3:` and `s3express:` storage, write the appends of every queue on this node into
+    /// one shared stream (one PUT per batch window instead of one per queue append) and move them
+    /// to each queue's own objects later in large batches.
     #[arg(long = "queues-express-group", env = "ROLL_QUEUES_EXPRESS_GROUP", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = true, num_args = 0..=1, default_missing_value = "true")]
     pub express_group: bool,
-    /// How long a draining node waits for its queues to move, in seconds.
-    #[arg(long = "queues-drain-timeout", env = "ROLL_QUEUES_DRAIN_TIMEOUT", default_value_t = 30)]
-    pub drain_timeout_s: u64,
 }
 
 pub struct Queues {
@@ -147,92 +126,77 @@ pub struct Queues {
     shovels: Arc<Shovels>,
     logs: Arc<dyn LogStore>,
     args: QueuesArgs,
-    /// Host clients are told to connect to (stream metadata).
-    advertise: String,
+    /// The stream protocol's server: its listener and the edge's connections share it.
+    pub stream: mq_stream::Handle,
     home: std::path::PathBuf,
+    clients_closed: AtomicBool,
 }
 
 impl Queues {
-    pub async fn start(home: &Path, args: QueuesArgs, public_host: &str) -> anyhow::Result<Self> {
+    /// Start the broker on `nodes` (the node's roll-cluster handle). `system_database`: the
+    /// shared database's URL, where a cluster keeps metadata; `objects`: the node's object
+    /// storage, where a cluster keeps logs by default; `public`: behind the edge, the names
+    /// connection details give.
+    pub async fn start(home: &Path, args: QueuesArgs, public_host: &str, nodes: Arc<roll_cluster::Cluster>, system_database: Option<&str>, objects: &StorageConfig, public: Option<&crate::edge::Public>) -> anyhow::Result<Self> {
         let dir = home.join("queues");
-        let mut args = args;
-        if args.az.is_none() {
-            args.az = mq_cluster::aws::ecs_availability_zone().await;
+        let clustered = nodes.backend_name() != "memory";
+        // RabbitMQ's rule: guest/guest only from this machine (behind the edge, nothing is).
+        let listeners = [args.amqp, args.management, args.stomp, args.web_stomp, args.mqtt, args.web_mqtt, args.stream, args.http];
+        let open = listeners.iter().find(|a| !a.ip().is_loopback()).map(|a| a.to_string()).or_else(|| crate::auth::edge().then(|| "the edge".to_string()));
+        if args.user == "guest" && args.password == "guest" && !args.remote_guest && let Some(open) = open {
+            anyhow::bail!("queues listen on {open} with the default guest/guest login: set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD");
         }
-        if args.user == "guest" && args.password == "guest" && !args.amqp.ip().is_loopback() {
-            tracing::warn!("queues listen on {} with the default guest/guest login; set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD", args.amqp.ip());
-        }
-        let logs = open_storage(&args, &dir).await?;
-        let meta: Arc<dyn MetaStore> = match &args.cluster_meta {
-            Some(url) => PgMeta::connect_with(url, args.cluster_meta_ca.as_deref()).await?,
+        let zone = nodes.config().zone.clone();
+        let logs = open_storage(&args, &dir, objects, clustered, zone.as_deref()).await?;
+        let meta: Arc<dyn MetaStore> = match system_database {
+            Some(url) => PgMeta::connect_with(url, args.database_ca.as_deref()).await?,
+            None if clustered => anyhow::bail!("roll queues on a cluster keeps its metadata in the system database: set ROLL_SYSTEM_DATABASE"),
             None => SqliteMeta::open(&dir.join("meta.db"))?,
         };
-        let node_id = args.node_id.clone().unwrap_or_else(hostname);
+        let node_id = if clustered { nodes.node_id().to_string() } else { hostname() };
         let config = BrokerConfig {
             node_name: format!("rabbit@{node_id}"),
             default_user: args.user.clone(),
             default_pass: args.password.clone(),
             default_queue_type: args.default_queue_type.clone(),
-            az: args.az.clone(),
+            az: zone,
             vhost_idle_suspend_ms: args.idle_suspend_s * 1000,
             vhost_publish_rate: args.vhost_publish_rate,
             vhost_publish_bytes_rate: args.vhost_publish_bytes_rate,
             ..BrokerConfig::default()
         };
-        // Containers and VMs: the address our hostname resolves to is what peers can dial.
-        let own_ip = match tokio::net::lookup_host((hostname().as_str(), 0)).await {
-            Ok(mut addrs) => addrs.find(|a| a.is_ipv4() && !a.ip().is_loopback()).map(|a| a.ip()),
-            Err(_) => None,
-        };
-        let rpc_advertise = args.rpc_advertise.or_else(|| match (args.rpc.ip().is_unspecified(), own_ip) {
-            (true, Some(ip)) => Some(SocketAddr::new(ip, args.rpc.port())),
-            _ => None,
-        });
-        let advertise_host = match &args.cluster_meta {
-            Some(_) => args.advertise_host.clone().or_else(|| rpc_advertise.map(|a| a.ip().to_string())).unwrap_or_else(|| public_host.to_string()),
-            None => args.advertise_host.clone().unwrap_or_else(|| public_host.to_string()),
-        };
-        let cluster = match &args.cluster_meta {
-            Some(_) => {
-                let host = &advertise_host;
+        let advertise_host = args.advertise_host.clone().unwrap_or_else(|| public_host.to_string());
+        let cluster = match clustered {
+            true => {
                 let mut listeners = std::collections::BTreeMap::new();
                 for (proto, addr) in [("amqp", args.amqp), ("stream", args.stream), ("management", args.management), ("stomp", args.stomp), ("web-stomp", args.web_stomp), ("mqtt", args.mqtt), ("web-mqtt", args.web_mqtt), ("http", args.http)] {
-                    let a = tokio::net::lookup_host((host.as_str(), addr.port())).await?.next();
-                    let a = a.ok_or_else(|| anyhow::anyhow!("--queues-advertise-host {host} doesn't resolve"))?;
-                    listeners.insert(proto.to_string(), a);
+                    let a = tokio::net::lookup_host((advertise_host.as_str(), addr.port())).await?.next();
+                    listeners.insert(proto.to_string(), a.ok_or_else(|| anyhow::anyhow!("--queues-advertise-host {advertise_host} doesn't resolve"))?);
                 }
-                let tc = TransportConfig {
-                    secret: args.cluster_secret.clone(),
-                    tls_cert: args.cluster_tls_cert.clone(),
-                    tls_key: args.cluster_tls_key.clone(),
-                    tls: args.cluster_tls_cert.is_some(),
-                    tls_ca: args.cluster_tls_ca.clone(),
-                    tls_server_name: args.cluster_tls_name.clone(),
-                };
-                if tc.secret.is_none() {
-                    tracing::warn!("no ROLL_QUEUES_CLUSTER_SECRET: any host that can reach {} can join the cluster RPC", args.rpc);
-                }
-                let transport = Transport::new("cluster", &tc)?;
-                let cc = ClusterConfig { node_id, listen: args.rpc, advertise: rpc_advertise, az: args.az.clone(), listeners, transport, ..ClusterConfig::default() };
-                Some(Cluster::join(cc, meta.clone(), logs.clone()).await?)
+                Some(Cluster::join(nodes.clone(), ClusterConfig { listeners, ..ClusterConfig::default() }, meta.clone(), logs.clone()).await?)
             }
-            None => None,
+            false => None,
         };
         let broker = Broker::start_with_placement(config, meta.clone(), logs.clone(), cluster.as_ref().map(|c| c.placement())).await?;
         if let Some(c) = &cluster {
             c.attach(&broker);
         }
-        info!(storage = %logs.describe(), metadata = %meta.describe(), clustered = cluster.is_some(), "queues broker started");
+        info!(storage = %logs.describe(), metadata = %meta.describe(), clustered, "queues broker started");
 
+        // Behind the edge, each vhost's hostname over TLS (docs/cloud/README.md, "Hostnames");
+        // else this node's own listeners.
         let url = |scheme: &str, addr: SocketAddr| Some(format!("{scheme}://{public_host}:{}", addr.port()));
-        let endpoints = Endpoints {
-            amqp: url("amqp", args.amqp),
-            mqtt: url("mqtt", args.mqtt),
-            stream: url("rabbitmq-stream", args.stream),
-            stomp: url("stomp", args.stomp),
-            http: url("http", args.http),
-            management: url("http", args.management),
-            ..Default::default()
+        let endpoints = match public {
+            Some(p) => p.queues(),
+            None => Endpoints {
+                amqp: url("amqp", args.amqp),
+                mqtt: url("mqtt", args.mqtt),
+                stream: url("rabbitmq-stream", args.stream),
+                stomp: url("stomp", args.stomp),
+                http: url("http", args.http),
+                management: url("http", args.management),
+                ..Default::default()
+            },
         };
         let control = QueuesControl::with_config(
             broker.clone(),
@@ -260,11 +224,18 @@ impl Queues {
                 Box::pin(async move { mq_shovel::stop_migration_body(&b).await })
             }),
         });
-        Ok(Queues { broker, control, cluster, shovels, logs, args, home: dir, advertise: advertise_host })
+        let stream = mq_stream::start(broker.clone(), mq_stream::Config { advertised_host: advertise_host, advertised_port: args.stream.port(), ..mq_stream::Config::new(args.stream) }).await;
+        Ok(Queues { broker, control, cluster, shovels, logs, args, stream, home: dir, clients_closed: AtomicBool::new(false) })
     }
 
+    /// The control plane (`/v1/queues`), and on a cluster the route other nodes open their RPC
+    /// connection on (signed).
     pub fn router(&self) -> axum::Router {
-        mq_control::api::router(self.control.clone())
+        let r = mq_control::api::router(self.control.clone());
+        match &self.cluster {
+            Some(c) => r.merge(c.routes()),
+            None => r,
+        }
     }
 
     /// Run every listener until one fails.
@@ -285,7 +256,7 @@ impl Queues {
         let mgmt_listener = bind(a.management).await?;
 
         let stomp = mq_stomp::Config { listen: a.stomp, ws_listen: Some(a.web_stomp), ..mq_stomp::Config::default() };
-        let stream = mq_stream::Config { advertised_host: self.advertise.clone(), ..mq_stream::Config::new(a.stream) };
+        let stream_listener = bind(a.stream).await?;
         let mqtt = mq_mqtt::Config { listen: a.mqtt, ws_listen: Some(a.web_mqtt), ..mq_mqtt::Config::default() };
         let http = mq_http::Config { listen: a.http, public_url: Some(format!("http://{}", a.http)), ..mq_http::Config::default() };
 
@@ -295,24 +266,32 @@ impl Queues {
             r = mq_stomp::serve(b.clone(), stomp.clone()) => r,
             r = mq_stomp::serve_ws(b.clone(), stomp) => r,
             r = mq_mqtt::serve(b.clone(), mqtt) => r,
-            r = mq_stream::serve(b.clone(), stream) => r,
+            r = self.stream.serve_listener(stream_listener) => r,
             r = mq_http::serve(b.clone(), http) => r,
         }
     }
 
-    /// Graceful stop: hand queues to other nodes (cluster), close client connections gradually,
-    /// then flush and stop everything.
+    /// Ask every client connection to close, spread over `window` so they don't all reconnect
+    /// (to the other nodes) at once. On a cluster, the node's drain has handed every queue it
+    /// owned to other nodes by then, and the connections kept working through it.
+    pub async fn close_clients(&self, window: Duration) {
+        self.clients_closed.store(true, Ordering::SeqCst);
+        self.broker.drain(window).await;
+    }
+
+    /// Stop: close the clients still connected (over 2 s), flush and stop every queue still
+    /// here, and the log store.
     pub async fn shutdown(&self) {
-        if let Some(c) = &self.cluster {
-            let left = c.drain(Duration::from_secs(self.args.drain_timeout_s)).await;
-            info!(left, "queues handed off");
+        if !self.clients_closed.load(Ordering::SeqCst) {
+            self.close_clients(Duration::from_secs(2)).await;
         }
-        self.broker.drain(Duration::from_secs(2)).await;
         self.shovels.stop();
-        self.broker.stop().await;
+        // Leave first: the last node's handed-off queues would wait for an owner (mq_cluster's
+        // `leave`), and the broker's stop on them.
         if let Some(c) = &self.cluster {
             c.leave().await;
         }
+        self.broker.stop().await;
         self.logs.close().await;
         self.control.flush();
     }
@@ -339,18 +318,59 @@ fn hostname() -> String {
     }
 }
 
-/// The log store `--queues-storage` names.
-async fn open_storage(args: &QueuesArgs, dir: &Path) -> anyhow::Result<Arc<dyn LogStore>> {
+/// The storage spec a node uses: `--queues-storage`, else local files alone, else (a cluster)
+/// the node's S3 bucket under `queues/logs`.
+fn storage_spec(args: &QueuesArgs, objects: &StorageConfig, clustered: bool) -> anyhow::Result<Option<String>> {
+    if let Some(s) = &args.storage {
+        return Ok(Some(s.clone()));
+    }
+    if !clustered {
+        return Ok(None);
+    }
+    match objects {
+        StorageConfig::S3 { bucket, prefix, .. } => {
+            let prefix = prefix.as_deref().map(|p| p.trim_matches('/')).filter(|p| !p.is_empty());
+            Ok(Some(match prefix {
+                Some(p) => format!("s3:{bucket}/{p}/queues/logs"),
+                None => format!("s3:{bucket}/queues/logs"),
+            }))
+        }
+        StorageConfig::Local(_) => anyhow::bail!("roll queues on a cluster keeps its logs in S3 (--s3-bucket) or where --queues-storage says: this node's disk isn't shared"),
+    }
+}
+
+/// The log store `--queues-storage` names (see [`storage_spec`]).
+async fn open_storage(args: &QueuesArgs, dir: &Path, objects: &StorageConfig, clustered: bool, zone: Option<&str>) -> anyhow::Result<Arc<dyn LogStore>> {
     // A node alone owns its logs, so they can group-commit through one WAL. In a cluster on a
     // shared `file:` directory another node may take a log over, and it can't replay our WAL.
-    let file = |root: PathBuf| -> anyhow::Result<Arc<dyn LogStore>> {
-        Ok(if args.cluster_meta.is_some() { FileStore::new(root) } else { FileStore::with_wal(root, 16 << 20)? })
-    };
-    let Some(spec) = args.storage.as_deref() else { return file(dir.join("logs")) };
+    let file = |root: PathBuf| -> anyhow::Result<Arc<dyn LogStore>> { Ok(if clustered { FileStore::new(root) } else { FileStore::with_wal(root, 16 << 20)? }) };
+    let Some(spec) = storage_spec(args, objects, clustered)? else { return file(dir.join("logs")) };
     let (kind, rest) = spec.split_once(':').ok_or_else(|| anyhow::anyhow!("--queues-storage {spec}: expected <backend>:<target>"))?;
     let region = || std::env::var("AWS_REGION").or_else(|_| std::env::var("AWS_DEFAULT_REGION"));
+    let group = || args.express_group.then(mq_storage::GroupConfig::default);
     Ok(match kind {
         "file" => file(rest.into())?,
+        "s3" => {
+            let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+            let mut b = object_store::aws::AmazonS3Builder::from_env().with_bucket_name(bucket);
+            // The node's own S3 settings (an S3-compatible endpoint in tests), else the environment's.
+            match objects {
+                StorageConfig::S3 { region: r, endpoint, .. } => {
+                    if let Some(r) = r.clone().or_else(|| region().ok()) {
+                        b = b.with_region(r);
+                    }
+                    if let Some(e) = endpoint {
+                        b = b.with_endpoint(e).with_allow_http(e.starts_with("http://"));
+                    }
+                }
+                StorageConfig::Local(_) => {
+                    if let Ok(r) = region() {
+                        b = b.with_region(r);
+                    }
+                }
+            }
+            mq_storage::S3ExpressStore::new(mq_storage::ExpressConfig { group: group(), ..mq_storage::ExpressConfig::new(Arc::new(b.build()?), prefix) })
+        }
         "quorum" => {
             let mut keepers = Vec::new();
             for k in rest.split(',').filter(|k| !k.is_empty()) {
@@ -373,16 +393,40 @@ async fn open_storage(args: &QueuesArgs, dir: &Path) -> anyhow::Result<Arc<dyn L
             let write_quorum = keepers.len() / 2 + 1;
             let tc = TransportConfig { secret: args.keeper_secret.clone(), tls: args.keeper_tls, tls_ca: args.keeper_tls_ca.clone(), tls_server_name: args.keeper_tls_name.clone(), ..Default::default() };
             let transport = Transport::new("keeper", &tc)?;
-            let cfg = mq_storage::QuorumConfig { keepers, write_quorum, az: args.az.clone().unwrap_or_default(), tier, transport, compress: args.keeper_compress, ..Default::default() };
+            let az = zone.unwrap_or_default().to_string();
+            let cfg = mq_storage::QuorumConfig { keepers, write_quorum, az, tier, transport, compress: args.keeper_compress, ..Default::default() };
             mq_storage::QuorumStore::connect(cfg).await?
         }
         "s3express" => {
             let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
             let region = region().map_err(|_| anyhow::anyhow!("s3express storage needs AWS_REGION"))?;
             let store = mq_storage::S3ExpressStore::directory_bucket(bucket, &region)?;
-            let group = args.express_group.then(mq_storage::GroupConfig::default);
-            mq_storage::S3ExpressStore::new(mq_storage::ExpressConfig { group, ..mq_storage::ExpressConfig::new(store, prefix) })
+            mq_storage::S3ExpressStore::new(mq_storage::ExpressConfig { group: group(), ..mq_storage::ExpressConfig::new(store, prefix) })
         }
-        _ => anyhow::bail!("--queues-storage: unknown backend {kind} (file, quorum or s3express)"),
+        _ => anyhow::bail!("--queues-storage: unknown backend {kind} (file, s3, s3express or quorum)"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct T {
+        #[command(flatten)]
+        q: QueuesArgs,
+    }
+
+    #[test]
+    fn a_cluster_keeps_its_logs_in_the_nodes_bucket() {
+        let args = T::parse_from(["t"]).q;
+        let s3 = |prefix: Option<&str>| StorageConfig::S3 { bucket: "data".into(), region: None, endpoint: None, prefix: prefix.map(String::from) };
+        assert_eq!(storage_spec(&args, &s3(None), false).unwrap(), None, "a node alone keeps local files");
+        assert_eq!(storage_spec(&args, &s3(None), true).unwrap().as_deref(), Some("s3:data/queues/logs"));
+        assert_eq!(storage_spec(&args, &s3(Some("eu/")), true).unwrap().as_deref(), Some("s3:data/eu/queues/logs"));
+        assert!(storage_spec(&args, &StorageConfig::Local("/x".into()), true).is_err(), "a node's disk isn't shared");
+        let args = T::parse_from(["t", "--queues-storage", "file:/shared"]).q;
+        assert_eq!(storage_spec(&args, &StorageConfig::Local("/x".into()), true).unwrap().as_deref(), Some("file:/shared"));
+    }
 }

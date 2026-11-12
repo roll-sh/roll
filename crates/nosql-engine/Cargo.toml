@@ -1,0 +1,32 @@
+[package]
+name = "nosql-engine"
+description = "roll nosql engine: schema, CQL execution, system tables, auth, functions, views, indexes, LWT, CDC and dialects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bcrypt.workspace = true
+bytes.workspace = true
+futures.workspace = true
+md-5.workspace = true
+nosql-types.workspace = true
+nosql-cql.workspace = true
+nosql-storage.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+regex.workspace = true
+nosql-lua.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wasmi.workspace = true
+wat.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

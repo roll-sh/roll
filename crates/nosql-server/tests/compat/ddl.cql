@@ -1,0 +1,20 @@
+-- Keyspaces and tables: creation, schema change results, warnings, errors.
+CREATE KEYSPACE {ks} WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1};
+CREATE KEYSPACE {ks} WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1};
+CREATE KEYSPACE IF NOT EXISTS {ks} WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1};
+CREATE TABLE {ks}.t (k int PRIMARY KEY, v text);
+CREATE TABLE {ks}.t (k int PRIMARY KEY, v text);
+CREATE TABLE IF NOT EXISTS {ks}.t (k int PRIMARY KEY, v text);
+CREATE TABLE {ks}.c (k int, c1 int, c2 text, v blob, s int static, PRIMARY KEY ((k), c1, c2)) WITH CLUSTERING ORDER BY (c1 DESC, c2 ASC);
+ALTER TABLE {ks}.t ADD w int;
+ALTER TABLE {ks}.t DROP w;
+CREATE TABLE nope.t (k int PRIMARY KEY);
+CREATE TABLE {ks}.bad (k int, v int);
+DROP TABLE {ks}.nope;
+DROP TABLE IF EXISTS {ks}.nope;
+USE {ks};
+SELECT * FROM t;
+DROP TABLE t;
+DROP KEYSPACE {ks};
+DROP KEYSPACE {ks};
+DROP KEYSPACE IF EXISTS {ks};

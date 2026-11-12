@@ -1,0 +1,3004 @@
+//! roll code agents: the wire types (docs/code/agents.md). No I/O.
+//!
+//! The daemon (`agent-host`) owns these records and stamps every upsert with its own `seq`; the
+//! relay (`code-control/src/agents`) mirrors them and stamps an owner-wide `cursor`; the
+//! dashboard mirrors the types in `apps/dashboard/src/lib/agents-api.ts` and parses the JSON
+//! fixtures in `fixtures/` (written by `tests/fixtures.rs`).
+//!
+//! The model follows T3 Code's orchestration v2 (threads, runs, an execution-node tree per run,
+//! runtime requests, checkpoints), trimmed to what the canvas and the providers need.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Version of the daemon ↔ relay protocol. The relay refuses a `hello` with a different major.
+pub const PROTOCOL: u32 = 1;
+
+/// Milliseconds since the Unix epoch.
+pub type Millis = u64;
+
+macro_rules! id {
+    ($($(#[$m:meta])* $name:ident = $prefix:literal;)*) => {$(
+        $(#[$m])*
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub String);
+
+        impl $name {
+            pub const PREFIX: &'static str = $prefix;
+            /// An id from a random suffix (the caller supplies the randomness: this crate has no I/O).
+            pub fn from_suffix(suffix: &str) -> Self {
+                Self(format!("{}{}", $prefix, suffix))
+            }
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    )*};
+}
+
+id! {
+    /// A daemon registered with roll (`mch_…`). Assigned by the relay.
+    MachineId = "mch_";
+    ProjectId = "prj_";
+    ThreadId = "thr_";
+    RunId = "run_";
+    NodeId = "nod_";
+    RequestId = "req_";
+    CheckpointId = "chk_";
+    TerminalId = "trm_";
+    /// An automation (`aut_…`), kept by the relay (`automation`).
+    AutomationId = "aut_";
+    AutomationRunId = "arn_";
+    AutomationEventId = "aev_";
+}
+
+pub mod automation;
+pub mod endpoint;
+pub mod gateway;
+pub mod identity;
+pub mod registry;
+
+pub use endpoint::{
+    EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits,
+};
+pub use gateway::{
+    Attempt, CircuitState, ClientSeen, GatewayClient, GatewayInfo, GatewayJoin, GatewayMember, GatewayPlan, GatewayRun, GatewaySettings, GatewayStatus, GatewayUrl,
+    IssuedClient, LogBody, LogEntry, ModelPrice, RouteSpec, RouteTarget, UpstreamCheck, UpstreamHealth, UpstreamKey, UpstreamKind, UpstreamSpec, UsageBucket, UsageBy,
+    UsageReport, UsageRow, WireFormat, gateway_limits,
+};
+pub use identity::{IdentityColor, MachineAppearance, MachineKind, ProjectIcon, ProjectLogo};
+pub use registry::{RegistryAgent, RegistryInstalled, RegistryIntegrity, RegistryKind, RegistryList, is_registry_id};
+
+/// A provider instance on a machine: `codex`, `claude`, or `acp:<name>` (an ACP agent from the
+/// daemon's config, e.g. `acp:gemini`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderId(pub String);
+
+impl ProviderId {
+    pub fn codex() -> Self {
+        Self("codex".into())
+    }
+    pub fn claude() -> Self {
+        Self("claude".into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------------------------------
+
+/// Every record the daemon owns. A change re-sends the whole record; `Removed` is a tombstone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Entity {
+    Project(Project),
+    Thread(Thread),
+    Run(Run),
+    Node(Node),
+    Request(Request),
+    Checkpoint(Checkpoint),
+    Terminal(Terminal),
+    Removed(Removed),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityKind {
+    Project,
+    Thread,
+    Run,
+    Node,
+    Request,
+    Checkpoint,
+    Terminal,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Removed {
+    pub entity: EntityKind,
+    pub id: String,
+    /// The thread the removed record belonged to, for detail-scoped records (nodes, checkpoints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadId>,
+}
+
+/// Which sync scope a record belongs to (docs/code/agents.md, "Sequences, sync and resume").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Always sent: the canvas overview.
+    Shell,
+    /// Only sent for threads a client asked for.
+    Detail,
+}
+
+impl Entity {
+    pub fn kind(&self) -> EntityKind {
+        match self {
+            Entity::Project(_) => EntityKind::Project,
+            Entity::Thread(_) => EntityKind::Thread,
+            Entity::Run(_) => EntityKind::Run,
+            Entity::Node(_) => EntityKind::Node,
+            Entity::Request(_) => EntityKind::Request,
+            Entity::Checkpoint(_) => EntityKind::Checkpoint,
+            Entity::Terminal(_) => EntityKind::Terminal,
+            Entity::Removed(r) => r.entity,
+        }
+    }
+
+    /// The record's id (the key a mirror upserts on, together with `kind`).
+    pub fn id(&self) -> &str {
+        match self {
+            Entity::Project(p) => p.id.as_str(),
+            Entity::Thread(t) => t.id.as_str(),
+            Entity::Run(r) => r.id.as_str(),
+            Entity::Node(n) => n.id.as_str(),
+            Entity::Request(r) => r.id.as_str(),
+            Entity::Checkpoint(c) => c.id.as_str(),
+            Entity::Terminal(t) => t.id.as_str(),
+            Entity::Removed(r) => &r.id,
+        }
+    }
+
+    /// The thread a record belongs to, if any.
+    pub fn thread(&self) -> Option<&ThreadId> {
+        match self {
+            Entity::Project(_) => None,
+            Entity::Thread(t) => Some(&t.id),
+            Entity::Run(r) => Some(&r.thread),
+            Entity::Node(n) => Some(&n.thread),
+            Entity::Request(r) => Some(&r.thread),
+            Entity::Checkpoint(c) => Some(&c.thread),
+            Entity::Terminal(t) => t.thread.as_ref(),
+            Entity::Removed(r) => r.thread.as_ref(),
+        }
+    }
+
+    pub fn scope(&self) -> Scope {
+        match self.kind() {
+            EntityKind::Node | EntityKind::Checkpoint => Scope::Detail,
+            _ => Scope::Shell,
+        }
+    }
+}
+
+/// A directory on a machine that threads run in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: ProjectId,
+    pub name: String,
+    /// Absolute path on the machine.
+    pub path: String,
+    /// The roll code repository this project is a checkout of, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<RepoRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitInfo>,
+    /// What the owner set for the project (`project.update`).
+    #[serde(default)]
+    pub settings: ProjectSettings,
+    /// What the last pull did (auto-pull or `project.pull`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<PullResult>,
+    /// The project's own logo, as its daemon found it (docs/code/agents.md, "Identity").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<ProjectLogo>,
+    pub created_at: Millis,
+    pub updated_at: Millis,
+}
+
+/// A project's settings (T3 Code's per-project settings: `defaultAutoPull`,
+/// `defaultProjectScripts`, `defaultModelSelection`, `defaultRuntimeMode` and
+/// `defaultThreadEnvMode` in `packages/contracts/src/settings.ts`, and the project columns of
+/// `045_ProjectionProjectsAutoPull.ts`). `project.update` replaces them whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSettings {
+    /// Keep the checkout's default branch current: when the remote's moves (a change landed, a
+    /// PR merged), fast-forward it, only while the checkout is on that branch with no local
+    /// changes or commits (docs/code/agents.md, "Project settings").
+    #[serde(default)]
+    pub auto_pull: bool,
+    /// What new threads in the project start with.
+    #[serde(default, skip_serializing_if = "ThreadDefaults::is_empty")]
+    pub defaults: ThreadDefaults,
+    /// Commands for the project's checkout or a thread's worktree (T3's project scripts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<ProjectScript>,
+    /// When the daemon settles the project's threads by itself.
+    #[serde(default)]
+    pub auto_settle: AutoSettle,
+    /// What the daemon cleans up after settled and archived threads.
+    #[serde(default, skip_serializing_if = "Cleanup::is_default")]
+    pub cleanup: Cleanup,
+    /// Its colour (unset: one made from its repo or name, the same on every device).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<IdentityColor>,
+    /// Its logo, monogram or emoji.
+    #[serde(default, skip_serializing_if = "ProjectIcon::is_auto")]
+    pub icon: ProjectIcon,
+}
+
+/// When threads settle by themselves (T3's `sidebarAutoSettleAfterDays` and
+/// `sidebarAutoSettleOnMerge`, per project). A thread that is busy, waiting on its user, has
+/// queued messages, is snoozed, archived, settled or un-settled by hand, or has auto-settle off
+/// never settles by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoSettle {
+    /// Settle a thread after this many days without activity (a message, a run starting or
+    /// ending, a snooze waking); `null` never. 1 to 90.
+    #[serde(default = "AutoSettle::default_days")]
+    pub after_days: Option<u16>,
+    /// Settle a thread when its change lands. A closed change always settles it.
+    #[serde(default = "yes")]
+    pub on_land: bool,
+    /// Inactivity never settles a thread whose published change is still open (T3's
+    /// `sidebarAutoSettleKeepPullRequests`); its landing or closing still does.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_changes: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl AutoSettle {
+    pub const MAX_DAYS: u16 = 90;
+
+    fn default_days() -> Option<u16> {
+        Some(3)
+    }
+}
+
+impl Default for AutoSettle {
+    fn default() -> Self {
+        AutoSettle { after_days: AutoSettle::default_days(), on_land: true, keep_changes: false }
+    }
+}
+
+/// Cleaning up after settled and archived threads (T3's `worktreeCleanup` and storage cleanup
+/// rules, per project; off by default as there). A worktree with local changes is never removed,
+/// its branch and checkpoints always stay, and the thread's next run, rollback or terminal puts
+/// it back (docs/code/agents.md, "Settling").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cleanup {
+    /// Remove the worktree of a thread settled or archived this many days ago; `null` never.
+    /// 0 to 3650 (0: the next sweep).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_after_days: Option<u16>,
+    /// What keeps a worktree, however long its thread has been settled.
+    #[serde(default, skip_serializing_if = "CleanupKeep::is_default")]
+    pub keep: CleanupKeep,
+}
+
+impl Cleanup {
+    pub const MAX_DAYS: u16 = 3650;
+
+    pub fn is_default(&self) -> bool {
+        *self == Cleanup::default()
+    }
+}
+
+/// Which local files keep a worktree (T3's `worktreeKeepWhen`). Either way a worktree with
+/// uncommitted changes stays: roll has no setting that loses them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupKeep {
+    /// Changes to tracked files and untracked files git doesn't ignore.
+    #[default]
+    UncommittedChanges,
+    /// Those, and ignored files too (`.env`, build output, `node_modules`).
+    AnyLocalFiles,
+}
+
+impl CleanupKeep {
+    pub fn is_default(&self) -> bool {
+        *self == CleanupKeep::default()
+    }
+}
+
+/// What a new thread in a project starts with; an unset field falls back to the client's last
+/// choice. Clients fill new threads from it (`thread.create` itself always says everything).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The model's other options ([`ModelInfo::options`]).
+    #[serde(default, skip_serializing_if = "ModelOptions::is_empty")]
+    pub options: ModelOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<RuntimeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_mode: Option<InteractionMode>,
+    /// New threads get their own worktree (`true`) or work in the checkout (`false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
+}
+
+impl ThreadDefaults {
+    pub fn is_empty(&self) -> bool {
+        self == &ThreadDefaults::default()
+    }
+}
+
+/// A command kept with a project (T3's `ProjectScript`). It runs in a terminal, in the thread's
+/// worktree or the project's checkout, with `ROLL_PROJECT_ROOT` set (and `ROLL_WORKTREE_PATH`
+/// in a worktree).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScript {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub icon: ScriptIcon,
+    /// Run it in each new worktree of the project, beside the agent (T3's
+    /// `runOnWorktreeCreate`: the setup script).
+    #[serde(default)]
+    pub on_worktree: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptIcon {
+    #[default]
+    Play,
+    Test,
+    Lint,
+    Configure,
+    Build,
+    Debug,
+}
+
+/// What a pull did, and when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullResult {
+    pub at: Millis,
+    pub outcome: PullOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PullOutcome {
+    /// The default branch was fast-forwarded from `from` to `to`.
+    Pulled { branch: String, from: String, to: String, commits: u32 },
+    /// The remote has nothing new.
+    UpToDate { branch: String },
+    /// Something keeps it from pulling; nothing was touched.
+    Skipped { reason: PullSkip, message: String },
+    /// Fetching or fast-forwarding failed; nothing was touched.
+    Failed { message: String },
+}
+
+/// Why a pull didn't happen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullSkip {
+    /// The project isn't a git checkout.
+    NotGit,
+    /// HEAD is detached.
+    Detached,
+    /// The checkout is on another branch than the default one.
+    OtherBranch,
+    /// The branch has no upstream to pull from.
+    NoUpstream,
+    /// Uncommitted or untracked files.
+    LocalChanges,
+    /// The branch has commits the remote doesn't.
+    Diverged,
+    /// An agent is working in the checkout.
+    Busy,
+    /// roll can't fetch it (a roll code repo, without the relay's grant).
+    NoAccess,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoRef {
+    pub owner: String,
+    pub repo: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitInfo {
+    /// Current branch, or `None` when detached.
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub remote: Option<String>,
+    pub dirty: bool,
+}
+
+/// One agent conversation (T3's AppThread).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Thread {
+    pub id: ThreadId,
+    pub project: ProjectId,
+    pub title: String,
+    pub provider: ProviderId,
+    pub model: Option<String>,
+    /// Reasoning effort, where the provider has one (`low` … `max`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The model's other options, by id ([`ModelInfo::options`]: a speed, a context window, …).
+    #[serde(default, skip_serializing_if = "ModelOptions::is_empty")]
+    pub options: ModelOptions,
+    pub runtime_mode: RuntimeMode,
+    pub interaction_mode: InteractionMode,
+    /// Where the agent works: the project's directory or the thread's own worktree.
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<Worktree>,
+    pub status: ThreadStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<Lineage>,
+    /// An orchestrator: its agent plans the work and hands the parts to subagents through roll's
+    /// orchestrator MCP instead of doing it itself ("Orchestrate" on the canvas). The daemon
+    /// gives its sessions the orchestrator's instructions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub orchestrator: bool,
+    /// The run being worked on, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<RunId>,
+    /// Messages waiting for the active run to finish (`message.send` with `mode: queue`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<QueuedMessage>,
+    pub run_count: u32,
+    pub pending_requests: u32,
+    /// The whole thread's changes: its base checkpoint to its files now, the numbers of its
+    /// "Whole thread" diff (a run's `stat` counts only that run). Each run's end sets it; edits
+    /// between runs (a terminal, `fs.write`) refresh it once the thread goes quiet. Absent before
+    /// the daemon first counts it, and from daemons before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffStat>,
+    /// The newest run completed with a proposed plan (T3's `hasActionableProposedPlan`): in a
+    /// thread still in plan mode with nothing pending, the canvas says "Plan ready" without
+    /// loading the run. A new run, or rolling the run back, clears it.
+    #[serde(default)]
+    pub plan_ready: bool,
+    /// One line about what the agent is doing right now ("Editing src/lib.rs"), for the canvas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub usage: Usage,
+    /// How full the conversation's context window is, as its provider last reported it (T3's
+    /// `contextUsage`). Unset until the provider reports, and again after a switch to a provider
+    /// whose conversation has no report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The roll code change the thread was published as, as roll code sees it now. The relay
+    /// fills it in; daemons leave it unset (docs/code/agents.md, "Agents in roll code").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Box<ThreadChange>>,
+    /// The roll code work item the thread took. The relay fills it in, like `change`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<Box<WorkRef>>,
+    pub created_at: Millis,
+    pub updated_at: Millis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<Millis>,
+    /// Settled, snoozed, seen (docs/code/agents.md, "Settling").
+    #[serde(default)]
+    pub inbox: Box<Inbox>,
+}
+
+/// Where a thread sits in its owner's inbox: T3 Code's settle and snooze state
+/// (`settledOverride`, `snoozedUntil`, `lastSnoozeWakeAt`, `lastVisitedAt`,
+/// `autoSettleDisabledAt` on its `AppThread`). The daemon keeps it, so every device agrees.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inbox {
+    /// Settled, or kept active by hand. Unset: the daemon settles it once it has been inactive
+    /// long enough or its change landed or closed (the project's [`AutoSettle`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<Settle>,
+    /// Out of sight until `until`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze: Option<Snooze>,
+    /// When a snooze last woke by itself (its time came, or a request or a failure woke it
+    /// early): the thread reads "Woke" until it is visited after this, and inactivity counts
+    /// from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woke_at: Option<Millis>,
+    /// When someone last opened the conversation (`thread.visit`): runs that ended after it are
+    /// unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visited_at: Option<Millis>,
+    /// The daemon never settles this thread by itself (`thread.auto_settle`).
+    #[serde(default)]
+    pub manual: bool,
+}
+
+impl Inbox {
+    pub fn is_settled(&self) -> bool {
+        matches!(self.settle, Some(Settle::Settled { .. }))
+    }
+
+    /// Snoozed and not yet due at `now`.
+    pub fn is_snoozed(&self, now: Millis) -> bool {
+        self.snooze.is_some_and(|s| s.until > now)
+    }
+}
+
+/// A settle decision that sticks until new activity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Settle {
+    /// On the settled shelf since `at` (for an automatic settle, the thread's last activity).
+    Settled { at: Millis, by: SettledBy },
+    /// Un-settled by hand at `at`: auto-settle leaves it alone until it is active again.
+    Active { at: Millis },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettledBy {
+    /// `thread.settle`.
+    User,
+    /// Nothing happened in it for the project's `auto_settle.after_days`.
+    Inactivity,
+    /// Its roll code change landed.
+    Landed,
+    /// Its roll code change was closed.
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snooze {
+    pub until: Millis,
+    /// When it was snoozed.
+    pub at: Millis,
+}
+
+/// What a thread's inbox was before `thread.settle`, as the client saw it: what undoing the
+/// settle (`thread.unsettle` with `restore`) puts back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxBefore {
+    /// `None`: the daemon settled it by the project's rules.
+    #[serde(default)]
+    pub settle: Option<Settle>,
+    #[serde(default)]
+    pub snooze: Option<Snooze>,
+}
+
+/// For `skip_serializing_if`: a flag that's off isn't written, so records without it read the same.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A thread's roll code change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadChange {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub status: ChangeStatus,
+    /// The change in the web app.
+    pub url: String,
+    /// One line on why: the failing checks, the first blocker, the queue position, the
+    /// conflicting paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Where a change is, in one word for the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeStatus {
+    /// Open, with checks queued or running.
+    Checking,
+    /// Open, with a check that failed.
+    Failing,
+    /// Open; something else keeps it from landing (a review, a draft, required checks not run).
+    Blocked,
+    /// Open, and nothing keeps it from landing.
+    Ready,
+    /// In the merge queue.
+    Queued,
+    Landed,
+    /// It didn't land: the default branch changed the same lines.
+    Conflict,
+    Closed,
+}
+
+impl ChangeStatus {
+    /// Nothing more happens to it on its own.
+    pub fn is_settled(self) -> bool {
+        matches!(self, ChangeStatus::Landed | ChangeStatus::Closed)
+    }
+}
+
+/// A roll code work item.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkRef {
+    /// `wi_…`.
+    pub id: String,
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMode {
+    /// No approvals: the agent runs commands and edits files freely.
+    #[default]
+    FullAccess,
+    /// Edits inside the workspace are allowed; commands and anything else ask.
+    AutoEdit,
+    /// Everything asks.
+    Ask,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionMode {
+    #[default]
+    Default,
+    /// The agent plans and asks before changing anything.
+    Plan,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worktree {
+    pub path: String,
+    pub branch: String,
+    /// The commit the worktree was created from.
+    pub base: String,
+    /// When cleanup removed its folder (the branch and checkpoints stay). The thread's next
+    /// run, rollback or terminal puts it back from the branch and clears this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_at: Option<Millis>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadStatus {
+    /// Nothing running.
+    #[default]
+    Idle,
+    /// The provider session is starting.
+    Starting,
+    Running,
+    /// Blocked on an approval or a question.
+    Waiting,
+    /// The last run failed or the provider session died.
+    Error,
+}
+
+impl ThreadStatus {
+    /// Running or waiting: the canvas pulses it.
+    pub fn is_busy(self) -> bool {
+        matches!(self, ThreadStatus::Starting | ThreadStatus::Running | ThreadStatus::Waiting)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lineage {
+    pub parent: ThreadId,
+    pub relation: Relation,
+    pub root: ThreadId,
+    /// The parent's run this thread branched from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_run: Option<RunId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    /// The user forked the parent at a run.
+    Fork,
+    /// An agent in the parent delegated work (roll's orchestrator MCP).
+    Subagent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    pub at: Millis,
+    /// Results of these delegated tasks waiting behind the active run (a wake, [`Run::delivers`]
+    /// once it runs); empty for a person's message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivers: Vec<NodeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
+    /// What the provider reported the work cost, if it does (Claude does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+impl Usage {
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cached_tokens += other.cached_tokens;
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+        };
+    }
+}
+
+/// A conversation's context window (T3's `ThreadTokenUsageSnapshot`). `used_tokens` is what the
+/// next request carries: the last model call's input and output (Codex: `last.totalTokens`;
+/// Claude: input, cache reads and writes, and output of the main agent's last message; ACP:
+/// `used`). After a compaction it is what's left (Claude's `post_tokens`), so it drops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub used_tokens: u64,
+    /// The model's window. Unset when the provider doesn't say and the model isn't known: show
+    /// the tokens alone, never a percentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    /// Every token the conversation's model calls processed, where the provider reports it
+    /// (Codex's `total.totalTokens`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_processed_tokens: Option<u64>,
+    /// How long the provider keeps the conversation's prompt cache after its last request
+    /// (Claude: an hour when the request wrote 1-hour cache entries, as on subscriptions, five
+    /// minutes when it wrote 5-minute ones; T3's `promptCacheTtlMs`). Unset when the provider
+    /// doesn't say, or the request was served from the cache whole. Idle compaction keys off it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_ms: Option<u64>,
+    /// Where the provider compacts by itself, when a setting moved it below the model's window
+    /// (Claude's `autoCompactWindow` less the 33,000 it keeps free; T3's `autoCompactThreshold`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_at: Option<u64>,
+}
+
+impl ContextUsage {
+    /// Percent of the window used, 0–100; `None` when the window is unknown.
+    pub fn used_percent(&self) -> Option<f64> {
+        let max = self.max_tokens.filter(|m| *m > 0)?;
+        Some((self.used_tokens as f64 / max as f64 * 100.0).min(100.0))
+    }
+}
+
+/// One user turn (T3's Run).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Run {
+    pub id: RunId,
+    pub thread: ThreadId,
+    /// 1-based position in the thread.
+    pub ordinal: u32,
+    pub provider: ProviderId,
+    pub model: Option<String>,
+    pub status: RunStatus,
+    /// What the user sent.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// Inputs that steered the run while it was going.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steers: Vec<String>,
+    /// When each steer came (beside `steers`, one each), so a transcript puts it after the work
+    /// before it. Absent from daemons before it: steers then show under the prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered_at: Vec<Millis>,
+    /// The daemon started it, not a person: a compaction of the idle conversation just before its
+    /// prompt cache expired (T3's `idleCompaction: beforeCacheExpires`, "Context automatically
+    /// compacted before cache expiry").
+    #[serde(default)]
+    pub idle_compaction: bool,
+    /// The daemon started it, not a person: it carries the results of these delegated tasks to
+    /// the thread that delegated them (T3's `delegated_task` notification, "Delegated task
+    /// finished"); `prompt` is what the agent was told. Empty for a person's run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivers: Vec<NodeId>,
+    pub requested_at: Millis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<Millis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<Millis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stat: Option<DiffStat>,
+    /// What `stat` counts, per file, from the same checkpoint diff (T3's turn diff summary): the
+    /// run's changed-files card shows these, so it agrees with its diff. At most
+    /// [`RUN_FILES_MAX`] (`stat` still counts every file); empty from daemons before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileStat>,
+    #[serde(default)]
+    pub usage: Usage,
+    /// The context window as the run left it: its provider's newest report during the run
+    /// (T3's provider turn `tokenUsage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Queued,
+    Starting,
+    Running,
+    Waiting,
+    Completed,
+    Interrupted,
+    Failed,
+    Cancelled,
+    RolledBack,
+}
+
+impl RunStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            RunStatus::Completed | RunStatus::Interrupted | RunStatus::Failed | RunStatus::Cancelled | RunStatus::RolledBack
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    /// Base64 of the bytes (images; at most 5 MiB decoded).
+    pub data: String,
+}
+
+/// A unit of work inside a run (T3's ExecutionNode).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Node {
+    pub id: NodeId,
+    pub thread: ThreadId,
+    pub run: RunId,
+    /// The node this one runs under: a subagent's work hangs off its `subagent` node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<NodeId>,
+    /// Position among the run's nodes, in the order they started.
+    pub ordinal: u32,
+    pub status: NodeStatus,
+    pub started_at: Millis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<Millis>,
+    pub body: NodeBody,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus {
+    Running,
+    Waiting,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NodeBody {
+    /// What the agent said.
+    Message { text: String },
+    /// The agent's visible reasoning summary.
+    Reasoning { text: String },
+    /// A proposed plan (plan mode).
+    Plan { text: String },
+    Todos { items: Vec<Todo> },
+    Tool(ToolCall),
+    /// A subagent the provider started (Claude's Task tool, Codex's collab agents), or a
+    /// delegated roll thread (`child` set).
+    Subagent {
+        agent: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child: Option<ThreadId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        /// What it is doing now, while it runs, where the provider says (Claude's
+        /// `task_progress`; T3's subagent `progress`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress: Option<String>,
+        /// The model it runs, where the provider says (the Agent tool's `model`, Codex's collab
+        /// call's `model`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    /// The provider compacted the conversation's context (T3's `compaction` turn item): running
+    /// while it summarises, then completed, failed (with `error`) or interrupted. The token
+    /// counts are the context window before and after, where known.
+    Compaction {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// An approval or question; the record is the `Request`.
+    Request { request: RequestId },
+    /// Something the harness or provider reported (compaction, a hook, a retry, an error).
+    System { text: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Todo {
+    pub text: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// The provider's tool name (`Bash`, `Edit`, `commandExecution`, `mcp__roll__land`, …).
+    pub name: String,
+    pub kind: ToolKind,
+    /// A one-line label for the canvas ("npm test", "src/lib.rs").
+    pub title: String,
+    /// The tool's input as the provider sent it.
+    #[serde(default)]
+    pub input: Value,
+    /// Output so far (commands: combined stdout/stderr, capped at 64 KiB with the middle cut).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Files the tool changed, with their diffs where known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileChange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Command,
+    Edit,
+    Read,
+    Search,
+    Web,
+    Mcp,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub change: ChangeKind,
+    /// Unified diff, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Add,
+    Modify,
+    Delete,
+    Rename,
+}
+
+/// A pending approval or question (T3's RuntimeRequest).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Request {
+    pub id: RequestId,
+    pub thread: ThreadId,
+    pub run: RunId,
+    pub node: NodeId,
+    pub status: RequestStatus,
+    pub body: RequestBody,
+    pub created_at: Millis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<Millis>,
+    /// Who answered (owner or agent name), once answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<Response>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStatus {
+    Pending,
+    Resolved,
+    /// The run ended (interrupt, crash) before anyone answered.
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RequestBody {
+    Approval(Approval),
+    Questions { questions: Vec<Question> },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Approval {
+    pub action: ApprovalAction,
+    /// One line for the canvas ("Run `cargo test`", "Edit 3 files").
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileChange>,
+    /// Why the agent wants it, if it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The tool and its input, for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub input: Value,
+    /// Which decisions the provider accepts.
+    pub decisions: Vec<Decision>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalAction {
+    Command,
+    FileChange,
+    Permission,
+    Tool,
+    /// Leaving plan mode to carry out a plan.
+    Plan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    Accept,
+    /// Accept, and don't ask again for this kind of action in this session.
+    AcceptForSession,
+    Decline,
+    /// Decline and stop the run.
+    Cancel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    pub id: String,
+    /// A short label (a chip on the canvas).
+    pub header: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multi: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Response {
+    Decision {
+        decision: Decision,
+        /// A note back to the agent (why it was declined).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    /// Answers keyed by question id; a multi-select answer joins labels with ", ".
+    Answers { answers: std::collections::BTreeMap<String, String> },
+}
+
+/// The worktree's state after a run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub id: CheckpointId,
+    pub thread: ThreadId,
+    /// `None` for the base checkpoint taken before the first run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunId>,
+    /// 0 for the base, then the run's ordinal.
+    pub ordinal: u32,
+    /// The hidden commit (`refs/roll/checkpoints/<thread>/<ordinal>`).
+    pub commit: String,
+    /// Change from the previous checkpoint.
+    pub stat: DiffStat,
+    pub created_at: Millis,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DiffStat {
+    pub files: u32,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+/// Most files a run lists in [`Run::files`].
+pub const RUN_FILES_MAX: usize = 200;
+
+/// One file of a checkpoint diff: its path (the repository's, the new one for a rename) and the
+/// lines added and removed (0 and 0 for a binary file).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStat {
+    pub path: String,
+    pub change: ChangeKind,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Terminal {
+    pub id: TerminalId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadId>,
+    pub cwd: String,
+    pub title: String,
+    pub status: TerminalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub cols: u16,
+    pub rows: u16,
+    pub created_at: Millis,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalStatus {
+    Running,
+    Exited,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Machine info
+// ---------------------------------------------------------------------------------------------
+
+/// What a daemon says about itself in `hello` (and again when it changes).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MachineInfo {
+    pub hostname: String,
+    pub os: String,
+    pub arch: String,
+    /// The `roll` CLI version.
+    pub version: String,
+    /// The user's home directory (the default place to add projects from).
+    pub home: String,
+    /// The providers on offer: turned-off ones are left out (they are in `settings`).
+    pub providers: Vec<ProviderInfo>,
+    /// The machine's settings (unset: a daemon from before machine settings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Box<MachineConfig>>,
+    /// The daemon's X25519 public key (base64url, 32 bytes): endpoint keys are sealed to it
+    /// ([`SealedSecret`]), so only this daemon can open them. Unset: a daemon from before
+    /// endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal_key: Option<String>,
+}
+
+/// A machine's settings as its daemon reports them (docs/code/agents.md, "Machine settings"):
+/// what the owner set from roll, and what applies where that says nothing. Never a credential:
+/// the daemon's `config.toml` is read for names and paths only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MachineConfig {
+    /// What the owner set from roll (`machine.configure` replaces it whole).
+    pub set: MachineSettings,
+    /// What applies where `set` says nothing: the daemon's `config.toml`, else roll's defaults.
+    pub base: SettingsBase,
+    /// Every provider the daemon has, on or off.
+    pub providers: Vec<ProviderBase>,
+    /// The daemon's `config.toml` on the machine: its own API keys and base URLs stay there.
+    pub config_path: String,
+    /// The endpoints set from roll ([`EndpointSpec`]), with whether each has a key (never the
+    /// key) and the models it listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointInfo>,
+    /// roll's model gateway on this machine (docs/code/gateway.md); unset: never set up here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<Box<GatewayInfo>>,
+    /// The agents the daemon installed from the ACP registry (`registry.install`). Unset: a
+    /// daemon that can't install them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<Vec<RegistryInstalled>>,
+}
+
+/// What a machine's settings fall back to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsBase {
+    /// Where new threads' worktrees go (`<data>/worktrees`).
+    pub worktree_dir: String,
+    /// New threads' branches are `<prefix>/<slug>` (`roll`).
+    pub branch_prefix: String,
+    /// Where roll code repos are cloned as projects (`[code] clone_dir`, else `~/roll`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_dir: Option<String>,
+    /// Seconds between auto-pull fetches; 0 never (`[projects] pull_every`, else 60).
+    pub pull_every: u64,
+    /// `[delegation]`.
+    pub max_depth: u32,
+    pub max_children: u32,
+    /// The user's own git identity (`git config --global`), which publishing commits with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_email: Option<String>,
+}
+
+/// A provider as the daemon has it, on or off, and what its `config.toml` entry says.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderBase {
+    pub id: ProviderId,
+    pub name: String,
+    /// The binary `config.toml` names (unset: found on `PATH`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// How many arguments `config.toml` gives it (not what they are: they may hold a key).
+    #[serde(default)]
+    pub args: u32,
+    /// The environment variables `config.toml` sets for it: names, never values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+}
+
+/// What the owner set for a machine from roll (`machine.configure`; T3 Code's server settings
+/// that belong to a machine, `apps/server/src/serverSettings.ts` there). Every field overrides
+/// [`SettingsBase`] or the provider's `config.toml` entry; unset falls back to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineSettings {
+    /// Per provider id.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub providers: std::collections::BTreeMap<ProviderId, ProviderSettings>,
+    /// What new threads on the machine start with, after their project's defaults.
+    #[serde(default, skip_serializing_if = "ThreadDefaults::is_empty")]
+    pub defaults: ThreadDefaults,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_every: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_children: Option<u32>,
+    /// Who threads on the machine publish commits as (both or neither; unset: the repository's
+    /// git config, else roll).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_email: Option<String>,
+    /// When to compact idle threads on the machine, for providers that don't say (unset: on
+    /// return). T3's Providers > Advanced default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_compaction: Option<IdleCompaction>,
+}
+
+/// One provider's settings on a machine (T3's provider instance settings).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderSettings {
+    /// Offered for new threads, delegation and switching (T3's `enabled`). A thread already on
+    /// a turned-off provider keeps its records but takes no new turn on it until it is turned on
+    /// again or the thread switches provider.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub enabled: bool,
+    /// The binary to run instead of `config.toml`'s (or the one on `PATH`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// Arguments after `config.toml`'s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment for the provider, over `config.toml`'s. Never a credential
+    /// ([`is_credential_env`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Models to offer besides the ones the provider lists (T3's custom models).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<CustomModel>,
+    /// Compact once the conversation holds this many tokens (T3's "Auto-compact after", Claude's
+    /// `autoCompactWindow` setting): [`settings_limits::AUTO_COMPACT_MIN`] to
+    /// [`settings_limits::AUTO_COMPACT_MAX`]. Unset: the provider's own default. Claude only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_window: Option<u64>,
+    /// When to compact this provider's idle threads, over the machine's
+    /// [`MachineSettings::idle_compaction`] (T3's per-instance override).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_compaction: Option<IdleCompaction>,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        ProviderSettings {
+            enabled: true,
+            binary: None,
+            args: Vec::new(),
+            env: Default::default(),
+            models: Vec::new(),
+            auto_compact_window: None,
+            idle_compaction: None,
+        }
+    }
+}
+
+/// When to compact a big idle conversation (T3's `idleCompaction`): only conversations over
+/// [`IDLE_COMPACTION_MIN_TOKENS`] whose provider reports a prompt cache (Claude), since compacting
+/// after the cache expired pays for an uncached read of all of it anyway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdleCompaction {
+    /// When you come back to it: the composer's button becomes "Compact and send", which
+    /// compacts first, then sends (T3's default).
+    #[default]
+    OnReturn,
+    /// Just before its prompt cache expires, by the daemon on its own (T3's beta).
+    BeforeCacheExpires,
+    Off,
+}
+
+/// Below this the context is cheap to read again cold, so compacting mostly loses it (T3's
+/// `COMPACTION_SUGGESTION_MIN_TOKENS`, Claude Code's own idle default).
+pub const IDLE_COMPACTION_MIN_TOKENS: u64 = 200_000;
+
+fn is_yes(b: &bool) -> bool {
+    *b
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomModel {
+    /// The slug the provider takes (`gpt-5.5-codex`).
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What the composer offers for it (T3's custom model `capabilities.optionDescriptors`, its
+    /// "Options shown in the composer"). Unset: the provider's own for a slug like it (a known
+    /// family's, or its first model's). The reasoning option is a select with id `effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<ModelOption>>,
+}
+
+impl CustomModel {
+    /// A slug alone, with the provider's options.
+    pub fn new(id: impl Into<String>) -> Self {
+        CustomModel { id: id.into(), name: None, options: None }
+    }
+}
+
+/// Checks a custom model's options (T3's `validateDraft`, numbered from 1 as its editor shows
+/// them), bounded like a thread's: trimmed, an empty label is the id, an empty list is none.
+pub fn check_custom_options(options: &mut Option<Vec<ModelOption>>) -> Result<(), String> {
+    use option_limits as l;
+    let Some(list) = options.as_mut() else { return Ok(()) };
+    if list.is_empty() {
+        *options = None;
+        return Ok(());
+    }
+    if list.len() > l::OPTIONS {
+        return Err(format!("a model shows at most {} options", l::OPTIONS));
+    }
+    let text = |s: &str| s.len() <= l::VALUE && !s.chars().any(char::is_control);
+    let mut ids = std::collections::HashSet::new();
+    for (i, option) in list.iter_mut().enumerate() {
+        let n = i + 1;
+        let (id, label, description, role) = match option {
+            ModelOption::Select { id, label, description, role, .. } | ModelOption::Boolean { id, label, description, role, .. } => (id, label, description, role),
+        };
+        *id = id.trim().to_string();
+        if id.is_empty() {
+            return Err(format!("Option {n} needs an id."));
+        }
+        if id.len() > l::ID || id.chars().any(char::is_control) {
+            return Err(format!("Option {n}: ids are at most {} bytes.", l::ID));
+        }
+        if !ids.insert(id.clone()) {
+            return Err(format!("Option {n}: id \"{id}\" is used twice."));
+        }
+        *label = label.trim().to_string();
+        if label.is_empty() {
+            *label = id.clone();
+        }
+        if !text(label) || description.as_deref().is_some_and(|d| !text(d)) {
+            return Err(format!("Option {n}: labels are one line of at most {} bytes.", l::VALUE));
+        }
+        // The reasoning levels are the thread's effort: one select, always `effort`.
+        let is_effort = id == EFFORT_OPTION;
+        if is_effort != (*role == Some(OptionRole::Reasoning)) || (is_effort && matches!(option, ModelOption::Boolean { .. })) {
+            return Err(format!("Option {n}: the reasoning levels are a list of choices with the id {EFFORT_OPTION}."));
+        }
+        if let ModelOption::Select { choices, default, .. } = option {
+            if choices.is_empty() {
+                return Err(format!("Option {n} needs at least one choice."));
+            }
+            if choices.len() > 64 {
+                return Err(format!("Option {n} has more than 64 choices."));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for c in choices.iter_mut() {
+                c.id = c.id.trim().to_string();
+                if c.id.is_empty() {
+                    return Err(format!("Option {n} has a choice without a value."));
+                }
+                if !seen.insert(c.id.clone()) {
+                    return Err(format!("Option {n}: choice \"{}\" is used twice.", c.id));
+                }
+                c.label = c.label.trim().to_string();
+                if c.label.is_empty() {
+                    c.label = c.id.clone();
+                }
+                if !text(&c.id) || !text(&c.label) || c.description.as_deref().is_some_and(|d| !text(d)) {
+                    return Err(format!("Option {n}: choices are one line of at most {} bytes.", l::VALUE));
+                }
+            }
+            if default.as_ref().is_some_and(|d| !seen.contains(d)) {
+                return Err(format!("Option {n}: the default isn't one of its choices."));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An environment variable that may carry a credential or point a provider somewhere else: API
+/// keys, tokens, passwords, base URLs, endpoints and proxies. roll never relays one, so machine
+/// settings refuse them; they go in the daemon's `config.toml` on the machine.
+pub fn is_credential_env(name: &str) -> bool {
+    const WORDS: [&str; 13] =
+        ["KEY", "TOKEN", "SECRET", "PASS", "CREDENTIAL", "AUTH", "COOKIE", "SESSION", "PRIVATE", "URL", "ENDPOINT", "PROXY", "HOST"];
+    let upper = name.to_ascii_uppercase();
+    WORDS.iter().any(|w| upper.contains(w))
+}
+
+/// The limits on files written through `fs.write`.
+pub mod fs_limits {
+    /// 1 MiB, like a read.
+    pub const WRITE: usize = 1 << 20;
+    pub const PATH: usize = 4096;
+}
+
+/// The limits [`MachineSettings::check`] holds settings to.
+pub mod settings_limits {
+    pub const ENV_VARS: usize = 64;
+    pub const ENV_NAME: usize = 128;
+    pub const ENV_VALUE: usize = 4096;
+    pub const ARGS: usize = 64;
+    pub const ARG: usize = 4096;
+    pub const PATH: usize = 4096;
+    pub const MODELS: usize = 100;
+    pub const MODEL_ID: usize = 256;
+    pub const NAME: usize = 256;
+    pub const BRANCH_PREFIX: usize = 64;
+    /// A day.
+    pub const PULL_EVERY: u64 = 86_400;
+    pub const MAX_DEPTH: u32 = 8;
+    pub const MAX_CHILDREN: u32 = 32;
+    /// T3's "Auto-compact after": 100,000 to 1,000,000 tokens.
+    pub const AUTO_COMPACT_MIN: u64 = 100_000;
+    pub const AUTO_COMPACT_MAX: u64 = 1_000_000;
+}
+
+impl MachineSettings {
+    /// Trimmed, with empty strings unset, or why it can't be kept (for an `invalid` reply). The
+    /// daemon checks what it is sent, and the relay checks before it forwards, so a credential
+    /// is refused before it reaches a machine.
+    pub fn check(mut self) -> Result<MachineSettings, String> {
+        use settings_limits as l;
+        fn text(v: Option<String>) -> Option<String> {
+            v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        }
+        fn path(what: &str, v: Option<String>) -> Result<Option<String>, String> {
+            let Some(p) = text(v) else { return Ok(None) };
+            if p.len() > l::PATH || p.contains('\0') {
+                return Err(format!("{what} must be a path of at most {} bytes", l::PATH));
+            }
+            if !(p.starts_with('/') || p == "~" || p.starts_with("~/") || is_windows_absolute(&p)) {
+                return Err(format!("{what} must be an absolute path (or start with ~/)"));
+            }
+            Ok(Some(p))
+        }
+        fn name(what: &str, v: Option<String>) -> Result<Option<String>, String> {
+            let Some(n) = text(v) else { return Ok(None) };
+            if n.len() > l::NAME || n.chars().any(|c| c.is_control() || c == '<' || c == '>') {
+                return Err(format!("{what} must be one line of at most {} bytes, without < or >", l::NAME));
+            }
+            Ok(Some(n))
+        }
+        for (id, p) in self.providers.iter_mut() {
+            p.binary = path(&format!("{}'s binary", id.0), p.binary.take())?;
+            if p.args.len() > l::ARGS || p.args.iter().any(|a| a.len() > l::ARG || a.contains('\0')) {
+                return Err(format!("{} takes at most {} arguments of at most {} bytes", id.0, l::ARGS, l::ARG));
+            }
+            if p.env.len() > l::ENV_VARS {
+                return Err(format!("{} takes at most {} environment variables", id.0, l::ENV_VARS));
+            }
+            for (k, v) in &p.env {
+                let ok = !k.is_empty() && k.len() <= l::ENV_NAME && k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !ok {
+                    return Err(format!("{k:?} isn't an environment variable name (letters, digits and _, not starting with a digit)"));
+                }
+                if is_credential_env(k) {
+                    return Err(format!("{k} may hold a credential or an address, and roll never relays those: set it in the daemon's config.toml on the machine"));
+                }
+                if v.len() > l::ENV_VALUE || v.contains('\0') {
+                    return Err(format!("{k} can be at most {} bytes", l::ENV_VALUE));
+                }
+            }
+            if p.auto_compact_window.is_some_and(|w| !(l::AUTO_COMPACT_MIN..=l::AUTO_COMPACT_MAX).contains(&w)) {
+                return Err(format!("{} compacts after {} to {} tokens", id.0, l::AUTO_COMPACT_MIN, l::AUTO_COMPACT_MAX));
+            }
+            if p.models.len() > l::MODELS {
+                return Err(format!("{} takes at most {} custom models", id.0, l::MODELS));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for m in &mut p.models {
+                m.id = m.id.trim().to_string();
+                m.name = text(m.name.take());
+                if m.id.is_empty() {
+                    return Err("a custom model needs its slug".into());
+                }
+                if m.id.len() > l::MODEL_ID || m.id.chars().any(char::is_control) {
+                    return Err(format!("model slugs can be at most {} bytes", l::MODEL_ID));
+                }
+                if m.name.as_ref().is_some_and(|n| n.len() > l::NAME) {
+                    return Err(format!("model names can be at most {} bytes", l::NAME));
+                }
+                if !seen.insert(m.id.clone()) {
+                    return Err(format!("{} lists the custom model {} twice", id.0, m.id));
+                }
+                check_custom_options(&mut m.options).map_err(|e| format!("{}: {e}", m.id))?;
+            }
+        }
+        self.providers.retain(|_, p| p != &ProviderSettings::default());
+        self.worktree_dir = path("The worktree folder", self.worktree_dir.take())?;
+        self.clone_dir = path("The clone folder", self.clone_dir.take())?;
+        if let Some(prefix) = text(self.branch_prefix.take()) {
+            let parts_ok = prefix.split('/').all(|part| {
+                !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock") && part.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            });
+            if prefix.len() > l::BRANCH_PREFIX || !parts_ok || prefix.contains("..") {
+                return Err(format!("{prefix:?} can't start a branch name: use letters, digits, '-', '_', '.' and '/' (at most {} bytes)", l::BRANCH_PREFIX));
+            }
+            self.branch_prefix = Some(prefix);
+        }
+        if self.pull_every.is_some_and(|s| s > l::PULL_EVERY) {
+            return Err(format!("auto-pull looks at least once a day (at most {} seconds)", l::PULL_EVERY));
+        }
+        if self.max_depth.is_some_and(|d| d > l::MAX_DEPTH) {
+            return Err(format!("subagents nest at most {} deep", l::MAX_DEPTH));
+        }
+        if self.max_children.is_some_and(|n| n == 0 || n > l::MAX_CHILDREN) {
+            return Err(format!("a thread may run 1 to {} delegated tasks", l::MAX_CHILDREN));
+        }
+        self.git_name = name("The git name", self.git_name.take())?;
+        self.git_email = name("The git email", self.git_email.take())?;
+        if self.git_email.as_ref().is_some_and(|e| !e.contains('@') || e.contains(char::is_whitespace)) {
+            return Err("the git email must be an address".into());
+        }
+        if self.git_name.is_some() != self.git_email.is_some() {
+            return Err("set both the git name and the git email, or neither".into());
+        }
+        self.defaults.model = text(self.defaults.model.take());
+        self.defaults.effort = text(self.defaults.effort.take());
+        check_options(&self.defaults.options)?;
+        Ok(self)
+    }
+
+    /// The settings for a provider (the defaults when there are none).
+    pub fn provider(&self, id: &ProviderId) -> ProviderSettings {
+        self.providers.get(id).cloned().unwrap_or_default()
+    }
+
+    /// When a provider's idle threads compact: its own setting, else the machine's, else on return.
+    pub fn idle_compaction(&self, id: &ProviderId) -> IdleCompaction {
+        self.providers.get(id).and_then(|p| p.idle_compaction).or(self.idle_compaction).unwrap_or_default()
+    }
+}
+
+fn is_windows_absolute(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub id: ProviderId,
+    /// Display name ("Codex", "Claude Code", "Gemini CLI").
+    pub name: String,
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub auth: AuthStatus,
+    /// Detail for the user ("Logged in as …", "Run `claude /login`").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelInfo>,
+    /// Models it would offer after an update (T3's "Update Claude Code to v… to use …").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_required: Vec<UpdateRequired>,
+    pub capabilities: Capabilities,
+    /// The daemon is still probing it (it starts, and says hello, without waiting). The rest is
+    /// what the last probe found, kept from before a restart; with no last probe, it is not
+    /// installed and its login unknown until the probe answers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checking: bool,
+    /// How much of the account's allowance is left, as the provider's own CLI or protocol reports
+    /// it to its client (T3's `ServerProvider.usageLimits`). Unset for a provider that reports
+    /// none; roll never reads a credential to learn it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_limits: Option<UsageLimits>,
+}
+
+impl ProviderInfo {
+    /// Not installed, login unknown, nothing else known yet: what an adapter's `info` starts from.
+    pub fn new(id: ProviderId, name: String, capabilities: Capabilities) -> Self {
+        ProviderInfo {
+            id,
+            name,
+            installed: false,
+            version: None,
+            auth: AuthStatus::Unknown,
+            detail: None,
+            models: Vec::new(),
+            update_required: Vec::new(),
+            capabilities,
+            checking: false,
+            usage_limits: None,
+        }
+    }
+}
+
+/// A provider account's usage limits (T3's `ServerProviderUsageLimits`,
+/// `packages/contracts/src/providerUsageLimits.ts`; merge rules from
+/// `packages/provider-core/src/server/usageLimits.ts`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimits {
+    /// When the provider last said.
+    pub checked_at: Millis,
+    /// Sorted: session, weekly, monthly, other; then by id.
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    /// The account's plan, when the provider names it ("plus", "max").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+/// One allowance window ("Session", "Weekly", "Monthly credit limit").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// Stable per provider (`primary`, `five_hour`, `seven_day`), so updates replace their row.
+    pub id: String,
+    pub kind: UsageWindowKind,
+    pub label: String,
+    /// 0 to 100.
+    pub used_percent: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<Millis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageWindowKind {
+    Session,
+    Weekly,
+    Monthly,
+    Other,
+}
+
+impl UsageWindow {
+    pub fn new(id: &str, kind: UsageWindowKind, label: &str, used_percent: f64) -> Self {
+        UsageWindow { id: id.into(), kind, label: label.into(), used_percent: clamp_percent(used_percent), resets_at: None, window_minutes: None }
+    }
+}
+
+/// A percentage held to 0..=100 (anything not finite is 0).
+pub fn clamp_percent(value: f64) -> f64 {
+    if value.is_finite() { value.clamp(0.0, 100.0) } else { 0.0 }
+}
+
+impl UsageLimits {
+    /// Limits made of `windows`, sorted.
+    pub fn new(checked_at: Millis, windows: Vec<UsageWindow>) -> Self {
+        let mut limits = UsageLimits { checked_at, windows, plan: None };
+        limits.sort();
+        limits
+    }
+
+    fn sort(&mut self) {
+        self.windows.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.id.cmp(&b.id)));
+    }
+
+    /// The limits after a streamed update (T3's `applyUsageLimitsUpdate`): each window replaces
+    /// the one with its id, keeping the old reset time and length when the update leaves them out;
+    /// windows the update doesn't name stay. `None` when nothing changed.
+    pub fn apply(previous: Option<&UsageLimits>, update: &UsageLimits) -> Option<UsageLimits> {
+        if update.windows.is_empty() && update.plan.is_none() {
+            return None;
+        }
+        let mut next = previous.cloned().unwrap_or_default();
+        let mut changed = previous.is_none();
+        for window in &update.windows {
+            let existing = next.windows.iter_mut().find(|w| w.id == window.id);
+            let mut window = window.clone();
+            window.used_percent = clamp_percent(window.used_percent);
+            match existing {
+                Some(old) => {
+                    window.resets_at = window.resets_at.or(old.resets_at);
+                    window.window_minutes = window.window_minutes.or(old.window_minutes);
+                    if *old != window {
+                        *old = window;
+                        changed = true;
+                    }
+                }
+                None => {
+                    next.windows.push(window);
+                    changed = true;
+                }
+            }
+        }
+        if update.plan.is_some() && update.plan != next.plan {
+            next.plan = update.plan.clone();
+            changed = true;
+        }
+        if !changed {
+            return None;
+        }
+        next.checked_at = next.checked_at.max(update.checked_at);
+        next.sort();
+        Some(next)
+    }
+
+    /// What a probe's answer leaves (T3's `resolveUsageLimitsAfterProbe`): a probe that found
+    /// none keeps what sessions reported, and windows streamed after the probe began win.
+    pub fn after_probe(published: Option<UsageLimits>, probed: Option<UsageLimits>) -> Option<UsageLimits> {
+        match (published, probed) {
+            (published, None) => published,
+            (Some(published), Some(probed)) if published.checked_at > probed.checked_at => {
+                UsageLimits::apply(Some(&probed), &published).or(Some(probed)).map(|mut l| {
+                    l.checked_at = published.checked_at;
+                    l
+                })
+            }
+            (_, probed) => probed,
+        }
+    }
+
+    /// When every exhausted window resets, if all of them say (T3's `codexUsageLimitResetAt`).
+    pub fn reset_at(&self) -> Option<Millis> {
+        let full: Vec<_> = self.windows.iter().filter(|w| w.used_percent >= 100.0).collect();
+        if full.is_empty() {
+            return None;
+        }
+        full.iter().map(|w| w.resets_at).collect::<Option<Vec<_>>>()?.into_iter().max()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthStatus {
+    Ready,
+    /// Installed but not logged in.
+    Missing,
+    /// Couldn't tell without starting a session.
+    Unknown,
+}
+
+/// A model a provider runs, with the options it takes (T3's `ServerProviderModel` and
+/// `ModelCapabilities.optionDescriptors`, `packages/contracts/src/{server,model}.ts`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ModelInfoWire")]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    /// What a narrow place (the picker's trigger) calls it ("Opus 5.5" for "Claude Opus 5.5").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_name: Option<String>,
+    #[serde(default)]
+    pub default: bool,
+    /// What the model can be asked for besides itself: its reasoning effort (a thread's
+    /// `effort`) and the rest (a thread's `options`: a speed, a context window, …). Whatever the
+    /// model doesn't list is left out when a session starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ModelOption>,
+    /// An older model, listed after the others (the picker folds them under "Show more").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy: bool,
+    /// Takes images with a prompt (most do; T3 reads Codex's `inputModalities`).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub images: bool,
+    /// One of the machine's custom models (its settings), not one the provider lists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom: bool,
+    /// Listed by an endpoint the provider uses (its name), not by the provider itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// T3's model badge: "new" for a week after a current model's release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub badge: Option<ModelBadge>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelBadge {
+    New,
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// `ModelInfo` as it arrives: daemons (and stored probes) from before option descriptors sent
+/// a model's reasoning levels alone, as `efforts`.
+#[derive(Deserialize)]
+struct ModelInfoWire {
+    id: String,
+    name: String,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    default: bool,
+    #[serde(default)]
+    options: Vec<ModelOption>,
+    #[serde(default)]
+    efforts: Vec<String>,
+    #[serde(default)]
+    legacy: bool,
+    #[serde(default = "yes")]
+    images: bool,
+    #[serde(default)]
+    custom: bool,
+    #[serde(default)]
+    via: Option<String>,
+    #[serde(default)]
+    badge: Option<ModelBadge>,
+}
+
+impl From<ModelInfoWire> for ModelInfo {
+    fn from(w: ModelInfoWire) -> Self {
+        let mut options = w.options;
+        if !w.efforts.is_empty() && !options.iter().any(|o| o.role() == Some(OptionRole::Reasoning)) {
+            options.insert(0, ModelOption::reasoning(w.efforts.iter().map(|e| OptionChoice::new(e, &effort_label(e))).collect(), None));
+        }
+        ModelInfo { id: w.id, name: w.name, short_name: w.short_name, default: w.default, options, legacy: w.legacy, images: w.images, custom: w.custom, via: w.via, badge: w.badge }
+    }
+}
+
+impl ModelInfo {
+    /// A model with no options.
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        ModelInfo { id: id.into(), name: name.into(), short_name: None, default: false, options: Vec::new(), legacy: false, images: true, custom: false, via: None, badge: None }
+    }
+
+    /// Its reasoning option, if it has one.
+    pub fn reasoning(&self) -> Option<&ModelOption> {
+        self.options.iter().find(|o| o.role() == Some(OptionRole::Reasoning))
+    }
+
+    /// The reasoning efforts it takes, lowest first.
+    pub fn efforts(&self) -> Vec<&str> {
+        match self.reasoning() {
+            Some(ModelOption::Select { choices, .. }) => choices.iter().map(|c| c.id.as_str()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The option `id`, if it has one.
+    pub fn option(&self, id: &str) -> Option<&ModelOption> {
+        self.options.iter().find(|o| o.id() == id)
+    }
+
+    /// The options of `wanted` this model takes, with values it offers (a model switch keeps
+    /// what still applies).
+    pub fn accepted(&self, wanted: &ModelOptions) -> ModelOptions {
+        wanted.iter().filter(|(id, v)| self.option(id).is_some_and(|o| o.role() != Some(OptionRole::Reasoning) && o.accepts(v))).map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+}
+
+/// T3's names for reasoning levels (`CodexProvider.ts`, `REASONING_EFFORT_LABELS`).
+pub fn effort_label(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra High".into(),
+        "xlow" => "Extra Low".into(),
+        other => {
+            let mut c = other.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        }
+    }
+}
+
+/// One thing a model can be asked for (T3's `ProviderOptionDescriptor`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelOption {
+    /// One of a few values.
+    Select {
+        id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        choices: Vec<OptionChoice>,
+        /// What the model runs with when none is picked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<OptionRole>,
+    },
+    /// On or off.
+    Boolean {
+        id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default)]
+        default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<OptionRole>,
+    },
+}
+
+/// What an option is for, so a client shows it where it belongs without knowing each provider's
+/// ids: the reasoning levels in the picker's column (the value rides in a thread's `effort`), a
+/// speed as the picker's segmented control and a bolt on its trigger, a context window on the
+/// trigger after the model's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionRole {
+    Reasoning,
+    Speed,
+    ContextWindow,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionChoice {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl OptionChoice {
+    pub fn new(id: &str, label: &str) -> Self {
+        OptionChoice { id: id.into(), label: label.into(), description: None }
+    }
+
+    pub fn described(mut self, description: &str) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+/// The reasoning option's id. Its value is a thread's `effort`, never one of its `options`.
+pub const EFFORT_OPTION: &str = "effort";
+
+impl ModelOption {
+    /// Reasoning levels (a thread's `effort`).
+    pub fn reasoning(choices: Vec<OptionChoice>, default: Option<&str>) -> Self {
+        ModelOption::Select {
+            id: EFFORT_OPTION.into(),
+            label: "Reasoning".into(),
+            description: None,
+            choices,
+            default: default.map(str::to_string),
+            role: Some(OptionRole::Reasoning),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            ModelOption::Select { id, .. } | ModelOption::Boolean { id, .. } => id,
+        }
+    }
+
+    pub fn role(&self) -> Option<OptionRole> {
+        match self {
+            ModelOption::Select { role, .. } | ModelOption::Boolean { role, .. } => *role,
+        }
+    }
+
+    /// Whether `value` is one this option takes.
+    pub fn accepts(&self, value: &OptionValue) -> bool {
+        match (self, value) {
+            (ModelOption::Select { choices, .. }, OptionValue::Choice(v)) => choices.iter().any(|c| &c.id == v),
+            (ModelOption::Boolean { .. }, OptionValue::Flag(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A picked option: a select's choice or a boolean.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OptionValue {
+    Flag(bool),
+    Choice(String),
+}
+
+/// A thread's picked options besides its effort, by option id (T3's `ModelSelection.options`).
+pub type ModelOptions = std::collections::BTreeMap<String, OptionValue>;
+
+/// The limits on a thread's options (they come from clients).
+pub mod option_limits {
+    pub const OPTIONS: usize = 16;
+    pub const ID: usize = 64;
+    pub const VALUE: usize = 256;
+}
+
+/// Checks options from a client: at most [`option_limits::OPTIONS`], short ids and values, and
+/// never the effort (it has a field of its own).
+pub fn check_options(options: &ModelOptions) -> Result<(), String> {
+    use option_limits as l;
+    if options.len() > l::OPTIONS {
+        return Err(format!("a thread takes at most {} model options", l::OPTIONS));
+    }
+    for (id, v) in options {
+        if id.is_empty() || id.len() > l::ID || id.chars().any(char::is_control) {
+            return Err(format!("model option ids are 1 to {} bytes", l::ID));
+        }
+        if id == EFFORT_OPTION {
+            return Err("the effort is set with `effort`, not as an option".into());
+        }
+        if let OptionValue::Choice(c) = v
+            && (c.is_empty() || c.len() > l::VALUE || c.chars().any(char::is_control))
+        {
+            return Err(format!("model option values are 1 to {} bytes", l::VALUE));
+        }
+    }
+    Ok(())
+}
+
+/// A model the provider has that the installed version can't run yet (T3's
+/// `ServerProviderUpdateRequiredModel`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRequired {
+    pub id: String,
+    pub name: String,
+    pub min_version: String,
+}
+
+/// What a provider can do (T3's provider capabilities, trimmed). The UI hides what's missing
+/// and the orchestrator degrades (steer by interrupt and restart, fork by summary).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// Input can be added to a running turn.
+    pub steer: bool,
+    /// The native conversation can be forked at a turn.
+    pub fork: bool,
+    /// The native conversation can drop its last turns.
+    pub rollback: bool,
+    pub plan_mode: bool,
+    pub images: bool,
+    /// Reports subagents.
+    pub subagents: bool,
+    /// The runtime mode can change without a new session.
+    pub mode_switch: bool,
+    /// The conversation's context can be compacted on request (T3's `compact` slash command):
+    /// a `message.send` of exactly `/compact` runs as a compaction.
+    #[serde(default)]
+    pub compact: bool,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------------------------
+
+/// Everything a client can ask a daemon to do. Commands change state (and the change arrives as
+/// entities); queries only answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Command {
+    /// Add a directory as a project. `clone` clones one of the owner's roll code repos into
+    /// `path` first: an empty `path` is `<clone dir>/<owner>/<repo>`, a relative one is under the
+    /// clone dir (`~/roll` unless the daemon's config says otherwise). The relay grants the
+    /// access ([`CodeGrant`]).
+    #[serde(rename = "project.add")]
+    ProjectAdd {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clone: Option<RepoRef>,
+    },
+    #[serde(rename = "project.remove")]
+    ProjectRemove { project: ProjectId },
+    /// Rename a project, or replace its settings.
+    #[serde(rename = "project.update")]
+    ProjectUpdate {
+        project: ProjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<ProjectSettings>,
+    },
+    /// Fast-forward the checkout's default branch now, by auto-pull's rules (whether or not
+    /// auto-pull is on); answers `pulled`. A roll code project fetches with the relay's grant,
+    /// and the relay sends this itself when the repo's default branch moves.
+    #[serde(rename = "project.pull")]
+    ProjectPull { project: ProjectId },
+    /// Remove now the worktrees of the project's settled and archived threads that cleanup may
+    /// remove (whatever their age), with the same checks; answers `Reply::Cleaned`.
+    #[serde(rename = "project.cleanup")]
+    ProjectCleanup { project: ProjectId },
+
+    /// Start a thread. `worktree` puts it in its own git worktree on a new branch.
+    #[serde(rename = "thread.create")]
+    ThreadCreate {
+        project: ProjectId,
+        provider: ProviderId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        /// The model's other options ([`Thread::options`]).
+        #[serde(default, skip_serializing_if = "ModelOptions::is_empty")]
+        options: ModelOptions,
+        #[serde(default)]
+        runtime_mode: RuntimeMode,
+        #[serde(default)]
+        interaction_mode: InteractionMode,
+        #[serde(default)]
+        worktree: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// Send this as the first message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
+        /// Start an orchestrator ([`Thread::orchestrator`]): the prompt is a goal it plans and
+        /// delegates to subagents.
+        #[serde(default, skip_serializing_if = "is_false")]
+        orchestrator: bool,
+    },
+    /// Change what future runs use. Switching provider hands the conversation over with a
+    /// summary (T3's provider handoff).
+    #[serde(rename = "thread.configure")]
+    ThreadConfigure {
+        thread: ThreadId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<ProviderId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        /// Replaces the thread's options when set. A new model keeps those it takes, unless
+        /// this says otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<ModelOptions>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_mode: Option<RuntimeMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interaction_mode: Option<InteractionMode>,
+    },
+    /// Fork a thread at a run (its latest when `at` is unset) into a new thread.
+    #[serde(rename = "thread.fork")]
+    ThreadFork {
+        thread: ThreadId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<RunId>,
+        #[serde(default)]
+        worktree: bool,
+    },
+    #[serde(rename = "thread.archive")]
+    ThreadArchive { thread: ThreadId },
+    #[serde(rename = "thread.unarchive")]
+    ThreadUnarchive { thread: ThreadId },
+    /// Delete a thread and its records. Its worktree goes too unless it has uncommitted
+    /// changes; the branch always stays.
+    #[serde(rename = "thread.delete")]
+    ThreadDelete { thread: ThreadId },
+    /// Put a thread on the settled shelf (T3's `thread.settle`). Refused while it runs, waits on
+    /// its user or has queued messages. Its idle provider session is closed; a new message
+    /// brings it back.
+    #[serde(rename = "thread.settle")]
+    ThreadSettle { thread: ThreadId },
+    /// Take a thread off the settled shelf and keep it active: auto-settle leaves it alone until
+    /// it is active again. With `restore` it undoes a `thread.settle` instead: the inbox goes back
+    /// to what it was before (under the project's auto-settle rules again, its snooze back if it
+    /// hasn't passed); nothing happens unless the thread is still settled by its user.
+    #[serde(rename = "thread.unsettle")]
+    ThreadUnsettle {
+        thread: ThreadId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restore: Option<InboxBefore>,
+    },
+    /// Hide a thread until `until` (T3's `thread.snooze`). Refused while it waits on its user or
+    /// has queued messages, and for a time that isn't in the future (at most a year ahead).
+    #[serde(rename = "thread.snooze")]
+    ThreadSnooze { thread: ThreadId, until: Millis },
+    /// Wake a snoozed thread now.
+    #[serde(rename = "thread.unsnooze")]
+    ThreadUnsnooze { thread: ThreadId },
+    /// The conversation was opened: `inbox.visited_at` is now. Doesn't count as activity.
+    #[serde(rename = "thread.visit")]
+    ThreadVisit { thread: ThreadId },
+    /// Let the daemon settle the thread by itself, or never.
+    #[serde(rename = "thread.auto_settle")]
+    ThreadAutoSettle { thread: ThreadId, enabled: bool },
+    /// The thread's roll code change landed (`landed`) or was closed. Sent by the relay; the
+    /// daemon settles the thread if auto-settle allows it.
+    #[serde(rename = "thread.change_ended")]
+    ThreadChangeEnded { thread: ThreadId, landed: bool },
+
+    /// Send a message: starts a run when idle; otherwise queues it or steers the active run.
+    #[serde(rename = "message.send")]
+    MessageSend {
+        thread: ThreadId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
+        #[serde(default)]
+        mode: SendMode,
+    },
+    /// Drop a queued message.
+    #[serde(rename = "message.unqueue")]
+    MessageUnqueue { thread: ThreadId, message: String },
+    /// Change a queued message's text (T3's `queued-run.edit`). `attachments` replaces its
+    /// images when set and keeps them when unset.
+    #[serde(rename = "message.edit")]
+    MessageEdit {
+        thread: ThreadId,
+        message: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<Attachment>>,
+    },
+    /// Move a queued message in front of `before`, or to the end when unset (T3's
+    /// `queued-run.reorder`).
+    #[serde(rename = "message.reorder")]
+    MessageReorder {
+        thread: ThreadId,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+    },
+    /// Send a queued message now (T3's "Send now"): into the active run as a steer (T3's
+    /// `queued-message.promote-to-steer`), or, on a thread whose queue is held (it was stopped,
+    /// or the run failed), as the next run, after which the rest of the queue drains (T3's
+    /// `queued-run.start`).
+    #[serde(rename = "message.promote")]
+    MessagePromote { thread: ThreadId, message: String },
+    #[serde(rename = "run.interrupt")]
+    RunInterrupt { thread: ThreadId },
+    #[serde(rename = "request.respond")]
+    RequestRespond { request: RequestId, response: Response },
+    /// Restore the files to a checkpoint and drop the runs after it.
+    #[serde(rename = "checkpoint.rollback")]
+    CheckpointRollback { thread: ThreadId, checkpoint: CheckpointId },
+
+    /// Commit the thread's work on its branch and push it: to the project's roll code repo,
+    /// where the branch opens or revises a change (`land: true` then sends it to landing, through
+    /// the merge queue on a `queue` repo), or to `origin` for any other git project.
+    #[serde(rename = "thread.publish")]
+    ThreadPublish {
+        thread: ThreadId,
+        message: String,
+        #[serde(default)]
+        land: bool,
+    },
+
+    #[serde(rename = "terminal.open")]
+    TerminalOpen {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<ThreadId>,
+        /// Run this instead of the login shell (e.g. `claude /login`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// Run the project's script with this id instead (its command, with
+        /// `ROLL_PROJECT_ROOT` and `ROLL_WORKTREE_PATH` set).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
+    /// Bytes for the terminal's input, base64.
+    #[serde(rename = "terminal.input")]
+    TerminalInput { terminal: TerminalId, data: String },
+    #[serde(rename = "terminal.resize")]
+    TerminalResize { terminal: TerminalId, cols: u16, rows: u16 },
+    #[serde(rename = "terminal.close")]
+    TerminalClose { terminal: TerminalId },
+
+    /// Check providers again (after a login) and re-send `hello` info.
+    #[serde(rename = "provider.refresh")]
+    ProviderRefresh {},
+    /// Replace the machine's settings whole ([`MachineSettings`]); replies once the daemon has
+    /// stored and applied them and sent `hello` again with them.
+    #[serde(rename = "machine.configure")]
+    MachineConfigure { settings: Box<MachineSettings> },
+    /// Add or replace an endpoint ([`EndpointSpec`]) and change its key ([`KeyChange`]); the
+    /// providers it lists use it from their next process. Replies once the daemon has stored it
+    /// and sent `hello` again; its models are listed in the background.
+    #[serde(rename = "endpoint.set")]
+    EndpointSet {
+        endpoint: EndpointSpec,
+        #[serde(default, skip_serializing_if = "endpoint::key_change_is_keep")]
+        key: KeyChange,
+    },
+    /// Remove an endpoint and its key; its providers go back to their own login.
+    #[serde(rename = "endpoint.remove")]
+    EndpointRemove { endpoint: String },
+    /// Ask the endpoint for its models now (answers `endpoint_checked`, and keeps what it lists).
+    #[serde(rename = "endpoint.check")]
+    EndpointCheck { endpoint: String },
+    /// Install an agent of the ACP registry on the machine (docs/code/agents.md, "The ACP
+    /// registry"): the daemon fetches the registry, downloads and checks the agent (or installs
+    /// its package with the machine's own `npm`/`uv`) into its own directory, and offers it as the
+    /// provider `acp:<agent>` without a restart. Replies once it's installed and offered; its
+    /// probe follows in `hello`. Refused for an agent the machine already offers.
+    #[serde(rename = "registry.install")]
+    RegistryInstall { agent: String },
+    /// Remove an agent the daemon installed from the registry: its provider, its files and its
+    /// entry. Refused while one of its threads runs.
+    #[serde(rename = "registry.remove")]
+    RegistryRemove { agent: String },
+
+    /// Set up, change, start or stop roll's model gateway on this machine
+    /// (docs/code/gateway.md); [`GatewaySettings`] are replaced whole and applied live. Replies
+    /// once stored and applied, and `hello` says the new [`GatewayInfo`].
+    #[serde(rename = "gateway.configure")]
+    GatewayConfigure { settings: Box<GatewaySettings> },
+    /// Change an upstream's key: sealed to this daemon with
+    /// [`gateway::upstream_key_context`], or cleared.
+    #[serde(rename = "gateway.key")]
+    GatewayKey {
+        upstream: String,
+        #[serde(default, skip_serializing_if = "endpoint::key_change_is_keep")]
+        key: KeyChange,
+    },
+    /// Mint a client key and answer it sealed to `seal_key` (the machine that will use it, as its
+    /// `roll-gateway` endpoint's key: [`IssuedClient`]). The gateway keeps only its hash. A
+    /// machine's earlier client is revoked.
+    #[serde(rename = "gateway.client.issue")]
+    GatewayClientIssue {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<MachineId>,
+        seal_key: String,
+    },
+    /// Revoke a client key: its next request is refused.
+    #[serde(rename = "gateway.client.revoke")]
+    GatewayClientRevoke { client: String },
+    /// Ask upstreams (one, or all) for their model lists now: their keys open, they answer.
+    /// Never generates (costs nothing).
+    #[serde(rename = "gateway.test")]
+    GatewayTest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream: Option<String>,
+    },
+    /// Stop the gateway and forget it here: settings, upstream keys, clients and history.
+    #[serde(rename = "gateway.remove")]
+    GatewayRemove {},
+    /// Health of the gateway and its upstreams.
+    #[serde(rename = "gateway.status")]
+    GatewayStatus {},
+    /// Usage between `from` and `to`, grouped and bucketed.
+    #[serde(rename = "gateway.usage")]
+    GatewayUsage {
+        from: Millis,
+        to: Millis,
+        #[serde(default)]
+        by: UsageBy,
+        #[serde(default)]
+        bucket: UsageBucket,
+    },
+    /// The request log, newest first: entries after `after` (live tail) or before `before`
+    /// (paging back), at most `limit` ([`gateway_limits::LOG_PAGE`]).
+    #[serde(rename = "gateway.log")]
+    GatewayLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: u16,
+        /// Only failed requests and failovers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        errors: bool,
+    },
+    /// A logged request's bodies (kept only while `log_bodies` is on).
+    #[serde(rename = "gateway.log.body")]
+    GatewayLogBody { seq: u64 },
+
+    // Queries.
+    /// The diff of a run (checkpoint before → after), or of the whole thread when `run` is
+    /// unset (base → now, including uncommitted work).
+    #[serde(rename = "diff.get")]
+    DiffGet {
+        thread: ThreadId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<RunId>,
+    },
+    /// List a directory (relative to a project, or absolute when `project` is unset).
+    #[serde(rename = "fs.list")]
+    FsList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+        path: String,
+    },
+    #[serde(rename = "fs.read")]
+    FsRead { project: ProjectId, path: String },
+    /// Write a text file in a thread's workspace (its worktree, else its project's directory):
+    /// T3's `projects.writeFile`, behind "Save to workspace" on a plan. `path` is relative to the
+    /// workspace and may not leave it; missing folders are made, an existing file is replaced
+    /// (never a symlink or a folder). At most [`fs_limits::WRITE`] bytes. Answers `written`.
+    #[serde(rename = "fs.write")]
+    FsWrite { thread: ThreadId, path: String, text: String },
+    #[serde(rename = "git.status")]
+    GitStatus { thread: ThreadId },
+    /// Recent terminal output, for a client that just opened it (the last 256 KiB).
+    #[serde(rename = "terminal.scrollback")]
+    TerminalScrollback { terminal: TerminalId },
+    /// The ACP registry's agents as this machine sees them (answers `registry`). The daemon
+    /// fetches the registry (at most every 5 minutes) and keeps a copy for when it can't.
+    #[serde(rename = "registry.list")]
+    RegistryList {},
+}
+
+impl Command {
+    /// Queries only answer; they never change state. The relay may retry them freely.
+    pub fn is_query(&self) -> bool {
+        matches!(
+            self,
+            Command::DiffGet { .. }
+                | Command::FsList { .. }
+                | Command::FsRead { .. }
+                | Command::GitStatus { .. }
+                | Command::TerminalScrollback { .. }
+                | Command::GatewayStatus {}
+                | Command::GatewayUsage { .. }
+                | Command::GatewayLog { .. }
+                | Command::GatewayLogBody { .. }
+                | Command::RegistryList {}
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendMode {
+    /// After the active run, if one is going.
+    #[default]
+    Queue,
+    /// Into the active run.
+    Steer,
+}
+
+/// A daemon's answer to one command.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Reply {
+    Ok,
+    /// The command made a record (a project, thread, run or terminal).
+    Created { id: String },
+    Diff(Diff),
+    Entries { entries: Vec<FsEntry> },
+    File(FileContent),
+    GitStatus(GitStatus),
+    Published(Published),
+    /// What `project.pull` did.
+    Pulled(PullResult),
+    /// `fs.write` wrote `path` (relative to the workspace).
+    Written { path: String },
+    /// What `project.cleanup` did.
+    Cleaned(CleanupReport),
+    Scrollback {
+        /// Base64.
+        data: String,
+    },
+    /// What `endpoint.check` found.
+    EndpointChecked(EndpointCheck),
+    /// `gateway.client.issue`'s client and its sealed key.
+    GatewayClient(IssuedClient),
+    /// What `gateway.test` found, one per upstream tried.
+    GatewayTested { checks: Vec<UpstreamCheck> },
+    GatewayStatus(GatewayStatus),
+    GatewayUsage(UsageReport),
+    GatewayLog { entries: Vec<LogEntry> },
+    GatewayLogBody(LogBody),
+    /// What `registry.list` found.
+    Registry(RegistryList),
+    Error(ReplyError),
+}
+
+/// What a cleanup did: the threads whose worktrees it removed, and those it kept and why.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupReport {
+    pub removed: Vec<ThreadId>,
+    pub kept: Vec<CleanupKept>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupKept {
+    pub thread: ThreadId,
+    pub reason: KeptReason,
+}
+
+/// Why cleanup left a worktree where it is (T3's keep checks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptReason {
+    /// It has local changes (`CleanupKeep` says which count).
+    LocalChanges,
+    /// Its thread runs, waits on its user or has queued messages.
+    Busy,
+    /// A terminal is running in it.
+    Terminal,
+    /// It isn't on the thread's branch any more (someone checked out something else).
+    OtherBranch,
+    /// Another thread works in it too.
+    Shared,
+    /// It isn't a worktree roll made (outside the worktrees folder, a symlink, the checkout).
+    NotManaged,
+    /// git refused or failed (submodules, a lock); nothing was removed.
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyError {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    NotFound,
+    Invalid,
+    /// The thread is busy (e.g. rollback while running).
+    Conflict,
+    /// The provider isn't installed, logged in, or failed to start.
+    Provider,
+    /// Not connected (from the relay, never from a daemon).
+    MachineOffline,
+    /// The daemon didn't answer in time (from the relay).
+    Timeout,
+    Internal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diff {
+    pub stat: DiffStat,
+    pub files: Vec<FileChange>,
+    /// True when files were left out to keep the answer under 4 MiB.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsEntry {
+    pub name: String,
+    pub dir: bool,
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileContent {
+    pub path: String,
+    /// UTF-8 text; `None` when binary or over 1 MiB.
+    pub text: Option<String>,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatus {
+    pub branch: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub files: Vec<FileChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Published {
+    pub branch: String,
+    pub commit: String,
+    /// The roll code change it became (the relay fills it in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// What sending it to landing did, when `land` was asked (the relay fills it in). A land
+    /// that is blocked or conflicts is an answer, not an error: the change is there either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<Landing>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Landing {
+    pub status: LandingStatus,
+    /// For people: where it went, or why it didn't.
+    pub message: String,
+    /// What keeps it from landing (`blocked`), one line each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingStatus {
+    Landed,
+    /// In the merge queue: it lands once its checks pass.
+    Queued,
+    /// A landing rule keeps it out for now (reviews, checks, a draft).
+    Blocked,
+    /// The default branch changed the same lines.
+    Conflict,
+    /// roll code didn't take it (the message says why).
+    Failed,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deltas
+// ---------------------------------------------------------------------------------------------
+
+/// Ephemeral, never stored: smooth streaming between durable upserts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Delta {
+    /// Text appended to a message, reasoning or plan node.
+    Text { thread: ThreadId, node: NodeId, text: String },
+    /// Output appended to a tool call node.
+    Output { thread: ThreadId, node: NodeId, text: String },
+    /// Terminal bytes, base64.
+    Terminal { terminal: TerminalId, data: String },
+}
+
+// ---------------------------------------------------------------------------------------------
+// Relay protocol
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Stamped {
+    pub seq: u64,
+    pub entity: Entity,
+}
+
+/// daemon → relay.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonFrame {
+    /// The first frame; sent again (`info` changed) after `provider.refresh`.
+    Hello { protocol: u32, info: MachineInfo },
+    Entities { items: Vec<Stamped> },
+    Delta { delta: Delta },
+    Reply { id: String, result: Reply },
+    Pong,
+}
+
+/// relay → daemon.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RelayFrame {
+    Welcome {
+        machine: MachineId,
+        owner: String,
+        /// The newest `seq` the relay holds for this machine; replay what's after it.
+        resume_from: u64,
+    },
+    Ack { seq: u64 },
+    /// Something the daemon's user should know about the link (the relay didn't keep records
+    /// over the machine's quota). The daemon shows it; nothing else changes.
+    Notice { message: String },
+    Command {
+        id: String,
+        /// Who sent it: an owner name or `agent:<name>`.
+        by: String,
+        /// Boxed: a command is far bigger than the other frames.
+        command: Box<Command>,
+        /// Access to the roll code repo the command works on (cloning, publishing), minted for
+        /// this command alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<Box<CodeGrant>>,
+    },
+    Ping,
+}
+
+/// A short-lived credential for one roll code repository, minted by the relay for the command
+/// it comes with (docs/code/agents.md, "Agents in roll code"). It opens git for that repository
+/// alone (fetch, and push with `write`) as `agent:<machine name>`, never the HTTP API, and stops
+/// working when it expires or the machine is revoked. The daemon only keeps it in memory.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeGrant {
+    pub repo: RepoRef,
+    /// The repository's git URL (`{git_url}/{owner}/{repo}.git`), without credentials.
+    pub url: String,
+    /// `rlg_…`, sent as `Authorization: Bearer`.
+    pub token: String,
+    /// It may push, not only fetch.
+    pub write: bool,
+    /// The one branch a write grant pushes: a publish's thread branch, or the default branch of
+    /// an empty repository for its first commit (docs/code/agents.md, "The first commit").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub expires_at: Millis,
+    /// The GitHub repository a connected repo mirrors: where a publish's branch goes, as a pull
+    /// request opened with the user's own GitHub credentials, when roll can't be reached
+    /// (docs/code/agents.md, "When roll is down"). Unset for native repos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GrantGithub>,
+}
+
+/// A connected repo's GitHub side, as the relay knows it (no credential: the daemon uses the
+/// user's own).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantGithub {
+    pub owner: String,
+    pub repo: String,
+    /// `https://github.com/<owner>/<repo>`; git is at `<url>.git`.
+    pub url: String,
+    pub default_branch: String,
+}
+
+impl std::fmt::Debug for CodeGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeGrant")
+            .field("repo", &self.repo)
+            .field("url", &self.url)
+            .field("write", &self.write)
+            .field("branch", &self.branch)
+            .field("expires_at", &self.expires_at)
+            .field("github", &self.github)
+            .finish_non_exhaustive()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Relay API (browser ↔ relay)
+// ---------------------------------------------------------------------------------------------
+
+/// A machine as the relay knows it (the relay owns this record, not the daemon).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Machine {
+    pub id: MachineId,
+    pub name: String,
+    pub online: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<MachineInfo>,
+    /// Set for roll-hosted sandboxes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxInfo>,
+    /// Its colour and kind, as its owner set them (the relay's, like its name).
+    #[serde(default, skip_serializing_if = "MachineAppearance::is_empty")]
+    pub appearance: MachineAppearance,
+    pub created_at: Millis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<Millis>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SandboxInfo {
+    pub backend: String,
+    pub size: String,
+    pub status: SandboxStatus,
+    /// What it costs per running hour, in US cents.
+    pub hourly_cents: u32,
+    /// Why a `stopped` sandbox is stopped: asleep (`idle`) or stopped by its owner. Unset
+    /// otherwise. A command to either wakes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_reason: Option<StopReason>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxStatus {
+    Creating,
+    /// On its way up again after a stop (woken by a command, or started by its owner), until the
+    /// backend runs it.
+    Starting,
+    Running,
+    Stopped,
+    Failed,
+    Deleting,
+}
+
+/// Why a sandbox is stopped (docs/code/agents.md, "Sandboxes").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// Asleep: nothing ran on it for a while (`ROLL_SANDBOX_IDLE_STOP`).
+    Idle,
+    /// Its owner stopped it.
+    Owner,
+}
+
+/// A record as a browser sees it: which machine it's from and the owner-wide cursor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mirrored {
+    pub cursor: u64,
+    pub machine: MachineId,
+    pub entity: Entity,
+}
+
+/// `GET /v1/code/agents/{owner}/state`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct State {
+    /// Stream events with a newer cursor after this snapshot.
+    pub cursor: u64,
+    pub machines: Vec<Machine>,
+    pub entities: Vec<Mirrored>,
+}
+
+/// One SSE event on `GET /v1/code/agents/{owner}/events`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamEvent {
+    /// A record changed (SSE `id:` is its cursor).
+    Entity(Box<Mirrored>),
+    /// A machine was added, renamed, connected or disconnected (SSE `id:` is its cursor).
+    Machine { cursor: u64, machine: Machine },
+    /// A machine was revoked.
+    MachineRemoved { cursor: u64, machine: MachineId },
+    /// Ephemeral (no SSE `id:`).
+    Delta { machine: MachineId, delta: Delta },
+    /// The owner's canvas was saved (SSE `id:` is its cursor): a device showing an older
+    /// `revision` loads it again (`GET /v1/code/agents/{owner}/canvas`).
+    Canvas { cursor: u64, revision: u64, updated_at: Millis },
+    /// The owner's agents settings were saved (SSE `id:` is its cursor): a device showing an
+    /// older `revision` loads them again (`GET /v1/code/agents/{owner}/settings`).
+    Settings { cursor: u64, revision: u64, updated_at: Millis },
+    /// An automation was made or changed (SSE `id:` is its cursor).
+    Automation { cursor: u64, automation: Box<automation::Automation> },
+    /// An automation was deleted.
+    AutomationRemoved { cursor: u64, automation: AutomationId },
+    /// An automation run was made or moved on (SSE `id:` is its cursor).
+    AutomationRun { cursor: u64, run: Box<automation::AutomationRun> },
+    /// A `notify` step's notice: ephemeral (no SSE `id:`), for a toast.
+    Notice { notice: automation::Notice },
+}
+
+/// `POST /v1/code/agents/{owner}/machines/{machine}/commands`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommandRequest {
+    /// The idempotency key: retrying with the same id never runs the command twice.
+    pub id: String,
+    pub command: Command,
+}
+
+/// `POST /v1/code/agents/login`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLogin {
+    pub device_code: String,
+    /// What the user confirms in the dashboard (`ABCD-EFGH`).
+    pub user_code: String,
+    /// Where to approve it, with the code filled in.
+    pub verification_uri: String,
+    /// Seconds between polls.
+    pub interval: u32,
+    /// Seconds until the codes expire.
+    pub expires_in: u32,
+}
+
+/// `POST /v1/code/agents/login/poll`: `pending` until approved, then the token, once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LoginPoll {
+    Pending,
+    Approved { token: String, machine: MachineId, owner: String },
+    Expired,
+    Denied,
+}
+
+/// `GET /v1/code/agents/{owner}/login/{user_code}`: a device login waiting for approval, so the
+/// dashboard can say which machine asks before anyone approves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLogin {
+    pub user_code: String,
+    /// The name it asked for (`roll agent login --name`, or its hostname).
+    pub name: String,
+    /// What `roll agent login` said about the machine, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// `std::env::consts::OS` of the CLI (`macos`, `linux`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    pub created_at: Millis,
+    pub expires_at: Millis,
+}
+
+/// `GET /v1/code/agents/connect` without a WebSocket upgrade: the machine a token opens
+/// (`roll agent login --machine-token`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MachineLogin {
+    pub machine: Machine,
+    pub owner: String,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shares
+// ---------------------------------------------------------------------------------------------
+
+/// A read-only copy of a thread (and, with `subtree`, the subagent threads it delegated to) for a
+/// public link (`/agents/s/<id>`). Frozen when it was made: later work doesn't show. Terminals,
+/// attachments' bytes and home directories (`~`) are left out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Share {
+    /// `shr_…`.
+    pub id: String,
+    pub owner: String,
+    pub title: String,
+    /// The shared thread (the root of the copy).
+    pub thread: ThreadId,
+    pub subtree: bool,
+    pub machine: SharedMachine,
+    pub created_at: Millis,
+    /// The project, threads, runs, nodes, requests and checkpoints, as they were.
+    pub entities: Vec<Entity>,
+    /// Tool outputs and large diffs were shortened to fit.
+    #[serde(default)]
+    pub trimmed: bool,
+}
+
+/// What a share says about the machine its thread ran on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedMachine {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+}
+
+/// A share as its owner lists it (`GET /v1/code/agents/{owner}/shares`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareSummary {
+    pub id: String,
+    pub title: String,
+    pub thread: ThreadId,
+    pub subtree: bool,
+    /// The public page.
+    pub url: String,
+    /// Threads and runs in the copy.
+    pub threads: u32,
+    pub runs: u32,
+    /// Size of the copy (JSON).
+    pub bytes: u64,
+    pub created_at: Millis,
+    /// Who made it (the owner's name or `admin`).
+    pub created_by: String,
+}

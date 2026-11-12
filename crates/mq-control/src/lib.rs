@@ -18,7 +18,9 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use usage::Meter;
 
-/// Addresses clients use, shown in the dashboard and written into connection strings.
+/// Addresses clients use, shown in the dashboard and written into connection strings. A host
+/// may name [`VHOST`], which stands for the vhost's [`host_label`] (behind roll cloud's edge every
+/// vhost has its own hostname: `<label>.mq.<region>.<domain>`).
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Endpoints {
     pub amqp: Option<String>,
@@ -28,6 +30,40 @@ pub struct Endpoints {
     pub stream: Option<String>,
     pub http: Option<String>,
     pub management: Option<String>,
+}
+
+/// Where an [`Endpoints`] host names the vhost.
+pub const VHOST: &str = "{vhost}";
+
+impl Endpoints {
+    /// The addresses for clients of `vhost`.
+    pub fn for_vhost(&self, vhost: &str) -> Endpoints {
+        let label = host_label(vhost);
+        let f = |e: &Option<String>| e.as_ref().map(|e| e.replace(VHOST, &label));
+        Endpoints { amqp: f(&self.amqp), amqps: f(&self.amqps), mqtt: f(&self.mqtt), stomp: f(&self.stomp), stream: f(&self.stream), http: f(&self.http), management: f(&self.management) }
+    }
+}
+
+/// The DNS label a vhost's hostname starts with (`<label>.mq.<region>.<domain>`): the name
+/// itself when it is a label already (lowercase letters, digits and inner hyphens, at most 63),
+/// `default` for `/`, else the name lowercased with every run of other characters made one
+/// hyphen. The label only names the hostname: every node serves every vhost, and the vhost a
+/// connection opens (AMQP's `open`, MQTT's `vhost:user`, STOMP's `host`, the stream protocol's
+/// `Open`) is the one in its connection string.
+pub fn host_label(vhost: &str) -> String {
+    let mut out = String::with_capacity(vhost.len());
+    for c in vhost.chars() {
+        match c.to_ascii_lowercase() {
+            c @ ('a'..='z' | '0'..='9') => out.push(c),
+            _ if !out.ends_with('-') => out.push('-'),
+            _ => {}
+        }
+    }
+    let label: String = out.trim_matches('-').chars().take(63).collect();
+    match label.trim_end_matches('-') {
+        "" => "default".to_string(),
+        l => l.to_string(),
+    }
 }
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;

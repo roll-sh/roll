@@ -1,0 +1,24 @@
+[
+  {
+    "matched": false,
+    "trigger": true,
+    "filters": [
+      true,
+      false
+    ],
+    "steps": [
+      {
+        "id": "start",
+        "runs": true,
+        "config": {
+          "prompt": "Fix acme/app"
+        }
+      },
+      {
+        "id": "comment",
+        "runs": false,
+        "error": "no step kind linear.comment"
+      }
+    ]
+  }
+]

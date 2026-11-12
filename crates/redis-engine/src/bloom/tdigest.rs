@@ -1,6 +1,9 @@
 //! t-digests (the `t-digest-c` histogram RedisBloom links): centroids (mean, weight) buffered
 //! unmerged and merged by compression, with quantile/CDF/rank estimates.
 
+// `q < 0.0 || q > 1.0` lets NaN through on purpose; `RangeInclusive::contains` would not.
+#![allow(clippy::manual_range_contains)]
+
 use super::sb::MAX_ALLOC;
 
 use std::f64::consts::PI;
@@ -453,6 +456,8 @@ impl TDigest {
     }
 
     /// `td_quantile`.
+    // NaN passes these bound checks, as in RedisBloom; `!(0.0..=1.0).contains(&q)` would reject it.
+    #[allow(clippy::manual_range_contains)]
     pub fn quantile(&mut self, q: f64) -> f64 {
         let _ = self.compress();
         if q < 0.0 || q > 1.0 || self.merged_nodes == 0 {
@@ -472,6 +477,8 @@ impl TDigest {
     }
 
     /// `td_quantiles` over an ascending run of quantiles.
+    // NaN passes these bound checks, as in RedisBloom; `!(0.0..=1.0).contains(&q)` would reject it.
+    #[allow(clippy::manual_range_contains)]
     pub fn quantiles(&mut self, qs: &[f64]) -> Vec<f64> {
         let _ = self.compress();
         let n = self.merged_nodes;
@@ -509,6 +516,8 @@ impl TDigest {
     }
 
     /// `td_trimmed_mean`.
+    // NaN passes these bound checks, as in RedisBloom; `!(0.0..=1.0).contains(&q)` would reject it.
+    #[allow(clippy::manual_range_contains)]
     pub fn trimmed_mean(&mut self, low: f64, high: f64) -> f64 {
         let _ = self.compress();
         if self.merged_nodes == 0 || low < 0.0 || low > 1.0 || high < 0.0 || high > 1.0 {

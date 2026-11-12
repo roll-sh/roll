@@ -1,0 +1,3 @@
+/tmp/roll-cqlsh-golden/shell.cql:49:*** No help on nope
+/tmp/roll-cqlsh-golden/shell.cql:55:Already capturing output to /tmp/roll-cqlsh-golden/capture.txt. Use CAPTURE OFF to disable.
+/tmp/roll-cqlsh-golden/sourced.cql:3:InvalidRequest: Error from server: code=2200 [Invalid query] message="Undefined column name nope in table cli_g_shell.t"

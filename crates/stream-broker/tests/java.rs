@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn image() -> String {
-    std::env::var("ROLL_E2E_KAFKA_IMAGE").unwrap_or_else(|_| "apache/kafka:4.1.0".into())
+    std::env::var("ROLL_E2E_KAFKA_IMAGE").unwrap_or_else(|_| "apache/kafka:4.1.0@sha256:bff074a5d0051dbc0bbbcd25b045bb1fe84833ec0d3c7c965d1797dd289ec88f".into())
 }
 
 macro_rules! e2e {

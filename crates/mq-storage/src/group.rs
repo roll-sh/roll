@@ -217,7 +217,14 @@ pub(crate) struct Group {
     st: Mutex<GState>,
     /// Bytes staged by all logs of the store.
     pub staged: AtomicUsize,
+    /// Deletes of spent stream objects in flight at most: a log that flushes thousands of
+    /// staged entries spends thousands of objects at once, and a connection each would run the
+    /// node out of file descriptors (the fleet test saw 2,400 sockets at a drain).
+    deletes: Arc<tokio::sync::Semaphore>,
 }
+
+/// How many spent stream objects are deleted at a time.
+const DELETES_IN_FLIGHT: usize = 32;
 
 impl Group {
     pub fn new(cfg: GroupConfig, store: Arc<dyn ObjectStore>, root: Path, requests: Arc<Requests>) -> Arc<Group> {
@@ -229,6 +236,7 @@ impl Group {
             requests,
             st: Mutex::new(GState { id, next_seq: 0, pending: VecDeque::new(), running: false, refs: HashMap::new(), idle_latest: None }),
             staged: AtomicUsize::new(0),
+            deletes: Arc::new(tokio::sync::Semaphore::new(DELETES_IN_FLIGHT)),
         })
     }
 
@@ -283,6 +291,7 @@ impl Group {
     fn delete(self: &Arc<Self>, stream: u64, seq: u64) {
         let me = self.clone();
         tokio::spawn(async move {
+            let Ok(_permit) = me.deletes.clone().acquire_owned().await else { return };
             me.requests.delete();
             if let Err(e) = me.store.delete(&object_path(&me.root, stream, seq)).await
                 && !matches!(e, object_store::Error::NotFound { .. })

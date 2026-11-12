@@ -1,8 +1,6 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ChevronRight, GitBranch, Moon, Plus } from "lucide-react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import { useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
 import { formatCount, formatDuration, NAME_HINT, NAME_RE, searchApi, type SearchCluster, type SearchInfo, type SearchSettings } from "@/lib/search-api";

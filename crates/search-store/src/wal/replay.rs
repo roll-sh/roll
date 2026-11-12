@@ -192,7 +192,7 @@ async fn fetch_view(objects: &pg_storage::Objects, key: &str, seq: u64, cache: &
     } else {
         // A directory bigger than the tail read (a file with very many shards).
         cache.fetches.fetch_add(1, Relaxed);
-        let (dir, now) = objects.get_range(key, t.dir_offset..size - TRAILER as u64).await?.ok_or_else(|| missing(key))?;
+        let (dir, now) = objects.get_range_sized(key, t.dir_offset..size - TRAILER as u64).await?.ok_or_else(|| missing(key))?;
         anyhow::ensure!(now == size, "WAL object {key} changed size while being read");
         cache.fetched_bytes.fetch_add(dir.len() as u64, Relaxed);
         dir
@@ -224,7 +224,7 @@ async fn load_object(view: Arc<ObjectView>, objects: &pg_storage::Objects, key: 
         None => {
             anyhow::ensure!(e.len > 0, "WAL object {key} has an empty block");
             cache.block_fetches.fetch_add(1, Relaxed);
-            let (block, now) = objects.get_range(key, e.offset..e.offset + e.len as u64).await?.ok_or_else(|| missing(key))?;
+            let (block, now) = objects.get_range_sized(key, e.offset..e.offset + e.len as u64).await?.ok_or_else(|| missing(key))?;
             anyhow::ensure!(now == view.size, "WAL object {key} changed size while being read");
             cache.fetched_bytes.fetch_add(block.len() as u64, Relaxed);
             if e.len < INLINE_INFLATE {

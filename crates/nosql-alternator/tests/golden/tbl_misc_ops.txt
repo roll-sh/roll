@@ -1,0 +1,101 @@
+# DescribeContinuousBackups
+> DescribeContinuousBackups {"TableName":"alt_tbl_mo_missing"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#TableNotFoundException","message":"Table alt_tbl_mo_missing not found"}
+> DescribeContinuousBackups {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> DescribeContinuousBackups {"TableName":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> DescribeContinuousBackups {"TableName":"ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> DescribeContinuousBackups {"TableName":"a@b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> CreateTable {"TableName":"alt_tbl_mo","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_mo","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeContinuousBackups {"TableName":"alt_tbl_mo"}
+< 200 {"ContinuousBackupsDescription":{"ContinuousBackupsStatus":"DISABLED","PointInTimeRecoveryDescription":{"PointInTimeRecoveryStatus":"DISABLED"}}}
+> DescribeContinuousBackups {"TableName":"alt_tbl_mo","Foo":1}
+< 200 {"ContinuousBackupsDescription":{"ContinuousBackupsStatus":"DISABLED","PointInTimeRecoveryDescription":{"PointInTimeRecoveryStatus":"DISABLED"}}}
+# operations Alternator does not implement
+> UpdateContinuousBackups {"TableName":"alt_tbl_mo","PointInTimeRecoverySpecification":{"PointInTimeRecoveryEnabled":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation UpdateContinuousBackups"}
+> CreateBackup {"TableName":"alt_tbl_mo","BackupName":"b1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation CreateBackup"}
+> ListBackups {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListBackups"}
+> DescribeBackup {"BackupArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeBackup"}
+> DeleteBackup {"BackupArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DeleteBackup"}
+> RestoreTableFromBackup {"TargetTableName":"alt_tbl_mo2","BackupArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation RestoreTableFromBackup"}
+> RestoreTableToPointInTime {"SourceTableName":"alt_tbl_mo","TargetTableName":"alt_tbl_mo2"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation RestoreTableToPointInTime"}
+> DescribeLimits {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeLimits"}
+> CreateGlobalTable {"GlobalTableName":"alt_tbl_mo","ReplicationGroup":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation CreateGlobalTable"}
+> DescribeGlobalTable {"GlobalTableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeGlobalTable"}
+> ListGlobalTables {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListGlobalTables"}
+> UpdateGlobalTable {"GlobalTableName":"alt_tbl_mo","ReplicaUpdates":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation UpdateGlobalTable"}
+> DescribeGlobalTableSettings {"GlobalTableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeGlobalTableSettings"}
+> UpdateGlobalTableSettings {"GlobalTableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation UpdateGlobalTableSettings"}
+> ExecuteStatement {"Statement":"SELECT * FROM alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ExecuteStatement"}
+> BatchExecuteStatement {"Statements":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation BatchExecuteStatement"}
+> ExecuteTransaction {"TransactStatements":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ExecuteTransaction"}
+> DescribeKinesisStreamingDestination {"TableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeKinesisStreamingDestination"}
+> EnableKinesisStreamingDestination {"TableName":"alt_tbl_mo","StreamArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation EnableKinesisStreamingDestination"}
+> DisableKinesisStreamingDestination {"TableName":"alt_tbl_mo","StreamArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DisableKinesisStreamingDestination"}
+> UpdateKinesisStreamingDestination {"TableName":"alt_tbl_mo","StreamArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation UpdateKinesisStreamingDestination"}
+> DescribeContributorInsights {"TableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeContributorInsights"}
+> UpdateContributorInsights {"TableName":"alt_tbl_mo","ContributorInsightsAction":"ENABLE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation UpdateContributorInsights"}
+> ListContributorInsights {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListContributorInsights"}
+> DescribeTableReplicaAutoScaling {"TableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeTableReplicaAutoScaling"}
+> UpdateTableReplicaAutoScaling {"TableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation UpdateTableReplicaAutoScaling"}
+> ImportTable {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ImportTable"}
+> DescribeImport {"ImportArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeImport"}
+> ListImports {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListImports"}
+> ExportTableToPointInTime {"TableArn":"x","S3Bucket":"b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ExportTableToPointInTime"}
+> DescribeExport {"ExportArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeExport"}
+> ListExports {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListExports"}
+> GetResourcePolicy {"ResourceArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation GetResourcePolicy"}
+> PutResourcePolicy {"ResourceArn":"x","Policy":"{}"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation PutResourcePolicy"}
+> DeleteResourcePolicy {"ResourceArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DeleteResourcePolicy"}
+> Foo {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation Foo"}
+> describeTable {"TableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation describeTable"}
+> DESCRIBETABLE {"TableName":"alt_tbl_mo"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DESCRIBETABLE"}
+# unsupported operations do not parse the body
+> CreateBackup not json
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation CreateBackup"}
+> Foo [1]
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation Foo"}
+> DeleteTable {"TableName":"alt_tbl_mo"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_mo","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_mo:scylla:table/alt_tbl_mo","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

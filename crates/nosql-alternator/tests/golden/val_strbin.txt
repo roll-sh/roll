@@ -1,0 +1,337 @@
+# Strings and binary values: empty values, key restrictions, base64 rules, unicode and JSON escapes.
+> CreateTable {"TableName":"alt_val_sb_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_sb_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_sb_b","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_b","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_sb_bh","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_bh","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# Empty string, empty binary and sets holding them are allowed as non-key attributes
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"e"},"s":{"S":""},"b":{"B":""},"ss":{"SS":[""]},"bs":{"BS":[""]},"m":{"M":{"x":{"S":""},"y":{"B":""}}},"l":{"L":[{"S":""}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"e"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"e"},"b":{"B":""},"bs":{"BS":[""]},"l":{"L":[{"S":""}]},"m":{"M":{"x":{"S":""},"y":{"B":""}}},"s":{"S":""},"ss":{"SS":[""]}}}
+> UpdateItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"e"}},"UpdateExpression":"SET s2 = :e, b2 = :b","ExpressionAttributeValues":{":e":{"S":""},":b":{"B":""}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"b2":{"B":""},"s2":{"S":""}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"e"}},"ConditionExpression":"s = :e AND b = :b","ExpressionAttributeValues":{":e":{"S":""},":b":{"B":""}}}
+< 200 {}
+# Empty string / binary as a key: same message for hash and range, S and B, in every operation
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"a"},"c":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":""},"c":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"c":{"S":""},"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":""},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"AA=="},"c":{"B":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> PutItem {"TableName":"alt_val_sb_bh","Item":{"p":{"B":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> GetItem {"TableName":"alt_val_sb_ss","Key":{"p":{"S":"a"},"c":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> GetItem {"TableName":"alt_val_sb_b","Key":{"p":{"B":""},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> DeleteItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> DeleteItem {"TableName":"alt_val_sb_b","Key":{"p":{"B":"AA=="},"c":{"B":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> UpdateItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> UpdateItem {"TableName":"alt_val_sb_ss","Key":{"p":{"S":"a"},"c":{"S":""}},"UpdateExpression":"SET x = :v","ExpressionAttributeValues":{":v":{"S":"y"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> Query {"TableName":"alt_val_sb_s","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> Query {"TableName":"alt_val_sb_ss","KeyConditionExpression":"p = :p AND c = :c","ExpressionAttributeValues":{":p":{"S":"a"},":c":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> Query {"TableName":"alt_val_sb_ss","KeyConditionExpression":"p = :p AND c > :c","ExpressionAttributeValues":{":p":{"S":"a"},":c":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> Query {"TableName":"alt_val_sb_ss","KeyConditionExpression":"p = :p AND begins_with(c, :c)","ExpressionAttributeValues":{":p":{"S":"a"},":c":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> Query {"TableName":"alt_val_sb_b","KeyConditionExpression":"p = :p AND c >= :c","ExpressionAttributeValues":{":p":{"B":"AA=="},":c":{"B":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+# Setting a key attribute to an empty value through UpdateItem
+> UpdateItem {"TableName":"alt_val_sb_ss","Key":{"p":{"S":"a"},"c":{"S":"b"}},"UpdateExpression":"SET c = :v","ExpressionAttributeValues":{":v":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update key column c"}
+# Base64: padding is required, length must be a multiple of 4, standard alphabet only, no whitespace; non-zero trailing bits are accepted and dropped
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b0"},"a":{"B":"AA=="}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b0"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"AA=="}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b1"},"a":{"B":"AAA="}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b1"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"AAA="}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b2"},"a":{"B":"AAAA"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b2"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"AAAA"}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b3"},"a":{"B":"AB=="}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b3"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"AA=="}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b4"},"a":{"B":"AAB="}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b4"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"AAA="}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b5"},"a":{"B":"+/8="}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b5"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"+/8="}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b6"},"a":{"B":"QUJD"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b6"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"QUJD"}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b7"},"a":{"B":"QUI="}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b7"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"B":"QUI="}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b8"},"a":{"B":"AA="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b8"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b9"},"a":{"B":"AA"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b9"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b10"},"a":{"B":"A"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b10"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b11"},"a":{"B":"AAA"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b11"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b12"},"a":{"B":"A==="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b12"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b13"},"a":{"B":"===="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b13"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b14"},"a":{"B":"="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b14"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b15"},"a":{"B":"AA==AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b15"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b16"},"a":{"B":"AA==A"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b16"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b17"},"a":{"B":"A A="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b17"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b18"},"a":{"B":"AA==\n"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b18"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b19"},"a":{"B":" AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b19"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b20"},"a":{"B":"AA== "}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b20"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b21"},"a":{"B":"-_8="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b21"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b22"},"a":{"B":"AA=A"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b22"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b23"},"a":{"B":"QUJ"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b23"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b24"},"a":{"B":"QUJDRA"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b24"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b25"},"a":{"B":"éAA="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b25"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"b26"},"a":{"B":"AA\u0000="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"b26"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+# Base64 in key attributes: invalid data and non-canonical trailing bits
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"AB=="},"c":{"B":"AAB="},"x":{"S":"noncanon"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_b","Key":{"p":{"B":"AA=="},"c":{"B":"AAA="}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"B":"AA=="},"c":{"B":"AAA="},"x":{"S":"noncanon"}}}
+> GetItem {"TableName":"alt_val_sb_b","Key":{"p":{"B":"AB=="},"c":{"B":"AAB="}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"B":"AA=="},"c":{"B":"AAA="},"x":{"S":"noncanon"}}}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"!!"},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"AA=="},"c":{"B":"AA"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> GetItem {"TableName":"alt_val_sb_b","Key":{"p":{"B":"AA="},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> Query {"TableName":"alt_val_sb_b","KeyConditionExpression":"p = :p AND c > :c","ExpressionAttributeValues":{":p":{"B":"AA=="},":c":{"B":"A"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":1},"c":{"B":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"B\":1}"}
+# Base64 inside BS and nested values is not decoded or checked
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bs"},"bs":{"BS":["AB==","!","A"]},"m":{"M":{"x":{"B":"not base64"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"bs"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"bs"},"bs":{"BS":["AB==","!","A"]},"m":{"M":{"x":{"B":"not base64"}}}}}
+# B key order is by unsigned bytes
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"Ag=="},"c":{"B":"AA=="}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"Ag=="},"c":{"B":"/w=="}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"Ag=="},"c":{"B":"fw=="}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"Ag=="},"c":{"B":"gA=="}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"Ag=="},"c":{"B":"AAA="}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_b","Item":{"p":{"B":"Ag=="},"c":{"B":"AQ=="}}}
+< 200 {}
+> Query {"TableName":"alt_val_sb_b","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"B":"Ag=="}},"ConsistentRead":true}
+< 200 {"Count":6,"ScannedCount":6,"Items":[{"p":{"B":"Ag=="},"c":{"B":"AA=="}},{"p":{"B":"Ag=="},"c":{"B":"AAA="}},{"p":{"B":"Ag=="},"c":{"B":"AQ=="}},{"p":{"B":"Ag=="},"c":{"B":"fw=="}},{"p":{"B":"Ag=="},"c":{"B":"gA=="}},{"p":{"B":"Ag=="},"c":{"B":"/w=="}}]}
+# Non-ASCII strings: \u escapes, surrogate pairs, raw UTF-8, control characters via escapes, escaped slash
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u0"},"a":{"S":"\u00e9"},"m":{"M":{"k":{"S":"\u00e9"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u0"},"a":{"S":"é"},"m":{"M":{"k":{"S":"é"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u1"},"a":{"S":"\ud83d\ude00"},"m":{"M":{"k":{"S":"\ud83d\ude00"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u1"},"a":{"S":"😀"},"m":{"M":{"k":{"S":"😀"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u2"},"a":{"S":"\uD83D\uDE00"},"m":{"M":{"k":{"S":"\uD83D\uDE00"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u2"},"a":{"S":"😀"},"m":{"M":{"k":{"S":"😀"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u3"},"a":{"S":"é😀"},"m":{"M":{"k":{"S":"é😀"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u3"},"a":{"S":"é😀"},"m":{"M":{"k":{"S":"é😀"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u4"},"a":{"S":"\u0000"},"m":{"M":{"k":{"S":"\u0000"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u4"},"a":{"S":"\u0000"},"m":{"M":{"k":{"S":"\u0000"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u5"},"a":{"S":"a\u0000b"},"m":{"M":{"k":{"S":"a\u0000b"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u5"},"a":{"S":"a\u0000b"},"m":{"M":{"k":{"S":"a\u0000b"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u6"},"a":{"S":"\n\t\r\b\f\"\\\/"},"m":{"M":{"k":{"S":"\n\t\r\b\f\"\\\/"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u6"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u6"},"a":{"S":"\n\t\r\b\f\"\\/"},"m":{"M":{"k":{"S":"\n\t\r\b\f\"\\/"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u7"},"a":{"S":"\u001f"},"m":{"M":{"k":{"S":"\u001f"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u7"},"a":{"S":"\u001f"},"m":{"M":{"k":{"S":"\u001f"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u8"},"a":{"S":"\u007f"},"m":{"M":{"k":{"S":"\u007f"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u8"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u8"},"a":{"S":""},"m":{"M":{"k":{"S":""}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u9"},"a":{"S":"\uffff"},"m":{"M":{"k":{"S":"\uffff"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u9"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u9"},"a":{"S":"￿"},"m":{"M":{"k":{"S":"￿"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u10"},"a":{"S":"\ufeff"},"m":{"M":{"k":{"S":"\ufeff"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u10"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u10"},"a":{"S":"﻿"},"m":{"M":{"k":{"S":"﻿"}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u11"},"a":{"S":"\u2028"},"m":{"M":{"k":{"S":"\u2028"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u11"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u11"},"a":{"S":" "},"m":{"M":{"k":{"S":" "}}}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"u12"},"a":{"S":"\uDBFF\uDFFF"},"m":{"M":{"k":{"S":"\uDBFF\uDFFF"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"u12"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u12"},"a":{"S":"􏿿"},"m":{"M":{"k":{"S":"􏿿"}}}}}
+# Unicode in key values and attribute names; S range key order is by UTF-8 bytes
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"\u00e9\ud83d\ude00"},"\u00e9":{"S":"x"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"é😀"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"é😀"},"é":{"S":"x"}}}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"a"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"B"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"é"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"😀"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"￿"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"z"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":""}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"Z"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_ss","Item":{"p":{"S":"ord"},"c":{"S":"0"}}}
+< 200 {}
+> Query {"TableName":"alt_val_sb_ss","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"ord"}},"ConsistentRead":true}
+< 200 {"Count":9,"ScannedCount":9,"Items":[{"p":{"S":"ord"},"c":{"S":"0"}},{"p":{"S":"ord"},"c":{"S":"B"}},{"p":{"S":"ord"},"c":{"S":"Z"}},{"p":{"S":"ord"},"c":{"S":"a"}},{"p":{"S":"ord"},"c":{"S":"z"}},{"p":{"S":"ord"},"c":{"S":""}},{"p":{"S":"ord"},"c":{"S":"é"}},{"p":{"S":"ord"},"c":{"S":"￿"}},{"p":{"S":"ord"},"c":{"S":"😀"}}]}
+# Invalid escapes and lone surrogates are JSON parse errors (offset points at the backslash of the bad escape, or at the raw control character)
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\ud800"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The surrogate pair in string is invalid. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\udc00"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The surrogate pair in string is invalid. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\ud800\u0041"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The surrogate pair in string is invalid. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\ude00\ud83d"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The surrogate pair in string is invalid. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\x41"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid escape character in string. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\u12"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Incorrect hex digit after \\u escape in string. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\uZZZZ"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Incorrect hex digit after \\u escape in string. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"\U00e9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid escape character in string. at 62"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"a	b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid encoding in string. at 63"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"abc\x41"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid escape character in string. at 65"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"abc\ud800"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The surrogate pair in string is invalid. at 65"}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"bad"},"a":{"S":"abc\u00e9\ud800x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The surrogate pair in string is invalid. at 71"}
+# Strings are not compared by normalisation: precomposed and decomposed forms are different keys
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"é"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"é"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"é"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"é"}}}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"é"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"é"}}}
+# Large string and binary attribute values: no 400 KB item limit is enforced (only the 16 MB request limit)
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"big"},"a":{"S":"$repeat(x,409600)"},"b":{"B":"$repeat(AAAA,40000)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"big"}},"ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big"}}}
+> PutItem {"TableName":"alt_val_sb_s","Item":{"p":{"S":"big2"},"a":{"S":"$repeat(x,600000)"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"big2"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"$repeat(y,500000)"}},"ReturnValues":"NONE"}
+< 200 {}
+> GetItem {"TableName":"alt_val_sb_s","Key":{"p":{"S":"big2"}},"ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big2"}}}
+> DeleteTable {"TableName":"alt_val_sb_s"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_sb_s:scylla:table/alt_val_sb_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_sb_ss"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_sb_ss:scylla:table/alt_val_sb_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_sb_b"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_b","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_sb_b:scylla:table/alt_val_sb_b","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_sb_bh"}
+< 200 {"TableDescription":{"TableName":"alt_val_sb_bh","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_sb_bh:scylla:table/alt_val_sb_bh","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

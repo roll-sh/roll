@@ -1,0 +1,152 @@
+name: storage
+
+# Extended validation, run manually when needed.
+on:
+  workflow_dispatch:
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
+  workflow_call:
+
+concurrency:
+  group: storage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+  # Images pinned by digest (tag@multi-arch index digest), the same refs the scripts and tests use.
+  AWS_CLI_IMAGE: amazon/aws-cli:2.39.6@sha256:eccdb3ec77e159d43ca6a750a70738c546883138be7f094498294a1477ec7e42
+  RCLONE_IMAGE: rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+  MC_IMAGE: bitnamilegacy/minio-client:2025.5.21@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511
+  LOCALSTACK_IMAGE: localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+  NODE_IMAGE: node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
+  SEAWEEDFS_IMAGE: chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: scripts/test-storage.sh --force --unit
+
+  tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: |
+          docker pull -q "$AWS_CLI_IMAGE"
+          docker pull -q "$RCLONE_IMAGE"
+          docker pull -q "$MC_IMAGE"
+      - name: Real S3 tools (aws cli, rclone, mc) against roll storage
+        run: ROLL_COMPAT_REQUIRED=1 cargo test -p s3-server --test tools
+
+  aws:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: docker pull -q "$LOCALSTACK_IMAGE"
+      - name: SSE-KMS, notifications, replication and Object Lambda against LocalStack
+        run: scripts/test-storage-aws.sh --force
+
+  cdn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @roll/cdn-worker...
+      - run: docker pull -q "$NODE_IMAGE"
+      - name: The CDN Worker in workerd (Miniflare) against roll, purges to a mock Cloudflare API
+        run: scripts/test-storage-cdn.sh --force
+
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: ceph/s3-tests against roll storage (compared with tests/s3-conformance/expected.txt)
+        run: scripts/test-s3-conformance.sh --force
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-conformance
+          path: target/s3-conformance/
+          if-no-files-found: ignore
+
+  conformance-localstack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: docker pull -q "$LOCALSTACK_IMAGE"
+      - name: ceph/s3-tests against roll storage on LocalStack S3 and KMS (SSE-KMS, SSE-S3 at rest)
+        run: scripts/test-s3-conformance.sh --force --backend localstack
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-conformance-localstack
+          path: target/s3-conformance-localstack/
+          if-no-files-found: ignore
+
+  s3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: roll
+      AWS_SECRET_ACCESS_KEY: roll
+      AWS_REGION: us-east-1
+      ROLL_E2E_S3_BUCKET: roll-e2e
+      ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: S3 object store (SeaweedFS)
+        run: |
+          # Current SeaweedFS images refuse signed requests without configured identities.
+          mkdir -p /tmp/seaweed
+          echo '{"identities":[{"name":"roll","credentials":[{"accessKey":"roll","secretKey":"roll"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > /tmp/seaweed/s3.json
+          docker run -d --name seaweed -p 8333:8333 -v /tmp/seaweed:/etc/seaweed "$SEAWEEDFS_IMAGE" server -s3 -s3.config=/etc/seaweed/s3.json
+          for _ in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
+          docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
+      - name: Metadata log, blobs and the S3 API on S3
+        run: |
+          cargo test -p s3-store --tests
+          cargo test -p s3-server --tests

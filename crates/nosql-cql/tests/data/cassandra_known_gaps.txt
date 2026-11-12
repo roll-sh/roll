@@ -1,0 +1,5 @@
+# Statements of cassandra_reference.tsv whose error differs from the reference (see the crate
+# docs for why). The test fails if one starts matching: remove it from here then.
+GRANT EXECUTE ON FUNCTION ks . f ( int , text ) ) r
+GRANT EXECUTE ON FUNCTION ks.f(int, text) TO r
+GRANT EXECUTE ON FUNCTION x . f ( int , text ) TO r
