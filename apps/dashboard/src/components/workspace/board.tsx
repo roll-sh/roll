@@ -23,12 +23,15 @@ const DOT: Record<string, string> = {
  */
 export function Board({
   cards,
+  shift = 0,
   selected,
   onSelect,
   onMove,
   children,
 }: {
   cards: Card[];
+  /** Move the cards right by this much (a panel open on the left), sliding with it. */
+  shift?: number;
   selected: string | null;
   onSelect: (key: string | null) => void;
   onMove: (card: Card, x: number, y: number) => void;
@@ -41,7 +44,10 @@ export function Board({
       className="absolute inset-0 overflow-auto bg-[radial-gradient(var(--line-3)_1px,transparent_1.3px)] [background-size:20px_20px] [scrollbar-width:thin]"
       onPointerDown={(e) => e.target === e.currentTarget && onSelect(null)}
     >
-      <div className="relative min-h-full min-w-full" style={{ width, height }} onPointerDown={(e) => e.target === e.currentTarget && onSelect(null)}>
+      <div
+        className="relative min-h-full min-w-full transition-transform duration-300 ease-drawer motion-reduce:transition-none"
+        style={{ width, height, transform: shift ? `translateX(${shift}px)` : undefined }}
+        onPointerDown={(e) => e.target === e.currentTarget && onSelect(null)}>
         {cards.map((c) => (
           <Node key={c.key} card={c} selected={selected === c.key} onSelect={() => onSelect(c.key)} onMove={(x, y) => onMove(c, x, y)} />
         ))}

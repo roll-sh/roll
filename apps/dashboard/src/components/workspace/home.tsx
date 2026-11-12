@@ -3,7 +3,9 @@ import { Link } from "@/components/link";
 import { KIND_LABEL, monthOf, projectMonth, resourceKey, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
-import { KindTile, MiniMap } from "./kind";
+import { KindTile } from "./kind";
+import { openNewProject } from "./new-project";
+import { ProjectIcon } from "./project-icon";
 
 /** `/dashboard`: every project at a glance, this month's spend, and what's in no project yet. */
 export function Home() {
@@ -28,11 +30,11 @@ export function Home() {
                 className="group rounded-xl border border-line-2 bg-sheet p-3 shadow-card inset-shadow-highlight transition-[border-color,box-shadow] duration-150 hover:border-line-3 hover:shadow-card-hover"
               >
                 <div className="flex items-center gap-2.5">
-                  <MiniMap project={p} staged={ws.staged[p.id]} size={32} />
+                  <ProjectIcon project={p} className="size-8" />
                   <div className="min-w-0 flex-1 leading-tight">
                     <div className="truncate text-[13px] font-semibold tracking-[-0.015em]">{p.name}</div>
-                    <div className="font-mono text-[10.5px] text-subtle">
-                      {p.resources.length} {p.resources.length === 1 ? "resource" : "resources"}
+                    <div className={`truncate text-subtle ${p.description ? "text-[11px]" : "font-mono text-[10.5px]"}`}>
+                      {p.description || `${p.resources.length} ${p.resources.length === 1 ? "resource" : "resources"}`}
                     </div>
                   </div>
                   <ArrowUpRight className="size-3.5 text-subtle transition-colors group-hover:text-fg" />
@@ -52,9 +54,13 @@ export function Home() {
             );
           })}
           {ws.status === "ready" && !ws.projects.length && (
-            <p className="rounded-xl border border-dashed border-line-2 p-4 text-[12.5px] text-muted">
-              No projects yet. Make one with <b className="font-medium text-fg">+</b> beside Projects in the sidebar.
-            </p>
+            <button
+              onClick={openNewProject}
+              className="rounded-xl border border-dashed border-line-2 p-4 text-left text-[12.5px] text-muted transition-colors hover:border-line-3 hover:text-fg"
+            >
+              <b className="block font-medium text-fg">Make your first project</b>
+              Pick a name and an icon, and what it starts with.
+            </button>
           )}
         </div>
       </section>

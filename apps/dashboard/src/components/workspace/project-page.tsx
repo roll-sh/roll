@@ -1,7 +1,6 @@
-import { Lock, Moon, MoreHorizontal, Plus, Search } from "lucide-react";
-import { useNavigate } from "@tanstack/react-router";
+import { Bot, Lock, Moon, Plus, Search, Settings } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { PROJECT_NAME, type ResourceKind, type WorkspaceProject } from "@/lib/workspace-api";
+import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
 import {
   CREATABLE,
   freeSpot,
@@ -19,7 +18,10 @@ import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/wor
 import { AppShell } from "../app-shell";
 import { Board, type Card } from "./board";
 import { Inspector, ResourceSheet, StagedSheet } from "./inspector";
-import { KindTile, MiniMap } from "./kind";
+import { ProjectAgents, threadsOf, useAgents } from "./agents";
+import { KindTile } from "./kind";
+import { ProjectIcon } from "./project-icon";
+import { ProjectSettings } from "./project-settings";
 
 const btn =
   "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3";
@@ -36,15 +38,21 @@ export function ProjectPage({ id }: { id: string }) {
         </div>
       </AppShell>
     );
-  return <Project ws={ws} project={project} />;
+  return <Project key={project.id} ws={ws} project={project} />;
 }
 
 function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProject }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [settings, setSettings] = useState(false);
   const staged = ws.staged[project.id] ?? [];
   const busy = staged.some((s) => s.phase === "creating");
+  const repos = useMemo(() => new Set(project.resources.filter((r) => r.kind === "repo").map((r) => r.ref)), [project.resources]);
+  const agents = useAgents();
+  const live = agents ? threadsOf(agents, repos).filter((t) => t.status !== "idle").length : 0;
+  // Open while the project has a repository its agents can work in; the toggle decides after that.
+  const [agentsOpen, setAgentsOpen] = useState(repos.size > 0);
 
   useEffect(() => setSelected(null), [project.id]);
 
@@ -84,7 +92,13 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
   return (
     <AppShell
       bleed
-      crumb={<ProjectName project={project} staged={staged} />}
+      crumb={
+        <button onClick={() => setSettings(true)} className="flex min-w-0 items-center gap-2 rounded-md py-0.5 pr-1.5 pl-0.5 transition-colors hover:bg-white/[0.05]" title="Project settings">
+          <ProjectIcon project={project} className="size-5" />
+          <span className="truncate">{project.name}</span>
+          {project.description && <span className="truncate font-normal text-subtle max-lg:hidden">{project.description}</span>}
+        </button>
+      }
       actions={
         <>
           {staged.length > 0 && (
@@ -103,16 +117,24 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
               </button>
             </span>
           )}
+          <button className={`${btn} ${agentsOpen ? "border-line-3 bg-white/[0.06]" : ""}`} onClick={() => setAgentsOpen((o) => !o)} aria-pressed={agentsOpen} title="This project's agents">
+            <Bot className="size-3.5" />
+            Agents
+            {live > 0 && <span className="pulse-dot size-1.5 rounded-full bg-accent" aria-label={`${live} working`} />}
+          </button>
           <button className={btn} onClick={() => setAdding((a) => !a)} aria-expanded={adding}>
             <Plus className="size-3.5" />
             Add
           </button>
-          <ProjectMenu project={project} />
+          <button onClick={() => setSettings(true)} aria-label="Project settings" title="Project settings" className="grid size-7 place-items-center rounded-md text-muted hover:bg-white/[0.05] hover:text-fg">
+            <Settings className="size-4" />
+          </button>
         </>
       }
     >
       <div className="absolute inset-x-0 top-0 bottom-7">
         <Board
+          shift={agentsOpen ? 272 : 0}
           cards={cards}
           selected={selected}
           onSelect={(k) => {
@@ -125,6 +147,7 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
           }}
         />
         {cards.length === 0 && ws.status === "ready" && <Empty name={project.name} kinds={CREATABLE.filter((k) => ws.kinds.has(k))} onPick={stage} />}
+        <ProjectAgents open={agentsOpen} repos={repos} onClose={() => setAgentsOpen(false)} />
         <AddMenu open={adding} ws={ws} onClose={() => setAdding(false)} onNew={stage} onAttach={attach} />
         {error && (
           <button
@@ -179,91 +202,8 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
           {usd(spend.usd)} this month · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}
         </span>
       </footer>
+      <ProjectSettings project={project} open={settings} onClose={() => setSettings(false)} />
     </AppShell>
-  );
-}
-
-/** The project's name in the top bar; click to rename. */
-function ProjectName({ project, staged }: { project: WorkspaceProject; staged: { x: number; y: number }[] }) {
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(project.name);
-  const [bad, setBad] = useState(false);
-  useEffect(() => setName(project.name), [project.name]);
-  const save = () => {
-    setEditing(false);
-    const n = name.trim();
-    if (n === project.name) return;
-    if (!PROJECT_NAME.test(n)) return setName(project.name);
-    workspace.rename(project.id, n).catch(() => {
-      setName(project.name);
-      setBad(true);
-      setTimeout(() => setBad(false), 1200);
-    });
-  };
-  return (
-    <span className="flex items-center gap-2">
-      <MiniMap project={project} staged={staged} size={20} />
-      {editing ? (
-        <input
-          autoFocus
-          value={name}
-          onChange={(e) => setName(e.target.value.toLowerCase())}
-          onBlur={save}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") save();
-            if (e.key === "Escape") {
-              setName(project.name);
-              setEditing(false);
-            }
-          }}
-          className="w-44 rounded border border-line-2 bg-raised px-1.5 py-0.5 font-medium outline-none"
-        />
-      ) : (
-        <button onClick={() => setEditing(true)} title="Rename" className={`rounded px-1 py-0.5 hover:bg-white/[0.05] ${bad ? "text-danger" : ""}`}>
-          {project.name}
-        </button>
-      )}
-    </span>
-  );
-}
-
-function ProjectMenu({ project }: { project: WorkspaceProject }) {
-  const [open, setOpen] = useState<{ top: number; right: number } | null>(null);
-  const [confirm, setConfirm] = useState(false);
-  const navigate = useNavigate();
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const off = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && (setOpen(null), setConfirm(false));
-    window.addEventListener("mousedown", off);
-    return () => window.removeEventListener("mousedown", off);
-  }, [open]);
-  return (
-    <div ref={ref} className="relative">
-      <button
-        onClick={(e) => {
-          // Fixed, so the top bar's sideways scroll doesn't clip it.
-          const r = e.currentTarget.getBoundingClientRect();
-          setOpen((o) => (o ? null : { top: r.bottom + 4, right: window.innerWidth - r.right }));
-        }}
-        aria-label="Project settings" className="grid size-7 place-items-center rounded-md text-muted hover:bg-white/[0.05] hover:text-fg">
-        <MoreHorizontal className="size-4" />
-      </button>
-      {open && (
-        <div style={open} className="rise fixed z-50 w-56 rounded-lg border border-line-2 bg-popover p-1 shadow-pop">
-          <button
-            onClick={() => {
-              if (!confirm) return setConfirm(true);
-              workspace.removeProject(project.id).then(() => navigate({ href: "/dashboard" }));
-            }}
-            className="w-full rounded-md px-2 py-1.5 text-left text-[12px] text-danger hover:bg-danger/10"
-          >
-            {confirm ? "Click again to delete" : "Delete project"}
-            <span className="block text-[11px] text-subtle">Its resources stay; only the grouping goes.</span>
-          </button>
-        </div>
-      )}
-    </div>
   );
 }
 

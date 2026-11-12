@@ -12,6 +12,7 @@ pub mod api;
 
 use code_sql::{Db, OptionalExtension, Target, params};
 use serde::Serialize;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 
 pub use api::router;
@@ -38,6 +39,12 @@ CREATE INDEX IF NOT EXISTS resources_project ON resources (project_id);
 pub const NAME_MAX: usize = 48;
 /// The longest resource ref, in characters.
 pub const REF_MAX: usize = 200;
+/// The longest description, in characters.
+pub const DESCRIPTION_MAX: usize = 280;
+/// The biggest picture an icon may carry, as its `data:` URL.
+pub const IMAGE_MAX: usize = 200 * 1024;
+/// The colours an icon may have (`--id-<name>` in the dashboard's globals.css).
+pub const COLORS: [&str; 8] = ["slate", "violet", "purple", "pink", "rose", "teal", "cyan", "green"];
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -93,6 +100,9 @@ impl Kind {
 pub struct Project {
     pub id: String,
     pub name: String,
+    pub description: String,
+    /// How the project shows itself (docs/workspace.md, "Icons"); `null` for the default.
+    pub icon: Option<Value>,
     pub created_at: i64,
     pub resources: Vec<Resource>,
 }
@@ -124,13 +134,18 @@ impl Workspace {
 
     pub fn new(db: Db) -> Result<Workspace> {
         db.ensure_schema(SCHEMA)?;
+        db.migrate("workspace:project-look", |c| {
+            c.execute("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''", ())?;
+            c.execute("ALTER TABLE projects ADD COLUMN icon TEXT", ())?;
+            Ok(())
+        })?;
         Ok(Workspace { db })
     }
 
     /// Every project with its resources, oldest first.
     pub fn list(&self) -> Result<Vec<Project>> {
         self.db.read(|c| {
-            let projects = c.query("SELECT id, name, created_at FROM projects ORDER BY created_at, id", (), project_row)?;
+            let projects = c.query(&format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY created_at, id"), (), project_row)?;
             let resources = c.query(
                 "SELECT project_id, kind, ref, x, y, added_at FROM resources ORDER BY added_at, kind, ref",
                 (),
@@ -154,23 +169,47 @@ impl Workspace {
         self.db.read(|c| load(c, id))
     }
 
-    pub fn create(&self, name: &str) -> Result<Project> {
+    pub fn create(&self, name: &str, description: &str, icon: Option<&Value>) -> Result<Project> {
         check_name(name)?;
+        check_description(description)?;
+        let icon = icon.map(check_icon).transpose()?;
         let id = new_id();
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             name_free(c, name, None)?;
-            c.execute("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)", params![id, name, now])?;
-            Ok(Project { id: id.clone(), name: name.to_string(), created_at: now, resources: Vec::new() })
+            c.execute(
+                "INSERT INTO projects (id, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?)",
+                params![id, name, description, icon, now],
+            )?;
+            load(c, &id)
         })
     }
 
-    pub fn rename(&self, id: &str, name: &str) -> Result<Project> {
-        check_name(name)?;
+    /// Change what `change` names; the rest stays.
+    pub fn update(&self, id: &str, change: &Change) -> Result<Project> {
+        if let Some(name) = &change.name {
+            check_name(name)?;
+        }
+        if let Some(d) = &change.description {
+            check_description(d)?;
+        }
+        let icon = match &change.icon {
+            Some(Some(v)) => Some(Some(check_icon(v)?)),
+            Some(None) => Some(None),
+            None => None,
+        };
         self.db.write(|c| {
             exists(c, id)?;
-            name_free(c, name, Some(id))?;
-            c.execute("UPDATE projects SET name = ? WHERE id = ?", params![name, id])?;
+            if let Some(name) = &change.name {
+                name_free(c, name, Some(id))?;
+                c.execute("UPDATE projects SET name = ? WHERE id = ?", params![name, id])?;
+            }
+            if let Some(d) = &change.description {
+                c.execute("UPDATE projects SET description = ? WHERE id = ?", params![d, id])?;
+            }
+            if let Some(icon) = &icon {
+                c.execute("UPDATE projects SET icon = ? WHERE id = ?", params![icon, id])?;
+            }
             load(c, id)
         })
     }
@@ -231,8 +270,21 @@ impl Workspace {
     }
 }
 
+/// What [`Workspace::update`] changes: `None` leaves a field; `icon: Some(None)` clears the icon.
+#[derive(Debug, Default)]
+pub struct Change {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub icon: Option<Option<Value>>,
+}
+
+const PROJECT_COLUMNS: &str = "id, name, description, icon, created_at";
+
 fn project_row(r: &code_sql::Row<'_>) -> code_sql::Result<Project> {
-    Ok(Project { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, resources: Vec::new() })
+    let icon: Option<String> = r.get(3)?;
+    // Only checked icons are stored; one that doesn't parse shows as the default.
+    let icon = icon.and_then(|s| serde_json::from_str(&s).ok());
+    Ok(Project { id: r.get(0)?, name: r.get(1)?, description: r.get(2)?, icon, created_at: r.get(4)?, resources: Vec::new() })
 }
 
 /// A resource from columns `kind, ref, x, y, added_at` starting at `at`.
@@ -243,7 +295,7 @@ fn resource_row(r: &code_sql::Row<'_>, at: usize) -> code_sql::Result<Resource> 
 }
 
 fn load(c: &code_sql::Conn<'_>, id: &str) -> Result<Project> {
-    let project = c.query_row("SELECT id, name, created_at FROM projects WHERE id = ?", [id], project_row).optional()?;
+    let project = c.query_row(&format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?"), [id], project_row).optional()?;
     let mut project = project.ok_or_else(|| not_found(id))?;
     project.resources = c.query(
         "SELECT kind, ref, x, y, added_at FROM resources WHERE project_id = ? ORDER BY added_at, kind, ref",
@@ -282,6 +334,48 @@ fn check_name(name: &str) -> Result<()> {
     Err(Error::BadRequest(format!(
         "a project name is 1–{NAME_MAX} characters of a-z, 0-9 and -, not starting or ending with -"
     )))
+}
+
+fn check_description(d: &str) -> Result<()> {
+    match d.chars().count() {
+        0..=DESCRIPTION_MAX => Ok(()),
+        _ => Err(Error::BadRequest(format!("a description is at most {DESCRIPTION_MAX} characters"))),
+    }
+}
+
+/// An icon is `{kind, color?}` plus its kind's field: `monogram` (`text`, 1–3 characters, or
+/// none for the name's), `emoji` (`emoji`), or `image` (`url`, a PNG, JPEG or WebP `data:` URL
+/// up to [`IMAGE_MAX`]; never SVG, which can carry script). Returns it as stored JSON.
+fn check_icon(v: &Value) -> Result<String> {
+    let bad = |m: &str| Error::BadRequest(format!("icon: {m}"));
+    let o: &Map<String, Value> = v.as_object().ok_or_else(|| bad("an object"))?;
+    let kind = o.get("kind").and_then(Value::as_str).ok_or_else(|| bad("kind is monogram, emoji or image"))?;
+    let field = match kind {
+        "monogram" => "text",
+        "emoji" => "emoji",
+        "image" => "url",
+        _ => return Err(bad("kind is monogram, emoji or image")),
+    };
+    if let Some(k) = o.keys().find(|k| !["kind", "color", field].contains(&k.as_str())) {
+        return Err(bad(&format!("unknown field {k}")));
+    }
+    if let Some(c) = o.get("color")
+        && !c.as_str().is_some_and(|c| COLORS.contains(&c))
+    {
+        return Err(bad(&format!("color is one of {}", COLORS.join(", "))));
+    }
+    let text = o.get(field).map(|f| f.as_str().ok_or_else(|| bad(&format!("{field} is a string")))).transpose()?;
+    match (kind, text) {
+        ("monogram", None) => {}
+        ("monogram", Some(t)) if (1..=3).contains(&t.chars().count()) && !t.chars().any(char::is_whitespace) => {}
+        ("monogram", Some(_)) => return Err(bad("text is 1–3 characters")),
+        ("emoji", Some(e)) if (1..=16).contains(&e.chars().count()) && !e.chars().any(|c| c.is_ascii_alphanumeric()) => {}
+        ("emoji", _) => return Err(bad("emoji is one emoji")),
+        ("image", Some(u)) if u.len() <= IMAGE_MAX && ["png", "jpeg", "webp"].iter().any(|t| u.starts_with(&format!("data:image/{t};base64,"))) => {}
+        ("image", Some(u)) if u.len() > IMAGE_MAX => return Err(bad(&format!("the picture is over {} KiB", IMAGE_MAX / 1024))),
+        _ => return Err(bad("url is a data:image/png, jpeg or webp base64 URL")),
+    }
+    Ok(serde_json::to_string(v).expect("JSON"))
 }
 
 fn check_ref(r#ref: &str) -> Result<()> {

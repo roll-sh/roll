@@ -16,7 +16,7 @@ type S = State<Arc<Workspace>>;
 pub fn router(ws: Arc<Workspace>) -> Router {
     Router::new()
         .route("/v1/workspace/projects", get(list).post(create))
-        .route("/v1/workspace/projects/{id}", get(get_one).patch(rename).delete(delete))
+        .route("/v1/workspace/projects/{id}", get(get_one).patch(update).delete(delete))
         .route("/v1/workspace/projects/{id}/resources/{kind}/{ref}", put(place).delete(remove))
         .with_state(ws)
 }
@@ -44,8 +44,11 @@ fn body<T: DeserializeOwned>(b: &Bytes) -> crate::Result<T> {
 }
 
 #[derive(Deserialize)]
-struct NameBody {
+struct CreateBody {
     name: String,
+    #[serde(default)]
+    description: String,
+    icon: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -59,8 +62,8 @@ async fn list(State(ws): S) -> crate::Result<Response> {
 }
 
 async fn create(State(ws): S, b: Bytes) -> crate::Result<Response> {
-    let NameBody { name } = body(&b)?;
-    let project = blocking(ws, move |ws| ws.create(&name)).await?;
+    let CreateBody { name, description, icon } = body(&b)?;
+    let project = blocking(ws, move |ws| ws.create(&name, &description, icon.as_ref())).await?;
     Ok((StatusCode::CREATED, Json(project)).into_response())
 }
 
@@ -68,9 +71,25 @@ async fn get_one(State(ws): S, Path(id): Path<String>) -> crate::Result<Response
     Ok(Json(blocking(ws, move |ws| ws.get(&id)).await?).into_response())
 }
 
-async fn rename(State(ws): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
-    let NameBody { name } = body(&b)?;
-    Ok(Json(blocking(ws, move |ws| ws.rename(&id, &name)).await?).into_response())
+/// `{name?, description?, icon?}`: what's there changes; `"icon": null` goes back to the default.
+async fn update(State(ws): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
+    let text = |o: &mut serde_json::Map<String, serde_json::Value>, k: &str| -> crate::Result<Option<String>> {
+        match o.remove(k) {
+            None => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s)),
+            Some(_) => Err(Error::BadRequest(format!("{k} is a string"))),
+        }
+    };
+    let change = crate::Change {
+        name: text(&mut o, "name")?,
+        description: text(&mut o, "description")?,
+        icon: o.remove("icon").map(|v| if v.is_null() { None } else { Some(v) }),
+    };
+    if let Some(k) = o.keys().next() {
+        return Err(Error::BadRequest(format!("unknown field {k}")));
+    }
+    Ok(Json(blocking(ws, move |ws| ws.update(&id, &change)).await?).into_response())
 }
 
 async fn delete(State(ws): S, Path(id): Path<String>) -> crate::Result<StatusCode> {
