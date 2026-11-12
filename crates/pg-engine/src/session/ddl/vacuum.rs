@@ -1398,9 +1398,21 @@ impl Ddl<'_, '_> {
         let order: Vec<Vec<u8>> = items.iter().map(|(k, _)| k.clone()).collect();
         if t.has_rowid() {
             // Rows are stored by rowid: new rowids in index order put them in that order.
+            // (reform_and_rewrite_tuple copies each row's header: its xmin stays; what the
+            // copy froze is the new relfrozenxid's, `measure_rewritten`.)
+            let xmins: std::collections::HashMap<Vec<u8>, u64> = {
+                let start = crate::storage::keys::index_prefix(t.oid, 0);
+                let end = crate::storage::keys::prefix_end(&start);
+                let txn = self.ctx.txn.borrow();
+                txn.scan(&start, &end)
+                    .map(|r| r.and_then(|(k, v)| Ok((k, crate::exec::scan::row_xmin(&v)?))))
+                    .collect::<Result<_>>()?
+            };
             crate::exec::dml::truncate(t, self.ctx)?;
-            let rows: Vec<crate::exec::Row> = items.into_iter().map(|(_, (_, _, r))| r).collect();
-            self.write_new_rows(t, rows, false)?;
+            let xid = self.ctx.txn.borrow_mut().cur_xid();
+            let (rows, kept): (Vec<crate::exec::Row>, Vec<u64>) =
+                items.into_iter().map(|(k, (_, _, r))| (r, xmins.get(&k).copied().unwrap_or(xid))).unzip();
+            self.write_rows_as(t, rows, false, Some(&kept))?;
             let built: Vec<Index> = bixs.iter().map(|b| (*b.index).clone()).collect();
             for i in &built {
                 self.build_index(t, i)?;

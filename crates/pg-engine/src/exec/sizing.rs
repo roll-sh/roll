@@ -4481,8 +4481,27 @@ pub fn set_vacuum_index_cleanup(v: Option<bool>) {
     VACUUM_INDEX_CLEANUP.with(|c| c.set(v));
 }
 
+/// What ginvacuumcleanup reports of `t`'s GIN indexes, from their models before VACUUM
+/// cleans their pending lists up: (index, the list pages shiftList deletes, the free pages
+/// after: those and the ones free before).
+fn gin_cleanup_pages(t: &Table, ctx: &ExecCtx) -> Result<Vec<(u32, u32, u32)>> {
+    if !t.indexes.iter().any(|ix| ctx.sess.db.relfiles.of(t.oid).read().gin_built.contains_key(ix)) {
+        return Ok(Vec::new());
+    }
+    let ta = Arc::new(t.clone());
+    let indexes = crate::sql::binder::bound_indexes(&ta, ctx)?;
+    let mut out = Vec::new();
+    for bix in indexes.iter().filter(|b| b.index.method == "gin") {
+        if let Some(g) = gin_model(&ta, bix, &indexes, ctx)? {
+            out.push((bix.index.oid, g.pending_pages(), g.free_pages() + g.pending_pages()));
+        }
+    }
+    Ok(out)
+}
+
 /// Lazy VACUUM of a table (and of its TOAST table).
 pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
+    let gin = gin_cleanup_pages(t, ctx)?;
     gin_vacuumed(t, ctx)?;
     brin_vacuumed(t, ctx)?;
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
@@ -4601,7 +4620,8 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         }
     }
     // The other access methods' reports: GiST, SP-GiST, GIN and BRIN clean up (and report)
-    // every time, hash only after a bulk delete; their deleted pages aren't modelled.
+    // every time, hash only after a bulk delete. GIN's deleted pages are its pending list's
+    // (posting tree pages its bulk delete empties aren't modelled); the others' aren't.
     if main_cleanup != Some(false) {
         for bix in &indexes {
             let reports = match bix.index.method.as_str() {
@@ -4614,7 +4634,9 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
                     Some(i) => i.1.max(0) as u32,
                     None => fork_blocks(bix.index.oid, Fork::Main, ctx)?.unwrap_or(0) as u32,
                 };
-                out.report.indexes.push((bix.index.oid, pages, 0, 0, 0));
+                let (deleted, free) =
+                    gin.iter().find(|g| g.0 == bix.index.oid).map_or((0, 0), |g| (g.1, g.2));
+                out.report.indexes.push((bix.index.oid, pages, 0, deleted, free));
             }
         }
     }

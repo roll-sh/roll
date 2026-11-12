@@ -4409,6 +4409,12 @@ impl Ddl<'_, '_> {
     /// Insert rows into a table with no indexes (fresh CTAS / matview storage); `logged`:
     /// into the change stream too (CREATE TABLE AS).
     pub(super) fn write_new_rows(&self, t: &Table, rows: Vec<Row>, logged: bool) -> Result<()> {
+        self.write_rows_as(t, rows, logged, None)
+    }
+
+    /// `write_new_rows`, each row with its xmin of `xmins` (CLUSTER's copy keeps the old
+    /// rows' headers), else the transaction's.
+    pub(super) fn write_rows_as(&self, t: &Table, rows: Vec<Row>, logged: bool, xmins: Option<&[u64]>) -> Result<()> {
         let mut written = Vec::with_capacity(rows.len());
         for r in rows {
             let id = self.ctx.sess.db.nextval_by_one(t.oid, || rowid_sequence(t))?;
@@ -4422,6 +4428,7 @@ impl Ddl<'_, '_> {
         let tids = crate::exec::sizing::loaded(t, &written, frozen, self.ctx);
         let xid = self.ctx.txn.borrow_mut().cur_xid();
         for (i, (k, r)) in written.into_iter().enumerate() {
+            let xid = xmins.and_then(|x| x.get(i).copied()).unwrap_or(xid);
             crate::exec::toast::put_row(t, k, &r, xid, tids.get(i).copied(), &mut self.ctx.txn.borrow_mut())?;
             // (CREATE TABLE AS's rows are logically logged inserts, decoded as any others; a
             // rewrite's new storage and a materialized view's aren't.)

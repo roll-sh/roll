@@ -1,0 +1,251 @@
+> CREATE TABLE rw_h (a int, b text) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE INDEX rw_h_a ON rw_h (a)
+-- CREATE INDEX
+
+> INSERT INTO rw_h SELECT g, 'x' FROM generate_series(1, 50) g
+-- INSERT 0 50
+
+> INSERT INTO rw_h SELECT g, 'y' FROM generate_series(51, 100) g
+-- INSERT 0 50
+
+> DELETE FROM rw_h WHERE a % 10 = 0
+-- DELETE 10
+
+> UPDATE rw_h SET b = 'z' WHERE a % 10 = 1
+-- UPDATE 10
+
+> CREATE TABLE rw_k (a int PRIMARY KEY, b text) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO rw_k SELECT g, 'x' FROM generate_series(1, 50) g
+-- INSERT 0 50
+
+> INSERT INTO rw_k SELECT g, 'y' FROM generate_series(51, 100) g
+-- INSERT 0 50
+
+> CREATE TEMP TABLE rw_x AS SELECT 'h' AS t, a, xmin AS x FROM rw_h UNION ALL SELECT 'k', a, xmin FROM rw_k
+-- SELECT 190
+
+> CLUSTER rw_h USING rw_h_a
+-- CLUSTER
+
+> SELECT count(*) FILTER (WHERE r.xm = x.x) AS same_xmin, count(*) AS n FROM (SELECT a, xmin AS xm FROM rw_h) r JOIN rw_x x ON x.t = 'h' AND x.a = r.a
+same_xmin:int8 | n:int8
+90 | 90
+-- SELECT 1
+
+> VACUUM (VERBOSE) rw_h
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.public.rw_h"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.public.rw_h": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 90 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 1 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> SELECT age(relfrozenxid) < 3 AS young FROM pg_class WHERE relname = 'rw_h'
+young:bool
+t
+-- SELECT 1
+
+> VACUUM FULL rw_h
+-- VACUUM
+
+> SELECT count(*) FILTER (WHERE r.xm = x.x) AS same_xmin, count(*) AS n FROM (SELECT a, xmin AS xm FROM rw_h) r JOIN rw_x x ON x.t = 'h' AND x.a = r.a
+same_xmin:int8 | n:int8
+90 | 90
+-- SELECT 1
+
+> VACUUM (VERBOSE) rw_h
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.public.rw_h"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.public.rw_h": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 90 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 1 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM FULL rw_k
+-- VACUUM
+
+> CLUSTER rw_k USING rw_k_pkey
+-- CLUSTER
+
+> SELECT count(*) FILTER (WHERE r.xm = x.x) AS same_xmin, count(*) AS n FROM (SELECT a, xmin AS xm FROM rw_k) r JOIN rw_x x ON x.t = 'k' AND x.a = r.a
+same_xmin:int8 | n:int8
+100 | 100
+-- SELECT 1
+
+> VACUUM (VERBOSE) rw_k
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.public.rw_k"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.public.rw_k": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 100 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 1 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> CREATE TABLE rw_g (id int, t int[]) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE INDEX rw_g_t ON rw_g USING gin (t)
+-- CREATE INDEX
+
+> INSERT INTO rw_g SELECT g, ARRAY[g % 10, g % 7] FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> INSERT INTO rw_g SELECT g, ARRAY[g % 13, g % 5, g] FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> VACUUM (VERBOSE) rw_g
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.public.rw_g"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.public.rw_g": index scans: 0
+pages: 0 removed, 27 remain, 27 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 3200 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 27 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "rw_g_t": pages: 46 in total, 0 newly deleted, 23 currently deleted, 23 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE) rw_g
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.public.rw_g"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.public.rw_g": index scans: 0
+pages: 0 removed, 27 remain, 27 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 3200 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "rw_g_t": pages: 46 in total, 0 newly deleted, 0 currently deleted, 23 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> INSERT INTO rw_g SELECT g, ARRAY[g % 3] FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> VACUUM (VERBOSE) rw_g
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.public.rw_g"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.public.rw_g": index scans: 0
+pages: 0 removed, 42 remain, 42 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 5200 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 16 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "rw_g_t": pages: 46 in total, 0 newly deleted, 5 currently deleted, 23 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a222_vacuum_rewrite.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+

@@ -307,6 +307,11 @@ impl GinIndex {
         self.pending_pages
     }
 
+    /// The pages free for reuse (deleted, and recorded in the free space map).
+    pub fn free_pages(&self) -> u32 {
+        self.free
+    }
+
     /// GinNewBuffer: a free page if there is one, else a new one.
     fn alloc(&mut self) {
         if self.free > 0 {
