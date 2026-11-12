@@ -91,6 +91,9 @@ struct SeqState {
     log_cnt: i64,
 }
 
+/// (Aligned: the `Arc`'s counts, which sessions write as they take and drop references,
+/// are on a line of their own, not on the one with its first fields.)
+#[repr(align(128))]
 pub struct Database {
     pub name: String,
     pub oid: u32,
@@ -3056,7 +3059,7 @@ impl Txn {
 
     /// Whether this transaction holds heavyweight lock `key` (in any mode).
     pub fn holds_lock(&self, key: &[u8]) -> bool {
-        self.locks_held.keys().any(|(k, _)| k == key)
+        self.locks_held.keys().any(|(k, _)| k.as_slice() == key)
     }
 
     /// Whether this transaction holds heavyweight lock `key` in `mode`.
@@ -3891,7 +3894,8 @@ impl Txn {
                 }
             }
         }
-        let db = self.db.clone();
+        // (The database by reference: a clone's count is written by every session.)
+        let db = &self.db;
         // The change stream's commit record (`repl::log`): a placeholder until `check`
         // seals it under the commit lock.
         let xid = self.xid;
@@ -3959,7 +3963,7 @@ impl Txn {
             }
             Ok(())
         };
-        let db2 = self.db.clone();
+        let db2 = &self.db;
         let publish = self.publish;
         // A new catalog is published under the commit lock, with the data (`check` may have
         // merged it onto the current one).
@@ -3973,8 +3977,7 @@ impl Txn {
         };
         let result = if let Some((keys, mut stream)) = spilled {
             // (A snapshot transaction's conflict check, key by key as they are written.)
-            let store_watch = self.db.clone();
-            let store_watch = &store_watch.watch;
+            let store_watch = &self.db.watch;
             let each = |store: &Store, k: &[u8]| -> Result<()> {
                 if strict && !crate::storage::rdel::is_marker(k) && store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
                     return Err(Error::new(
@@ -4006,7 +4009,7 @@ impl Txn {
         } else if catalog.borrow().is_some() {
             // (Group-committed: the next DDL commit merges onto this one's catalog, which is
             // published once its fsync is done.)
-            let db3 = self.db.clone();
+            let db3 = &self.db;
             let appended = |ts| {
                 if let Some(c) = catalog.borrow().clone() {
                     *db3.pending.lock() = Some((ts, c));

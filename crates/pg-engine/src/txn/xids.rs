@@ -50,7 +50,7 @@ struct State {
 }
 
 pub struct Xids {
-    state: Mutex<State>,
+    state: crate::counter::Padded<Mutex<State>>,
     /// The snapshots pg_export_snapshot() exported, by identifier, until the exporting
     /// transaction ends (cluster-wide, like Postgres's pg_snapshots directory).
     exported: Mutex<std::collections::HashMap<String, Exported>>,
@@ -212,7 +212,7 @@ impl Xids {
     pub fn new(next: u64, persist: impl Fn(u64) + Send + Sync + 'static) -> Xids {
         let next = next.max(FIRST_NORMAL_XID);
         Xids {
-            state: Mutex::new(State {
+            state: crate::counter::Padded(Mutex::new(State {
                 next,
                 reserved: next,
                 running: BTreeSet::new(),
@@ -222,7 +222,7 @@ impl Xids {
                 snapshots: Default::default(),
                 owners: Default::default(),
                 safe_ic: BTreeSet::new(),
-            }),
+            })),
             exported: Mutex::new(std::collections::HashMap::new()),
             oldest: FIRST_NORMAL_XID,
             persist: Box::new(persist),

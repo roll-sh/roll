@@ -37,6 +37,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 use wal::WalWriter;
+use crate::counter::Padded;
 
 /// The store directory's subdirectory for transactions' spilled writes.
 const SPILL_DIR: &str = "spill";
@@ -302,21 +303,21 @@ pub struct Store {
     dir: PathBuf,
     opts: StoreOptions,
     view: crate::published::Published<View>,
-    commit: Mutex<CommitState>,
+    commit: Padded<Mutex<CommitState>>,
     manifest: Mutex<Manifest>,
-    visible: AtomicU64,
+    visible: Padded<AtomicU64>,
     /// The last commit timestamp handed out (under the commit lock). Commits past `visible`
     /// are in the WAL and the memtable, waiting for a WAL fsync (group commit).
-    assigned: AtomicU64,
+    assigned: Padded<AtomicU64>,
     /// Every commit up to this one is fsynced.
-    durable: AtomicU64,
+    durable: Padded<AtomicU64>,
     /// Held by the commit fsyncing the WAL for every commit appended so far.
-    sync_lock: Mutex<()>,
+    sync_lock: Padded<Mutex<()>>,
     /// Commits waiting for another's fsync sleep here (`wait_durable`), woken when
     /// `durable` advances (`made_durable`): they used to queue on `sync_lock`, spinning.
-    durable_wait: (Mutex<()>, parking_lot::Condvar),
+    durable_wait: Padded<(Mutex<()>, parking_lot::Condvar)>,
     next_id: AtomicU64,
-    snapshots: Mutex<BTreeMap<u64, usize>>,
+    snapshots: Padded<Mutex<BTreeMap<u64, usize>>>,
     /// The sessions' own pins (`pin_slot`).
     slots: Mutex<Vec<Arc<PinSlot>>>,
     /// The visible timestamp as `gc_horizon` last read it before reading the slots: a
@@ -526,19 +527,19 @@ impl Store {
             dir: dir.to_path_buf(),
             opts,
             view: crate::published::Published::new(Arc::new(View { mem, imm, l0, l1, rdels: Arc::default() })),
-            commit: Mutex::new(CommitState { wal }),
+            commit: Padded(Mutex::new(CommitState { wal })),
             manifest: Mutex::new(Manifest {
                 next_id,
                 last_ts,
                 ..manifest
             }),
-            visible: AtomicU64::new(last_ts),
-            assigned: AtomicU64::new(last_ts),
-            durable: AtomicU64::new(last_ts),
-            sync_lock: Mutex::new(()),
-            durable_wait: (Mutex::new(()), parking_lot::Condvar::new()),
+            visible: Padded(AtomicU64::new(last_ts)),
+            assigned: Padded(AtomicU64::new(last_ts)),
+            durable: Padded(AtomicU64::new(last_ts)),
+            sync_lock: Padded(Mutex::new(())),
+            durable_wait: Padded((Mutex::new(()), parking_lot::Condvar::new())),
             next_id: AtomicU64::new(next_id),
-            snapshots: Mutex::new(BTreeMap::new()),
+            snapshots: Padded(Mutex::new(BTreeMap::new())),
             slots: Mutex::new(Vec::new()),
             gc_floor: AtomicU64::new(0),
             horizon_seen: AtomicU64::new(last_ts),
@@ -1087,7 +1088,7 @@ impl Store {
             // Another commit is fsyncing: sleep until it is done (it may cover this one),
             // then sync if it didn't.
             let Some(_g) = self.sync_lock.try_lock() else {
-                let mut w = self.durable_wait.0.lock();
+                let mut w = self.durable_wait.0.0.lock();
                 while self.durable.load(Ordering::Acquire) < ts && self.sync_lock.is_locked() {
                     // (A bound on the sleep: a store closed meanwhile wakes no one.)
                     self.durable_wait.1.wait_for(&mut w, std::time::Duration::from_millis(50));
@@ -1146,7 +1147,7 @@ impl Store {
 
     /// Wake the commits sleeping in `wait_durable` (`durable` advanced, or the fsync ended).
     fn wake_durable(&self) {
-        let _w = self.durable_wait.0.lock();
+        let _w = self.durable_wait.0.0.lock();
         self.durable_wait.1.notify_all();
     }
 
