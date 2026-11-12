@@ -6390,6 +6390,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-workspace"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "code-sql",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "rolld"
 version = "0.1.0"
 dependencies = [
@@ -6444,6 +6461,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-workspace",
  "s3-api",
  "s3-control",
  "s3-server",
