@@ -723,13 +723,29 @@ free again and its history stays readable by key.
 Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
 streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
-webhook, notify), the dashboard's Secrets surface, and the fixes from a security review. Ranked:
+sealed webhooks, deploy notifications), the dashboard's Secrets surface, and the fixes from a
+security review. `pnpm test:code` is green on the head. Reviewed on 2026-11-12 against Infisical,
+Doppler, Vercel and 1Password Developer, and against the apps, previews, MCP and search branches.
+Ranked:
 
-1. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
-   `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
-   merges second does it; build the resource as `Resource { product: "secrets", project, environment,
-   path, ..Default::default() }`, since it gained `also_in`), and `rlst_` tokens migrate to roll-access
-   tokens (`rls_` is accounts' session prefix). Its MCP tools map onto
-   the routes above.
-2. **More sync kinds**: Vercel (its API token a reference to a secret of the same project, resolved
-   at push time), AWS Parameter Store, Cloudflare Workers, as `SyncTarget`s in rolld.
+1. **Lease renewal** for long-running consumers (roll apps' services): `POST …/leases/{id}/renew`
+   pushes a dynamic credential's expiry out (the provider extends it where the product enforces
+   one: a Postgres role's `VALID UNTIL`), so a service doesn't have to restart before its lease
+   ends. In progress.
+2. **Approvers see what they approve**: `GET …/requests/{id}/values` (`reveal`) returns a request's
+   pending values to a caller who may reveal them, and the dashboard shows old and new side by
+   side; today approvals see fingerprints only.
+3. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands
+   `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever PR
+   merges second does it), the resource is `Resource { product: "secrets", project, environment,
+   path, ..Default::default() }`, `rlst_` tokens migrate to roll-access tokens, and a sync made by a
+   grant re-checks it through roll-access. Also: roll apps' `Secrets` port wired to `Secrets::values`
+   (whichever of #20 and #21 merges second; the adapter is in the apps thread).
+4. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
+   a version's history shows the old and new value side by side on reveal.
+5. **Audit streaming and export**: a CSV/JSON export of the audit log, and a sync-like sink that
+   streams audit rows (no values) to a SIEM URL.
+6. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
+   links, previews), for users rather than implementers.
+7. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
+   change.
