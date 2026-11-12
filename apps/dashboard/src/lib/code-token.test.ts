@@ -20,6 +20,16 @@ afterEach(() => {
 });
 
 describe("code token", () => {
+  it("sends the session cookie on every request and the session's CSRF token only on writes", async () => {
+    const { setCsrf, withSession } = await import("./code-token");
+    expect(withSession({ method: "POST" })).toEqual({ method: "POST", headers: undefined, credentials: "include" });
+    setCsrf("c1");
+    expect(withSession({ headers: { a: "1" } })).toEqual({ headers: { a: "1" }, credentials: "include" });
+    expect(withSession({ method: "delete", headers: { a: "1" } })).toEqual({ method: "delete", headers: { a: "1", "x-roll-csrf": "c1" }, credentials: "include" });
+    setCsrf(null);
+    expect(withSession({ method: "PATCH" }).headers).toBeUndefined();
+  });
+
   it("stores, trims and clears the token, telling subscribers", async () => {
     const t = await import("./code-token");
     const changed = vi.fn();
