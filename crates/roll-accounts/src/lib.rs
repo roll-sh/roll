@@ -206,6 +206,10 @@ pub trait Owners: Send + Sync + 'static {
     fn available(&self, handle: &str) -> Result<bool, String>;
     /// A new user owner: its id, or `None` if the name was taken meanwhile.
     fn create(&self, handle: &str, name: &str) -> Result<Option<String>, String>;
+    /// Cut owner `owner_id` off (its user was disabled): its tokens and machine links stop now.
+    fn suspend(&self, _owner_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -526,6 +530,14 @@ impl Accounts {
             }
             Ok(())
         })?;
+        // A session isn't the only way in: the roll code owner's own tokens and machine links
+        // go too (another database, so after the write; an admin who sees the error retries).
+        if disabled == Some(true)
+            && let Some(owners) = &self.owners
+            && let Some(owner) = self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [id], |r| r.get::<_, Option<String>>(0)))?
+        {
+            owners.suspend(&owner).map_err(|e| Error::Internal(format!("the account is disabled, but cutting off its roll code owner failed: {e}")))?;
+        }
         self.user(id)
     }
 

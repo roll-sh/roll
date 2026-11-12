@@ -118,13 +118,17 @@ impl Accounts {
 
     /// Turn the pending seed on with a code from it: the new recovery codes, shown once.
     pub fn totp_confirm(&self, user: &str, code: &str) -> Result<Vec<String>> {
-        if self.db.read(|c| c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 0", [user], |_| Ok(())).optional())?.is_none() {
+        // The seed shown (sealed): only it is turned on, so a second setup started in another tab
+        // meanwhile can't turn on a seed the person never saw.
+        let Some(seed) = self.db.read(|c| c.query_row("SELECT seed FROM totp WHERE user_id = ? AND enabled = 0", [user], |r| r.get::<_, String>(0)).optional())? else {
             return Err(Error::NotFound("no authenticator app is waiting to be confirmed".into()));
-        }
+        };
         if !self.check_totp(user, code, false)? {
             return Err(Error::bad_code());
         }
-        self.db.write(|c| c.execute("UPDATE totp SET enabled = 1 WHERE user_id = ?", [user]))?;
+        if self.db.write(|c| c.execute("UPDATE totp SET enabled = 1 WHERE user_id = ? AND enabled = 0 AND seed = ?", [user, seed.as_str()]))? == 0 {
+            return Err(Error::Conflict("the authenticator app's setup changed meanwhile: start it again".into()));
+        }
         self.new_recovery_codes(user)
     }
 

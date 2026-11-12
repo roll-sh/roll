@@ -217,21 +217,31 @@ impl Accounts {
         let linked_to = self.db.read(|c| c.query_row("SELECT user_id FROM identities WHERE provider = ? AND subject = ?", [provider, v.subject.as_str()], |r| r.get::<_, String>(0)).optional())?;
         if st.intent == "link" {
             let user = st.user_id.ok_or_else(|| Error::BadRequest("sign in first".into(), Some("state")))?;
-            match linked_to {
-                Some(other) if other != user => return Err(Error::BadRequest("this identity belongs to another account".into(), Some("linked_elsewhere"))),
-                Some(_) => {}
-                None => {
-                    let now = self.db.now_ms()?;
-                    self.db.write(|c| {
+            let elsewhere = || Error::BadRequest("this identity belongs to another account".into(), Some("linked_elsewhere"));
+            let now = self.db.now_ms()?;
+            // One write: who has the identity, whether the user may still link, and the link. Two
+            // accounts linking the same identity at once can't both win (the loser's write fails
+            // and keeps its old link).
+            self.db.write(|c| {
+                let enabled = c.query_row("SELECT disabled FROM users WHERE id = ?", [user.as_str()], |r| r.get::<_, bool>(0)).optional()?;
+                if enabled != Some(false) {
+                    return Err(Error::Forbidden("this account is disabled".into(), "disabled"));
+                }
+                let holder = c.query_row("SELECT user_id FROM identities WHERE provider = ? AND subject = ?", [provider, v.subject.as_str()], |r| r.get::<_, String>(0)).optional()?;
+                match holder {
+                    Some(other) if other != user => Err(elsewhere()),
+                    Some(_) => Ok(()),
+                    None => {
                         // One identity per provider per user: a new link replaces the old one.
                         c.execute("DELETE FROM identities WHERE user_id = ? AND provider = ?", [user.as_str(), provider])?;
-                        c.execute(
+                        let n = c.execute(
                             "INSERT INTO identities (provider, subject, user_id, email, login, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (provider, subject) DO NOTHING",
                             params![provider, v.subject, user, v.email, v.login, now],
-                        )
-                    })?;
+                        )?;
+                        if n == 0 { Err(elsewhere()) } else { Ok(()) }
+                    }
                 }
-            }
+            })?;
             return Ok(Finished::Linked { return_to: st.return_to });
         }
         if let Some(user) = linked_to {
