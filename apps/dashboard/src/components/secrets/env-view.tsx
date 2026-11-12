@@ -1,4 +1,4 @@
-import { Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Trash2, Upload, User } from "lucide-react";
+import { Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
@@ -10,6 +10,7 @@ import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
 import { ImportsPanel } from "./imports";
+import { ShareDialog, type ShareSource } from "./share-dialog";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
@@ -61,6 +62,7 @@ export function EnvView({ env }: { env: Environment }) {
   const [importing, setImporting] = useState(false);
   const [linking, setLinking] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
+  const [sharing, setSharing] = useState<ShareSource | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<{ text: string; warnings: string[] } | null>(null);
@@ -301,6 +303,7 @@ export function EnvView({ env }: { env: Environment }) {
                     focus={search.key === s.key}
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
+                    onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
                     onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
@@ -313,6 +316,7 @@ export function EnvView({ env }: { env: Environment }) {
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
+      <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />
       <LinkDialog open={linking} onClose={() => setLinking(false)} env={env} path={path} taken={keys} onWrite={write} />
     </div>
   );
@@ -444,6 +448,7 @@ function SecretRow({
   focus,
   onWrite,
   onHistory,
+  onShare,
   onSource,
 }: {
   env: Environment;
@@ -453,6 +458,7 @@ function SecretRow({
   focus: boolean;
   onWrite: WriteFn;
   onHistory: () => void;
+  onShare: () => void;
   onSource: (source: Exclude<Secret["source"], { kind: "own" }>) => void;
 }) {
   const { api, project, resourceName } = useSecrets();
@@ -546,6 +552,11 @@ function SecretRow({
                   {!own && (
                     <MenuItem onClick={() => setEditing("own")}>
                       <Pencil className="size-3.5" /> Set here (own value)
+                    </MenuItem>
+                  )}
+                  {s.link?.mode !== "dynamic" && (
+                    <MenuItem onClick={onShare}>
+                      <Send className="size-3.5" /> Share once…
                     </MenuItem>
                   )}
                   {s.link && canRotate(s.link) && own && (

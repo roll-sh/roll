@@ -1,6 +1,7 @@
-import { Check, Copy, KeyRound, Plus } from "lucide-react";
+import { Check, Copy, KeyRound, Plus, Send } from "lucide-react";
 import { useState } from "react";
 import { ACTIONS, type Action, type NewToken } from "@/lib/secrets-api";
+import { ShareDialog, type ShareSource } from "./share-dialog";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, LinkChip, primary, Section, Teach, until, useLoad } from "./ui";
 
@@ -12,12 +13,13 @@ const ACTION_HELP: Record<Action, string> = {
   admin: "rename, reorder, protection, review requests",
 };
 
-/** Scoped tokens (`rls_…`, for CI and services: `ROLL_TOKEN=… roll run …`) and the leases of dynamic credentials. */
+/** Scoped tokens (`rls_…`, for CI and services: `ROLL_TOKEN=… roll run …`), the leases of dynamic credentials, and one-time shares. */
 export function AccessView() {
   return (
     <div className="mx-auto max-w-4xl space-y-8 px-4 py-5">
       <Tokens />
       <Leases />
+      <Shares />
     </div>
   );
 }
@@ -268,6 +270,62 @@ function Leases() {
           })}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** One-time shares: links that open a value a few times (docs/secrets.md, "Sharing a value once"). The list never has a value or a link. */
+function Shares() {
+  const { api, project } = useSecrets();
+  const shares = useLoad(() => api.shares(), [api]);
+  const [error, setError] = useState<string | null>(null);
+  const [sharing, setSharing] = useState<ShareSource | null>(null);
+  const [all, setAll] = useState(false);
+  const now = Date.now();
+  const live = (x: { open: boolean; expires_at: number }) => x.open && x.expires_at > now;
+  const rows = (shares.data ?? []).filter((x) => all || live(x));
+  return (
+    <Section
+      title="Shares"
+      aside={
+        <span className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-[12px] text-muted">
+            <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} className="accent-[var(--accent)]" />
+            Show closed
+          </label>
+          <button className={button} onClick={() => setSharing({ kind: "value" })}>
+            <Send className="size-3.5" /> Share a value…
+          </button>
+        </span>
+      }
+    >
+      <p className="mb-2 text-[11.5px] text-muted">Links that open a value a few times, for someone outside roll. roll keeps only the ciphertext; the key is in the link, which is shown once.</p>
+      <ErrorNote error={error ?? shares.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
+      {shares.data && rows.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-line-2 px-3 py-4 text-[12px] text-muted">
+          No open shares. Share once from a secret&apos;s menu, share a value here, or from the CLI: <span className="font-mono text-soft">roll secrets share -p {project.name} -e staging KEY</span>
+        </p>
+      ) : (
+        <div className={`${card} divide-y divide-line`}>
+          {rows.map((x) => {
+            const on = live(x);
+            const state = on ? `${x.views_left} ${x.views_left === 1 ? "open" : "opens"} left · expires ${until(x.expires_at)}` : x.open ? "expired" : x.opened_at ? `closed · last opened ${ago(x.opened_at)}` : "revoked";
+            return (
+              <div key={x.id} className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 ${on ? "" : "opacity-60"}`}>
+                <span className={`min-w-0 truncate text-[12.5px] ${x.note ? "" : "text-subtle"}`} title={x.note}>
+                  {x.note || "No note"}
+                </span>
+                <ActorMark who={x.created_by} />
+                <span className="ml-auto text-[11px] text-subtle">
+                  {ago(x.created_at)} · {state}
+                </span>
+                {on && <Revoke onRevoke={() => api.revokeShare(x.id).then(shares.reload, (e) => setError(errorText(e)))} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={shares.reload} />
     </Section>
   );
 }
