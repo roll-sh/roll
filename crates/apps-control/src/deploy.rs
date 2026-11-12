@@ -280,8 +280,11 @@ impl Apps {
             RunType::Worker => "rolling out the worker".to_string(),
             RunType::Cron => "the next scheduled run uses this deployment".to_string(),
         });
-        let (made, took) = live.prepare(&tpl, None).await?;
-        if cancel.is_cancelled() {
+        let prepared = live.prepare(&tpl, None).await?;
+        let (made, took) = (prepared.made.clone(), prepared.took);
+        // Canceled meanwhile, or the service moved to another node (its lease lost): nothing
+        // of this rollout may stay.
+        if cancel.is_cancelled() || !self.owns(&svc.id) {
             for i in &made {
                 self.deps.runtime.remove(&i.name).await;
             }
@@ -307,7 +310,7 @@ impl Apps {
             }
             anyhow::bail!("another deploy switched this environment meanwhile");
         }
-        live.commit(tpl, made).await;
+        live.commit(tpl, prepared).await;
         Ok(())
     }
 
@@ -510,6 +513,15 @@ impl Apps {
     }
 
     async fn release_service(self: &Arc<Self>, service: &str) {
+        // Deploys in flight stop here; the new owner resumes them from the store.
+        let sid = service.to_string();
+        if let Ok(pending) = self.db(move |s| s.pending_deployments(&sid)).await {
+            for d in pending {
+                if let Some(t) = self.cancels.lock().get(&d.id) {
+                    t.cancel();
+                }
+            }
+        }
         let lives: Vec<_> = self.lives().into_iter().filter(|l| l.service == service).collect();
         for l in lives {
             self.lives.lock().remove(&crate::env_key(&l.service, &l.env));

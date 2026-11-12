@@ -58,6 +58,12 @@ fn page(status: StatusCode, title: &str, text: &str) -> Response {
     r
 }
 
+/// A 503 the client may retry in a second (a restart or a crowd that clears quickly).
+fn retry_soon(mut r: Response) -> Response {
+    r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    r
+}
+
 fn is_upgrade(h: &axum::http::HeaderMap) -> bool {
     h.contains_key(header::UPGRADE)
         && h.get(header::CONNECTION).and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("upgrade")))
@@ -85,6 +91,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
         Ok(l) => l,
         Err(WakeError::NoDeployment) => return page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet."),
         Err(WakeError::NotWeb) => return page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP."),
+        Err(WakeError::Busy) => return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment.")),
         Err(e) => {
             live.log.stream(crate::logs::Stream::System).line(format!("a request couldn't wake the service: {e}"));
             return page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds.");
@@ -123,6 +130,13 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
     }
     let mut resp = match apps.client.request(req).await {
         Ok(r) => r,
+        Err(e) if e.is_connect() => {
+            // Nothing listens any more (killed, out of memory): the next request starts a
+            // fresh instance.
+            live.connect_failed(&lease.inst);
+            live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 503, 0);
+            return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Restarting", "The instance stopped; the next request starts it again."));
+        }
         Err(e) => {
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 502, 0);
             return page(StatusCode::BAD_GATEWAY, "The service didn't answer", &format!("The instance closed the connection: {e}"));

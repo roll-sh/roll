@@ -25,9 +25,19 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
+/// A `docker` call that should be quick: a hung daemon fails it after a minute.
 pub async fn docker(args: &[&str]) -> anyhow::Result<String> {
+    docker_within(args, Some(Duration::from_secs(60))).await
+}
+
+pub async fn docker_within(args: &[&str], within: Option<Duration>) -> anyhow::Result<String> {
     tracing::debug!(?args, "docker");
-    let out = Command::new("docker").args(args).stdin(Stdio::null()).kill_on_drop(true).output().await.context("running docker")?;
+    let run = Command::new("docker").args(args).stdin(Stdio::null()).kill_on_drop(true).output();
+    let out = match within {
+        Some(d) => tokio::time::timeout(d, run).await.map_err(|_| anyhow::anyhow!("docker {} didn't finish within {} s", args.first().unwrap_or(&""), d.as_secs()))?,
+        None => run.await,
+    }
+    .context("running docker")?;
     if !out.status.success() {
         bail!("docker {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -54,6 +64,8 @@ pub struct Docker {
 
 impl Docker {
     pub fn new(scratch: PathBuf) -> Docker {
+        // Env files a stopped process left behind (they hold variables' values).
+        let _ = std::fs::remove_dir_all(&scratch);
         Docker { known: Mutex::new(Known::default()), scratch, engine: Engine::local() }
     }
 
@@ -258,7 +270,7 @@ impl Runtime for Docker {
         let secs = grace.as_secs().max(1);
         match &self.engine {
             Some(e) => e.stop(name, secs).await,
-            None => docker(&["stop", "-t", &secs.to_string(), name]).await.map(|_| ()),
+            None => docker_within(&["stop", "-t", &secs.to_string(), name], Some(Duration::from_secs(secs + 60))).await.map(|_| ()),
         }
     }
 
@@ -271,7 +283,7 @@ impl Runtime for Docker {
         if let Some(e) = &self.engine {
             return e.wait(name).await;
         }
-        let code = docker(&["wait", name]).await?;
+        let code = docker_within(&["wait", name], None).await?;
         Ok(code.trim().parse().unwrap_or(-1))
     }
 

@@ -13,7 +13,7 @@ use crate::runtime::{InstanceSpec, Runtime};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// What instances of the active deployment are made from.
@@ -103,6 +103,15 @@ impl Drop for Lease {
     }
 }
 
+/// A rollout's new instances, started and healthy, waiting for [`EnvLive::commit`].
+pub struct Prepared {
+    pub made: Vec<Arc<Inst>>,
+    pub took: Duration,
+    /// The environment's lock, held from a volume service's stop of its old instance to the
+    /// commit.
+    hold: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WakeError {
     #[error("this environment has no deployment yet")]
@@ -113,6 +122,8 @@ pub enum WakeError {
     Failed(String),
     #[error("the service took longer than {0:?} to start")]
     Timeout(Duration),
+    #[error("too many requests are waiting for this service to start")]
+    Busy,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +137,8 @@ pub struct LiveConfig {
     pub scale_down_after: Duration,
     /// Between two probes of a starting instance.
     pub probe_every: Duration,
+    /// Requests that may wait for one environment's wake; more get a 503 at once.
+    pub max_waiters: u32,
 }
 
 impl Default for LiveConfig {
@@ -136,6 +149,7 @@ impl Default for LiveConfig {
             drain: Duration::from_secs(30),
             scale_down_after: Duration::from_secs(60),
             probe_every: Duration::from_millis(10),
+            max_waiters: 1000,
         }
     }
 }
@@ -148,7 +162,15 @@ pub struct EnvLive {
     template: Mutex<Option<Arc<Template>>>,
     insts: Mutex<Vec<Arc<Inst>>>,
     /// One change of instances at a time (wakes, scale-ups, rollouts).
-    wake: tokio::sync::Mutex<()>,
+    wake: Arc<tokio::sync::Mutex<()>>,
+    /// Torn down: nothing is made or adopted any more (a request or a tick that held this
+    /// environment from before can't bring it back).
+    closed: AtomicBool,
+    /// Requests waiting on a wake.
+    waiters: AtomicU32,
+    /// The last failed wake and how many failed in a row: the requests behind it get its error
+    /// instead of each trying again, for a backoff that grows from 1 s to 30 s.
+    failed: Mutex<Option<(Instant, String, u32)>>,
     seq: AtomicU64,
     pub log: LogSink,
     pub meter: Mutex<Meter>,
@@ -172,7 +194,10 @@ impl EnvLive {
             cfg,
             template: Mutex::new(None),
             insts: Mutex::new(Vec::new()),
-            wake: tokio::sync::Mutex::new(()),
+            wake: Arc::new(tokio::sync::Mutex::new(())),
+            closed: AtomicBool::new(false),
+            waiters: AtomicU32::new(0),
+            failed: Mutex::new(None),
             seq: AtomicU64::new(0),
             log,
             meter: Mutex::new(Meter::default()),
@@ -213,6 +238,7 @@ impl EnvLive {
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
+        anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "this environment was torn down");
         let mut spec = tpl.spec.clone();
         spec.name = self.name_for(tpl);
         self.runtime.create(&spec).await?;
@@ -299,6 +325,9 @@ impl EnvLive {
     /// for the same wake.
     pub async fn acquire(self: &Arc<Self>) -> Result<Lease, WakeError> {
         let began = Instant::now();
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(WakeError::NoDeployment);
+        }
         let tpl = self.template().ok_or(WakeError::NoDeployment)?;
         if tpl.run.kind != RunType::Web {
             return Err(WakeError::NotWeb);
@@ -316,12 +345,39 @@ impl EnvLive {
                 return Ok(l);
             }
         }
-        let _g = self.wake.lock().await;
-        if let Some(mut l) = self.pick(run.concurrency, self.awake_count() as u32 >= run.max_instances) {
+        if self.waiters.fetch_add(1, Ordering::SeqCst) >= self.cfg.max_waiters {
+            self.waiters.fetch_sub(1, Ordering::SeqCst);
+            return Err(WakeError::Busy);
+        }
+        // The wake runs on its own task: a client that goes away mid-wake can't leave an
+        // instance half started (or a container half made); the wake finishes, and its lease,
+        // if nobody takes it, is dropped there.
+        let this = self.clone();
+        tokio::spawn(async move {
+            let r = this.wake_slow(began).await;
+            this.waiters.fetch_sub(1, Ordering::SeqCst);
+            r
+        })
+        .await
+        .unwrap_or_else(|e| Err(WakeError::Failed(e.to_string())))
+    }
+
+    async fn wake_slow(self: &Arc<Self>, began: Instant) -> Result<Lease, WakeError> {
+        let deadline = began + self.cfg.wake_timeout;
+        let _g = tokio::time::timeout_at(deadline.into(), self.wake.lock()).await.map_err(|_| WakeError::Timeout(self.cfg.wake_timeout))?;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(WakeError::NoDeployment);
+        }
+        let tpl = self.template().ok_or(WakeError::NoDeployment)?;
+        if let Some(mut l) = self.pick(tpl.run.concurrency, self.awake_count() as u32 >= tpl.run.max_instances) {
             l.waited = began.elapsed();
             return Ok(l);
         }
-        let tpl = self.template().ok_or(WakeError::NoDeployment)?;
+        if let Some((at, why, n)) = self.failed.lock().clone()
+            && at.elapsed() < Duration::from_secs(1 << (n.saturating_sub(1)).min(5)).min(Duration::from_secs(30))
+        {
+            return Err(WakeError::Failed(why));
+        }
         // A frozen one first: milliseconds.
         let suspended = self.insts.lock().iter().find(|i| matches!(i.phase(), Phase::Suspended(_))).cloned();
         if let Some(i) = suspended {
@@ -337,10 +393,23 @@ impl EnvLive {
             }
         }
         // Then a start: a created instance of the active deployment, or a new one.
-        let deadline = began + self.cfg.wake_timeout;
-        let inst = self.ready_instance(&tpl).await.map_err(|e| WakeError::Failed(e.to_string()))?;
         let woke = Instant::now();
-        self.start(&inst, &tpl.run, None, deadline).await?;
+        let started = match self.ready_instance(&tpl).await {
+            Ok(inst) => self.start(&inst, &tpl.run, None, deadline).await.map(|_| inst),
+            Err(e) => Err(WakeError::Failed(e.to_string())),
+        };
+        let inst = match started {
+            Ok(i) => {
+                *self.failed.lock() = None;
+                i
+            }
+            Err(e) => {
+                let mut f = self.failed.lock();
+                let n = f.as_ref().map_or(0, |(_, _, n)| *n) + 1;
+                *f = Some((Instant::now(), e.to_string(), n));
+                return Err(e);
+            }
+        };
         let ms = woke.elapsed().as_secs_f64() * 1000.0;
         self.meter.lock().cold_start(now_ms(), ms);
         self.log.stream(Stream::System).line(format!("cold start: {} answered in {ms:.0} ms", inst.name));
@@ -348,6 +417,15 @@ impl EnvLive {
         l.waited = began.elapsed();
         l.cold = true;
         Ok(l)
+    }
+
+    /// The proxy couldn't connect to a running instance: it's gone (killed, out of memory), and
+    /// the next request starts a fresh one instead of trying it again.
+    pub fn connect_failed(&self, inst: &Inst) {
+        let mut p = inst.phase.lock();
+        if matches!(*p, Phase::Running(_)) {
+            *p = Phase::Crashed;
+        }
     }
 
     /// A created (not running) instance of the active deployment, made if there's none.
@@ -383,8 +461,11 @@ impl EnvLive {
     }
 
     /// Make and start the instances a new deployment needs and check their health: the old
-    /// ones keep serving meanwhile. On failure nothing of the new deployment is left.
-    pub async fn prepare(self: &Arc<Self>, tpl: &Arc<Template>, health_path: Option<&str>) -> anyhow::Result<(Vec<Arc<Inst>>, Duration)> {
+    /// ones keep serving meanwhile, except with a volume (one writer): then the old ones stop
+    /// first, and the environment stays locked until [`EnvLive::commit`], so no request starts
+    /// an old instance on the volume in between. On failure nothing of the new deployment is
+    /// left.
+    pub async fn prepare(self: &Arc<Self>, tpl: &Arc<Template>, health_path: Option<&str>) -> anyhow::Result<Prepared> {
         let run = &tpl.run;
         let was_awake = self.awake_count() as u32;
         let n = match run.kind {
@@ -395,10 +476,12 @@ impl EnvLive {
         .min(run.max_instances);
         if run.kind == RunType::Cron {
             // Nothing runs between runs; the next run uses the new template.
-            return Ok((Vec::new(), Duration::ZERO));
+            return Ok(Prepared { made: Vec::new(), took: Duration::ZERO, hold: None });
         }
+        let mut hold = None;
         if run.volume.is_some() {
             // One volume, one instance: the old one lets go of it first.
+            hold = Some(self.wake.clone().lock_owned().await);
             let old: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
             for i in old {
                 let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
@@ -428,7 +511,7 @@ impl EnvLive {
                 anyhow::bail!("{why}");
             }
         }
-        Ok((made, began.elapsed()))
+        Ok(Prepared { made, took: began.elapsed(), hold })
     }
 
     async fn discard(&self, insts: &[Arc<Inst>]) {
@@ -441,8 +524,16 @@ impl EnvLive {
     /// The new deployment takes over: new requests go to `made`, the old instances finish what
     /// they're doing (up to `drain`) and go. An environment that was asleep goes back to sleep
     /// with the new deployment created, so the next request is a start, not a build.
-    pub async fn commit(self: &Arc<Self>, tpl: Arc<Template>, made: Vec<Arc<Inst>>) {
-        let _g = self.wake.lock().await;
+    pub async fn commit(self: &Arc<Self>, tpl: Arc<Template>, prepared: Prepared) {
+        let Prepared { made, hold, .. } = prepared;
+        let _g = match hold {
+            Some(g) => g,
+            None => self.wake.clone().lock_owned().await,
+        };
+        if self.closed.load(Ordering::SeqCst) {
+            self.discard(&made).await;
+            return;
+        }
         let was_awake = self.awake_count();
         *self.template.lock() = Some(tpl.clone());
         let old: Vec<Arc<Inst>> = std::mem::replace(&mut *self.insts.lock(), made.clone());
@@ -475,6 +566,9 @@ impl EnvLive {
     /// Set the active deployment without starting anything (a new owner taking the service).
     pub async fn adopt(self: &Arc<Self>, tpl: Arc<Template>) {
         let _g = self.wake.lock().await;
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         *self.template.lock() = Some(tpl.clone());
         if tpl.run.kind == RunType::Web
             && self.insts.lock().is_empty()
@@ -516,6 +610,7 @@ impl EnvLive {
     /// Remove every instance (an environment's teardown, or the service leaving this node).
     pub async fn shutdown(&self) {
         let _g = self.wake.lock().await;
+        self.closed.store(true, Ordering::SeqCst);
         let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
         self.discard(&all).await;
         *self.template.lock() = None;
@@ -597,6 +692,13 @@ impl EnvLive {
             self.log.stream(Stream::System).line(format!("scaled in: {awake} instances"));
         }
         for i in &insts {
+            if matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)) && !self.runtime.running(&i.name).await {
+                // Exited on its own: the next request starts it again.
+                *i.phase.lock() = Phase::Crashed;
+                awake = awake.saturating_sub(1);
+                self.log.stream(Stream::System).line(format!("{} exited", i.name));
+                continue;
+            }
             if i.in_flight() > 0 {
                 continue;
             }
@@ -615,12 +717,6 @@ impl EnvLive {
                     let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
                     *i.phase.lock() = Phase::Created;
                     awake -= 1;
-                }
-                Phase::Running(_) | Phase::Suspended(_) if !self.runtime.running(&i.name).await => {
-                    // Exited on its own: the next request starts it again.
-                    *i.phase.lock() = Phase::Crashed;
-                    awake = awake.saturating_sub(1);
-                    self.log.stream(Stream::System).line(format!("{} exited", i.name));
                 }
                 _ => {}
             }
@@ -707,16 +803,20 @@ mod tests {
     use crate::runtime::fake::{Fake, FakeState};
 
     fn template(run: Run) -> Arc<Template> {
+        template_of("dep_aaaaaaaaaaaa", run, &[])
+    }
+
+    fn template_of(deployment: &str, run: Run, vars: &[(&str, &str)]) -> Arc<Template> {
         Arc::new(Template {
-            deployment: "dep_aaaaaaaaaaaa".into(),
+            deployment: deployment.into(),
             spec: InstanceSpec {
                 name: String::new(),
                 service: "svc_x".into(),
                 env: "production".into(),
-                deployment: "dep_aaaaaaaaaaaa".into(),
+                deployment: deployment.into(),
                 image: "img".into(),
                 command: None,
-                vars: vec![],
+                vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 port: Some(8080),
                 cpu: 0.5,
                 memory_mb: 512,
@@ -736,8 +836,8 @@ mod tests {
         let live = EnvLive::new("svc_x", "production", fake.clone(), cfg, hub.sink("env:x", Stream::System));
         let run = Run { suspend_after_s: 30, sleep_after_s: 600, ..Run::default() };
         let tpl = template(run);
-        let (made, _) = live.prepare(&tpl, None).await.unwrap();
-        live.commit(tpl, made).await;
+        let prepared = live.prepare(&tpl, None).await.unwrap();
+        live.commit(tpl, prepared).await;
         assert_eq!(live.state(), InstanceState::Stopped, "asleep before: asleep after, created");
         let l = live.acquire().await.unwrap();
         assert!(l.cold);
@@ -755,5 +855,71 @@ mod tests {
         assert_eq!(live.state(), InstanceState::Stopped);
         let name = &live.instances()[0].name;
         assert_eq!(fake.state(name), Some(FakeState::Stopped));
+    }
+
+    fn live(fake: &Arc<Fake>) -> Arc<EnvLive> {
+        let cfg = LiveConfig { probe_every: Duration::from_millis(1), ..Default::default() };
+        EnvLive::new("svc_x", "production", fake.clone(), cfg, LogHub::new(None).sink("env:x", Stream::System))
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_dies_is_replaced_and_a_wake_left_by_its_client_still_finishes() {
+        let fake = Fake::new();
+        let live = live(&fake);
+        let tpl = template_of("dep_aaaaaaaaaaaa", Run::default(), &[("FAKE_BOOT_MS", "150")]);
+        let prepared = live.prepare(&tpl, None).await.unwrap();
+        live.commit(tpl, prepared).await;
+        // The client gives up mid-wake: the wake finishes anyway, nothing is left Starting.
+        assert!(tokio::time::timeout(Duration::from_millis(20), live.acquire()).await.is_err());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(live.state(), InstanceState::Running);
+        // Killed under it (well before it would go to sleep): the reaper notices, and the next
+        // request starts a fresh one.
+        let dead = live.instances()[0].name.clone();
+        fake.crash(&dead);
+        live.tick().await;
+        assert_eq!(live.state(), InstanceState::Crashed);
+        let l = live.acquire().await.unwrap();
+        assert!(l.cold && l.inst.name != dead);
+    }
+
+    #[tokio::test]
+    async fn a_volume_rollout_never_starts_the_old_deployment_on_the_volume() {
+        let fake = Fake::new();
+        let live = live(&fake);
+        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1 }), min_instances: 1, ..Run::default() };
+        let old = template_of("dep_aaaaaaaaaaaa", run.clone(), &[]);
+        let prepared = live.prepare(&old, None).await.unwrap();
+        live.commit(old, prepared).await;
+        // The new deployment boots slowly; a request comes in while the old instance is gone.
+        let new = template_of("dep_bbbbbbbbbbbb", run, &[("FAKE_BOOT_MS", "200")]);
+        let rollout = {
+            let (live, new) = (live.clone(), new.clone());
+            tokio::spawn(async move {
+                let p = live.prepare(&new, None).await.unwrap();
+                live.commit(new, p).await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let l = live.acquire().await.unwrap();
+        assert_eq!(l.inst.deployment, "dep_bbbbbbbbbbbb", "the request waited for the new one");
+        rollout.await.unwrap();
+        let up: Vec<_> = fake.instances("svc_x").into_iter().filter(|(_, _, st)| *st == FakeState::Running).collect();
+        assert_eq!(up.len(), 1, "{up:?}");
+    }
+
+    #[tokio::test]
+    async fn nothing_comes_back_after_a_teardown() {
+        let fake = Fake::new();
+        let live = live(&fake);
+        let tpl = template(Run::default());
+        let prepared = live.prepare(&tpl, None).await.unwrap();
+        live.commit(tpl.clone(), prepared).await;
+        live.shutdown().await;
+        // A request or a new owner's adopt that held this environment from before.
+        live.adopt(tpl).await;
+        assert!(matches!(live.acquire().await, Err(WakeError::NoDeployment)));
+        live.tick().await;
+        assert!(fake.instances("svc_x").is_empty());
     }
 }

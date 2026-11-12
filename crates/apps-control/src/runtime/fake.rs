@@ -67,6 +67,17 @@ impl Fake {
         v
     }
 
+    /// The process dies on its own (killed, out of memory): its port stops answering.
+    pub fn crash(&self, name: &str) {
+        if let Some(i) = self.instances.lock().get_mut(name) {
+            if let Some(s) = i.server.take() {
+                s.abort();
+            }
+            i.state = FakeState::Stopped;
+            i.exited.send_replace(Some(137));
+        }
+    }
+
     pub fn networks(&self) -> Vec<String> {
         self.networks.lock().clone()
     }

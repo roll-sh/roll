@@ -123,6 +123,20 @@ every deployment is immutable with instant rollback.
   503 with `Retry-After`), one wake starts, and every held request goes through as soon as the
   instance answers its port. Requests arriving while it wakes join the same wait; nothing
   starts twice.
+  - The wake runs on its own task, so a client that goes away mid-wake leaves nothing half
+    started. At most 1,000 requests wait per environment (more get a 503 with `Retry-After`),
+    and after a failed wake the requests behind it get its error for a backoff (1 s doubling to
+    30 s) instead of each trying again. Calls to Docker have timeouts, so a hung daemon fails a
+    wake instead of holding it.
+  - An instance that dies on its own (killed, out of memory) is noticed by the next reaper tick,
+    or by the proxy when its port refuses a connection (a 503 with `Retry-After: 1`); the next
+    request starts a fresh one.
+  - A service with a volume has one writer: a rollout stops the old instance and keeps the
+    environment locked until the new one is live, so requests wait for the new deployment
+    instead of starting the old one on the volume.
+  - Deleting an environment deletes its row first, then tears down its live state, which
+    refuses to make or adopt anything afterwards. A node that loses a service's lease cancels its
+    deploys in flight and doesn't switch an environment it no longer owns.
 - **Idle states**, cheapest last:
   1. **running**: serving, billed per second of CPU and memory it actually uses.
   2. **suspended**: after `suspend_after` (default 30 s) without a request, the instance is
@@ -387,47 +401,42 @@ feature/roll-previews and feature/roll-search found these. Ours are in `## Next`
 
 Ranked; the top item is what's being worked on.
 
-1. **Instance lifecycle.** A wake runs on a task the waiting requests share, so a client going
-   away can't strand an instance in Starting or leave an env file (scratch is cleared at start).
-   The reaper checks `running` before the idle rules (a crashed instance is missed until
-   `sleep_after` now), and a refused connection marks the instance crashed and retries once. A
-   volume service never runs two instances during a rollout. Deleting an environment marks it
-   first and the live state refuses `adopt`/`make` after teardown. Losing a service's lease
-   cancels its deploys and fences `switch_active`. Waiters are capped, a failed wake backs off,
-   and runtime calls have timeouts.
-2. **Redeploy** for every source: the active image again with the current variables and settings.
+1. **Redeploy** for every source: the active image again with the current variables and settings.
    The Deploy button and the "settings changed" banner are dead for `roll up` services today.
-3. **Containers.** Variables go in through the Engine API's `Env` (no env file on disk, and
+   An `Idempotency-Key` on `POST …/deploys` (previews checks `active.revision` first today).
+   Fence `switch_active` with the lease's generation (roll-cluster), not only an ownership
+   check before it.
+2. **Containers.** Variables go in through the Engine API's `Env` (no env file on disk, and
    multi-line values such as PEM keys work; roll secrets moved code-preview off `K=V` argv for the
    same reason). `--cap-drop` what apps don't need, the writable layer and `volume.size_gb` get
    quotas, builds get their CPU and memory limits and a concurrency cap. Logs cap unflushed bytes
    and forget a build's ring once it's stored.
-4. **roll secrets as the env store** (after #20 merges): an apps environment is a project
+3. **roll secrets as the env store** (after #20 merges): an apps environment is a project
    environment of roll secrets (checked on `PUT`, ephemeral from its kind, deleted with it);
    service variables live in secrets at `/services/<name>`; values are resolved only when a
    container is made (never for a dashboard read; `needs_deploy` from fingerprints); links become
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-5. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
+4. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
    `DATABASE_URL`); a pre-deploy (release) command that gates the switch, for migrations;
    `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
-6. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
+5. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
    `roll ssh` / exec into an instance, with the API routes under the service.
-7. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
+6. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics
    tiles that total the window; CLI output for people, not JSON; a project slug that isn't
    repeated in the URL.
-8. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
+7. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
    output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
    `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
-9. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
+8. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
-10. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
-11. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+9. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+10. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.
-12. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+11. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
     node; pending claims expire.
-13. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-14. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+12. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

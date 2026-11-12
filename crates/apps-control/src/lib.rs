@@ -487,10 +487,12 @@ impl Apps {
         for d in self.store.pending_deployments(service)?.into_iter().filter(|d| d.environment == env) {
             self.cancel(service, env, &d.id).await.ok();
         }
-        self.teardown_live(service, env).await;
-        self.deps.runtime.remove_volume(&volume_name(service, env)).await;
+        // The row goes first: from here no request finds the environment, so nothing makes its
+        // live state (or a container, or the volume) again behind the teardown.
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
+        self.teardown_live(service, env).await;
+        self.deps.runtime.remove_volume(&volume_name(service, env)).await;
         self.logs.forget(&format!("env:{service}/{env}"));
         Ok(())
     }
@@ -539,12 +541,15 @@ impl Apps {
     /// Make sure this node's live state knows the environment's active deployment (after a
     /// restart or a takeover).
     pub async fn load_live(self: &Arc<Self>, service: &str, env: &str) -> Result<Arc<EnvLive>> {
-        let live = self.live(service, env);
-        if live.template().is_some() {
+        if let Some(live) = self.lives.lock().get(&env_key(service, env)).cloned()
+            && live.template().is_some()
+        {
             return Ok(live);
         }
+        // Only an environment that exists gets live state.
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        let live = self.live(service, env);
         let Some(active) = row.active.clone() else { return Ok(live) };
         let dep = self.db(move |s| s.deployment(&active)).await?;
         let sid = service.to_string();

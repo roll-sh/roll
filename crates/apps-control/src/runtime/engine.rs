@@ -15,10 +15,14 @@ use hyper_util::rt::TokioIo;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::net::UnixStream;
 
 /// Bytes read from one non-streaming answer (an inspect is a few KiB).
 const ANSWER_MAX: usize = 4 << 20;
+/// How long a call that should be quick may take: a hung daemon fails a wake instead of holding
+/// it (and every request behind it) forever.
+const QUICK: Duration = Duration::from_secs(60);
 const NAME: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.');
 
 #[derive(Clone, Debug)]
@@ -57,8 +61,20 @@ impl Engine {
         Ok(tx.send_request(req).await?)
     }
 
-    /// A call whose answer is small: its status and body. Errors carry the daemon's message.
+    /// A quick call whose answer is small: its status and body. Errors carry the daemon's
+    /// message.
     async fn call(&self, method: Method, path: &str) -> anyhow::Result<(StatusCode, Bytes)> {
+        self.call_within(method, path, Some(QUICK)).await
+    }
+
+    async fn call_within(&self, method: Method, path: &str, within: Option<Duration>) -> anyhow::Result<(StatusCode, Bytes)> {
+        match within {
+            Some(d) => tokio::time::timeout(d, self.call_unbounded(method, path)).await.map_err(|_| anyhow::anyhow!("docker didn't answer {path} within {} s", d.as_secs()))?,
+            None => self.call_unbounded(method, path).await,
+        }
+    }
+
+    async fn call_unbounded(&self, method: Method, path: &str) -> anyhow::Result<(StatusCode, Bytes)> {
         let res = self.send(method, path).await?;
         let status = res.status();
         let body = Limited::new(res.into_body(), ANSWER_MAX).collect().await.map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?.to_bytes();
@@ -92,7 +108,7 @@ impl Engine {
 
     /// SIGTERM, then SIGKILL after `secs`; already stopped is fine (304).
     pub async fn stop(&self, name: &str, secs: u64) -> anyhow::Result<()> {
-        self.call(Method::POST, &format!("{}?t={secs}", Self::container(name, "stop"))).await.map(|_| ())
+        self.call_within(Method::POST, &format!("{}?t={secs}", Self::container(name, "stop")), Some(Duration::from_secs(secs) + QUICK)).await.map(|_| ())
     }
 
     /// Wait for it to exit: its exit code.
@@ -102,7 +118,7 @@ impl Engine {
             #[serde(rename = "StatusCode")]
             status: i64,
         }
-        let (_, body) = self.call(Method::POST, &Self::container(name, "wait")).await?;
+        let (_, body) = self.call_within(Method::POST, &Self::container(name, "wait"), None).await?;
         Ok(serde_json::from_slice::<Waited>(&body)?.status as i32)
     }
 
