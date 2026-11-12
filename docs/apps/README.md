@@ -502,7 +502,7 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    nothing).
 2. **The rest of a cold start**: with the CPU boost in, what's left is dockerd starting the
    container on its network (≈250 ms here; the network, `--init` and the log driver each
-   measured within noise, `bench.sh` in the 2026-11-13 notes). Snapshot restore (CRIU, or
+   measured within noise by `scripts/bench-apps-coldstart.sh`). Snapshot restore (CRIU, or
    Firecracker on the fleet) is the next step for it.
 3. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
