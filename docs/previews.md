@@ -138,7 +138,7 @@ database's or a stream's lease, storage's metadata owner) wherever the reconcile
 | `redis` | `redis_control::Control::branch` | Delete and branch again | Nothing in memory; its manifest and the segments it pins | Copy-on-write in storage. Loading replays the parent into memory. |
 | `bucket` | `s3_store::Store::branch_bucket` | Delete and branch again | The objects it wrote, plus the parent's writes pushed down to it | One row to create. Credentials are a write key scoped to the branch. |
 | `nosql` | `nosql_control::Control::branch` (`schema_only` for `schema`) | `nosql_control::Control::reset`: same id, endpoint and credentials | The SSTables it wrote | Zero copy. Masking policies are inherited. |
-| `stream` | A new stream with the parent's topics and their configs (`schema`). `branch` also copies each topic's committed offsets so consumers resume where the parent was | Delete and branch again | Its own chunks | A data fork that shares the parent's chunks needs reference counting in the broker's retention and compaction first. See `## Next`. |
+| `stream` | `branch`: `POST /v1/streams/{s}/branches` on the parent's owner, a new stream with the parent's topics and configs whose partitions share the parent's chunks as of the branch (same offsets, nothing copied) and its committed group offsets. `schema`: a new stream with the parent's topics and configs, no records | Delete and branch again | The chunks it wrote (`own_bytes`; what it shares stays the parent's) | Zero copy. Retention, compaction and deletes on either side delete only objects no stream references, so a branch outlives its parent. A transaction open at the branch is aborted in it. See the broker's README, "Branches". |
 | `queue` | A vhost with the parent vhost's definitions (exchanges, queues, bindings, policies), no messages | Delete and branch again | Nothing (a vhost suspends after 5 minutes) | A branch never holds production messages. |
 | `tasks` | A new tenant with no messages and no schedules | Delete and create again | Its own SQLite file | Copied schedules would call production endpoints, so they never are. |
 | `search` | `search_control::Control::branch` (zero copy) | Delete and branch again | Segments it wrote | Joins when roll search lands (`feature/serverless-search`). Its adapter is behind the same trait. |
@@ -396,7 +396,7 @@ ready, `error` on failure, and `sleep` for a sleeping preview.
 
 Ranked by what a person notices first. Done so far: the crate, rolld's adapters for every
 product, the secrets adapter, roll code and GitHub reporting, `roll preview`, the end-to-end run
-and its cost.
+and its cost, and stream data branches.
 
 1. **The dashboard's Previews tab and canvas overlay** (`feature/roll-previews-dashboard`, being
    built) merged here. Then the dashboard's workspace kinds for `queue` and `tasks`.
@@ -404,16 +404,13 @@ and its cost.
    ext4. A branch could start from the parent's latest base backup in object storage plus WAL
    (lazy pages), not `pg_basebackup`. Also: `schema` mode for Postgres (structure only), and a
    reset that keeps the endpoint, so `DATABASE_URL` doesn't change.
-3. **Stream data branches** that share the parent's uploaded chunks (refcounted chunks in the
-   broker's retention, compaction and `delete_stream`). Today a stream branch gets the topics,
-   not the records.
-4. **Several services per repo**: `[services.<name>]` in `roll.toml`, each with its own image,
+3. **Several services per repo**: `[services.<name>]` in `roll.toml`, each with its own image,
    command, port and `root`, so a monorepo's web and API both run.
-5. **Build caches.** Keep a service's package caches between starts, in a per-repo volume shared
+4. **Build caches.** Keep a service's package caches between starts, in a per-repo volume shared
    by every preview of the repo. This cuts the cold start of real apps.
-6. **Spread preview services across nodes** (a lease per preview rather than one leader). Today
+5. **Spread preview services across nodes** (a lease per preview rather than one leader). Today
    one node serves every preview host in a cluster.
-7. **Search branches** (roll search, `search_control::Control::branch`) when it lands, and the
+6. **Search branches** (roll search, `search_control::Control::branch`) when it lands, and the
    roll apps adapter (`Apps`) when `feature/roll-apps` lands.
-8. **Seeds and anonymised data**: a per-resource `seed` command run once after branching, and
+7. **Seeds and anonymised data**: a per-resource `seed` command run once after branching, and
    NoSQL masking surfaced in the settings.
