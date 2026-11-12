@@ -68,6 +68,15 @@ pub enum Preview {
     },
     /// What a project's previews cost.
     Usage { project: String },
+    /// Print a service's link (with its access token when the preview is private); `--browser`
+    /// opens it.
+    Open {
+        preview: String,
+        #[arg(long, short)]
+        service: Option<String>,
+        #[arg(long)]
+        browser: bool,
+    },
 }
 
 /// A project by id or name.
@@ -112,7 +121,9 @@ fn print_preview(p: &Value) {
     }
     println!("repo {}  head {}  created {}", s(&p["repo"]), &s(&p["head"])[..s(&p["head"]).len().min(12)], ago(p["created_at"].as_i64().unwrap_or(0) / 1000));
     for svc in p["services"].as_array().into_iter().flatten() {
-        println!("  service {:<16} {:<10} {}", s(&svc["name"]), s(&svc["state"]), s(&svc["url"]));
+        // The link with the access token when the preview is private: the one that opens it.
+        let url = svc["share_url"].as_str().or(svc["url"].as_str()).unwrap_or("-");
+        println!("  service {:<16} {:<10} {url}", s(&svc["name"]), s(&svc["state"]));
     }
     for r in p["resources"].as_array().into_iter().flatten() {
         println!("  {:<8} {} → {} ({}, {})", s(&r["kind"]), s(&r["parent"]), r["ref"].as_str().unwrap_or("…"), s(&r["state"]), bytes(r["bytes"].as_f64().unwrap_or(0.0)));
@@ -217,6 +228,25 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Settings { project, set } => {
             let path = format!("/v1/previews/projects/{}/settings", project_id(api, &project).await?);
             if set.is_empty() { api.get(&path).await? } else { api.call(reqwest::Method::PUT, &path, Some(patch(&set)?)).await? }
+        }
+        Preview::Open { preview, service, browser } => {
+            let p = api.get(&format!("/v1/previews/{preview}")).await?;
+            let services = p["services"].as_array().cloned().unwrap_or_default();
+            let svc = match &service {
+                Some(name) => services.iter().find(|x| x["name"] == name.as_str()),
+                None => services.first(),
+            };
+            let Some(svc) = svc else { bail!("the preview has no service {}", service.as_deref().unwrap_or("")) };
+            let url = svc["share_url"].as_str().or(svc["url"].as_str()).unwrap_or_default().to_string();
+            if browser {
+                let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                std::process::Command::new(opener).arg(&url).status()?;
+            }
+            if !as_json {
+                println!("{url}");
+                return Ok(());
+            }
+            json!({ "service": svc["name"], "url": url })
         }
         Preview::Usage { project } => {
             let v = api.get(&format!("/v1/previews/projects/{}/usage", project_id(api, &project).await?)).await?;
