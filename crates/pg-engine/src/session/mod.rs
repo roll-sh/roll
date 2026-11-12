@@ -399,6 +399,9 @@ pub struct Session {
     /// Executor trees prepared statements' plans ran to their ends, the latest last
     /// (`KeptTree`).
     kept: Vec<KeptTree>,
+    /// A custom plan whose scan was chosen again (`Analyzed::rechosen`), with the plan of
+    /// the same statement it was made after: that one's kept tree takes it (`Node::adopt`).
+    rechosen_after: Option<(Arc<Plan>, Arc<Plan>)>,
 }
 
 /// An executor tree a statement's plan ran to its end, for the plan's next execution to
@@ -537,6 +540,7 @@ impl Session {
             fetch_limit: 0,
             suspended: None,
             kept: Vec::new(),
+            rechosen_after: None,
         }
     }
 
@@ -2067,8 +2071,13 @@ impl Session {
     /// The tree kept for `plan` (`KeptTree`), taken out (None inside: none, or one opened
     /// under another catalog or other settings, dropped).
     fn kept_tree(&mut self, plan: &Arc<Plan>, version: u64, settings: u64) -> Option<crate::exec::BoxNode> {
-        let i = self.kept.iter().position(|k| Arc::ptr_eq(&k.plan, plan))?;
-        let k = self.kept.remove(i);
+        // (A rechosen plan: the tree of the plan it was made after, when that adopts it.)
+        let after = self.rechosen_after.take().filter(|(p, _)| Arc::ptr_eq(p, plan)).map(|(_, a)| a);
+        let i = self.kept.iter().position(|k| Arc::ptr_eq(&k.plan, plan) || after.as_ref().is_some_and(|a| Arc::ptr_eq(&k.plan, a)))?;
+        let mut k = self.kept.remove(i);
+        if !Arc::ptr_eq(&k.plan, plan) && !k.node.adopt(plan) {
+            return None;
+        }
         (k.version == version && k.settings == settings).then_some(k.node)
     }
 

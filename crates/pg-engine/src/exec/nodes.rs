@@ -2885,6 +2885,14 @@ impl Node for ProjectNode {
         self.input.park();
     }
 
+    /// (A rechosen plan's nodes above its scan are the kept plan's: its expressions too.)
+    fn adopt(&mut self, plan: &Arc<Plan>) -> bool {
+        match &**plan {
+            Plan::Project { input, .. } => self.input.adopt(input),
+            _ => false,
+        }
+    }
+
     fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {
         let ProjectNode { input, exprs: _, computed, tried, topk, moves, piped, passed } = self;
         *computed = None;

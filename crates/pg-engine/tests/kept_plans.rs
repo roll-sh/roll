@@ -498,3 +498,79 @@ fn prepared_statements_restart_their_trees() {
     assert_eq!(ext(&mut s, "s", sel, &[Some("2")]).unwrap(), format!("{:?}", Value::Int8(bal[2] + 5)));
     assert_eq!(one(&mut s, "SELECT count(*) FROM fired"), Some(Value::Int8(37)));
 }
+
+/// A prepared range read bound again and again as its range widens and narrows: each custom
+/// plan is the scan of the plan before chosen again (`Analyzed::rechosen`, run over the tree
+/// the plan before ran: `Node::adopt`) while the same path wins, and planned afresh when
+/// another does (an index scan, a bitmap scan, a sequential scan). Debug builds plan every
+/// rechosen plan afresh too and require the same plan and cost; every step's rows are
+/// checked.
+#[test]
+fn rechosen_plans_follow_the_range_width() {
+    use pg_engine::session::Outcome;
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "sweep");
+    s.query("CREATE TABLE t (id int PRIMARY KEY, v int NOT NULL, pad text)").unwrap();
+    s.query("INSERT INTO t SELECT g, (g * 7919) % 20000, repeat('x', 40) FROM generate_series(1, 20000) g").unwrap();
+    s.query("CREATE INDEX t_v ON t (v)").unwrap();
+    s.query("ANALYZE t").unwrap();
+    // (Custom plans every time: the generic plan's estimate could win the average.)
+    s.query("SET plan_cache_mode = force_custom_plan").unwrap();
+    let sql = "SELECT id, v FROM t WHERE v BETWEEN $1 AND $2";
+    s.parse_message("w", sql, &[]).unwrap();
+    s.sync().unwrap();
+    let (used, restarts) = (s.rechosen_custom_uses(), pg_engine::exec::TREE_RESTARTS.load(Relaxed));
+    let mut widths: Vec<i32> = [0, 1, 2, 3, 5, 8, 13, 20, 30, 50, 80, 120, 200, 300, 500, 800, 1200, 2000, 3000, 5000, 8000, 12000, 20000].into();
+    widths.extend(widths.clone().into_iter().rev());
+    let mut ranges = Vec::new();
+    // (Each bind's way to its plan: r rechosen, a from the analysis, g the generic binding, b bound afresh.)
+    let mut trace = String::new();
+    // (A sweep at the low end of the column, then one in its middle: a range near an end reads
+    // the column's actual end from the index, and may take another path than one in the middle.)
+    for (i, (base, w)) in [300, 5000].into_iter().flat_map(|b| widths.iter().map(move |&w| (b, w))).enumerate() {
+        let lo = base + 7 * (i as i32 % 13);
+        let hi = lo + w;
+        let params = [lo, hi].iter().map(|v| Some(v.to_string().into_bytes())).collect();
+        let before = (s.rechosen_custom_uses(), s.analysis_custom_uses(), s.generic_custom_uses());
+        s.bind_message("", "w", params, &[], Vec::new(), false).unwrap();
+        let Outcome::Done(q) = s.execute_portal("", 0).unwrap().0 else { panic!("expected SELECT") };
+        let after = (s.rechosen_custom_uses(), s.analysis_custom_uses(), s.generic_custom_uses());
+        trace.push(if after.0 > before.0 { 'r' } else if after.1 > before.1 { 'a' } else if after.2 > before.2 { 'g' } else { 'b' });
+        s.sync().unwrap();
+        let mut got: Vec<i32> = q.rows.iter().map(|r| match r[1] { Value::Int4(v) => v, ref x => panic!("{x:?}") }).collect();
+        got.sort_unstable();
+        let mut want: Vec<i32> = (1..=20000).map(|g: i32| (g * 7919) % 20000).filter(|v| (lo..=hi).contains(v)).collect();
+        want.sort_unstable();
+        assert_eq!(got, want, "rows of {lo}..={hi}");
+        ranges.push((lo, hi));
+    }
+    let (rechosen, restarted) = (s.rechosen_custom_uses() - used, pg_engine::exec::TREE_RESTARTS.load(Relaxed) - restarts);
+    // (The sweep crosses from index scans to bitmap scans to a sequential scan and back.)
+    let mut kinds = std::collections::BTreeSet::new();
+    for (lo, hi) in ranges {
+        let plan = s.query(&format!("EXPLAIN (COSTS OFF) SELECT id, v FROM t WHERE v BETWEEN {lo} AND {hi}")).unwrap();
+        let top = format!("{:?}", plan.last().unwrap().rows[0][0]);
+        kinds.insert(["Index Scan", "Bitmap Heap Scan", "Seq Scan"].into_iter().find(|k| top.contains(k)).unwrap_or("other"));
+    }
+    assert_eq!(kinds.into_iter().collect::<Vec<_>>(), ["Bitmap Heap Scan", "Index Scan", "Seq Scan"]);
+    // (This shape, a non-unique index's range with no ORDER BY, has its index and bitmap scans
+    // planned afresh at every bind; its sequential scans are rechosen.)
+    eprintln!("rechosen {rechosen} of 92, trees restarted {restarted}: {trace}");
+    // The benchmark's shape, a key range in key order: each bind's plan is the one before's
+    // scan chosen again, run over the tree the one before ran.
+    s.parse_message("k", "SELECT id, v FROM t WHERE id BETWEEN $1 AND $1 + 99 ORDER BY id", &[]).unwrap();
+    s.sync().unwrap();
+    let (used, restarts) = (s.rechosen_custom_uses(), pg_engine::exec::TREE_RESTARTS.load(Relaxed));
+    for i in 0..20 {
+        let lo = 1 + (i * 7919) % 19900;
+        s.bind_message("", "k", vec![Some(lo.to_string().into_bytes())], &[], Vec::new(), false).unwrap();
+        let Outcome::Done(q) = s.execute_portal("", 0).unwrap().0 else { panic!("expected SELECT") };
+        s.sync().unwrap();
+        let ids: Vec<i32> = q.rows.iter().map(|r| match r[0] { Value::Int4(v) => v, ref x => panic!("{x:?}") }).collect();
+        assert_eq!(ids, (lo..lo + 100).collect::<Vec<_>>());
+    }
+    let (rechosen, restarted) = (s.rechosen_custom_uses() - used, pg_engine::exec::TREE_RESTARTS.load(Relaxed) - restarts);
+    assert!(rechosen >= 15, "{rechosen} of 20 key ranges rechosen");
+    assert!(restarted >= 15, "{restarted} trees restarted");
+}

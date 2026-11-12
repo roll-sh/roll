@@ -167,6 +167,15 @@ pub trait Node {
         Err(crate::error::internal("restart of a node that can't"))
     }
 
+    /// Of a tree parked for its next execution (`park`): take `plan` as its plan from now
+    /// on, a plan of the same shape as its own made for other values (a custom plan's scan
+    /// chosen again, `Analyzed::rechosen`: the nodes above the scan the same, the scan of the
+    /// same table, access and index, its bounds, filter and estimates of other constants),
+    /// for `restart` to run it as opening it would. False: it can't, and nothing changed.
+    fn adopt(&mut self, _plan: &Arc<Plan>) -> bool {
+        false
+    }
+
     /// Before its first row: a node that can may leave out the rows whose column `col` (an
     /// oid) is none of `keys`, which nothing above can match (an inner or semi hash join's
     /// outer side, its inner side built: a catalog scan then reads the matching rows through

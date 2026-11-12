@@ -5586,15 +5586,7 @@ impl Node for ScanNode {
             && s.sample.is_none()
             && matches!(s.access, Access::Index { only: false, .. })
             && s.index.as_ref().is_some_and(|(ix, b)| {
-                // (One key's entries, as a point read or write has them: a range's scan opened
-                // afresh measured cheaper than one restarted, BENCH.md "Point reads, round 1".)
-                matches!(ix.method.as_str(), "btree" | "hash")
-                    && b.order.is_empty()
-                    && b.eq.len() == ix.columns.len()
-                    && b.any.is_none()
-                    && b.skip.is_none()
-                    && b.lower.is_none()
-                    && b.upper.is_none()
+                matches!(ix.method.as_str(), "btree" | "hash") && b.order.is_empty() && b.any.is_none() && b.skip.is_none()
             })
             && self.keys.is_none()
             && self.am.is_none()
@@ -5724,6 +5716,42 @@ impl Node for ScanNode {
         fetched.clear();
         *batch = first_batch(plan);
         *ios_cols = None;
+    }
+
+    /// (The same table, access, index and direction: what `open_scan_as` decides from the
+    /// plan is decided again as `restart` runs, but for the columns decoded, which the
+    /// new filter must read as the old one does, and the run of equal keys.)
+    fn adopt(&mut self, plan: &Arc<crate::sql::plan::Plan>) -> bool {
+        let crate::sql::plan::Plan::Scan(new) = &**plan else { return false };
+        let old: &ScanPlan = &self.plan;
+        let index = |s: &ScanPlan| s.index.as_ref().map(|(ix, b)| (ix.oid, b.order.is_empty()));
+        let filter_cols = |s: &ScanPlan| {
+            let mut out = Vec::new();
+            s.filter.as_ref().is_none_or(|f| super::need::mark(f, &mut out)).then_some(out)
+        };
+        if new.table.oid != old.table.oid
+            || !Arc::ptr_eq(&new.table, &old.table)
+            || index(new) != index(old)
+            || new.reverse != old.reverse
+            || new.mark.is_some()
+            || old.mark.is_some()
+            || new.current_of.is_some()
+            || new.sample.is_some()
+            || new.with_key != old.with_key
+            || new.limit != old.limit
+            || new.sys != old.sys
+            || !matches!((&new.access, &old.access), (Access::Index { only: a, .. }, Access::Index { only: b, .. }) if a == b)
+            || filter_cols(new).is_none()
+            || filter_cols(new) != filter_cols(old)
+        {
+            return false;
+        }
+        let Some(shared) = super::planref::scan(plan) else { return false };
+        self.key = &**new as *const ScanPlan as usize;
+        self.one_run = collation_equal_run(new);
+        self.plan = shared;
+        self.plan_decided = None;
+        true
     }
 
     fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {

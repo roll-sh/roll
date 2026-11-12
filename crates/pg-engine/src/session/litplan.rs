@@ -678,6 +678,9 @@ struct KeptCustom {
     bq: Arc<BoundQuery>,
     choice: Arc<crate::sql::paths::ScanChoice>,
     reads: Watched,
+    /// The custom plan made last (`bq`'s, or the last one rechosen): the next rechosen one
+    /// takes its executor tree (`Session::kept_tree`).
+    last: Arc<crate::sql::plan::Plan>,
 }
 
 /// What a Parse of a query found.
@@ -928,12 +931,15 @@ impl Session {
                 let (c, r) = (self.plan_cost(&own, params, true), self.plan_cost(&bq, params, true));
                 assert!((c - r).abs() <= 1e-9 * c.abs().max(1.0), "rechosen custom cost of {:?}: {c} {r}", p.sql);
             }
+            let bq = Arc::new(bq);
             if let Some(k) = self.param_entry(&p.sql, &oids).and_then(|e| e.kept.as_mut()) {
                 k.reads = reads;
+                let last = std::mem::replace(&mut k.last, bq.plan.clone());
+                self.rechosen_after = Some((bq.plan.clone(), last));
             }
             self.param_plans.from_analysis += 1;
             self.param_plans.rechosen += 1;
-            return Some(Arc::new(bq));
+            return Some(bq);
         }
         let ((made, choice), mut reads) = crate::sql::literals::recording(|| {
             crate::sql::paths::keeping_choice(|| self.with_ctx(params, |ctx| Ok(a.bind_values(params, ctx))))
@@ -951,7 +957,7 @@ impl Session {
         };
         // (A scan's estimates read from its data are made again as its path is chosen.)
         reads.retain(|r| *r != SizeRead::Data);
-        let kept = choice.filter(|_| a.rechoosable()).map(|choice| KeptCustom { bq: bq.clone(), choice, reads: Watched::new(reads) });
+        let kept = choice.filter(|_| a.rechoosable()).map(|choice| KeptCustom { last: bq.plan.clone(), bq: bq.clone(), choice, reads: Watched::new(reads) });
         if checked && !cfg!(debug_assertions) {
             if let Some(e) = self.param_entry(&p.sql, &oids) {
                 e.kept = kept;
