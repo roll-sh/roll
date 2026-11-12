@@ -23,6 +23,56 @@ environments that inherit from a base environment instead of copying it.
   `crates/roll-cli/tests/secrets.rs` (`roll run` against a live rolld),
   `apps/dashboard/src/lib/secrets-*.test.ts`.
 
+## Getting started
+
+Everything below works the same from the dashboard (a project's **Secrets**) and the CLI.
+
+1. **Pick a project and its environments.** A workspace project has `development`, `staging` and
+   `production` the first time you open its secrets. Add your own (`roll secrets envs add qa`) and
+   remember the project for this directory:
+
+   ```
+   roll secrets setup -p shop -e development
+   ```
+2. **Add values**, one by one or from a `.env` file (one change, which you can roll back):
+
+   ```
+   roll secrets set STRIPE_KEY=sk_test_… LOG_LEVEL=debug
+   roll secrets import .env
+   roll secrets set DATABASE_URL='postgres://app:${PASSWORD}@${staging.DB_HOST}/shop'   # references
+   ```
+3. **Link roll resources** instead of pasting their credentials. A linked value follows the
+   resource: a rotated password, a new key. In the dashboard, **Link a resource**: a Postgres
+   branch's URL, a Redis URL, a bucket's own access key, a stream's API key, a search API key.
+4. **Run with them.** Nothing is written to disk; `--watch` restarts on a change:
+
+   ```
+   roll run -- npm run dev
+   roll run -e production --watch -- ./server
+   ```
+5. **Promote** what changed from one environment to the next, and **protect** production so writes
+   become change requests someone else approves:
+
+   ```
+   roll secrets diff --from development --to staging
+   roll secrets promote --from staging --to production STRIPE_KEY
+   roll secrets envs protect production --approvals 1
+   ```
+6. **CI and services** get a scoped token for one project, some environments, some folders and
+   only the actions they need, with an expiry:
+
+   ```
+   roll secrets tokens create ci --for-env staging --action read --action reveal --ttl-days 90
+   ROLL_TOKEN=rlst_… roll run -e staging -- make test
+   ```
+
+   Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
+   notification). roll's own checks (`secrets = "development"` in `roll.toml`), previews, apps and
+   sandboxes read their environment directly.
+7. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
+   audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
+   one value to someone outside roll through a link that works once.
+
 ## Where it runs
 
 roll secrets is always on, like workspace projects: it is not a product in `ROLL_PRODUCTS`.
@@ -761,10 +811,8 @@ Ranked:
    (whichever of #20 and #21 merges second; the adapter is in the apps thread).
 2. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
    a version's history shows the old and new value side by side on reveal.
-3. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
-   links, previews), for users rather than implementers.
-4. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
+3. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
-5. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
+4. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
    Cloudflare Workers; the platform's token is a reference to a secret of the same project,
    resolved at push time, never stored in the sync.
