@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS services (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, name)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS dismissed (
+    change_id TEXT PRIMARY KEY,
+    head TEXT NOT NULL,
+    at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS activity (
     preview_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
@@ -423,6 +428,32 @@ impl Store {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A change's preview was deleted while the change stays open (its TTL ran out, or someone
+    /// deleted it): no new one until the change's head moves.
+    pub fn dismiss(&self, change: &str, head: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO dismissed (change_id, head, at) VALUES (?, ?, ?) ON CONFLICT (change_id) DO UPDATE SET head = excluded.head, at = excluded.at",
+                params![change, head, now],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Whether a change's preview was dismissed at this head.
+    pub fn dismissed(&self, change: &str, head: &str) -> Result<bool> {
+        Ok(self.db.read(|c| c.query_row("SELECT 1 FROM dismissed WHERE change_id = ? AND head = ?", [change, head], |_| Ok(())).optional())?.is_some())
+    }
+
+    /// Forget dismissals of changes that are gone (landed, closed or deleted).
+    pub fn undismiss(&self, change: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM dismissed WHERE change_id = ?", [change])?;
             Ok::<_, Error>(())
         })
     }

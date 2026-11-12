@@ -84,6 +84,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   (7 days by default). `DELETE /v1/previews/{id}` deletes it at once. Deletion removes, in this
   order: services, the secrets environment, then every data branch. Each step is idempotent, and
   the preview row goes last, so a crash restarts the deletion.
+  A change's preview deleted by its TTL or by hand stays deleted until the change's next push
+  (`dismissed(change_id, head)`).
 - **Limits**:
   - `max_previews` (10 by default): previews beyond it wait as `queued`, oldest change first,
     until one is deleted.

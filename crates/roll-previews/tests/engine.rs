@@ -293,6 +293,15 @@ async fn previews_beyond_the_limit_wait_and_start_as_others_go() {
     }
     let b = e.engine.store.row(&b.id).unwrap();
     assert_eq!((b.state, b.desired), (State::Ready, Desired::Active));
+    // A deleted change preview stays deleted until the change's next push.
+    e.engine.delete(&b.id).unwrap();
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    assert!(e.engine.store.row_by_change("chg_b").unwrap().is_none(), "not recreated at the same head");
+    e.code.edit("chg_b", |c| c.head = "cs_2b".into());
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_b").unwrap().is_some(), "a push brings it back");
     // A manual preview of a branch is refused at the limit rather than queued.
     e.code.heads.lock().insert("acme/web@feat/x".into(), "cs_x".into());
     let err = e.engine.create(&e.project, "acme/web", Some("feat/x"), None, "me").await.unwrap_err();

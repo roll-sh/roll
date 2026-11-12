@@ -216,7 +216,7 @@ impl Engine {
             if !wants(s, c) {
                 continue;
             }
-            if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) {
+            if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) || self.store.dismissed(&c.id, &c.head)? {
                 continue;
             }
             let key = match c.github_pr {
@@ -290,6 +290,7 @@ impl Engine {
                             None => Some("the change was deleted"),
                         };
                         if let Some(why) = why {
+                            self.store.undismiss(change)?;
                             self.mark_deleted(&r.id, why)?;
                             continue;
                         }
@@ -317,6 +318,10 @@ impl Engine {
                 }
             }
             if r.expires_at.is_some_and(|t| t <= now) || r.last_active_at + ttl_ms <= now {
+                // An open change gets a preview again on its next push, not before.
+                if let Some(change) = &r.change_id {
+                    self.store.dismiss(change, &r.head)?;
+                }
                 self.mark_deleted(&r.id, &format!("unused for {} hours (ttl)", s.ttl_hours))?;
                 continue;
             }
@@ -701,6 +706,7 @@ impl Engine {
                 if let Some(existing) = self.store.row_by_change(id)? {
                     return Ok((self.store.view(existing)?, false));
                 }
+                self.store.undismiss(id)?;
                 New {
                     project_id: project_id.to_string(),
                     key: c.github_pr.map_or_else(|| format!("c{}", c.number), |n| format!("pr{n}")),
@@ -756,7 +762,12 @@ impl Engine {
         Ok((self.store.view(row)?, made))
     }
 
+    /// Delete a preview. A change's preview stays deleted until the change's next push.
     pub fn delete(&self, id: &str) -> Result<Preview> {
+        let row = self.store.row(id)?;
+        if let Some(change) = &row.change_id {
+            self.store.dismiss(change, &row.head)?;
+        }
         let r = self.mark_deleted(id, "asked to")?;
         self.store.view(r)
     }
