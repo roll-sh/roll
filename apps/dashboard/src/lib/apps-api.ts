@@ -318,6 +318,12 @@ export const appsApi = {
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 
+  /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
+  openShell: (id: string, e: string, size: { cols: number; rows: number }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, size),
+  shellKeys: (id: string, e: string, sh: string, data: string) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),
+  resizeShell: (id: string, e: string, sh: string, size: { cols: number; rows: number }) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/resize`, size),
+  closeShell: (id: string, e: string, sh: string) => call<null>("DELETE", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}`),
+
   domains: (id: string, e: string) => call<Domain[]>("GET", `${env(id, e)}/domains`),
   addDomain: (id: string, e: string, hostname: string) => call<Domain>("POST", `${env(id, e)}/domains`, { hostname }),
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
@@ -329,6 +335,35 @@ export const appsApi = {
  * send. `onReset` runs on every (re)connect: the stream starts again with the last `tail` lines,
  * so the caller drops what it had. Returns the function that stops it.
  */
+/** A shell's screen over SSE: base64 chunks (the scrollback first, again after a reconnect: `onReset`), then `onClosed`. */
+export function followShell(
+  service: string,
+  e: string,
+  sh: string,
+  opts: { onChunk: (bytes: Uint8Array) => void; onReset: () => void; onClosed: () => void },
+): () => void {
+  let opened = false;
+  const stop = streamSse(`${ROLL_API}${env(service, e)}/shell/sessions/${encodeURIComponent(sh)}/screen`, {
+    headers: operatorHeaders,
+    onOpen: (open) => {
+      if (open && opened) opts.onReset();
+      if (open) opened = true;
+    },
+    onEvent: (ev) => {
+      if (ev.event === "closed") {
+        stop();
+        opts.onClosed();
+        return;
+      }
+      const bin = atob(ev.data);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      opts.onChunk(out);
+    },
+  });
+  return stop;
+}
+
 export function followLog(
   kind: { runtime: { service: string; env: string } } | { build: { service: string; env: string; deployment: string } } | { job: { service: string; env: string; job: string } },
   opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },

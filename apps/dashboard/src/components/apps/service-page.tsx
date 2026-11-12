@@ -20,6 +20,7 @@ import { btn, Connecting, EmptyPanel, ErrorNote, Offline, primary } from "../ui"
 import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
+import { ShellTab } from "./shell";
 import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, useDeployMark } from "./live";
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
@@ -28,7 +29,7 @@ import { StateBadge, useRunner } from "./shared";
 import { UsageTab } from "./usage";
 import { VariablesTab } from "./variables";
 
-export const SERVICE_TABS = ["deployments", "logs", "metrics", "variables", "jobs", "domains", "usage", "settings"] as const;
+export const SERVICE_TABS = ["deployments", "logs", "metrics", "variables", "jobs", "shell", "domains", "usage", "settings"] as const;
 export type ServiceTab = (typeof SERVICE_TABS)[number];
 
 const TAB_LABEL: Record<ServiceTab, string> = {
@@ -37,6 +38,7 @@ const TAB_LABEL: Record<ServiceTab, string> = {
   metrics: "Metrics",
   variables: "Variables",
   jobs: "Jobs",
+  shell: "Shell",
   domains: "Domains",
   usage: "Usage",
   settings: "Settings",
@@ -286,6 +288,8 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <VariablesTab service={service.id} project={service.project} env={env!} runner={runner} onRedeploy={redeploy} />
         ) : tab === "jobs" ? (
           <JobsTab service={service.id} env={envName} runner={runner} />
+        ) : tab === "shell" ? (
+          <ShellTab service={service.id} env={envName} />
         ) : tab === "domains" ? (
           <DomainsTab service={service.id} env={env!} runner={runner} />
         ) : tab === "usage" ? (

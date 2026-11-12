@@ -76,6 +76,11 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/shell"), get(shell))
+        .route(&format!("{env}/shell/sessions"), post(open_session))
+        .route(&format!("{env}/shell/sessions/{{sh}}"), axum::routing::delete(close_session))
+        .route(&format!("{env}/shell/sessions/{{sh}}/screen"), get(session_screen))
+        .route(&format!("{env}/shell/sessions/{{sh}}/keys"), post(session_keys))
+        .route(&format!("{env}/shell/sessions/{{sh}}/resize"), post(session_resize))
         .route(&format!("{env}/jobs"), get(jobs).post(start_job))
         .route(&format!("{env}/jobs/{{job}}"), get(get_job))
         .route(&format!("{env}/jobs/{{job}}/logs"), get(job_logs))
@@ -437,6 +442,70 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
     let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
     Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, cols, rows)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenSession {
+    instance: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+/// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
+async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+    let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
+    let sh = apps.open_session(&id, &env, o.instance.as_deref(), o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": sh }))).into_response())
+}
+
+/// The screen over SSE: each event a base64 chunk, the scrollback first; it ends with the shell.
+async fn session_screen(State(apps): S, Path((id, env, sh)): Path<(String, String, String)>) -> R {
+    use base64::Engine as _;
+    let (first, rx, closed) = apps.session_screen(&id, &env, &sh)?;
+    let b64 = |b: &[u8]| Event::default().data(base64::engine::general_purpose::STANDARD.encode(b));
+    let head = futures::stream::iter((!first.is_empty()).then(|| Ok::<_, Infallible>(b64(&first))));
+    let rest = futures::stream::unfold((rx, closed), move |(mut rx, closed)| async move {
+        loop {
+            tokio::select! {
+                m = rx.recv() => match m {
+                    Ok(chunk) => return Some((Ok::<_, Infallible>(b64(&chunk)), (rx, closed))),
+                    // A slow viewer missed some: carry on from what's next.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return None,
+                },
+                _ = closed.cancelled() => return None,
+            }
+        }
+    });
+    use futures::StreamExt as _;
+    // The shell ended: say so, so the viewer stops instead of reconnecting.
+    let end = futures::stream::once(async { Ok::<_, Infallible>(Event::default().event("closed").data("")) });
+    Ok(Sse::new(head.chain(rest).chain(end)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
+}
+
+async fn session_keys(State(apps): S, Path((id, env, sh)): Path<(String, String, String)>, b: Bytes) -> R {
+    use base64::Engine as _;
+    let v = body(&b)?;
+    let data = v.get("data").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("data is base64".into()))?;
+    let keys = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| Error::BadRequest("data is base64".into()))?;
+    if keys.len() > 64 << 10 {
+        return Err(Error::BadRequest("at most 64 KiB of keys at once".into()));
+    }
+    apps.session_keys(&id, &env, &sh, keys).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn session_resize(State(apps): S, Path((id, env, sh)): Path<(String, String, String)>, b: Bytes) -> R {
+    let v = body(&b)?;
+    let n = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n.min(u16::MAX as u64) as u16).ok_or_else(|| Error::BadRequest(format!("{k} is a number")));
+    apps.session_resize(&id, &env, &sh, n("cols")?, n("rows")?).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn close_session(State(apps): S, Path((id, env, sh)): Path<(String, String, String)>) -> R {
+    apps.close_session(&id, &env, &sh)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn jobs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

@@ -97,3 +97,133 @@ impl Apps {
         drop(target);
     }
 }
+
+// ── shells over HTTP (the dashboard's terminal: browsers can't send the token on a WebSocket) ──
+
+/// A shell's scrollback a reconnecting viewer gets first.
+const SCROLLBACK: usize = 256 << 10;
+/// Shells open at once per environment.
+const MAX_SESSIONS: usize = 8;
+/// A session nobody reads and nobody types in for this long is closed.
+const IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// An open shell (`POST …/shell/sessions`): its keys, its screen (scrollback and what comes),
+/// and what keeps its instance up.
+pub struct Session {
+    service: String,
+    env: String,
+    exec: String,
+    keys: tokio::sync::mpsc::Sender<Vec<u8>>,
+    screen: tokio::sync::broadcast::Sender<bytes::Bytes>,
+    scrollback: parking_lot::Mutex<std::collections::VecDeque<u8>>,
+    last_used: parking_lot::Mutex<std::time::Instant>,
+    closed: tokio_util::sync::CancellationToken,
+    _target: Target,
+}
+
+impl Session {
+    fn touch(&self) {
+        *self.last_used.lock() = std::time::Instant::now();
+    }
+}
+
+impl Apps {
+    pub async fn open_session(self: &Arc<Self>, service: &str, env: &str, instance: Option<&str>, cols: u16, rows: u16) -> Result<String> {
+        let open = self.sessions.lock().values().filter(|s| s.service == service && s.env == env).count();
+        if open >= MAX_SESSIONS {
+            return Err(Error::Conflict(format!("{MAX_SESSIONS} shells are open in {env}: close one first")));
+        }
+        let target = self.shell_target(service, env, instance).await?;
+        let shell = self.deps.runtime.shell(&target.instance, cols, rows).await.map_err(|e| Error::Conflict(format!("the shell didn't start: {e:#}")))?;
+        let id = crate::model::new_id("sh");
+        let (keys_tx, mut keys) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let (screen, _) = tokio::sync::broadcast::channel(256);
+        let s = Arc::new(Session {
+            service: service.to_string(),
+            env: env.to_string(),
+            exec: shell.id.clone(),
+            keys: keys_tx,
+            screen: screen.clone(),
+            scrollback: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            last_used: parking_lot::Mutex::new(std::time::Instant::now()),
+            closed: tokio_util::sync::CancellationToken::new(),
+            _target: target,
+        });
+        self.sessions.lock().insert(id.clone(), s.clone());
+        let (mut out, mut inp) = tokio::io::split(shell.io);
+        let (this, sid, sess) = (self.clone(), id.clone(), s.clone());
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 16 << 10];
+            let mut idle = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    n = out.read(&mut buf) => match n {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            {
+                                let mut sb = sess.scrollback.lock();
+                                sb.extend(&buf[..n]);
+                                let over = sb.len().saturating_sub(SCROLLBACK);
+                                sb.drain(..over);
+                            }
+                            let _ = sess.screen.send(bytes::Bytes::copy_from_slice(&buf[..n]));
+                        }
+                    },
+                    k = keys.recv() => match k {
+                        Some(k) => {
+                            if inp.write_all(&k).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
+                    _ = idle.tick() => {
+                        if sess.screen.receiver_count() == 0 && sess.last_used.lock().elapsed() > IDLE {
+                            break;
+                        }
+                    }
+                    _ = sess.closed.cancelled() => break,
+                }
+            }
+            sess.closed.cancel();
+            this.sessions.lock().remove(&sid);
+        });
+        Ok(id)
+    }
+
+    fn session(&self, service: &str, env: &str, id: &str) -> Result<Arc<Session>> {
+        self.sessions.lock().get(id).filter(|s| s.service == service && s.env == env).cloned().ok_or_else(|| Error::NotFound(format!("no shell {id}")))
+    }
+
+    /// The scrollback, then the screen as it comes, until the shell closes.
+    pub fn session_screen(&self, service: &str, env: &str, id: &str) -> Result<(Vec<u8>, tokio::sync::broadcast::Receiver<bytes::Bytes>, tokio_util::sync::CancellationToken)> {
+        let s = self.session(service, env, id)?;
+        s.touch();
+        let rx = s.screen.subscribe();
+        let first = s.scrollback.lock().iter().copied().collect();
+        Ok((first, rx, s.closed.clone()))
+    }
+
+    pub async fn session_keys(&self, service: &str, env: &str, id: &str, keys: Vec<u8>) -> Result<()> {
+        let s = self.session(service, env, id)?;
+        s.touch();
+        s.keys.send(keys).await.map_err(|_| Error::NotFound(format!("shell {id} has closed")))
+    }
+
+    pub async fn session_resize(&self, service: &str, env: &str, id: &str, cols: u16, rows: u16) -> Result<()> {
+        let s = self.session(service, env, id)?;
+        s.touch();
+        self.deps.runtime.resize_shell(&s.exec, cols.clamp(10, 1000), rows.clamp(2, 500)).await.map_err(|e| Error::Internal(e.to_string()))
+    }
+
+    pub fn close_sessions_of(&self, service: &str) {
+        for s in self.sessions.lock().values().filter(|s| s.service == service) {
+            s.closed.cancel();
+        }
+    }
+
+    pub fn close_session(&self, service: &str, env: &str, id: &str) -> Result<()> {
+        self.session(service, env, id)?.closed.cancel();
+        Ok(())
+    }
+}

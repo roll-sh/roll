@@ -56,6 +56,11 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/shell?instance=&cols=&rows=` | WebSocket | a terminal: binary both ways, text `{"resize":[cols,rows]}` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions` | `{ instance?, cols?, rows? }` | 201 `{ id }` (a shell over HTTP: the dashboard's terminal) | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen` | | SSE: base64 chunks (the scrollback first), then `event: closed` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204 | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 | deploy* |
+| `DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}` | | 204 | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs` | | `Job[]`, newest first | read |
 | `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s? }` | 202 `Job` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |

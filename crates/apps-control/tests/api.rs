@@ -511,4 +511,34 @@ async fn a_shell_wakes_the_service_and_carries_the_terminal_both_ways() {
     let echoed = ws.next().await.unwrap().unwrap().into_data();
     assert_eq!(&echoed[..], b"ls -la\r");
     ws.close(None).await.unwrap();
+
+    // The same over HTTP (the dashboard's terminal): the screen as SSE, keys as POSTs.
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let base = format!("/v1/apps/services/{id}/environments/production/shell/sessions");
+    let (st, open) = call(&w.api, "POST", &base, Some(json!({"cols": 90, "rows": 20}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{open}");
+    let sh = open["id"].as_str().unwrap().to_string();
+    let resp = w.api.clone().oneshot(Request::get(format!("{base}/{sh}/screen")).body(Body::empty()).unwrap()).await.unwrap();
+    let mut body = resp.into_body();
+    assert!(sse_chunk(&mut body).await.contains("(90x20)"), "the scrollback first");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{sh}/keys"), Some(json!({"data": b64.encode("echo hi\r")}))).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(sse_chunk(&mut body).await, "echo hi\r");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{sh}/resize"), Some(json!({"cols": 100, "rows": 30}))).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sh}"), None).await.0, StatusCode::NO_CONTENT);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{sh}/keys"), Some(json!({"data": b64.encode("x")}))).await.0, StatusCode::NOT_FOUND, "closed");
+}
+
+/// The next base64 event of an SSE body, decoded.
+async fn sse_chunk(body: &mut Body) -> String {
+    use base64::Engine as _;
+    loop {
+        let f = body.frame().await.unwrap().unwrap();
+        if let Some(d) = f.data_ref()
+            && let Some(data) = String::from_utf8_lossy(d).lines().find_map(|l| l.strip_prefix("data:").map(str::to_string))
+        {
+            return String::from_utf8(base64::engine::general_purpose::STANDARD.decode(data.trim()).unwrap()).unwrap();
+        }
+    }
 }

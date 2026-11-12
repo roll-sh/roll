@@ -139,7 +139,10 @@ every deployment is immutable with instant rollback.
   `fly ssh console`: `bash` (else `sh`) in a running instance through a TTY exec over the Engine
   API, the terminal raw on the CLI's side and resized with the window. A web service asleep is
   woken and held awake while the shell is open; a worker's running instance is used; a cron
-  service has none (a job does that). It needs Docker on a local socket.
+  service has none (a job does that). It needs Docker on a local socket. The dashboard's Shell
+  tab is the same shell over HTTP sessions (a browser can't send the token on a WebSocket): the
+  screen over SSE with its scrollback, keys and resizes as POSTs, at most 8 open per
+  environment, closed on leaving the page or after 10 idle minutes.
 - **Watch paths** (monorepos; `build.watch`, `[app] watch`, the settings page): a push deploys a
   repo service only when a path that differs between what the environment runs and the pushed
   commit matches one of its patterns (gitignore-style from the repo's root, roll code's
@@ -477,25 +480,20 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **A terminal in the dashboard** (xterm.js): browsers can't send the operator token on a
-   WebSocket, so the dashboard's shell is HTTP sessions on the owner, as the agents' terminals
-   are: `POST …/shell/sessions` (a TTY exec), its screen over SSE (fetch, with the token), keys and
-   resizes as POSTs, closed on `DELETE` or idle. The CLI keeps the WebSocket. (Jobs are in the
-   dashboard: the Jobs tab runs a command, streams its output, lists the recent ones.)
-3. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
+2. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics
    tiles that total the window; CLI output for people, not JSON; a project slug that isn't
    repeated in the URL.
-4. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
+3. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
    output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
    `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
-5. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
+4. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
-6. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
-7. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+5. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+6. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.
-8. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+7. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
     node; pending claims expire.
-9. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-10. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+8. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+9. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

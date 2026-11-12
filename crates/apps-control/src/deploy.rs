@@ -650,8 +650,9 @@ impl Apps {
     }
 
     async fn release_service(self: &Arc<Self>, service: &str) {
-        // Another node owns it now: what this one cached may change there.
+        // Another node owns it now: what this one cached may change there, and its shells go.
         self.access.lock().retain(|k, _| !k.starts_with(&format!("{service}/")));
+        self.close_sessions_of(service);
         // Deploys in flight stop here; the new owner resumes them from the store.
         let sid = service.to_string();
         if let Ok(pending) = self.db(move |s| s.pending_deployments(&sid)).await {
