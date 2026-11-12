@@ -102,6 +102,8 @@ pub struct SearchConfig {
     /// The catalog in a Postgres database every node of a fleet shares (rolld's system
     /// database; `None`: `search.db` under `home`).
     pub catalog: Option<String>,
+    /// Connections the catalog's Postgres pool may open (rolld's share of the system database).
+    pub catalog_connections: usize,
     pub defaults: Defaults,
     pub pricing: Pricing,
 }
@@ -136,6 +138,7 @@ impl SearchConfig {
             stats_interval: Duration::from_secs(600),
             memory_budget: None,
             catalog: None,
+            catalog_connections: 8,
             defaults: Defaults {
                 flavor: "elasticsearch".into(),
                 idle_timeout_s: 300,
@@ -330,7 +333,7 @@ impl Control {
         std::fs::create_dir_all(&cfg.home)?;
         let store = match (catalog, &cfg.catalog) {
             (Some(c), _) => c,
-            (None, Some(url)) => Arc::new(Store::postgres(url, code_sql::PgOptions { max_connections: 8, ..Default::default() })?),
+            (None, Some(url)) => Arc::new(Store::postgres(url, code_sql::PgOptions { max_connections: cfg.catalog_connections.max(1), ..Default::default() })?),
             (None, None) => Arc::new(Store::open(&cfg.home.join("search.db"))?),
         };
         let scfg = StoreConfig {

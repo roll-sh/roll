@@ -420,7 +420,7 @@ async fn run() -> anyhow::Result<()> {
 
     // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
     let search = match on.on(Product::Search) {
-        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), edge::Public::of(&args).as_ref()).await?),
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref()).await?),
         false => None,
     };
 

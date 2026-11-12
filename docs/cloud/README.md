@@ -433,7 +433,7 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
 | `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
 | `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set; roll streams' catalog (schema `streams`) |
-| `ROLL_SYSTEM_DB_CONNECTIONS` | 8 (the stack's `SystemDbConnections`) | connections a node opens to the system database across its products, split by `DbBudget` (code's two pools 3 each, nosql 2, redis and streams 1, one each for queues, code's `LISTEN` and workspace projects); unset: each product's default, about 59 |
+| `ROLL_SYSTEM_DB_CONNECTIONS` | 8 (the stack's `SystemDbConnections`) | connections a node opens to the system database across its products, split by `DbBudget` (code's two pools 3 each, nosql 2, redis, streams and search 1, one each for queues, code's `LISTEN` and workspace projects); unset: each product's default, about 67 |
 | `ROLL_STREAM_ACK_LINGER_MS` | `50` | how long a stream's owner gathers appends before writing its write-ahead log object: `acks=all` latency against S3 PUTs (at most one per busy stream per round) |
 | `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code,search` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |

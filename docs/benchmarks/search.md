@@ -1,4 +1,4 @@
-# roll search vs Elasticsearch 9.5.5
+# roll search vs Elasticsearch 9.5.5 and OpenSearch 3.9
 
 `scripts/bench-search.sh` runs every benchmark here against roll search (`search-dev`, release
 build, `--data-dir` so it persists like Elasticsearch) and Elasticsearch 9.5.5 (the official
@@ -69,6 +69,81 @@ over rounds with the min–max spread; trust a difference only where the spreads
   subset loaded by a small script; A/B numbers in the tuning log are server CPU time per
   request (sum of the process's threads' `schedstat` run time) of two binaries loaded with the
   same data and measured interleaved.
+
+## Round 7: roll, Elasticsearch 9.5.5 and OpenSearch 3.9 (2026-11-12)
+
+The tree merged with `main` (`search-dev --release`). All three targets in Docker on the same
+CPUs (`10,11,28,29`: 2 cores / 4 hardware threads; lane b of the host's benchmark lanes, held
+under its lock) and 4 GiB each, Elasticsearch and OpenSearch with 2 GiB heaps; Rally on
+`12,13,30,31`. The host was busy (1-minute load 29–48 on 36 threads, other sessions building and
+benchmarking), so the tables give medians over rounds with their min–max, and the server CPU
+per request, which load distorts less than wall time. Runs alternate between targets per
+workload (micro) and per round (Rally), so drift hits all three alike. Raw outputs:
+`~/.cache/rsearch/bench/` on the machine that ran them.
+
+**Footprint** (`bench-search.sh footprint`):
+
+| measure | roll | Elasticsearch 9.5.5 | OpenSearch 3.9 |
+|---|---:|---:|---:|
+| RSS, idle node (MiB) | **24** | 2,519 | 2,517 |
+| RSS, one loaded 50k-doc index (MiB) | **46** | 2,591 | 2,579 |
+| store bytes per document (force-merged) | **199** | 263 | 262 |
+| cold start to the first search hit | **22.6 ms** (wake after idle unload; warm 16.8 ms) | 40.4 s (node restart) | 38.4 s (node restart) |
+| RSS after idle unload (MiB) | 44 | - | - |
+
+The 44 MiB after an unload is mostly the binary's code paged in by the work and memory the
+allocator is still giving back: anonymous memory measured separately came back to 15.8 MiB
+after three load/unload cycles, the same after each cycle (nothing kept per cluster).
+
+**Micro suite** (`bench-search.sh micro --rounds 3`, 50,000 generated documents, one shard; 200
+requests per workload after 30 warm-up ones, every target answering the same seeded sequence):
+
+| workload | roll median (min-max) | es median (min-max) | os median (min-max) | roll p50 / p99 | es p50 / p99 | os p50 / p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| bulk 50k docs, 1 client | 1.367 s (1.306-2.131) | 3.053 s (2.805-7.545) | 3.007 s (2.422-5.855) | - | - | - |
+| match | 0.572 ms (0.555-0.860) | 3.083 ms (2.532-7.025) | 2.849 ms (2.571-6.630) | 0.570 / 3.422 | 3.045 / 12.173 | 2.696 / 12.187 |
+| match_or_2 | 0.786 ms (0.760-0.981) | 3.593 ms (2.774-6.858) | 3.412 ms (2.647-7.004) | 0.752 / 2.427 | 3.383 / 13.199 | 3.281 / 13.165 |
+| match_or_3 | 1.044 ms (1.019-1.174) | 3.921 ms (2.936-6.898) | 3.470 ms (3.166-6.441) | 1.017 / 2.596 | 3.682 / 12.962 | 3.503 / 14.035 |
+| match_and_2 | 0.854 ms (0.748-0.858) | 3.022 ms (2.501-5.515) | 3.148 ms (2.600-5.126) | 0.679 / 2.007 | 3.074 / 10.828 | 3.118 / 10.284 |
+| bool_filter_range | 0.577 ms (0.518-0.596) | 2.865 ms (2.125-5.458) | 3.040 ms (2.474-4.794) | 0.528 / 1.135 | 2.801 / 9.777 | 2.819 / 9.537 |
+| terms_agg | 0.550 ms (0.392-0.573) | 2.325 ms (1.900-4.634) | 2.109 ms (1.851-5.096) | 0.501 / 0.826 | 2.399 / 8.671 | 2.093 / 10.705 |
+| date_histogram | 0.511 ms (0.489-0.623) | 2.291 ms (2.102-4.098) | 1.990 ms (1.476-3.479) | 0.504 / 0.935 | 2.184 / 7.561 | 1.939 / 6.719 |
+| sort_field | 0.584 ms (0.487-0.787) | 2.931 ms (2.452-4.132) | 3.204 ms (2.488-3.766) | 0.554 / 1.421 | 3.035 / 7.742 | 3.000 / 8.101 |
+| sort_match_all | 1.256 ms (1.062-1.330) | 3.168 ms (3.151-4.191) | 3.040 ms (2.924-4.014) | 1.091 / 2.205 | 3.318 / 8.035 | 2.980 / 7.818 |
+| range_count | 0.440 ms (0.421-0.457) | 1.818 ms (1.231-2.788) | 1.610 ms (1.055-2.377) | 0.411 / 1.146 | 1.667 / 8.395 | 1.541 / 5.055 |
+| match_all_count | 0.349 ms (0.288-0.486) | 2.117 ms (1.398-2.334) | 1.696 ms (1.273-1.991) | 0.349 / 0.606 | 1.875 / 5.946 | 1.582 / 3.506 |
+| terms_agg (no cache) | 3.640 ms (3.637-3.968) | 6.734 ms (6.480-7.779) | 7.288 ms (6.551-8.494) | 3.627 / 7.720 | 6.680 / 12.568 | 6.822 / 17.494 |
+| date_histogram (no cache) | 3.499 ms (3.487-4.358) | 5.921 ms (5.866-6.603) | 3.514 ms (2.856-3.662) | 3.604 / 6.861 | 5.812 / 11.736 | 2.877 / 7.876 |
+| range_count (no cache) | 0.469 ms (0.414-0.544) | 1.558 ms (1.408-2.618) | 2.184 ms (1.963-2.374) | 0.431 / 1.369 | 1.631 / 4.621 | 1.877 / 6.725 |
+| match_all_count (no cache) | 0.398 ms (0.390-0.554) | 1.415 ms (0.901-2.253) | 1.071 ms (0.982-1.837) | 0.368 / 2.925 | 1.377 / 6.211 | 1.093 / 4.402 |
+| get | 0.282 ms (0.205-0.292) | 1.283 ms (1.045-1.619) | 0.858 ms (0.658-1.091) | 0.254 / 0.502 | 1.106 / 5.730 | 0.637 / 4.872 |
+
+Server CPU time per request (bulk: per load), median over rounds (min-max):
+
+| workload | roll CPU | es CPU | os CPU |
+|---|---:|---:|---:|
+| bulk 50k docs, 1 client | 1.639 s (1.614-2.174) | 5.695 s (5.376-17.344) | 6.055 s (4.288-16.228) |
+| match | 0.396 ms (0.394-0.478) | 7.912 ms (2.851-13.674) | 5.565 ms (2.400-12.278) |
+| match_or_2 | 0.592 ms (0.568-0.789) | 8.234 ms (2.330-16.929) | 8.907 ms (3.617-18.001) |
+| match_or_3 | 0.839 ms (0.837-0.881) | 5.429 ms (5.005-16.317) | 6.884 ms (6.151-11.926) |
+| match_and_2 | 0.568 ms (0.568-0.606) | 5.912 ms (4.540-7.917) | 6.197 ms (5.633-9.828) |
+| bool_filter_range | 0.368 ms (0.296-0.486) | 3.189 ms (3.031-13.031) | 4.777 ms (2.507-12.106) |
+| terms_agg | 0.347 ms (0.297-0.387) | 4.014 ms (2.401-9.447) | 3.380 ms (2.252-8.670) |
+| date_histogram | 0.322 ms (0.316-0.501) | 3.483 ms (3.420-8.902) | 3.774 ms (2.554-6.551) |
+| sort_field | 0.402 ms (0.353-0.594) | 5.592 ms (4.767-9.504) | 4.657 ms (2.940-9.619) |
+| sort_match_all | 1.041 ms (0.859-1.202) | 5.429 ms (4.770-7.119) | 5.533 ms (5.134-8.059) |
+| range_count | 0.249 ms (0.233-0.267) | 2.229 ms (0.972-4.096) | 2.427 ms (0.996-5.057) |
+| match_all_count | 0.214 ms (0.169-0.314) | 3.823 ms (0.990-4.443) | 2.176 ms (0.945-3.652) |
+| terms_agg (no cache) | 3.299 ms (3.241-3.513) | 11.714 ms (9.603-21.484) | 14.051 ms (8.047-15.886) |
+| date_histogram (no cache) | 3.142 ms (3.085-3.929) | 8.667 ms (6.854-8.873) | 7.452 ms (3.915-7.619) |
+| range_count (no cache) | 0.296 ms (0.261-0.297) | 2.562 ms (1.439-4.986) | 2.839 ms (1.713-3.969) |
+| match_all_count (no cache) | 0.216 ms (0.212-0.231) | 1.092 ms (0.661-3.796) | 1.353 ms (0.690-2.727) |
+| get | 0.113 ms (0.094-0.127) | 1.463 ms (1.139-2.737) | 1.787 ms (0.695-2.022) |
+
+roll wins every row: 1.7–6.3x Elasticsearch's median latency and 2.6–15x less server CPU per
+request; bulk loads in 1.37 s against 3.05 s on 3.5x less CPU. The closest row is an uncached
+`date_histogram`: roll's median (3.50 ms) and CPU (3.14 ms) are better than OpenSearch's (3.51 ms,
+7.45 ms CPU), but OpenSearch's p50 is lower (2.88 against 3.60 ms).
 
 ## Round 6: every Rally track, indexing, memory and cold start (perf-bench lane, 2026-10-28)
 

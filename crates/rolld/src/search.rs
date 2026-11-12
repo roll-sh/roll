@@ -102,7 +102,7 @@ impl Search {
     /// cluster is served by the holder of its lease (`search_control::cluster`), with the catalog
     /// in the system database and acknowledgements once writes are in object storage.
     #[allow(clippy::too_many_arguments)]
-    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, public: Option<&crate::edge::Public>) -> anyhow::Result<Self> {
+    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>) -> anyhow::Result<Self> {
         let mut cfg = SearchConfig::local(home.join("search"));
         let fleet = (cluster.backend_name() != "memory").then(|| cluster.clone());
         cfg.node_name = node.to_string();
@@ -112,6 +112,7 @@ impl Search {
                 anyhow::bail!("search in a cluster needs the system database (ROLL_SYSTEM_DATABASE): every node must see the same catalog");
             };
             cfg.catalog = Some(db.to_string());
+            cfg.catalog_connections = db_connections;
             // Another node replays this one's WAL after a takeover.
             cfg.sync_objects = true;
             // WAL objects are named by the node: the cluster's node id is unique per process.
