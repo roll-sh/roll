@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+apps-control.workspace = true
+async-trait.workspace = true
+code-store.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true

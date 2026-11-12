@@ -1,0 +1,16 @@
+[package]
+name = "apps-build"
+description = "roll apps: detect how to build a source tree (Railpack-style providers) and the Dockerfile that builds it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

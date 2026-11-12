@@ -1,0 +1,44 @@
+[package]
+name = "apps-control"
+description = "roll apps: services in workspace projects, builds, immutable deployments, scale-to-zero instances and the waking proxy (/v1/apps)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+anyhow.workspace = true
+apps-build.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+code-sql.workspace = true
+croner.workspace = true
+flate2.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["server", "client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio", "server"] }
+parking_lot.workspace = true
+percent-encoding.workspace = true
+pg-storage.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+roll-cluster.workspace = true
+roll-fetch.workspace = true
+roll-workspace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true

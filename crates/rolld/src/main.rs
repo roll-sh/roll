@@ -13,6 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod apps;
 mod auth;
 mod cluster;
 mod code;
@@ -166,6 +167,8 @@ struct Args {
     code_only: bool,
     #[command(flatten)]
     code: code::CodeArgs,
+    #[command(flatten)]
+    apps: apps::AppsArgs,
     /// S3-compatible storage listen address.
     #[arg(long, env = "ROLL_S3", default_value = "127.0.0.1:59000")]
     s3: SocketAddr,
@@ -412,6 +415,26 @@ async fn run() -> anyhow::Result<()> {
         false => None,
     };
 
+    // Workspace projects: always on (docs/workspace.md); roll apps places its services there.
+    let workspace = workspace::open(&args, &home)?;
+    // roll apps: services built and run on this host's Docker, each on its lease's holder.
+    let apps = match on.on(Product::Apps) {
+        true => Some(
+            apps::start(
+                &args,
+                &home,
+                &storage,
+                cluster.clone(),
+                workspace.clone(),
+                code.as_ref().map(|c| c.code.clone()),
+                postgres.as_ref().map(|p| p.control.clone()),
+                redis.as_ref().map(|r| r.control.clone()),
+            )
+            .await?,
+        ),
+        false => None,
+    };
+
     // The internal API: every product's routes, and a clear 404 for the ones that are off.
     let mut router = axum::Router::new();
     if let Some(p) = &postgres {
@@ -438,8 +461,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
+    if let Some(a) = &apps {
+        router = router.merge(a.router());
+    }
     // Workspace projects: always on, behind the same operator token.
-    router = router.merge(roll_workspace::router(workspace::open(&args, &home)?));
+    router = router.merge(roll_workspace::router(workspace.clone()));
     // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
     // products that are off answer before it. The gated router merges last so its fallback (401
     // without the token) stays the fallback.
@@ -508,6 +534,9 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         serving.push(Box::pin(n.serve()));
     }
+    if let Some(a) = &apps {
+        serving.push(Box::pin(a.serve()));
+    }
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, products = %on, "control API listening");
@@ -541,6 +570,9 @@ async fn run() -> anyhow::Result<()> {
                 r.shutdown().await?;
             }
         }
+    }
+    if let Some(a) = &apps {
+        a.shutdown().await;
     }
     if let Some(n) = &nosql {
         n.shutdown().await?;

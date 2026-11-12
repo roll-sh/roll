@@ -34,6 +34,7 @@ nosql-storage = { workspace = true, optional = true }
 nosql-types.workspace = true
 # rustls: the released CLI talks to https://api.roll.sh (dev-dependencies hid that it had no TLS).
 reqwest = { workspace = true, features = ["stream", "rustls"] }
+roll-fetch.workspace = true
 rustls-pemfile.workspace = true
 rustyline.workspace = true
 serde.workspace = true

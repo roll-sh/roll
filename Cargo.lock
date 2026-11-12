@@ -258,6 +258,56 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apps-build"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "apps-control"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "apps-build",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "code-sql",
+ "croner",
+ "flate2",
+ "futures",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "parking_lot",
+ "percent-encoding",
+ "pg-storage",
+ "reqwest",
+ "roll-cluster",
+ "roll-fetch",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6301,6 +6351,7 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "roll-fetch",
  "rustls-pemfile",
  "rustyline",
  "s3-control",
@@ -6411,6 +6462,8 @@ name = "rolld"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apps-control",
+ "async-trait",
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
  "aws-smithy-http-client",
@@ -6422,6 +6475,7 @@ dependencies = [
  "code-control",
  "code-preview",
  "code-sql",
+ "code-store",
  "futures",
  "futures-util",
  "http-body 1.1.0",
