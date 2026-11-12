@@ -6418,6 +6418,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "code-sql",
+ "futures",
+ "http-body-util",
+ "percent-encoding",
+ "roll-access",
+ "roll-auth",
+ "roll-workspace",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "url",
+]
+
+[[package]]
 name = "roll-workspace"
 version = "0.1.0"
 dependencies = [

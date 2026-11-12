@@ -44,6 +44,11 @@ impl FromRequestParts<Arc<Code>> for Caller {
     type Rejection = Error;
 
     async fn from_request_parts(parts: &mut Parts, code: &Arc<Code>) -> Result<Self, Self::Rejection> {
+        // A scoped roll token (docs/permissions.md): rolld's gate decided this request already and
+        // sends it on as the operator's, narrowed to what the token allows.
+        if roll_auth::Grant::on(&parts.extensions).is_some() {
+            return Ok(Caller::Admin);
+        }
         code.caller(token(parts).as_deref())
     }
 }
@@ -173,14 +178,14 @@ async fn health(State(code): S) -> Response {
 // ── info, names, owners ──
 
 /// Server info, plus who the request is: the dashboard's sign-in checks a token against it.
-async fn info(State(code): S, operator: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
+async fn info(State(code): S, operator: Option<axum::Extension<roll_auth::Operator>>, ext: axum::http::Extensions, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, t)| t.trim().to_string());
-    let resolved = code.caller(token.as_deref());
+    let resolved = if roll_auth::Grant::on(&ext).is_some() { Ok(Caller::Admin) } else { code.caller(token.as_deref()) };
     // Who this caller reviews and comments as (so the UI knows which threads are theirs).
     let reviewer = resolved.as_ref().ok().and_then(|c| code.reviewer(c, &headers).ok()).map(|r| json!({ "kind": r.kind, "name": r.name }));
     let mut caller = match resolved {

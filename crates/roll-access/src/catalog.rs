@@ -192,7 +192,15 @@ pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
     if !route.contains("{*") && !is_nest(route) {
         return None;
     }
+    by_path(method, path)
+}
+
+/// The row for a request by its path alone (what a catch-all hides, or a tool's route).
+pub fn by_path(method: &str, path: &str) -> Option<Found> {
     let path = path.split('?').next().unwrap_or(path);
+    if OPERATOR_ONLY.iter().any(|(r, _)| match_pattern(r, path).is_some()) {
+        return None;
+    }
     let exact = ROWS
         .iter()
         .filter(|r| !r.route.ends_with('/'))
