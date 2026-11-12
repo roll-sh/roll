@@ -56,6 +56,12 @@ pub(crate) fn who(access: &Access, ext: &Extensions) -> crate::Result<Who> {
     Err(Error::Unauthorized("this API needs a token".into()))
 }
 
+/// Who acted, for the record: the signed-in admin (`usr_…`, docs/accounts.md), else the operator's
+/// token ("operator").
+pub(crate) fn actor(ext: &Extensions) -> String {
+    ext.get::<roll_auth::SignedIn>().map_or_else(|| "operator".to_string(), |u| u.user.clone())
+}
+
 fn operator_only(access: &Access, ext: &Extensions, what: &str) -> crate::Result<()> {
     match who(access, ext)? {
         Who::Operator => Ok(()),
@@ -178,7 +184,7 @@ async fn get_one(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Valu
 async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
     let new: NewGrant = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let by = match who(&a, &ext)? {
-        Who::Operator => "operator".to_string(),
+        Who::Operator => actor(&ext),
         Who::Grant(g) => {
             check_within(&a, &g, &new.rules, new.expires_at, &new.ip_allow).await?;
             g.id.to_string()
@@ -301,14 +307,16 @@ struct Decision {
 
 async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "approve a request")?;
-    Ok(Json(json!(blocking(a, move |a| a.store.decide(&id, true, "operator", None)).await?)))
+    let by = actor(&ext);
+    Ok(Json(json!(blocking(a, move |a| a.store.decide(&id, true, &by, None)).await?)))
 }
 
 async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "deny a request")?;
     let d: Decision = if body.iter().all(u8::is_ascii_whitespace) { Decision::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
     let reason = d.reason.map(|r| r.chars().take(500).collect::<String>());
-    Ok(Json(json!(blocking(a, move |a| a.store.decide(&id, false, "operator", reason.as_deref())).await?)))
+    let by = actor(&ext);
+    Ok(Json(json!(blocking(a, move |a| a.store.decide(&id, false, &by, reason.as_deref())).await?)))
 }
 
 async fn audit(State(a): S, Query(q): Query<AuditQuery>) -> crate::Result<Json<Value>> {

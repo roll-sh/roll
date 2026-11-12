@@ -293,6 +293,13 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
   with every product's own API in `lib/workspace-resources.ts`, and holds it in `lib/workspace-store.ts`
   for the sidebar, Home and `/dashboard/projects/$id`. A new resource kind needs its row in all three.
+- **Accounts (sign-in to roll.sh):** `crates/roll-accounts` (docs/accounts.md: invites, email
+  codes, GitHub, Google, TOTP), mounted by `crates/rolld/src/accounts.rs`. Sessions are hashed
+  cookies that rolld's gate (`roll_auth::check`) resolves on every request, never cached, with
+  `X-Roll-CSRF` on writes; it puts `roll_auth::SignedIn` on the request (an admin's also carries
+  `Operator`). A product that serves users reads `SignedIn`; everything else stays operator-only
+  (403 for users). Never log or echo a code, token or seed. Tests: `roll-accounts/tests/flows.rs`
+  (fake providers, file outbox) and `rolld/tests/auth.rs`.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
