@@ -273,12 +273,10 @@ Ranked; the top item is in progress. A watchdog reads this list.
 4. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
    reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
    branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
-5. **Storage on a fleet:** check the operator's marker (and a grant's) survives the hop to the
-   metadata owner, as tasks now does.
-6. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
+5. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
    the public-only client.
-7. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
+6. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
    `deploy`.
-8. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
-9. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
+7. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+8. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
     last day in the list.

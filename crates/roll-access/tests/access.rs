@@ -49,6 +49,7 @@ fn postgres() -> Router {
         .route("/v1/endpoints/{id}/query", post(|body: String| async move { axum::Json(json!({ "ran": body })) }))
         .route("/v1/queues/overview", get(|| async { "{}" }))
         .route("/v1/unclassified", get(|| async { "{}" }))
+        .route("/internal/tasks", axum::routing::any(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
 }
@@ -140,6 +141,10 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(d.call(&token, Method::POST, "/v1/endpoints/ep_pa/query", Some(json!({ "sql": "drop table t" }))).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&token, Method::POST, "/v1/endpoints/ep_pb/query", Some(json!({ "sql": "select 1", "read_only": true }))).await.0, StatusCode::FORBIDDEN);
+
+    // A signed hop to the tasks leader is decided as the request it carries.
+    let hop = d.send(&token, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", "/v1/tasks/queues")]).await;
+    assert_eq!(hop.1["needs"]["product"], "tasks", "{}", hop.1);
 
     // It can ask what it may do without doing it.
     let (_, c) = d.call(&token, Method::POST, "/v1/access/check", Some(json!({ "method": "DELETE", "path": "/v1/projects/pa" }))).await;

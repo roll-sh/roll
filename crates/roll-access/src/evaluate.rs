@@ -213,7 +213,14 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
-    let original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
+    let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
+    // A signed hop to an owner or leader: the request it carries is the one to decide.
+    if let Some((_, h)) = catalog::FORWARDS.iter().find(|(r, _)| *r == ctx.route) {
+        match req.headers().get(*h).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<axum::http::Uri>().ok()) {
+            Some(u) => original = u,
+            None => return deny(StatusCode::BAD_REQUEST, "bad_request", "a forwarded request without its path".into(), json!({})),
+        }
+    }
     let Some(found) = catalog::find(&ctx.method, &ctx.route, original.path()) else {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
         return deny(StatusCode::FORBIDDEN, "operator_only", format!("{} {} is the operator's: no token can call it", ctx.method, ctx.route), json!({}));
