@@ -742,8 +742,9 @@ pub struct ShardOptions {
     /// under a `match_all` query ([`crate::bucket::fbf`]). Off by default here, so a caller
     /// opts in with the cluster setting.
     pub filter_by_filter: bool,
-    /// The shard's query, for profiles that report what OpenSearch would have done with it
-    /// ([`crate::filter_rewrite`]); only read when profiling in the opensearch dialect.
+    /// The shard's query when it alone decides which docs are collected (no `post_filter` or
+    /// `min_score`): [`crate::filter_rewrite`] counts date histogram buckets under a range on
+    /// their field, and opensearch-dialect profiles report what OpenSearch would do with it.
     pub query: Option<search_index::QueryRef>,
 }
 

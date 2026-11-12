@@ -472,6 +472,9 @@ pub fn create_histogram(def: &AggDef, spec: &HistogramSpec, ctx: &mut BindCtx<'_
         out: Out::Numeric { cfg, empty },
         starts: None,
         os: None,
+        counted: None,
+        nanos: false,
+        seg_done: false,
     }))
 }
 
@@ -518,6 +521,15 @@ pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut B
     let cfg = Arc::new(HistoConfig { order: spec.order.clone(), min_doc_count: spec.min_doc_count, keyed: spec.keyed, format: vs.format.clone() });
     let empty = if spec.min_doc_count == 0 { Some(Arc::new(DateEmptyInfo { rounding: rounding.without_offset(), bounds: ext })) } else { None };
     let os = if range.is_none() { OsDateDebug::new(ctx, &vs, &rounding, hard.unwrap_or((None, None)), !subs.is_empty()) } else { None };
+    let nanos = vs.field.as_ref().is_some_and(|f| f.type_name == "date_nanos");
+    // Buckets counted from the points tree where a segment allows it (crate::filter_rewrite).
+    let counted = match range {
+        None => {
+            let buckets = crate::filter_rewrite::DateBuckets { rounding: rounding.clone(), hard: hard.unwrap_or((None, None)), after: None, nanos, auto: Vec::new(), target: 1 };
+            crate::filter_rewrite::FilterRewrite::counting(ctx, &vs, buckets, !subs.is_empty()).map(Box::new)
+        }
+        Some(_) => None,
+    };
     Ok(Box::new(HistoAgg {
         key_fn: KeyFn::Date { rounding: rounding.clone(), hard: hard.unwrap_or((None, None)) },
         range: range.map(RangeSrc::new),
@@ -538,6 +550,9 @@ pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut B
         out: Out::Date { cfg, empty, offset: rounding.offset },
         starts,
         os,
+        counted,
+        nanos,
+        seg_done: false,
     }))
 }
 
@@ -613,6 +628,12 @@ struct HistoAgg {
     /// Profiled opensearch-dialect date histograms: OpenSearch's leaf collector counts and
     /// filter rewrite replay.
     os: Option<Box<OsDateDebug>>,
+    /// date_histogram counted from the points tree on the segments that allow it.
+    counted: Option<Box<crate::filter_rewrite::FilterRewrite>>,
+    /// A `date_nanos` field (the counted ranges are in nanoseconds, keys in milliseconds).
+    nanos: bool,
+    /// The current segment was counted from its points: no document of it is collected.
+    seg_done: bool,
 }
 
 /// OpenSearch's `DateHistogramAggregator.collectDebugInfo`: which leaf collector each segment
@@ -909,9 +930,33 @@ impl Aggregator for HistoAgg {
         }
         o
     }
+    fn segment_done(&self) -> bool {
+        self.seg_done
+    }
+
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         if let Some(os) = &mut self.os {
             os.segment(&self.vs, seg);
+        }
+        self.seg_done = false;
+        if let (Some(fr), KeyFn::Date { rounding, .. }) = (&self.counted, &self.key_fn)
+            && let Some(counts) = fr.count_segment(seg)
+        {
+            let rounding = rounding.clone();
+            for ((lo, _), n) in counts {
+                let ms = if self.nanos { lo.div_euclid(1_000_000) } else { lo };
+                let (ord, new) = self.ords.add(0, rounding.round(ms) as u64);
+                if new {
+                    grow(&mut self.counts, ord, 0);
+                    if self.counts.len() * 8 > self.tracker.reserved() as usize {
+                        self.tracker.ensure(self.counts.len() * 8 + self.ords.ram_bytes())?;
+                    }
+                }
+                self.counts[ord as usize] += n;
+            }
+            self.seg_done = true;
+            self.reader = None;
+            return self.subs.set_segment(seg);
         }
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         if let Some(src) = &mut self.range {

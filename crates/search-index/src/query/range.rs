@@ -374,30 +374,40 @@ impl Weight for PointRangeWeight {
         explain_const(self, seg, doc, &self.desc, self.score)
     }
     fn count(&self, seg: &SegmentContext) -> Result<Option<u32>> {
+        Ok(self.q.count_points(seg).map(|n| n as u32))
+    }
+}
+
+impl PointRangeQuery {
+    /// The segment's documents in the range, counted from the points tree without collecting
+    /// them (cells inside the range count whole): `None` when that isn't exact (deletions, or a
+    /// field with several points per document).
+    pub fn count_points(&self, seg: &SegmentContext) -> Option<u64> {
         if seg.has_deletions() {
-            return Ok(None);
+            return None;
         }
-        let Some(p) = seg.reader.points(self.q.field) else { return Ok(Some(0)) };
-        if self.q.empty() {
-            return Ok(Some(0));
+        let Some(p) = seg.reader.points(self.field) else { return Some(0) };
+        if self.empty() {
+            return Some(0);
         }
-        let mut v = RangeVisitor { q: &self.q, b: DocIdSetBuilder::new(1) };
+        let q = self;
+        let mut v = RangeVisitor { q, b: DocIdSetBuilder::new(1) };
         let r = v.compare(p.min_packed_value(), p.max_packed_value());
         // Single-valued (one point per doc) and fully inside / outside: exact without walking.
         if r == Relation::CellOutsideQuery {
-            return Ok(Some(0));
+            return Some(0);
         }
         if r == Relation::CellInsideQuery && p.size() == p.doc_count() as u64 {
-            return Ok(Some(p.doc_count()));
+            return Some(p.doc_count() as u64);
         }
         // Single-valued: count points, skipping the cells inside the range (Lucene's
         // `pointCount`), instead of collecting doc ids.
         if p.size() == p.doc_count() as u64 {
-            let mut cv = CountVisitor { inner: RangeVisitor { q: &self.q, b: DocIdSetBuilder::new(1) }, n: 0 };
+            let mut cv = CountVisitor { inner: RangeVisitor { q, b: DocIdSetBuilder::new(1) }, n: 0 };
             let inside = p.count_inside(&mut cv);
-            return Ok(Some((inside + cv.n) as u32));
+            return Some(inside + cv.n);
         }
-        Ok(None)
+        None
     }
 }
 

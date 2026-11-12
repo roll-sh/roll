@@ -1261,8 +1261,10 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
                 // OpenSearch (forked before 7.13) has no filter-by-filter aggregations.
                 filter_by_filter: cluster.dialect != crate::cluster::Dialect::OpenSearch
                     && st.metadata.cluster_setting("search.aggs.rewrite_to_filter_by_filter") != Some("false"),
-                // OpenSearch profiles report what its optimizations would do with the query.
-                query: (profiler.is_some() && cluster.dialect == crate::cluster::Dialect::OpenSearch && post.is_none() && src.min_score.is_none()).then(|| q.clone()),
+                // The query decides which docs are collected: date histograms count buckets
+                // from the points tree under a range on their field, and OpenSearch profiles
+                // report what its optimizations would do with it.
+                query: (post.is_none() && src.min_score.is_none()).then(|| q.clone()),
             };
             agg_profiler = opts.profiler.clone();
             Some(a.collector(&lookup, &searcher, &opts).map_err(aggs::agg_error)?)

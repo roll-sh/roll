@@ -11,6 +11,13 @@
 //! how many tree nodes would its walk have visited — and it only runs for profiled requests of
 //! the opensearch dialect.
 //!
+//! [`FilterRewrite::counting`] is the same rewrite for real, in every dialect: a top-level date
+//! histogram without sub-aggregations, under a `match_all`, an `exists` on its field or a range
+//! on its field, counts each bucket's range from the points tree on every segment it can
+//! ([`FilterRewrite::count_segment`]: no deletions, one point per document) and needs none of
+//! that segment's documents. Elasticsearch gets there by rewriting the histogram into a `range`
+//! aggregation run filter by filter (`DateHistogramAggregator.FromDateRange`).
+//!
 //! The walk is replayed exactly: Lucene's one-dimensional BKD writer cuts the sorted points of
 //! a segment into leaves of 512 in order and splits the leaves with
 //! `BKDWriter.getNumLeftLeafNodes`; an inner node's cell is bounded by the first value of its
@@ -183,6 +190,8 @@ pub struct FilterRewrite {
     match_all_only: bool,
     matches_all: bool,
     weight: Option<Box<dyn Weight>>,
+    /// [`FilterRewrite::counting`]: the `_doc_count` field (a segment with values is collected).
+    doc_count_field: Option<u32>,
     pub segments: u32,
     pub optimized: u32,
     pub leaf_visited: u32,
@@ -213,6 +222,7 @@ impl FilterRewrite {
         }
         let field = f.number;
         let mut fr = FilterRewrite::new(ctx, field, Encoding::Long, Source::Date(buckets), has_sub, size, false);
+        fr.weight = query_weight(ctx);
         // `Helper.getDateHistoAggBounds`: the shard's bounds under a `match_all`, an `exists`
         // on the field, or a range on the field (clipped to it).
         let bounds = shard_bounds(ctx.searcher, field);
@@ -242,6 +252,87 @@ impl FilterRewrite {
         Some(fr)
     }
 
+    /// [`FilterRewrite::date`] for counting buckets (see the module docs): top-level, one
+    /// owning bucket, no sub-aggregations, no `terminate_after`, no script or `missing`, not a
+    /// `time_series` request, any dialect. A segment with `_doc_count` values is collected doc
+    /// by doc, and so is a profiled request: its profile reports the collection Elasticsearch
+    /// does without the rewrite (roll doesn't render `FromDateRange`'s delegate debug).
+    pub fn counting(ctx: &BindCtx<'_>, vs: &BoundVs, buckets: DateBuckets, has_sub: bool) -> Option<FilterRewrite> {
+        let ok = !has_sub
+            && ctx.profiler.is_none()
+            && !ctx.terminate_after
+            && ctx.parents.is_empty()
+            && ctx.cardinality.is_one()
+            && !ctx.time_series_request
+            && vs.script.is_none()
+            && vs.missing.is_none()
+            && vs.field.as_ref().is_some_and(|f| f.points);
+        if !ok || buckets.rounding.offset != 0 || !is_utc(&buckets.rounding) {
+            return None;
+        }
+        let f = vs.field.as_ref()?;
+        if f.type_name != "date" && f.type_name != "date_nanos" {
+            return None;
+        }
+        let field = f.number;
+        let mut fr = FilterRewrite::new(ctx, field, Encoding::Long, Source::Date(buckets), false, usize::MAX, false);
+        fr.doc_count_field = ctx.doc_count_field;
+        let bounds = shard_bounds(ctx.searcher, field);
+        let shard = if ctx.matches_all {
+            Some(bounds)
+        } else {
+            match ctx.query.as_ref().map(unwrap) {
+                Some(q) if q.as_any().downcast_ref::<FieldExistsQuery>().is_some_and(|e| e.field == field) => Some(bounds),
+                Some(q) => match q.as_any().downcast_ref::<PointRangeQuery>() {
+                    Some(p) if p.field == field && p.lower.len() == 8 => {
+                        let lo = search_codec::points::encode::i64_from(&p.lower);
+                        let hi = search_codec::points::encode::i64_from(&p.upper);
+                        Some(bounds.and_then(|(min, max)| {
+                            let (l, u) = (lo.max(min), hi.min(max));
+                            (l <= u).then_some((l, u))
+                        }))
+                    }
+                    _ => None,
+                },
+                None => None,
+            }
+        };
+        // Only a query whose matches are exactly the buckets' ranges (clipped to it) is counted.
+        let shard = shard?;
+        fr.shard_ranges = Some(match (&fr.source, shard) {
+            (Source::Date(d), Some((l, h))) => d.ranges(l, h),
+            // No values in range anywhere: nothing to count, every segment is done.
+            (_, None) => Some(Vec::new()),
+            _ => None,
+        });
+        Some(fr)
+    }
+
+    /// The documents of each bucket range on `seg`, counted from the points tree (`None`: the
+    /// segment must be collected doc by doc). Ranges are `[lower, upper)` in the field's units.
+    pub fn count_segment(&self, seg: &SegmentContext) -> Option<Vec<((i64, i64), u64)>> {
+        if seg.live.is_some() || self.doc_count_field.is_some_and(|f| seg.reader.doc_values(f).is_some()) {
+            return None;
+        }
+        let ranges = self.shard_ranges.as_ref()?.as_ref()?;
+        let Some(points) = seg.reader.points(self.field) else { return Some(Vec::new()) };
+        if points.doc_count() as u64 != points.size() || points.spec().packed_len() != 8 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(ranges.len());
+        for &(lo, hi) in ranges {
+            if hi <= lo {
+                continue;
+            }
+            let q = PointRangeQuery::long(self.field, lo, hi - 1);
+            let n = q.count_points(seg)?;
+            if n > 0 {
+                out.push(((lo, hi), n));
+            }
+        }
+        Some(out)
+    }
+
     /// A `range` aggregation: non-overlapping ranges (sorted by `from`, then `to`) over a
     /// numeric field.
     pub fn range(ctx: &BindCtx<'_>, vs: &BoundVs, ranges: &[(f64, f64)], has_sub: bool) -> Option<FilterRewrite> {
@@ -260,12 +351,12 @@ impl FilterRewrite {
         }
         let fixed: Vec<(i64, i64)> = ranges.iter().map(|&(from, to)| (enc.encode(from), enc.encode(to))).collect();
         let mut fr = FilterRewrite::new(ctx, f.number, enc, Source::Fixed(fixed.clone()), has_sub, usize::MAX, true);
+        fr.weight = query_weight(ctx);
         fr.shard_ranges = Some(Some(fixed));
         Some(fr)
     }
 
     fn new(ctx: &BindCtx<'_>, field: u32, enc: Encoding, source: Source, has_sub: bool, size: usize, match_all_only: bool) -> FilterRewrite {
-        let weight = if ctx.matches_all { None } else { ctx.query.as_ref().and_then(|q| ctx.searcher.create_weight(q, ScoreMode::CompleteNoScores).ok()) };
         FilterRewrite {
             field,
             enc,
@@ -275,7 +366,8 @@ impl FilterRewrite {
             size,
             match_all_only,
             matches_all: ctx.matches_all,
-            weight,
+            weight: None,
+            doc_count_field: None,
             segments: 0,
             optimized: 0,
             leaf_visited: 0,
@@ -355,6 +447,14 @@ fn is_utc(r: &Rounding) -> bool {
         crate::format::TimeZone::Fixed { offset_secs, .. } => *offset_secs == 0,
         crate::format::TimeZone::Named(tz) => matches!(tz.name(), "UTC" | "Etc/UTC" | "Etc/UCT" | "UCT" | "Zulu" | "Etc/Zulu" | "Universal" | "Etc/Universal"),
     }
+}
+
+/// The query's weight, for the profile's `segmentMatchAll` (`None` under a `match_all`).
+fn query_weight(ctx: &BindCtx<'_>) -> Option<Box<dyn Weight>> {
+    if ctx.matches_all {
+        return None;
+    }
+    ctx.query.as_ref().and_then(|q| ctx.searcher.create_weight(q, ScoreMode::CompleteNoScores).ok())
 }
 
 /// `Helper.unwrapIntoConcreteQuery`: through constant-score and index-or-doc-values wrappers.
