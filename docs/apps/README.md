@@ -70,8 +70,14 @@ every deployment is immutable with instant rollback.
   FastAPI, Flask), Go, Rust, Ruby (Rails, Rack), PHP (Laravel, plain), Java (Maven, Gradle;
   Spring Boot), static sites (an `index.html`, or a framework build's output dir served by a
   tiny static server). The generated Dockerfile is shown in the UI and in the build log, so a
-  build is never magic, and `roll.toml` `[app]` (or the service settings) can override any
+  build is never magic, and the service settings or `roll.toml` `[app]` can override any
   command.
+- **Config as code** (`roll.toml` `[app]` in the service's root, like `railway.json`): `builder`,
+  `dockerfile`, `install`, `build`, `start`, `pre_deploy`, `health_path`. Read at each build;
+  what it sets wins over the service's settings and is named in the build log and the plan's
+  notes (`POST /v1/apps/plan` shows it too). It's checked as the API checks settings, an unknown
+  key is an error (a typo never silently does nothing), and it must be a regular file. The
+  file's other sections are roll code's; code-preview allows `[app]` in it.
 - **Why a generated Dockerfile instead of Nix or buildpacks' lifecycle**: BuildKit's layer cache
   makes dependency installs incremental, multi-stage builds give slim runtime images (cold
   starts scale with image size), and one build path (Dockerfile → BuildKit) serves detected and
@@ -440,7 +446,8 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-2. **Builds people need.** `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
+2. **Watch paths for monorepos**: a push deploys a service only when it changes a path the
+   service watches (`[app] watch`, the settings), with the changed paths from roll code.
 3. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
    `roll ssh` / exec into an instance, with the API routes under the service.
 4. **First run and the dashboard.** GitHub repos inline in New service; type, variables and

@@ -131,9 +131,21 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             Some(r) => crate::model::in_tree(&dir, "root", r, true)?,
             None => dir.clone(),
         };
-        let o = overrides.overrides();
+        // What a build would use: roll.toml `[app]` over the settings sent, said in the notes.
+        let (build, said) = match crate::config::read(&root)? {
+            Some(app) => {
+                let (b, _, said) = app.apply(&overrides, &crate::model::Run::default())?;
+                (b, said)
+            }
+            None => (overrides, Vec::new()),
+        };
+        let o = build.overrides();
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(root), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
-        p.map_err(|e| Error::BadRequest(e.to_string()))
+        p.map(|mut p| {
+            p.notes.splice(0..0, said);
+            p
+        })
+        .map_err(|e| Error::BadRequest(e.to_string()))
     }
     .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;

@@ -13,6 +13,7 @@
 //! runs its deploys, instances, cron and meter; other nodes forward to it.
 
 pub mod api;
+pub mod config;
 pub mod cron;
 pub mod deploy;
 pub mod integrations;

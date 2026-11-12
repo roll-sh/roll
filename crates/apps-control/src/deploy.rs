@@ -465,6 +465,17 @@ impl Apps {
             Some(r) => crate::model::in_tree(&tree, "the root directory", r, true)?,
             None => tree.clone(),
         };
+        // roll.toml `[app]` in the root: config as code, over the service's settings.
+        let (build_cfg, mut run) = match crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))? {
+            Some(app) => {
+                let (b, r, said) = app.apply(&svc.build, &svc.run).map_err(|e| anyhow::anyhow!("{e}"))?;
+                for l in said {
+                    log.line(l);
+                }
+                (b, r)
+            }
+            None => (svc.build.clone(), svc.run.clone()),
+        };
         // The variables the build's steps see: the environment's, as its instances will.
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
@@ -488,7 +499,7 @@ impl Apps {
             }
             h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
         };
-        let mut overrides = svc.build.overrides();
+        let mut overrides = build_cfg.overrides();
         overrides.build_env = build_env.iter().map(|(k, _)| k.clone()).collect();
         let ctx = context.clone();
         let plan = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(ctx), &overrides)).await?.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -496,7 +507,7 @@ impl Apps {
             log.line(format!("plan: {n}"));
         }
         let dockerfile = if plan.provider == apps_build::Provider::Dockerfile {
-            let df = svc.build.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into());
+            let df = build_cfg.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into());
             crate::model::in_tree(&context, "the Dockerfile", &df, false)?;
             df
         } else {
@@ -512,7 +523,6 @@ impl Apps {
             }
             name.to_string()
         };
-        let mut run = svc.run.clone();
         if run.port.is_none() {
             run.port = Some(plan.port);
         }
