@@ -44,7 +44,14 @@ impl FromRequestParts<Arc<Code>> for Caller {
     type Rejection = Error;
 
     async fn from_request_parts(parts: &mut Parts, code: &Arc<Code>) -> Result<Self, Self::Rejection> {
-        code.caller(token(parts).as_deref())
+        let token = token(parts);
+        // A session rolld's gate signed in (docs/accounts.md): only without a token of its own.
+        if token.is_none()
+            && let Some(user) = parts.extensions.get::<roll_auth::SignedIn>()
+        {
+            return code.session_caller(user);
+        }
+        code.caller(token.as_deref())
     }
 }
 
@@ -173,14 +180,17 @@ async fn health(State(code): S) -> Response {
 // ── info, names, owners ──
 
 /// Server info, plus who the request is: the dashboard's sign-in checks a token against it.
-async fn info(State(code): S, operator: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
+async fn info(State(code): S, operator: Option<axum::Extension<roll_auth::Operator>>, user: Option<axum::Extension<roll_auth::SignedIn>>, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, t)| t.trim().to_string());
-    let resolved = code.caller(token.as_deref());
+    let resolved = match (&token, user) {
+        (None, Some(axum::Extension(u))) => code.session_caller(&u),
+        _ => code.caller(token.as_deref()),
+    };
     // Who this caller reviews and comments as (so the UI knows which threads are theirs).
     let reviewer = resolved.as_ref().ok().and_then(|c| code.reviewer(c, &headers).ok()).map(|r| json!({ "kind": r.kind, "name": r.name }));
     let mut caller = match resolved {

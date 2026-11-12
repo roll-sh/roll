@@ -375,7 +375,9 @@ the host (`ROLL_CODE_RUNNER=docker`, the default), exactly as before.
   - the product decides: roll code (`/v1/code`, `/git`: owners, tokens, public repos, signed
     webhooks, device login), signed internal hops (`/internal`);
   - the token or the product's own credential: storage (console sessions), tasks (its token
-    and API keys), streams' HTTP data plane and Confluent REST (stream API keys).
+    and API keys), streams' HTTP data plane and Confluent REST (stream API keys);
+  - the token or any signed-in user: workspace projects (`/v1/workspace`), each user seeing
+    their own; accounts (`/v1/accounts`) decide for themselves.
 
   Every other route, and any route a product adds later, is the operator's, on the internal API
   and through the edge (the API host, and the Kafka HTTP and tasks hosts, which carry control-plane
@@ -388,10 +390,15 @@ the host (`ROLL_CODE_RUNNER=docker`, the default), exactly as before.
   so. With a token, tasks requires a token or API key and streams' HTTP data plane requires an
   API key (`ROLL_STREAM_REQUIRE_AUTH`); queues refuse the default `guest`/`guest` login off
   loopback.
+- **Accounts.** People sign in to roll.sh by invite only, with GitHub, Google or an email code,
+  and an authenticator app as a second factor (docs/accounts.md). A session is an httpOnly
+  `__Host-` cookie on the API's host, looked up on every request (revocation is immediate), with
+  an `X-Roll-CSRF` header on writes. An admin's session opens what the operator token does;
+  anyone else's opens roll code, the agents and their own projects, and gets 403 elsewhere.
 - **CORS.** One policy for every control-plane API: the origins in `ROLL_DASHBOARD_ORIGIN`
   (comma separated, `https://roll.sh` in the cloud); on loopback, by default, the local
   dashboard (any port on localhost, 127.0.0.1 or [::1]). Off loopback without the setting, no
-  browser origin is allowed. No cookies are involved: the dashboard sends tokens.
+  browser origin is allowed. Credentials are allowed, for the session cookie.
 - **The dashboard** signs in with the operator token (or a roll code owner token) in the header
   of every page; it stays in the browser's localStorage and goes to every product's API only
   when roll code says it's the operator's (`GET /v1/code` `auth.operator`). Nothing is built
@@ -431,12 +438,16 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
 | `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
 | `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set; roll streams' catalog (schema `streams`) |
-| `ROLL_SYSTEM_DB_CONNECTIONS` | 8 (the stack's `SystemDbConnections`) | connections a node opens to the system database across its products, split by `DbBudget` (code's two pools 3 each, nosql 2, redis and streams 1, one each for queues, code's `LISTEN` and workspace projects); unset: each product's default, about 59 |
+| `ROLL_SYSTEM_DB_CONNECTIONS` | 8 (the stack's `SystemDbConnections`) | connections a node opens to the system database across its products, split by `DbBudget` (code's two pools 3 each, nosql 2, redis and streams 1, one each for queues, code's `LISTEN`, workspace projects and accounts); unset: each product's default, about 63 |
 | `ROLL_STREAM_ACK_LINGER_MS` | `50` | how long a stream's owner gathers appends before writing its write-ahead log object: `acks=all` latency against S3 PUTs (at most one per busy stream per round) |
 | `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
-| `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys and the stored certificates |
+| `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys, the stored certificates and accounts' TOTP seeds |
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
+| `ROLL_ACCOUNTS_MAIL_FROM` | the stack's `MailFrom` (unset: no mail) | sign-in codes and invites through SES v2 from this address (docs/accounts.md) |
+| `ROLL_ACCOUNTS_OUTBOX` | never set | writes mail to a directory instead: local development and tests only |
+| `ROLL_ACCOUNTS_GITHUB_CLIENT_ID`, `_SECRET` | `GitHubOAuthClientId`, the secret from Secrets Manager | sign-in with GitHub (a GitHub OAuth app); off unless both are set |
+| `ROLL_ACCOUNTS_GOOGLE_CLIENT_ID`, `_SECRET` | `GoogleOAuthClientId`, the secret from Secrets Manager | sign-in with Google (OpenID Connect); off unless both are set |
 | `ROLL_DASHBOARD_ORIGIN` | `https://roll.sh` | the only origin CORS allows |
 | `ROLL_EDGE` | `1` | public listeners with TLS, SNI routing and PROXY protocol |
 | `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.sh`, `roll.site`, `us-east-1` | hostnames are built from these |
