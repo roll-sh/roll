@@ -537,7 +537,8 @@ Ranked by what a person notices first. Done so far:
 3. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page, and the comment shows it (Vercel does). Store it in roll storage and
    drop it with the preview.
-4. **Live logs as a stream** (`…/logs?follow=1`, SSE) rather than the dashboard's 3-second
-   re-read.
+4. **Live logs pushed, not polled**: a streamed `…/logs?follow=1` the dashboard can read with
+   its token (fetch streaming); `roll preview logs -f` and the dashboard re-read every 2–3 s
+   today.
 5. **A cost alert outside the dashboard**: tell the project's owners (webhook, chat) when its
    previews pass 80% of `max_usd_month`; the Previews tab shows it today.

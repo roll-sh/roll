@@ -55,6 +55,9 @@ pub enum Preview {
         service: Option<String>,
         #[arg(long, short = 'n', default_value_t = 200)]
         lines: usize,
+        /// Keep printing new lines (every 2 s) until interrupted.
+        #[arg(long, short)]
+        follow: bool,
     },
     /// What happened to a preview, newest first.
     Activity { preview: String },
@@ -201,10 +204,30 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Wake { preview } => api.post(&format!("/v1/previews/{preview}/wake"), json!({})).await?,
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
-        Preview::Logs { preview, service, lines } => {
+        Preview::Logs { preview, service, lines, follow } => {
             let mut path = format!("/v1/previews/{preview}/logs?lines={lines}");
             if let Some(svc) = service {
                 path.push_str(&format!("&service={svc}"));
+            }
+            if follow {
+                // The tail again every 2 s; print what's new since the last read (the lines
+                // after the last one seen).
+                let mut seen: Vec<String> = Vec::new();
+                loop {
+                    let v = api.get(&path).await?;
+                    let now: Vec<String> = v["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(str::to_string)).collect();
+                    let start = match seen.last() {
+                        Some(last) => now.iter().rposition(|l| l == last).map_or(0, |i| i + 1),
+                        None => 0,
+                    };
+                    for l in &now[start..] {
+                        println!("{l}");
+                    }
+                    if !now.is_empty() {
+                        seen = now;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
             }
             let v = api.get(&path).await?;
             if !as_json {
