@@ -147,6 +147,7 @@ code-sql = { path = "crates/code-sql" }
 roll-cluster = { path = "crates/roll-cluster" }
 roll-auth = { path = "crates/roll-auth" }
 roll-workspace = { path = "crates/roll-workspace" }
+roll-secrets = { path = "crates/roll-secrets" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }

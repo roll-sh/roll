@@ -1,0 +1,240 @@
+//! Leases, rotation and the sweeper (docs/secrets.md, "Links", "Where it runs"): dynamic
+//! credentials and retired managed ones are revoked when they expire, managed links rotate on
+//! their schedule, ephemeral environments expire, and old audit rows go.
+//!
+//! Every node sweeps; each item is claimed in a write before its provider is called, so no two
+//! nodes act on one item.
+
+use crate::access::{Action, Caller, Scope};
+use crate::envs;
+use crate::links::{Link, Mode};
+use crate::write::{Applied, Item, ItemAction, retire, seal_parts};
+use crate::{Error, Result, Secrets, names};
+use code_sql::{OptionalExtension, params};
+use serde::Serialize;
+use serde_json::Value as Json;
+
+#[derive(Debug, Serialize)]
+pub struct Lease {
+    pub id: String,
+    pub environment: String,
+    pub key: String,
+    pub kind: String,
+    pub link: Option<Link>,
+    pub consumer: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+/// What one sweep did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Swept {
+    pub revoked: usize,
+    pub rotated: usize,
+    pub expired: usize,
+    pub failed: usize,
+}
+
+impl Secrets {
+    pub fn leases(&self, project: &str, caller: &Caller) -> Result<Vec<Lease>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        self.db.read(|c| {
+            let rows = c.query(
+                "SELECT l.id, e.slug, l.key, l.kind, l.link, l.consumer, l.issued_at, l.expires_at, l.revoked_at FROM leases l JOIN environments e ON e.id = l.env_id
+                 WHERE l.project_id = ? ORDER BY l.issued_at DESC LIMIT 500",
+                [project],
+                |r| {
+                    Ok(Lease {
+                        id: r.get(0)?,
+                        environment: r.get(1)?,
+                        key: r.get(2)?,
+                        kind: r.get(3)?,
+                        link: serde_json::from_str(&r.get::<_, String>(4)?).ok(),
+                        consumer: r.get(5)?,
+                        issued_at: r.get(6)?,
+                        expires_at: r.get(7)?,
+                        revoked_at: r.get(8)?,
+                    })
+                },
+            )?;
+            Ok(rows.into_iter().filter(|l| caller.allows(Action::Read, &Scope::env(project, &l.environment))).collect())
+        })
+    }
+
+    /// Revoke a lease now.
+    pub fn revoke_lease(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
+        self.project(project)?;
+        let env: Option<String> = self.db.read(|c| {
+            c.query_row("SELECT e.slug FROM leases l JOIN environments e ON e.id = l.env_id WHERE l.id = ? AND l.project_id = ?", [id, project], |r| r.get(0)).optional()
+        })?;
+        let env = env.ok_or_else(|| Error::NotFound(format!("no lease {id}")))?;
+        caller.need(Action::Delete, &Scope::env(project, &env))?;
+        match self.revoke_one(id)? {
+            true => {
+                self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}"));
+                Ok(())
+            }
+            false => Err(Error::Conflict("conflict", format!("{id} is already revoked"))),
+        }
+    }
+
+    /// Claim and revoke one lease. `Ok(false)`: someone else did.
+    fn revoke_one(&self, id: &str) -> Result<bool> {
+        let now = self.db.now_ms()?;
+        let claimed: Option<(String, String)> = self.db.write(|c| {
+            let row = c.query_row("SELECT link, handle FROM leases WHERE id = ? AND revoked_at IS NULL", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()?;
+            if row.is_some() {
+                c.execute("UPDATE leases SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![now, id])?;
+            }
+            Ok::<_, Error>(row)
+        })?;
+        let Some((link, handle)) = claimed else { return Ok(false) };
+        let link: Link = serde_json::from_str(&link).map_err(|_| Error::Internal("a lease's link isn't JSON".into()))?;
+        let handle: Json = serde_json::from_str(&handle).unwrap_or_default();
+        if let Err(e) = self.links.get(&link.kind).and_then(|p| p.revoke(&link.r#ref, &handle)) {
+            // Give it back to the sweeper, which tries again.
+            self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ? WHERE id = ?", params![now + 60_000, id]))?;
+            return Err(Error::Link(format!("revoking {id}: {e}")));
+        }
+        Ok(true)
+    }
+
+    /// Revoke every live lease matching `cond` (`env_id = ?`, `project_id = ?`), best effort.
+    pub(crate) fn revoke_leases_where(&self, cond: &str, arg: &str) {
+        let ids = self.db.read(|c| c.query(&format!("SELECT id FROM leases WHERE revoked_at IS NULL AND {cond}"), [arg], |r| r.get::<_, String>(0)));
+        for id in ids.unwrap_or_default() {
+            if let Err(e) = self.revoke_one(&id) {
+                tracing::warn!(lease = %id, "revoking a lease failed: {e}");
+            }
+        }
+    }
+
+    /// Rotate a managed link's credential (with every secret that shares it), or a live link's
+    /// resource credential. A rotation doesn't need approval on a protected environment.
+    pub fn rotate(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
+        let path = names::path(path)?;
+        caller.need(Action::Write, &Scope::at(project, slug, &path))?;
+        let dek = self.project(project)?;
+        let (env, link, state) = self.db.read(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let row: Option<(Option<String>, Option<String>)> =
+                c.query_row("SELECT link, link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let (link, state) = row.ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
+            let link: Link = link.and_then(|l| serde_json::from_str(&l).ok()).ok_or_else(|| Error::BadRequest(format!("{key} isn't linked: nothing to rotate")))?;
+            Ok::<_, Error>((env, link, state.and_then(|s| serde_json::from_str::<Json>(&s).ok())))
+        })?;
+        let provider = self.links.get(&link.kind)?;
+        match link.mode {
+            Mode::Live => {
+                if !provider.rotate_source(&link.r#ref)? {
+                    return Err(Error::BadRequest(format!("{} {} has no credential to rotate", link.kind, link.r#ref)));
+                }
+                self.audit_now(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref));
+                Ok(Applied { change: None, items: vec![], warnings: vec![] })
+            }
+            Mode::Dynamic => Err(Error::BadRequest(format!("{key} is dynamic: every resolve issues a fresh credential"))),
+            Mode::Managed => {
+                let cred = self.links.credential(&link).unwrap_or("default").to_string();
+                let old = state.as_ref().and_then(|s| s.get("credential")).and_then(Json::as_str).map(String::from);
+                let issued = provider.issue(&link.r#ref, &cred, &link, &format!("roll secrets {slug} {key} (rotated)"), None)?;
+                let now = self.db.now_ms()?;
+                let handle = issued.handle.clone();
+                let new_state = seal_parts(&dek, project, &issued.parts, issued.handle, now);
+                let res = self.db.write(|c| {
+                    let env = envs::by_slug(c, project, slug)?;
+                    // Every secret of the environment that shares the credential.
+                    let sharing: Vec<(String, String, String, String)> = match &old {
+                        Some(old) => c.query(
+                            "SELECT path, key, link, link_state FROM secrets WHERE env_id = ? AND link_state LIKE ?",
+                            [env.id.as_str(), &format!("%\"credential\":\"{old}\"%")],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        )?,
+                        None => c.query("SELECT path, key, link, link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default(), r.get::<_, Option<String>>(3)?.unwrap_or_default()))
+                        })?,
+                    };
+                    let mut items = vec![];
+                    for (p, k, l, _) in sharing {
+                        let l: Link = serde_json::from_str(&l).map_err(|_| Error::Internal("a stored link isn't JSON".into()))?;
+                        let v = issued.parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
+                        items.push(Item { path: p, key: k, owner: String::new(), action: ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: Some(new_state.clone()) } });
+                    }
+                    let r = crate::write::apply(c, &dek, &env, &items, "rotate", &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
+                    if let (None, Some(h)) = (&old, state.as_ref().and_then(|s| s.get("handle"))) {
+                        retire(c, &env, &link, h, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
+                    }
+                    Ok::<_, Error>(r)
+                });
+                match res {
+                    Ok((change, items)) => Ok(Applied { change: Some(change), items, warnings: vec![] }),
+                    Err(e) => {
+                        let _ = provider.revoke(&link.r#ref, &handle);
+                        let _ = env;
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    /// One pass of background work, as of `now`.
+    pub fn sweep(&self) -> Result<Swept> {
+        let mut out = Swept::default();
+        let now = self.db.now_ms()?;
+        // Expired leases: dynamic credentials and retired managed ones.
+        let due = self.db.read(|c| c.query("SELECT id FROM leases WHERE revoked_at IS NULL AND expires_at <= ? LIMIT 200", [now], |r| r.get::<_, String>(0)))?;
+        for id in due {
+            match self.revoke_one(&id) {
+                Ok(true) => out.revoked += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    out.failed += 1;
+                    tracing::warn!(lease = %id, "revoking an expired lease failed: {e}");
+                }
+            }
+        }
+        // Expired ephemeral environments.
+        let expired: Vec<(String, String)> = self.db.read(|c| {
+            c.query("SELECT project_id, slug FROM environments WHERE kind = 'ephemeral' AND expires_at IS NOT NULL AND expires_at <= ? LIMIT 100", [now], |r| Ok((r.get(0)?, r.get(1)?)))
+        })?;
+        let sweeper = Caller::consumer("roll:sweeper");
+        for (project, slug) in expired {
+            match self.delete_environment(&project, &slug, None, &sweeper) {
+                Ok(()) | Err(Error::NotFound(_)) => out.expired += 1,
+                Err(e) => {
+                    out.failed += 1;
+                    tracing::warn!(%project, env = %slug, "deleting an expired environment failed: {e}");
+                }
+            }
+        }
+        // Managed links due for rotation (one per credential).
+        let managed: Vec<(String, String, String, String, String, String)> = self.db.read(|c| {
+            c.query(
+                "SELECT s.project_id, e.slug, s.path, s.key, s.link, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.link LIKE '%\"mode\":\"managed\"%' AND s.link LIKE '%rotate_days%' AND s.link_state IS NOT NULL",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+        })?;
+        let mut seen = std::collections::BTreeSet::new();
+        for (project, slug, path, key, link, state) in managed {
+            let (Ok(link), Ok(state)) = (serde_json::from_str::<Link>(&link), serde_json::from_str::<Json>(&state)) else { continue };
+            let (Some(days), Some(issued)) = (link.rotate_days(), state.get("issued_at").and_then(Json::as_i64)) else { continue };
+            let cred = state.get("credential").and_then(Json::as_str).unwrap_or_default().to_string();
+            if issued + days as i64 * 86_400_000 > now || !seen.insert(cred) {
+                continue;
+            }
+            match self.rotate(&project, &slug, &path, &key, &Caller::consumer("roll:rotation")) {
+                Ok(_) => out.rotated += 1,
+                Err(e) => {
+                    out.failed += 1;
+                    tracing::warn!(%project, env = %slug, %key, "a scheduled rotation failed: {e}");
+                }
+            }
+        }
+        let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
+        self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
+        Ok(out)
+    }
+}

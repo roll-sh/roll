@@ -1,0 +1,365 @@
+//! roll secrets (docs/secrets.md): the secrets and environment variables of workspace projects.
+//!
+//! A project has environments, an environment has folders, a folder has secrets; every write is
+//! a change that makes versions, so an environment rolls back to any point. Values are encrypted
+//! with the project's data key, sealed by the deployment key ([`crypto`]). Values can reference
+//! other values ([`refs`]) and come from roll resources ([`links`]).
+//!
+//! The data is one `code_sql` database: SQLite at `<home>/secrets.db` on one node, or the system
+//! database's `secrets` schema shared by every node. Every read-then-write is one [`Db::write`]
+//! closure that only touches the database; providers (issuing and revoking credentials) are
+//! called outside it. [`api::router`] serves it under `/v1/secrets`.
+
+pub mod access;
+pub mod api;
+mod audit;
+pub mod crypto;
+pub mod dotenv;
+mod envs;
+pub mod links;
+pub mod names;
+mod read;
+pub mod refs;
+mod requests;
+mod sweep;
+mod tokens;
+mod write;
+
+pub use access::{Action, Caller, Scope};
+pub use api::router;
+pub use crypto::{Keyring, Value};
+pub use envs::{EnvChange, Environment, NewEnvironment, Policy};
+pub use links::{Link, LinkProvider, Links, Mode};
+pub use read::{Grid, Values};
+pub use write::{Batch, Op};
+
+use code_sql::{Db, OptionalExtension, Target};
+use std::sync::Arc;
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    dek TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS environments (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    base_id TEXT,
+    labels TEXT NOT NULL,
+    expires_at INTEGER,
+    protected INTEGER NOT NULL,
+    approvals INTEGER NOT NULL,
+    approvers TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (project_id, slug)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS environments_expiry ON environments (expires_at);
+CREATE TABLE IF NOT EXISTS folders (
+    env_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (env_id, path)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS imports (
+    env_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    from_env_id TEXT NOT NULL,
+    from_path TEXT NOT NULL,
+    PRIMARY KEY (env_id, path, position)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS imports_from ON imports (from_env_id);
+CREATE TABLE IF NOT EXISTS secrets (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    env_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    key TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    value BLOB,
+    fp TEXT NOT NULL,
+    comment TEXT NOT NULL,
+    tags TEXT NOT NULL,
+    link TEXT,
+    link_state TEXT,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    UNIQUE (env_id, path, key, owner)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS secrets_project ON secrets (project_id);
+CREATE TABLE IF NOT EXISTS versions (
+    secret_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+    env_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    key TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    op TEXT NOT NULL,
+    what TEXT NOT NULL,
+    value BLOB,
+    fp TEXT,
+    comment TEXT NOT NULL,
+    tags TEXT NOT NULL,
+    link TEXT,
+    at INTEGER NOT NULL,
+    by TEXT NOT NULL,
+    PRIMARY KEY (secret_id, version)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS versions_env ON versions (env_id, seq);
+CREATE INDEX IF NOT EXISTS versions_key ON versions (env_id, path, key, owner);
+CREATE INDEX IF NOT EXISTS versions_change ON versions (project_id, seq);
+CREATE TABLE IF NOT EXISTS changes (
+    project_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    env_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    keys INTEGER NOT NULL,
+    PRIMARY KEY (project_id, seq)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS changes_env ON changes (env_id, seq);
+CREATE TABLE IF NOT EXISTS requests (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    env_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    message TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    base_seq INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    ops BLOB NOT NULL,
+    items TEXT NOT NULL,
+    reviews TEXT NOT NULL,
+    applied_seq INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS requests_env ON requests (env_id, at);
+CREATE TABLE IF NOT EXISTS leases (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    env_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    link TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    consumer TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS leases_due ON leases (revoked_at, expires_at);
+CREATE INDEX IF NOT EXISTS leases_project ON leases (project_id, issued_at);
+CREATE TABLE IF NOT EXISTS tokens (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    environments TEXT,
+    paths TEXT,
+    actions TEXT NOT NULL,
+    expires_at INTEGER,
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS tokens_project ON tokens (project_id);
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    env TEXT,
+    path TEXT,
+    keys TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    ip TEXT
+);
+CREATE INDEX IF NOT EXISTS audit_project ON audit (project_id, id);
+CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
+";
+
+/// The environments a project starts with, in order.
+pub const DEFAULT_ENVIRONMENTS: [(&str, &str); 3] = [("development", "Development"), ("staging", "Staging"), ("production", "Production")];
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Errors name keys, environments and paths, never values.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
+    Unauthorized(String),
+    #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
+    NotFound(String),
+    /// 409 with a code: `conflict`, `approval_required`, `stale`, `last_environment`.
+    #[error("{1}")]
+    Conflict(&'static str, String),
+    /// 503: no deployment key.
+    #[error("{0}")]
+    Unavailable(String),
+    /// A product behind a link failed (502).
+    #[error("{0}")]
+    Link(String),
+    #[error("secrets database: {0}")]
+    Db(#[from] code_sql::Error),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl From<crypto::CryptoError> for Error {
+    fn from(e: crypto::CryptoError) -> Self {
+        Error::Internal(e.to_string())
+    }
+}
+
+/// Where the deployment key came from (`/v1/secrets/health`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeySource {
+    Env,
+    File,
+    Missing,
+}
+
+pub struct Options {
+    /// The deployment key, or why there is none (every route then answers 503).
+    pub keyring: std::result::Result<Keyring, String>,
+    pub key_source: KeySource,
+    pub links: Links,
+    /// rolld has no operator token (loopback development): a request without a token is the
+    /// operator's.
+    pub open: bool,
+}
+
+/// The secrets store.
+pub struct Secrets {
+    db: Db,
+    keys: std::result::Result<Keyring, String>,
+    key_source: KeySource,
+    workspace: Arc<roll_workspace::Workspace>,
+    links: Links,
+    open: bool,
+}
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Secrets").field("links", &self.links).finish_non_exhaustive()
+    }
+}
+
+impl Secrets {
+    pub fn open(target: &Target, pg: code_sql::PgOptions, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
+        let db = match target {
+            Target::Sqlite(path) => Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
+            Target::Postgres { url, schema } => Db::connect(url, schema, pg)?,
+        };
+        Secrets::new(db, workspace, opts)
+    }
+
+    pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
+        db.ensure_schema(SCHEMA)?;
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, open: opts.open })
+    }
+
+    pub fn links(&self) -> &Links {
+        &self.links
+    }
+
+    fn keys(&self) -> Result<&Keyring> {
+        self.keys.as_ref().map_err(|why| Error::Unavailable(why.clone()))
+    }
+
+    /// The project's data key, creating the project's secrets (its key and default
+    /// environments) the first time. 404 if the workspace has no such project.
+    fn project(&self, project: &str) -> Result<crypto::Dek> {
+        let keys = self.keys()?;
+        self.workspace.get(project).map_err(|e| match e {
+            roll_workspace::Error::NotFound(m) => Error::NotFound(m),
+            e => Error::Internal(e.to_string()),
+        })?;
+        let stored = self.db.read(|c| c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0)).optional())?;
+        let sealed = match stored {
+            Some(s) => s,
+            None => {
+                let (_, sealed) = keys.new_dek(project);
+                let now = self.db.now_ms()?;
+                self.db.write(|c| {
+                    let n = c.execute(
+                        "INSERT INTO projects (project_id, dek, seq, created_at) VALUES (?, ?, 0, ?) ON CONFLICT (project_id) DO NOTHING",
+                        code_sql::params![project, sealed, now],
+                    )?;
+                    if n == 1 {
+                        for (i, (slug, name)) in DEFAULT_ENVIRONMENTS.iter().enumerate() {
+                            envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
+                        }
+                    }
+                    Ok::<_, Error>(c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?)
+                })?
+            }
+        };
+        let (dek, resealed) = keys.open_dek(project, &sealed)?;
+        if let Some(new) = resealed {
+            self.db.write(|c| c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [new.as_str(), project, sealed.as_str()]))?;
+        }
+        Ok(dek)
+    }
+
+    /// The deployment key's state: where it came from, and whether every project's data key is
+    /// sealed with it (after a key rotation).
+    pub fn health(&self) -> Result<serde_json::Value> {
+        let resealed = match &self.keys {
+            Ok(keys) => {
+                let rows = self.db.read(|c| c.query("SELECT project_id, dek FROM projects", (), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+                let old = rows.iter().filter(|(p, d)| keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true)).count();
+                if old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
+            }
+            Err(_) => serde_json::Value::Null,
+        };
+        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>() }))
+    }
+
+    /// Forget everything about a project (its workspace project was deleted). Active leases are
+    /// revoked first.
+    pub fn forget_project(&self, project: &str) -> Result<()> {
+        self.revoke_leases_where("project_id = ?", project);
+        self.db.write(|c| {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit"] {
+                c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
+            }
+            let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;
+            for e in &envs {
+                c.execute("DELETE FROM folders WHERE env_id = ?", [e])?;
+                c.execute("DELETE FROM imports WHERE env_id = ?", [e])?;
+            }
+            c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM projects WHERE project_id = ?", [project])?;
+            Ok::<_, Error>(())
+        })
+    }
+}
+
+fn json<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_string(v).expect("JSON")
+}
+
+fn from_json<T: serde::de::DeserializeOwned + Default>(s: &str) -> T {
+    serde_json::from_str(s).unwrap_or_default()
+}
