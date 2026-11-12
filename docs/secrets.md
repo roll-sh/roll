@@ -498,8 +498,25 @@ free again and its history stays readable by key.
 
 ## Next
 
-1. Storage, crypto and the router (`crates/roll-secrets`), mounted by rolld.
-2. `roll secrets` and `roll run`.
-3. The dashboard's Secrets surface in each project.
-4. Link providers for every product, rotation and dynamic leases.
-5. Runtime resolve wired into code-preview, agent sandboxes and roll tasks.
+Done: the store and crypto (`crates/roll-secrets`), rolld's mount and link providers, `roll secrets`
+and `roll run`, checks and sandboxes. Ranked:
+
+1. **The dashboard's Secrets surface** in each project: overview grid, inline edit, reveal, bulk
+   `.env` paste, history and rollback, compare and promote, environments, requests, links, tokens,
+   audit. In progress.
+2. **Prove it on Postgres**: run `crates/roll-secrets/tests/api.rs` with `ROLL_CODE_TEST_DATABASE`
+   (the system database's dialect), and two nodes sharing one schema.
+3. **Postgres roles for real**: issue and revoke a dynamic role against a running compute
+   (`pnpm test:pg`), and check `VALID UNTIL` and the grants.
+4. **Open the PR to `main`** with screenshots, after 1–3.
+5. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` lands
+   `roll_auth::Grant`: `Secrets::caller` reads the Grant first, and `rls_` tokens migrate to
+   roll-access tokens. Its MCP tools map onto the routes above.
+6. **A directory's default project**: `roll secrets setup` remembers the project and environment
+   for a directory (as `doppler setup` does), so `roll run -- npm start` needs no flags.
+7. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+   Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
+8. **Required keys**: a project-wide list of keys every standard environment must define. The grid
+   flags a missing one, and promote and `roll run` warn about it.
+9. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+10. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
