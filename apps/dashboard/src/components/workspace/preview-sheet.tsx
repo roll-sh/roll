@@ -246,11 +246,13 @@ export function PreviewSheet({
               </button>
             )}
             <button
-              className="ml-auto flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+              className="ml-auto grid size-7 place-items-center rounded-md text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40"
               disabled={busy !== null}
               onClick={() => setDeleting(true)}
+              aria-label="Delete"
+              title="Delete this preview"
             >
-              <Trash2 className="size-3.5" /> Delete
+              <Trash2 className="size-3.5" />
             </button>
           </div>
         )}

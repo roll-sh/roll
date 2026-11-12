@@ -165,9 +165,9 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
         </>
       }
     >
-      <div className="absolute inset-x-0 top-0 bottom-7">
+      <div className="absolute inset-x-0 top-0 bottom-7 overflow-clip">
         {!canvas && (
-          <div className="absolute inset-y-0 right-0 transition-[left] duration-300 ease-drawer motion-reduce:transition-none" style={{ left: agentsOpen ? 272 : 0 }}>
+          <div className={`absolute inset-y-0 right-0 left-0 transition-[left] duration-300 ease-drawer motion-reduce:transition-none ${agentsOpen ? "md:left-[272px]" : ""}`}>
             {children}
           </div>
         )}

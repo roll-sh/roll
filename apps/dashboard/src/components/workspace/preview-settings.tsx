@@ -105,6 +105,7 @@ function Form({
 
   return (
     <form
+      noValidate
       className="space-y-5 text-[12.5px]"
       onSubmit={(e) => {
         e.preventDefault();
@@ -161,7 +162,7 @@ function Form({
             <Num value={s.reset_every_hours} onChange={(v) => set("reset_every_hours", v)} />
           </Field>
           <Field label="Most data per preview" note="GiB its branches may own.">
-            <Num value={+(s.max_bytes / GIB).toFixed(2)} step={0.5} onChange={(v) => set("max_bytes", Math.round(v * GIB))} />
+            <Num value={+(s.max_bytes / GIB).toFixed(2)} step="any" onChange={(v) => set("max_bytes", Math.round(v * GIB))} />
           </Field>
         </div>
       </Section>
@@ -169,7 +170,7 @@ function Form({
       <Section title="Lifetime">
         <div className="grid grid-cols-3 gap-3 max-sm:grid-cols-1">
           <Field label="Sleep after" note="Minutes without a request.">
-            <Num value={+(s.sleep_after_s / 60).toFixed(1)} onChange={(v) => set("sleep_after_s", Math.round(v * 60))} />
+            <Num value={+(s.sleep_after_s / 60).toFixed(1)} step="any" onChange={(v) => set("sleep_after_s", Math.round(v * 60))} />
           </Field>
           <Field label="Delete after" note="Hours without a push or visit.">
             <Num value={s.ttl_hours} onChange={(v) => set("ttl_hours", v)} />
@@ -251,10 +252,10 @@ function Form({
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <fieldset className="space-y-3 border-t border-line pt-4">
-      <legend className="float-left mb-3 w-full text-[11.5px] font-medium text-subtle">{title}</legend>
+    <section className="space-y-3 border-t border-line pt-4">
+      <h3 className="text-[11.5px] font-medium text-subtle">{title}</h3>
       {children}
-    </fieldset>
+    </section>
   );
 }
 
@@ -270,7 +271,7 @@ function Field({ label, note, group, children }: { label: string; note?: string;
   );
 }
 
-function Num({ value, onChange, step = 1 }: { value: number; onChange: (v: number) => void; step?: number }) {
+function Num({ value, onChange, step = 1 }: { value: number; onChange: (v: number) => void; step?: number | "any" }) {
   return (
     <input
       type="number"
