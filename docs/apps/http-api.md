@@ -42,6 +42,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | | 202 `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message? }` | 202 `Deployment` (trigger `settings`) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
@@ -68,8 +69,12 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 - `…/usage` counts whole UTC days (`day` is days since 1970-01-01), today included, days without
   use as zeros.
 
+`POST …/deploys` takes an `Idempotency-Key` header (1–200 printable ASCII): a retry with the same
+key in the same environment, within a day, answers the deployment the first call queued instead of
+queuing another.
+
 Statuses: 400 a bad body, name, env or query; 404 no such service, environment, deployment or
-domain; 409 a name or hostname that's taken, a rollback to a deployment with no image, a cancel
+domain; 409 a name or hostname that's taken, a rollback to a deployment with no image, a redeploy of an environment with nothing deployed, a cancel
 of a finished deployment, a second volume instance; 413 an upload over 512 MiB; 503 with
 `Retry-After` while the service's owner moves.
 
@@ -167,7 +172,7 @@ type Deployment = {
   service: string;
   environment: string;
   status: DeployStatus;
-  trigger: "push" | "manual" | "rollback" | "upload" | "api" | "settings";
+  trigger: "push" | "manual" | "rollback" | "upload" | "api" | "settings"; // settings: a redeploy
   revision: string | null;   // git commit of a repo source
   message: string;
   image: string | null;      // the built or pinned image, by digest once known

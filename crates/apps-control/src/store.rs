@@ -57,6 +57,18 @@ CREATE TABLE IF NOT EXISTS deployments (
     ready_ms INTEGER
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS deployments_env ON deployments (service, env, created_at);
+CREATE TABLE IF NOT EXISTS fences (
+    service TEXT PRIMARY KEY,
+    epoch INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_keys (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    key TEXT NOT NULL,
+    deployment TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (service, env, key)
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS deployments_status ON deployments (status);
 CREATE TABLE IF NOT EXISTS variables (
     service TEXT NOT NULL,
@@ -379,7 +391,7 @@ impl Store {
     /// Remove a service and everything that belongs to it (deployments' history included).
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["environments", "deployments", "variables", "links", "domains", "runs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "variables", "links", "domains", "runs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -464,7 +476,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "domains", "runs", "metrics"] {
+            for t in ["variables", "domains", "runs", "metrics", "deploy_keys"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -477,9 +489,19 @@ impl Store {
 
     /// Point the environment at `to`, if it still points at `from` (a compare-and-swap, so two
     /// nodes can't both switch it): `to` becomes active and `from` inactive. False if it moved.
-    pub fn switch_active(&self, service: &str, env: &str, from: Option<&str>, to: &str, ready_ms: Option<i64>) -> Result<bool> {
+    /// Move an environment's active deployment from `from` to `to` (a compare-and-swap). With
+    /// `epoch` (the service's lease epoch on the node switching), it's fenced too: a node whose
+    /// lease is older than one that has already switched this service can't switch it.
+    pub fn switch_active(&self, service: &str, env: &str, from: Option<&str>, to: &str, ready_ms: Option<i64>, epoch: Option<i64>) -> Result<bool> {
         let now = self.now()?;
         self.db.write(|c| {
+            if let Some(ep) = epoch {
+                c.execute("INSERT INTO fences (service, epoch) VALUES (?, ?) ON CONFLICT (service) DO NOTHING", params![service, ep])?;
+                // The row lock serializes two owners: the older epoch finds nothing to update.
+                if c.execute("UPDATE fences SET epoch = ? WHERE service = ? AND epoch <= ?", params![ep, service, ep])? == 0 {
+                    return Ok(false);
+                }
+            }
             let current: Option<Option<String>> =
                 c.query_row("SELECT active FROM environments WHERE service = ? AND name = ?", [service, env], |r| r.get(0)).optional()?;
             let Some(current) = current else { return Ok(false) };
@@ -502,10 +524,25 @@ impl Store {
 
     /// Queue a deployment; queued ones of the same environment that haven't started are
     /// superseded by it (a newer push wins).
-    pub fn create_deployment(&self, service: &str, env: &str, d: NewDeployment, vars_hash: &str) -> Result<Deployment> {
+    /// The deployment an `Idempotency-Key` already made in this environment.
+    pub fn keyed_deployment(&self, service: &str, env: &str, key: &str) -> Result<Option<Deployment>> {
+        let id: Option<String> = self.db.query_row("SELECT deployment FROM deploy_keys WHERE service = ? AND env = ? AND key = ?", params![service, env, key], |r| r.get(0)).optional()?;
+        id.map(|id| self.deployment(&id)).transpose()
+    }
+
+    /// Queue a deployment (superseding queued ones). With `key`, a second call with the same
+    /// key answers the first one's deployment instead.
+    pub fn create_deployment(&self, service: &str, env: &str, d: NewDeployment, vars_hash: &str, key: Option<&str>) -> Result<Deployment> {
         let id = new_id("dep");
         let now = self.now()?;
         self.db.write(|c| {
+            if let Some(k) = key {
+                let had: Option<String> = c.query_row("SELECT deployment FROM deploy_keys WHERE service = ? AND env = ? AND key = ?", params![service, env, k], |r| r.get(0)).optional()?;
+                if let Some(had) = had {
+                    return Ok(c.query_row(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE id = ?"), [&had], deploy_row)?);
+                }
+                c.execute("INSERT INTO deploy_keys (service, env, key, deployment, created_at) VALUES (?, ?, ?, ?, ?)", params![service, env, k, id, now])?;
+            }
             c.execute(
                 "UPDATE deployments SET status = 'superseded', finished_at = ? WHERE service = ? AND env = ? AND status = 'queued'",
                 params![now, service, env],
@@ -814,6 +851,12 @@ impl Store {
         Ok(())
     }
 
+    /// Idempotency keys are for retries, which come within minutes: keep them a day.
+    pub fn prune_deploy_keys(&self, before_ms: i64) -> Result<()> {
+        self.db.execute("DELETE FROM deploy_keys WHERE created_at < ?", [before_ms])?;
+        Ok(())
+    }
+
     /// Add to an hour's usage.
     pub fn add_usage(&self, service: &str, env: &str, hour: i64, u: &UsageAdd) -> Result<()> {
         self.db.write(|c| {
@@ -862,5 +905,23 @@ impl Store {
             c.execute("INSERT INTO state (key, value) VALUES (?, ?)", [key, value])?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_node_with_an_older_lease_cannot_switch_after_a_newer_one_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_sqlite(&dir.path().join("apps.db"), Default::default()).unwrap();
+        let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        s.db.execute("INSERT INTO environments (service, name, branch, ephemeral, active, slug, port, created_at) VALUES ('svc_a', 'production', NULL, 0, NULL, 'a', NULL, 0)", params![]).unwrap();
+        // The new owner (epoch 2) switches; the old one (epoch 1), finishing its rollout late,
+        // can't, even from the state it saw.
+        assert!(s.switch_active("svc_a", "production", None, "dep_new", None, Some(2)).unwrap());
+        assert!(!s.switch_active("svc_a", "production", Some("dep_new"), "dep_old", None, Some(1)).unwrap());
+        assert!(s.switch_active("svc_a", "production", Some("dep_new"), "dep_next", None, Some(2)).unwrap());
     }
 }

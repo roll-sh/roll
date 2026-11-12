@@ -65,6 +65,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
+        .route(&format!("{env}/redeploy"), post(redeploy))
         .route(&format!("{env}/restart"), post(restart))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
@@ -223,11 +224,15 @@ async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 /// JSON (`NewDeploy`), or a gzipped tar of the tree (`roll up`).
 async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, headers: HeaderMap, b: Bytes) -> R {
     let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let key = match headers.get("idempotency-key") {
+        Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
+        None => None,
+    };
     let d = if ct.starts_with("application/gzip") || ct.starts_with("application/x-gzip") {
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-        apps.deploy(&id, &env, json!({ "message": message }), Trigger::Upload, Some(b)).await?
+        apps.deploy(&id, &env, json!({ "message": message }), Trigger::Upload, Some(b), key).await?
     } else {
-        apps.deploy(&id, &env, body(&b)?, Trigger::Manual, None).await?
+        apps.deploy(&id, &env, body(&b)?, Trigger::Manual, None, key).await?
     };
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -342,6 +347,11 @@ async fn deploy_logs(State(apps): S, Path((id, env, dep)): Path<(String, String,
 async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<LogQuery>) -> R {
     apps.environment(&id, &env).await?;
     stream_log(&apps, format!("env:{id}/{env}"), q, None).await
+}
+
+async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }).await?;
+    Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
 async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {

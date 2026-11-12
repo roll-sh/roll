@@ -162,6 +162,12 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Run the live image again with the current variables and settings (no build, same
+    /// revision): how changed variables reach a `roll up` service.
+    Redeploy {
+        #[command(flatten)]
+        target: Target,
+    },
     /// Roll back to an earlier deployment (no build: its image runs again).
     Rollback {
         deployment: String,
@@ -649,6 +655,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Redeploy { target } => {
+            let svc = service(api, &target).await?;
+            let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
+            if !json_out {
+                return watch(api, &svc, &target.env, &dep).await;
+            }
+            dep
         }
         AppsCmd::Rollback { deployment, target } => {
             let svc = service(api, &target).await?;

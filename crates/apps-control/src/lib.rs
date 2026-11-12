@@ -259,7 +259,7 @@ impl Apps {
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
         // A repo or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {
-            self.deploy(&row.id, PRODUCTION, json!({}), Trigger::Api, None).await?;
+            self.deploy(&row.id, PRODUCTION, json!({}), Trigger::Api, None, None).await?;
         }
         self.service(&row.id).await
     }

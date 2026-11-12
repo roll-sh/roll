@@ -112,6 +112,11 @@ every deployment is immutable with instant rollback.
   serving. A service scaled to zero rolls out without starting anything: the pointer moves, and
   the next request wakes the new deployment (a health check runs at the first wake instead, and
   failing it there rolls the pointer back automatically).
+- **Redeploy** (`POST …/redeploy`, `roll apps redeploy`, the dashboard's banner after a change
+  of variables or settings): the active image again with the service's current run settings and
+  variables, same revision, no build. It's how a `roll up` service takes new variables.
+- **Retries**: `POST …/deploys` takes an `Idempotency-Key`; a retry answers the first call's
+  deployment.
 - **Instant rollback**: the old image is still in the registry (deployments keep their
   images until the deployment is deleted from history), so a rollback is a rollout with no
   build: seconds, not minutes.
@@ -136,7 +141,9 @@ every deployment is immutable with instant rollback.
     instead of starting the old one on the volume.
   - Deleting an environment deletes its row first, then tears down its live state, which
     refuses to make or adopt anything afterwards. A node that loses a service's lease cancels its
-    deploys in flight and doesn't switch an environment it no longer owns.
+    deploys in flight and doesn't switch an environment it no longer owns; on a shared cluster
+    backend the switch is fenced too (`fences`: the service's lease epoch, checked in the
+    switch's own transaction), so an older owner finishing late can't move the pointer.
 - **Idle states**, cheapest last:
   1. **running**: serving, billed per second of CPU and memory it actually uses.
   2. **suspended**: after `suspend_after` (default 30 s) without a request, the instance is
@@ -401,42 +408,37 @@ feature/roll-previews and feature/roll-search found these. Ours are in `## Next`
 
 Ranked; the top item is what's being worked on.
 
-1. **Redeploy** for every source: the active image again with the current variables and settings.
-   The Deploy button and the "settings changed" banner are dead for `roll up` services today.
-   An `Idempotency-Key` on `POST …/deploys` (previews checks `active.revision` first today).
-   Fence `switch_active` with the lease's generation (roll-cluster), not only an ownership
-   check before it.
-2. **Containers.** Variables go in through the Engine API's `Env` (no env file on disk, and
+1. **Containers.** Variables go in through the Engine API's `Env` (no env file on disk, and
    multi-line values such as PEM keys work; roll secrets moved code-preview off `K=V` argv for the
    same reason). `--cap-drop` what apps don't need, the writable layer and `volume.size_gb` get
    quotas, builds get their CPU and memory limits and a concurrency cap. Logs cap unflushed bytes
    and forget a build's ring once it's stored.
-3. **roll secrets as the env store** (after #20 merges): an apps environment is a project
+2. **roll secrets as the env store** (after #20 merges): an apps environment is a project
    environment of roll secrets (checked on `PUT`, ephemeral from its kind, deleted with it);
    service variables live in secrets at `/services/<name>`; values are resolved only when a
    container is made (never for a dashboard read; `needs_deploy` from fingerprints); links become
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-4. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
+3. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
    `DATABASE_URL`); a pre-deploy (release) command that gates the switch, for migrations;
    `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
-5. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
+4. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
    `roll ssh` / exec into an instance, with the API routes under the service.
-6. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
+5. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics
    tiles that total the window; CLI output for people, not JSON; a project slug that isn't
    repeated in the URL.
-7. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
+6. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
    output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
    `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
-8. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
+7. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
-9. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
-10. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+8. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+9. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.
-11. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+10. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
     node; pending claims expire.
-12. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+11. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

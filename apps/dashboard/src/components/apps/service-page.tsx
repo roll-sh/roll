@@ -161,6 +161,8 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const asleep = st === "stopped" || st === "suspended";
   const localUrl = env?.port && typeof window !== "undefined" ? `http://${window.location.hostname}:${env.port}` : null;
   const deploy = () => runner.run("deploy", () => appsApi.deploy(service.id, envName));
+  const redeploy = () => runner.run("redeploy", () => appsApi.redeploy(service.id, envName));
+  const upload = service.source.kind === "upload";
   const busy = runner.busy !== null;
 
   return (
@@ -185,9 +187,15 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <button className={`${btn} shrink-0`} disabled={busy || !env?.active} onClick={() => runner.run("restart", () => appsApi.restart(service.id, envName))} title="Replace the instances with fresh ones">
             <RotateCw className="size-3.5" /> Restart
           </button>
-          <button className={`${primary} !py-1 !text-[12px]`} disabled={busy || service.source.kind === "upload"} onClick={deploy} title={service.source.kind === "upload" ? "Deploy with roll up" : "Build the source and roll it out"}>
-            <Rocket className="size-3.5" /> Deploy
-          </button>
+          {upload ? (
+            <button className={`${primary} !py-1 !text-[12px]`} disabled={busy || !env?.active} onClick={redeploy} title="Run the live image again with the current variables and settings (new code: roll up)">
+              <Rocket className="size-3.5" /> Redeploy
+            </button>
+          ) : (
+            <button className={`${primary} !py-1 !text-[12px]`} disabled={busy} onClick={deploy} title="Build the source and roll it out">
+              <Rocket className="size-3.5" /> Deploy
+            </button>
+          )}
         </>
       }
     >
@@ -273,7 +281,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "metrics" ? (
           <MetricsTab service={service.id} env={envName} />
         ) : tab === "variables" ? (
-          <VariablesTab service={service.id} project={service.project} env={env!} runner={runner} onDeploy={deploy} />
+          <VariablesTab service={service.id} project={service.project} env={env!} runner={runner} onRedeploy={redeploy} />
         ) : tab === "domains" ? (
           <DomainsTab service={service.id} env={env!} runner={runner} />
         ) : tab === "usage" ? (

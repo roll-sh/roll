@@ -291,9 +291,17 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
     let (st, env) = call(&w.api, "PUT", &base, Some(json!({"ephemeral": true}))).await;
     assert_eq!(st, StatusCode::OK, "{env}");
     assert!(env["url"].as_str().unwrap().contains("-pr-7"), "{env}");
-    let (st, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"revision": "c3c3c3c3c3c3"}))).await;
-    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
-    let d = settled(&w, &id, "pr-7", d["id"].as_str().unwrap()).await;
+    // A retry with the same Idempotency-Key answers the deployment the first call queued.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let req = Request::post(format!("{base}/deploys")).header("content-type", "application/json").header("idempotency-key", "pv-7@c3c3").body(Body::from(r#"{"revision": "c3c3c3c3c3c3"}"#)).unwrap();
+        let resp = w.api.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        ids.push(d["id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(ids[0], ids[1]);
+    let d = settled(&w, &id, "pr-7", &ids[0]).await;
     assert_eq!((d["status"].as_str(), d["revision"].as_str()), (Some("active"), Some("c3c3c3c3c3c3")));
     assert!(w.fake.instances(&id).iter().any(|(_, dep, st)| *dep == d["id"] && *st == FakeState::Running), "min_instances 1 keeps one up");
     let (st, _) = call(&w.api, "DELETE", &base, None).await;
@@ -339,6 +347,19 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     // The image is the deployment's now; the uploaded tree isn't kept.
     let uploads = w.apps.cfg.home.join("apps/uploads");
     assert!(std::fs::read_dir(&uploads).map(|mut d| d.next().is_none()).unwrap_or(true), "the upload is deleted after its build");
+    // A variable changes: a redeploy runs the same image with it, no upload and no build.
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"GREETING": "hej", "FAKE_ECHO": "GREETING"}}))).await;
+    assert_eq!(call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "nothing to deploy without an upload");
+    let builds = Fake::count(&w.fake.counts.builds);
+    let (st, r) = call(&w.api, "POST", &format!("{base}/redeploy"), None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{r}");
+    let r = settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    assert_eq!((r["status"].as_str(), r["trigger"].as_str()), (Some("active"), Some("settings")), "{r}");
+    assert_eq!(r["image"], d["image"]);
+    assert_eq!(Fake::count(&w.fake.counts.builds), builds, "no build");
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(visit(&w, &host(&env["url"]), "/").await.1["vars"]["GREETING"], "hej");
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;

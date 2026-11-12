@@ -23,7 +23,7 @@ type Edit = { name: string; value: string };
  * The environment's variables (masked; Reveal asks for the values), edited in place and saved in
  * one PATCH, then the links to the project's databases that add their own.
  */
-export function VariablesTab({ service, project, env, runner, onDeploy }: { service: string; project: string; env: Environment; runner: Runner; onDeploy: () => void }) {
+export function VariablesTab({ service, project, env, runner, onRedeploy }: { service: string; project: string; env: Environment; runner: Runner; onRedeploy: () => void }) {
   const [vars, setVars] = useState<Variables | null>(null);
   const [values, setValues] = useState<Record<string, string> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,9 +72,9 @@ export function VariablesTab({ service, project, env, runner, onDeploy }: { serv
     <div className="space-y-6">
       {env.needs_deploy && (
         <div className="rise flex flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-accent/[0.06] px-4 py-3">
-          <p className="min-w-0 flex-1 text-[13px]">Variables or settings changed since the live deployment. Deploy to apply them.</p>
-          <button className={primary} onClick={onDeploy} disabled={runner.busy !== null}>
-            <Rocket className="size-3.5" /> Deploy
+          <p className="min-w-0 flex-1 text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
+          <button className={primary} onClick={onRedeploy} disabled={runner.busy !== null || !env.active}>
+            <Rocket className="size-3.5" /> Redeploy
           </button>
         </div>
       )}

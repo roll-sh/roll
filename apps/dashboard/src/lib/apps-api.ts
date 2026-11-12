@@ -274,6 +274,8 @@ export const appsApi = {
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   rollback: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`),
+  /** The live image again with the current variables and settings: no build, same revision. */
+  redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
 
   restart: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/restart`),
@@ -381,7 +383,7 @@ export const TRIGGER_LABEL: Record<DeployTrigger, string> = {
   rollback: "Rollback",
   upload: "roll up",
   api: "API",
-  settings: "Settings",
+  settings: "Redeploy",
 };
 
 /** The environment a service's card and page show first: production, else the oldest. */

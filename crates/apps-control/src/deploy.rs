@@ -47,7 +47,17 @@ impl Apps {
 
     /// `POST …/deploys`: queue a deployment of the service's source (`revision` for a repo,
     /// `image` to deploy another image), or of `upload` (a `roll up` tree).
-    pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, trigger: Trigger, upload: Option<Bytes>) -> Result<Deployment> {
+    /// With `key` (an `Idempotency-Key`), a retry answers the deployment the first call queued.
+    pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, trigger: Trigger, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
+        if let Some(k) = key {
+            if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
+            }
+            let (sid, e, k) = (service.to_string(), env.to_string(), k.to_string());
+            if let Some(d) = self.db(move |s| s.keyed_deployment(&sid, &e, &k)).await? {
+                return Ok(d);
+            }
+        }
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
             if !["revision", "image", "message"].contains(&k.as_str()) {
@@ -80,7 +90,7 @@ impl Apps {
                 Source::Image { image: img.clone() }.check()?;
                 (None, Some(img), trigger)
             }
-            (Source::Upload, false, None) => return Err(Error::BadRequest("this service deploys uploads: run `roll up` in its directory".into())),
+            (Source::Upload, false, None) => return Err(Error::BadRequest("this service deploys uploads: run `roll up` in its directory, or redeploy (`POST …/redeploy`) to apply variables and settings".into())),
             (Source::Image { image }, false, None) => (None, Some(image.clone()), trigger),
             (Source::Repo { repo, .. }, false, None) => {
                 let sources = self.deps.sources.as_ref().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
@@ -115,10 +125,59 @@ impl Apps {
             }
         }
         let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.run.clone(), upload: upload_key, status: DeployStatus::Queued };
-        let (sid, e) = (service.to_string(), env.to_string());
-        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "")).await?;
+        let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
+        let ours = d.upload.clone().filter(|_| key.is_some());
+        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
+        if let Some(up) = ours {
+            let id = dep.id.clone();
+            if self.db(move |s| s.deployment_upload(&id)).await.ok().flatten().as_deref() != Some(up.as_str()) {
+                // A retry with the same key won the race: its deployment has its own upload.
+                self.delete_upload(&up).await;
+            }
+        }
         self.deploy_log(&dep.id).line(format!("queued ({})", dep.trigger.as_str()));
         let _ = row;
+        self.kick(service, env);
+        Ok(dep)
+    }
+
+    /// `POST …/redeploy`: the active deployment's image again, with the service's current run
+    /// settings and variables (variables are read when its instances are made), without a build
+    /// and without moving to another revision. What a change of variables or settings needs,
+    /// for every source (an upload service has no source to deploy again).
+    pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Deployment> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let message = match o.get("message") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(m)) => Some(m.chars().take(500).collect::<String>()),
+            Some(_) => return Err(Error::BadRequest("message is a string".into())),
+        };
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        let active = row.active.clone().ok_or_else(|| Error::Conflict(format!("nothing is deployed in {env} yet")))?;
+        let old = self.deployment(service, env, &active).await?;
+        let image = old.image.clone().ok_or_else(|| Error::Conflict(format!("{active} has no image")))?;
+        let mut run = svc.run.clone();
+        if run.port.is_none() {
+            run.port = old.run.port;
+        }
+        let d = NewDeployment {
+            trigger: Trigger::Settings,
+            revision: old.revision.clone(),
+            message: message.unwrap_or_else(|| format!("Redeploy of {}", old.id)),
+            image: Some(image),
+            plan: old.plan.clone(),
+            rollback_of: None,
+            run,
+            upload: None,
+            status: DeployStatus::Queued,
+        };
+        let (sid, e) = (service.to_string(), env.to_string());
+        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
+        self.deploy_log(&dep.id).line("queued (redeploy)");
         self.kick(service, env);
         Ok(dep)
     }
@@ -140,7 +199,7 @@ impl Apps {
             status: DeployStatus::Queued,
         };
         let (sid, e) = (service.to_string(), env.to_string());
-        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "")).await?;
+        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
         self.kick(service, env);
         Ok(dep)
     }
@@ -238,10 +297,10 @@ impl Apps {
         let (svc, env) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
         let id = d.id.clone();
         let (image, run) = match &d.image {
-            // A rollback or a pinned image: nothing to build.
-            Some(img) if d.trigger == Trigger::Rollback => {
+            // A rollback or a redeploy: an image roll already has, nothing to build or pull.
+            Some(img) if matches!(d.trigger, Trigger::Rollback | Trigger::Settings) => {
                 self.db(move |s| s.set_status(&id, &[DeployStatus::Queued, DeployStatus::Building], DeployStatus::Deploying, None)).await?;
-                log.line(format!("using the image of {}", d.rollback_of.as_deref().unwrap_or("an earlier deployment")));
+                log.line(format!("using the image of {}", d.rollback_of.as_deref().unwrap_or("the deployment it redeploys")));
                 (img.clone(), d.run.clone())
             }
             Some(img) => {
@@ -294,10 +353,13 @@ impl Apps {
             log.stream(Stream::System).line(format!("healthy after {:.1} s", took.as_secs_f64()));
         }
         let (sid, e, from, to, vh) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone());
+        // Epochs only grow on a backend that outlives the process; the in-memory one starts
+        // again at 1, and a fence kept in the store would then refuse every later switch.
+        let epoch = Some(&self.deps.cluster).filter(|c| c.backend_name() != "memory").and_then(|c| c.epoch(&crate::lease_key(&svc.id)));
         let ready = (!made.is_empty()).then_some(took.as_millis() as i64);
         let switched = self
             .db(move |s| {
-                let ok = s.switch_active(&sid, &e, from.as_deref(), &to, ready)?;
+                let ok = s.switch_active(&sid, &e, from.as_deref(), &to, ready, epoch)?;
                 if ok {
                     s.set_vars_hash(&to, &vh)?;
                 }
@@ -531,16 +593,20 @@ impl Apps {
 
     /// Delete a stored upload, then forget it. A failed delete leaves the row for the sweep.
     pub(crate) async fn drop_upload(self: &Arc<Self>, deployment: &str, key: &str) {
-        let gone = match &self.deps.objects {
+        if self.delete_upload(key).await {
+            let id = deployment.to_string();
+            let _ = self.db(move |s| s.clear_upload(&id)).await;
+        }
+    }
+
+    /// Delete an upload's bytes: whether they're gone.
+    async fn delete_upload(&self, key: &str) -> bool {
+        match &self.deps.objects {
             Some(o) => o.delete(key).await.is_ok(),
             None => match tokio::fs::remove_file(self.cfg.home.join(key)).await {
                 Ok(()) => true,
                 Err(e) => e.kind() == std::io::ErrorKind::NotFound,
             },
-        };
-        if gone {
-            let id = deployment.to_string();
-            let _ = self.db(move |s| s.clear_upload(&id)).await;
         }
     }
 
@@ -588,6 +654,8 @@ impl Apps {
             if n.is_multiple_of(3600) {
                 let before = code_sql::now_ms() / 60_000 - 7 * 24 * 60;
                 let _ = self.db(move |s| s.prune_metrics(before)).await;
+                let day_ago = code_sql::now_ms() - 24 * 3_600_000;
+                let _ = self.db(move |s| s.prune_deploy_keys(day_ago)).await;
             }
         }
     }
@@ -666,7 +734,7 @@ impl Apps {
             for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral && e.branch.as_deref() == Some(l.branch.as_str())) {
                 let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
                 // The owner queues it (it may be another node: the queue is in the store).
-                self.deploy(&svc.id, &e.name, body, Trigger::Push, None).await?;
+                self.deploy(&svc.id, &e.name, body, Trigger::Push, None, None).await?;
                 info!(service = %svc.id, env = %e.name, revision = %l.revision.sha, "apps: deploying a push");
             }
         }
