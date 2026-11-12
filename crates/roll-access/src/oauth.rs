@@ -75,6 +75,7 @@ async fn server_metadata(State(a): S) -> Json<Value> {
         "revocation_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": SCOPES,
         "authorization_response_iss_parameter_supported": true,
+        "client_id_metadata_document_supported": true,
     }))
 }
 
@@ -191,7 +192,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     }
     let a2 = a.clone();
     let cid = c.client_id.clone();
-    let client = tokio::task::spawn_blocking(move || a2.store.client(&cid)).await.map_err(|e| Error::Internal(e.to_string()))??.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
+    let client = known_client(&a2, &cid).await?.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
     if !client.redirect_uris.contains(&c.redirect_uri) {
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
@@ -208,6 +209,77 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         q.append_pair("iss", &api(&a));
     }
     Ok(Json(json!({ "redirect": redirect.to_string() })))
+}
+
+/// A metadata document is fetched at most this often (it's kept between).
+const METADATA_TTL_MS: i64 = 3600 * 1000;
+/// A metadata document's size, at most.
+const METADATA_MAX: usize = 64 << 10;
+
+/// A client by its id: registered here, or (an https URL, MCP 2025-11-25) known by the metadata
+/// document at that URL, fetched when it isn't known or is an hour old.
+pub async fn known_client(a: &Arc<Access>, id: &str) -> crate::Result<Option<crate::store::Client>> {
+    let (a2, id2) = (a.clone(), id.to_string());
+    let stored = tokio::task::spawn_blocking(move || a2.store.client(&id2)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let document = id.starts_with("https://") || (a.config.metadata_allow_private && id.starts_with("http://"));
+    if !document {
+        return Ok(stored);
+    }
+    if let Some(c) = &stored
+        && code_sql::now_ms() - c.created_at < METADATA_TTL_MS
+    {
+        return Ok(stored);
+    }
+    let fetched = fetch_metadata(id, a.config.metadata_allow_private).await.map_err(Error::BadRequest)?;
+    let (a2, f2) = (a.clone(), fetched.clone());
+    tokio::task::spawn_blocking(move || a2.store.put_metadata_client(&f2)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    Ok(Some(fetched))
+}
+
+/// A client ID metadata document: `id` is its URL (https, with a path, no fragment). Fetched
+/// through roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most
+/// 64 KiB; it must name itself (`client_id` is the URL) and list redirects a client may use.
+pub async fn fetch_metadata(id: &str, allow_private: bool) -> Result<crate::store::Client, String> {
+    let url = url::Url::parse(id).map_err(|_| "client_id isn't a URL".to_string())?;
+    if url.scheme() != "https" && !(allow_private && url.scheme() == "http") {
+        return Err("a client metadata document is https".into());
+    }
+    if url.fragment().is_some() || url.path() == "/" || url.path().is_empty() || id.len() > 2000 {
+        return Err("a client metadata URL has a path and no fragment".into());
+    }
+    if !allow_private && roll_net::literal_private_host(&url) {
+        return Err("a client metadata document can't be at a private address".into());
+    }
+    let mut b = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(5)).no_proxy();
+    if !allow_private {
+        b = b.dns_resolver(roll_net::PublicOnly);
+    }
+    let client = b.build().map_err(|e| e.to_string())?;
+    let mut resp = client.get(url.clone()).header("accept", "application/json").send().await.map_err(|e| format!("fetching the client's metadata: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("the client's metadata answered {}", resp.status()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        body.extend_from_slice(&chunk);
+        if body.len() > METADATA_MAX {
+            return Err("the client's metadata is over 64 KiB".into());
+        }
+    }
+    let doc: Value = serde_json::from_slice(&body).map_err(|_| "the client's metadata isn't JSON".to_string())?;
+    if doc["client_id"].as_str() != Some(id) {
+        return Err("the client's metadata names another client_id".into());
+    }
+    if doc["token_endpoint_auth_method"].as_str().is_some_and(|m| m != "none") {
+        return Err("only public clients (token_endpoint_auth_method \"none\", with PKCE) can connect".into());
+    }
+    let redirect_uris: Vec<String> = doc["redirect_uris"].as_array().into_iter().flatten().filter_map(|u| u.as_str().map(str::to_string)).collect();
+    if redirect_uris.is_empty() || redirect_uris.len() > 10 || !redirect_uris.iter().all(|u| redirect_ok(u)) {
+        return Err("the client's metadata needs 1-10 redirect_uris, each https, http on localhost, or an app scheme".into());
+    }
+    let name: String = doc["client_name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(url.host_str().unwrap_or("MCP client")).chars().filter(|c| !c.is_control()).take(80).collect();
+    let uri = doc["client_uri"].as_str().filter(|u| u.starts_with("https://") && u.len() <= 500).map(str::to_string);
+    Ok(crate::store::Client { id: id.to_string(), name, uri, redirect_uris, created_at: code_sql::now_ms(), last_used_at: None })
 }
 
 /// PKCE: BASE64URL(SHA256(verifier)) == challenge.

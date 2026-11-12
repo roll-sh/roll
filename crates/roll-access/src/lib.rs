@@ -111,6 +111,9 @@ pub struct Config {
     pub trust_forwarded_for: bool,
     /// How long a request waits for an approval before answering `approval_pending`.
     pub approval_wait: std::time::Duration,
+    /// Fetch MCP clients' metadata documents from private addresses and over http (local
+    /// development and tests only; `ROLL_ACCESS_METADATA_ALLOW_PRIVATE`).
+    pub metadata_allow_private: bool,
 }
 
 impl Default for Config {
@@ -122,6 +125,7 @@ impl Default for Config {
             audit_days: 90,
             trust_forwarded_for: false,
             approval_wait: std::time::Duration::from_secs(55),
+            metadata_allow_private: false,
         }
     }
 }

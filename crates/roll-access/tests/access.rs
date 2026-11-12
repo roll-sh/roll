@@ -64,7 +64,8 @@ impl Daemon {
         let mut resolvers = Resolvers::default();
         resolvers.by_kind.insert("endpoint", Arc::new(Endpoints));
         resolvers.workspace = Some(Arc::new(WorkspaceResolver(workspace.clone())));
-        let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), ..Config::default() };
+        // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
+        let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
         let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
         let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
@@ -374,6 +375,35 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     seen(format!("update chi_a C9 1700.1 {id} approved")).await;
     let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
     assert_eq!((a["state"].as_str(), a["decided_by"].as_str()), (Some("approved"), Some("slack:U1")));
+}
+
+/// An MCP client known by its metadata document (MCP 2025-11-25: its client_id is the document's
+/// URL) connects without registering; a document that names another client is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn clients_connect_by_their_metadata_document() {
+    let d = Daemon::new(50);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (b1, b2) = (base.clone(), base.clone());
+    let docs = Router::new()
+        .route("/client.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b1}/client.json"), "client_name": "Doc Client", "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }))
+        .route("/liar.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b2}/other.json"), "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }));
+    tokio::spawn(async move { axum::serve(listener, docs).await.unwrap() });
+    let id = format!("{base}/client.json");
+    let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+    let (s, c) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/clients/{}", enc(&id)), None).await;
+    assert_eq!((s, c["name"].as_str()), (StatusCode::OK, Some("Doc Client")), "{c}");
+    let (s, _) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/clients/{}", enc(&format!("{base}/liar.json"))), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (verifier, challenge) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    let consent = json!({ "client_id": id, "redirect_uri": "http://127.0.0.1:43111/cb", "code_challenge": challenge, "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] });
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent)).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let code = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap().query_pairs().find(|(k, _)| k == "code").unwrap().1.to_string();
+    let (s, tokens) = d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", "http://127.0.0.1:43111/cb"), ("client_id", &id), ("code_verifier", verifier)]).await;
+    assert_eq!(s, StatusCode::OK, "{tokens}");
+    assert_eq!(d.call(tokens["access_token"].as_str().unwrap(), Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
 }
 
 /// An MCP client connects with OAuth: it registers, the operator consents (narrowing what it

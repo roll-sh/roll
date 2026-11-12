@@ -100,7 +100,7 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 | a call without a token gets `401` with `WWW-Authenticate: Bearer resource_metadata="…"` | `/v1/mcp` | RFC 9728 §5.1 |
 | protected resource metadata: the resource and its authorization server | `GET /.well-known/oauth-protected-resource[/v1/mcp]` | RFC 9728 |
 | authorization server metadata | `GET /.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | RFC 8414 |
-| dynamic client registration (public clients only) | `POST /v1/access/oauth/register` | RFC 7591 |
+| dynamic client registration (public clients only), or a client ID metadata document | `POST /v1/access/oauth/register`; the client's own URL | RFC 7591; MCP 2025-11-25 |
 | authorization: the dashboard's consent screen | `GET <dashboard>/oauth/authorize` | OAuth 2.1 §4.1 |
 | tokens: `authorization_code` (PKCE `S256` required) and `refresh_token` | `POST /v1/access/oauth/token` | OAuth 2.1, RFC 7636, RFC 8707 |
 | revocation | `POST /v1/access/oauth/revoke` | RFC 7009 |
@@ -118,7 +118,10 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   place a connection's rules come from: a client can't widen them.
 - Each connection is a grant: it's listed with its client, last use and rules, and revoking it ends
   every token it has, at once.
-- Client ID metadata documents (2025-11-25) aren't supported yet: clients register dynamically.
+- Clients either register (dynamic registration) or are known by a client ID metadata document
+  (2025-11-25: the `client_id` is an https URL whose JSON names it). A document is fetched through
+  roll's private-address guard (`roll-net`), without redirects, in 5 seconds, at most 64 KiB, and
+  at most once an hour; it must name itself, list valid redirect URIs, and be a public client.
 
 ## Protocol
 
@@ -271,6 +274,4 @@ Ranked; the top item is in progress. A watchdog reads this list.
 3. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
    reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
    branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
-4. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
-   the public-only client.
-5. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+4. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
