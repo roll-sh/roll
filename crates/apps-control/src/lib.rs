@@ -624,7 +624,7 @@ impl Apps {
                 Err(e) => tracing::warn!(service = %svc.id, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a link's variables couldn't be read"),
             }
         }
-        match self.deps.secrets.resolve(&svc.project, &env.name).await {
+        match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
             Ok(secrets) => {
                 for (k, v) in secrets {
                     vars.insert(k, (v, "secret"));

@@ -53,8 +53,10 @@ pub trait Sources: Send + Sync {
 #[async_trait]
 pub trait SecretSource: Send + Sync {
     fn name(&self) -> &'static str;
-    /// The project's secrets in `env`, as variables.
-    async fn resolve(&self, project: &str, env: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// The project's secrets in `env`, as variables, for `service` (`svc_…`: the consumer the
+    /// audit names, `app:<service>`). An unresolved reference or a missing required key is an
+    /// error: the deploy fails rather than start without it.
+    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<(String, String)>>;
 }
 
 /// No project secrets (until roll secrets is on this node): services use their own variables.
@@ -66,7 +68,7 @@ impl SecretSource for NoSecrets {
         "none"
     }
 
-    async fn resolve(&self, _project: &str, _env: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<(String, String)>> {
         Ok(Vec::new())
     }
 }
