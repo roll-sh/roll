@@ -526,9 +526,7 @@ the dashboard's Secrets surface. Ranked:
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
    merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto
    the routes above.
-3. **The dashboard's missing pieces**: folder imports (`…/imports`), creating an ephemeral
-   environment, and showing rotate only for links that can rotate.
-4. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+3. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-5. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-6. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
+4. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+5. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.

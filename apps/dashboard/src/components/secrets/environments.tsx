@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp, GripVertical, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { ENV_SLUG, type Environment } from "@/lib/secrets-api";
+import { ENV_SLUG, LABEL_PART, type Environment } from "@/lib/secrets-api";
+import { Select } from "../agents/ui/select";
 import { Dialog } from "../agents/ui/dialog";
 import { Switch } from "../agents/ui/switch";
 import { useSecrets } from "./secrets-page";
@@ -297,8 +298,91 @@ function DeleteEnvironment({ env, project, onClose, onDelete }: { env: Environme
   );
 }
 
+const UNITS = { minutes: 1, hours: 60, days: 1440 } as const;
+type Unit = keyof typeof UNITS;
+const MAX_LABELS = 16;
+
+/** `pr=117, change=chg_42` → the labels, or what's wrong with them. */
+function parseLabels(text: string): { labels: Record<string, string> } | { error: string } {
+  const labels: Record<string, string> = {};
+  for (const part of text.split(/[\s,]+/).filter(Boolean)) {
+    const [k, v, ...rest] = part.split("=");
+    if (rest.length || v === undefined || !LABEL_PART.test(k) || !LABEL_PART.test(v)) return { error: `${part}: labels are key=value, each 1–64 characters of a-z, 0-9, _, . and -` };
+    labels[k] = v;
+  }
+  return Object.keys(labels).length > MAX_LABELS ? { error: `At most ${MAX_LABELS} labels` } : { labels };
+}
+
+/** A preview environment by hand: a slug, the standard environment it reads the rest from, labels and an expiry. */
+function NewPreview({ onCreated, onError }: { onCreated: (e: Environment) => void; onError: (e: string) => void }) {
+  const { api, standard } = useSecrets();
+  const [slug, setSlug] = useState("");
+  const [base, setBase] = useState<string | null>(null);
+  const [labels, setLabels] = useState("");
+  const [ttl, setTtl] = useState("1");
+  const [unit, setUnit] = useState<Unit>("days");
+  const [busy, setBusy] = useState(false);
+  const from = base ?? standard.find((e) => e.slug === "staging")?.slug ?? standard[0]?.slug ?? null;
+  const parsed = parseLabels(labels);
+  const n = ttl.trim() === "" ? null : Number(ttl);
+  const ttlOk = n === null || (Number.isInteger(n) && n > 0);
+  const slugOk = ENV_SLUG.test(slug);
+  const ok = slugOk && !!from && !("error" in parsed) && ttlOk;
+  return (
+    <form
+      className="mt-3 rounded-xl border border-line-2 p-3"
+      aria-label="New preview environment"
+      onSubmit={async (ev) => {
+        ev.preventDefault();
+        if (!ok || busy || "error" in parsed || !from) return;
+        setBusy(true);
+        try {
+          const e = await api.createEnvironment({ slug, kind: "ephemeral", base: from, labels: parsed.labels, ttl_minutes: n === null ? undefined : n * UNITS[unit] });
+          setSlug("");
+          setLabels("");
+          onCreated(e);
+        } catch (err) {
+          onError(errorText(err));
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="w-36">
+          <span className={label}>Slug</span>
+          <input value={slug} onChange={(e) => setSlug(e.target.value.toLowerCase())} placeholder="pr-117" maxLength={32} spellCheck={false} className={`${field} h-7 font-mono`} />
+        </label>
+        <div className="w-40">
+          <span className={label}>Base</span>
+          <Select label="Base" value={from} onChange={setBase} options={standard.map((e) => ({ value: e.slug, label: e.name }))} className="h-7 w-40" />
+        </div>
+        <label className="min-w-40 flex-1">
+          <span className={label}>Labels</span>
+          <input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="pr=117, change=chg_42" spellCheck={false} className={`${field} h-7 font-mono text-[12px]`} />
+        </label>
+        <div>
+          <span className={label}>Expires after (blank: never)</span>
+          <span className="flex gap-1">
+            <input value={ttl} onChange={(e) => setTtl(e.target.value)} inputMode="numeric" aria-label="Expires after" className={`${sized} h-7 w-14 font-mono`} />
+            <Select label="Unit" value={unit} onChange={setUnit} options={(Object.keys(UNITS) as Unit[]).map((u) => ({ value: u, label: u }))} className="h-7 w-24" />
+          </span>
+        </div>
+        <button type="submit" className={button} disabled={!ok || busy}>
+          <Plus className="size-3.5" /> {busy ? "Creating…" : "Create preview"}
+        </button>
+      </div>
+      {slug && !slugOk && <p className="mt-1.5 text-[11px] text-danger">1–32 characters of a-z, 0-9 and -, not starting or ending with -.</p>}
+      {"error" in parsed && <p className="mt-1.5 text-[11px] text-danger">{parsed.error}</p>}
+      {!ttlOk && <p className="mt-1.5 text-[11px] text-danger">A whole number above 0, or blank to keep it until it's deleted.</p>}
+      <p className="mt-1.5 text-[11px] text-subtle">It stores only what you set in it and reads every other key from {from ?? "its base"} at the same path.</p>
+    </form>
+  );
+}
+
 function Previews({ previews, onError, onChanged }: { previews: Environment[]; onError: (e: string) => void; onChanged: () => void }) {
-  const { api, project } = useSecrets();
+  const { api, project, go } = useSecrets();
+  const [created, setCreated] = useState<string | null>(null);
   const [selector, setSelector] = useState("");
   const [result, setResult] = useState<string | null>(null);
   const labelOk = /^[a-z0-9_.-]+=[a-z0-9_.-]+$/.test(selector);
@@ -306,14 +390,16 @@ function Previews({ previews, onError, onChanged }: { previews: Environment[]; o
     <Section title={`Previews ${previews.length ? previews.length : ""}`.trim()} aside={<span className="text-[11.5px] text-subtle">Ephemeral: they store only overrides and read the rest from their base.</span>}>
       {previews.length === 0 ? (
         <p className="rounded-xl border border-dashed border-line-2 px-3 py-4 text-[12px] text-muted">
-          No preview environments. roll previews makes one per change or pull request, or from the CLI:{" "}
+          No preview environments. roll previews makes one per change or pull request; make one below, or from the CLI:{" "}
           <span className="font-mono text-soft">roll secrets envs add pr-117 -p {project.name} --base staging --ephemeral</span>
         </p>
       ) : (
         <div className={`${card} divide-y divide-line`}>
           {previews.map((e) => (
             <div key={e.slug} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-              <span className="font-mono text-[12.5px]">{e.slug}</span>
+              <button onClick={() => go({ env: e.slug })} className={`font-mono text-[12.5px] hover:text-accent hover:underline ${created === e.slug ? "text-accent" : ""}`} title={`Open ${e.slug}`}>
+                {e.slug}
+              </button>
               <span className="text-[11.5px] text-muted">
                 from <b className="font-medium text-soft">{e.base}</b>
               </span>
@@ -325,7 +411,7 @@ function Previews({ previews, onError, onChanged }: { previews: Environment[]; o
                 ))}
               </span>
               <span className="ml-auto font-mono text-[11px] text-subtle">
-                {e.secrets} overrides · {e.expires_at ? `expires ${until(e.expires_at)}` : "no expiry"} · {ago(e.created_at)}
+                {e.secrets} {e.secrets === 1 ? "override" : "overrides"} · {e.expires_at ? `expires ${until(e.expires_at)}` : "no expiry"} · {ago(e.created_at)}
               </span>
               <button className={iconButton} aria-label={`Delete ${e.slug}`} onClick={() => api.deleteEnvironment(e.slug).then(onChanged, (err) => onError(errorText(err)))}>
                 <Trash2 className="size-3.5" />
@@ -334,6 +420,13 @@ function Previews({ previews, onError, onChanged }: { previews: Environment[]; o
           ))}
         </div>
       )}
+      <NewPreview
+        onError={onError}
+        onCreated={(e) => {
+          setCreated(e.slug);
+          onChanged();
+        }}
+      />
       {previews.length > 0 && (
         <form
           className="mt-3 flex flex-wrap items-center gap-2"
