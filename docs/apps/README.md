@@ -98,6 +98,11 @@ every deployment is immutable with instant rollback.
   at most 4 KiB read without trusting a header's size, PAX refused) and deletes it once its build
   ends; a sweep removes those of deployments that never built. A build root or Dockerfile is
   reached only through real directories, never a symlink in the tree.
+- **Lean Node images**: after the build, devDependencies are pruned (`npm prune --omit=dev`,
+  `pnpm prune --prod`), as Heroku's Node builds do, unless the start command uses one (`ts-node`,
+  `nodemon`: the plan says so) or only a framework's output directory is copied. An express app
+  with TypeScript and ESLint as devDependencies: `node_modules` 45 MB → 4.4 MB, the image 381 →
+  332 MB (the rest is `node:22-slim`).
 - **Variables in builds**: every install and build step sees the environment's variables
   (`NEXT_PUBLIC_*`, `VITE_*`, a Prisma `DATABASE_URL`, an `NPM_TOKEN`), as Railway's builds do.
   They're BuildKit secrets mounted as environment variables (`RUN --mount=type=secret,id=K,env=K`),
@@ -481,9 +486,9 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
-   output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
-   `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
+2. **Real builds in tests, and the Node cold start again.** Build the generated Node, Python and
+   Go Dockerfiles in `tests/docker.rs` (images this host already has); measure a Node cold start
+   with `node` started directly; Next's standalone output when `next.config` asks for it.
 3. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
 4. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.

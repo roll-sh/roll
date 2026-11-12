@@ -215,6 +215,23 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         }
     }
     let output = output.filter(|_| o.start.is_none());
+    // The runtime image without devDependencies (as Heroku's Node builds do), unless the app
+    // starts with one (`ts-node`, `nodemon`) or only its output directory is copied anyway.
+    let starts_with: String = [start.as_deref(), start_script, o.start.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    let dev_used = pkg["devDependencies"].as_object().into_iter().flat_map(|m| m.keys()).find(|d| starts_with.split(|c: char| !(c.is_alphanumeric() || "@/-_.".contains(c))).any(|w| w == d.as_str()));
+    let prune = match (node.pm, &output, dev_used) {
+        (_, Some(_), _) => None,
+        (_, None, Some(d)) => {
+            notes.push(format!("the start command uses {d}, a devDependency: devDependencies stay in the image"));
+            None
+        }
+        (Pm::Npm, None, None) => Some("npm prune --omit=dev"),
+        (Pm::Pnpm, None, None) => Some("pnpm prune --prod"),
+        _ => None,
+    };
+    if let Some(p) = prune {
+        notes.push(format!("devDependencies are pruned after the build ({p})"));
+    }
     let install = Some(node.install());
     let version = node.version.to_string();
     let render = Box::new(move |c: &crate::Commands<'_>| {
@@ -224,6 +241,9 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         node.source(&mut df, c);
         if let Some(build) = c.build {
             df.run(&node.build_caches(framework), build);
+        }
+        if let Some(p) = prune {
+            df.run(&node.caches(), p);
         }
         df.from("base", None);
         df.env(&[("NODE_ENV", "production")]);

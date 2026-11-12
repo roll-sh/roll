@@ -135,6 +135,16 @@ fn express_on_npm_with_a_start_script() {
         ],
     );
     assert!(!p.dockerfile.contains("corepack"));
+    // The runtime image leaves devDependencies out...
+    assert!(p.dockerfile.contains("npm prune --omit=dev"), "{}", p.dockerfile);
+    // ...unless the app starts with one.
+    let ts = detect(&[
+        ("package.json", r#"{"scripts": {"start": "ts-node server.ts"}, "dependencies": {"express": "^5"}, "devDependencies": {"ts-node": "^10", "typescript": "^5"}}"#),
+        ("package-lock.json", "{}"),
+        ("server.ts", ""),
+    ]);
+    assert!(!ts.dockerfile.contains("prune"), "{}", ts.dockerfile);
+    assert!(ts.notes.iter().any(|n| n.contains("ts-node, a devDependency")), "{:?}", ts.notes);
 
     // A prestart hook, or a script that needs a shell, keeps npm running it.
     for pkg in [
