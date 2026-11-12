@@ -6,7 +6,7 @@
 //!   only if its step is newer than the last one accepted: the step is moved forward by a
 //!   compare-and-set, so a code works once even when two nodes see it at the same time.
 //! - Ten wrong TOTP or recovery codes per user within five minutes refuse every code until the
-//!   window passes.
+//!   window passes. Each try is counted before its code is checked, in one write.
 
 use crate::{Accounts, Error, MINUTE, Result, random, sha256_hex};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -169,7 +169,7 @@ impl Accounts {
     /// one) and use its step up. Wrong codes count against the user.
     pub(crate) fn check_totp(&self, user: &str, code: &str, enabled: bool) -> Result<bool> {
         let key = format!("2fa:{user}");
-        if self.throttled(&key, FAILS, FAIL_WINDOW_MS)? {
+        if !self.attempt(&key, FAILS, FAIL_WINDOW_MS)? {
             return Ok(false);
         }
         let row = self.db.read(|c| c.query_row("SELECT seed, last_step FROM totp WHERE user_id = ? AND enabled = ?", params![user, enabled], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).optional())?;
@@ -183,23 +183,19 @@ impl Accounts {
         };
         if used {
             self.forget(&key)?;
-        } else {
-            self.count(&key, FAIL_WINDOW_MS)?;
         }
         Ok(used)
     }
 
     pub(crate) fn check_recovery(&self, user: &str, code: &str) -> Result<bool> {
         let key = format!("2fa:{user}");
-        if self.throttled(&key, FAILS, FAIL_WINDOW_MS)? {
+        if !self.attempt(&key, FAILS, FAIL_WINDOW_MS)? {
             return Ok(false);
         }
         let hash = recovery_hash(code);
         let used = self.db.write(|c| c.execute("DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?", [user, hash.as_str()]))? == 1;
         if used {
             self.forget(&key)?;
-        } else {
-            self.count(&key, FAIL_WINDOW_MS)?;
         }
         Ok(used)
     }
