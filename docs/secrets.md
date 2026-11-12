@@ -547,6 +547,13 @@ the dashboard's Secrets surface. Ranked:
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
    merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto
    the routes above.
-2. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+2. **Leaked secrets don't land** (roll-native: roll hosts the repos too). A change whose added
+   lines contain a value of its repo's project's secrets gets a `secret_leak` blocker
+   (`Code::blockers`), found by fingerprinting candidate tokens in the change's diff (O(change)),
+   and the key's name, never the value, is in the message. In progress.
+3. **`roll run --watch`**: restart the command when its environment changes (Infisical has it).
+4. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-3. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+5. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+6. **One-time sharing**: a link that reveals a value once and expires (Infisical and Doppler have
+   it), for handing a credential to someone outside roll.
