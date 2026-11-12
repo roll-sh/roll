@@ -35,7 +35,7 @@ use pg_query::NodeEnum;
 use pg_query::protobuf::{self as pb, Node};
 use state::SessionState;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -319,9 +319,11 @@ pub struct Session {
     /// BEGIN / SET TRANSACTION options for a transaction not started yet.
     txn_opts: Option<(Isolation, bool)>,
     txn_time: i64,
-    pub prepared: HashMap<String, Arc<Prepared>>,
+    /// (Looked up by name at every Bind and Execute: hashed with hashbrown's hasher, not
+    /// SipHash.)
+    pub prepared: hashbrown::HashMap<String, Arc<Prepared>>,
     /// Named prepared statements: (statement text, prepare time, from SQL PREPARE).
-    prepared_meta: HashMap<String, (String, i64, bool)>,
+    prepared_meta: hashbrown::HashMap<String, (String, i64, bool)>,
     /// Whether `state.prepared_list` names the statements `prepared` has (`sync_lists`);
     /// whatever adds or drops one sets it false.
     prepared_listed: bool,
@@ -332,7 +334,7 @@ pub struct Session {
     /// The analysis of the statement a Parse last bound, when it plans again alone
     /// (`litplan::analyzed_bound`).
     last_unplanned: Option<Arc<crate::sql::binder::Analyzed>>,
-    pub portals: HashMap<String, Portal>,
+    pub portals: hashbrown::HashMap<String, Portal>,
     pub cancel: Arc<AtomicBool>,
     /// The server's loop clears `cancel` when it waits for the client (else a transaction's
     /// start does: an embedded caller's cancel ends with the statement it meant).
@@ -501,13 +503,13 @@ impl Session {
             implicit: false,
             txn_opts: None,
             txn_time: 0,
-            prepared: HashMap::new(),
-            prepared_meta: HashMap::new(),
+            prepared: Default::default(),
+            prepared_meta: Default::default(),
             prepared_listed: false,
             lit_plans: Default::default(),
             param_plans: Default::default(),
             last_unplanned: None,
-            portals: HashMap::new(),
+            portals: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             reads_clear_cancel: false,
             waits_armed: false,
