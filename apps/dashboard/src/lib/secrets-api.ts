@@ -28,6 +28,8 @@ export type Environment = {
   approvers: string[];
   created_at: number;
   secrets: number;
+  /** Keys unchanged for longer are flagged stale (insights); null: never. */
+  max_age_days: number | null;
 };
 export type NewEnvironment = {
   slug: string;
