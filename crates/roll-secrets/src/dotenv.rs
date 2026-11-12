@@ -78,6 +78,46 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
+/// Entries from JSON: an object of `KEY: value` (numbers and booleans as their text), or an array
+/// of `{key, value, comment?}` (Infisical's and Doppler's exports have one or the other shape).
+pub fn from_json(j: &serde_json::Value) -> Result<Vec<Entry>, String> {
+    use serde_json::Value as J;
+    let text = |k: &str, v: &J| -> Result<String, String> {
+        match v {
+            J::String(s) => Ok(s.clone()),
+            J::Number(n) => Ok(n.to_string()),
+            J::Bool(b) => Ok(b.to_string()),
+            J::Null => Ok(String::new()),
+            _ => Err(format!("{k}: a value is a string, a number or a boolean")),
+        }
+    };
+    let mut out: Vec<Entry> = vec![];
+    let mut push = |key: &str, value: String, comment: String| -> Result<(), String> {
+        crate::names::key(key).map_err(|e| e.to_string())?;
+        crate::names::value(&value).map_err(|e| format!("{key}: {e}"))?;
+        out.retain(|e| e.key != key);
+        out.push(Entry { key: key.to_string(), value: Value::new(value), comment });
+        Ok(())
+    };
+    match j {
+        J::Object(o) => {
+            for (k, v) in o {
+                push(k, text(k, v)?, String::new())?;
+            }
+        }
+        J::Array(a) => {
+            for (n, item) in a.iter().enumerate() {
+                let key = item.get("key").and_then(J::as_str).ok_or_else(|| format!("item {n}: needs a key"))?;
+                let value = text(key, item.get("value").unwrap_or(&J::Null))?;
+                let comment = item.get("comment").and_then(J::as_str).unwrap_or_default().to_string();
+                push(key, value, comment)?;
+            }
+        }
+        _ => return Err("json is an object of KEY: value or an array of {key, value}".into()),
+    }
+    Ok(out)
+}
+
 /// The position of the first `"` not escaped by a backslash.
 fn closing(s: &str) -> Option<usize> {
     let mut escaped = false;

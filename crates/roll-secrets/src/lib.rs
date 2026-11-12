@@ -16,11 +16,14 @@ mod audit;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
+pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
 mod read;
 pub mod refs;
+mod notices;
+mod purge;
 mod requests;
 mod required;
 mod shares;
@@ -320,6 +323,14 @@ impl Secrets {
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
+        db.add_column("environments", "max_age_days", "INTEGER")?;
+        // Purge and retention (purge.rs): a purged version's time, a project's retention.
+        db.add_column("versions", "purged_at", "INTEGER")?;
+        db.add_column("projects", "history_days", "INTEGER")?;
+        // Approval notifications (notices.rs): the sealed URL, its host to show, and the outbox.
+        db.add_column("environments", "notify_url", "BLOB")?;
+        db.add_column("environments", "notify_host", "TEXT")?;
+        db.ensure_schema(notices::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
     }
 
@@ -386,7 +397,7 @@ impl Secrets {
         self.revoke_leases_where("project_id = ?", project);
         let managed = self.managed_where("project_id = ?", project);
         let done = self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks"] {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;

@@ -69,7 +69,20 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
    notification). roll's own checks (`secrets = "development"` in `roll.toml`), previews, apps and
    sandboxes read their environment directly.
-7. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
+7. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
+   same token. `resolve` with `sealTo` returns the values sealed to a key only that process holds,
+   and `watch` follows the digest and renews dynamic credentials' leases, as `roll run --watch` does:
+
+   ```ts
+   import { createClient, generateKeyPair } from "@roll/secrets";
+
+   const secrets = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN! });
+   const { values } = await secrets.values("staging");
+   const keys = generateKeyPair();
+   const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
+   const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
+   ```
+8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
@@ -195,6 +208,17 @@ new version of its secret, and a delete makes a tombstone version, so history is
 - **Snapshot.** `GET …/changes/{seq}` with `?state=1` lists every key as it was after that change
   (metadata and fingerprints).
 
+### Purge and retention
+
+After a leak and a rotation, the old value shouldn't stay readable in history.
+`POST …/secrets/{key}/purge?path= {before_version?}` (`admin`) drops the stored ciphertext of the
+key's older versions (default: all but the current one), which nothing can decrypt again. The
+history rows stay, marked `purged`, so history still says what changed and when. Revealing a purged
+version answers 404. A rollback that would need a purged value leaves that key as it is and says so
+in its `warnings`. A project can also keep old values for a while only
+(`PATCH /v1/secrets/projects/{project} {history_days}`, 1–3650, `null` for good): the sweeper purges
+versions older than that, never a secret's current version.
+
 ### References
 
 A value can include other values:
@@ -232,6 +256,15 @@ before any environment sets it (`required: true`). Reading an environment's valu
 required key it lacks as a problem (`required, but staging doesn't set it`), so `roll run`, checks
 and resolves refuse to start without it, as they do for an unresolved reference. An ephemeral
 environment counts what its base defines.
+
+### Insights
+
+`GET …/environments/{env}/insights?path=` shows, for each key of a folder, when it last changed
+and by whom, when its value was last read and by whom, how often in the last 30 days, and whether
+it's **stale**: unchanged for longer than the environment's `max_age_days`
+(`PATCH …/environments/{env} {max_age_days}`, 1–3650, `null` for never). Reads come from the audit
+log (reveal, export, resolve and sync pushes) over the last 90 days; nothing is decrypted. A stale
+key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 
 ### Compare and promote
 
@@ -316,13 +349,20 @@ roll secrets ls      [-p project] [-e env] [--path /]          # keys, masked
 roll secrets get     KEY [--plain]
 roll secrets set     KEY=VALUE… | KEY (value from stdin) [--comment] [--tag]
 roll secrets rm      KEY…
-roll secrets import  .env [--overwrite]                         # one change
+roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
+roll secrets edit                                               # the folder in $EDITOR, one change
+roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets export  [--format dotenv|json|shell|yaml]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging
 roll secrets promote --from development --to staging [KEY…]
-roll secrets audit   [--key KEY]
+roll secrets audit   [--key KEY] [--format csv|jsonl]
+roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
+roll secrets sinks   ls | add URL [--from-start] | rm ID
+roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
+roll secrets insights [--unused]             roll secrets shares [--revoke ID]
+roll secrets leases  [--renew ID | --revoke ID]
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -338,6 +378,10 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   environment or another), that decrypts nothing, issues nothing and isn't audited
   (`Secrets::digest` in process). A change that doesn't resolve keeps the running command. A live
   link's resource rotating doesn't change the digest.
+- `roll secrets edit` opens the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
+  `$XDG_RUNTIME_DIR` when there is one, removed after) and applies what changed as one change
+  (`import` with `replace`: a removed line deletes its key; linked and personal keys aren't in the
+  file and never deleted). `set KEY --generate N` makes a random value of N letters and digits.
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
@@ -409,6 +453,18 @@ the change`. The blocker names keys and environments, never the value or the lin
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
 
+### Moving from another manager
+
+`roll secrets import` takes a `.env` file or JSON: an object of `KEY: value` (numbers and booleans
+as their text) or an array of `{key, value, comment?}`. Export from the old manager, then import
+into each environment:
+
+```
+infisical export --env=prod --format=json > prod.json   &&  roll secrets import prod.json -e production
+doppler secrets download --no-file --format json > prod.json  &&  roll secrets import prod.json -e production
+vercel env pull .env.production --environment=production  &&  roll secrets import .env.production -e production
+```
+
 ### Sharing a value once
 
 `roll secrets share STRIPE_KEY [--views 1] [--ttl 24h] [--note …]` (or a value on stdin) prints a
@@ -432,9 +488,10 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, an endpoint of the team's own, or a deploy hook that only hears
-that something changed. Infisical's "secret syncs" are the reference. roll secrets stays the source
-of truth: a sync never reads from its target, and a value edited there is overwritten at the next
+they change: GitHub Actions secrets, Vercel, Cloudflare Workers, AWS Parameter Store, an endpoint
+of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
+syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
+target, and a value edited there is overwritten at the next
 change of that key.
 
 roll-secrets knows no platform. Each kind is a `SyncTarget` (`crates/roll-secrets/src/syncs.rs`)
@@ -447,10 +504,11 @@ pub trait SyncTarget: Send + Sync {
     fn fields(&self) -> &[SyncField];                         // what the dashboard asks for
     fn values(&self) -> bool { true }                         // false: pushes carry key names only
     fn signed(&self) -> bool { false }                        // a signing secret, shown once
+    fn credentials(&self, target: &Json) -> Vec<String> { vec![] } // keys holding its token
     // On create and before every push; `resources`: the project's canvas, as (kind, ref).
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
     // `push`: the values by target name, which names changed, which were removed, the digest,
-    // the signing secret.
+    // the signing secret, the resolved credentials.
     fn push(&self, target: &Json, push: &Push) -> Result<()>;
 }
 ```
@@ -490,6 +548,9 @@ last_synced_at, error}`:
 | `github` | `{repo: "owner/name", environment?: "production"}` | Repository Actions secrets, or a GitHub environment's secrets, through roll's GitHub App |
 | `webhook` | `{url, recipient}` (a base64url X25519 public key) | Every synced value, sealed to `recipient`, POSTed to `url` |
 | `notify` | `{url}` | No values: that the environment changed, and which keys, POSTed to `url` (deploy hooks) |
+| `vercel` | `{project: "<id or name>", team?: "<team id>", target: ["production" \| "preview" \| "development", …], token_key: "VERCEL_TOKEN"}` | A Vercel project's environment variables (`type: "encrypted"`) for those environments |
+| `cloudflare` | `{account: "<account id>", script: "<worker>", token_key: "CLOUDFLARE_API_TOKEN"}` | A Worker's secrets (`secret_text`) |
+| `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
 
 ### `github`
 
@@ -504,6 +565,33 @@ last_synced_at, error}`:
   done).
 - GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
   an error naming it (rename it or use `keys`/`prefix`).
+
+### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`)
+
+A platform's own credential is never in the sync. The target names **keys of the sync's own
+environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
+`secret_access_key_key`, an IAM user's key the team stores, not a roll bucket's managed key).
+They are resolved at each push like any value (references work), never pushed themselves (they're
+left out of the synced keys, and `keys` can't list them), and never stored, logged or put in an
+error. A credential key that isn't set, is empty or doesn't resolve fails the push with an error
+naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cloudflare.com`,
+`ssm.<region>.amazonaws.com`; `region` is `[a-z0-9-]`), with timeouts, no redirects and at most
+1 MiB of an answer read; an error carries the platform's status and error code, never its message.
+
+- **`vercel`**: changed names are upserted in batches of 50 (`POST /v10/projects/{project}/env?upsert=true`,
+  `type: "encrypted"`, the target's environments). A removed name is looked up by id
+  (`GET …/env`) and deleted (`DELETE /v9/projects/{project}/env/{id}`) only where every
+  environment it serves is one of the sync's: a variable that also serves another environment is
+  the team's own. `target` may also be a comma-separated string (the dashboard's form). Values are
+  at most 64 KB.
+- **`cloudflare`**: `PUT /client/v4/accounts/{account}/workers/scripts/{script}/secrets` with
+  `{name, text, type: "secret_text"}` per changed name, `DELETE …/secrets/{name}` per removed one
+  (a 404 counts as done). Values are at most 5 KB.
+- **`aws-ssm`**: `PutParameter` (`SecureString`, standard tier, `Overwrite`, `KeyId` when
+  `kms_key_id` is set) and `DeleteParameter` (`ParameterNotFound` counts as done) over AWS JSON 1.1,
+  signed with SigV4 by hand from s3-proto's primitives (no AWS SDK in rolld). `prefix` is a path
+  that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
+  it.
 
 ### `webhook` and `notify`
 
@@ -589,7 +677,12 @@ and the routes stay the same.
 
 ### Protected environments and approvals
 
-An environment can be **protected** with a policy: `{"approvals": 1, "approvers": [principal…]}`.
+An environment can be **protected** with a policy: `{"approvals": 1, "approvers": [principal…],
+"notify_url"?}`. With `notify_url` (a Slack or Discord incoming webhook, or any HTTPS URL; kept
+sealed, the environment shows only its host as `notify`), each request opened on it is announced:
+the notice is written in the request's own transaction and delivered by the sweeper with retries,
+as `{text, content, project, environment, request: {id, by, message, keys}, link}` (key names,
+never values).
 A write to a protected environment doesn't apply. It answers 409 `approval_required`, and the
 client opens a **change request** with the same operations (`POST …/requests`). A request:
 
@@ -635,16 +728,17 @@ isn't in the workspace is 404.
 | Route | Body | Answer |
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
-| `GET` | | `{project, environments: Environment[], previews: number}` |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
+| `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
 | `DELETE /environments?label=k=v` | | `{deleted: string[]}` (ephemeral only) |
 | `PUT /environments/order` | `{order: slug[]}` | `Environment[]` |
 | `GET /environments/{env}` | | `Environment` |
-| `PATCH /environments/{env}` | `{slug?, name?, expires_at?}` | `Environment` |
+| `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
-| `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?}` | `Environment` |
+| `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
 | `GET /environments/{env}/folders?path=` | | `{path, folders: Folder[]}` |
 | `POST /environments/{env}/folders` | `{path}` | 201 `Folder` |
 | `DELETE /environments/{env}/folders?path=` | | `{change: Change \| null}` |
@@ -658,12 +752,14 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
+| `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
+| `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
-| `POST /environments/{env}/import` | `{dotenv, path?, overwrite?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
+| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
@@ -740,9 +836,10 @@ type Item = { key: string; path: string; type: "shared" | "personal"; what: stri
 type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: "write" | "rollback" | "promote" | "rotate" | "request" | "rename" };
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
-type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
+type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
+type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
@@ -797,22 +894,28 @@ free again and its history stays readable by key.
 Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
 streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
-sealed webhooks, deploy notifications), the dashboard's Secrets surface, and the fixes from a
+sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), the
+dashboard's Secrets surface, and the fixes from a
 security review. `pnpm test:code` is green on the head. Reviewed on 2026-11-12 against Infisical,
 Doppler, Vercel and 1Password Developer, and against the apps, previews, MCP and search branches.
 Ranked:
 
-1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands
-   `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever PR
-   merges second does it), the resource is `Resource { product: "secrets", project, environment,
-   path, ..Default::default() }`, `rlst_` tokens migrate to roll-access tokens, and a sync made by a
-   grant stores the grant's id and re-checks it at each push through `roll_auth::Grants::grant(id)`
-   (rolld hands roll-access's `Access` as `Arc<dyn roll_auth::Grants>`). Also: roll apps' `Secrets` port wired to `Secrets::values`
-   (whichever of #20 and #21 merges second; the adapter is in the apps thread).
-2. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
-   a version's history shows the old and new value side by side on reveal.
-3. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
-   change.
-4. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
-   Cloudflare Workers; the platform's token is a reference to a secret of the same project,
-   resolved at push time, never stored in the sync.
+1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands: done and
+   tested on `wip/secrets-on-mcp` (this branch merged with roll-mcp): `Secrets::caller` reads
+   `roll_auth::Grant` before the operator marker, `GrantGrants` answers second resources through
+   `Grant::allows` (an `ask` is a no inside the product), whoami's project comes from the grant's
+   rules, a sync made by a grant re-checks it through `roll_auth::Grants`, rolld opens secrets
+   after roll-access. Merge it in when #19 is on main; then retire `rlst_` tokens for roll-access's.
+   Also: roll apps' `SecretSource` wired to `Secrets::values` as `app:<svc>` (whichever of #20 and
+   #21 merges second; the adapter is in the apps thread).
+2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
+   against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
+3. **A second security audit** of what came after the first: syncs, audit sinks, notices, one-time
+   shares, purge and retention, insights, request values, lease renewal, the TypeScript client. In
+   progress.
+4. **The dashboard's controls** for purge (a secret's history), retention (the project's settings)
+   and `notify_url` (an environment's protection).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
+   so the roll-access swap is ready the day #19 lands.
+6. **Performance on Postgres**: the 2k/9k-key measurements (import, grid, values, digest) against
+   the system database, and indexes where they're slow.

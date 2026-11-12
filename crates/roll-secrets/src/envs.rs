@@ -40,9 +40,15 @@ pub(crate) struct EnvRow {
     pub approvals: i64,
     pub approvers: Vec<String>,
     pub created_at: i64,
+    /// Keys unchanged for longer are flagged stale (insights).
+    pub max_age_days: Option<i64>,
+    /// The host change requests are announced to (the URL itself is sealed).
+    pub notify: Option<String>,
 }
 
 const ENV_COLUMNS: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at";
+/// What reads select: the columns above, and the ones added since.
+const ENV_SELECT: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at, max_age_days, notify_host";
 
 fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
     let kind: String = r.get(5)?;
@@ -60,6 +66,8 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         approvals: r.get(10)?,
         approvers: from_json(&r.get::<_, String>(11)?),
         created_at: r.get(12)?,
+        max_age_days: r.get(13)?,
+        notify: r.get(14)?,
     })
 }
 
@@ -79,6 +87,9 @@ pub struct Environment {
     pub approvals: i64,
     pub approvers: Vec<String>,
     pub created_at: i64,
+    pub max_age_days: Option<i64>,
+    /// The host opened change requests are announced to (`notify_url`'s; the URL stays sealed).
+    pub notify: Option<String>,
     /// Shared secrets in every folder.
     pub secrets: i64,
 }
@@ -109,6 +120,9 @@ pub struct EnvChange {
     /// `Some(None)`: no expiry.
     #[serde(default, deserialize_with = "some")]
     pub expires_at: Option<Option<i64>>,
+    /// Flag keys unchanged for longer (insights); `Some(None)`: never.
+    #[serde(default, deserialize_with = "some")]
+    pub max_age_days: Option<Option<i64>>,
 }
 
 fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
@@ -123,6 +137,10 @@ pub struct Policy {
     pub approvals: Option<i64>,
     #[serde(default)]
     pub approvers: Option<Vec<String>>,
+    /// Where opened change requests are announced (a Slack or Discord incoming webhook, any
+    /// HTTPS URL); `null` stops it, absent keeps it. Kept sealed: the URL is a credential.
+    #[serde(default, deserialize_with = "some")]
+    pub notify_url: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -173,23 +191,25 @@ pub(crate) fn insert(
         approvals: 0,
         approvers: vec![],
         created_at: now,
+        max_age_days: None,
+        notify: None,
     })
 }
 
 pub(crate) fn by_slug(c: &Conn<'_>, project: &str, slug: &str) -> Result<EnvRow> {
-    c.query_row(&format!("SELECT {ENV_COLUMNS} FROM environments WHERE project_id = ? AND slug = ?"), [project, slug], env_row)
+    c.query_row(&format!("SELECT {ENV_SELECT} FROM environments WHERE project_id = ? AND slug = ?"), [project, slug], env_row)
         .optional()?
         .ok_or_else(|| Error::NotFound(format!("no environment {slug}")))
 }
 
 pub(crate) fn by_id(c: &Conn<'_>, id: &str) -> Result<EnvRow> {
-    c.query_row(&format!("SELECT {ENV_COLUMNS} FROM environments WHERE id = ?"), [id], env_row)
+    c.query_row(&format!("SELECT {ENV_SELECT} FROM environments WHERE id = ?"), [id], env_row)
         .optional()?
         .ok_or_else(|| Error::NotFound(format!("no environment {id}")))
 }
 
 pub(crate) fn all(c: &Conn<'_>, project: &str) -> Result<Vec<EnvRow>> {
-    Ok(c.query(&format!("SELECT {ENV_COLUMNS} FROM environments WHERE project_id = ? ORDER BY position, created_at"), [project], env_row)?)
+    Ok(c.query(&format!("SELECT {ENV_SELECT} FROM environments WHERE project_id = ? ORDER BY position, created_at"), [project], env_row)?)
 }
 
 fn view(c: &Conn<'_>, rows: Vec<EnvRow>) -> Result<Vec<Environment>> {
@@ -215,6 +235,8 @@ fn view(c: &Conn<'_>, rows: Vec<EnvRow>) -> Result<Vec<Environment>> {
             approvals: e.approvals,
             approvers: e.approvers,
             created_at: e.created_at,
+            max_age_days: e.max_age_days,
+            notify: e.notify,
         })
         .collect())
 }
@@ -328,6 +350,13 @@ impl Secrets {
                 c.execute("UPDATE environments SET expires_at = ? WHERE id = ?", params![at, env.id])?;
                 env.expires_at = at;
             }
+            if let Some(d) = change.max_age_days {
+                if d.is_some_and(|d| !(1..=3650).contains(&d)) {
+                    return Err(Error::BadRequest("max_age_days is 1–3650".into()));
+                }
+                c.execute("UPDATE environments SET max_age_days = ? WHERE id = ?", params![d, env.id])?;
+                env.max_age_days = d;
+            }
             if let Some(new) = change.slug.as_deref().filter(|s| *s != slug) {
                 if by_slug(c, project, new).is_ok() {
                     return Err(Error::Conflict("conflict", format!("an environment named {new} exists")));
@@ -373,10 +402,24 @@ impl Secrets {
         if approvers.len() > 50 || approvers.iter().any(|a| a.is_empty() || a.len() > 200) {
             return Err(Error::BadRequest("at most 50 approvers, each a principal".into()));
         }
-        self.project(project)?;
+        if let Some(Some(u)) = &p.notify_url {
+            self.deliver.as_ref().ok_or_else(|| Error::BadRequest("notifications aren't on this server".into()))?.check(u)?;
+        }
+        let dek = self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
+            match &p.notify_url {
+                Some(Some(u)) => {
+                    let sealed = dek.seal(&crate::notices::notify_aad(project, &env.id), &crate::Value::new(u.trim()));
+                    let host = u.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or_default().rsplit('@').next().unwrap_or_default().to_string();
+                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ? WHERE id = ?", params![sealed, host, env.id])?;
+                }
+                Some(None) => {
+                    c.execute("UPDATE environments SET notify_url = NULL, notify_host = NULL WHERE id = ?", [&env.id])?;
+                }
+                None => {}
+            }
             if env.kind == Kind::Ephemeral && p.protected {
                 return Err(Error::BadRequest("an ephemeral environment can't be protected".into()));
             }

@@ -29,7 +29,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
     Router::new()
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
-        .route(P, get(overview))
+        .route(P, get(overview).patch(project_settings))
         .route(&format!("{P}/grid"), get(grid))
         .route(&format!("{P}/compare"), get(compare))
         .route(&format!("{P}/environments"), get(environments).post(create_environment).delete(delete_by_label))
@@ -44,8 +44,10 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{K}/versions"), get(versions))
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
+        .route(&format!("{K}/purge"), post(purge))
         .route(&format!("{E}/values"), get(values))
         .route(&format!("{E}/digest"), get(digest))
+        .route(&format!("{E}/insights"), get(insights))
         .route(&format!("{E}/resolve"), post(resolve))
         .route(&format!("{E}/changes"), get(changes).post(batch))
         .route(&format!("{E}/changes/{{seq}}"), get(change))
@@ -171,10 +173,39 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
     let v = blocking(s, move |s| {
         let envs = s.environments(&project, &c)?;
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
-        Ok(json!({ "project": project, "environments": envs, "previews": previews }))
+        let history_days = s.history_days(&project)?;
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days }))
     })
     .await?;
     Ok(ok(v))
+}
+
+/// `{history_days}`: how long old values are kept (`null`: for good).
+async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
+    let days = match o.remove("history_days") {
+        Some(serde_json::Value::Null) => None,
+        Some(v) => Some(v.as_i64().ok_or_else(|| Error::BadRequest("history_days is a number of days or null".into()))?),
+        None => return Err(Error::BadRequest("nothing to change: history_days".into())),
+    };
+    if let Some(k) = o.keys().next() {
+        return Err(Error::BadRequest(format!("unknown field {k}")));
+    }
+    let d = blocking(s, move |s| s.set_history_days(&project, days, &c)).await?;
+    Ok(ok(json!({ "history_days": d })))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PurgeBody {
+    #[serde(default)]
+    before_version: Option<i64>,
+}
+
+async fn purge(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let p: PurgeBody = if b.is_empty() { PurgeBody::default() } else { body(&b)? };
+    let n = blocking(s, move |s| s.purge(&project, &env, &path_of(&q), &key, p.before_version, &c)).await?;
+    Ok(ok(json!({ "purged": n })))
 }
 
 async fn grid(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Q) -> crate::Result<Response> {
@@ -345,6 +376,10 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     Ok(secret_response(r))
 }
 
+async fn insights(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.insights(&project, &env, &path_of(&q), &c)).await?))
+}
+
 async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
     let d = blocking(s, move |s| s.digest(&project, &env, &path_of(&q), &c)).await?;
     Ok(ok(json!({ "digest": d })))
@@ -412,8 +447,12 @@ async fn promote(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportBody {
-    /// A `.env` file's text.
-    dotenv: String,
+    /// A `.env` file's text…
+    #[serde(default)]
+    dotenv: Option<String>,
+    /// …or JSON: `{"KEY": "value"}` or `[{key, value, comment?}]` (other managers' exports).
+    #[serde(default)]
+    json: Option<serde_json::Value>,
     #[serde(default)]
     path: Option<String>,
     /// Replace keys that exist (default: only add new ones).
@@ -424,20 +463,36 @@ struct ImportBody {
     /// Open a change request instead of writing (protected environments).
     #[serde(default)]
     request: bool,
+    /// Make the folder match the file: its own keys the file doesn't have are deleted in the same
+    /// change (never a linked or a personal one). Implies `overwrite`.
+    #[serde(default)]
+    replace: bool,
 }
 
 /// A `.env` file as one change (bulk paste, `roll secrets import`).
 async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
     let i: ImportBody = body(&b)?;
-    let entries = dotenv::parse(&i.dotenv).map_err(Error::BadRequest)?;
+    let entries = match (&i.dotenv, &i.json) {
+        (Some(text), None) => dotenv::parse(text).map_err(Error::BadRequest)?,
+        (None, Some(j)) => dotenv::from_json(j).map_err(Error::BadRequest)?,
+        _ => return Err(Error::BadRequest("import takes dotenv (a .env file's text) or json".into())),
+    };
     let path = crate::names::path(i.path.as_deref().unwrap_or("/"))?;
     let v = blocking(s, move |s| {
-        let existing: Vec<String> = s.secrets(&project, &env, &path, &c)?.into_iter().filter(|x| x.source == crate::read::Source::Own).map(|x| x.key).collect();
+        let own: Vec<crate::Secret> = s.secrets(&project, &env, &path, &c)?.into_iter().filter(|x| x.source == crate::read::Source::Own && x.kind == crate::SecretType::Shared).collect();
+        let existing: Vec<String> = own.iter().map(|x| x.key.clone()).collect();
+        let in_file: std::collections::HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
+        let removed: Vec<Op> = if i.replace {
+            own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None }).collect()
+        } else {
+            vec![]
+        };
+        let overwrite = i.overwrite || i.replace;
         let mut skipped = vec![];
         let ops: Vec<Op> = entries
             .into_iter()
             .filter(|e| {
-                let keep = i.overwrite || !existing.contains(&e.key);
+                let keep = overwrite || !existing.contains(&e.key);
                 if !keep {
                     skipped.push(e.key.clone());
                 }
@@ -452,6 +507,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
                 link: None,
                 path: None,
             })
+            .chain(removed)
             .collect();
         let message = i.message.or_else(|| Some("imported a .env file".into()));
         let b = Batch { path: Some(path), message, ops, if_seq: None };

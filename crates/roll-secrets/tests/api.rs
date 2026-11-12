@@ -54,7 +54,8 @@ impl LinkProvider for Fake {
     }
 }
 
-/// A push a fake platform got: its values (exposed), changed and removed names.
+/// A push a fake platform got: its values and credentials (`credential:<key>`), exposed;
+/// changed and removed names.
 type Pushed = (BTreeMap<String, String>, Vec<String>, Vec<String>);
 
 /// A fake outside platform: the pushes it got.
@@ -76,11 +77,15 @@ impl SyncTarget for FakeSync {
     fn signed(&self) -> bool {
         true
     }
+    fn credentials(&self, target: &Value) -> Vec<String> {
+        target["token_key"].as_str().map(String::from).into_iter().collect()
+    }
     fn check(&self, _: &str, _: &Resources, target: &Value) -> roll_secrets::Result<()> {
         target.get("name").map(|_| ()).ok_or_else(|| roll_secrets::Error::BadRequest("target needs a name".into()))
     }
     fn push(&self, _: &Value, p: &Push<'_>) -> roll_secrets::Result<()> {
-        let values = p.values.iter().map(|(k, v)| (k.clone(), v.expose().to_string())).collect();
+        let credentials = p.credentials.iter().map(|(k, v)| (format!("credential:{k}"), v.expose().to_string()));
+        let values = p.values.iter().map(|(k, v)| (k.clone(), v.expose().to_string())).chain(credentials).collect();
         self.pushes.lock().unwrap().push((values, p.changed.to_vec(), p.removed.to_vec()));
         Ok(())
     }
@@ -217,11 +222,24 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     let r = api.ok(Method::POST, "/environments/production/rollback", Some(json!({ "to": seq }))).await;
     assert_eq!(r["change"]["kind"], "rollback");
     assert_eq!(api.values("production", "/").await["values"], json!({ "A": "10", "B": "2" }));
-    // Deleted and restored, a key keeps one history.
+        // Deleted and restored, a key keeps one history.
     let versions = api.ok(Method::GET, "/environments/production/secrets/A/versions", None).await;
     assert_eq!(versions[0]["version"], 4);
     let changes = api.ok(Method::GET, "/environments/production/changes", None).await;
     assert_eq!(changes.as_array().unwrap().len(), 4);
+    // After a leak: older values are purged for good; history keeps the rows, a rollback says so.
+    let p = api.ok(Method::POST, "/environments/production/secrets/A/purge", None).await;
+    assert_eq!(p["purged"], 2);
+    let (s, _) = api.call(Method::GET, "/environments/production/secrets/A/versions/1/value", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let r = api.ok(Method::POST, "/environments/production/rollback", Some(json!({ "to": 1 }))).await;
+    assert_eq!(r["warnings"], json!(["A's value at #1 was purged: it stays as it is now"]));
+    // A retention purges only what's older than it, never a value in use.
+    api.ok(Method::PATCH, "", Some(json!({ "history_days": 1 }))).await;
+    let sec = api.secrets.clone();
+    tokio::task::spawn_blocking(move || sec.sweep().unwrap()).await.unwrap();
+    assert_eq!(api.values("production", "/").await["values"]["A"], "10");
+    assert_eq!(api.ok(Method::GET, "", None).await["history_days"], 1);
 }
 
 #[tokio::test]
@@ -330,12 +348,22 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     let (s, e) = api.call(Method::PUT, "/environments/production/secrets/KEY", Some(json!({ "value": "new" }))).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")));
 
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1, "notify_url": "https://hooks.example/T0/B0/secret-path" }))).await;
     let r = api.ok(Method::POST, "/environments/production/requests", Some(json!({ "message": "rotate", "ops": [{ "op": "set", "key": "KEY", "value": "new" }] }))).await;
     let id = r["id"].as_str().unwrap();
     assert_eq!((r["state"].as_str(), r["items"][0]["what"].clone()), (Some("open"), json!(["changed"])));
     assert!(!r.to_string().contains("\"new\""), "a request never shows its values");
     let (s, _) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+    // Its approvers hear about it, by key name only, from the sweeper; the environment shows the
+    // URL's host, never the URL.
+    let sec = api.secrets.clone();
+    tokio::task::spawn_blocking(move || sec.sweep().unwrap()).await.unwrap();
+    let notice = api.sent.0.lock().unwrap().iter().find(|b| b["request"]["id"] == id).cloned().unwrap();
+    assert_eq!(notice["request"]["keys"], json!(["KEY"]));
+    assert!(notice["text"].as_str().unwrap().contains("opened change request") && !notice.to_string().contains("\"new\""));
+    let env = api.ok(Method::GET, "/environments/production", None).await;
+    assert_eq!(env["notify"], "hooks.example");
     // An approver who may reveal sees what changes, the value now beside the one proposed.
     let v = api.ok(Method::GET, &format!("/environments/production/requests/{id}/values"), None).await;
     assert_eq!((v[0]["key"].as_str(), v[0]["now"].as_str(), v[0]["proposed"].as_str()), (Some("KEY"), Some("old"), Some("new")));
@@ -467,6 +495,13 @@ async fn values_are_sealed_for_services_and_never_appear_in_the_audit_log() {
     assert_eq!(&actions[..3], ["secrets.resolve", "secrets.export", "secrets.write"]);
     assert_eq!(audit[0]["summary"], "resolved 2 values for app:web");
     assert!(!audit.to_string().contains("sk_live_123"));
+
+    // Other managers' JSON exports import too.
+    let j = api.ok(Method::POST, "/environments/staging/import", Some(json!({ "json": [{ "key": "FROM_DOPPLER", "value": "d" }, { "key": "PORT", "value": 8080 }] }))).await;
+    assert_eq!(j["items"].as_array().unwrap().len(), 2);
+        // `replace` makes the folder match the file, deletions included, in one change.
+    let r = api.ok(Method::POST, "/environments/production/import", Some(json!({ "dotenv": "STRIPE_KEY=sk_live_123\n", "replace": true }))).await;
+    assert_eq!((r["items"][0]["key"].as_str(), r["items"][0]["what"][0].as_str()), (Some("PORT"), Some("deleted")));
 }
 
 #[tokio::test]
@@ -555,7 +590,8 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     let api = Api::new().await;
     api.set("staging", "DB_URL", "postgres://db").await;
     api.set("staging", "STRIPE_KEY", "sk_live_123").await;
-    let s = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x" } }))).await;
+    api.set("staging", "PLATFORM_TOKEN", "tok_platform_1").await;
+    let s = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
     let id = s["id"].as_str().unwrap().to_string();
     assert!(s["signing_secret"].as_str().unwrap().starts_with("whsec_"), "shown once: {s}");
     let pushes = |n: usize| api.sync.pushes.lock().unwrap()[n].clone();
@@ -563,6 +599,8 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     api.secrets.sweep().unwrap();
     let (values, changed, removed) = pushes(0);
     assert_eq!(values["STRIPE_KEY"], "sk_live_123");
+    assert_eq!(values["credential:PLATFORM_TOKEN"], "tok_platform_1", "the platform's token, resolved at push time");
+    assert!(!values.contains_key("PLATFORM_TOKEN"), "and never pushed itself");
     assert_eq!((changed, removed.len()), (vec!["DB_URL".to_string(), "STRIPE_KEY".into()], 0));
     api.secrets.sweep().unwrap();
     assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "an unchanged environment isn't pushed again");
@@ -571,7 +609,7 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     api.ok(Method::DELETE, "/environments/staging/secrets/STRIPE_KEY", None).await;
     api.secrets.sweep().unwrap();
     let (values, changed, removed) = pushes(1);
-    assert_eq!((values.len(), changed, removed), (1, vec!["DB_URL".to_string()], vec!["STRIPE_KEY".to_string()]));
+    assert_eq!((values.len(), changed, removed), (2, vec!["DB_URL".to_string()], vec!["STRIPE_KEY".to_string()]));
 
     let listed = api.ok(Method::GET, "/syncs", None).await;
     assert_eq!((listed["syncs"][0]["status"].as_str(), listed["syncs"][0]["synced"].as_u64()), (Some("ok"), Some(1)));
@@ -610,6 +648,21 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
     let csv = csv.as_str().unwrap();
     assert!(csv.starts_with("id,at,actor,action,") && csv.contains("\"secrets.export\"") && !csv.contains("sk_live"));
+}
+
+#[tokio::test]
+async fn insights_show_when_each_key_was_last_read_and_changed() {
+    let api = Api::new().await;
+    api.set("production", "USED", "u").await;
+    api.ok(Method::PUT, "/environments/production/secrets/IDLE?path=/old", Some(json!({ "value": "i" }))).await;
+    api.values("production", "/").await;
+    api.ok(Method::PATCH, "/environments/production", Some(json!({ "max_age_days": 90 }))).await;
+    let i = api.ok(Method::GET, "/environments/production/insights", None).await;
+    assert_eq!(i["max_age_days"], 90);
+    let used = &i["keys"][0];
+    assert_eq!((used["key"].as_str(), used["reads_30d"].as_i64(), used["last_read_by"].as_str(), used["stale"].as_bool()), (Some("USED"), Some(1), Some("operator"), Some(false)));
+    let idle = api.ok(Method::GET, "/environments/production/insights?path=/old", None).await;
+    assert_eq!((idle["keys"][0]["key"].as_str(), idle["keys"][0]["last_read_at"].clone()), (Some("IDLE"), Value::Null));
 }
 
 #[tokio::test]

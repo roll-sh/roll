@@ -1,6 +1,7 @@
 //! The kinds roll secrets' syncs push to (docs/secrets.md, "Syncs"): `github` (Actions secrets
 //! through roll's GitHub App), `webhook` (values sealed to a key of the team's own) and `notify`
-//! (that something changed, no values). roll-secrets knows no platform: each kind is a
+//! (that something changed, no values); `vercel`, `cloudflare` and `aws-ssm` are in
+//! [`platforms`]. roll-secrets knows no platform: each kind is a
 //! [`SyncTarget`] registered here.
 //!
 //! Errors name keys and the target, never a value. URLs a tenant chose are fetched through the
@@ -15,6 +16,8 @@ use serde_json::{Value as Json, json};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod platforms;
+
 /// The kinds rolld offers. `allow_private`: webhooks may go to private addresses and plain
 /// `http` (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only).
 pub fn kinds(api: Api, allow_private: bool) -> Syncs {
@@ -28,6 +31,10 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(GitHubSync { api, github }));
     s.register(Arc::new(Webhook(hooks.clone())));
     s.register(Arc::new(Notify(hooks)));
+    let http = platforms::Http::new();
+    s.register(Arc::new(platforms::Vercel(http.clone())));
+    s.register(Arc::new(platforms::Cloudflare(http.clone())));
+    s.register(Arc::new(platforms::Ssm(http)));
     s
 }
 

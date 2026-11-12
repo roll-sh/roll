@@ -299,6 +299,12 @@ impl Secrets {
             )?;
             let keys: Vec<String> = diff.iter().map(|d| d.key.clone()).collect();
             audit::record(c, project, caller, "request.open", Some(slug), Some(&path), &keys, &format!("opened {id}: {}", crate::write::summarize(&diff)), now)?;
+            // The approvers hear about it (delivered by the sweeper, never from here).
+            let notify: Option<i64> = c.query_row("SELECT 1 FROM environments WHERE id = ? AND notify_url IS NOT NULL", [&env.id], |r| r.get(0)).optional()?;
+            if notify.is_some() {
+                let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}", w.trim_end_matches('/')));
+                crate::notices::queue(c, project, &env.id, slug, &id, &caller.principal, &message, &keys, link, now)?;
+            }
             Ok(view(&env, load(c, &env, &id)?))
         })
     }
