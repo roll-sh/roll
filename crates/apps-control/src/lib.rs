@@ -17,6 +17,7 @@ pub mod config;
 pub mod cron;
 pub mod deploy;
 pub mod integrations;
+pub mod jobs;
 pub mod live;
 pub mod logs;
 pub mod metrics;
@@ -334,9 +335,11 @@ impl Apps {
         let state = if latest.as_ref().is_some_and(|l| l.status.pending()) {
             InstanceState::Deploying
         } else {
-            match self.lives.lock().get(&env_key(&e.service, &e.name)) {
-                Some(l) => l.state(),
-                None if e.active.is_some() => InstanceState::Stopped,
+            // Deployed but not loaded on this node yet (or between a switch and its commit):
+            // nothing runs, which is asleep, not "not deployed".
+            match self.lives.lock().get(&env_key(&e.service, &e.name)).map(|l| l.state()) {
+                Some(InstanceState::None) | None if e.active.is_some() => InstanceState::Stopped,
+                Some(s) => s,
                 None => InstanceState::None,
             }
         };

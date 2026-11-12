@@ -627,6 +627,7 @@ pub enum RunStatus {
     Failed,
     Skipped,
     TimedOut,
+    Canceled,
 }
 
 impl RunStatus {
@@ -637,6 +638,7 @@ impl RunStatus {
             RunStatus::Failed => "failed",
             RunStatus::Skipped => "skipped",
             RunStatus::TimedOut => "timed_out",
+            RunStatus::Canceled => "canceled",
         }
     }
 
@@ -646,9 +648,22 @@ impl RunStatus {
             "failed" => RunStatus::Failed,
             "skipped" => RunStatus::Skipped,
             "timed_out" => RunStatus::TimedOut,
+            "canceled" => RunStatus::Canceled,
             _ => RunStatus::Running,
         }
     }
+}
+
+/// A one-off command in a fresh container of an environment's active deployment (`…/jobs`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Job {
+    pub id: String,
+    pub deployment: String,
+    pub command: String,
+    pub status: RunStatus,
+    pub exit_code: Option<i32>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -778,22 +778,62 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let tpl = self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?;
-        let inst = self.make(&tpl).await?;
-        let log = self.log.instance(&inst.name, &inst.deployment);
-        let began = Instant::now();
-        self.runtime.start(&inst.name, log).await?;
-        let code = tokio::time::timeout(timeout, self.runtime.wait(&inst.name)).await;
-        let timed_out = code.is_err();
-        if timed_out {
-            let _ = self.runtime.stop(&inst.name, Duration::from_secs(10)).await;
+        let e = self.run_to_exit(None, timeout, None, tokio_util::sync::CancellationToken::new(), |_| {}).await?;
+        Ok((e.deployment, e.code, e.timed_out))
+    }
+
+    /// A fresh instance of the active deployment run to its exit, `timeout` or `cancel`: a cron
+    /// run, or a one-off job (`command` in place of the image's, with no port and no volume,
+    /// since the service's own instance may be using it). `made` gets the container's name
+    /// before it starts; the container is removed after, whatever happened.
+    pub async fn run_to_exit(
+        self: &Arc<Self>,
+        command: Option<&str>,
+        timeout: Duration,
+        log: Option<LogSink>,
+        cancel: tokio_util::sync::CancellationToken,
+        made: impl FnOnce(&str),
+    ) -> anyhow::Result<Exit> {
+        let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        if let Some(cmd) = command {
+            tpl.spec.command = Some(cmd.to_string());
+            tpl.spec.port = None;
+            tpl.spec.volume = None;
+            tpl.spec.aliases.clear();
         }
+        let inst = self.make(&tpl).await?;
+        made(&inst.name);
+        let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
+        let began = Instant::now();
+        let ran = async {
+            self.runtime.start(&inst.name, log).await?;
+            tokio::select! {
+                code = tokio::time::timeout(timeout, self.runtime.wait(&inst.name)) => Ok::<_, anyhow::Error>(match code {
+                    Ok(code) => (code.ok(), false, false),
+                    Err(_) => (None, true, false),
+                }),
+                _ = cancel.cancelled() => Ok((None, false, true)),
+            }
+        }
+        .await;
+        let _ = self.runtime.stop(&inst.name, Duration::from_secs(10)).await;
         let secs = began.elapsed().as_secs_f64();
         // A run is metered at its allocation: it's short, and the container is gone after.
         self.meter.lock().sample(now_ms(), secs * tpl.run.cpu * 0.5, (tpl.run.memory_mb as u64) << 20, secs, 1);
         self.runtime.remove(&inst.name).await;
-        Ok((tpl.deployment.clone(), code.ok().and_then(Result::ok), timed_out))
+        let (code, timed_out, canceled) = ran?;
+        Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled })
     }
+}
+
+/// How a run ended.
+#[derive(Debug)]
+pub struct Exit {
+    pub deployment: String,
+    pub container: String,
+    pub code: Option<i32>,
+    pub timed_out: bool,
+    pub canceled: bool,
 }
 
 #[cfg(test)]

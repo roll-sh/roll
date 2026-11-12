@@ -9,7 +9,7 @@ use crate::live::Template;
 use crate::logs::{LogSink, Stream};
 use crate::model::*;
 use crate::runtime::{BuildJob, InstanceSpec, docker_reads};
-use crate::store::{EnvRow, NewDeployment, ServiceRow};
+use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
 use crate::{Apps, Error, Result, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
 use serde_json::Value;
@@ -362,13 +362,7 @@ impl Apps {
         let epoch = Some(&self.deps.cluster).filter(|c| c.backend_name() != "memory").and_then(|c| c.epoch(&crate::lease_key(&svc.id)));
         let ready = (!made.is_empty()).then_some(took.as_millis() as i64);
         let switched = self
-            .db(move |s| {
-                let ok = s.switch_active(&sid, &e, from.as_deref(), &to, ready, epoch)?;
-                if ok {
-                    s.set_vars_hash(&to, &vh)?;
-                }
-                Ok(ok)
-            })
+            .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh) }))
             .await?;
         if !switched {
             for i in &made {
@@ -630,6 +624,9 @@ impl Apps {
                 self.deps.runtime.remove(&name).await;
             }
         }
+        // Jobs an earlier process ran had their containers removed just above.
+        let sid = service.to_string();
+        let _ = self.db(move |s| s.fail_running_jobs(&sid)).await;
         let sid = service.to_string();
         let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { return };
         for e in envs {

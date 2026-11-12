@@ -223,10 +223,23 @@ export interface Usage {
   total_usd: number;
 }
 
+export type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";
+
 export interface CronRun {
   id: string;
   deployment: string;
-  status: "running" | "succeeded" | "failed" | "skipped" | "timed_out";
+  status: RunStatus;
+  exit_code: number | null;
+  started_at: number;
+  finished_at: number | null;
+}
+
+/** A one-off command in a fresh container of the active deployment (`roll apps run`). */
+export interface Job {
+  id: string;
+  deployment: string;
+  command: string;
+  status: RunStatus;
   exit_code: number | null;
   started_at: number;
   finished_at: number | null;
@@ -298,6 +311,10 @@ export const appsApi = {
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),
   runNow: (id: string, e: string) => call<CronRun>("POST", `${env(id, e)}/runs`),
+  jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
+  startJob: (id: string, e: string, body: { command: string; timeout_s?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
+  job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
+  cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 
   domains: (id: string, e: string) => call<Domain[]>("GET", `${env(id, e)}/domains`),
   addDomain: (id: string, e: string, hostname: string) => call<Domain>("POST", `${env(id, e)}/domains`, { hostname }),

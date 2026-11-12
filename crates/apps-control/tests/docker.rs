@@ -99,6 +99,19 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let (_, log) = call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/logs?tail=400"), None, "application/json", None).await;
     assert_eq!(d["status"], "active", "{d}\n{log}");
     assert!(log.as_array().unwrap().iter().any(|l| l["text"] == "pre-deploy done"), "the pre-deploy command ran in a container of the new image");
+    // A one-off job: the live image, its variables, to its exit, its container gone after.
+    let (st, job) = call(&api, "POST", &format!("/v1/apps/services/{id}/environments/production/jobs"), Some(json!({"command": "test \"$GREETING\" = hej && echo ran"})), "application/json", None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+    let mut job_status = Value::Null;
+    for _ in 0..300 {
+        let (_, j) = call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production/jobs/{}", job["id"].as_str().unwrap()), None, "application/json", None).await;
+        if j["status"] != "running" {
+            job_status = j;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(job_status["status"], "succeeded", "{job_status}");
     let (_, env) = call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
     let live = apps.live(&id, "production");

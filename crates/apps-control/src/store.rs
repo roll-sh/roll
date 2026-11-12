@@ -106,6 +106,18 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at INTEGER
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS runs_env ON runs (service, env, started_at);
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    deployment TEXT NOT NULL,
+    command TEXT NOT NULL,
+    status TEXT NOT NULL,
+    exit_code INTEGER,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS jobs_env ON jobs (service, env, started_at);
 CREATE TABLE IF NOT EXISTS metrics (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -243,6 +255,20 @@ pub struct UsageAdd {
     pub requests: i64,
     pub egress_bytes: i64,
     pub build_seconds: f64,
+}
+
+/// One move of an environment's active deployment ([`Store::switch_active`]): from `from` to
+/// `to`, with the new one's health-check time, the node's lease epoch (fenced when given) and
+/// its variables' hash.
+#[derive(Clone, Copy, Debug)]
+pub struct Switch<'a> {
+    pub service: &'a str,
+    pub env: &'a str,
+    pub from: Option<&'a str>,
+    pub to: &'a str,
+    pub ready_ms: Option<i64>,
+    pub epoch: Option<i64>,
+    pub vars_hash: Option<&'a str>,
 }
 
 pub struct Store {
@@ -391,7 +417,7 @@ impl Store {
     /// Remove a service and everything that belongs to it (deployments' history included).
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["environments", "deployments", "deploy_keys", "fences", "variables", "links", "domains", "runs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -476,7 +502,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "domains", "runs", "metrics", "deploy_keys"] {
+            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -492,7 +518,8 @@ impl Store {
     /// Move an environment's active deployment from `from` to `to` (a compare-and-swap). With
     /// `epoch` (the service's lease epoch on the node switching), it's fenced too: a node whose
     /// lease is older than one that has already switched this service can't switch it.
-    pub fn switch_active(&self, service: &str, env: &str, from: Option<&str>, to: &str, ready_ms: Option<i64>, epoch: Option<i64>) -> Result<bool> {
+    pub fn switch_active(&self, w: &Switch<'_>) -> Result<bool> {
+        let Switch { service, env, from, to, ready_ms, epoch, vars_hash } = *w;
         let now = self.now()?;
         self.db.write(|c| {
             if let Some(ep) = epoch {
@@ -516,6 +543,11 @@ impl Store {
                 "UPDATE deployments SET status = 'active', finished_at = COALESCE(finished_at, ?), ready_ms = COALESCE(?, ready_ms), error = NULL WHERE id = ?",
                 params![now, ready_ms, to],
             )?;
+            // In the same transaction: nobody sees the new deployment active without its hash
+            // (it would read as "needs a deploy").
+            if let Some(h) = vars_hash {
+                c.execute("UPDATE deployments SET vars_hash = ? WHERE id = ?", params![h, to])?;
+            }
             Ok(true)
         })
     }
@@ -648,11 +680,6 @@ impl Store {
             }
             Ok(())
         })
-    }
-
-    pub fn set_vars_hash(&self, id: &str, hash: &str) -> Result<()> {
-        self.db.execute("UPDATE deployments SET vars_hash = ? WHERE id = ?", params![hash, id])?;
-        Ok(())
     }
 
     pub fn set_ready_ms(&self, id: &str, ms: i64) -> Result<()> {
@@ -806,6 +833,42 @@ impl Store {
         Ok(())
     }
 
+    // ── jobs ──
+
+    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str) -> Result<Job> {
+        let id = new_id("job");
+        let now = self.now()?;
+        self.db.execute(
+            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL)",
+            params![id, service, env, deployment, command, now],
+        )?;
+        Ok(Job { id, deployment: deployment.into(), command: command.into(), status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
+    }
+
+    pub fn finish_job(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
+        let now = self.now()?;
+        self.db.execute("UPDATE jobs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ? AND status = 'running'", params![status.as_str(), exit_code, now, id])?;
+        Ok(())
+    }
+
+    /// Jobs a node that stopped had running: their containers went with it.
+    pub fn fail_running_jobs(&self, service: &str) -> Result<()> {
+        let now = self.now()?;
+        self.db.execute("UPDATE jobs SET status = 'failed', finished_at = ? WHERE service = ? AND status = 'running'", params![now, service])?;
+        Ok(())
+    }
+
+    pub fn jobs(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Job>> {
+        Ok(self.db.query(&format!("SELECT {JOB_COLS} FROM jobs WHERE service = ? AND env = ? ORDER BY started_at DESC, id DESC LIMIT ?"), params![service, env, limit as i64], job_row)?)
+    }
+
+    pub fn job(&self, service: &str, env: &str, id: &str) -> Result<Job> {
+        self.db
+            .query_row(&format!("SELECT {JOB_COLS} FROM jobs WHERE service = ? AND env = ? AND id = ?"), params![service, env, id], job_row)
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("no job {id}")))
+    }
+
     // ── metrics and usage ──
 
     pub fn put_minutes(&self, service: &str, env: &str, rows: &[MinuteRow]) -> Result<()> {
@@ -908,6 +971,20 @@ impl Store {
     }
 }
 
+const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at";
+
+fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
+    Ok(Job {
+        id: r.get(0)?,
+        deployment: r.get(1)?,
+        command: r.get(2)?,
+        status: RunStatus::parse(&r.get::<_, String>(3)?),
+        exit_code: r.get::<_, Option<i64>>(4)?.map(|c| c as i32),
+        started_at: r.get(5)?,
+        finished_at: r.get(6)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,10 +995,11 @@ mod tests {
         let db = Db::open_sqlite(&dir.path().join("apps.db"), Default::default()).unwrap();
         let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
         s.db.execute("INSERT INTO environments (service, name, branch, ephemeral, active, slug, port, created_at) VALUES ('svc_a', 'production', NULL, 0, NULL, 'a', NULL, 0)", params![]).unwrap();
+        let sw = |from, to, epoch| Switch { service: "svc_a", env: "production", from, to, ready_ms: None, epoch: Some(epoch), vars_hash: None };
         // The new owner (epoch 2) switches; the old one (epoch 1), finishing its rollout late,
         // can't, even from the state it saw.
-        assert!(s.switch_active("svc_a", "production", None, "dep_new", None, Some(2)).unwrap());
-        assert!(!s.switch_active("svc_a", "production", Some("dep_new"), "dep_old", None, Some(1)).unwrap());
-        assert!(s.switch_active("svc_a", "production", Some("dep_new"), "dep_next", None, Some(2)).unwrap());
+        assert!(s.switch_active(&sw(None, "dep_new", 2)).unwrap());
+        assert!(!s.switch_active(&sw(Some("dep_new"), "dep_old", 1)).unwrap());
+        assert!(s.switch_active(&sw(Some("dep_new"), "dep_next", 2)).unwrap());
     }
 }

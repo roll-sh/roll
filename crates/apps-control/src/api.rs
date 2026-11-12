@@ -75,6 +75,10 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
+        .route(&format!("{env}/jobs"), get(jobs).post(start_job))
+        .route(&format!("{env}/jobs/{{job}}"), get(get_job))
+        .route(&format!("{env}/jobs/{{job}}/logs"), get(job_logs))
+        .route(&format!("{env}/jobs/{{job}}/cancel"), post(cancel_job))
         .route(&format!("{env}/domains"), get(domains).post(add_domain))
         .route(&format!("{env}/domains/{{host}}/verify"), post(verify_domain))
         .route(&format!("{env}/domains/{{host}}"), axum::routing::delete(delete_domain))
@@ -418,6 +422,48 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
 async fn usage(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     apps.environment(&id, &env).await?;
     ok(apps.usage(&id, Some(&env), w.days.unwrap_or(30)).await?)
+}
+
+async fn jobs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.jobs(&id, &env).await?)
+}
+
+async fn start_job(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+    let job = apps.start_job(&id, &env, body(&b)?).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+async fn get_job(State(apps): S, Path((id, env, job)): Path<(String, String, String)>) -> R {
+    ok(apps.job(&id, &env, &job).await?)
+}
+
+async fn cancel_job(State(apps): S, Path((id, env, job)): Path<(String, String, String)>) -> R {
+    ok(apps.cancel_job(&id, &env, &job).await?)
+}
+
+/// A job's output; `follow` streams it until the job ends.
+async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>) -> R {
+    let j = apps.job(&id, &env, &job).await?;
+    let (tx, rx) = tokio::sync::watch::channel(j.status != crate::model::RunStatus::Running);
+    if j.status == crate::model::RunStatus::Running {
+        let (apps2, id2, env2, job2) = (apps.clone(), id.clone(), env.clone(), job.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                match apps2.job(&id2, &env2, &job2).await {
+                    Ok(j) if j.status == crate::model::RunStatus::Running => {}
+                    _ => break,
+                }
+                if tx.is_closed() {
+                    return;
+                }
+            }
+            // Let the last lines through.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(true);
+        });
+    }
+    stream_log(&apps, format!("job:{job}"), q, Some(rx)).await
 }
 
 async fn runs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

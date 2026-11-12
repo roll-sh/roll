@@ -425,3 +425,43 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!((last["status"].as_str(), last["exit_code"].as_i64()), (Some("succeeded"), Some(0)), "{last}");
     let _ = Ordering::SeqCst;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
+    let w = world().await;
+    let (svc, d) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let instances = w.fake.instances(&id).len();
+    let ended = |job: String| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move {
+            for _ in 0..500 {
+                let (_, j) = call(&api, "GET", &format!("{base}/jobs/{job}"), None).await;
+                if j["status"] != "running" {
+                    return j;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("job {job} never ended");
+        }
+    };
+    let (st, j) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 3"}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{j}");
+    assert_eq!(j["deployment"], d["id"], "the live deployment's image");
+    let j = ended(j["id"].as_str().unwrap().to_string()).await;
+    assert_eq!((j["status"].as_str(), j["exit_code"].as_i64()), (Some("failed"), Some(3)), "{j}");
+    let (_, log) = call(&w.api, "GET", &format!("{base}/jobs/{}/logs", j["id"].as_str().unwrap()), None).await;
+    assert!(log.as_array().unwrap().iter().any(|l| l["text"] == "$ exit 3"), "{log}");
+    let (_, ok) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0"}))).await;
+    assert_eq!(ended(ok["id"].as_str().unwrap().to_string()).await["status"], "succeeded");
+    // One that doesn't end by itself is canceled, and its container goes.
+    let (_, long) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "sleep 3600"}))).await;
+    let lid = long["id"].as_str().unwrap().to_string();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(call(&w.api, "POST", &format!("{base}/jobs/{lid}/cancel"), None).await.0, StatusCode::OK);
+    assert_eq!(ended(lid.clone()).await["status"], "canceled");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/jobs/{lid}/cancel"), None).await.0, StatusCode::CONFLICT);
+    assert_eq!(w.fake.instances(&id).len(), instances, "no job's container is left");
+    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 3);
+}

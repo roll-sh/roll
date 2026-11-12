@@ -55,6 +55,11 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/jobs` | | `Job[]`, newest first | read |
+| `POST /v1/apps/services/{id}/environments/{env}/jobs` | `{ command, timeout_s? }` | 202 `Job` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}` | | `Job` | read |
+| `GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the job) | read |
+| `POST /v1/apps/services/{id}/environments/{env}/jobs/{job}/cancel` | | `Job` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
@@ -229,7 +234,11 @@ type Usage = {
   total_usd: number;
 };
 
-type CronRun = { id: string; deployment: string; status: "running" | "succeeded" | "failed" | "skipped" | "timed_out"; exit_code: number | null; started_at: number; finished_at: number | null };
+type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";
+type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
+/** A one-off command in a fresh container of the active deployment: its variables and project
+ *  network, no port, no volume. timeout_s 1–86400 (default 3600). */
+type Job = { id: string; deployment: string; command: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 
 type Domain = {
   hostname: string;

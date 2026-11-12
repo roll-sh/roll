@@ -165,6 +165,18 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Run a one-off command in a fresh container of the live deployment, with its variables
+    /// and on its network (no port, no volume): `roll apps run -- npx prisma db seed`. Its output
+    /// streams here; the CLI exits with the command's exit code.
+    Run {
+        #[command(flatten)]
+        target: Target,
+        /// The job's limit, in seconds (default 3600).
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Run the live image again with the current variables and settings (no build, same
     /// revision): how changed variables reach a `roll up` service.
     Redeploy {
@@ -371,6 +383,20 @@ fn secret_env_file(name: &str) -> bool {
         Some(rest) => rest.starts_with('.') && ![".example", ".sample", ".template"].contains(&rest),
         None => false,
     }
+}
+
+/// Arguments as one `sh -c` command, each quoted when the shell would split or expand it.
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            if !a.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&b)) {
+                a.clone()
+            } else {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Print a log's lines (SSE `data:` JSON) until the stream ends.
@@ -660,6 +686,22 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
+        AppsCmd::Run { target, timeout, command } => {
+            let svc = service(api, &target).await?;
+            let base = format!("{}/jobs", env_path(&svc, &target.env));
+            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout })).await?;
+            if !json_out {
+                let id = s(&job["id"]);
+                follow(api, &format!("{base}/{}/logs?follow=1", enc(&id))).await?;
+                let done = api.get(&format!("{base}/{}", enc(&id))).await?;
+                match done["exit_code"].as_i64() {
+                    Some(0) => return Ok(()),
+                    Some(code) => std::process::exit(code.clamp(1, 255) as i32),
+                    None => bail!("the job {}", s(&done["status"])),
+                }
+            }
+            job
+        }
         AppsCmd::Redeploy { target } => {
             let svc = service(api, &target).await?;
             let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
@@ -798,6 +840,14 @@ mod tests {
         let mut got = walkdir(&out.path().join("t"));
         got.sort();
         assert_eq!(got, [".dockerignore", ".env.example", ".gitignore", ".npmrc", ".rollignore", "server.js", "src/index.js"]);
+    }
+
+    #[test]
+    fn a_command_keeps_its_arguments_through_sh() {
+        let args: Vec<String> = ["npx", "prisma", "db", "execute", "--stdin", "it's $HOME", ""].map(String::from).to_vec();
+        let joined = shell_join(&args);
+        let out = std::process::Command::new("sh").arg("-c").arg(format!("printf '%s|' {joined}")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "npx|prisma|db|execute|--stdin|it's $HOME||");
     }
 
     fn walkdir(root: &Path) -> Vec<String> {

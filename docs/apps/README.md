@@ -129,6 +129,12 @@ every deployment is immutable with instant rollback.
   serving. A service scaled to zero rolls out without starting anything: the pointer moves, and
   the next request wakes the new deployment (a health check runs at the first wake instead, and
   failing it there rolls the pointer back automatically).
+- **One-off jobs** (`POST …/jobs`, `roll apps run -- <cmd>`): a command in a fresh container of
+  the active deployment, with its variables on the project network (no port, no volume: the
+  service's instance may have it), as Render's one-off jobs and `heroku run` are. Its output is a
+  log of its own (followed over SSE, kept like build logs); it ends at its exit, `timeout_s` or a
+  cancel, and its container goes. `roll apps run` exits with the command's exit code. A node
+  that takes the service over marks jobs a lost node was running as failed.
 - **Watch paths** (monorepos; `build.watch`, `[app] watch`, the settings page): a push deploys a
   repo service only when a path that differs between what the environment runs and the pushed
   commit matches one of its patterns (gitignore-style from the repo's root, roll code's
@@ -419,7 +425,9 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 A review on 2026-11-12 against feature/roll-secrets (#20), feature/roll-mcp (#19),
 feature/roll-previews and feature/roll-search found these. Ours are in `## Next`; theirs:
 
-- **roll-mcp**: the catalogue misses `GET /v1/apps`, `POST /v1/apps/plan` and
+- **roll-mcp**: `POST …/jobs` and `…/jobs/{job}/cancel` run code with the environment's
+  variables, so they're `deploy` (production) like deploys; the other `…/jobs` routes are reads.
+  The catalogue misses `GET /v1/apps`, `POST /v1/apps/plan` and
   `GET /v1/apps/projects/{project}/services`; `…/wake` and `…/domains/{host}/verify` are reads
   and `DELETE …/links/{kind}/{ref}` is a write (http-api.md). Creating a service with a repo or
   image source deploys production, so it's `deploy` unless the source is an upload. The apps
@@ -451,8 +459,9 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-2. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
-   `roll ssh` / exec into an instance, with the API routes under the service.
+2. **A shell in it.** `roll apps ssh`: an interactive shell in a running instance (Engine API exec
+   with a TTY over a WebSocket, routed to the owner), and jobs in the dashboard (run a
+   command, its output, history).
 3. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics
