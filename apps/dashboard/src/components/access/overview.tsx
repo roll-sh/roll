@@ -1,5 +1,5 @@
 import { ChevronRight, Plug, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   accessApi,
   CLIENT_NAMES,
@@ -10,12 +10,15 @@ import {
   mcpUrl,
   reach,
   statusOf,
+  type Catalog,
   type Grant,
   type McpClient,
+  type Rule,
 } from "@/lib/access-api";
 import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
-import { btn, Connecting, CopyButton, danger, EmptyPanel, ErrorNote, Panel, useCopy } from "../ui";
+import { btn, Connecting, CopyButton, danger, EmptyPanel, ErrorNote, input, Panel, primary, useCopy } from "../ui";
+import { Builder } from "./builder";
 import { AccessShell, relative, usePoll } from "./shell";
 
 /** `/dashboard/access`: how to connect a client, and every token and connection with what it may do. */
@@ -145,8 +148,23 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [secret, setSecret] = useState<string | null>(null);
+  const { copied, copy } = useCopy();
   const status = statusOf(g);
   const r = reach(g);
+  const rotate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSecret((await accessApi.rotate(g.id)).token);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   const revoke = async () => {
     setBusy(true);
     try {
@@ -183,9 +201,19 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
           </p>
         </div>
         {status === "active" && !confirm && (
-          <button onClick={() => setConfirm(true)} className={btn}>
-            Revoke
-          </button>
+          <span className="flex shrink-0 gap-1.5">
+            <button onClick={() => setEditing((e) => !e)} className={btn} aria-expanded={editing}>
+              Edit
+            </button>
+            {g.kind === "token" && (
+              <button onClick={rotate} disabled={busy} className={btn} title="A new secret with the same rules; the old one stops at once">
+                Rotate
+              </button>
+            )}
+            <button onClick={() => setConfirm(true)} className={btn}>
+              Revoke
+            </button>
+          </span>
         )}
         {confirm && (
           <span className="flex shrink-0 gap-1.5">
@@ -198,6 +226,24 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
           </span>
         )}
       </div>
+      {secret && (
+        <div className="rise mt-3 ml-6 space-y-1.5">
+          <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-3 py-2">
+            <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{secret}</code>
+            <CopyButton id={`rotated-${g.id}`} text={secret} copied={copied} onCopy={copy} />
+          </div>
+          <p className="text-[12px] text-subtle">The new secret: copy it now. The old one stopped working.</p>
+        </div>
+      )}
+      {editing && (
+        <EditGrant
+          g={g}
+          onDone={async () => {
+            setEditing(false);
+            await refresh();
+          }}
+        />
+      )}
       {open && (
         <ul className="rise mt-3 ml-6 space-y-1.5">
           {g.rules.map((x, i) => (
@@ -214,5 +260,50 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
       )}
       <ErrorNote error={error} />
     </li>
+  );
+}
+
+/** Change a token's or connection's rules and name in place (its secret stays). */
+function EditGrant({ g, onDone }: { g: Grant; onDone: () => Promise<void> }) {
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [rules, setRules] = useState<Rule[]>(g.rules);
+  const [name, setName] = useState(g.name);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accessApi
+      .catalog()
+      .then(setCatalog)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await accessApi.update(g.id, { name: name.trim(), rules });
+      await onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="rise mt-3 ml-6 space-y-4 rounded-lg border border-line bg-bg p-4">
+      <label className="block max-w-sm space-y-1.5">
+        <span className="block text-[12px] text-subtle">Name</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} className={`${input} w-full`} />
+      </label>
+      {catalog ? <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} /> : !error && <Connecting />}
+      <ErrorNote error={error} />
+      <div className="flex gap-2">
+        <button onClick={save} disabled={busy || !name.trim() || rules.length === 0} className={primary}>
+          {busy ? <span className="shimmer">Saving…</span> : "Save"}
+        </button>
+        <button onClick={() => void onDone()} className={btn}>
+          Cancel
+        </button>
+      </div>
+      <p className="text-[12px] text-subtle">Changes take effect on the token&apos;s next request.</p>
+    </div>
   );
 }

@@ -1,5 +1,5 @@
-import { Hand } from "lucide-react";
-import { useState } from "react";
+import { Bell, Hand } from "lucide-react";
+import { useEffect, useState } from "react";
 import { accessApi, productName, type Approval } from "@/lib/access-api";
 import { btn, Connecting, danger, EmptyPanel, ErrorNote, input, Panel, primary } from "../ui";
 import { AccessShell, relative, usePoll } from "./shell";
@@ -20,6 +20,7 @@ export function Approvals({ focus }: { focus?: string }) {
   return (
     <AccessShell tab="approvals">
       <div className="space-y-6">
+        <NotifyMe />
         <ErrorNote error={pending.error} />
         {pending.data === null && !pending.error ? (
           <Connecting />
@@ -124,5 +125,21 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
       )}
       <ErrorNote error={error} />
     </article>
+  );
+}
+
+/** Ask the browser for notifications, so a new approval reaches you while roll is in the background. */
+function NotifyMe() {
+  const [perm, setPerm] = useState<NotificationPermission | "unsupported">("unsupported");
+  useEffect(() => setPerm(typeof Notification === "undefined" ? "unsupported" : Notification.permission), []);
+  if (perm !== "default") return null;
+  return (
+    <p className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      <Bell className="size-3.5" />
+      Get a notification when a request starts waiting, while roll is open in the background.
+      <button onClick={() => void Notification.requestPermission().then(setPerm)} className={btn}>
+        Notify me
+      </button>
+    </p>
   );
 }

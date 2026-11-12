@@ -159,6 +159,8 @@ export const accessApi = {
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
   update: (id: string, patch: Partial<NewGrant>) => call<Grant>("PATCH", token(id), patch),
   revoke: (id: string) => call<Grant>("DELETE", token(id)),
+  /** A new secret, the same rules; the old one stops at once. Shown this once. */
+  rotate: (id: string) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`),
   approvals: (state?: ApprovalState) => call<Approval[]>("GET", `/v1/access/approvals${query({ state })}`),
   approve: (id: string) => call<Approval>("POST", `${approval(id)}/approve`),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),

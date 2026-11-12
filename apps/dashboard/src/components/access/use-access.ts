@@ -37,13 +37,15 @@ export function usePoll<T>(fn: () => Promise<T>, ms: number) {
   return { data, error, refresh };
 }
 
-/** How many approvals wait right now (the tab's and the header's badge). */
-export function usePendingCount(ms = 5000) {
+/** The approvals waiting right now (the tab's and the header's badge), polled while the operator's. */
+export function usePending(ms = 5000) {
   const [can, setCan] = useState(mayManageAccess);
   useEffect(() => subscribeToken(() => setCan(mayManageAccess())), []);
   const { data } = usePoll(() => (can ? accessApi.approvals("pending") : Promise.resolve([])), ms);
-  return can ? (data?.length ?? 0) : 0;
+  return can ? (data ?? []) : [];
 }
+
+export const usePendingCount = (ms = 5000) => usePending(ms).length;
 
 /**
  * Whether this browser acts as the operator: signed in with the operator's token, or not signed
