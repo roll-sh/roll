@@ -418,12 +418,18 @@ ready, `error` on failure, and `sleep` for a sleeping preview.
 
 ## Next
 
-Ranked by what a person notices first. Done so far: the crate, rolld's adapters for every
-product, the secrets adapter, roll code and GitHub reporting, `roll preview`, the end-to-end run
-and its cost.
+Ranked by what a person notices first. Done so far:
 
-1. **The dashboard's Previews tab and canvas overlay** (`feature/roll-previews-dashboard`, being
-   built) merged here. Then the dashboard's workspace kinds for `queue` and `tasks`.
+- the crate;
+- rolld's adapters for every product (Postgres resets in place), the secrets, roll apps and
+  search adapters;
+- roll code and GitHub reporting;
+- link access;
+- `roll preview`;
+- the dashboard's Previews tab and canvas overlay;
+- the end-to-end run and its cost.
+
+1. **Stream data branches** (being built on `feature/roll-previews-streams`): see 3.
 2. **Postgres in the measured run**, and Postgres branches that don't copy the data directory on
    ext4. A branch could start from the parent's latest base backup in object storage plus WAL
    (lazy pages), not `pg_basebackup`. Also: `schema` mode for Postgres (structure only).
