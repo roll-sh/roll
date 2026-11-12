@@ -153,6 +153,21 @@ async fn clusters_and_requests() {
     assert!(row.contains("open"), "{out}");
     assert!(out.starts_with("health"), "{out}");
 
+    // index and docs: the per-index routes, Elasticsearch's answers printed as they come.
+    let out = e.roll(&["search", "index", "create", "app", "films", r#"{"mappings":{"properties":{"year":{"type":"integer"}}}}"#]).await;
+    assert!(out.contains("\"acknowledged\" : true"), "{out}");
+    let out = e.roll(&["search", "docs", "put", "app", "films", "1", r#"{"title":"alien","year":1979}"#, "--refresh"]).await;
+    assert!(out.contains("\"result\" : \"created\""), "{out}");
+    e.roll(&["search", "index", "bulk", "app", "films", "{\"index\":{\"_id\":\"2\"}}\n{\"title\":\"heat\",\"year\":1995}\n", "--refresh"]).await;
+    let v = e.roll_json(&["search", "index", "search", "app", "films", "--q", "year:1995"]).await;
+    assert_eq!(v["hits"]["hits"][0]["_id"], "2", "{v}");
+    let out = e.roll(&["search", "docs", "get", "app", "films", "1"]).await;
+    assert!(out.contains("\"title\" : \"alien\""), "{out}");
+    let out = e.roll_with(&["search", "docs", "get", "app", "films", "9"], None).await;
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"found\" : false"));
+    e.roll(&["search", "index", "delete", "app", "films"]).await;
+
     // url
     let out = e.roll(&["search", "clusters", "url", "app"]).await;
     let url = out.trim().to_string();
@@ -218,9 +233,10 @@ async fn clusters_and_requests() {
     }
     let u = e.roll_json(&["search", "clusters", "usage", "app"]).await;
     assert_eq!(u["days"], 30);
-    // Every request the node admitted (`Node::take_request_counts`): nine console requests and
-    // the indices listing. The one over the body limit never reached the cluster.
-    assert_eq!(u["requests"], 10, "the node's request counts are metered: {u}");
+    // Every request the node admitted (`Node::take_request_counts`): nine console requests, the
+    // indices listing and seven per-index calls. The one over the body limit never reached the
+    // cluster.
+    assert_eq!(u["requests"], 17, "the node's request counts are metered: {u}");
     assert!(u["loaded_seconds"].as_i64().unwrap() >= 1, "{u}");
 
     // delete

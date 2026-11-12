@@ -55,6 +55,12 @@ roll search clusters branch app app-yesterday --at 1d    # as of a day ago
 roll search clusters indices app
 roll search clusters usage app                           # cost vs Elastic Cloud / Amazon OpenSearch
 roll search clusters password app | unload app | delete app | url app | show app | list
+roll search index create app books '{"mappings":{"properties":{"title":{"type":"text"}}}}'
+roll search docs put app books 1 '{"title":"dune"}' --refresh
+roll search index bulk app books @books.ndjson --refresh
+roll search index search app books --q title:dune
+roll search docs get app books 1 | delete app books 1
+roll search index show app books | mapping … | delete-by-query … | delete app books
 ```
 
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,

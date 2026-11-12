@@ -20,6 +20,76 @@ pub enum Search {
         /// Request body: JSON, NDJSON for `_bulk`, `@file` to read a file, or `-` for stdin.
         body: Option<String>,
     },
+    /// One index: show, create, delete, mappings, search, bulk, delete by query.
+    #[command(subcommand)]
+    Index(Index),
+    /// One document of an index: get, put, add, delete.
+    #[command(subcommand, alias = "doc")]
+    Docs(Docs),
+}
+
+/// Bodies are JSON (NDJSON for `bulk`), given inline, as `@file`, or `-` for stdin.
+#[derive(Subcommand)]
+pub enum Index {
+    /// Mappings, settings and aliases.
+    Show { cluster: String, index: String },
+    /// Create an index (`{"mappings": …, "settings": …}`).
+    Create { cluster: String, index: String, body: Option<String> },
+    /// Delete an index and its documents.
+    Delete { cluster: String, index: String },
+    /// Add fields to the mapping (`{"properties": …}`).
+    Mapping { cluster: String, index: String, body: String },
+    /// Search (an index expression: `logs-*`, `a,b`); a body, or `--q` for a query string.
+    Search {
+        cluster: String,
+        index: String,
+        body: Option<String>,
+        /// Lucene query string (`title:shoes`).
+        #[arg(long)]
+        q: Option<String>,
+        #[arg(long)]
+        size: Option<u32>,
+    },
+    /// Index documents from NDJSON (`{"index":{"_id":"1"}}` lines, each followed by a document).
+    Bulk {
+        cluster: String,
+        index: String,
+        body: String,
+        /// Make the documents searchable before returning.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Delete the documents a query matches (`{"query": …}`).
+    DeleteByQuery { cluster: String, index: String, body: String },
+}
+
+#[derive(Subcommand)]
+pub enum Docs {
+    Get { cluster: String, index: String, id: String },
+    /// Create or replace a document.
+    Put {
+        cluster: String,
+        index: String,
+        id: String,
+        body: String,
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Index a document under a new id.
+    Add {
+        cluster: String,
+        index: String,
+        body: String,
+        #[arg(long)]
+        refresh: bool,
+    },
+    Delete {
+        cluster: String,
+        index: String,
+        id: String,
+        #[arg(long)]
+        refresh: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -173,12 +243,89 @@ fn print_credentials(c: &Value) {
     println!("\ncurl -u {user}:{pw} {}", s(&c["url"]));
 }
 
+/// The query string and body of a per-index call (a body is its content type and text).
+type Extra<'a> = (Vec<(&'a str, String)>, Option<(&'a str, String)>);
+
+/// One call to a per-index route (`/v1/search/clusters/{id}/indices/{index}…`): the body is sent
+/// as text, byte for byte (re-encoding parsed JSON would reorder `_source` keys), and
+/// Elasticsearch's answer is printed as it came (pretty unless `--json`).
+async fn index_call(api: &Api, as_json: bool, method: reqwest::Method, cluster: &str, index: &str, rest: &str, (query, body): Extra<'_>) -> anyhow::Result<()> {
+    let c = find(api, cluster).await?;
+    let mut q: Vec<String> = query.into_iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(&v))).collect();
+    if !as_json {
+        q.push("pretty".into());
+    }
+    let q = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
+    let path = format!("/v1/search/clusters/{}/indices/{}{rest}{q}", urlencoding::encode(&s(&c["id"])), urlencoding::encode(index));
+    let mut req = api.http.request(method, format!("{}{path}", api.base));
+    if let Some(k) = &api.key {
+        req = req.bearer_auth(k);
+    }
+    for (k, v) in &api.headers {
+        req = req.header(k, v);
+    }
+    if let Some((ct, b)) = body {
+        req = req.header("content-type", ct).body(b);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", api.base))?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !text.is_empty() {
+        print!("{text}{}", if text.ends_with('\n') { "" } else { "\n" });
+    }
+    if !status.is_success() {
+        if text.is_empty() {
+            eprintln!("HTTP {}", status.as_u16());
+        }
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn refresh(on: bool) -> Vec<(&'static str, String)> {
+    if on { vec![("refresh", "wait_for".to_string())] } else { Vec::new() }
+}
+
 async fn find(api: &Api, key: &str) -> anyhow::Result<Value> {
     api.get(&format!("/v1/search/clusters/{}", urlencoding::encode(key))).await.with_context(|| format!("no search cluster {key}"))
 }
 
 pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
+    use reqwest::Method;
+    const JSON: &str = "application/json";
+    let json_body = |b: String| read_body(&b).map(|b| (JSON, b));
     let out = match cmd {
+        Search::Index(cmd) => {
+            return match cmd {
+                Index::Show { cluster, index } => index_call(api, as_json, Method::GET, &cluster, &index, "", (vec![], None)).await,
+                Index::Create { cluster, index, body } => index_call(api, as_json, Method::PUT, &cluster, &index, "", (vec![], body.map(json_body).transpose()?)).await,
+                Index::Delete { cluster, index } => index_call(api, as_json, Method::DELETE, &cluster, &index, "", (vec![], None)).await,
+                Index::Mapping { cluster, index, body } => index_call(api, as_json, Method::PUT, &cluster, &index, "/mapping", (vec![], Some(json_body(body)?))).await,
+                Index::Search { cluster, index, body, q, size } => {
+                    let mut query = Vec::new();
+                    if let Some(q) = q {
+                        query.push(("q", q));
+                    }
+                    if let Some(n) = size {
+                        query.push(("size", n.to_string()));
+                    }
+                    index_call(api, as_json, Method::POST, &cluster, &index, "/search", (query, body.map(json_body).transpose()?)).await
+                }
+                Index::Bulk { cluster, index, body, refresh: r } => {
+                    index_call(api, as_json, Method::POST, &cluster, &index, "/bulk", (refresh(r), Some(("application/x-ndjson", read_body(&body)?)))).await
+                }
+                Index::DeleteByQuery { cluster, index, body } => index_call(api, as_json, Method::POST, &cluster, &index, "/delete_by_query", (vec![], Some(json_body(body)?))).await,
+            };
+        }
+        Search::Docs(cmd) => {
+            let doc = |id: &str| format!("/docs/{}", urlencoding::encode(id));
+            return match cmd {
+                Docs::Get { cluster, index, id } => index_call(api, as_json, Method::GET, &cluster, &index, &doc(&id), (vec![], None)).await,
+                Docs::Put { cluster, index, id, body, refresh: r } => index_call(api, as_json, Method::PUT, &cluster, &index, &doc(&id), (refresh(r), Some(json_body(body)?))).await,
+                Docs::Add { cluster, index, body, refresh: r } => index_call(api, as_json, Method::POST, &cluster, &index, "/docs", (refresh(r), Some(json_body(body)?))).await,
+                Docs::Delete { cluster, index, id, refresh: r } => index_call(api, as_json, Method::DELETE, &cluster, &index, &doc(&id), (refresh(r), None)).await,
+            };
+        }
         Search::Request { cluster, method, path, body } => {
             let c = find(api, &cluster).await?;
             // Sent as text, byte for byte (the control plane labels it JSON, or NDJSON for
