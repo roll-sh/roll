@@ -235,7 +235,9 @@ pub trait Secrets: Send + Sync {
     /// Make environment `env` exist, inheriting `base`, with `vars` set on top.
     async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)]) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included.
-    async fn resolve(&self, project: &str, env: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
+    /// import or through the base): what the preview's code reads is its own overrides and links.
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<Vec<(String, String)>>;
     async fn delete(&self, project: &str, env: &str) -> anyhow::Result<()>;
 }
 
@@ -249,7 +251,7 @@ impl Secrets for NoSecrets {
         Ok(())
     }
 
-    async fn resolve(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn resolve(&self, _: &str, _: &str, _: bool) -> anyhow::Result<Vec<(String, String)>> {
         Ok(Vec::new())
     }
 

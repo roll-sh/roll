@@ -234,6 +234,10 @@ A preview's secrets are an environment of the project's secrets (`feature/roll-s
 docs/secrets.md) called `pv-<preview id>` (an ephemeral environment, labelled `preview`), inheriting from `secrets.base` (`development` by
 default) with the project's `env` overrides and the branched resources' URLs on top.
 
+- **Protected values stay out of preview code.** A preview resolves its secrets as `untrusted`
+  (roll secrets' flag): nothing of a protected environment resolves, whether directly, by
+  reference, by import or through the base. The preview gets its own overrides and links. Only
+  a project with `secrets.allow_production` and a trusted change resolve without it.
 - **Production secrets are never inherited unless the project allows it.** A base named
   `production` or `prod` is refused unless `secrets.allow_production` is true, and a fork's
   preview never gets them, whatever the setting says.

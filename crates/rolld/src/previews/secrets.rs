@@ -40,9 +40,9 @@ impl roll_previews::ports::Secrets for Secrets {
         }
     }
 
-    async fn resolve(&self, project: &str, env: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<Vec<(String, String)>> {
         let path = format!("/v1/secrets/projects/{}/environments/{}/resolve", seg(project), seg(env));
-        match self.0.post(&path, json!({ "path": "/", "consumer": format!("preview:{env}") })).await {
+        match self.0.post(&path, json!({ "path": "/", "consumer": format!("preview:{env}"), "untrusted": untrusted })).await {
             Ok(v) => {
                 if let Some(p) = v["problems"].as_array().filter(|p| !p.is_empty()) {
                     tracing::warn!(%env, problems = p.len(), "previews: unresolved secrets");
