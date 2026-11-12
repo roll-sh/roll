@@ -1,7 +1,7 @@
-import { Download, Folder, FolderPlus, History, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Trash2, Upload, User } from "lucide-react";
+import { Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Trash2, Upload, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
-import { needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
+import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
 import { childPath, folderName } from "@/lib/secrets-grid";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../agents/ui/menu";
 import { Segmented } from "../agents/ui/toggle-group";
@@ -9,6 +9,7 @@ import { FolderCrumbs } from "./folders";
 import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
+import { ImportsPanel } from "./imports";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
@@ -52,6 +53,9 @@ export function EnvView({ env }: { env: Environment }) {
   const list = useLoad(() => api.secrets(env.slug, path), [api, env.slug, path]);
   const folders = useLoad(() => api.folders(env.slug, path), [api, env.slug, path]);
   const open = useLoad(() => api.requests(env.slug, "open"), [api, env.slug]);
+  const imports = useLoad(() => api.imports(env.slug, path), [api, env.slug, path]);
+  /** The imports panel, open with one import picked out (an imported key's source was clicked). */
+  const [importsOpen, setImportsOpen] = useState<{ highlight: Import | null } | null>(null);
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -200,6 +204,15 @@ export function EnvView({ env }: { env: Environment }) {
                   <span className="font-mono text-[10px] text-subtle">{f.secrets}</span>
                 </button>
               ))}
+              <button
+                onClick={() => setImportsOpen((o) => (o ? null : { highlight: null }))}
+                aria-expanded={!!importsOpen}
+                className={`inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] transition-colors hover:bg-fg/[0.05] hover:text-fg ${importsOpen ? "bg-fg/[0.05] text-fg" : "text-muted"}`}
+                title="Folders whose keys show up here"
+              >
+                <ImportIcon className="size-3" /> Imports
+                {!!imports.data?.length && <span className="font-mono text-[10px] text-subtle">{imports.data.length}</span>}
+              </button>
               <NewFolder path={path} onCreate={(np) => api.createFolder(env.slug, np).then(() => go({ env: env.slug, path: np }), (e) => setError(errorText(e)))} />
               <span className="ml-auto" />
               <label className="flex h-7 w-52 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 px-2 text-subtle focus-within:border-accent/60 max-sm:w-full">
@@ -238,6 +251,20 @@ export function EnvView({ env }: { env: Environment }) {
           )}
         </div>
 
+        {tab === "secrets" && importsOpen && imports.data && (
+          <ImportsPanel
+            env={env}
+            path={path}
+            saved={imports.data}
+            highlight={importsOpen.highlight}
+            onClose={() => setImportsOpen(null)}
+            onSaved={(list) => {
+              imports.set(list);
+              setNote({ text: list.length ? `Imports saved: ${list.map((i) => `${i.environment}${i.path === "/" ? "" : i.path}`).join(", ")}` : "This folder imports nothing now", warnings: [] });
+              refresh();
+            }}
+          />
+        )}
         {tab === "requests" ? (
           <RequestsPanel env={env} onChanged={() => (open.reload(), refresh())} />
         ) : (
@@ -274,6 +301,7 @@ export function EnvView({ env }: { env: Environment }) {
                     focus={search.key === s.key}
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
+                    onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
                 {list.data && shown.length === 0 && secrets.length > 0 && <p className="px-2 py-6 text-center text-[12px] text-subtle">Nothing matches "{query}".</p>}
@@ -416,6 +444,7 @@ function SecretRow({
   focus,
   onWrite,
   onHistory,
+  onSource,
 }: {
   env: Environment;
   secret: Secret;
@@ -424,6 +453,7 @@ function SecretRow({
   focus: boolean;
   onWrite: WriteFn;
   onHistory: () => void;
+  onSource: (source: Exclude<Secret["source"], { kind: "own" }>) => void;
 }) {
   const { api, project, resourceName } = useSecrets();
   const [editing, setEditing] = useState<null | EditMode>(null);
@@ -442,7 +472,7 @@ function SecretRow({
 
   return (
     <div ref={row} role="row" className={`group/row border-t border-line first:border-t-0 ${focus ? "bg-accent/[0.05]" : ""}`}>
-      <div className="grid min-h-9 grid-cols-[minmax(0,1.1fr)_minmax(0,1.6fr)_minmax(0,1fr)_auto] items-center gap-3 px-2 py-1 @max-4xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)_auto] @max-xl:grid-cols-[minmax(0,1fr)_auto] @max-xl:gap-y-0.5">
+      <div className="grid min-h-9 grid-cols-[minmax(0,1.1fr)_minmax(0,1.6fr)_minmax(0,1fr)_minmax(6.5rem,auto)] items-center gap-3 px-2 py-1 @max-4xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)_minmax(6.5rem,auto)] @max-xl:grid-cols-[minmax(0,1fr)_minmax(6.5rem,auto)] @max-xl:gap-y-0.5">
         <div role="cell" className="flex min-w-0 items-center gap-1.5">
           <span className={`truncate font-mono text-[12px] ${own ? "text-fg" : "text-muted"}`} title={s.key}>
             {s.key}
@@ -454,7 +484,7 @@ function SecretRow({
             </span>
           )}
           {s.references.length > 0 && <RefMark refs={s.references} />}
-          <SourceMark source={s.source} />
+          <SourceMark source={s.source} onOpen={s.source.kind === "own" ? undefined : () => s.source.kind !== "own" && onSource(s.source)} />
         </div>
         <div role="cell" className="flex min-w-0 items-center gap-1.5 @max-xl:order-last @max-xl:col-span-2">
           {s.link && <LinkChip link={s.link} name={resourceName(s.link)} />}
@@ -518,7 +548,7 @@ function SecretRow({
                       <Pencil className="size-3.5" /> Set here (own value)
                     </MenuItem>
                   )}
-                  {s.link && s.link.mode !== "dynamic" && own && (
+                  {s.link && canRotate(s.link) && own && (
                     <MenuItem onClick={rotate}>
                       <RotateCw className="size-3.5" /> Rotate {s.link.mode === "managed" ? "credential" : "the resource's password"}
                     </MenuItem>

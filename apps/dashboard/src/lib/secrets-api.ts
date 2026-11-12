@@ -284,3 +284,18 @@ export const SECRET_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;
 export const ENV_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 /** The rule for tags. */
 export const TAG = /^[a-z0-9-]{1,32}$/;
+/** The rule for folder paths: `/`, or 1–8 segments of `[A-Za-z0-9_-]` (docs/secrets.md, "Folders"). */
+export const FOLDER_PATH = /^\/$|^(?:\/[A-Za-z0-9_-]{1,64}){1,8}$/;
+/** The rule for label keys and values. */
+export const LABEL_PART = /^[a-z0-9_.-]{1,64}$/;
+
+/**
+ * Link kinds whose live links can rotate the resource's own password: the providers that implement
+ * `rotate_source` in crates/rolld/src/secrets.rs. Keep the two together.
+ */
+const ROTATES_SOURCE: ReadonlySet<string> = new Set(["redis", "nosql"]);
+
+/** Whether rotating a linked secret can work: a managed credential always, a live link only where the resource rotates, a dynamic one never (each resolve issues a fresh one). */
+export function canRotate(link: Link): boolean {
+  return link.mode === "managed" || (link.mode === "live" && ROTATES_SOURCE.has(link.kind));
+}

@@ -139,19 +139,25 @@ export function LinkChip({ link, name, compact = false }: { link: Link; name?: s
 }
 
 /** Where a key comes from when it isn't the folder's own. */
-export function SourceMark({ source }: { source: Secret["source"] | Cell["source"] }) {
+/** Where an inherited key comes from; with `onOpen`, a button to that import (or the base). */
+export function SourceMark({ source, onOpen }: { source: Secret["source"] | Cell["source"]; onOpen?: () => void }) {
   const kind = typeof source === "string" ? source : source.kind;
   if (kind === "own") return null;
   const from = typeof source === "string" ? "" : source.kind === "import" ? `${source.environment}${source.path === "/" ? "" : source.path}` : source.kind === "base" ? source.environment : "";
-  return kind === "import" ? (
-    <span title={`Imported${from ? ` from ${from}` : ""}: read-only here`} className="inline-flex items-center gap-1 text-[11px] text-subtle">
-      <ImportIcon className="size-3" />
-      {from || "import"}
-    </span>
+  const title = kind === "import" ? `Imported${from ? ` from ${from}` : ""}: read-only here` : `Inherited from the base environment${from ? ` ${from}` : ""}`;
+  const body = (
+    <>
+      {kind === "import" ? <ImportIcon className="size-3" /> : <CornerDownRight className="size-3" />}
+      {from || kind}
+    </>
+  );
+  return onOpen ? (
+    <button type="button" onClick={onOpen} title={title} aria-label={kind === "import" ? `Show the import from ${from}` : `Open the base, ${from}`} className="inline-flex shrink-0 items-center gap-1 rounded text-[11px] text-subtle transition-colors hover:text-accent hover:underline">
+      {body}
+    </button>
   ) : (
-    <span title={`Inherited from the base environment${from ? ` ${from}` : ""}`} className="inline-flex items-center gap-1 text-[11px] text-subtle">
-      <CornerDownRight className="size-3" />
-      {from || "base"}
+    <span title={title} className="inline-flex items-center gap-1 text-[11px] text-subtle">
+      {body}
     </span>
   );
 }
