@@ -3361,6 +3361,68 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 15: displaced heap rows by the model, batches of few outer rows kept as
+  stored** (agent 219; BENCH.md "Executor, round 15"). Lane C (servers on CPUs 14,15,32,33: two
+  cores, four threads), PostgreSQL, the engine and pgrust each at max_parallel_workers_per_gather
+  2, max_parallel_workers 8 and a 2 GB cache. TPC-H SF1 13.80 -> 13.35 s against PostgreSQL's
+  13.98 and pgrust's 10.13 (CPU 36.02 -> 35.73 s against 35.94 and 16.36; peak 1,669 -> 1,667
+  MB against 1,649 and 1,897). The head pushed, agent 220's analytic round under it: 13.05 s,
+  CPU 34.41 s, peak 1,671 MB against PostgreSQL's 14.13 / 36.79 / 1,653 and pgrust's 10.47 /
+  16.92 / 1,892.
+  - **A parallel scan of a heap only inserted into, some rows out of key order**
+    (`sizing::displaced_inserts`, `parscan::DisplacedFill`, `Heap::inserted_in_heap_order`): a
+    COPY puts some rows in an earlier page's free space (TPC-H's customer, part, supplier: 42 of
+    customer's 150,000), so its heap order isn't key order; each parallel scan read every row on
+    the executor's thread, found its TID and sorted them before the workers started. The heap
+    model walks its pages for the keys in heap order; the rows outside the longest run of rising
+    keys are fetched by key (a few dozen), passed over where storage has them and put before the
+    run row that follows them in heap order, in the chunk of keys the workers read anyway. Only
+    for heaps with one version a row (nothing updated, deleted or pending); otherwise as before.
+    q22 0.206 -> 0.107 s (PostgreSQL 0.117), q19 0.120 -> 0.066 (0.065), q08 0.333 -> 0.281,
+    q07 0.604 -> 0.554; user instructions q22 -16.5%, q19 -19.1%, q08 -9.8%, q07 -3.2% in every
+    round.
+  - **A hash join's reloaded batch of few outer rows** (`HashTable::new_batch`, `Files::hashes`,
+    `HashTable::stored`): when a batch's outer file has under a quarter of its inner file's rows
+    (and no unmatched inner row is returned: not a right or full join), the outer file's hash
+    values are read first and the inner rows of any other hash value are kept as their file had
+    them: never decoded, out of the table's map, written back as they are if they move to a later
+    batch. PostgreSQL's table, chains, batch counts, sizes and temp-file accounting are unchanged.
+    q02's 8 batches (809 outer rows, 158,720 inner): 0.71 -> 0.57 s (PostgreSQL 0.21, pgrust
+    0.15); user instructions -13.0% in every round.
+  - Dropped (patches with numbers in `~/.cache/a219/patches/`): a later batch's inner rows
+    decoded by another thread while the current batch runs, and each batch's table freed by
+    another thread (q02 wall -9%, but CPU +20%, instructions +2%, cycles +12%: cross-thread frees);
+    an aggregation's parts of one integer key and counts merged straight from their words (q13
+    -1.0 to -1.9% instructions: under the bar, the merge is 1-2% of q13).
+  - Measured, not changed: the engine's executor thread in the queries left behind PostgreSQL
+    (perf, `--comm roll-conn`): q02, q11 and q20 run serially in both, their time the inner
+    index scans' heap fetches (`get_sorted`: a merging `Scan` sought key to key, `Block::seek`,
+    `find_block`, `block_with`; 30-45% of each) and the SubPlans rerun per outer row (q20 8,332
+    runs, q02 1,309); that is the range-read storage path (agent 215). q13's executor thread is
+    9.5% of its samples (the customer hash build 3.7%, the parts' merge about 3%); the rest is
+    the workers' scan, probe and partial aggregation (agent 220's path). EXPLAIN ANALYZE
+    differences met on the way, not changed: q20's Hash `Memory Usage: 118kB` against
+    PostgreSQL's 42kB; q22's inner Index Only Scan `rows=3.38 loops=57330` against `rows=0.67
+    loops=19110` and q08's inner index scans' loops (122,841 against 40,947); q13's
+    per-worker Sort lines (quicksort against PostgreSQL's external merge) and its Gather Merge
+    rows (150,000 against 343,854).
+  - Tests: the full verification train on `1e3cdc554` (`tools/verification-train.sh`, its
+    head as checked out): release and debug crate tests pass, Clippy 19 warnings (none in the
+    changed code), crash_random seeds 1-30 x 4, power_cut 4 passed, the power and async power
+    crash rounds pass, the regression suite 51,148 / 51,150 units with none newly differing,
+    isolation 1,647 / 1,648 (intra-grant-inplace, as on the other trains today), pg_dump TAP
+    14,609 passed. New tests: `parallel_scan::inserts_into_free_space_through_chunks` (a heap
+    whose later rows went into earlier pages' free space after a VACUUM, read by the workers
+    through `DisplacedFill`, each query's rows and order the serial scan's) and
+    `query_spill::hash_join_batches_of_few_outer_rows` (inner, semi, anti, left and right joins
+    past work_mem against the same in memory, rows kept as stored).
+  - Next steps (largest first): q02 (0.57 s against 0.21: the 1,984 partsupp index scans' heap
+    fetches and the 1,309 SubPlan runs, storage point reads), q20 (0.35 against 0.09, the same),
+    q13 (1.0 against 0.77: the workers' scan and partial aggregation; on the executor's thread
+    the customer hash build, 80 ms, could be a Parallel Hash's in the workers, but the bar on
+    instructions doesn't reward moving work between threads), q07 (0.54 against 0.41, the
+    workers' lookups), q11 (0.18 against 0.08, serial index fetches). The anti join gap 207 and
+    212 left (`(ok = o.ok) AND (ok = 5)` in the parameterized inner scan) is still open.
 - **Analytic path, round 1: a parallel scan's runs aggregated a batch at a time** (agent 220;
   HANDOFF "Analytic path against pgrust", BENCH.md "Analytic path, round 1"). TPC-H SF1 on lane
   C, all three servers at `max_parallel_workers_per_gather = 2` and 2 GB caches: 14.00 -> 12.97 s

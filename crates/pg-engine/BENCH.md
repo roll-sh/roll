@@ -285,6 +285,104 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Executor, round 15 (2026-11-12, agent 219)
+
+HANDOFF "Executor, round 15" has what changed: a parallel scan of a heap only inserted into,
+some of its rows out of key order, reads chunks of keys in the workers with those rows put in
+their places (no read and sort of every row on the executor's thread first), and a hash join's
+reloaded batch of few outer rows keeps the inner rows none of them can match as stored, never
+decoded. **base** is `abfa993e5`; `c005` the displaced rows against base, `c006` the batches
+against `c005` (the dropped `c002` and `c004` against base). Dist builds (fat LTO, line tables)
+of one checkout, equal-length paths (`~/.cache/a219/bin`).
+
+Lane C: each server in its own container on CPUs 14,15,32,33 (two cores and their
+hyperthreads, `--memory 8g`, host network), the client on 16,17,34,35 at nice 19, each pass
+under `~/.cache/lane-c.lock` (shared with agents 217 and 220). The same settings on all three
+servers: `max_parallel_workers_per_gather = 2`, `max_parallel_workers = 8` (PostgreSQL's
+defaults, set on pgrust, whose own default is 4 / 16) and a 2 GB cache (the engine
+`--cache-mb 2048`, PostgreSQL and pgrust `shared_buffers = 2GB`; pgrust's heap is also read
+through the OS page cache, counted in its container's peak). PostgreSQL 18.6 with the bench
+settings, pgrust `malisper/pgrust` (0.4-beta). TPC-H SF1 from `bench tpch-load --sf 1`; the
+engine's data directory restored before every start. Other tenants kept the host at load 9-30;
+each pass waited up to 60 s for the lane's CPUs to average under 30% busy.
+
+### TPC-H SF1, PostgreSQL, base, c006 and pgrust (three interleaved rounds, medians)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 2.49 | 0.21 | 0.48 | 0.18 | 0.35 | 0.44 | 0.41 | 0.19 | 1.44 | 0.71 | 0.08 | 0.68 | 0.77 | 0.17 | 0.33 | 0.26 | 0.82 | 3.05 | 0.07 | 0.09 | 0.65 | 0.12 | 13.98 |
+| base s | 1.31 | 0.71 | 0.51 | 0.26 | 0.42 | 0.52 | 0.60 | 0.33 | 1.29 | 0.77 | 0.19 | 0.55 | 1.00 | 0.19 | 0.52 | 0.32 | 0.80 | 2.07 | 0.13 | 0.38 | 0.74 | 0.21 | 13.80 |
+| c006 s | 1.32 | 0.57 | 0.49 | 0.25 | 0.40 | 0.52 | 0.54 | 0.27 | 1.32 | 0.73 | 0.17 | 0.57 | 1.01 | 0.20 | 0.51 | 0.33 | 0.78 | 2.12 | 0.07 | 0.35 | 0.74 | 0.11 | 13.35 |
+| pgrust s | 0.58 | 0.15 | 0.33 | 0.15 | 0.18 | 0.51 | 0.44 | 0.13 | 1.81 | 0.84 | 0.05 | 0.62 | 0.48 | 0.06 | 0.28 | 0.22 | 0.60 | 2.04 | 0.03 | 0.09 | 0.50 | 0.04 | 10.13 |
+| pg CPU, s | 7.23 | 0.36 | 1.30 | 0.53 | 0.96 | 1.22 | 1.19 | 0.53 | 3.78 | 1.83 | 0.08 | 1.89 | 2.07 | 0.44 | 0.90 | 0.69 | 0.91 | 7.59 | 0.19 | 0.10 | 1.82 | 0.33 | 35.94 |
+| base CPU, s | 3.88 | 0.70 | 1.49 | 0.77 | 1.01 | 1.44 | 1.59 | 0.62 | 3.73 | 2.07 | 0.19 | 1.65 | 2.45 | 0.45 | 1.41 | 0.95 | 1.77 | 6.68 | 0.26 | 0.37 | 2.11 | 0.43 | 36.02 |
+| c006 CPU, s | 3.89 | 0.55 | 1.42 | 0.77 | 1.01 | 1.50 | 1.58 | 0.57 | 3.78 | 2.02 | 0.17 | 1.66 | 2.48 | 0.46 | 1.38 | 0.98 | 1.73 | 6.83 | 0.19 | 0.36 | 2.09 | 0.31 | 35.73 |
+| pgrust CPU, s | 1.18 | 0.20 | 0.74 | 0.31 | 0.36 | 1.04 | 0.88 | 0.27 | 3.30 | 0.91 | 0.06 | 1.13 | 0.88 | 0.12 | 0.50 | 0.36 | 0.66 | 2.22 | 0.07 | 0.11 | 0.97 | 0.09 | 16.36 |
+
+- Engine/PostgreSQL: wall 0.987x -> 0.955x (13.80 -> 13.35 s against 13.98), CPU 1.002x ->
+  0.994x (36.02 -> 35.73 s against 35.94). q22 0.21 -> 0.11 s (PostgreSQL 0.12), q19 0.13 ->
+  0.07 (0.07), q02 0.71 -> 0.57 (0.21), q08 0.33 -> 0.27 (0.19), q07 0.60 -> 0.54 (0.41).
+- These numbers are of `abfa993e5` and the changes on it. Agent 220's analytic round
+  (`2c6b32155`, q01's batch aggregation) landed in between and is under the head this round
+  pushed (`1e3cdc554`), measured the same way after it (three rounds, the host at load 12-30):
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 2.59 | 0.22 | 0.49 | 0.19 | 0.34 | 0.46 | 0.43 | 0.20 | 1.47 | 0.70 | 0.08 | 0.69 | 0.77 | 0.17 | 0.34 | 0.27 | 0.82 | 2.99 | 0.06 | 0.11 | 0.62 | 0.12 | 14.13 |
+| head s | 0.58 | 0.62 | 0.53 | 0.26 | 0.42 | 0.49 | 0.60 | 0.28 | 1.39 | 0.74 | 0.19 | 0.55 | 1.13 | 0.20 | 0.47 | 0.34 | 0.81 | 2.15 | 0.09 | 0.35 | 0.74 | 0.12 | 13.05 |
+| pgrust s | 0.58 | 0.16 | 0.35 | 0.16 | 0.20 | 0.51 | 0.43 | 0.17 | 1.87 | 0.86 | 0.08 | 0.61 | 0.50 | 0.08 | 0.29 | 0.27 | 0.62 | 2.09 | 0.03 | 0.10 | 0.45 | 0.06 | 10.47 |
+| pg CPU, s | 7.56 | 0.35 | 1.31 | 0.56 | 1.00 | 1.23 | 1.23 | 0.55 | 3.88 | 1.81 | 0.08 | 1.99 | 2.07 | 0.47 | 0.95 | 0.68 | 0.92 | 7.70 | 0.19 | 0.11 | 1.79 | 0.36 | 36.79 |
+| head CPU, s | 1.64 | 0.59 | 1.52 | 0.77 | 1.02 | 1.38 | 1.67 | 0.59 | 3.99 | 2.08 | 0.20 | 1.68 | 2.71 | 0.47 | 1.26 | 1.01 | 1.81 | 6.96 | 0.22 | 0.38 | 2.11 | 0.35 | 34.41 |
+| pgrust CPU, s | 1.19 | 0.21 | 0.71 | 0.32 | 0.40 | 1.05 | 0.86 | 0.32 | 3.50 | 0.94 | 0.08 | 1.05 | 0.98 | 0.16 | 0.53 | 0.42 | 0.66 | 2.28 | 0.08 | 0.12 | 0.94 | 0.12 | 16.92 |
+
+  The head: 13.05 s against PostgreSQL's 14.13 (0.924x) and pgrust's 10.47; CPU 34.41 s against
+  36.79 and 16.92; peak 1,671 MB against 1,653 and 1,892. q19 there 0.069-0.099 s by round (the
+  displaced rows' path taken, the executor's thread 7% of its samples): the lane's other
+  tenants.
+- Peak memory (anon + shmem of each server's cgroup, sampled; the largest of a pass):
+  PostgreSQL 1,649 MB, base 1,669, c006 1,667, pgrust 1,897 (with its 2 GB of shared buffers
+  and the page cache it reads through). Per query (VmHWM reset before each, after a warm-up
+  pass): base 1,607-1,697 MB, c005 1,607-1,696, c006 1,607-1,709 (q14 1,709 against c005's
+  1,692, q14's peak moved by 15-30 MB between runs of one binary; the cgroup peak of the c006
+  gate's passes was 1,699-1,705 against c005's 1,707-1,719).
+- All 22 result hashes equal PostgreSQL's in every pass of every build.
+- Point read and short transaction smoke (a fresh 100,000-row fixture, 8 clients, 10 s, user
+  instructions over 9 s, five alternating pairs, base against c006): point_select 54.3k against
+  54.4k instructions an operation (medians; base 54.2-54.5k, c006 54.2-54.6k), 76.6k against
+  77.2k ops/s; short_txn 311.9k against 309.7k (base 306.8-333.4k, c006 300.6-323.2k), 10.68k
+  against 10.69k ops/s.
+
+### User instructions a run (`perf stat -e instructions:u` over each run of a fresh engine)
+
+| % | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| displaced rows r1 | +0.0 | -0.7 | -1.2 | +0.2 | -0.3 | +0.0 | -3.2 | -9.8 | +0.5 | -1.6 | -0.0 | -0.0 | +0.2 | -2.8 | -0.0 | -0.2 | -0.8 | -0.1 | -19.1 | -1.8 | +0.1 | -16.5 | -0.72 |
+| displaced rows r2 | +0.0 | -0.9 | -1.1 | +0.0 | +0.1 | -0.0 | -3.2 | -9.8 | -1.2 | -1.6 | -0.2 | +0.0 | +0.7 | +3.5 | +0.0 | -0.9 | -1.7 | -0.1 | -19.2 | -1.8 | -0.1 | -16.6 | -0.80 |
+| displaced rows r3 | +0.0 | -0.9 | +0.5 | +0.0 | +0.4 | -0.0 | -3.3 | -9.7 | +0.2 | -1.6 | -0.0 | -0.0 | -1.1 | -4.3 | +0.0 | +0.5 | -0.8 | -0.1 | -19.1 | -1.8 | -0.0 | -16.6 | -0.74 |
+| few outer rows r1 | +0.0 | -13.0 | +0.7 | +0.1 | +0.0 | +0.0 | -0.0 | +0.1 | -0.2 | +0.1 | -0.0 | +0.0 | +0.5 | -1.0 | -0.0 | -0.2 | +0.1 | -0.0 | +0.0 | +0.0 | +0.0 | -0.2 | -0.25 |
+| few outer rows r2 | +0.0 | -12.7 | -0.3 | -0.1 | -0.4 | +0.0 | -0.1 | +0.1 | +1.0 | +0.1 | -0.0 | +0.0 | -0.4 | +5.0 | -0.0 | -0.4 | -0.2 | -0.1 | -0.0 | -0.1 | +0.0 | +0.1 | -0.24 |
+| few outer rows r3 | -0.0 | -13.0 | -2.6 | +0.3 | +0.2 | -0.0 | -0.3 | +0.2 | -1.1 | +0.1 | +0.1 | +0.0 | +0.9 | -2.7 | -0.0 | +0.1 | +0.8 | -0.2 | -0.1 | +0.0 | +0.1 | +0.1 | -0.42 |
+
+- Sums of the 22 queries' user instructions: base 192.3 -> c005 190.9 x 10^9 (-0.7%), c005
+  190.9 -> c006 190.4 (-0.3%).
+- Over +2% once: q14 (+3.5 c005 r2, +5.0 c006 r2), within the spread q14 shows between runs of
+  one binary (BENCH "Executor, round 13": +-2.8); neither change touches it.
+- Wall medians of the targets in the gates' rounds: c005 q22 0.206 -> 0.107, q19 0.120 ->
+  0.066, q08 0.333 -> 0.281, q07 0.604 -> 0.554; c006 q02 0.733 -> 0.596 (the host busier, a
+  verification train on other cores).
+
+### Dropped
+
+- `c002`, a later batch's inner rows decoded by another thread while the current batch runs,
+  and each finished batch's table freed by another thread: q02 wall 0.727 -> 0.662 s, but CPU
+  0.72 -> 0.86 s, user instructions +2.0%, cycles +12% (rows decoded on one thread and freed on
+  another). `~/.cache/a219/patches/dropped-c002-batch-prefetch.*`.
+- `c004`, an aggregation's parts of one integer key and counts merged straight from their
+  words (q13's c_custkey groups, no `Value` key or states made a group): q13 user
+  instructions -1.0, -1.9, -1.0%, cycles -2.5, -4.3, -0.9%. Under the bar: the merge is 1-2% of
+  q13, whose workers' scan, probe and partial aggregation are the rest.
+  `~/.cache/a219/patches/dropped-c004-int-counts.*`.
+
 ## Analytic path, round 1 (2026-11-12, agent 220)
 
 HANDOFF "Analytic path against pgrust" has the phase study and what changed: a parallel scan's
