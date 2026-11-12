@@ -69,6 +69,23 @@ fn unwatch_written(watched: &mut HashMap<u32, u64>, key: &[u8], value: Option<&[
     }
 }
 
+/// Bytes a compaction's output holds before it may end where a table's or an index's keys
+/// end (`part_ends`).
+const PART_MIN: u64 = 256 << 10;
+
+/// Whether a compaction's output `w`, whose last key began with `part` (a key's first 8
+/// bytes: its table's and index's ids), ends before `uk`: where the keys pass to another
+/// table's or index's once it holds `PART_MIN` bytes, and always between the store's own keys
+/// (table 0) and a table's. A file then holds the rows of one table or the entries of one
+/// index (or many small ones), so a write to another (a catalog write, a statement's size
+/// estimates) doesn't make a compaction rewrite it (`compact` merges the L1 files an L0
+/// file's range meets), and a range deletion of it (TRUNCATE, DROP) drops the file whole
+/// without reading it (`collect_ranges`).
+fn part_ends(w: &SstWriter, part: &[u8], uk: &[u8]) -> bool {
+    let next = &uk[..uk.len().min(8)];
+    part != next && (w.approx_size() >= PART_MIN || (key_table(part) == 0) != (key_table(next) == 0))
+}
+
 pub fn mvcc_key(user: &[u8], ts: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(user.len() + 8);
     k.extend_from_slice(user);
@@ -1913,6 +1930,8 @@ impl Store {
         let mut cur_user: Vec<u8> = Vec::new();
         let mut started = false;
         let mut kept_old = false;
+        // (The first 8 bytes of the last key the writer took: `part_ends`.)
+        let mut part: Vec<u8> = Vec::new();
         let mut discarded = self.discard.filter();
         while let Some(i) = merge.min()? {
             let (k, v) = merge.sources[i].head().expect("a head entry");
@@ -1957,9 +1976,9 @@ impl Store {
                 next_kept += 1;
             }
             if first_version
-                && writer
-                    .as_ref()
-                    .is_some_and(|w| past_kept || w.approx_size() >= self.opts.target_file_bytes)
+                && writer.as_ref().is_some_and(|w| {
+                    past_kept || w.approx_size() >= self.opts.target_file_bytes || part_ends(w, &part, uk)
+                })
             {
                 let w = writer.take().unwrap();
                 outputs.push(w.finish()?);
@@ -1972,6 +1991,10 @@ impl Store {
                 )?);
             }
             writer.as_mut().unwrap().add(k, v)?;
+            if first_version || part.is_empty() {
+                part.clear();
+                part.extend_from_slice(&uk[..uk.len().min(8)]);
+            }
             merge.sources[i].advance();
         }
         if let Some(w) = writer {
