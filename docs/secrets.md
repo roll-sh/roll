@@ -905,3 +905,14 @@ Ranked:
    #21 merges second; the adapter is in the apps thread).
 2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
+3. **A second security audit** of what came after the first: syncs, audit sinks, notices, one-time
+   shares, purge and retention, insights, request values, lease renewal, the TypeScript client. In
+   progress.
+4. **CLI parity**: `roll secrets syncs|sinks ls|add|run|rm`, `purge`, `retention`, `insights`,
+   `shares`, `leases renew`, so nothing needs the dashboard. In progress.
+5. **The dashboard's controls** for purge (a secret's history), retention (the project's settings)
+   and `notify_url` (an environment's protection).
+6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
+   so the roll-access swap is ready the day #19 lands.
+7. **Performance on Postgres**: the 2k/9k-key measurements (import, grid, values, digest) against
+   the system database, and indexes where they're slow.
