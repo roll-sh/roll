@@ -17,7 +17,8 @@ environments that inherit from a base environment instead of copying it.
   `crates/rolld/src/secrets.rs`, which also implements the link providers.
 - Client: `apps/dashboard/src/lib/secrets-api.ts`. Change it and this contract together.
 - CLI: `roll secrets …` and `roll run` in `crates/roll-cli/src/secrets.rs`.
-- Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite),
+- Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
+  `crates/roll-secrets/tests/nodes.rs` (two stores racing on one database),
   `crates/roll-cli/tests/secrets.rs` (`roll run` against a live rolld),
   `apps/dashboard/src/lib/secrets-*.test.ts`.
 
@@ -513,13 +514,11 @@ the dashboard's Secrets surface. Ranked:
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
    merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto
    the routes above.
-3. **Two nodes on one schema**: a test of two stores on one Postgres schema racing on the same
-   environment (seq, shared credentials, sweeps).
-4. **The dashboard's missing pieces**: folder imports (`…/imports`), creating an ephemeral
+3. **The dashboard's missing pieces**: folder imports (`…/imports`), creating an ephemeral
    environment, and showing rotate only for links that can rotate.
-5. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+4. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-6. **Required keys**: a project-wide list of keys every standard environment must define. The grid
+5. **Required keys**: a project-wide list of keys every standard environment must define. The grid
    flags a missing one, and promote and `roll run` warn about it.
-7. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-8. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
+6. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+7. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
