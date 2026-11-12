@@ -350,19 +350,82 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 - Private networking is a Docker network per project and environment; it isn't reachable from
   the host's own roll databases on hosts whose firewall drops container-to-host traffic.
 
+## With the other platform branches
+
+A review on 2026-11-12 against feature/roll-secrets (#20), feature/roll-mcp (#19),
+feature/roll-previews and feature/roll-search found these. Ours are in `## Next`; theirs:
+
+- **roll-mcp**: the catalogue misses `GET /v1/apps`, `POST /v1/apps/plan` and
+  `GET /v1/apps/projects/{project}/services`; `…/wake` and `…/domains/{host}/verify` are reads
+  and `DELETE …/links/{kind}/{ref}` is a write (http-api.md). Creating a service with a repo or
+  image source deploys production, so it's `deploy` unless the source is an upload. The apps
+  tools send the wrong fields: `apps_deploy` takes `revision`/`image` (not `ref`),
+  `apps_add_domain` takes `hostname` (not `host`), and `apps_logs` takes `since` in unix ms and
+  `tail` (not `limit`). The "previews only" template should match ephemeral environments
+  (previews names them `pv-<id>`), not the literal `preview`.
+- **roll-previews**: makes no `/v1/apps` calls yet; its `Apps` port runs its own containers. The
+  end state is an adapter over `/v1/apps`: the environment named `pv-<id>` (the same name as its
+  roll secrets environment), a deploy only when `active.revision` differs (deploys aren't
+  idempotent), a 404 on teardown counted as done, and the URL from `Environment.url`. Then its
+  own runtime goes.
+- **Every product sharing the system database** (apps, previews, mcp) reserves its own share of
+  `ROLL_SYSTEM_DB_CONNECTIONS`, as secrets does, instead of borrowing the workspace's.
+- **rolld/src/main.rs on merge**: open the workspace once, merge every product's router, and only
+  then take the copies secrets (`products_api`) and mcp (`roll_mcp::routes`) keep; a router
+  copied earlier 404s for products merged after it.
+- Suggested merge order: mcp, secrets, search, apps (with the secrets work in `## Next`),
+  previews.
+
 ## Next
 
 Ranked; the top item is what's being worked on.
 
-1. Measure the Node cold start again (`roll up` of the two-file app against a real rolld) now
-   that wakes skip the CLI and npm; then see what dockerd's own ~250 ms start is made of
-   (network attach, `--init`, the log driver).
-2. Review pass against Railway/Render/Fly: UX gaps (new environment from the switcher, deploy
-   messages for `roll up` from git, an SPA fallback for static sites), security (hostile uploads,
-   header spoofing, SSRF in DoH), and lean tests; then open the PR to main with screenshots.
-3. Links for buckets, streams, queues and NoSQL; the roll secrets `SecretSource` once
-   feature/roll-secrets lands.
-4. Fargate runtime and CodeBuild builder against fakes, like `code-preview/tests/fargate.rs`.
-5. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one node.
-6. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-7. EFS volumes and Cloud Map private DNS on the fleet.
+1. **Hostile input.** roll-fetch bounds GNU long-name and PAX entries itself and caps the
+   uncompressed stream (a 4 MiB gzip can claim a 4 GiB name today). A service's `root` that
+   passes through a symlink is refused, in deploys and `/v1/apps/plan` (only the last component
+   is checked now). `roll up` honours `.gitignore`/`.dockerignore` and never sends `.env*`;
+   uploads are deleted with their deployments and services.
+2. **Instance lifecycle.** A wake runs on a task the waiting requests share, so a client going
+   away can't strand an instance in Starting or leave an env file (scratch is cleared at start).
+   The reaper checks `running` before the idle rules (a crashed instance is missed until
+   `sleep_after` now), and a refused connection marks the instance crashed and retries once. A
+   volume service never runs two instances during a rollout. Deleting an environment marks it
+   first and the live state refuses `adopt`/`make` after teardown. Losing a service's lease
+   cancels its deploys and fences `switch_active`. Waiters are capped, a failed wake backs off,
+   and runtime calls have timeouts.
+3. **Redeploy** for every source: the active image again with the current variables and settings.
+   The Deploy button and the "settings changed" banner are dead for `roll up` services today.
+4. **Containers.** Variables go in through the Engine API's `Env` (no env file on disk, and
+   multi-line values such as PEM keys work; roll secrets moved code-preview off `K=V` argv for the
+   same reason). `--cap-drop` what apps don't need, the writable layer and `volume.size_gb` get
+   quotas, builds get their CPU and memory limits and a concurrency cap. Logs cap unflushed bytes
+   and forget a build's ring once it's stored.
+5. **roll secrets as the env store** (after #20 merges): an apps environment is a project
+   environment of roll secrets (checked on `PUT`, ephemeral from its kind, deleted with it);
+   service variables live in secrets at `/services/<name>`; values are resolved only when a
+   container is made (never for a dashboard read; `needs_deploy` from fingerprints); links become
+   per-environment secrets links (a prefixed link points staging at production today);
+   `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
+   folder; dynamic credentials are refused or the container is remade on wake.
+6. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
+   `DATABASE_URL`); a pre-deploy (release) command that gates the switch, for migrations;
+   `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
+7. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
+   `roll ssh` / exec into an instance, with the API routes under the service.
+8. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
+   links before the first deploy; new environment and its branch from the switcher; cron runs
+   and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics
+   tiles that total the window; CLI output for people, not JSON; a project slug that isn't
+   repeated in the URL.
+9. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
+   output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
+   `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
+10. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
+    stored 7 days of logs.
+11. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+12. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+    `code-preview/tests/fargate.rs`.
+13. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+    node; pending claims expire.
+14. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+15. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
