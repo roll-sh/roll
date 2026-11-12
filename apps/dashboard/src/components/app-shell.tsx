@@ -1,62 +1,30 @@
 import { RollLogo } from "@roll/brand";
-import {
-  Activity,
-  Database,
-  GitBranch,
-  Globe,
-  HardDrive,
-  Inbox,
-  Boxes,
-  LayoutGrid,
-  LucideProvider,
-  MemoryStick,
-  Rocket,
-  ScrollText,
-  Search,
-  Settings,
-  SquareFunction,
-  Waves,
-  Workflow,
-  X,
-} from "lucide-react";
+import { LucideProvider, Menu, X } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
-import { Link } from "@/components/link";
-import { api, type Product } from "@/lib/roll-api";
 import { AgentsControl } from "./agents/agents-control";
-import { SignIn } from "./code/sign-in";
-import { useShownOwner } from "./agents/use-connection";
 import { OwnerSwitcher } from "./agents/owner-switcher";
+import { useShownOwner } from "./agents/use-connection";
 import { AskPanel } from "./ask";
+import { SignIn } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
-
-const nav: { label: string; icon: typeof LayoutGrid; href?: string; product?: Product }[] = [
-  { label: "Overview", icon: LayoutGrid, href: "/dashboard" },
-  { label: "Code", icon: GitBranch, href: "/dashboard/code", product: "code" },
-  { label: "Databases", icon: Database, href: "/dashboard/databases", product: "postgres" },
-  { label: "Redis", icon: MemoryStick, href: "/dashboard/redis", product: "redis" },
-  { label: "Storage", icon: HardDrive, href: "/dashboard/storage", product: "storage" },
-  { label: "NoSQL", icon: Boxes, href: "/dashboard/nosql", product: "nosql" },
-  { label: "Queues", icon: Inbox, href: "/dashboard/queues", product: "queues" },
-  { label: "Tasks", icon: Workflow, href: "/dashboard/tasks", product: "tasks" },
-  { label: "Streams", icon: Waves, href: "/dashboard/streams", product: "streams" },
-  { label: "Functions", icon: SquareFunction },
-  { label: "Deployments", icon: Rocket },
-  { label: "Edge", icon: Globe },
-  { label: "Logs", icon: ScrollText },
-  { label: "Observability", icon: Activity },
-  { label: "Settings", icon: Settings },
-];
+import { Sidebar } from "./workspace/sidebar";
 
 /**
- * Sidebar, top bar and the ⌘K "Ask roll" palette shared by every dashboard page. The top bar
- * holds the agents (running, waiting, "New agent"; ⌘J opens them over the page). `bleed` gives
- * the page the whole area under the top bar instead of the centred column.
+ * Every dashboard page's frame, Linear's inverted L on the agents surface's ladder
+ * (docs/code/agents-design.md): the sidebar (projects, the month's spend) flush on the base, the
+ * page an inset panel with its top bar (the crumb, the page's buttons, the agents, sign-in), and
+ * the ⌘K "Ask roll" palette. `bleed` gives the page the whole panel under the top bar (the
+ * project canvas) instead of the centred column.
  */
 export function AppShell({ crumb, actions, bleed = false, children }: { crumb: ReactNode; actions?: ReactNode; bleed?: boolean; children: ReactNode }) {
   const { state } = useMarkState();
   const shown = useShownOwner();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [drawer, setDrawer] = useState(false);
+  const pathname = useLocation({ select: (l) => l.pathname });
+
+  useEffect(() => setDrawer(false), [pathname]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -71,66 +39,63 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const who =
+    shown?.admin && shown.owner ? (
+      // An admin works as any owner: which one shows, everywhere.
+      <OwnerSwitcher owner={shown.owner} />
+    ) : shown?.owner ? (
+      <span className="flex items-center gap-1.5 truncate text-[12px] text-muted">
+        <span className="grid size-4 place-items-center rounded bg-accent text-[9px] font-bold text-white uppercase">{shown.owner[0]}</span>
+        {shown.owner}
+      </span>
+    ) : null;
+  const sidebar = <Sidebar onSearch={() => setPaletteOpen(true)} header={who} />;
+
   return (
     <LucideProvider strokeWidth={1.5}>
-      <div className={`flex ${bleed ? "h-svh overflow-hidden" : "min-h-svh"}`}>
-        <aside className="sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r border-line bg-panel px-3 py-4 md:flex">
-          <Link href="/" className="px-2 py-1" aria-label="roll home">
-            <RollLogo state={state} size={19} />
-          </Link>
-          {shown?.admin && shown.owner ? (
-            // An admin works as any owner: which one shows, everywhere.
-            <div className="mt-5">
-              <OwnerSwitcher owner={shown.owner} />
-              <p className="mt-1 px-1 text-[11px] text-subtle">Signed in as admin</p>
-            </div>
-          ) : (
-            <div className="mt-5 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-left text-[13px]" title={shown?.admin ? "Signed in as admin" : undefined}>
-              <span className="grid size-5 place-items-center rounded bg-accent text-[10px] font-bold text-white uppercase">{shown?.owner?.[0] ?? "·"}</span>
-              <span className={`min-w-0 flex-1 truncate ${shown?.owner ? "" : "text-muted"}`}>{shown === undefined ? "" : (shown.owner ?? "Signed out")}</span>
-              {shown?.admin && <span className="text-[11px] text-subtle">admin</span>}
-            </div>
-          )}
-          <Nav />
-          <p className="mt-auto px-2 text-[11px] text-subtle">Usage · 41% of Pro plan</p>
-        </aside>
+      <div data-agents className={`flex w-full ${bleed ? "h-svh overflow-hidden" : "min-h-svh"}`}>
+        <aside className="sticky top-0 hidden h-svh w-56 shrink-0 md:block">{sidebar}</aside>
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-10 flex h-14 items-center gap-3 border-b border-line bg-bg/80 px-4 backdrop-blur">
-            <span className="md:hidden">
-              <RollLogo state={state} size={17} />
-            </span>
-            <span className="hidden text-[13px] text-muted sm:inline">
-              {shown?.owner && (
-                <>
-                  {shown.owner} <span className="text-subtle">/</span>{" "}
-                </>
-              )}
-              <span className="text-fg">{crumb}</span>
-            </span>
-            <button
-              onClick={() => setPaletteOpen(true)}
-              aria-label="Ask roll"
-              className="ml-auto flex w-full max-w-xs min-w-0 items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] text-subtle hover:border-line-2 max-sm:w-auto max-sm:shrink-0 max-sm:px-2"
-            >
-              <Search className="size-3.5 shrink-0" />
-              <span className="flex-1 truncate text-left max-sm:hidden">Ask roll…</span>
-              <kbd className="rounded border border-line px-1.5 font-mono text-[10px] max-sm:hidden">⌘K</kbd>
-            </button>
-            <AgentsControl />
-            {/* A page's buttons (Review, Land, sign-in) scroll sideways on a phone rather than widen the page. */}
-            <span className="flex min-w-0 shrink items-center gap-2 overflow-x-auto [scrollbar-width:none]">
-              {actions}
+        <div className={`flex min-w-0 flex-1 flex-col md:py-2 md:pr-2 ${bleed ? "h-svh" : ""}`}>
+          <div
+            className={`relative flex min-w-0 flex-1 flex-col bg-canvas md:rounded-xl md:border md:border-line-2 md:inset-shadow-highlight ${
+              bleed ? "overflow-hidden" : ""
+            }`}
+          >
+            <header className="sticky top-0 z-20 flex h-11 shrink-0 items-center gap-2 border-b border-line bg-canvas/85 px-3 backdrop-blur md:rounded-t-xl">
+              <button
+                onClick={() => setDrawer(true)}
+                aria-label="Menu"
+                className="grid size-7 place-items-center rounded-md text-muted hover:bg-white/[0.05] hover:text-fg md:hidden"
+              >
+                <Menu className="size-4" />
+              </button>
+              <span className="md:hidden">
+                <RollLogo state={state} size={15} />
+              </span>
+              <span className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium max-sm:hidden">{crumb}</span>
+              <span className="ml-auto flex min-w-0 shrink items-center gap-2 overflow-x-auto [scrollbar-width:none]">
+                {/* A page's buttons (Review, Land, Deploy) scroll sideways on a phone rather than widen the page. */}
+                {actions}
+              </span>
+              <AgentsControl />
               <SignIn />
-            </span>
-          </header>
+            </header>
 
-          {bleed ? (
-            <main className="relative min-h-0 flex-1">{children}</main>
-          ) : (
-            <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8">{children}</main>
-          )}
+            {bleed ? (
+              <main className="relative min-h-0 flex-1">{children}</main>
+            ) : (
+              <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 md:px-6">{children}</main>
+            )}
+          </div>
         </div>
+
+        {drawer && (
+          <div className="fixed inset-0 z-40 md:hidden" onMouseDown={(e) => e.target === e.currentTarget && setDrawer(false)}>
+            <div className="absolute inset-0 bg-[var(--scrim)]" onClick={() => setDrawer(false)} />
+            <aside className="rise absolute inset-y-0 left-0 w-64 border-r border-line-2 bg-bg shadow-sheet">{sidebar}</aside>
+          </div>
+        )}
 
         {paletteOpen && (
           <div
@@ -138,11 +103,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
             onMouseDown={(e) => e.target === e.currentTarget && setPaletteOpen(false)}
           >
             <div className="rise relative w-full max-w-xl">
-              <button
-                onClick={() => setPaletteOpen(false)}
-                aria-label="Close"
-                className="absolute -top-9 right-0 text-subtle hover:text-fg"
-              >
+              <button onClick={() => setPaletteOpen(false)} aria-label="Close" className="absolute -top-9 right-0 text-subtle hover:text-fg">
                 <X className="size-5" />
               </button>
               <AskPanel autoFocus />
@@ -151,53 +112,5 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
         )}
       </div>
     </LucideProvider>
-  );
-}
-
-/** Nav with the current section highlighted. */
-/** The products rolld runs (`GET /v1/info`); `null` until known, or from a rolld that doesn't say. */
-function useProducts(): Set<Product> | null {
-  const [products, setProducts] = useState<Set<Product> | null>(null);
-  useEffect(() => {
-    let live = true;
-    api.info().then(
-      (i) => live && setProducts(new Set(i.products)),
-      () => {},
-    );
-    return () => {
-      live = false;
-    };
-  }, []);
-  return products;
-}
-
-function Nav() {
-  const pathname = useLocation({ select: (l) => l.pathname });
-  const products = useProducts();
-  return (
-    <nav className="mt-5 space-y-0.5">
-      {nav.filter((n) => !n.product || !products || products.has(n.product)).map(({ label, icon: Icon, href }) => {
-        const active =
-          !!href && (href === pathname || (href !== "/dashboard" && pathname.startsWith(`${href}/`)));
-        const cls = `flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition ${
-          active ? "bg-panel-2 text-fg" : "text-muted hover:bg-panel-2 hover:text-fg"
-        }`;
-        const inner = (
-          <>
-            <Icon className="size-4" />
-            {label}
-          </>
-        );
-        return href ? (
-          <Link key={label} href={href} className={cls}>
-            {inner}
-          </Link>
-        ) : (
-          <a key={label} href="#" className={cls}>
-            {inner}
-          </a>
-        );
-      })}
-    </nav>
   );
 }
