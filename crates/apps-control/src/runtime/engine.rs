@@ -147,6 +147,56 @@ impl Engine {
         self.call(Method::POST, &format!("/exec/{}/resize?h={rows}&w={cols}", utf8_percent_encode(exec, NAME))).await.map(|_| ())
     }
 
+    /// Pull `image` with a registry login (`X-Registry-Auth`), its progress to `log`.
+    pub async fn pull(&self, image: &str, login: &super::RegistryLogin, log: &crate::logs::LogSink) -> anyhow::Result<()> {
+        use base64::Engine as _;
+        let auth = serde_json::json!({ "username": login.username, "password": login.password, "serveraddress": login.server });
+        let header = base64::engine::general_purpose::URL_SAFE.encode(serde_json::to_vec(&auth)?);
+        let stream = UnixStream::connect(&self.socket).await.with_context(|| format!("connecting to {}", self.socket.display()))?;
+        let (mut tx, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        tokio::spawn(conn);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/images/create?fromImage={}", utf8_percent_encode(image, NON_ALPHANUMERIC)))
+            .header("host", "docker")
+            .header("x-registry-auth", header)
+            .body(Full::new(Bytes::new()))?;
+        let res = tokio::time::timeout(QUICK, tx.send_request(req)).await.map_err(|_| anyhow::anyhow!("docker didn't start the pull"))??;
+        let status = res.status();
+        let mut body = res.into_body();
+        let mut buf = Vec::new();
+        let mut last = String::new();
+        // A JSON object per line: `status`, or `error` (a failed pull still answers 200).
+        while let Some(frame) = body.frame().await {
+            let Ok(data) = frame?.into_data() else { continue };
+            buf.extend_from_slice(&data);
+            while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=i).collect();
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(&line) else { continue };
+                if let Some(e) = v["error"].as_str() {
+                    bail!("pulling {image}: {e}");
+                }
+                if let Some(s) = v["status"].as_str() {
+                    let s = match v["id"].as_str() {
+                        Some(id) => format!("{id}: {s}"),
+                        None => s.to_string(),
+                    };
+                    if s != last && !s.ends_with("Downloading") && !s.ends_with("Extracting") {
+                        log.line(&s);
+                        last = s;
+                    }
+                }
+            }
+            if buf.len() > ANSWER_MAX {
+                buf.clear();
+            }
+        }
+        if !status.is_success() {
+            bail!("pulling {image}: {status}");
+        }
+        Ok(())
+    }
+
     /// Start it; already running is fine (304).
     pub async fn start(&self, name: &str) -> anyhow::Result<()> {
         self.call(Method::POST, &Self::container(name, "start")).await.map(|_| ())

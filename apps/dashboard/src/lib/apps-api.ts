@@ -80,6 +80,8 @@ export interface Service {
   source: Source;
   build: Build;
   run: Run;
+  /** The private registry login its image pulls with (the password is never returned). */
+  registry: { server: string; username: string } | null;
   created_at: number;
   environments: EnvironmentSummary[];
 }
@@ -321,6 +323,8 @@ export const appsApi = {
 
   environments: (id: string) => call<Environment[]>("GET", `${svc(id)}/environments`),
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
+  putRegistry: (id: string, body: { username: string; password: string; server?: string }) => call<Service>("PUT", `${svc(id)}/registry`, body),
+  deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 

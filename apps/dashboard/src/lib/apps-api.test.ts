@@ -9,6 +9,7 @@ const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
   source: { kind: "repo", repo: "acme/site" },
   build: { builder: "auto" },
   run: { type: "web", min_instances: 0, max_instances: 3, concurrency: 50, cpu: 0.5, memory_mb: 512, health_timeout_s: 60, suspend_after_s: 30, sleep_after_s: 600 },
+  registry: null,
   created_at: 1,
   environments: [{ name: "production", state: "running", url: "https://web-shop.up.roll.site", active: null, latest: null, ...env }],
 });

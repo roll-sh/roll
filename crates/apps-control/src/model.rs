@@ -51,7 +51,17 @@ impl Source {
             }
             Source::Image { image } => {
                 let ok = !image.is_empty() && image.len() <= 255 && image.bytes().all(|b| b.is_ascii_graphic()) && !image.starts_with('-');
-                if ok { Ok(()) } else { Err(Error::BadRequest("source.image is an image reference".into())) }
+                if !ok {
+                    return Err(Error::BadRequest("source.image is an image reference".into()));
+                }
+                // dockerd fetches the registry a tenant names: never one on this host or a
+                // private network (it would speak plain HTTP to loopback, and say what answered).
+                if let Some(host) = registry_host(image)
+                    && private_host(host)
+                {
+                    return Err(Error::BadRequest(format!("source.image: {host} isn't a public registry")));
+                }
+                Ok(())
             }
             Source::Upload => Ok(()),
         }
@@ -61,6 +71,34 @@ impl Source {
     pub fn builds(&self) -> bool {
         !matches!(self, Source::Image { .. })
     }
+}
+
+/// The registry host an image reference names (`ghcr.io`, `registry:5000`), none for Docker Hub.
+pub fn registry_host(image: &str) -> Option<&str> {
+    let (first, rest) = image.split_once('/')?;
+    (!rest.is_empty() && (first.contains('.') || first.contains(':') || first == "localhost")).then_some(first)
+}
+
+/// A host on this machine or a private network: loopback, private, link-local, unique-local
+/// addresses and `localhost`.
+fn private_host(host: &str) -> bool {
+    let name = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_start_matches('[').trim_end_matches(']');
+    if name.eq_ignore_ascii_case("localhost") || name.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    match name.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.octets()[0] == 100 && (a.octets()[1] & 0xc0) == 64,
+        Ok(std::net::IpAddr::V6(a)) => a.is_loopback() || a.is_unspecified() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80,
+        Err(_) => false,
+    }
+}
+
+/// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
+/// and never returned.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Registry {
+    pub server: String,
+    pub username: String,
 }
 
 /// A relative path inside a tree: no `..`, not absolute, plain characters.
@@ -321,6 +359,8 @@ pub struct Service {
     pub source: Source,
     pub build: Build,
     pub run: Run,
+    /// The private registry login its image pulls with (never the password).
+    pub registry: Option<Registry>,
     pub created_at: i64,
     pub environments: Vec<EnvironmentSummary>,
 }

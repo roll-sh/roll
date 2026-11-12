@@ -33,6 +33,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
 | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` | write |
 | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 | write |
+| `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
+| `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
@@ -154,6 +156,7 @@ type Service = {
   source: Source;
   build: Build;
   run: Run;
+  registry: { server: string; username: string } | null; // a private registry's login (never the password)
   created_at: number;
   environments: EnvironmentSummary[];
 };

@@ -170,12 +170,13 @@ export function SettingsTab({ service, runner, onDeleted }: { service: Service; 
             </>
           )}
           {form.sourceKind === "image" && (
-            <Field label="Image" hint="public; its digest is pinned per deploy">
+            <Field label="Image" hint="its digest is pinned per deploy">
               {t("image", "docker.io/library/nginx:1.27")}
             </Field>
           )}
           {form.sourceKind === "upload" && <p className="self-end text-[12px] text-subtle">Deploys come from `roll up`.</p>}
         </Grid>
+        {service.source.kind === "image" && <RegistryLogin service={service} runner={runner} />}
       </Panel>
 
       {form.sourceKind !== "image" && (
@@ -341,3 +342,45 @@ export function SettingsTab({ service, runner, onDeleted }: { service: Service; 
 }
 
 const Grid = ({ children }: { children: ReactNode }) => <div className="grid gap-x-3 gap-y-4 p-5 sm:grid-cols-2 lg:grid-cols-3">{children}</div>;
+
+/** A private registry's login for the image: write-only (the password never comes back). */
+function RegistryLogin({ service, runner }: { service: Service; runner: Runner }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const r = service.registry;
+  return (
+    <div className="border-t border-line px-5 py-4">
+      <p className="text-[13px] font-medium">Private registry</p>
+      {r ? (
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-[13px] text-muted">
+          <span>
+            Pulls as <span className="font-mono text-fg">{r.username}</span> at <span className="font-mono text-fg">{r.server}</span>
+          </span>
+          <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("registry", () => appsApi.deleteRegistry(service.id))}>
+            Remove
+          </button>
+        </div>
+      ) : (
+        <form
+          className="mt-2 flex flex-wrap items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void runner.run("registry", () => appsApi.putRegistry(service.id, { username, password })).then((ok) => {
+              if (ok) {
+                setUsername("");
+                setPassword("");
+              }
+            });
+          }}
+        >
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" aria-label="Registry username" autoComplete="off" spellCheck={false} className={`${input} w-44 font-mono text-[12px]`} />
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="password or token" aria-label="Registry password" autoComplete="new-password" className={`${input} w-56 font-mono text-[12px]`} />
+          <button type="submit" className={primary} disabled={!username || !password || runner.busy !== null}>
+            Save login
+          </button>
+          <span className="text-[12px] text-subtle">Sealed; only pulls use it.</span>
+        </form>
+      )}
+    </div>
+  );
+}

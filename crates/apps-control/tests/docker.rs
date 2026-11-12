@@ -85,6 +85,16 @@ async fn docker_world() -> Option<World> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let Some(World { _dir, apps, api, public, project }) = docker_world().await else { return };
+    // A pull through the Engine API with a login header (an empty one is anonymous): what a
+    // private registry's pull runs, its progress read off the stream.
+    {
+        let engine = apps_control::runtime::engine::Engine::local().expect("a local docker socket");
+        let login = apps_control::runtime::RegistryLogin { server: "https://index.docker.io/v1/".into(), username: String::new(), password: String::new() };
+        let hub = apps_control::logs::LogHub::new(None);
+        engine.pull("busybox:1.37", &login, &hub.sink("pull", apps_control::logs::Stream::Build)).await.unwrap();
+        let lines = hub.tail("pull", 50, None).await;
+        assert!(lines.iter().any(|l| l.text.contains("busybox:1.37") || l.text.contains("Image is up to date") || l.text.contains("Downloaded")), "{lines:?}");
+    }
 
     let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "build": {"build": "test \"$GREETING\" = hej"}, "run": {"memory_mb": 256, "cpu": 0.25, "pre_deploy": "test \"$GREETING\" = hej"} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");

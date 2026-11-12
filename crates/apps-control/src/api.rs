@@ -58,6 +58,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}", get(get_service).patch(patch_service).delete(delete_service))
         .route("/v1/apps/services/{id}/links", get(links))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
+        .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
@@ -220,6 +221,14 @@ async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, Str
 async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>) -> R {
     apps.delete_link(&id, &kind, &r).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn put_registry(State(apps): S, Path(id): Path<String>, b: Bytes) -> R {
+    ok(apps.put_registry(&id, body(&b)?).await?)
+}
+
+async fn delete_registry(State(apps): S, Path(id): Path<String>) -> R {
+    ok(apps.delete_registry(&id).await?)
 }
 
 async fn environments(State(apps): S, Path(id): Path<String>) -> R {

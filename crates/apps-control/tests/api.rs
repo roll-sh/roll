@@ -329,6 +329,21 @@ async fn variables_are_sealed_masked_and_revealed_only_on_their_route() {
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{sid}/environments/production"), None).await;
     assert_eq!(env["needs_deploy"], false, "the first deploy had them: {env}");
     assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "bad", "source": {"kind": "upload"}, "variables": {"1X": "y"} }))).await.0, StatusCode::BAD_REQUEST);
+    // A private registry: its login is sealed, never returned, and a pull uses it.
+    let (st, svc) = call(&w.api, "PUT", &format!("/v1/apps/services/{sid}/registry"), Some(json!({"username": "bot", "password": "ghp-registry-secret"}))).await;
+    assert_eq!(st, StatusCode::OK, "{svc}");
+    assert_eq!(svc["registry"], json!({"server": "https://index.docker.io/v1/", "username": "bot"}));
+    assert!(!svc.to_string().contains("ghp-registry-secret"));
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{sid}/environments/production/deploys"), Some(json!({}))).await;
+    settled(&w, sid, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(w.fake.pulled_as.lock().as_deref(), Some("bot"));
+    let raw = std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap();
+    assert!(!raw.windows(19).any(|x| x == b"ghp-registry-secret"));
+    // A registry on this host or a private network isn't one dockerd is sent to.
+    for image in ["127.0.0.1:5000/app", "localhost:5000/app", "10.0.0.5/app:1", "[::1]:5000/app"] {
+        let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "priv", "source": {"kind": "image", "image": image} }))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{image}: {v}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

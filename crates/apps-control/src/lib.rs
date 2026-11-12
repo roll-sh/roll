@@ -340,7 +340,43 @@ impl Apps {
         for e in &envs {
             summaries.push(self.summary(e).await?);
         }
-        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, created_at: r.created_at, environments: summaries })
+        let id = r.id.clone();
+        let registry = self.db(move |s| s.registry(&id)).await?;
+        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, created_at: r.created_at, environments: summaries })
+    }
+
+    /// `PUT …/registry`: the login a service's image pulls with. `server` defaults to the image's
+    /// registry (Docker Hub when it names none).
+    pub async fn put_registry(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| !["server", "username", "password"].contains(&k.as_str())) {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let text = |k: &str, max: usize| -> Result<Option<String>> {
+            match o.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(v)) if !v.is_empty() && v.len() <= max && !v.contains('\0') => Ok(Some(v.clone())),
+                _ => Err(Error::BadRequest(format!("{k} is 1–{max} characters"))),
+            }
+        };
+        let (username, password) = (text("username", 200)?, text("password", 4096)?);
+        let (Some(username), Some(password)) = (username, password) else { return Err(Error::BadRequest("username and password are required".into())) };
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Image { image } = &svc.source else { return Err(Error::Conflict("only an image source pulls from a registry".into())) };
+        let server = match text("server", 255)? {
+            Some(s) => s,
+            None => registry_host(image).map(str::to_string).unwrap_or_else(|| "https://index.docker.io/v1/".into()),
+        };
+        let sid = service.to_string();
+        self.db(move |s| s.set_registry(&sid, &server, &username, &password)).await?;
+        self.service(service).await
+    }
+
+    pub async fn delete_registry(self: &Arc<Self>, service: &str) -> Result<Service> {
+        let sid = service.to_string();
+        self.db(move |s| s.delete_registry(&sid)).await?;
+        self.service(service).await
     }
 
     pub fn url(&self, slug: &str) -> String {

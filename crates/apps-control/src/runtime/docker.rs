@@ -124,8 +124,17 @@ impl Runtime for Docker {
         true
     }
 
-    async fn pull(&self, image: &str, log: &LogSink) -> anyhow::Result<String> {
+    async fn pull(&self, image: &str, log: &LogSink, login: Option<&super::RegistryLogin>) -> anyhow::Result<String> {
         log.line(format!("pulling {image}"));
+        // A private registry's login goes to dockerd with this pull only (never `docker login`,
+        // which would keep it in this host's docker config for everyone).
+        if let Some(login) = login {
+            let Some(engine) = &self.engine else { bail!("a private registry needs Docker on a local socket") };
+            log.line(format!("logging in to {} as {}", login.server, login.username));
+            engine.pull(image, login, log).await?;
+            let digest = docker(&["image", "inspect", "-f", "{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}", image]).await?;
+            return Ok(if digest.is_empty() { image.to_string() } else { digest });
+        }
         let mut child = Command::new("docker")
             .args(["pull", image])
             .stdin(Stdio::null())

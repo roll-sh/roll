@@ -318,7 +318,9 @@ impl Apps {
             }
             Some(img) => {
                 self.db(move |s| s.set_status(&id, &[DeployStatus::Queued], DeployStatus::Building, None)).await?;
-                let pinned = self.deps.runtime.pull(img, log).await?;
+                let sid = svc.id.clone();
+                let login = self.db(move |s| s.registry_login(&sid)).await?.map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
+                let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
                 let (id, p) = (d.id.clone(), pinned.clone());
                 self.db(move |s| s.set_built(&id, &p, None, None)).await?;

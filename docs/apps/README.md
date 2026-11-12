@@ -114,6 +114,12 @@ every deployment is immutable with instant rollback.
   stay out). A tree's own Dockerfile gets them as secrets and as build arguments (`ARG NAME`),
   values always through the docker CLI's environment, never argv. Names the CLI reads itself
   (`DOCKER_*`, `BUILDKIT_*`, `PATH`, proxies) aren't passed, and the log says so.
+- **Private registries** (`PUT …/registry`, the settings page): an image source can pull with a
+  login (a username and a password or token), sealed like variables and never returned. It goes
+  to dockerd with each pull only (`X-Registry-Auth` on the Engine API), never `docker login`,
+  which would keep it in the host's docker config for everyone. An image on a registry on this
+  host or a private network (loopback, RFC 1918, link-local, unique-local, `localhost`) is
+  refused: dockerd would fetch it on a tenant's say-so.
 - **Public images** skip the build: the deployment pins the image's digest at deploy time, so a
   moving tag never changes a running deployment.
 - Build logs stream line by line to the dashboard and `roll deploy` as they're written
@@ -513,7 +519,8 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    through chat ops; designed with the other branches, not a second webhook system. (Done:
    crash loops on the environment and the service page; search over the stored 7 days of logs,
    `?q=`, `roll logs --grep … --since 2h`, the Logs tab's Search 7 days.)
-4. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL: as roll secrets links per
+   environment (their providers), not more apps link kinds.
 5. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.
 6. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one

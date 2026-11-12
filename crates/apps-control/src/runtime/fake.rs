@@ -49,6 +49,8 @@ pub struct Fake {
     instances: Mutex<HashMap<String, FakeInstance>>,
     networks: Mutex<Vec<String>>,
     pub counts: Counts,
+    /// Who the last pull logged in as (a private registry).
+    pub pulled_as: Mutex<Option<String>>,
 }
 
 impl Fake {
@@ -125,7 +127,8 @@ impl Runtime for Fake {
         true
     }
 
-    async fn pull(&self, image: &str, log: &LogSink) -> anyhow::Result<String> {
+    async fn pull(&self, image: &str, log: &LogSink, login: Option<&super::RegistryLogin>) -> anyhow::Result<String> {
+        *self.pulled_as.lock() = login.map(|l| l.username.clone());
         self.counts.pulls.fetch_add(1, Ordering::SeqCst);
         log.line(format!("pulled {image}"));
         Ok(format!("{image}@sha256:{}", "0".repeat(64)))

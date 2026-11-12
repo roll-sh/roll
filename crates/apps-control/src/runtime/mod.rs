@@ -54,6 +54,20 @@ impl std::fmt::Debug for InstanceSpec {
     }
 }
 
+/// A private registry's login for one pull; the password never shows in `Debug`.
+#[derive(Clone)]
+pub struct RegistryLogin {
+    pub server: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for RegistryLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryLogin").field("server", &self.server).field("username", &self.username).finish_non_exhaustive()
+    }
+}
+
 /// What an instance uses: CPU time since it started and memory resident now.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Usage {
@@ -67,8 +81,9 @@ pub trait Runtime: Send + Sync {
     fn name(&self) -> &'static str;
     /// Whether [`Runtime::suspend`] freezes (Docker's pause) rather than stops.
     fn can_suspend(&self) -> bool;
-    /// Pull a public image and answer it pinned by digest (`repo@sha256:…`).
-    async fn pull(&self, image: &str, log: &LogSink) -> anyhow::Result<String>;
+    /// Pull an image (with `login` for a private registry) and answer it pinned by digest
+    /// (`repo@sha256:…`).
+    async fn pull(&self, image: &str, log: &LogSink, login: Option<&RegistryLogin>) -> anyhow::Result<String>;
     /// Make the instance, ready to start; nothing runs yet.
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()>;
     /// Start a created (or stopped) instance and say where its port answers. Its output goes

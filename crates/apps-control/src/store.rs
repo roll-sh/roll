@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS deployments (
     ready_ms INTEGER
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS deployments_env ON deployments (service, env, created_at);
+CREATE TABLE IF NOT EXISTS registry_auth (
+    service TEXT PRIMARY KEY,
+    server TEXT NOT NULL,
+    username TEXT NOT NULL,
+    sealed TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS env_access (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -431,7 +437,7 @@ impl Store {
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -856,6 +862,33 @@ impl Store {
         let now = self.now()?;
         self.db.execute("UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?", params![status.as_str(), exit_code, now, id])?;
         Ok(())
+    }
+
+    // ── private registries ──
+
+    pub fn set_registry(&self, service: &str, server: &str, username: &str, password: &str) -> Result<()> {
+        let sealed = self.sealer.seal(&format!("registry:{service}"), password);
+        self.db.execute(
+            "INSERT INTO registry_auth (service, server, username, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service) DO UPDATE SET server = excluded.server, username = excluded.username, sealed = excluded.sealed",
+            params![service, server, username, sealed],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_registry(&self, service: &str) -> Result<()> {
+        self.db.execute("DELETE FROM registry_auth WHERE service = ?", [service])?;
+        Ok(())
+    }
+
+    /// The login, without the password.
+    pub fn registry(&self, service: &str) -> Result<Option<Registry>> {
+        Ok(self.db.query_row("SELECT server, username FROM registry_auth WHERE service = ?", [service], |r| Ok(Registry { server: r.get(0)?, username: r.get(1)? })).optional()?)
+    }
+
+    /// The login with its password opened, for a pull.
+    pub fn registry_login(&self, service: &str) -> Result<Option<(Registry, String)>> {
+        let row: Option<(String, String, String)> = self.db.query_row("SELECT server, username, sealed FROM registry_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        row.map(|(server, username, sealed)| Ok((Registry { server, username }, self.sealer.open(&format!("registry:{service}"), &sealed)?))).transpose()
     }
 
     // ── private environments ──
