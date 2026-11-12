@@ -60,7 +60,8 @@ fn tree_params(m: &Map) -> EsResult<Map> {
         let v = if k == "max_trees" { m.get(k).or_else(|| m.get("maximum_number_trees")) } else { m.get(k) };
         v.and_then(number)
     };
-    let checks: [(&str, fn(f64) -> bool, &str); 12] = [
+    type Check = (&'static str, fn(f64) -> bool, &'static str);
+    let checks: [Check; 12] = [
         ("lambda", |v| v < 0.0, "must be a non-negative double"),
         ("gamma", |v| v < 0.0, "must be a non-negative double"),
         ("eta", |v| !(0.001..=1.0).contains(&v), "must be a double in [0.001, 1]"),
@@ -153,7 +154,7 @@ fn parse_analysis(ctx: &Ctx, kind: &str, cfg: &Value) -> EsResult<Value> {
     }
     out.insert("dependent_variable".into(), dep.clone().into());
     out.extend(trees);
-    let seed = m.get("randomize_seed").and_then(number).map_or_else(|| rand::random::<i64>(), |s| s as i64);
+    let seed = m.get("randomize_seed").and_then(number).map_or_else(rand::random::<i64>, |s| s as i64);
     let prediction = m.get("prediction_field_name").map(Value::to_es_string).unwrap_or_else(|| format!("{dep}_prediction"));
     if kind == "classification" {
         out.insert("class_assignment_objective".into(), m.get("class_assignment_objective").map(|v| v.to_es_string().to_lowercase()).unwrap_or_else(|| "maximize_minimum_recall".into()).into());

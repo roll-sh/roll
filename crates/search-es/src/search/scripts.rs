@@ -67,7 +67,7 @@ enum VectorSlot {
     Other,
     /// No vectors in this segment.
     Absent,
-    Reader(search_codec::VectorsReader),
+    Reader(Box<search_codec::VectorsReader>),
 }
 
 /// A literal doc field of the script, as [`DocHost::doc_values_at`] resolved it.
@@ -735,7 +735,7 @@ impl Host for DocHost {
             let slot = match resolve(&mut self.resolved, &self.table, field) {
                 Some(fi) if fi.kind == Kind::DenseVector && fi.index && fi.vector.is_some_and(|s| s.element == search_codec::VectorElement::Float32) => {
                     match self.seg.reader.vectors(fi.number) {
-                        Some(v) => VectorSlot::Reader(v.clone()),
+                        Some(v) => VectorSlot::Reader(Box::new(v.clone())),
                         None => VectorSlot::Absent,
                     }
                 }

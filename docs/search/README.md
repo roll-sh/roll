@@ -143,3 +143,35 @@ Raise the minimum whenever the count goes up, so it can't silently go back down.
 differential suite against a real Elasticsearch (`crates/search-server/tests/differential.rs`)
 and the client matrix (`tests/search/clients/run.sh`) run when present. CI:
 `.github/workflows/search.yml`, triggered from `ci.yml` when search code changes.
+
+## Next
+
+Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
+
+1. **Honest green status on the merged tree**: build, clippy, `cargo test` of every search crate,
+   rolld and roll-cli; the ES 9.5.5 and OpenSearch 3.9 YAML suites against their baselines; the
+   extended suites; the differential suite against ES 9.5.5 in Docker; the client matrix. Real
+   numbers in this README.
+2. **The fleet on roll-cluster**: lease `search:cluster:<id>` from rolld's handle instead of
+   search's own lease table and node records; catalog in the system database (schema `search`);
+   requests for a cluster another node owns forwarded through `/internal/search/rest` with
+   `Cluster::dispatch`; manifests fenced by object-storage compare-and-swap (`Objects::put_if`),
+   not by epochs that a deleted lease row could reset. Retire search-proxy's own fleet.
+3. **The edge**: `<cluster>.search.<region>.<domain>` on the HTTPS listener, routed by `Host` to
+   the search REST front, connection details naming it (`edge::Public`), logs and metrics through
+   `logs.rs` route patterns.
+4. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** on this machine (idle RAM per tenant, cold
+   start from object storage, indexing throughput, p50/p99 latency, RAM/CPU per query; Rally
+   nyc_taxis, http_logs, geonames, so): docs/benchmarks/search.md; optimise where roll loses.
+5. **Control plane per index** (for roll MCP's permission catalogue): `/v1/search/clusters/{id}/indices/{index}`
+   (get, create, delete, mapping), `…/search`, `…/docs/{doc}`, `…/bulk`, `…/delete_by_query`; the CLI
+   and dashboard on them. Credential fields stay `password` and `url`.
+6. **Dashboard polish**: index browser, query console, mappings, analyzers (`_analyze` playground),
+   usage; checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
+7. **Metering on the fleet**: client requests counted per cluster at the node (today only the
+   console's), usage on the workspace's monthly spend.
+8. **Previews, secrets, apps**: a search cluster branches for a preview environment
+   (`code_preview::DataBranches`), endpoints and passwords as bindable secrets, private networking
+   for services.
+9. **Test gate**: `pnpm test:search` on `scripts/lib/gate.sh`, an AGENTS.md line like the other
+   products', CI under a minute; then the PR to `main`.

@@ -452,7 +452,7 @@ fn parse_mappings(body: &Body<'_>, m: &Map) -> EsResult<Value> {
     out.insert("dynamic".into(), Value::Str(dynamic.into()));
     out.insert("properties".into(), Value::Obj(properties));
     if let Some(p) = id {
-        out.insert("_id".into(), obj! { "path" => p }.into());
+        out.insert("_id".into(), obj! { "path" => p });
     }
     Ok(Value::Obj(out))
 }

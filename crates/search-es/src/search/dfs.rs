@@ -22,6 +22,9 @@ use search_index::similarity::{CollectionStats, TermStats};
 use super::Target;
 use crate::error::EsResult;
 
+/// Terms (field number, bytes) and the statistics given for them, if any.
+type TermsAsked = HashMap<(u32, Vec<u8>), Option<TermStats>>;
+
 /// Statistics summed over the views of every shard of one search.
 pub struct DfsStats {
     views: Vec<Searcher>,
@@ -29,7 +32,7 @@ pub struct DfsStats {
     requested: Vec<HashSet<u32>>,
     /// Per view, the terms its DFS-phase weights asked statistics for, with the statistics
     /// they gave (a blended rewrite's), which that shard reports instead of its own.
-    requested_terms: Vec<HashMap<(u32, Vec<u8>), Option<TermStats>>>,
+    requested_terms: Vec<TermsAsked>,
     terms: Mutex<HashMap<(u32, Vec<u8>), TermStats>>,
     fields: Mutex<HashMap<u32, Option<CollectionStats>>>,
 }
@@ -95,7 +98,7 @@ impl search_index::StatsSource for DfsStats {
 #[derive(Default)]
 struct Recorder {
     fields: Mutex<HashSet<u32>>,
-    terms: Mutex<HashMap<(u32, Vec<u8>), Option<TermStats>>>,
+    terms: Mutex<TermsAsked>,
 }
 
 impl search_index::StatsSource for Recorder {

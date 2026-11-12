@@ -2822,7 +2822,7 @@ fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync
                 let mut hit: Vec<String> = Vec::new();
                 if s.contains('*') {
                     hit.extend(views.iter().filter(|v| crate::xcontent::filter::glob_match(s, v)).map(|v| v.to_string()));
-                } else if views.iter().any(|v| *v == s) && !is_index_abstraction(st, s) {
+                } else if views.contains(&s) && !is_index_abstraction(st, s) {
                     hit.push(s.clone());
                 }
                 let keep = hit.is_empty() || (s.contains('*') && (st.metadata.indices.keys().any(|i| crate::xcontent::filter::glob_match(s, i)) || st.metadata.data_streams.keys().any(|i| crate::xcontent::filter::glob_match(s, i))));
@@ -3281,10 +3281,13 @@ fn ts_rewrite(text: &str, cmds: &mut Vec<Cmd>) -> EsResult<()> {
     Ok(())
 }
 
+/// A boxed [`run_query`] (it recurses through subqueries).
+type QueryRun<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<(Table, Stats)>> + Send + 'a>>;
+
 /// Runs a query (`top`: the request's own, which gets the implicit limit; branches of a union
 /// don't). `outer`: the commands that will run over this query's result, for fields they
 /// reference that `SET unmapped_fields` has to provide.
-fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &'a mut Warnings, top: bool, outer: &'a [Cmd]) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<(Table, Stats)>> + Send + 'a>> {
+fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &'a mut Warnings, top: bool, outer: &'a [Cmd]) -> QueryRun<'a> {
     Box::pin(async move {
         if matches!(q.cmds.first(), Some(Cmd::Ts { .. })) {
             ts_rewrite(&q.src, &mut q.cmds)?;

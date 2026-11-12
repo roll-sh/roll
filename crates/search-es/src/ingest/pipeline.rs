@@ -85,6 +85,9 @@ pub struct ProcMetrics {
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A pipeline's metrics: its `created_date_millis`, its own counters and its processors'.
+type PipelineMetrics = (Option<i64>, Arc<Metric>, Arc<ProcMetrics>);
+
 /// Compiled pipelines of a cluster, valid for one metadata version, and the ingest stats.
 #[derive(Default)]
 pub struct Cache {
@@ -93,7 +96,7 @@ pub struct Cache {
     /// list changes).
     /// Keyed by the pipeline's `created_date_millis` too, so a deleted and recreated pipeline
     /// starts over.
-    metrics: parking_lot::Mutex<std::collections::HashMap<String, (Option<i64>, Arc<Metric>, Arc<ProcMetrics>)>>,
+    metrics: parking_lot::Mutex<std::collections::HashMap<String, PipelineMetrics>>,
     /// Documents that went through ingest (`IngestService.totalMetrics`).
     total: Metric,
 }
@@ -577,7 +580,7 @@ pub fn run_pipeline(cluster: &Cluster, pl: &Pipeline, d: &mut IngestDoc, depth: 
     d.ingest.insert("pipeline".into(), Value::Str(pl.id.clone()));
     let outer_flexible = std::mem::replace(&mut d.flexible, pl.flexible);
     let started = d.count_stats.then(std::time::Instant::now);
-    let outer_procs = if d.count_stats { std::mem::replace(&mut d.procs, Some(pl.procs.clone())) } else { None };
+    let outer_procs = if d.count_stats { d.procs.replace(pl.procs.clone()) } else { None };
     let mut result = Ok(Flow::Continue);
     for p in &pl.processors {
         match run_one(cluster, p, d, depth) {

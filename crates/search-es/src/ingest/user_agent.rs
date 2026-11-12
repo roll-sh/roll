@@ -155,13 +155,16 @@ impl DeviceTypes {
     }
 }
 
+/// Parsed user agents by string and whether device types were asked for.
+type DetailsCache = HashMap<(Box<str>, bool), Arc<Details>>;
+
 /// One regex file (`UserAgentParserImpl`) with its cache.
 pub struct Parser {
     ua: Vec<Subpattern>,
     os: Vec<Subpattern>,
     device: Vec<Subpattern>,
     device_types: Option<Arc<DeviceTypes>>,
-    cache: parking_lot::Mutex<HashMap<(Box<str>, bool), Arc<Details>>>,
+    cache: parking_lot::Mutex<DetailsCache>,
 }
 
 impl Parser {
