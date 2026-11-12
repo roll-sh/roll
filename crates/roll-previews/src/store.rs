@@ -670,6 +670,11 @@ impl Store {
         Ok(Some((token.unwrap_or_default(), required)))
     }
 
+    /// Whether any preview but `except` has a service from `repo`.
+    pub fn repo_has_other_services(&self, repo: &str, except: &str) -> Result<bool> {
+        Ok(self.db.read(|c| c.query_row("SELECT 1 FROM services WHERE repo = ? AND preview_id <> ? LIMIT 1", [repo, except], |_| Ok(())).optional())?.is_some())
+    }
+
     /// The preview and service a host label serves.
     pub fn service_for_host(&self, host: &str) -> Result<Option<(String, String)>> {
         Ok(self.db.read(|c| c.query_row("SELECT preview_id, name FROM services WHERE host = ?", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional())?)

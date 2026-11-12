@@ -216,9 +216,10 @@ behind the `Apps` trait:
      `_<NAME>` (`DATABASE_URL_ANALYTICS`).
   5. `ROLL_PREVIEW`, `ROLL_PREVIEW_URL`, and `ROLL_PREVIEW_URL_<SERVICE>` for each service, so
      services find each other; `PORT`, `ROLL_REPO`, `ROLL_CHANGE` and `ROLL_CHANGESET`.
-- Containers and images are shared: one image per `roll.toml` image reference, pulled once per
-  node. Build caches are the image's (`pnpm`, `cargo` caches under `/root/.cache` aren't kept
-  between starts; see `## Next`).
+- **Shared images and caches.** Images are pulled once per node. Each repo has one package cache
+  (a Docker volume `roll-previews-cache-<repo>`, at `/roll-cache`), shared by every preview of
+  the repo. npm, pnpm, yarn, bun, pip, uv, cargo and go are pointed into it, so the second
+  preview installs from what the first downloaded. The cache goes with the repo's last preview.
 
 ## Secrets
 
@@ -469,7 +470,8 @@ Ranked by what a person notices first. Done so far:
 - the dashboard's Previews tab and canvas overlay;
 - the end-to-end run and its cost;
 - an adversarial review and its fixes;
-- the private page's way in through roll.
+- the private page's way in through roll;
+- per-repo build caches.
 
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
@@ -479,8 +481,6 @@ Ranked by what a person notices first. Done so far:
 3. **roll apps end to end**: run `scripts/preview-cost.sh` against a rolld with roll apps (once
    `feature/roll-apps` lands), and measure a built service's cold start and cost. Also link
    access for its `pv-…` environments.
-4. **Build caches**: keep a `roll.toml` service's package caches between starts, in a per-repo
-   volume shared by every preview of the repo.
-5. **Spread preview services across nodes**, with a lease per preview rather than one leader.
-6. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
+4. **Spread preview services across nodes**, with a lease per preview rather than one leader.
+5. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
    `own_bytes` from roll search so a search branch's cost counts only what it wrote.

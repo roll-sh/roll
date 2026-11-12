@@ -92,6 +92,11 @@ pub struct Runtime {
     client: Client<HttpConnector, Body>,
 }
 
+/// A repo's cache volume.
+pub fn cache_name(repo: &str) -> String {
+    format!("roll-previews-cache-{}", crate::label_part(repo, 40))
+}
+
 /// The container of a service: every one roll previews makes starts with `roll-previews-`.
 pub fn container_name(host: &str) -> String {
     format!("roll-previews-{host}")
@@ -277,6 +282,9 @@ impl Runtime {
             // A service lives while it's visited: on Fargate it stops by itself a little after
             // `sleep_after` without a byte, if this node is gone and can't stop it.
             deadline: t.sleep_after + Duration::from_secs(120),
+            // Package caches shared by every preview of the repo: a second preview installs from
+            // what the first downloaded.
+            cache: Some(cache_name(&t.repo)),
         };
         self.trees.prepare(&*self.iso, &job, &t.repo, &t.revision).await?;
         let addr = self.iso.start(&name, t.spec.port).await?;
@@ -528,6 +536,12 @@ impl Apps for Runtime {
         if let Ok(Some(host)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service).map(|s| s.host)) {
             // Whichever node started it.
             self.iso.remove(&container_name(&host)).await;
+        }
+        // The repo's cache goes with its last preview service.
+        if let Ok(Some(svc)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service))
+            && !self.store.repo_has_other_services(&svc.repo, preview).unwrap_or(true)
+        {
+            self.iso.drop_cache(&cache_name(&svc.repo)).await;
         }
         Ok(())
     }

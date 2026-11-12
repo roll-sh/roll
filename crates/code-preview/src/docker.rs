@@ -65,6 +65,27 @@ pub async fn remove_leftovers(kind: &str) {
     }
 }
 
+/// Make a cache volume (once): world-writable, so an image that runs as another user can use it.
+async fn ensure_cache(name: &str) -> anyhow::Result<()> {
+    if docker(&["volume", "inspect", name]).await.is_ok() {
+        return Ok(());
+    }
+    let mut labels = vec!["volume".to_string(), "create".into(), "--label".into(), format!("{LABEL}=cache")];
+    if let Some(h) = home_label() {
+        labels.extend(["--label".into(), h]);
+    }
+    labels.push(name.to_string());
+    let argv: Vec<&str> = labels.iter().map(String::as_str).collect();
+    docker(&argv).await?;
+    let mount = format!("{name}:/c");
+    let helper = format!("{name}-init");
+    let r = docker(&["run", "--rm", "--name", &helper, "-v", &mount, "alpine:3", "chmod", "1777", "/c"]).await;
+    if r.is_err() {
+        remove(&helper).await;
+    }
+    r.map(|_| ())
+}
+
 pub async fn running(name: &str) -> bool {
     docker(&["inspect", "-f", "{{.State.Running}}", name]).await.is_ok_and(|s| s == "true")
 }
@@ -178,7 +199,15 @@ impl Isolation for Docker {
         }
         args.extend(["--workdir".into(), workdir.into(), "--add-host".into(), "host.docker.internal:host-gateway".into()]);
         args.extend(limits(job.memory_mb, job.cpus));
-        for (k, v) in &job.env {
+        let mut env: Vec<(String, String)> = Vec::new();
+        if let Some(cache) = &job.cache {
+            ensure_cache(cache).await?;
+            args.extend(["--volume".into(), format!("{cache}:{}", crate::isolation::CACHE_DIR)]);
+            // The cache's variables first: the job's own env wins.
+            env.extend(crate::isolation::CACHE_ENV.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        }
+        env.extend(job.env.iter().cloned());
+        for (k, v) in &env {
             args.push("--env".into());
             args.push(format!("{k}={v}"));
         }
@@ -233,6 +262,10 @@ impl Isolation for Docker {
 
     fn reach(&self, url: &str) -> String {
         crate::data::for_container(url)
+    }
+
+    async fn drop_cache(&self, name: &str) {
+        let _ = docker(&["volume", "rm", "-f", name]).await;
     }
 }
 

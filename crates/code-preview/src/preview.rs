@@ -365,6 +365,7 @@ impl Previews {
             // A preview lives while it's visited: on Fargate it stops by itself a little after
             // `idle` without a byte, if this node is gone and can't stop it.
             deadline: self.cfg.idle + Duration::from_secs(120),
+            cache: None,
         };
         {
             let tree = code.checkout(&repo.id, &head).await?;
