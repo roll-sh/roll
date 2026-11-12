@@ -835,14 +835,23 @@ security review. `pnpm test:code` is green on the head. Reviewed on 2026-11-12 a
 Doppler, Vercel and 1Password Developer, and against the apps, previews, MCP and search branches.
 Ranked:
 
-1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands
-   `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever PR
-   merges second does it), the resource is `Resource { product: "secrets", project, environment,
-   path, ..Default::default() }`, `rlst_` tokens migrate to roll-access tokens, and a sync made by a
-   grant stores the grant's id and re-checks it at each push through `roll_auth::Grants::grant(id)`
-   (rolld hands roll-access's `Access` as `Arc<dyn roll_auth::Grants>`). Also: roll apps' `Secrets` port wired to `Secrets::values`
-   (whichever of #20 and #21 merges second; the adapter is in the apps thread).
+1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands: done and
+   tested on `wip/secrets-on-mcp` (this branch merged with roll-mcp): `Secrets::caller` reads
+   `roll_auth::Grant` before the operator marker, `GrantGrants` answers second resources through
+   `Grant::allows` (an `ask` is a no inside the product), whoami's project comes from the grant's
+   rules, a sync made by a grant re-checks it through `roll_auth::Grants`, rolld opens secrets
+   after roll-access. Merge it in when #19 is on main; then retire `rlst_` tokens for roll-access's.
+   Also: roll apps' `SecretSource` wired to `Secrets::values` as `app:<svc>` (whichever of #20 and
+   #21 merges second; the adapter is in the apps thread).
 2. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
    a version's history shows the old and new value side by side on reveal.
 3. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
+4. **Insights**: when each key was last read (from the audit log) and changed, so unused and stale
+   credentials stand out in the grid (`GET …/insights?env=&path=`), with a per-environment
+   `max_age_days` that reports keys older than it as problems. In progress.
+5. **`roll secrets edit`** (an environment as a `.env` in `$EDITOR`, in a 0600 file under
+   `$XDG_RUNTIME_DIR`, applied as one change) and `roll secrets set KEY --generate 32` (a random
+   value made locally).
+6. **Search links live** once roll search (#22) lands its workspace kind: check the provider
+   against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
