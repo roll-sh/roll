@@ -11,7 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PATHS=(crates/apps-build crates/apps-control crates/roll-workspace crates/rolld/src/apps.rs crates/roll-cli/src/apps.rs
-       Cargo.toml Cargo.lock scripts/test-apps.sh)
+       crates/roll-fetch apps/dashboard/src/components/apps apps/dashboard/src/lib/apps-api.ts
+       apps/dashboard/src/lib/workspace-resources.ts Cargo.toml Cargo.lock scripts/test-apps.sh)
 STAMP=target/.test-apps.hash
 
 force=0 docker=0 args=()
