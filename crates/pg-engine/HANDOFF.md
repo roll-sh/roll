@@ -10337,6 +10337,65 @@ the column where get_actual_variable_range reads the one it needs. The row made 
 stored bytes (`emit` 9.5%: the decode 2.9%, its allocation 1.2%, the header's numbers 0.8%,
 `PlanRef`'s calls 0.6%). Describe at Bind starts the transaction (`ensure_txn`, 0.7%).
 
+## Range reads round 7 (agent 215)
+
+BENCH.md "Range reads, round 7" has the measurements, on the coordinator's new benchmark lane
+(servers on CPUs 10,11,28,29, clients on 12,13,30,31; builds on 0-5,18-23). One change: a kept
+index scan's rows go to a text-format client from their stored values too.
+
+- **`put_data_row_stored`** (`server.rs`) now writes text-format values as well, from the stored
+  bytes: a bool (`t`/`f`), int2, int4, int8 or oid whose result column is of that very type
+  (digits as `put_text_fast` writes them), and a string (stored `TEXT`) whose column is text,
+  varchar, bpchar or name, for a UTF-8 client (`plain_utf8`), when its bytes are valid UTF-8.
+  Those are exactly the (value, type) pairs `put_text_fast` writes for the decoded row, so the
+  bytes are the same; anything else (floats, numerics, dates, a value of another type than its
+  column's, another client encoding, invalid UTF-8, a row over the 256-byte stack buffer) returns
+  false and the row is decoded as before. `RowSink::row_stored` takes the result's columns
+  (`Feed::row_stored` passes its own) for the types.
+- Text output of these types reads no setting (DateStyle, extra_float_digits, bytea_output and
+  the like only touch the types left out), so no `FormatCtx` is made for such rows.
+
+Checks: `tests/wire.rs` `stored_rows_go_out_as_decoded_ones` (extended: varchar, bpchar, name,
+multibyte and empty text, a date, negative values, a LATIN1 client; every DataRow equal to the
+same statement's under a LIMIT, which decodes its rows); `~/.cache/a215/edge/binscan2.py` (the
+same bytes from base and the change, and PostgreSQL 18.6's, for a UTF-8 and a LATIN1 client).
+
+Verification on `c7149376f` (the change over `f18acbcc7`): release build, lib tests (213), kept_plans
+release and debug (10), wire (70), golden release and debug (all files), the planner regress
+subset (select, join, subselect, aggregates, create_index, btree_index, partition_prune, portals,
+limit, prepare, plancache; debug build, a private PG 18.6 reference): 4184/4186 units, the known
+join 368 and partition_prune 410, none newly differing; release Clippy (all targets) 19 warnings
+as on base, none in this change. Rebased onto `abfa993e5`: release build, kept_plans (10), wire (71) and
+golden again.
+The full verification train on the change over `481c345ef` (`a2cfb1289`): crate tests release and
+debug, Clippy 19 warnings, crash seeds 1-30 x 4 and the power-loss stage, the full regression
+suite with none newly differing, isolation 1647/1648 (the known one), pg_dump_tap 14,609 passed.
+(Its first regress and pg_dump runs failed on the harness's side: their helper containers still
+had the train's earlier directory mounted; run again after a restart of the helpers.)
+
+Step 0 of the round (owed from round 6): the full verification train on `f18acbcc7` (211's
+`15ad6c775` after its rebase) passed: crate tests release and debug, Clippy 19 warnings, crash
+seeds 1-30 x 4 and the power-loss stage, the full regression suite 51,148/51,150 (none newly
+differing), isolation 1647/1648 permutations (the known intra-grant-inplace one), pg_dump_tap
+14,609 passed.
+
+Where it stands (same day, this lane): roll leads PostgreSQL 18.6 on the binary 100-row range
+read (+13% ops/s, -6% user and -15% total cycles per operation, half the memory) and now on the
+text one too (+13%, -5%, -14%); the round's goal, user cycles at least 10% below PostgreSQL's,
+isn't met. Where the time goes (binary, BENCH.md): planning 23% (choosing the scan again 12%,
+placing the WHERE 4%), the two storage passes 21%, opening the tree afresh 4.7%, the allocator
+6.8%. The tree is opened afresh on every Bind because each rechosen custom plan is a new
+`Arc<Plan>` (`kept_tree` matches by pointer) and a range scan isn't `restartable` anyway; keeping
+the tree for the rechosen plans of one `KeptCustom` and restarting it over the new plan's bounds
+would save the open (4.7%) and its drop (1.2%), and would let the scan keep its readers
+(`scan_snap`, 2.1%). Agent 199 measured restarting a range scan's tree as a cycles regression
+(BENCH.md "Point reads, round 1"), so measure it alone first.
+
+Dropped (`~/.cache/a215/patches/R-reader-pool-dropped.patch` and `.txt`): a connection thread's
+pool of finished scans' store readers, moved over the next scans' ranges at their new snapshots
+(`Store::scan_raw_reusing`, `Scan::reseek_at`, `Txn::reuse_snap`; only while the store's sources
+are the ones the reader holds). -0.9% median instructions, -0.6% to -2.9% cycles: below the gate.
+
 ## Range reads round 6 (agent 211)
 
 BENCH.md "Range reads, round 6" has the measurements. One change: a kept plain index scan's

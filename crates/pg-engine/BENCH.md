@@ -285,6 +285,86 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Range reads, round 7 (2026-11-11, agent 215)
+
+HANDOFF.md, "Range reads round 7", has what changed: a kept index scan's rows go to a text-format
+client from their stored values too (`put_data_row_stored`): nulls, bools, int2/4/8, oids and
+strings of the string types, the bytes `put_text_fast` writes for the decoded row. Agent 211's
+harness, copied to `~/.cache/a215/h` (dist builds in containers with PostgreSQL's limits, 100,000
+accounts, 2 s warmup, 10 s measured; user instructions and cycles of the connection threads,
+`perf stat --per-thread`; the server containers' cycles, `perf stat -a -G`), on the coordinator's
+new lane: **servers on CPUs 10,11,28,29 (two cores, four threads), clients on 12,13,30,31**.
+Numbers from round 6 and before were on CPUs 24-27 (four threads that shared cores with build
+CPUs) and don't compare. New this round: a text-format case, `range_text`: pgbench `-M prepared`
+running the same statement (`\set start random(1, 99900)`, the `BETWEEN :start AND :start + 99`
+read), whose results come in text as psql's and most drivers' do. pgbench doesn't check the rows;
+their bytes are checked separately (below).
+
+**Same day, the three servers** (three rounds each, the arms' order reversed in round 2; other
+tenants' load on the server CPUs 0.07-0.30 cores; cycles are the server container's, all its
+processes and threads; medians):
+
+| format | server | ops/s | us CPU / op | user cycles / op | all cycles / op | MiB after |
+|---|---|---:|---:|---:|---:|---:|
+| binary | PostgreSQL 18.6 | 25,144 | 147.7 | 432k | 587k | 103 |
+| binary | pgrust | 23,748 | 154.8 | 519k | 626k | 198 |
+| binary | roll, base `f18acbcc7` | 28,503 | 128.6 | 407k | 499k | 54 |
+| binary | roll, this change | 29,316 | 125.3 | 407k | 499k | 51 |
+| text | PostgreSQL 18.6 | 24,381 | 145.5 | 451k | 597k | 103 |
+| text | pgrust | 25,099 | 140.9 | 477k | 575k | 187 |
+| text | roll, base `f18acbcc7` | 24,516 | 145.8 | 499k | 586k | 54 |
+| text | roll, this change | 27,562 | 127.9 | 427k | 512k | 54 |
+
+On this lane roll is ahead of PostgreSQL on the binary read in every round (+13% ops/s, -13% CPU
+per operation, -6% user and -15% total cycles, half the memory); the change doesn't touch the
+binary path (its binary arm is base's within noise). In text, base was level with PostgreSQL
+(+0.6% ops/s, +11% user cycles); with the change roll is +13% ops/s, -12% CPU per operation, -5%
+user and -14% total cycles. The round's target (user cycles at least 10% below PostgreSQL's) isn't
+met in either format. pgrust is behind PostgreSQL in binary and slightly ahead in text.
+
+The change against base (`f18acbcc7`), five alternating pairs each:
+
+| workload | instr / op (median; range) | cycles / op (range) | ops/s (median; worst pair) | CPU / op (median) |
+|---|---|---|---|---:|
+| range read, text, 8 clients | -20.9%; -20.3% to -21.2% | -11.2% to -16.3% | +12.3%; +8.9% | -11.5% |
+| range read, text, 1 client | -20.7%; -20.1% to -21.4% | -14.3% to -23.2% | +4.9%; +1.5% | -6.8% |
+| range read, binary, 8 clients | -0.03%; -2.5% to +0.5% | -3.9% to +0.6% | +0.2%; -0.2% | +0.2% |
+| range read, binary, 1 client | +0.47%; +0.3% to +1.6% | -7.7% to +1.9% | +1.0%; -1.4% | +0.4% |
+| point read, 8 clients | -0.01%; -0.6% to +0.3% | -0.8% to +0.9% | -0.5%; -0.8% | +0.5% |
+| UPDATE one row, 8 clients | +0.20%; -5.5% to +3.5% | -0.2% to +2.2% | +0.4%; -2.8% | +0.0% |
+
+(No pair above a core of other load; the 1-client runs had 0.36-0.46 cores.) The binary path is
+the same code as base's but for `row_stored`'s added column types: the 1-client binary read's
++0.3% to +1.6% instructions came with ops/s and CPU per operation within noise (+1.0%, +0.4%),
+and the 8-client binary read measured -0.03%. Memory after the runs
+47-56 MiB on both builds.
+
+DataRows: `~/.cache/a215/edge/binscan2.py` (211's `binscan.py` plus a table of varchar, bpchar,
+name, multibyte and empty text, a date, extreme int2/int8/oid values and strings up to 300 bytes;
+twelve prepared index scans, four result-format sets, three executions each; once with a UTF-8 and
+once with a LATIN1 client) gives the same bytes from base and the change, and PostgreSQL 18.6's
+(ErrorResponses compared by SQLSTATE and message: PostgreSQL's carry its file and line).
+
+The LBR profile of the binary read with the change on this lane (connection threads; shares of
+the samples): planning (`planned_as`) 23.1% (choosing the scan again 12.0%, placing the WHERE
+4.2%), the scan 41.9% (the index entries' read 9.7%, the rows' dense read 11.5%, `fill_batch`
+12.3% of both, new storage readers `scan_snap` 2.1%, reopening the tree 4.7%), the DataRows from
+the stored bytes 4.6%, the kernel send at ReadyForQuery 12.4%, reading the next message 7.4%,
+the transaction's end 2.8%, Bind 2.4%; the allocator 6.8%. In text, before the change, the rows
+went through `projected_row` (5.7%) and `Feed::row` / `put_data_row` (7.7%).
+
+Dropped (`~/.cache/a215/patches/R-reader-pool-dropped.patch`, with its numbers): a connection
+thread's finished scans' store readers kept (up to four, emptied at the idle hook) and moved over
+the next scans' ranges at their new snapshots (`Store::scan_raw_reusing`, `Scan::reseek_at`:
+allowed while the store's sources are the reader's). Against the change, five pairs: instructions
+-0.5% to -1.0% (median -0.9%), cycles -0.6% to -2.9%, ops/s +2.1%, CPU -1.7%: the new scans it
+saves (2.1% of samples) are mostly paid again in repositioning (the sources looked up again when
+the index's and the table's readers trade places, the toast source, the gc horizon's lock).
+
+The kernel send at ReadyForQuery is the same work in both servers: round 3's strace found one
+`sendto` and one `recvfrom` per query on the engine (2.0 system calls per query) against
+PostgreSQL's 8.5.
+
 ## Short write transactions, round 4 (2026-11-11/12, agent 216)
 
 Nothing kept: four steps measured, none met the keep gate (user cycles per transaction down in
