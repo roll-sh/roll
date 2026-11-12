@@ -122,9 +122,10 @@ pub fn match_none(reason: &str) -> QueryRef {
     arc(MatchNoneQuery::new(reason))
 }
 
-/// `QueryShardException` ("failed to create query: …") wrapping a conversion error.
+/// `QueryShardException` ("failed to create query: …") wrapping a conversion error
+/// (`SearchExecutionContext.toQuery` rethrows `QueryShardException`s and `ParsingException`s).
 pub fn shard_exception(idx: &IndexMeta, e: EsError) -> EsError {
-    if e.kind == "query_shard_exception" {
+    if e.kind == "query_shard_exception" || e.kind == "parsing_exception" {
         return e;
     }
     let reason = format!("failed to create query: {}", e.reason());
@@ -362,6 +363,7 @@ impl<'a> QueryCtx<'a> {
             Q::QueryString(qs) => super::query_string::query_string(self, qs),
             Q::SimpleQueryString(qs) => super::query_string::simple_query_string(self, qs),
             Q::Nested(n) => self.nested_query(n),
+            Q::Kql(k) => self.to_query(&super::kql::rewrite(self, k)?),
             Q::Wrapper(w) => {
                 let v = crate::json::parse(&w.source)?.unwrap_or(Value::Null);
                 let (inner, _) = crate::query::parse_query(&v, None, &[])?;

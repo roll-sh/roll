@@ -213,6 +213,12 @@ impl EsError {
             out.push(' ');
         }
         out.push_str(&format!("{}: {}", java_class(&self.kind), self.reason()));
+        // `printStackTrace`'s cause chain (the frames left out).
+        let mut cause = self.caused_by.as_deref();
+        while let Some(c) = cause {
+            out.push_str(&format!("\nCaused by: {}: {}", java_class(&c.kind), c.reason()));
+            cause = c.caused_by.as_deref();
+        }
         out
     }
 

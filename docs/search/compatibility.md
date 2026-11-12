@@ -269,6 +269,7 @@ the discovery/store plugins.
 <!-- test-search: eql >= 27 -->
 <!-- test-search: fleet >= 21 -->
 <!-- test-search: ilm >= 16 -->
+<!-- test-search: kql >= 34 -->
 <!-- test-search: logsdb >= 136 -->
 <!-- test-search: mapper-constant-keyword >= 5 -->
 <!-- test-search: mapper-unsigned-long >= 22 -->
@@ -300,8 +301,8 @@ the discovery/store plugins.
 
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
 not implemented at all: the plugin analyzers and mappers (`analysis-icu`, `-kuromoji`, `-nori`,
-`-phonetic`, `-smartcn`, `-stempel`, `-ukrainian`, `annotated_text`, `murmur3`, `_size`), the
-`kql` query, CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
+`-phonetic`, `-smartcn`, `-stempel`, `-ukrainian`, `annotated_text`, `murmur3`, `_size`),
+CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
 `attachment`, reindex management, Prometheus ingest, rollups; roll lists no `lang-expression`,
 `transport-netty4` or `user-agent` module in `_nodes`; roll ignores `xpack.license.self_generated.type: basic`
 (its license is always `enterprise`), so `rank-rrf-license`'s licence errors are missing; the

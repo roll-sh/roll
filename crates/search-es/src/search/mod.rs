@@ -29,6 +29,7 @@ pub mod inner;
 pub mod fusion;
 pub mod join;
 pub mod knn;
+pub mod kql;
 pub mod retriever;
 pub mod runtime;
 pub mod runtime_query;

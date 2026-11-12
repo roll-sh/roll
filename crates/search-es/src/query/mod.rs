@@ -16,6 +16,7 @@ pub mod compound;
 pub mod full_text;
 pub mod geo;
 pub mod joining;
+pub mod kql;
 pub mod script;
 pub mod span;
 pub mod specialized;
@@ -143,6 +144,7 @@ queries! {
     QueryString(full_text::QueryString) = "query_string",
     SimpleQueryString(full_text::SimpleQueryString) = "simple_query_string",
     Intervals(full_text::Intervals) = "intervals",
+    Kql(kql::Kql) = "kql",
     Nested(joining::Nested) = "nested",
     HasChild(joining::HasChild) = "has_child",
     HasParent(joining::HasParent) = "has_parent",
@@ -187,7 +189,7 @@ queries! {
 pub const QUERY_NAMES: &[&str] = &[
     "bool", "boosting", "combined_fields", "constant_score", "dis_max", "distance_feature", "exact_knn", "exists",
     "field_masking_span", "function_score", "fuzzy", "geo_bounding_box", "geo_distance", "geo_grid", "geo_polygon",
-    "geo_shape", "has_child", "has_parent", "ids", "intervals", "knn", "knn_score_doc", "match", "match_all",
+    "geo_shape", "has_child", "has_parent", "ids", "intervals", "knn", "knn_score_doc", "kql", "match", "match_all",
     "match_bool_prefix", "match_none", "match_phrase", "match_phrase_prefix", "more_like_this", "multi_match", "nested",
     "parent_id", "percolate", "pinned", "prefix", "query_string", "range", "rank_feature", "regexp", "rule", "rule_query", "script",
     "script_score", "semantic", "shape", "simple_query_string", "span_containing", "span_field_masking", "span_first", "span_gap",
@@ -337,6 +339,7 @@ fn parse_named(name: &str, p: &mut XParser<'_>) -> EsResult<Query> {
         "query_string" => full_text::QueryString::parse(p)?.into(),
         "simple_query_string" => full_text::SimpleQueryString::parse(p)?.into(),
         "intervals" => full_text::Intervals::parse(p)?.into(),
+        "kql" => kql::Kql::parse(p)?.into(),
         "nested" => joining::Nested::parse(p)?.into(),
         "has_child" => joining::HasChild::parse(p)?.into(),
         "has_parent" => joining::HasParent::parse(p)?.into(),
