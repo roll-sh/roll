@@ -93,6 +93,12 @@ impl Shutdown {
         self.0.send_replace(true);
     }
 
+    /// Resolves once [`Shutdown::trigger`] ran.
+    pub async fn wait(&self) {
+        let mut rx = self.subscribe();
+        let _ = rx.wait_for(|v| *v).await;
+    }
+
     fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
         self.0.subscribe()
     }
@@ -251,7 +257,7 @@ where
     }
 }
 
-fn head_of(req: &Request<Incoming>) -> EsRequest {
+fn head_of<B>(req: &Request<B>) -> EsRequest {
     // An absolute-form target (`GET http://host/ HTTP/1.1`) is routed as written, as Netty
     // hands it to Elasticsearch: no handler matches it.
     let uri = match req.uri().authority() {
@@ -294,7 +300,12 @@ enum BodyError {
 /// The service's error: hyper closes the connection without answering (Netty's behaviour when
 /// a request body can't be decoded).
 #[derive(Debug)]
-struct DropConnection(String);
+pub struct DropConnection(String);
+
+/// A request body [`respond`] can read: hyper's own, or another server's (axum's, on a fleet).
+pub trait RequestBody: hyper::body::Body<Data = Bytes, Error: Into<Box<dyn std::error::Error + Send + Sync>>> + Unpin + Send {}
+
+impl<B> RequestBody for B where B: hyper::body::Body<Data = Bytes, Error: Into<Box<dyn std::error::Error + Send + Sync>>> + Unpin + Send {}
 
 impl std::fmt::Display for DropConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -332,7 +343,7 @@ fn expectation_failed() -> Response<Full<Bytes>> {
 
 /// Netty's limits on the request head (see the module docs), measured as the client sent it
 /// (header lines as `name: value`).
-fn head_too_long(req: &Request<Incoming>) -> Option<EsError> {
+fn head_too_long<B>(req: &Request<B>) -> Option<EsError> {
     let target = match req.uri().authority() {
         Some(_) => req.uri().to_string().len(),
         None => req.uri().path_and_query().map_or(1, |p| p.as_str().len()),
@@ -350,8 +361,8 @@ fn head_too_long(req: &Request<Incoming>) -> Option<EsError> {
 
 /// Reads the whole body, at most `max` bytes, within the body timeouts. Without a declared
 /// length every frame is reserved from the byte budget before it is kept (`reserve`).
-async fn read_body(
-    body: Incoming,
+async fn read_body<B: RequestBody>(
+    body: B,
     max: usize,
     (idle, total): (Duration, Duration),
     declared: Option<u64>,
@@ -386,7 +397,14 @@ async fn read_body(
     }
 }
 
-async fn respond(node: Arc<Node>, req: Request<Incoming>, sni: Option<&str>, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
+/// Serves one request as this node's REST port does, for a request another server accepted
+/// (a fleet node's front, which runs it on its cluster's owner): the same limits, decoding and
+/// answers. `Err`: close the connection without answering.
+pub async fn serve_request<B: RequestBody>(node: Arc<Node>, req: Request<B>) -> Result<Response<Full<Bytes>>, DropConnection> {
+    respond(node, req, None, (BODY_IDLE_TIMEOUT, BODY_TIMEOUT)).await
+}
+
+async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
     let mut es = head_of(&req);
     let gzip_ok = accepts_gzip(es.header("accept-encoding")) && es.method != "HEAD";
     if let Some(e) = head_too_long(&req) {

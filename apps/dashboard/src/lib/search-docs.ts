@@ -1,7 +1,6 @@
 /**
  * Documents in the index browser: flattening `_source` into table cells, choosing columns, and
- * the requests that write a document. Pure and dependency-free, so `node --test` runs its tests
- * from the TypeScript source (`search-docs.test.mjs`).
+ * the requests that write a document. Pure (tests: `search-docs.test.ts`).
  *
  * Documents travel as JSON text and are never re-encoded from parsed values: `JSON.parse` rounds
  * integers above 2^53, turns `1.0` into `1` (which Elasticsearch's dynamic mapping then maps as

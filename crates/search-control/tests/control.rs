@@ -514,6 +514,47 @@ async fn documents() {
 
 /// Documents are durable: acknowledged writes survive an unload (flush, recovery on wake), a
 /// branch sees them, and so does a new node on the same object storage after a restart.
+/// The per-index routes (what roll's permission catalogue and MCP tools map onto): each one
+/// Elasticsearch operation, answering with its status and body.
+#[tokio::test]
+async fn per_index_routes() {
+    let e = env().await;
+    e.post("/v1/search/clusters", json!({"name": "idx"})).await;
+    let base = "/v1/search/clusters/idx/indices";
+    let (s, v) = e.call(reqwest::Method::PUT, &format!("{base}/books"), Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await;
+    assert_eq!((s, &v["acknowledged"]), (200, &json!(true)), "{v}");
+    let (s, v) = e.call(reqwest::Method::PUT, &format!("{base}/books/mapping"), Some(json!({"properties": {"year": {"type": "integer"}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.call(reqwest::Method::PUT, &format!("{base}/books/docs/1?refresh=true"), Some(json!({"title": "the rust book", "year": 2018}))).await;
+    assert_eq!((s, v["result"].as_str()), (201, Some("created")), "{v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/docs?refresh=true"), Some(json!({"title": "rust in action", "year": 2021}))).await;
+    assert_eq!(s, 201, "{v}");
+    let bulk = "{\"index\":{\"_id\":\"3\"}}\n{\"title\":\"programming rust\",\"year\":2021}\n";
+    let r = e.http.post(format!("{}{base}/books/bulk?refresh=true", e.api)).body(bulk).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["errors"], false, "{v}");
+    let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/books/docs/1"), None).await;
+    assert_eq!((s, v["_source"]["year"].as_i64()), (200, Some(2018)), "{v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(json!({"query": {"term": {"year": 2021}}}))).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
+    let (_, v) = e.call(reqwest::Method::GET, &format!("{base}/books"), None).await;
+    assert_eq!(v["books"]["mappings"]["properties"]["year"]["type"], "integer", "{v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/delete_by_query?refresh=true"), Some(json!({"query": {"term": {"year": 2018}}}))).await;
+    assert_eq!((s, v["deleted"].as_i64()), (200, Some(1)), "{v}");
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{base}/books/docs/3"), None).await;
+    assert_eq!(s, 200);
+    // Elasticsearch's own errors and statuses come through.
+    let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/books/docs/1"), None).await;
+    assert_eq!((s, &v["found"]), (404, &json!(false)), "{v}");
+    let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/nope"), None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (404, Some("index_not_found_exception")), "{v}");
+    // A write names one index; `_` names are Elasticsearch's own APIs, not indices.
+    assert_eq!(e.call(reqwest::Method::DELETE, &format!("{base}/books*"), None).await.0, 400);
+    assert_eq!(e.call(reqwest::Method::GET, &format!("{base}/_all"), None).await.0, 400);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{base}/books"), None).await;
+    assert_eq!(s, 200);
+}
+
 #[tokio::test]
 async fn documents_survive_unload_and_branch() {
     let e = env().await;

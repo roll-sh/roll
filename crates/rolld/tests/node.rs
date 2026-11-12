@@ -58,6 +58,7 @@ fn start(home: &std::path::Path, env: &[(&str, &str)]) -> (Rolld, u16) {
         "ROLL_QUEUES_WEB_MQTT",
         "ROLL_QUEUES_STREAM",
         "ROLL_QUEUES_HTTP",
+        "ROLL_SEARCH_HTTP",
     ] {
         cmd.env(var, local(free_port()));
     }

@@ -483,6 +483,8 @@ pub struct ClusterData {
     syncer: AtomicBool,
     /// Local deadline of the cluster's lease (ms since `epoch`; 0: no lease).
     lease_deadline: AtomicU64,
+    /// [`crate::lease::Leases::validity`]: checked with the deadline.
+    lease_check: parking_lot::Mutex<Option<crate::lease::Validity>>,
     /// Check ownership in object storage before acknowledging ([`ClusterData::set_verify_owner`]).
     verify_owner: AtomicBool,
     /// The newest LSN an ownership check that passed covers…
@@ -582,6 +584,7 @@ impl ClusterData {
             closing: tokio::sync::Notify::new(),
             syncer: AtomicBool::new(false),
             lease_deadline: AtomicU64::new(0),
+            lease_check: parking_lot::Mutex::new(None),
             verify_owner: AtomicBool::new(false),
             owner_checked: AtomicU64::new(0),
             owner_checks: Mutex::new(Vec::new()),
@@ -635,9 +638,15 @@ impl ClusterData {
         self.lease_deadline.store(LEASE_REVOKED, Ordering::SeqCst);
     }
 
+    /// Acknowledgements also need `check` to hold ([`crate::lease::Leases::validity`]).
+    pub fn set_lease_check(&self, check: Option<crate::lease::Validity>) {
+        *self.lease_check.lock() = check;
+    }
+
     fn lease_valid(&self) -> bool {
         let d = self.lease_deadline.load(Ordering::SeqCst);
-        d != LEASE_REVOKED && (d == 0 || (self.epoch.elapsed().as_millis() as u64) < d)
+        let held = d != LEASE_REVOKED && (d == 0 || (self.epoch.elapsed().as_millis() as u64) < d);
+        held && self.lease_check.lock().as_ref().is_none_or(|check| check())
     }
 
     /// Acknowledge a write only after an ownership check in object storage that started once

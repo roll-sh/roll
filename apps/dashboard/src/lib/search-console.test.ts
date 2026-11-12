@@ -1,8 +1,7 @@
-// Tests of the console completion (`node --test`; Node 23.6+ runs the TypeScript source as is).
-// Run: node --test apps/dashboard/src/lib/search-console.test.mjs
+// Tests of the console completion (vitest).
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, requestIndex } from "./search-console.ts";
+import { test } from "vitest";
+import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, requestIndex } from "./search-console";
 
 const FIELDS = [
   { name: "price", type: "float" },

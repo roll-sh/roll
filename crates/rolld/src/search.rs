@@ -6,20 +6,16 @@
 //! the WAL holds them (local disk, or object storage with `--search-sync-objects`), and a
 //! cluster that unloads is flushed first.
 //!
-//! **Fleet mode** (`--search-meta postgres://…`, with `--search-only` on AWS): the node joins a
-//! fleet sharing one catalog. It takes a cluster's ownership lease before serving it,
-//! heartbeats its addresses for `search-proxy`, acknowledges writes once they are in object
-//! storage (optionally an S3 Express One Zone bucket for the WAL, `--search-wal-bucket`), and on
-//! SIGTERM drains: it publishes `draining`, refuses new requests (`node_closed_exception`, which
-//! the proxy resends to the next owner), lets those in flight finish, flushes and hands each
-//! cluster's lease back, then leaves. See `docs/search/deploy-aws.md`.
-//!
-//! `/v1/search` is served on rolld's API port with every other product's routes, behind its
-//! operator gate (auth.rs).
+//! On a cluster (a roll-cluster backend other than memory) every search cluster is served by the
+//! holder of its lease `search:cluster:<name>` (`search_control::cluster`): the catalog is in the
+//! system database (`ROLL_SYSTEM_DATABASE`, schema `search`), writes are acknowledged once their
+//! WAL batch is in object storage, and this node's REST port runs each request on its cluster's
+//! owner. `/v1/search` is served on rolld's API port with every other product's routes, behind
+//! its operator gate (auth.rs).
 
 use clap::Args;
 use pg_storage::StorageConfig;
-use search_control::{Control, FleetConfig, SearchConfig};
+use search_control::{Control, SearchConfig};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,21 +34,18 @@ pub struct SearchArgs {
     #[arg(long = "search-http", env = "ROLL_SEARCH_HTTP", default_value = "127.0.0.1:59200")]
     pub search_http: SocketAddr,
     /// Serve HTTPS with this PEM certificate chain (needs --search-tls-key). The TLS server name
-    /// can select the cluster (`<cluster>.<--search-domain>`).
+    /// can select the cluster (`<cluster>.<--search-domain>`). A single node only: on a cluster
+    /// TLS ends at the edge.
     #[arg(long = "search-tls-cert", env = "ROLL_SEARCH_TLS_CERT", requires = "search_tls_key")]
     pub search_tls_cert: Option<PathBuf>,
     #[arg(long = "search-tls-key", env = "ROLL_SEARCH_TLS_KEY", requires = "search_tls_cert")]
     pub search_tls_key: Option<PathBuf>,
-    /// Serve HTTPS with a certificate made at boot (fleet nodes behind search-proxy: the
-    /// heartbeat publishes its SHA-256 and the proxies accept only it).
-    #[arg(long = "search-tls-self-signed", env = "ROLL_SEARCH_TLS_SELF_SIGNED", conflicts_with = "search_tls_cert", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
-    pub search_tls_self_signed: bool,
     /// Clusters are reached at `<cluster>.<domain>` (e.g. `search.example.com`): SNI or `Host`
     /// routing, and the host in cluster URLs.
     #[arg(long = "search-domain", env = "ROLL_SEARCH_DOMAIN")]
     pub search_domain: Option<String>,
     /// The URL clients reach clusters at when something sits in front of this node (a load
-    /// balancer or a Lambda function URL): cluster URLs use its scheme, host and port.
+    /// balancer): cluster URLs use its scheme, host and port.
     #[arg(long = "search-public-url", env = "ROLL_SEARCH_PUBLIC_URL")]
     pub search_public_url: Option<String>,
     /// Unload clusters idle this long, in seconds (a cluster's own idle timeout wins).
@@ -66,11 +59,10 @@ pub struct SearchArgs {
     #[arg(long = "search-memory-mb", env = "ROLL_SEARCH_MEMORY_MB", default_value_t = 0)]
     pub search_memory_mb: u64,
     /// Acknowledge writes once the WAL is in object storage (for nodes with ephemeral disks;
-    /// always on in fleet mode).
+    /// always on in a cluster).
     #[arg(long = "search-sync-objects", env = "ROLL_SEARCH_SYNC_OBJECTS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_sync_objects: bool,
-    /// Keep search data in this directory instead of rolld's object storage (several nodes of
-    /// one host sharing a disk; tests).
+    /// Keep search data in this directory instead of rolld's object storage (tests).
     #[arg(long = "search-storage-dir", env = "ROLL_SEARCH_STORAGE_DIR")]
     pub search_storage_dir: Option<PathBuf>,
     /// Keep the WAL in this S3 Express One Zone directory bucket (`name--azid--x-s3`): acks in
@@ -84,57 +76,46 @@ pub struct SearchArgs {
     #[arg(long = "search-history", env = "ROLL_SEARCH_HISTORY", default_value_t = 86_400)]
     pub search_history_s: u64,
     /// Collect unreferenced segments and WAL files every this many seconds (0: never). In a
-    /// fleet, one node at a time runs it.
+    /// cluster, one node at a time runs it.
     #[arg(long = "search-gc-interval", env = "ROLL_SEARCH_GC_INTERVAL", default_value_t = 3600)]
     pub search_gc_interval_s: u64,
     /// Publish Elasticsearch's test cluster features (to run the YAML REST suites against
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_test_features: bool,
-    /// Join a fleet whose catalog, leases and node records live here: `postgres://…` (roll
-    /// postgres or RDS), or a SQLite file shared by the nodes of one host.
-    #[arg(long = "search-meta", env = "ROLL_SEARCH_META")]
-    pub search_meta: Option<String>,
-    /// Password for the fleet database, when the URL has none (an RDS-managed secret).
-    #[arg(long = "search-meta-password", env = "ROLL_SEARCH_META_PASSWORD", hide_env_values = true)]
-    pub search_meta_password: Option<String>,
-    /// More CA certificates (PEM) to verify the fleet Postgres with (the image ships the RDS bundle).
-    #[arg(long = "search-meta-ca", env = "ROLL_SEARCH_META_CA")]
-    pub search_meta_ca: Option<PathBuf>,
-    /// This node's id in the fleet (default: the ECS task id, else `--node`). Unique per
-    /// running node.
-    #[arg(long = "search-node-id", env = "ROLL_SEARCH_NODE_ID")]
-    pub search_node_id: Option<String>,
-    /// Availability zone (default: from the ECS task metadata); proxies prefer nodes in theirs.
-    #[arg(long = "search-az", env = "ROLL_SEARCH_AZ")]
-    pub search_az: Option<String>,
-    /// Host proxies and other nodes reach this node on (default: its primary address).
-    #[arg(long = "search-advertise-host", env = "ROLL_SEARCH_ADVERTISE_HOST")]
-    pub search_advertise_host: Option<String>,
-    /// Seconds a stopping node may take to hand its clusters over (Spot gives 120).
-    #[arg(long = "search-shutdown-timeout", env = "ROLL_SEARCH_SHUTDOWN_TIMEOUT", default_value_t = 90)]
-    pub search_shutdown_timeout_s: u64,
 }
 
 pub struct Search {
     pub control: Arc<Control>,
+    /// The roll-cluster fleet clusters are served in (`None`: this node alone owns them all).
+    cluster: Option<Arc<roll_cluster::Cluster>>,
     listener: tokio::sync::Mutex<Option<tokio::net::TcpListener>>,
     opts: search_server::ListenOptions,
     stop: search_server::Shutdown,
-    timeout: Duration,
 }
 
-fn advertise(host: Option<&str>, bind: SocketAddr) -> String {
-    match host.filter(|h| !h.is_empty()) {
-        Some(h) => format!("{h}:{}", bind.port()),
-        None => search_proxy::aws::advertise_for(bind).to_string(),
-    }
-}
+/// How long a stop may take to flush what's still loaded (a drain has handed the rest over).
+const SHUTDOWN: Duration = Duration::from_secs(60);
 
 impl Search {
-    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, api: SocketAddr) -> anyhow::Result<Self> {
+    /// `cluster`: the node's roll-cluster handle. On a cluster backend other than memory every
+    /// cluster is served by the holder of its lease (`search_control::cluster`), with the catalog
+    /// in the system database and acknowledgements once writes are in object storage.
+    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>) -> anyhow::Result<Self> {
         let mut cfg = SearchConfig::local(home.join("search"));
+        let fleet = (cluster.backend_name() != "memory").then(|| cluster.clone());
         cfg.node_name = node.to_string();
+        if fleet.is_some() {
+            anyhow::ensure!(!matches!(storage, StorageConfig::Local(_)) || args.search_storage_dir.is_some(), "search in a cluster needs S3 (--s3-bucket): the other nodes can't read a local directory");
+            let Some(db) = system_database.filter(|u| !u.is_empty()) else {
+                anyhow::bail!("search in a cluster needs the system database (ROLL_SYSTEM_DATABASE): every node must see the same catalog");
+            };
+            cfg.catalog = Some(db.to_string());
+            // Another node replays this one's WAL after a takeover.
+            cfg.sync_objects = true;
+            // WAL objects are named by the node: the cluster's node id is unique per process.
+            cfg.node_name = cluster.node_id().to_string();
+        }
         cfg.public_host = public_host.to_string();
         cfg.http_port = args.search_http.port();
         cfg.domain = args.search_domain.clone().filter(|d| !d.is_empty());
@@ -143,50 +124,14 @@ impl Search {
         cfg.defaults.idle_timeout_s = args.search_idle_unload_s as i64;
         cfg.cache_bytes = args.search_cache_bytes;
         cfg.memory_budget = (args.search_memory_mb > 0).then_some(args.search_memory_mb << 20);
-        cfg.sync_objects = args.search_sync_objects;
+        cfg.sync_objects |= args.search_sync_objects;
         cfg.history_retention = Duration::from_secs(args.search_history_s);
         cfg.test_features = args.search_test_features;
         cfg.gc_interval = (args.search_gc_interval_s > 0).then(|| Duration::from_secs(args.search_gc_interval_s));
-        // TLS first: in a fleet, the heartbeat publishes the certificate's pin.
-        let host = args.search_advertise_host.as_deref();
-        let tls = match (&args.search_tls_cert, &args.search_tls_key) {
-            (Some(c), Some(k)) => Some((std::fs::read(c)?, std::fs::read(k)?)),
-            _ if args.search_tls_self_signed => {
-                let ip = advertise(host, args.search_http);
-                let ip = ip.rsplit_once(':').map_or(ip.as_str(), |(h, _)| h).trim_matches(['[', ']']).to_string();
-                let c = search_proxy::upstream::self_signed(&[ip, "localhost".into()])?;
-                Some((c.cert_pem.into_bytes(), c.key_pem.into_bytes()))
-            }
-            _ => None,
-        };
-        let tls_pin = match &tls {
-            Some((cert, _)) => Some(search_proxy::upstream::pem_fingerprint(cert)?),
-            None => None,
-        };
-        // `/v1/search` sits behind rolld's operator gate (auth.rs), like every product's API.
-        cfg.api_token = None;
-        if let Some(meta) = args.search_meta.clone().filter(|m| !m.is_empty()) {
-            let node_id = match args.search_node_id.clone().filter(|n| !n.is_empty()) {
-                Some(n) => n,
-                None => search_proxy::aws::ecs_task_id().await.unwrap_or_else(|| node.to_string()),
-            };
-            // WAL objects are named by the node: every running node needs its own name.
-            cfg.node_name = node_id.clone();
-            let az = match args.search_az.clone().filter(|a| !a.is_empty()) {
-                Some(a) => Some(a),
-                None => search_proxy::aws::ecs_availability_zone().await,
-            };
-            let mut f = FleetConfig::new(meta, node_id, advertise(host, args.search_http));
-            f.meta_ca = args.search_meta_ca.clone();
-            f.meta_password = args.search_meta_password.clone();
-            f.az = az;
-            f.advertise_api = Some(advertise(host, api));
-            f.tls_pin = tls_pin;
-            cfg.fleet = Some(f);
-        }
         let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, ..Default::default() };
-        if let Some((cert, key)) = &tls {
-            opts.tls = Some(search_server::net::tls_acceptor(cert, key)?);
+        if let (Some(c), Some(k)) = (&args.search_tls_cert, &args.search_tls_key) {
+            anyhow::ensure!(fleet.is_none(), "--search-tls-cert is for a single node: in a cluster TLS ends at the edge");
+            opts.tls = Some(search_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?);
         }
         cfg.tls = opts.tls.is_some();
         let wal = match args.search_wal_bucket.as_deref().filter(|b| !b.is_empty()) {
@@ -204,91 +149,46 @@ impl Search {
             None => search_store::Objects::new(storage)?,
         };
         let control = Control::open(cfg, objects, wal).await?;
+        if let Some(c) = &fleet {
+            control.join(c.clone())?;
+        }
         let listener = tokio::net::TcpListener::bind(args.search_http).await.map_err(|e| anyhow::anyhow!("bind {}: {e}", args.search_http))?;
-        info!(
-            addr = %args.search_http,
-            tls = control.cfg.tls,
-            domain = ?control.cfg.domain,
-            storage = %control.objects().description,
-            fleet = control.fleet.as_ref().map(|f| f.node_id.as_str()),
-            "search listening"
-        );
-        Ok(Search {
-            control,
-            listener: tokio::sync::Mutex::new(Some(listener)),
-            opts,
-            stop: search_server::Shutdown::new(),
-            timeout: Duration::from_secs(args.search_shutdown_timeout_s.max(1)),
-        })
+        info!(addr = %args.search_http, tls = control.cfg.tls, domain = ?control.cfg.domain, storage = %control.objects().description, clustered = fleet.is_some(), "search listening");
+        Ok(Search { control, cluster: fleet, listener: tokio::sync::Mutex::new(Some(listener)), opts, stop: search_server::Shutdown::new() })
     }
 
     pub fn router(&self) -> axum::Router {
         search_control::api::router(self.control.clone())
     }
 
-    /// Serves the REST listener until it fails or [`Search::shutdown`] has handed everything
-    /// over. In a fleet, announces the node once it accepts.
+    /// The internal route REST requests other nodes forward come in on (their cluster is here).
+    pub fn internal(&self, router: axum::Router) -> axum::Router {
+        match &self.cluster {
+            Some(c) => router.merge(search_control::cluster::internal_router(self.control.clone(), c.clone())),
+            None => router,
+        }
+    }
+
+    /// Serves the REST listener until it fails or [`Search::shutdown`] stops it.
     pub async fn serve(&self) -> anyhow::Result<()> {
         let listener = self.listener.lock().await.take().ok_or_else(|| anyhow::anyhow!("search listener already serving"))?;
-        let serving = search_server::serve_until(listener, self.control.node.clone(), self.opts.clone(), self.stop.clone());
-        let mut serving = std::pin::pin!(serving);
-        // The listener is bound, so proxies may route here as soon as the record appears.
-        tokio::select! {
-            r = &mut serving => return r,
-            r = self.control.announce() => r?,
+        // On a cluster each request runs on its cluster's owner: the front names the cluster and
+        // dispatches it (`search_control::cluster`).
+        if self.cluster.is_some() {
+            let front = search_control::cluster::rest_router(self.control.clone());
+            let stop = self.stop.clone();
+            axum::serve(listener, front).with_graceful_shutdown(async move { stop.wait().await }).await?;
+            return Ok(());
         }
-        serving.await
+        search_server::serve_until(listener, self.control.node.clone(), self.opts.clone(), self.stop.clone()).await
     }
 
-    /// Drains: unloads every cluster (flushing and handing its lease back) while the listener
-    /// still answers, accounts usage, makes the WAL durable, leaves the fleet, then stops
-    /// accepting and lets connections finish. Returns when the connections still open must be
-    /// given up: the whole stop, from the call to that instant, takes at most
-    /// `--search-shutdown-timeout` ([`stop_phases`]), so it fits the orchestrator's kill
-    /// deadline set from it (ECS `StopTimeout`, Spot's two minutes).
-    pub async fn shutdown(&self) -> tokio::time::Instant {
-        let deadline = tokio::time::Instant::now() + self.timeout;
-        let (drain, _) = stop_phases(self.timeout);
-        let stop = self.control.shutdown_within(drain);
-        match tokio::time::timeout_at(deadline, stop).await {
-            Ok(Err(e)) => tracing::warn!(error = %e, "search shutdown"),
-            Ok(Ok(())) => {}
-            Err(_) => tracing::warn!("search shutdown: leaving the fleet ran out of time"),
+    /// Unloads every cluster still loaded here (flushing it and giving its lease back),
+    /// accounts usage and makes the WAL durable, then stops the REST listener.
+    pub async fn shutdown(&self) {
+        if let Err(e) = self.control.shutdown_within(SHUTDOWN).await {
+            tracing::warn!(error = %e, "search shutdown");
         }
         self.stop.trigger();
-        deadline
-    }
-}
-
-/// How a stop of `total` splits: handing clusters over first, and a reserve after it for
-/// metering, leaving the fleet and the last connections finishing (a quarter, at most 15 s).
-pub fn stop_phases(total: Duration) -> (Duration, Duration) {
-    let tail = (total / 4).min(Duration::from_secs(15));
-    (total - tail, tail)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    #[test]
-    fn a_stop_fits_its_timeout() {
-        // The template's 100 s, inside ECS's 120 s StopTimeout.
-        assert_eq!(super::stop_phases(Duration::from_secs(100)), (Duration::from_secs(85), Duration::from_secs(15)));
-        assert_eq!(super::stop_phases(Duration::from_secs(20)), (Duration::from_secs(15), Duration::from_secs(5)));
-        for s in [1, 2, 7, 60, 90, 3600] {
-            let (drain, tail) = super::stop_phases(Duration::from_secs(s));
-            assert_eq!(drain + tail, Duration::from_secs(s));
-            assert!(drain >= tail, "{s}");
-        }
-    }
-
-    #[test]
-    fn advertised_hosts() {
-        let bind: std::net::SocketAddr = "0.0.0.0:9200".parse().unwrap();
-        assert_eq!(super::advertise(Some("10.0.1.5"), bind), "10.0.1.5:9200");
-        assert!(super::advertise(None, bind).ends_with(":9200"));
-        assert!(!super::advertise(None, bind).starts_with("0.0.0.0"));
-        assert_eq!(super::advertise(None, "10.1.1.1:7070".parse().unwrap()), "10.1.1.1:7070");
     }
 }

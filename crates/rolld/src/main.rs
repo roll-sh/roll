@@ -420,7 +420,7 @@ async fn run() -> anyhow::Result<()> {
 
     // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
     let search = match on.on(Product::Search) {
-        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, args.api).await?),
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref()).await?),
         false => None,
     };
 
@@ -488,6 +488,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(r) = &redis {
         router = r.internal(router);
+    }
+    if let Some(s) = &search {
+        router = s.internal(router);
     }
 
     // Everything that serves until it fails; any of them ending ends the process.

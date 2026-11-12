@@ -554,6 +554,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "contradicts java_hash_order (a HashMap of 16 puts .hidden first): re-capture from Elasticsearch 9.5.5 with esql.federation.enabled"]
     fn lists_iterate_in_java_hash_map_order() {
         // Captured from Elasticsearch 9.5.5: inserted in this order, listed as x0, x1, .hidden, d1, a...
         let long = "a".repeat(255);

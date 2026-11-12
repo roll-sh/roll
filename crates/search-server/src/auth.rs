@@ -164,6 +164,17 @@ pub fn host_label<'a>(host: &'a str, domain: Option<&str>) -> Option<&'a str> {
     (!label.is_empty() && !label.contains('.')).then_some(label)
 }
 
+/// The cluster a request names, read as [`crate::Node::enter`] reads it (the `Host` label under
+/// `domain`, then the credentials' user, key id or token prefix) without checking anything: a
+/// fleet node's front runs the request on that cluster's owner, which authenticates it.
+pub fn cluster_named(headers: &hyper::HeaderMap, domain: Option<&str>) -> Option<String> {
+    let host = headers.get(hyper::header::HOST).and_then(|h| h.to_str().ok());
+    let host_cluster = host.and_then(|h| host_label(h, domain));
+    let auth = headers.get(hyper::header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let presented = parse_authorization(auth).ok()?;
+    claim(&presented, host_cluster).map(|c| c.cluster)
+}
+
 /// Which cluster a request is for and the secret to check (`None` when no secret was given).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {

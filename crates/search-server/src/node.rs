@@ -733,6 +733,11 @@ impl Node {
         let _ = self.leases.set(leases);
     }
 
+    /// The domain clusters are reached under (`<cluster>.<domain>`), if any.
+    pub fn domain(&self) -> Option<&str> {
+        self.cfg.domain.as_deref()
+    }
+
     /// The node's identity in leases.
     pub fn node_id(&self) -> &str {
         self.cfg.node_id.as_deref().unwrap_or(&self.cfg.node_name)
@@ -877,7 +882,9 @@ impl Node {
                     anyhow::bail!(OpenError { error: e, source: anyhow::anyhow!("cluster [{name}] is owned by node [{}] (epoch {})", owner.node, owner.epoch) });
                 }
             }
-            if let Some(store) = &data_store {
+            if let Some(store) = &data_store
+                && !leases.store_epochs()
+            {
                 store.set_epoch(&name, held.map_or(0, |h| h.epoch));
             }
         }
@@ -984,7 +991,11 @@ impl Node {
         {
             // Before reading anything: an older owner's later writes and acknowledgements then
             // find this claim and are refused (`persist`, ownership).
-            ds.claim_cluster(&spec.name).await.map_err(|e| e.context(format!("claiming cluster [{}] under epoch {epoch}", spec.name)))?;
+            match self.leases.get().is_some_and(|l| l.store_epochs()) {
+                true => ds.claim_next(&spec.name).await.map(|_| ()),
+                false => ds.claim_cluster(&spec.name).await,
+            }
+            .map_err(|e| e.context(format!("claiming cluster [{}] (lease epoch {epoch})", spec.name)))?;
         }
         // Only states that load again are saved: a cluster must never be left unwakeable.
         let meta = Arc::new(crate::meta_guard::CheckedMeta::new(self.stores.meta_store(&spec.name).await?, spec.dialect));
@@ -1009,6 +1020,7 @@ impl Node {
                 let verify_owner = epoch > 0 && ds.wal().config().sync_objects;
                 let data = ClusterData::new(ds, &spec.name, self.tasks.clone());
                 data.set_lease_deadline(deadline);
+                data.set_lease_check(self.leases.get().and_then(|l| l.validity(&spec.name)));
                 data.set_verify_owner(verify_owner);
                 cluster.engine = search_es::engine::Engine::with_storage(data.clone());
                 stats = data.recover(&cluster).await?;

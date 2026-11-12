@@ -6,7 +6,7 @@ branch instantly and keep their data on object storage. Clients speak the Elasti
 changing the URL.
 
 Design: [architecture.md](architecture.md). Cross-crate interfaces: [contracts.md](contracts.md).
-On AWS (a fleet behind `search-proxy`): [deploy-aws.md](deploy-aws.md).
+On AWS search runs on the roll cloud fleet with every other product (docs/cloud/README.md).
 
 ## Run it
 
@@ -29,10 +29,15 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-history` (`ROLL_SEARCH_HISTORY`)         | `86400`           | point-in-time branching window, seconds (0: off) |
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
-| `--no-search`                                      |                   | don't run search |
-| `--search-only` (`ROLL_SEARCH_ONLY`)               |                   | only search and its API (search nodes on AWS) |
-| `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (load balancer, Lambda function URL): cluster URLs name it |
-| `--search-meta` (`ROLL_SEARCH_META`)               |                   | join a fleet: catalog, leases and node records in Postgres (or a shared SQLite file) |
+| `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
+| `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
+
+Search is one of rolld's products (`ROLL_PRODUCTS`, `crates/rolld/src/products.rs`): `/v1/search`
+sits behind rolld's operator token (`ROLL_ADMIN_TOKEN`) like every product's API. On a cluster
+(roll cloud: `ROLL_CLUSTER_SECRET`, a cluster backend, `ROLL_SYSTEM_DATABASE`, S3) every search
+cluster is served by the holder of its lease `search:cluster:<name>`, its catalog is in the system
+database and any node's REST port forwards a request to the owner (architecture.md, "On the
+fleet").
 
 Storage is rolld's: `--s3-bucket` (with `--s3-prefix`, `--s3-endpoint`), or `<home>/objects`.
 Local disk under `<home>/search/` holds `search.db` (the control plane's SQLite) and the cache.
@@ -78,6 +83,20 @@ own host), `Authorization: ApiKey base64(<name>:<password>)` or
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
 | GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
+| PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `PUT /<index>/_mapping` |
+| POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
+| POST | `/v1/search/clusters/{id}/indices/{index}/docs` | `POST /<index>/_doc`: index a document under a new id |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
+| POST | `/v1/search/clusters/{id}/indices/{index}/bulk` | `POST /<index>/_bulk` (NDJSON) |
+| POST | `/v1/search/clusters/{id}/indices/{index}/delete_by_query` | `POST /<index>/_delete_by_query` |
+
+The per-index routes are one Elasticsearch operation each, so the cluster, the index and the kind
+of access (read, write, delete) are in the route: roll's scoped tokens and MCP tools map onto
+them. They answer with Elasticsearch's own status and body, and pass the query string through
+(`refresh`, `routing`, `size`, …). A write names exactly one index; a name starting with `_` is
+refused (those are Elasticsearch's own APIs: use the console). Bodies may be up to the cluster's
+`max_body_mb`.
 
 To run the YAML REST suites against clusters made through the API, start rolld with
 `--search-test-features` and point the runner at the create endpoint:
@@ -99,8 +118,9 @@ and copies a request as curl. The dashboard never re-encodes JSON it sends or sh
 document bodies go out as typed (`1.0` stays a float to dynamic mapping, longs above 2^53 stay
 exact, key order is kept), `_source` is cut from the response text, and responses are re-indented
 token by token (`lib/search-docs.ts`: `formatJson`, `hitSources`, `sourceCells`). Index names and mappings are fetched only when a completion needs
-them, so opening the console never wakes a sleeping cluster. Against a fleet (AWS), build the
-dashboard with `NEXT_PUBLIC_ROLL_SEARCH_API` (its `ApiUrl`) and `NEXT_PUBLIC_ROLL_SEARCH_TOKEN`.
+them, so opening the console never wakes a sleeping cluster. The dashboard reaches `/v1/search`
+through rolld's API like every product (`VITE_ROLL_API`, the operator token from sign-in), and
+search clusters appear in workspace projects (the `search` resource kind).
 
 ## Metering and pricing
 
@@ -148,30 +168,39 @@ and the client matrix (`tests/search/clients/run.sh`) run when present. CI:
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Honest green status on the merged tree**: build, clippy, `cargo test` of every search crate,
-   rolld and roll-cli; the ES 9.5.5 and OpenSearch 3.9 YAML suites against their baselines; the
-   extended suites; the differential suite against ES 9.5.5 in Docker; the client matrix. Real
-   numbers in this README.
-2. **The fleet on roll-cluster**: lease `search:cluster:<id>` from rolld's handle instead of
-   search's own lease table and node records; catalog in the system database (schema `search`);
-   requests for a cluster another node owns forwarded through `/internal/search/rest` with
-   `Cluster::dispatch`; manifests fenced by object-storage compare-and-swap (`Objects::put_if`),
-   not by epochs that a deleted lease row could reset. Retire search-proxy's own fleet.
+1. **Honest green status on the merged tree.** Done so far: build and clippy clean; the unit run
+   on the merged tree (2026-11-12) passed 1,949 tests, failed 8, ignored 46 in 134 test binaries.
+   Fixed since: rolld tests that collided on search's default port, two timing-dependent tests,
+   SQL `CAST … AS VARCHAR`, ES|QL keys under a `flattened` field in a union. Left: the
+   connector key order after `_name` (entsearch fixture) and the data-source list order (ignored
+   test), both to be re-captured against ES 9.5.5; `by_query_scans_are_child_searches_of_the_run`
+   hangs (a by-query run's search can't be listed or cancelled while an endless script runs).
+   Then the YAML suites, the differential suite and the client matrix, with numbers here.
+2. **The fleet on roll-cluster** (architecture.md, "On the fleet"): built. Lease
+   `search:cluster:<name>` from rolld's handle, the REST front dispatching to owners, owner-run
+   `/v1/search/clusters/{id}/…`, idle leases given up, store epochs from ownership markers, acks
+   checking the guard, catalog on code-sql in the system database. The old search-only fleet
+   (search-proxy, its AWS stack, PgLeases) is deleted. Left: a rolld test with two nodes on
+   Postgres leases (like `rolld/tests/fleet_e2e.rs`), search in the fleet's `ROLL_PRODUCTS`.
 3. **The edge**: `<cluster>.search.<region>.<domain>` on the HTTPS listener, routed by `Host` to
    the search REST front, connection details naming it (`edge::Public`), logs and metrics through
    `logs.rs` route patterns.
 4. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** on this machine (idle RAM per tenant, cold
    start from object storage, indexing throughput, p50/p99 latency, RAM/CPU per query; Rally
-   nyc_taxis, http_logs, geonames, so): docs/benchmarks/search.md; optimise where roll loses.
-5. **Control plane per index** (for roll MCP's permission catalogue): `/v1/search/clusters/{id}/indices/{index}`
-   (get, create, delete, mapping), `…/search`, `…/docs/{doc}`, `…/bulk`, `…/delete_by_query`; the CLI
-   and dashboard on them. Credential fields stay `password` and `url`.
-6. **Dashboard polish**: index browser, query console, mappings, analyzers (`_analyze` playground),
-   usage; checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
+   nyc_taxis, http_logs, geonames, so): docs/benchmarks/search.md; optimise where roll loses
+   (round 6 lost k-NN on HNSW, range fields, nyc_taxis histograms, nested aggregations). One
+   allocator policy: rolld's (purge delay 0, collect on park) vs search-dev's purge governor,
+   decided by a matched benchmark.
+5. **Control plane per index** for roll MCP's permission catalogue: the routes are in (README
+   table); `roll search index …` CLI commands and the dashboard on them are next. Credential
+   fields stay `password` and `url`.
+6. **Dashboard polish**: index browser, query console, mappings, analyzers (`_analyze`
+   playground), usage; checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
 7. **Metering on the fleet**: client requests counted per cluster at the node (today only the
-   console's), usage on the workspace's monthly spend.
+   console's), usage on the workspace's monthly spend; cluster lists show which node a cluster
+   is loaded on without one lease read per cluster.
 8. **Previews, secrets, apps**: a search cluster branches for a preview environment
-   (`code_preview::DataBranches`), endpoints and passwords as bindable secrets, private networking
-   for services.
-9. **Test gate**: `pnpm test:search` on `scripts/lib/gate.sh`, an AGENTS.md line like the other
-   products', CI under a minute; then the PR to `main`.
+   (`roll_previews::Brancher`), endpoints and passwords as bindable secrets
+   (`roll_secrets::LinkProvider`, fields `url` and `password`), private networking for services.
+9. **Test gate**: `pnpm test:search` like the other products', an AGENTS.md line, CI under a
+   minute; then the PR to `main`.

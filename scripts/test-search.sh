@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # roll search test suite: build, clippy and the tests of every search-* crate plus rolld and the
-# CLI, the dashboard's search helpers (node --test, when Node 23.6+ is installed), then (unless --unit) the Docker-backed compatibility checks:
+# CLI, the dashboard's search helpers (vitest), then (unless --unit) the Docker-backed compatibility checks:
 #   - Elastic's YAML REST suites against search-dev (scripts/search-yaml-suites.sh roll), the
 #     OpenSearch suite against its opensearch dialect (roll-os), the SQL plugin's PPL suite
 #     (roll-os-sql) and Elasticsearch's module and
@@ -11,12 +11,10 @@
 #   - the client matrix of unmodified official clients, when present (tests/search/clients/run.sh).
 #
 # Only runs when something search-related changed since the last green run. `--force` runs
-# regardless; `--unit` skips the Docker checks. `--images` also builds the linux/amd64 and
-# linux/arm64 images and smoke-tests them as AWS runs them (scripts/search-image-smoke.sh; arm64
-# under qemu; amd64 once more on S3 through LocalStack), then rehearses the deployment (scripts/search-aws-rehearsal.sh: the node user data
-# on Amazon Linux 2023, the stack on LocalStack, the Lambda function); about 40 minutes. Set ROLL_E2E_S3_BUCKET (+ ROLL_E2E_S3_ENDPOINT,
+# regardless; `--unit` skips the Docker checks. Set ROLL_E2E_S3_BUCKET (+ ROLL_E2E_S3_ENDPOINT,
 # AWS_* credentials) to run the storage and control-plane tests against S3 instead of a local
-# directory. ROLL_PORT / ROLL_JOBS are passed to the YAML runner (search-dev ports and processes).
+# directory, and ROLL_CODE_TEST_DATABASE (a Postgres URL) to run the catalog on Postgres.
+# ROLL_PORT / ROLL_JOBS are passed to the YAML runner (search-dev ports and processes).
 #
 # Pass thresholds: docs/search/compatibility.md lines of the form
 #   <!-- test-search: roll >= 1234 -->
@@ -31,19 +29,18 @@ CRATES=()
 for d in crates/search-*/; do
   CRATES+=(-p "$(basename "$d")")
 done
-PATHS=(crates/search-* crates/snowball crates/pg-storage crates/rolld crates/roll-cli deploy/search
-       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh scripts/search-image-smoke.sh scripts/search-aws-rehearsal.sh
+PATHS=(crates/search-* crates/snowball crates/pg-storage crates/roll-cluster crates/code-sql crates/rolld crates/roll-cli
+       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh
        docs/search/compatibility.md .github/workflows/search.yml tests/search
        apps/dashboard/src/lib/search-console.ts apps/dashboard/src/lib/search-docs.ts
-       apps/dashboard/src/lib/search-console.test.mjs apps/dashboard/src/lib/search-docs.test.mjs)
+       apps/dashboard/src/lib/search-console.test.ts apps/dashboard/src/lib/search-docs.test.ts)
 STAMP=target/.test-search.hash
 
-force=0 unit_only=0 images=0
+force=0 unit_only=0
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --unit) unit_only=1 ;;
-    --images) images=1 ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
 done
@@ -60,18 +57,12 @@ fi
 cargo build "${CRATES[@]}" -p rolld -p roll-cli
 cargo clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets -- -D warnings
 cargo test "${CRATES[@]}"
-# rolld's own tests include cli_is_consistent: flattened argument groups (search, queues) must
-# not share an id, which clap only reports at run time.
+# rolld's own tests check the flags (clap only reports a clash between flattened groups at run
+# time) and run rolld with every product.
 cargo test -p roll-cli -p rolld
 
-# The dashboard's console completion and document helpers: plain TypeScript run by Node's type
-# stripping (23.6+), so no JavaScript toolchain is needed. pnpm typecheck/build is web.yml's.
-NODE_TESTS=(apps/dashboard/src/lib/search-console.test.mjs apps/dashboard/src/lib/search-docs.test.mjs)
-if command -v node >/dev/null && node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>23||(a==23&&b>=6)?0:1)'; then
-  node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test "${NODE_TESTS[@]}"
-else
-  echo "search: Node 23.6+ not found; skipping the dashboard helper tests" >&2
-fi
+# The dashboard's console completion and document helpers.
+pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts
 
 # Minimum pass count for a suite from docs/search/compatibility.md (0 when not set).
 threshold() {
@@ -127,30 +118,6 @@ extended_suites() {
   echo "search: extended YAML suites at or above their minimums"
 }
 
-# The fleet tests (in-process nodes behind the proxy) once more with their catalog, leases and
-# node records in Postgres instead of SQLite. They wipe the tables, so they run one at a time.
-fleet_on_postgres() {
-  local name=roll-search-fleet-pg-$$ port
-  docker run --rm -d --name "$name" -m 1g -e POSTGRES_USER=roll -e POSTGRES_PASSWORD=roll -e POSTGRES_DB=search \
-    -p 127.0.0.1::5432 postgres:18-alpine >/dev/null
-  local status=0
-  port=$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')
-  for _ in $(seq 1 100); do
-    docker exec "$name" pg_isready -q -h 127.0.0.1 -U roll -d search 2>/dev/null && break
-    sleep 0.2
-  done
-  ROLL_SEARCH_TEST_PG="postgres://roll:roll@127.0.0.1:$port/search?sslmode=disable" \
-    cargo test -p search-control --test fleet -- --test-threads=1 || status=$?
-  docker stop "$name" >/dev/null 2>&1 || true
-  return $status
-}
-
-# The AWS stack must pass cfn-lint (no AWS credentials are needed for that).
-lint_template() {
-  docker run --rm -m 1g -v "$PWD/deploy/search/aws:/t:ro" python:3.13-slim \
-    sh -c 'pip install -q --root-user-action=ignore cfn-lint >/dev/null && cfn-lint /t/roll-search.yaml'
-}
-
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then
     echo "search: Docker is not running; start it or pass --unit" >&2
@@ -165,15 +132,6 @@ if [[ $unit_only == 0 ]]; then
   fi
   if [[ -x tests/search/clients/run.sh ]]; then
     tests/search/clients/run.sh
-  fi
-  fleet_on_postgres
-  lint_template
-  # The template's scaling and capacity rules under AWS's documented semantics.
-  scripts/search-aws-rehearsal.sh model
-  if [[ $images == 1 ]]; then
-    IMAGE=roll-search-test PORT=${ROLL_IMAGE_SMOKE_PORT:-19280} scripts/search-image-smoke.sh --build --install-binfmt amd64 arm64
-    IMAGE=roll-search-test PORT=${ROLL_IMAGE_SMOKE_PORT:-19280} scripts/search-image-smoke.sh --s3 amd64
-    IMAGE=roll-search-test scripts/search-aws-rehearsal.sh userdata localstack
   fi
 fi
 

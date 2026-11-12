@@ -32,6 +32,6 @@ pub mod store;
 
 pub use catalog::{Catalog, ClusterSpec, Credential, MemoryStores, StaticCatalog, StoreProvider, secret_hash};
 pub use http::{ListenOptions, Shutdown, serve, serve_until, spawn};
-pub use lease::{Leases, MemoryLeases, Owner, PgLeases, SqliteLeases};
+pub use lease::{Leases, MemoryLeases, Owner};
 pub use node::{LifecycleHooks, Node, NodeConfig, Usage};
 pub use store::ObjectStores;
