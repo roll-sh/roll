@@ -60,6 +60,7 @@ const LOSSY = '{"title":"x","price":1.0,"sku":12345678901234567890,"b":1,"10":2,
 test("json spans", () => {
   const root = jsonSpans(` ${LOSSY} `);
   assert.equal(root.kind, "object");
+  assert.ok(root.entries);
   assert.deepEqual(root.entries.map(([k]) => k), ["title", "price", "sku", "b", "10", "2", "e", "s"]);
   const sku = root.entries[2][1];
   assert.equal(` ${LOSSY} `.slice(sku.start, sku.end), "12345678901234567890");
@@ -112,7 +113,7 @@ test("source cells are lossless", () => {
 });
 
 test("sort fields", async () => {
-  const { sortField } = await import("./search-docs.ts");
+  const { sortField } = await import("./search-docs");
   const fields = [
     { name: "title", type: "text" },
     { name: "title.keyword", type: "keyword" },
@@ -136,10 +137,11 @@ test("sort fields", async () => {
 });
 
 test("table sorts cycle and build Elasticsearch's sort clause", async () => {
-  const { nextSort, sortClause } = await import("./search-docs.ts");
+  const { nextSort, sortClause } = await import("./search-docs");
   const a = nextSort(null, "title", "title.keyword");
   assert.deepEqual(a, { column: "title", field: "title.keyword", order: "asc" });
   const d = nextSort(a, "title", "title.keyword");
+  assert.ok(d);
   assert.equal(d.order, "desc");
   assert.equal(nextSort(d, "title", "title.keyword"), null);
   assert.deepEqual(nextSort(d, "price", "price"), { column: "price", field: "price", order: "asc" });
@@ -148,7 +150,7 @@ test("table sorts cycle and build Elasticsearch's sort clause", async () => {
 });
 
 test("column picker", async () => {
-  const { visibleColumns, toggleColumn } = await import("./search-docs.ts");
+  const { visibleColumns, toggleColumn } = await import("./search-docs");
   const avail = ["a", "b", "c", "d"];
   assert.deepEqual(visibleColumns(null, avail, 2), ["a", "b"]);
   assert.deepEqual(visibleColumns([], avail, 2), ["a", "b"]);

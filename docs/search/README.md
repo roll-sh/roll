@@ -132,8 +132,8 @@ search clusters appear in workspace projects (the `search` resource kind).
 
 Every 60 s the control plane accounts each loaded cluster's loaded time exactly (load and unload
 come from the node's lifecycle hooks; an unload accounts the remainder, rounded up to a second),
-its requests (today only the console's: the node doesn't count client requests per cluster
-yet) and its resident size, measured from the engine: the heap its shards hold (segments still in
+its requests (every request the node admitted for it: clients', the console's and the per-index
+routes') and its resident size, measured from the engine: the heap its shards hold (segments still in
 memory, readers' heap and caches, indexing buffers, the version map) plus 16 MiB for the cluster
 itself. Size is measured at every tick and as the cluster unloads, and each interval is billed at
 the larger of the measurements at its two ends. While a cluster is loaded with every index open,
@@ -153,10 +153,10 @@ scripts/test-search.sh --unit # no Docker
 
 `scripts/test-search.sh` builds and lints every `search-*` crate, `rolld` and `roll-cli`, runs
 their tests (the control plane's integration tests in `crates/search-control/tests` drive the
-API, the node and an Elasticsearch client over HTTP; `crates/roll-cli/tests/search.rs` runs the
-real `roll` binary against an in-process control plane), the dashboard's console completion and
-document helpers (`apps/dashboard/src/lib/search-*.test.mjs`, under `node --test`; Node 23.6+
-runs the TypeScript as is), then the YAML REST suites against
+API, the node and an Elasticsearch client over HTTP, and `cluster.rs` two nodes of a fleet;
+`crates/roll-cli/tests/search.rs` runs the real `roll` binary against an in-process control
+plane), the dashboard's console completion and document helpers
+(`apps/dashboard/src/lib/search-*.test.ts`, vitest), then the YAML REST suites against
 `search-dev` for both dialects. A suite passes when its pass count is at least the minimum in
 [compatibility.md](compatibility.md), written as
 
@@ -169,6 +169,27 @@ Raise the minimum whenever the count goes up, so it can't silently go back down.
 differential suite against a real Elasticsearch (`crates/search-server/tests/differential.rs`)
 and the client matrix (`tests/search/clients/run.sh`) run when present. CI:
 `.github/workflows/search.yml`, triggered from `ci.yml` when search code changes.
+
+## Status
+
+Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-core host):
+
+| check | result |
+| --- | --- |
+| build, `cargo clippy --all-targets -D warnings` (search crates, rolld, roll-cli, roll-workspace, roll-edge) | clean |
+| `cargo test`, every search crate + rolld + roll-cli | 1,949 passed, 8 failed, 46 ignored (134 binaries) on the merged tree; every failure fixed since (below) |
+| Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
+| OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
+| OpenSearch SQL plugin's PPL suite | **204 of 204** |
+| extended suites (66 module and x-pack suites) | running |
+| differential suite against Elasticsearch 9.5.5 | running |
+| client matrix (11 unmodified clients) | running |
+
+The failures on the merged tree, all fixed: rolld tests that collided on search's default port;
+two tests that depended on timing; three behaviours the uncommitted round-6 work had broken (SQL
+`CAST … AS VARCHAR`, ES|QL keys under a field `flattened` in another index, connector key order
+after an update, checked against the reference Elasticsearch); a by-query task test that read a
+filtered listing; and the auth matrix's probe of storage's nested route (also broken on `main`).
 
 ## Next
 
@@ -202,9 +223,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields stay `password` and `url`.
 6. **Dashboard polish**: index browser, query console, mappings, analyzers (`_analyze`
    playground), usage; checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
-7. **Metering on the fleet**: client requests counted per cluster at the node (today only the
-   console's), usage on the workspace's monthly spend; cluster lists show which node a cluster
-   is loaded on without one lease read per cluster.
+7. **Metering on the fleet**: cluster lists show which node a cluster is loaded on without one
+   lease read per cluster; metering of a cluster that moves mid-interval accounted once.
 8. **Previews, secrets, apps**: a search cluster branches for a preview environment
    (`roll_previews::Brancher`), endpoints and passwords as bindable secrets
    (`roll_secrets::LinkProvider`, fields `url` and `password`), private networking for services.

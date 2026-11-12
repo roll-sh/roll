@@ -231,7 +231,7 @@ async fn modify(ctx: &Ctx<'_>, f: impl FnOnce(&crate::meta::ClusterState, &mut M
             let c = live(st, &id, false)?;
             let Value::Obj(mut m) = c else { return Err(not_found(&id)) };
             f(st, &mut m)?;
-            store::put(st, CONNECTORS, &id, hash_ordered(Value::Obj(m)), now).map(|_| ())
+            store::put(st, CONNECTORS, &id, updated_doc(m), now).map(|_| ())
         })
         .await?;
     updated()
@@ -396,8 +396,14 @@ fn invalid_index_name(name: &str) -> Option<String> {
     crate::meta::names::name_problem(name).map(|p| format!("[{name}] org.elasticsearch.indices.InvalidIndexNameException: Invalid index name [{name}], {p}"))
 }
 
-/// A stored document after Elasticsearch's update API merged a partial doc into it: every
-/// object becomes a `HashMap` (its keys in Java's bucket order).
+/// A stored connector after an update merged into it: its own keys stay in their order (new
+/// ones last, as Elasticsearch 9.5.5 keeps them), every object inside becomes a `HashMap` (its
+/// keys in Java's bucket order).
+fn updated_doc(m: Map) -> Value {
+    Value::Obj(m.into_iter().map(|(k, v)| (k, hash_ordered(v))).collect())
+}
+
+/// A merged object: Java's `HashMap` bucket order, objects inside it too.
 fn hash_ordered(v: Value) -> Value {
     match v {
         Value::Obj(m) => {
@@ -962,7 +968,7 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
                 _ => {}
             }
-            store::put(st, CONNECTORS, &id, hash_ordered(Value::Obj(m)), now_ms).map(|_| false)
+            store::put(st, CONNECTORS, &id, updated_doc(m), now_ms).map(|_| false)
         })
         .await?;
     if noop { Reply::ok(obj! { "result" => "noop" }) } else { updated() }

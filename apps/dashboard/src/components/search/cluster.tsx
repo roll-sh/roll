@@ -19,11 +19,12 @@ import {
 import { AppShell } from "../app-shell";
 import { formatTime, fromLocalInput, now, POLL_MS, Segmented, toLocalInput } from "../redis/shared";
 import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, Panel, primary, Stats, useCopy } from "../ui";
+import { AnalyzeTab } from "./analyze";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
-const TABS = ["overview", "indices", "console", "branches", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "console", "analyze", "branches", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -180,6 +181,7 @@ export function SearchClusterPage({ id }: { id: string }) {
           />
         )}
         {tab === "console" && <SearchConsole key={cluster.id} cluster={cluster} prefill={prefill} />}
+        {tab === "analyze" && <AnalyzeTab key={cluster.id} cluster={cluster} />}
         {tab === "branches" && (
           <BranchesTab
             cluster={cluster}

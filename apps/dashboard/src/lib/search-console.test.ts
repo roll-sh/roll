@@ -1,7 +1,7 @@
 // Tests of the console completion (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, requestIndex } from "./search-console";
+import { applyCompletion, bodyKind, complete, jsonContext, mappingFields, ndjsonRole, parseConsole, requestIndex, type Completion, type CompletionSources } from "./search-console";
 
 const FIELDS = [
   { name: "price", type: "float" },
@@ -14,14 +14,14 @@ const FIELDS = [
 const SRC = { indices: ["products", "logs-2026", ".internal"], fields: FIELDS };
 
 /** Completes at the `|` in `t`. */
-function at(t, src = SRC) {
+function at(t: string, src: CompletionSources = SRC) {
   const i = t.indexOf("|");
   return { text: t.slice(0, i) + t.slice(i + 1), cursor: i, c: complete(t.slice(0, i) + t.slice(i + 1), i, src) };
 }
-const labels = (c) => (c ? c.items.map((s) => s.label) : []);
+const labels = (c: Completion | null) => (c ? c.items.map((s) => s.label) : []);
 
 /** Applies the first suggestion named `label` and returns the text with `|` at the cursor. */
-function choose(t, label) {
+function choose(t: string, label: string) {
   const { text, c } = at(t);
   assert.ok(c, `no completion at ${t}`);
   const item = c.items.find((s) => s.label === label);
@@ -183,12 +183,20 @@ test("console requests keep their body text", () => {
   assert.throws(() => parseConsole("/a"), /Start with a method/);
 });
 
+/** Applies the suggestion labelled `label` from `c` to `line`. */
+function pick(line: string, c: Completion | null, label: string) {
+  assert.ok(c, `no completion for ${line}`);
+  const item = c.items.find((i) => i.label === label);
+  assert.ok(item, `${label} not offered for ${line}`);
+  return applyCompletion(line, c, item);
+}
+
 test("URL query parameters", async () => {
-  const { complete, applyCompletion, apiParams } = await import("./search-console.ts");
-  const { PARAMS, COMMON_PARAMS, API_PATHS } = await import("./search-params.generated.ts");
+  const { complete, applyCompletion, apiParams } = await import("./search-console");
+  const { PARAMS, COMMON_PARAMS, API_PATHS } = await import("./search-params.generated");
   const params = { params: PARAMS, common: COMMON_PARAMS, apis: API_PATHS };
   const src = { indices: ["products"], fields: [], params };
-  const names = (c) => c.items.map((i) => i.label);
+  const names = (c: Completion | null) => (c ? c.items.map((i) => i.label) : []);
   // The search API's parameters and the common ones.
   const search = apiParams("GET", "/products/_search", params).map((p) => p[0]);
   for (const n of ["size", "from", "q", "track_total_hits", "pretty", "filter_path", "expand_wildcards"]) assert.ok(search.includes(n), n);
@@ -205,12 +213,12 @@ test("URL query parameters", async () => {
   let line = "GET /products/_search?si";
   let c = complete(line, line.length, src);
   assert.ok(names(c).includes("size"), names(c).join());
-  let r = applyCompletion(line, c, c.items.find((i) => i.label === "size"));
+  let r = pick(line, c, "size");
   assert.equal(r.text, "GET /products/_search?size=");
   // Boolean parameters go in bare (Elasticsearch reads an empty value as true).
   line = "GET /products/_search?size=5&pre";
   c = complete(line, line.length, src);
-  r = applyCompletion(line, c, c.items.find((i) => i.label === "pretty"));
+  r = pick(line, c, "pretty");
   assert.equal(r.text, "GET /products/_search?size=5&pretty");
   // Parameters already given aren't offered again.
   line = "GET /products/_search?size=5&";
@@ -223,7 +231,7 @@ test("URL query parameters", async () => {
   line = "GET /products/_search?expand_wildcards=open,hi";
   c = complete(line, line.length, src);
   assert.deepEqual(names(c), ["hidden"]);
-  r = applyCompletion(line, c, c.items[0]);
+  r = pick(line, c, "hidden");
   assert.equal(r.text, "GET /products/_search?expand_wildcards=open,hidden");
   line = "GET /products/_search?track_scores=";
   c = complete(line, line.length, src);
@@ -234,7 +242,7 @@ test("URL query parameters", async () => {
   // In the middle of the line: replaces the name only.
   line = "GET /products/_search?siz&from=1 ";
   c = complete(line, "GET /products/_search?siz".length, src);
-  r = applyCompletion(line, c, c.items.find((i) => i.label === "size"));
+  r = pick(line, c, "size");
   assert.equal(r.text, "GET /products/_search?size=&from=1 ");
   // Without a table, nothing (the old behaviour).
   assert.equal(complete("GET /_search?si", 15, { indices: [], fields: [] }), null);

@@ -24,7 +24,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 
 - Tests run: 3905; passed 3809, failed 1, skipped 95.
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
-  <!-- test-search: roll >= 3809 -->
+  <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (66 suites, 6,044
   tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 3,463,
   3,424 of the 5,541 that pass on Elasticsearch 9.5.5 run like each suite's own test cluster.

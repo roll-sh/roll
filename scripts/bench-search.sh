@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# roll search benchmarks against Elasticsearch on the same CPUs and memory
+# roll search benchmarks against Elasticsearch and OpenSearch on the same CPUs and memory
 # (docs/benchmarks/search.md).
 #
 #   scripts/bench-search.sh start | stop       start (stop) both targets
@@ -23,8 +23,12 @@
 # target is ever under load at a time: runs alternate, so drift on a shared host (load changes
 # over minutes) hits both alike.
 #
+# OpenSearch (the official image, 2 GiB heap, security plugin off) is a third target unless
+# BENCH_OS=0; runs rotate through all of them.
+#
 # Env: SEARCH_DEV (a search-dev binary; default: a release build in target/bench-search),
-#      ROLL_PORT (19801), ES_PORT (19210), ES_VERSION (9.5.5), ES_NAME (roll-es-perf),
+#      ROLL_PORT (19801), ES_PORT (19210), ES_VERSION (9.5.5), ES_NAME (roll-search-es-ref),
+#      OS_PORT (19211), OS_VERSION (3.9.0), OS_NAME (roll-search-os-ref), BENCH_OS (1),
 #      ROLL_NAME (roll-bench-roll), RALLY_CPUS (6-9,24-27), RALLY_HOME (~/.cache/roll-search/rally:
 #      tracks and corpora, about 300 MB for geonames), RALLY_PARAMS (extra track params),
 #      RALLY_TASKS / RALLY_EXCLUDE (Rally --include-tasks / --exclude-tasks filters),
@@ -41,7 +45,11 @@ MEM=${BENCH_MEM:-4g}
 ROLL_PORT=${ROLL_PORT:-19801}
 ES_PORT=${ES_PORT:-19210}
 ES_VERSION=${ES_VERSION:-9.5.5}
-ES_NAME=${ES_NAME:-roll-es-perf}
+ES_NAME=${ES_NAME:-roll-search-es-ref}
+OS_PORT=${OS_PORT:-19211}
+OS_VERSION=${OS_VERSION:-3.9.0}
+OS_NAME=${OS_NAME:-roll-search-os-ref}
+BENCH_OS=${BENCH_OS:-1}
 ROLL_NAME=${ROLL_NAME:-roll-bench-roll}
 ROLL_IMAGE=${ROLL_IMAGE:-debian:trixie-slim}
 RALLY_CPUS=${RALLY_CPUS:-6-9,24-27}
@@ -85,6 +93,33 @@ start_es() {
   wait_http "http://127.0.0.1:$ES_PORT/_cluster/health?wait_for_status=yellow" 180
 }
 
+start_os() {
+  [[ $BENCH_OS == 1 ]] || return 0
+  if ! running "$OS_NAME"; then
+    docker_ run --rm -d --name "$OS_NAME" --cpuset-cpus "$CPUS" -m "$MEM" \
+      -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true \
+      -e "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g" \
+      -p "127.0.0.1:$OS_PORT:9200" "opensearchproject/opensearch:$OS_VERSION" >/dev/null
+  fi
+  wait_http "http://127.0.0.1:$OS_PORT/_cluster/health?wait_for_status=yellow" 180
+}
+
+# The targets other than roll: name, port and container, one per line.
+others() {
+  echo "es $ES_PORT $ES_NAME"
+  [[ $BENCH_OS == 1 ]] && echo "os $OS_PORT $OS_NAME"
+  true
+}
+
+# --target / --cgroup arguments of bench-search.py for every target.
+target_args() {
+  local name port ctr
+  printf '%s\n' --target "roll=http://127.0.0.1:$ROLL_PORT" $(cgroup_of "$ROLL_NAME" roll)
+  while read -r name port ctr; do
+    printf '%s\n' --target "$name=http://127.0.0.1:$port" $(cgroup_of "$ctr" "$name")
+  done < <(others)
+}
+
 # start_roll [extra search-dev args...]: a fresh roll node with an empty data directory.
 start_roll() {
   local bin
@@ -101,6 +136,7 @@ start_roll() {
 stop_all() {
   running "$ROLL_NAME" && docker_ stop -t 5 "$ROLL_NAME" >/dev/null
   running "$ES_NAME" && docker_ stop -t 30 "$ES_NAME" >/dev/null
+  running "$OS_NAME" && docker_ stop -t 30 "$OS_NAME" >/dev/null
   true
 }
 
@@ -161,10 +197,10 @@ local_track() {
 
 # drop_es_indices: deletes Elasticsearch's indices matching $indices by name (a wildcard
 # DELETE is refused: action.destructive_requires_name defaults to true).
-drop_es_indices() {
-  local names
-  names=$(curl -sf "http://127.0.0.1:$ES_PORT/_cat/indices/$indices?h=index&ignore_unavailable=true" | tr -s ' \n' ',' | sed 's/^,//; s/,$//') || true
-  [[ -n $names ]] && curl -sf -XDELETE "http://127.0.0.1:$ES_PORT/$names" >/dev/null || true
+drop_es_indices() { # [port]
+  local names port=${1:-$ES_PORT}
+  names=$(curl -sf "http://127.0.0.1:$port/_cat/indices/$indices?h=index&ignore_unavailable=true" | tr -s ' \n' ',' | sed 's/^,//; s/,$//') || true
+  [[ -n $names ]] && curl -sf -XDELETE "http://127.0.0.1:$port/$names" >/dev/null || true
 }
 
 rally_race() { # name port track params report
@@ -185,24 +221,26 @@ rally_race() { # name port track params report
 case ${1:-} in
   start)
     start_es
+    start_os
     start_roll
-    echo "roll http://127.0.0.1:$ROLL_PORT  Elasticsearch http://127.0.0.1:$ES_PORT"
+    echo "roll http://127.0.0.1:$ROLL_PORT  Elasticsearch http://127.0.0.1:$ES_PORT  OpenSearch http://127.0.0.1:$OS_PORT"
     ;;
   stop) stop_all ;;
   micro)
     shift
     start_es
+    start_os
     start_roll
-    python3 scripts/bench-search.py --target "roll=http://127.0.0.1:$ROLL_PORT" \
-      --target "es=http://127.0.0.1:$ES_PORT" $(cgroup_of "$ROLL_NAME" roll) $(cgroup_of "$ES_NAME" es) \
-      --out "$OUT/micro.json" "$@"
+    mapfile -t targets < <(target_args)
+    python3 scripts/bench-search.py "${targets[@]}" --out "$OUT/micro.json" "$@"
     ;;
   ingest)
     shift
     start_es
+    start_os
     start_roll
-    python3 scripts/bench-search.py ingest --target "roll=http://127.0.0.1:$ROLL_PORT" \
-      --target "es=http://127.0.0.1:$ES_PORT" $(cgroup_of "$ROLL_NAME" roll) $(cgroup_of "$ES_NAME" es) "$@"
+    mapfile -t targets < <(target_args)
+    python3 scripts/bench-search.py ingest "${targets[@]}" "$@"
     ;;
   rally)
     track=${2:?track}
@@ -213,30 +251,26 @@ case ${1:-} in
     # The indices the track creates (dropped from Elasticsearch between races; http_logs: logs-*).
     indices=${RALLY_INDICES:-$track*}
     start_es
+    start_os
     TRACK_ARG=$(local_track "$track")
     if grep -rq include_target_throughput "$RALLY_HOME/local-tracks/$track"; then
       params+=",include_target_throughput:false"
     fi
     stamp=$(date +%Y%m%d-%H%M%S)
     for ((r = 0; r < rounds; r++)); do
-      # Alternate who goes first, so neither side always runs in the same part of the hour.
-      if ((r % 2 == 0)); then order="roll es"; else order="es roll"; fi
-      for t in $order; do
-        if [[ $t == roll ]]; then
-          start_roll
-          port=$ROLL_PORT
-        else
-          drop_es_indices
-          port=$ES_PORT
-        fi
+      # Rotate who goes first, so no target always runs in the same part of the hour.
+      all=(roll $(others | cut -d' ' -f1))
+      order=("${all[@]:r % ${#all[@]}}" "${all[@]:0:r % ${#all[@]}}")
+      for t in "${order[@]}"; do
+        case $t in
+          roll) start_roll; port=$ROLL_PORT ctr=$ROLL_NAME ;;
+          es) port=$ES_PORT ctr=$ES_NAME; drop_es_indices "$port" ;;
+          os) port=$OS_PORT ctr=$OS_NAME; drop_es_indices "$port" ;;
+        esac
         echo "bench-search: round $r $t $track" >&2
         rally_race "$t" "$port" "$track" "$params" "rally-$track-$stamp-$t-$r.csv"
-        if [[ $t == roll ]]; then
-          echo "$t $r rss_kib $(rss_kib "$ROLL_NAME")" >>"$OUT/rally-$track-$stamp.rss"
-        else
-          echo "$t $r rss_kib $(rss_kib "$ES_NAME")" >>"$OUT/rally-$track-$stamp.rss"
-          drop_es_indices
-        fi
+        echo "$t $r rss_kib $(rss_kib "$ctr")" >>"$OUT/rally-$track-$stamp.rss"
+        [[ $t == roll ]] || drop_es_indices "$port"
       done
     done
     python3 scripts/bench-search.py rally-summary "$OUT"/rally-"$track"-"$stamp"-*.csv
