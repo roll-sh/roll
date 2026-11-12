@@ -50,7 +50,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}` | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[]}` | `Variables` | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=` | | `LogLine[]` or SSE | read |
+| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&q=` | | `LogLine[]` or SSE | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=` | | `Metrics` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
@@ -82,6 +82,10 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 
 A `roll up` upload (`application/gzip`) may carry `X-Roll-Message` (percent-encoded UTF-8: the
 checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment.
+
+A log's `q` (1–200 characters) returns the lines that contain it, any case, from memory and then
+the stored chunks newest first (back to `since`), at most `tail` (2000); it reads at most 64 MiB
+of stored logs and says so with `X-Roll-Search-Truncated: 1`.
 
 `POST …/deploys` takes an `Idempotency-Key` header (1–200 printable ASCII): a retry with the same
 key in the same environment, within a day, answers the deployment the first call queued instead of

@@ -270,6 +270,8 @@ struct LogQuery {
     follow: Option<String>,
     tail: Option<usize>,
     since: Option<i64>,
+    /// Lines that contain this (any case), from memory and the stored chunks.
+    q: Option<String>,
 }
 
 fn truthy(v: &Option<String>) -> bool {
@@ -279,6 +281,17 @@ fn truthy(v: &Option<String>) -> bool {
 /// Lines as JSON, or (`follow`) as server-sent events: what's there, then what comes.
 async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tokio::sync::watch::Receiver<bool>>) -> R {
     let tail = q.tail.unwrap_or(500).min(crate::logs::RING);
+    if let Some(text) = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if text.len() > 200 {
+            return Err(Error::BadRequest("q is at most 200 characters".into()));
+        }
+        let (lines, cut) = apps.logs.search(&key, text, q.since, tail).await;
+        let mut r = Json(lines).into_response();
+        if cut {
+            r.headers_mut().insert("x-roll-search-truncated", axum::http::HeaderValue::from_static("1"));
+        }
+        return Ok(r);
+    }
     if !truthy(&q.follow) {
         return ok(apps.logs.tail(&key, tail, q.since).await);
     }

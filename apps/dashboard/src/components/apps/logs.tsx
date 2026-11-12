@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { followLog, type LogLine } from "@/lib/apps-api";
+import { appsApi, followLog, type LogLine } from "@/lib/apps-api";
+import { btn } from "../ui";
 import { LogBar, LogView } from "./shared";
 
 const MAX_LINES = 5000;
@@ -11,6 +12,21 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [paused, setPaused] = useState(false);
   const [filter, setFilter] = useState("");
   const [instance, setInstance] = useState("");
+  // A search back through the stored days, shown instead of the live tail until left.
+  const [found, setFound] = useState<{ q: string; lines: LogLine[] } | null>(null);
+  const [searching, setSearching] = useState(false);
+  const search = async () => {
+    const q = filter.trim();
+    if (!q) return;
+    setSearching(true);
+    try {
+      setFound({ q, lines: await appsApi.searchLogs(service, env, q, Date.now() - 7 * 86_400_000) });
+    } catch {
+      setFound({ q, lines: [] });
+    } finally {
+      setSearching(false);
+    }
+  };
   // Lines keep arriving while paused; the view shows them on resume.
   const buffer = useRef<LogLine[]>([]);
   const pausedRef = useRef(paused);
@@ -66,7 +82,13 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
         onPause={setPaused}
         live={open}
         extra={
-          instances.length > 1 && (
+          <>
+          {filter.trim() && (
+            <button type="button" className={btn} disabled={searching} onClick={() => void search()} title="Search the stored logs of the last 7 days, not just what's here">
+              {searching ? "Searching…" : "Search 7 days"}
+            </button>
+          )}
+          {instances.length > 1 && (
             <select value={instance} onChange={(e) => setInstance(e.target.value)} className="h-8 rounded-lg border border-line bg-panel px-2 font-mono text-[12px] outline-none" aria-label="Instance">
               <option value="">every instance</option>
               {instances.map((i) => (
@@ -75,11 +97,20 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
                 </option>
               ))}
             </select>
-          )
+          )}
+          </>
         }
       />
+      {found && (
+        <p className="mb-2 flex items-center gap-2 text-[12px] text-muted">
+          {found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{found.q}” in the last 7 days
+          <button type="button" className="text-accent hover:underline" onClick={() => setFound(null)}>
+            Back to live
+          </button>
+        </p>
+      )}
       <LogView
-        lines={shown}
+        lines={found ? found.lines : shown}
         columns
         className="h-[min(560px,65svh)]"
         empty={lines.length ? "Nothing matches the filter." : open ? "No output yet. A service that's asleep logs again when a request wakes it." : <span className="shimmer">Connecting…</span>}

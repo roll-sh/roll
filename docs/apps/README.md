@@ -508,8 +508,11 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    container on its network (≈250 ms here; the network, `--init` and the log driver each
    measured within noise by `scripts/bench-apps-coldstart.sh`). Snapshot restore (CRIU, or
    Firecracker on the fleet) is the next step for it.
-3. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
-    stored 7 days of logs.
+3. **Notifications.** A failed deploy and a crash loop reach people: for a repo service as
+   deployment events through roll code's one delivery queue (webhooks, review apps), and to chat
+   through chat ops; designed with the other branches, not a second webhook system. (Done:
+   crash loops on the environment and the service page; search over the stored 7 days of logs,
+   `?q=`, `roll logs --grep … --since 2h`, the Logs tab's Search 7 days.)
 4. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
 5. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.

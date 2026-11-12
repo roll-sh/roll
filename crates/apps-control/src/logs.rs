@@ -19,6 +19,9 @@ pub const LINE_MAX: usize = 16 << 10;
 /// Bytes a log holds between two flushes (about 10 s); a chattier process's further lines are
 /// counted and dropped, and a line in their place says how many.
 pub const UNFLUSHED_MAX: usize = 8 << 20;
+/// What a search reads from stored chunks at most (about 7 days of a busy service's logs are
+/// many times this: it says when it stopped).
+pub const SEARCH_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,6 +130,42 @@ impl LogHub {
         }
         let skip = lines.len().saturating_sub(tail);
         lines.split_off(skip)
+    }
+
+    /// Lines that contain `q` (any case), newest last, at most `limit`: the lines in memory, then
+    /// the stored chunks newest first (those older than `since` skipped by name), until `limit`
+    /// matches or [`SEARCH_BYTES`] read. The flag says whether it stopped before reading all.
+    pub async fn search(&self, key: &str, q: &str, since: Option<i64>, limit: usize) -> (Vec<LogLine>, bool) {
+        let q = q.to_lowercase();
+        let hit = |l: &LogLine| l.text.to_lowercase().contains(&q) && since.is_none_or(|s| l.t >= s);
+        let mem: Vec<LogLine> = self.logs.lock().get(key).map(|l| l.ring.iter().cloned().collect()).unwrap_or_default();
+        let first_mem = mem.first().map(|l| l.t);
+        let mut found: Vec<LogLine> = mem.into_iter().rev().filter(|l| hit(l)).take(limit).collect();
+        let mut cut = false;
+        if found.len() < limit
+            && let Some(objects) = &self.objects
+        {
+            let mut chunks = objects.list(&prefix(key)).await.unwrap_or_default();
+            chunks.sort();
+            let mut read = 0usize;
+            for (chunk, _) in chunks.iter().rev() {
+                // `<first ms>-<seq>.ndjson`: a chunk that starts before `since` may still end after it.
+                if found.len() >= limit || read > SEARCH_BYTES {
+                    cut = true;
+                    break;
+                }
+                let Ok(Some(b)) = objects.get(chunk).await else { continue };
+                read += b.len();
+                let mut part: Vec<LogLine> = b.split(|c| *c == b'\n').filter_map(|l| serde_json::from_slice(l).ok()).collect();
+                part.retain(|l: &LogLine| first_mem.is_none_or(|f| l.t < f) && hit(l));
+                found.extend(part.into_iter().rev().take(limit - found.len()));
+                if since.is_some_and(|s| chunk.rsplit('/').next().and_then(|n| n.split('-').next()).and_then(|n| n.parse::<i64>().ok()).is_some_and(|t| t < s)) {
+                    break;
+                }
+            }
+        }
+        found.reverse();
+        (found, cut)
     }
 
     /// Write every log's new lines to object storage (each key a chunk of its own).
@@ -310,6 +349,25 @@ pub async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, sink: LogSink) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_search_finds_lines_in_stored_chunks_and_in_memory_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = LogHub::new(Some(Objects::new(&pg_storage::StorageConfig::Local(dir.path().to_path_buf())).unwrap()));
+        let sink = hub.sink("env:svc_x/production", Stream::Stdout);
+        for l in ["GET / 200", "ERROR db timeout", "GET /a 200"] {
+            sink.line(l);
+        }
+        hub.flush().await;
+        hub.forget("env:svc_x/production");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        for l in ["GET /b 200", "error: retry"] {
+            sink.line(l);
+        }
+        let (found, cut) = hub.search("env:svc_x/production", "Error", None, 100).await;
+        assert_eq!(found.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["ERROR db timeout", "error: retry"]);
+        assert!(!cut);
+    }
 
     #[tokio::test]
     async fn a_flood_of_output_is_capped_between_flushes_and_says_so() {

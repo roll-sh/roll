@@ -344,6 +344,8 @@ export const appsApi = {
     call<Variables>("PATCH", `${env(id, e)}/variables`, change),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
+  /** Lines that contain `q` (any case), back through the stored logs (7 days), newest last. */
+  searchLogs: (id: string, e: string, q: string, since?: number) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ q, since, tail: 2000 })}`),
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
 

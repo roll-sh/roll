@@ -65,6 +65,12 @@ pub struct Logs {
     /// A deployment's build log instead of the runtime log (`latest` for the newest).
     #[arg(long, short = 'b')]
     pub build: Option<String>,
+    /// Only lines that contain this (any case), searched back through the stored logs.
+    #[arg(long, short = 'g')]
+    pub grep: Option<String>,
+    /// Only lines from this long ago on: `30m`, `2h`, `7d`.
+    #[arg(long)]
+    pub since: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -505,6 +511,19 @@ mod term {
     }
 }
 
+/// `30s`, `15m`, `2h`, `7d` in milliseconds.
+fn ago_ms(d: &str) -> anyhow::Result<i64> {
+    let (n, unit) = d.trim().split_at(d.trim().len().saturating_sub(1));
+    let n: i64 = n.parse().map_err(|_| anyhow::anyhow!("--since is like 30m, 2h or 7d"))?;
+    Ok(n * match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => bail!("--since is like 30m, 2h or 7d"),
+    })
+}
+
 /// The git commit `dir` is checked out at: its sha, its subject, and whether the tree has local
 /// changes. None outside a git checkout (or without git).
 fn git_head(dir: &Path) -> Option<(String, String, bool)> {
@@ -667,10 +686,15 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         }
         None => format!("{base}/logs"),
     };
+    let since = match &l.since {
+        Some(d) => format!("&since={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?),
+        None => String::new(),
+    };
     if l.follow {
-        return follow(api, &format!("{path}?follow=1&tail={}", l.tail)).await;
+        return follow(api, &format!("{path}?follow=1&tail={}{since}", l.tail)).await;
     }
-    let lines = api.get(&format!("{path}?tail={}", l.tail)).await?;
+    let grep = l.grep.as_deref().map(|g| format!("&q={}", enc(g))).unwrap_or_default();
+    let lines = api.get(&format!("{path}?tail={}{since}{grep}", l.tail)).await?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&lines)?);
         return Ok(());
