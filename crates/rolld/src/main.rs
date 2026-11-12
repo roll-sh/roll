@@ -443,7 +443,8 @@ async fn run() -> anyhow::Result<()> {
         router = router.merge(n.router());
     }
     // Workspace projects and roll secrets: always on, behind the same operator token (secrets
-    // also take their scoped tokens). Secrets' links call the products' routes in process.
+    // also take their scoped tokens). Secrets' links call the products' routes in process, through
+    // the copy taken below: every product's router merges above this line, or its links 404.
     let workspace = workspace::open(&args, &home)?;
     router = router.merge(roll_workspace::router(workspace.clone()));
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.

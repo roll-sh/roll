@@ -256,6 +256,14 @@ impl Secrets {
         })
     }
 
+    /// `caller` as a consumer running code nobody vetted (a check, a sandbox, a preview): kept out
+    /// of the project's protected environments, as they are when it asks.
+    pub fn untrusted(&self, project: &str, caller: &Caller) -> Result<Caller> {
+        self.project(project)?;
+        let protected = self.db.read(|c| Ok::<_, Error>(all(c, project)?.into_iter().filter(|e| e.protected).map(|e| e.slug).collect()))?;
+        Ok(caller.without(protected))
+    }
+
     pub fn environment(&self, project: &str, slug: &str, caller: &Caller) -> Result<Environment> {
         caller.need(Action::Read, &Scope::env(project, slug))?;
         self.project(project)?;

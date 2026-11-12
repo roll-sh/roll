@@ -417,7 +417,13 @@ secrets when the service starts. It uses one call:
   The project must have one of the owner's repos on its canvas. The values are sealed with the rest
   of the sandbox's env until the backend has them. The consumer is `sandbox:<id>`.
 - **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
-  "Ephemeral environments") and resolves it as `preview:<slug>`.
+  "Ephemeral environments") and resolves it as `preview:<slug>`. A preview runs a change's code, so
+  it resolves with `"untrusted": true`: an ephemeral environment based on a protected one gets its
+  overrides and links, never the base's values.
+- **Untrusted consumers.** Anything that runs code nobody vetted resolves untrusted
+  (`Secrets::untrusted` in process, `"untrusted": true` over HTTP): no protected environment is
+  read, asked for or reached through a reference, an import or a base, whatever the caller may
+  otherwise do. Checks and sandboxes always are.
 - **roll tasks** runs functions in the user's own app, so it has no environment to inject. The app
   itself uses `roll run` or the resolve call.
 
@@ -763,7 +769,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` | 201 `Applied & {skipped}` or `{request, skipped}` |

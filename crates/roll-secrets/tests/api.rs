@@ -514,19 +514,17 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-1", "base": "production" }))).await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
 
-    // Checks and sandboxes resolve as a consumer that may not touch protected environments: not
-    // through a reference, an import or an ephemeral environment's base either.
-    let check = roll_secrets::Caller::consumer_except("check:acme/web#test", vec!["production".into()]);
-    let s = api.secrets.clone();
-    let p = api.project.clone();
-    let (dev, staging, preview) = tokio::task::spawn_blocking(move || {
-        (s.values(&p, "development", "/", true, Some("check"), &check).unwrap(), s.values(&p, "staging", "/", true, Some("check"), &check).unwrap(), s.values(&p, "pr-1", "/", true, Some("check"), &check).unwrap())
-    })
-    .await
-    .unwrap();
-    assert_eq!(dev.values["REF"].expose(), "${production.DB_PASSWORD}");
-    assert_eq!(dev.problems[0].problem, "production.DB_PASSWORD: no access to production");
-    assert!(!staging.values.contains_key("DB_PASSWORD") && !preview.values.contains_key("DB_PASSWORD"));
+    // Checks, sandboxes and previews resolve as untrusted consumers, which may not touch protected
+    // environments: not through a reference, an import or an ephemeral environment's base either.
+    let body = || Some(json!({ "consumer": "check:acme/web#test", "untrusted": true }));
+    let dev = api.ok(Method::POST, "/environments/development/resolve", body()).await;
+    let staging = api.ok(Method::POST, "/environments/staging/resolve", body()).await;
+    let preview = api.ok(Method::POST, "/environments/pr-1/resolve", body()).await;
+    assert_eq!(dev["values"]["REF"], "${production.DB_PASSWORD}");
+    assert_eq!(dev["problems"][0]["problem"], "production.DB_PASSWORD: no access to production");
+    assert!(staging["values"].get("DB_PASSWORD").is_none() && preview["values"].get("DB_PASSWORD").is_none());
+    let (s, _) = api.call(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "check:x", "untrusted": true }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
 
     // A token for development can't make development an overlay of production, nor link a
     // resource (that's an admin's), nor see the fingerprint of what it can't reveal.

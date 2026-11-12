@@ -88,6 +88,19 @@ impl Grants for Except {
     }
 }
 
+/// `0`'s grants, never in `1`'s environments.
+#[derive(Debug)]
+struct Narrowed(std::sync::Arc<dyn Grants>, Except);
+
+impl Grants for Narrowed {
+    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
+        self.1.allows(action, at) && self.0.allows(action, at)
+    }
+    fn project(&self) -> Option<&str> {
+        self.0.project()
+    }
+}
+
 /// A scoped token's grants: one project; environments and folders (prefixes) or all; actions.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TokenScope {
@@ -185,9 +198,10 @@ impl Caller {
         Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None }
     }
 
-    /// An in-process consumer that may not touch `except` (a project's protected environments).
-    pub fn consumer_except(name: &str, except: Vec<String>) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Except(except)), ip: None }
+    /// This caller, kept out of `except` (a project's protected environments) whatever it may
+    /// otherwise do.
+    pub fn without(&self, except: Vec<String>) -> Caller {
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone() }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
