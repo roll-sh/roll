@@ -545,12 +545,13 @@ async fn post_process(
             }
         }
     }
-    if filter_list && let Tgt::List { items, id_field } = row.target {
+    if filter_list && let Tgt::List { items, id_field, kind } = row.target {
         let (a, s, product) = (ctx.access.clone(), scope.clone(), row.product);
+        let kind = kind.unwrap_or(product);
         v = tokio::task::spawn_blocking(move || {
             let keep = |item: &Value| {
                 let Some(id) = item.get(id_field).and_then(Value::as_str) else { return false };
-                let r = if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, product, id) };
+                let r = if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) };
                 s.outcome(&Target::One(r), action) == Outcome::Allow
             };
             let filter = |list: &mut Vec<Value>| list.retain(&keep);

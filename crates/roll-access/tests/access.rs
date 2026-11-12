@@ -150,6 +150,11 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     // A signed hop to the tasks leader is decided as the request it carries.
     let hop = d.send(&token, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", "/v1/tasks/queues")]).await;
     assert_eq!(hop.1["needs"]["product"], "tasks", "{}", hop.1);
+    // A tasks token for one queue reaches that queue, not another, nor a topic of its name.
+    let (queue, _) = d.token(json!([{ "product": "tasks", "resources": [{ "id": "queue:emails" }], "actions": { "read": "allow" } }]), json!({})).await;
+    for (uri, status) in [("/v1/tasks/queues/emails", StatusCode::OK), ("/v1/tasks/queues/billing", StatusCode::FORBIDDEN), ("/v1/tasks/topics/emails", StatusCode::FORBIDDEN)] {
+        assert_eq!(d.send(&queue, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", uri)]).await.0, status, "{uri}");
+    }
 
     // A public route is public for it too, as anyone (no grant, not the operator).
     let (s, open) = d.call(&token, Method::GET, "/v1/open", None).await;

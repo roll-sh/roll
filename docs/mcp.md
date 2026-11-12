@@ -274,4 +274,5 @@ Ranked; the top item is in progress. A watchdog reads this list.
 3. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
    reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
    branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
-4. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+4. **Finer resources:** storage buckets in another account (today a request naming an account
+   needs a rule for every storage resource), apps' deploys by id.
