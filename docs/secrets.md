@@ -860,9 +860,15 @@ Ranked:
    after roll-access. Merge it in when #19 is on main; then retire `rlst_` tokens for roll-access's.
    Also: roll apps' `SecretSource` wired to `Secrets::values` as `app:<svc>` (whichever of #20 and
    #21 merges second; the adapter is in the apps thread).
-2. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
-   a version's history shows the old and new value side by side on reveal.
-3. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
-   change.
-4. **Search links live** once roll search (#22) lands its workspace kind: check the provider
+2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
+3. **Purge and retention of old values**: after a leak and a rotation, `POST …/secrets/{key}/purge
+   {before_version}` destroys the stored ciphertext of older versions (their history rows stay,
+   marked purged, so rollback says what it can't restore), audited; and an optional per-project
+   `history_days` after which old versions' values are purged by the sweeper. In progress.
+4. **A TypeScript client** (`packages/secrets`): `resolve` for services (with the sealed box opened
+   in process), `values`, `digest`-based watching; documented in the getting-started guide.
+5. **JSON import** (`{"KEY": "value"}` and arrays of `{key, value}`), and notes on moving from
+   Infisical, Doppler and Vercel (their CLIs export `.env` or JSON).
+6. **Approval notifications**: when a change request opens on a protected environment, its
+   approvers hear about it (a `notify` sync on the environment, or roll's chat ops).
