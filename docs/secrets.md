@@ -326,6 +326,8 @@ roll secrets get     KEY [--plain]
 roll secrets set     KEY=VALUE… | KEY (value from stdin) [--comment] [--tag]
 roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change
+roll secrets edit                                               # the folder in $EDITOR, one change
+roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets export  [--format dotenv|json|shell|yaml]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
@@ -347,6 +349,10 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   environment or another), that decrypts nothing, issues nothing and isn't audited
   (`Secrets::digest` in process). A change that doesn't resolve keeps the running command. A live
   link's resource rotating doesn't change the digest.
+- `roll secrets edit` opens the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
+  `$XDG_RUNTIME_DIR` when there is one, removed after) and applies what changed as one change
+  (`import` with `replace`: a removed line deletes its key; linked and personal keys aren't in the
+  file and never deleted). `set KEY --generate N` makes a random value of N letters and digits.
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
@@ -705,7 +711,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
-| `POST /environments/{env}/import` | `{dotenv, path?, overwrite?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
+| `POST /environments/{env}/import` | `{dotenv, path?, overwrite?, replace?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
@@ -858,8 +864,5 @@ Ranked:
    a version's history shows the old and new value side by side on reveal.
 3. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
-4. **`roll secrets edit`** (an environment as a `.env` in `$EDITOR`, in a 0600 file under
-   `$XDG_RUNTIME_DIR`, applied as one change) and `roll secrets set KEY --generate 32` (a random
-   value made locally).
-5. **Search links live** once roll search (#22) lands its workspace kind: check the provider
+4. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.

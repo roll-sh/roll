@@ -459,6 +459,9 @@ async fn values_are_sealed_for_services_and_never_appear_in_the_audit_log() {
     assert_eq!(s["comment"], "stripe");
     let (_, text) = api.call(Method::GET, "/environments/production/values?format=dotenv", None).await;
     assert_eq!(text, "PORT=8080\nSTRIPE_KEY=sk_live_123\n");
+    // `replace` makes the folder match the file, deletions included, in one change.
+    let r = api.ok(Method::POST, "/environments/production/import", Some(json!({ "dotenv": "STRIPE_KEY=sk_live_123\n", "replace": true }))).await;
+    assert_eq!((r["items"][0]["key"].as_str(), r["items"][0]["what"][0].as_str()), (Some("PORT"), Some("deleted")));
 
     let sk = [9u8; 32];
     let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web", "seal_to": roll_secrets::crypto::public_key(&sk) }))).await;

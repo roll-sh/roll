@@ -429,6 +429,10 @@ struct ImportBody {
     /// Open a change request instead of writing (protected environments).
     #[serde(default)]
     request: bool,
+    /// Make the folder match the file: its own keys the file doesn't have are deleted in the same
+    /// change (never a linked or a personal one). Implies `overwrite`.
+    #[serde(default)]
+    replace: bool,
 }
 
 /// A `.env` file as one change (bulk paste, `roll secrets import`).
@@ -437,12 +441,20 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
     let entries = dotenv::parse(&i.dotenv).map_err(Error::BadRequest)?;
     let path = crate::names::path(i.path.as_deref().unwrap_or("/"))?;
     let v = blocking(s, move |s| {
-        let existing: Vec<String> = s.secrets(&project, &env, &path, &c)?.into_iter().filter(|x| x.source == crate::read::Source::Own).map(|x| x.key).collect();
+        let own: Vec<crate::Secret> = s.secrets(&project, &env, &path, &c)?.into_iter().filter(|x| x.source == crate::read::Source::Own && x.kind == crate::SecretType::Shared).collect();
+        let existing: Vec<String> = own.iter().map(|x| x.key.clone()).collect();
+        let in_file: std::collections::HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
+        let removed: Vec<Op> = if i.replace {
+            own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None }).collect()
+        } else {
+            vec![]
+        };
+        let overwrite = i.overwrite || i.replace;
         let mut skipped = vec![];
         let ops: Vec<Op> = entries
             .into_iter()
             .filter(|e| {
-                let keep = i.overwrite || !existing.contains(&e.key);
+                let keep = overwrite || !existing.contains(&e.key);
                 if !keep {
                     skipped.push(e.key.clone());
                 }
@@ -457,6 +469,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
                 link: None,
                 path: None,
             })
+            .chain(removed)
             .collect();
         let message = i.message.or_else(|| Some("imported a .env file".into()));
         let b = Batch { path: Some(path), message, ops, if_seq: None };
