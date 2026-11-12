@@ -704,13 +704,10 @@ impl Accounts {
 
     // ── throttles: durable, and only for things that exist ──
 
-    pub(crate) fn throttled(&self, key: &str, max: i64, window_ms: i64) -> Result<bool> {
-        let now = self.db.now_ms()?;
-        let row = self.db.read(|c| c.query_row("SELECT n, since FROM throttle WHERE key = ?", [key], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).optional())?;
-        Ok(row.is_some_and(|(n, since)| n >= max && now - since < window_ms))
-    }
-
-    pub(crate) fn count(&self, key: &str, window_ms: i64) -> Result<()> {
+    /// Count one attempt at `key` and say whether it's within `max` per `window_ms`. Counting
+    /// and checking are one write, so attempts made in parallel (on any node) can't all slip in
+    /// under the limit before any of them is counted.
+    pub(crate) fn attempt(&self, key: &str, max: i64, window_ms: i64) -> Result<bool> {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let row = c.query_row("SELECT n, since FROM throttle WHERE key = ?", [key], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).optional()?;
@@ -719,7 +716,7 @@ impl Accounts {
                 _ => (1, now),
             };
             c.execute("INSERT INTO throttle (key, n, since) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET n = excluded.n, since = excluded.since", params![key, n, since])?;
-            Ok(())
+            Ok(n <= max)
         })
     }
 
@@ -732,27 +729,24 @@ impl Accounts {
 
     // ── email codes ──
 
-    /// Start an email sign-in: a challenge id, and the mail to send if the address has an
-    /// account (or `invite` is a valid invite for it) and hasn't had too many codes lately.
-    /// The answer looks the same either way.
-    pub fn email_start(&self, email: &str, invite: Option<&str>) -> Result<(String, Option<Mail>)> {
+    /// Start email sign-in `challenge`: the mail to send if the address has an account (or
+    /// `invite` is a valid invite for it) and hasn't had too many codes lately. The caller answers
+    /// before running this, so neither the answer nor its timing says which it was.
+    pub fn email_start(&self, challenge: &str, email: &str, invite: Option<&str>) -> Result<Option<Mail>> {
         let email = normalize_email(email)?;
-        let id = new_id("chl");
         let user = self.db.read(|c| c.query_row("SELECT id, disabled FROM users WHERE email = ?", [email.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))).optional())?;
         let (user_id, invite_id) = match (user, invite) {
-            (Some((_, true)), _) => return Ok((id, None)),
+            (Some((_, true)), _) => return Ok(None),
             (Some((u, false)), _) => (Some(u), None),
             (None, Some(token)) => match self.valid_invite(token)? {
                 Some((inv, inv_email, _)) if inv_email == email => (None, Some(inv)),
-                _ => return Ok((id, None)),
+                _ => return Ok(None),
             },
-            (None, None) => return Ok((id, None)),
+            (None, None) => return Ok(None),
         };
-        let key = format!("send:{email}");
-        if self.throttled(&key, SENDS_PER_HOUR, 60 * MINUTE)? {
-            return Ok((id, None));
+        if !self.attempt(&format!("send:{email}"), SENDS_PER_HOUR, 60 * MINUTE)? {
+            return Ok(None);
         }
-        self.count(&key, 60 * MINUTE)?;
         let code = zeroize::Zeroizing::new(six_digits());
         let hash = twofactor::hash_code(&code)?;
         let now = self.db.now_ms()?;
@@ -761,7 +755,7 @@ impl Accounts {
             c.execute("DELETE FROM email_codes WHERE expires_at <= ?", [now])?;
             c.execute(
                 "INSERT INTO email_codes (id, email, user_id, invite_id, code_hash, attempts, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
-                params![id, email, user_id, invite_id, hash, now, now + CODE_TTL_MS],
+                params![challenge, email, user_id, invite_id, hash, now, now + CODE_TTL_MS],
             )
         })?;
         let mail = Mail {
@@ -769,29 +763,26 @@ impl Accounts {
             subject: format!("{} is your roll sign-in code", *code),
             text: format!("Your roll sign-in code is {}.\n\nIt works once, for the next 10 minutes. If you didn't ask for it, ignore this mail.\n", *code),
         };
-        Ok((id, Some(mail)))
+        Ok(Some(mail))
     }
 
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
     pub fn email_verify(&self, challenge: &str, code: &str) -> Result<String> {
         let now = self.db.now_ms()?;
-        let row = self.db.read(|c| {
-            c.query_row("SELECT email, user_id, invite_id, code_hash, attempts, expires_at FROM email_codes WHERE id = ?", [challenge], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?))
+        // A try is used up before the code is checked, in one write: guesses sent in parallel
+        // can't share one.
+        let row = self.db.write(|c| {
+            if c.execute("UPDATE email_codes SET attempts = attempts + 1 WHERE id = ? AND attempts < ? AND expires_at > ?", params![challenge, CODE_TRIES, now])? == 0 {
+                return Ok(None);
+            }
+            c.query_row("SELECT email, user_id, invite_id, code_hash FROM email_codes WHERE id = ?", [challenge], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?))
             })
             .optional()
         })?;
-        let Some((email, user, invite, hash, attempts, expires)) = row else { return Err(Error::bad_code()) };
-        if attempts >= CODE_TRIES || expires <= now {
-            return Err(Error::bad_code());
-        }
+        let Some((email, user, invite, hash)) = row else { return Err(Error::bad_code()) };
         let key = format!("code:{}", user.as_deref().or(invite.as_deref()).unwrap_or_default());
-        if self.throttled(&key, CODE_FAILS, 15 * MINUTE)? {
-            return Err(Error::bad_code());
-        }
-        if !twofactor::verify_code(code.trim(), &hash) {
-            self.db.write(|c| c.execute("UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?", [challenge]))?;
-            self.count(&key, 15 * MINUTE)?;
+        if !self.attempt(&key, CODE_FAILS, 15 * MINUTE)? || !twofactor::verify_code(code.trim(), &hash) {
             return Err(Error::bad_code());
         }
         // Single use: whoever deletes it signs in.

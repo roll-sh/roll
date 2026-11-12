@@ -8,8 +8,9 @@
 
 use crate::oauth::{Finished, Provider};
 use crate::{Accounts, Error, Issued, Result, SECOND_FACTOR_TTL_MS, SESSION_TTL_MS};
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
@@ -49,7 +50,25 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/users", get(list_users))
         .route("/v1/accounts/users/{id}", axum::routing::patch(update_user))
         .route("/v1/accounts/users/{id}/sessions", delete(revoke_user_sessions))
+        .route_layer(axum::middleware::from_fn(json_only))
         .with_state(accounts)
+}
+
+/// A browser's write here is JSON (docs/accounts.md, "CSRF"). A form on another site can post
+/// any text as its body, and the browser keeps the cookie its answer sets: without this, a page
+/// could post the attacker's own email code and sign the visitor in to the attacker's account.
+/// `application/json` from another origin needs a CORS preflight, which only the dashboard
+/// passes. Calls with a token aren't a browser's and are left alone.
+async fn json_only(req: Request, next: Next) -> Response {
+    let json = |v: &HeaderValue| v.to_str().ok().and_then(|s| s.split(';').next()).is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"));
+    let h = req.headers();
+    let form = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && !h.contains_key(header::AUTHORIZATION)
+        && h.get(header::CONTENT_TYPE).is_some_and(|v| !json(v));
+    if form {
+        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, Json(json!({ "error": "send the body as JSON (Content-Type: application/json)" }))).into_response();
+    }
+    next.run(req).await
 }
 
 impl IntoResponse for Error {
@@ -157,8 +176,9 @@ async fn session(State(a): S, me: Me, owed: Owed, headers: HeaderMap) -> Result<
         (None, Some(_), Some(t)) => json!({ "status": "mfa_required", "methods": ["totp", "recovery"], "csrf": roll_auth::csrf_token(t) }),
         _ => {
             let resp = Json(json!({ "status": "anonymous" })).into_response();
-            // A cookie that no longer stands for a session goes.
-            let clear = token.is_some().then(|| cookie(&a, a.config.session_cookie(), "", 0));
+            // A cookie that no longer stands for a session goes. With an `Authorization` header the
+            // gate didn't look at the cookie, so it may still be good.
+            let clear = (token.is_some() && !headers.contains_key(header::AUTHORIZATION)).then(|| cookie(&a, a.config.session_cookie(), "", 0));
             return Ok(with_cookies(resp, clear));
         }
     };
@@ -184,10 +204,19 @@ async fn email_start(State(a): S, b: Bytes) -> Result<Response> {
         return Err(Error::Unavailable("email sign-in isn't configured on this server".into(), "email_off"));
     }
     let EmailStart { email, invite } = body(&b)?;
-    let (challenge, mail) = blocking(&a, move |a| a.email_start(&email, invite.as_deref())).await?;
-    if let Some(mail) = mail {
-        a.send_later(mail, "sign-in code");
-    }
+    let email = crate::normalize_email(&email)?;
+    let challenge = crate::new_id("chl");
+    // Whether the address has an account decides only work done after the answer, off the
+    // request (lookups, the throttle, argon2, the write, the mail): the answer's timing can't
+    // say which it was.
+    let (a2, id) = (a.clone(), challenge.clone());
+    tokio::spawn(async move {
+        match blocking(&a2, move |a| a.email_start(&id, &email, invite.as_deref())).await {
+            Ok(Some(mail)) => a2.send_later(mail, "sign-in code"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "accounts: starting an email sign-in failed"),
+        }
+    });
     Ok((StatusCode::ACCEPTED, Json(json!({ "challenge": challenge }))).into_response())
 }
 

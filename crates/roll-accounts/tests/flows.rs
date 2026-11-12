@@ -414,4 +414,20 @@ async fn csrf_is_refused() {
     b.csrf = Some(csrf);
     let a = env.call(&mut b, Method::PATCH, "/v1/accounts/me", Some(json!({ "name": "Ada" }))).await;
     assert_eq!((a.status, a.json["name"].as_str()), (StatusCode::OK, Some("Ada")));
+    // A request carrying a token is judged by it: it doesn't end the cookie's session.
+    let req = Request::builder().uri("/v1/accounts/session").header("cookie", &cookie).header("authorization", "Bearer rlc_someone_elses");
+    assert!(env.send(req.body(Body::empty()).unwrap()).await.headers.get(header::SET_COOKIE).is_none());
+
+    // Login CSRF: another site's form posts the attacker's own code (any text can be the body)
+    // to sign the visitor in to the attacker's account. Only JSON is taken from a browser.
+    let sent = count_codes(&env.outbox, "ada@example.com");
+    let start = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    let code = env.code_for("ada@example.com", sent).await;
+    let body = format!("{{\"challenge\":\"{}\",\"code\":\"{code}\",\"pad\":\"=\"}}", start.json["challenge"].as_str().unwrap());
+    let req = Request::builder().method(Method::POST).uri("/v1/accounts/email/verify").header("content-type", "text/plain").header("origin", "https://evil.example");
+    let a = env.send(req.body(Body::from(body.clone())).unwrap()).await;
+    assert_eq!(a.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert!(a.headers.get(header::SET_COOKIE).is_none());
+    let req = Request::builder().method(Method::POST).uri("/v1/accounts/email/verify").header("content-type", "application/json");
+    assert_eq!(env.send(req.body(Body::from(body)).unwrap()).await.status, StatusCode::OK, "the same code as JSON");
 }

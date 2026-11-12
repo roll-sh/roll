@@ -135,6 +135,13 @@ API's own. A missing or wrong header or origin is:
 403 {"error": "this request needs the X-Roll-CSRF header from GET /v1/accounts/session", "code": "csrf"}
 ```
 
+Signing in has no session yet, so the header can't guard it. Instead, a write to `/v1/accounts`
+without an `Authorization` header must send its body as `Content-Type: application/json` (else
+`415`). A form on another site can post any text as its body, and the browser keeps the cookie the
+answer sets. Without the rule, such a form could post the attacker's own email code and sign the
+visitor in to the attacker's account. JSON from another origin needs a CORS preflight, which only
+the dashboard's origins pass.
+
 ## What a session can reach (phase 1)
 
 The gate (`roll_auth::check`) resolves the cookie, then:
@@ -169,6 +176,9 @@ each put the same repository on their canvas (docs/workspace.md).
 
 Counted durably in `throttle` (they hold across restarts and nodes) and only for things that
 exist (a user, an invite, a challenge), so made-up input can't grow the table.
+
+Each try is counted before it's checked, in the same write as the check, so tries sent in
+parallel (to any node) can't get past a limit.
 
 - Email codes sent: 5 per address per hour. Past it, `POST /email/start` answers the same 202
   and sends nothing.
@@ -322,8 +332,9 @@ A non-admin session on these is 403 `{code: "admin_only"}`; no credentials at al
   (`{to, subject, text}`) instead: local development and tests only. It's never on unless set.
 - Without either, email sign-in is off (`/email/start` is 503) and invites return their link
   for the operator to pass on.
-- Mails go out after the answer is decided, off the request, so the answer's timing doesn't say
-  whether an address has an account.
+- `POST /email/start` answers as soon as the address is valid. Everything that depends on whether
+  the address has an account (lookups, the throttle, hashing the code, storing it, the mail) runs
+  after that, off the request, so the answer's timing doesn't say.
 
 ## Settings
 
