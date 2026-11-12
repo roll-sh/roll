@@ -271,39 +271,42 @@ own rates (the same ones its usage page shows).
 `scripts/preview-cost.sh` runs a rolld of its own (ports 27xxx, home in `~/.cache`). It:
 
 1. makes a project with a repo (`roll.toml` `[preview]`: `python -m http.server`, 128 MiB,
-   0.25 CPU) and a Redis database, a bucket, a NoSQL database, a queues vhost, a stream with a
-   topic and a tasks tenant;
+   0.25 CPU) and a Postgres project, a Redis database, a bucket, a NoSQL database, a queues
+   vhost, a stream with a topic and a tasks tenant;
 2. puts 20 MiB of objects and 20,000 1 KiB keys into the parents;
-3. opens a change, writes 1 MiB and 1,000 keys into the preview's branches, and visits it;
+3. opens a change, writes 1 MiB and 1,000 keys into the preview's branches, and opens the
+   preview through its link (without it: 401);
 4. sleeps it and lands the change.
 
 These are the numbers from 2026-11-12 on ai-server (36 threads, ext4, load 25–30 from other
-sessions, debug build). Postgres wasn't in the run (see `## Next`).
+sessions, debug build).
 
 | What | Measured |
 | --- | --- |
-| Change opened → preview ready (6 branches, 1 service deployed) | 1.2–1.7 s |
+| Change opened → preview ready (7 branches, 1 service deployed) | 12.3 s with Postgres (its `pg_basebackup` of the running parent is most of it); 1.2–2.1 s without |
 | The bucket branch: parent's bytes / its own after writing 1 MiB / objects it sees | 20 MiB / 1 MiB / 21 |
-| First request (cold start of the service's container, image cached) | 3.8–6.4 s |
-| Next request (warm) | 18–25 ms |
-| The service's container while running | 26 MiB of 128 MiB, 0.01% CPU |
-| rolld while the preview runs (its Redis branch and NoSQL database loaded) | +94 MiB RSS |
+| The Postgres branch's data directory (a full copy on ext4; the parent's: 94 MiB) | 62 MiB |
+| First request (cold start of the service's container, image cached) | 3.6–13.6 s (13.6 under the heaviest load) |
+| Next request (warm) | 16–27 ms |
+| The service's container while running | 12–30 MiB of 128 MiB, 0.01% CPU |
+| rolld while the preview runs (its Redis branch and NoSQL database loaded) | +86 to +96 MiB RSS |
 | Containers left once it sleeps | 0 |
-| Bytes the preview's branches own | 24.7 MB (Redis: 23.6 MB of loaded memory, bucket: 1 MiB, the rest: 0) |
-| **Cost asleep** | **$0.00057 a month** |
-| **Cost running** | **$0.0022 an hour** (the container's 128 MiB, plus Redis memory) |
+| **Cost asleep** | **$0.006 a month**: the Postgres directory, $0.005 until it's evicted after 24 h (then about $0.0001); Redis, $0.0006 |
+| **Cost running** | **$0.012 an hour**: the container's 128 MiB, $0.002; Postgres at 0.25 CU, $0.010; Redis memory |
 | After landing | every branch gone, every parent intact |
 
-So with these sizes, a hundred sleeping previews cost about 6 cents a month, and an hour of
-someone clicking through one costs a fifth of a cent.
+So a hundred sleeping previews of this project cost about 60 cents a month in their first day,
+and about 7 cents a month once their Postgres directories are evicted. An hour of someone
+clicking through one costs about a cent.
 
 What dominates, from most to least:
 
-- **The service container while it runs**, priced as Fargate memory and CPU.
+- **Postgres while connected.** A compute at its minimum size.
+- **The Postgres branch's local directory on ext4.** Until eviction it's a full copy (see
+  `## Next`).
+- **The service's container while it runs.**
 - **A Redis branch.** It reports its loaded dataset, which includes the parent's keys.
-- **Bytes the preview writes.** Every other product branches copy-on-write and pays only for those.
-
-A Postgres branch on this ext4 disk is a full data directory (see `## Next`).
+- **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those.
 
 ## Data model
 

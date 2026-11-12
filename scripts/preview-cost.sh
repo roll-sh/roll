@@ -35,7 +35,8 @@ cleanup() {
     for _ in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done
     kill -9 "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
-    for c in $(docker ps -aq --filter "label=sh.roll.code.home=$HOME_DIR"); do docker rm -f "$c" >/dev/null; done
+    # Only what this daemon made: its service containers and its Postgres computes.
+    for c in $(docker ps -aq --filter "label=sh.roll.code.home=$HOME_DIR") $(docker ps -aq --filter "label=roll.home=$HOME_DIR"); do docker rm -f "$c" >/dev/null; done
   fi
 }
 trap cleanup EXIT
@@ -49,7 +50,7 @@ export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:27432 ROLL_REDIS=1
   ROLL_QUEUES_AMQP=127.0.0.1:27672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:27673 ROLL_QUEUES_STOMP=127.0.0.1:27613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:27674 \
   ROLL_QUEUES_MQTT=127.0.0.1:27883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:27675 ROLL_QUEUES_STREAM=127.0.0.1:27552 ROLL_QUEUES_HTTP=127.0.0.1:27680 \
   ROLL_NOSQL_CQL=127.0.0.1:27042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:27043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:27000 ROLL_NOSQL_REST=127.0.0.1:27100 \
-  ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,redis,storage,nosql,queues,streams,tasks} RUST_LOG=${RUST_LOG:-info}
+  ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
 say "starting rolld ($ROLL_PRODUCTS) in $HOME_DIR"
 nice -n 10 "$BIN" >"$HOME_DIR/rolld.log" 2>&1 &
@@ -72,6 +73,7 @@ api POST /v1/storage/buckets '{"name":"assets"}' >/dev/null
 NOSQL=$(api POST /v1/nosql/databases '{"name":"events"}' | jq_ "d['id']")
 api POST /v1/queues/vhosts '{"name":"jobs"}' >/dev/null
 STREAM=$(api POST /v1/streams '{"name":"clicks"}' | jq_ "d['id']")
+PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
 api POST "/v1/streams/$STREAM/topics" '{"name":"clicks","partitions":3}' >/dev/null
 api POST /_roll/tenants '{"id":"work"}' >/dev/null
 # Data in the parents, so the branches have something to share: 20 MiB of objects, 20,000 keys.
@@ -100,7 +102,7 @@ PY
 resp "$REDIS_URL" 20000 parent
 
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
-for r in "repo/acme%2Fweb" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work"; do
+for r in "repo/acme%2Fweb" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
 api PUT "/v1/previews/projects/$PRJ/settings" '{"enabled":true,"sleep_after_s":60}' >/dev/null
@@ -132,6 +134,9 @@ BRANCH_REDIS=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']==
 $S3 cp --quiet "$HOME_DIR/blobs/1.bin" "s3://$BRANCH_BUCKET/new/1.bin"
 resp "$(api GET "/v1/redis/databases/$BRANCH_REDIS" | jq_ "d['redis_url']")" 1000 preview
 PARENT_OBJECTS=$(api GET /v1/storage/buckets/assets | jq_ "d['bytes']")
+PG_BRANCH=$(echo "$P" | jq_ "([r['ref'] for r in d['resources'] if r['kind']=='postgres'] or [''])[0]")
+PG_PARENT_KB=$(du -sk "$HOME_DIR/data/$(api GET "/v1/projects/$PG" | jq_ "[b['id'] for b in d['branches'] if b['parent_id'] is None][0]")" | cut -f1)
+PG_BRANCH_KB=$( [ -n "$PG_BRANCH" ] && du -sk "$HOME_DIR/data/$PG_BRANCH" | cut -f1 || echo 0)
 BRANCH_OBJECTS=$(api GET "/v1/storage/buckets/$BRANCH_BUCKET" | jq_ "d['bytes']")
 BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
 
@@ -171,6 +176,7 @@ cat <<EOF
 | --- | --- |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
+| Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |
 | Service container while running | $STATS |
