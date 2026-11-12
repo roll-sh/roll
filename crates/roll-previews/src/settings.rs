@@ -36,6 +36,10 @@ pub struct Settings {
     /// A command run once on the preview's fresh data (after branching, and after each reset)
     /// before its services deploy: anonymise, migrate, load fixtures.
     pub seed: Option<Seed>,
+    /// Column masks for NoSQL branches: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_inner(1, 1)"}`
+    /// (Cassandra 5's mask functions). Merged onto what the branch inherits from its parent,
+    /// whenever it's made or reset: the preview reads masked values, the parent is untouched.
+    pub masking: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,6 +112,7 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             seed: None,
+            masking: BTreeMap::new(),
         }
     }
 }
@@ -197,6 +202,16 @@ impl Settings {
                 return bad("seed.memory_mb: 64 to 16384".into());
             }
         }
+        for (key, cols) in &self.masking {
+            if !key.strip_prefix("nosql:").is_some_and(|r| !r.is_empty()) {
+                return bad(format!("masking: {key:?} isn't \"nosql:<ref>\" (only NoSQL branches can mask columns)"));
+            }
+            for (col, f) in cols {
+                if col.split('.').count() != 3 || col.split('.').any(str::is_empty) || f.trim().is_empty() || f.len() > 200 {
+                    return bad(format!("masking: {key}: {col:?} → {f:?} isn't \"keyspace.table.column\" → a mask function call"));
+                }
+            }
+        }
         if self.env.len() > MAX_ENV {
             return bad(format!("env: at most {MAX_ENV} variables"));
         }
@@ -234,9 +249,9 @@ fn merge(into: &mut Value, patch: &Value) {
         (Value::Object(a), Value::Object(b)) => {
             for (k, v) in b {
                 match a.get_mut(k) {
-                    // `resources` and `env` are maps: a patch replaces them whole, so a key
-                    // can be removed.
-                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env") => merge(slot, v),
+                    // `resources`, `env` and `masking` are maps: a patch replaces them whole, so
+                    // a key can be removed.
+                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "masking") => merge(slot, v),
                     _ => {
                         a.insert(k.clone(), v.clone());
                     }
@@ -270,5 +285,7 @@ mod tests {
         let schema = Settings::default().patched(&json!({ "data": "schema" })).unwrap();
         assert_eq!(schema.mode_of(Kind::Postgres, "prj_1"), None);
         assert_eq!(schema.mode_of(Kind::Stream, "st_1"), Some(Mode::Schema));
+        assert!(Settings::default().patched(&json!({ "masking": { "nosql:n1": { "app.users.email": "mask_default()" } } })).is_ok());
+        assert!(Settings::default().patched(&json!({ "masking": { "postgres:p1": { "a.b.c": "mask_null()" } } })).is_err(), "only NoSQL masks");
     }
 }

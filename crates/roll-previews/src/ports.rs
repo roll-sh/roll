@@ -65,6 +65,12 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// Add column masks to a branch's policy (its parent's stays as it is). Only products that
+    /// mask (NoSQL) do.
+    async fn mask(&self, _branch: &str, _columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        anyhow::bail!("this product's branches can't mask columns")
+    }
+
     /// The preview has been idle a while: drop what the branch keeps for a quick start (a
     /// Postgres branch's local data directory, to object storage). Its next use brings it back.
     async fn idle(&self, _parent: &str, _branch: &str) -> anyhow::Result<()> {

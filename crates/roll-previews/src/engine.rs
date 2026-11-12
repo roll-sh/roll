@@ -537,6 +537,7 @@ impl Engine {
                     })?;
                     self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                     self.store.set_seed_needed(&r.id, true)?;
+                    self.mask(&r.id, &b, &key, &made.r#ref, &s).await?;
                 }
                 Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
@@ -550,6 +551,7 @@ impl Engine {
                     })?;
                     self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                     self.store.set_seed_needed(&r.id, true)?;
+                    self.mask(&r.id, &b, &key, &fresh.r#ref, &s).await?;
                     reset_any = true;
                 }
                 Some(_) if res.state != ResourceState::Ready => {
@@ -729,6 +731,14 @@ impl Engine {
             self.store.log(&r.id, row.state.as_str())?;
         }
         self.report(row).await;
+        Ok(())
+    }
+
+    /// The project's column masks for a fresh branch, if it has any for this resource.
+    async fn mask(&self, id: &str, b: &Arc<dyn Brancher>, key: &str, branch: &str, s: &Settings) -> anyhow::Result<()> {
+        let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) else { return Ok(()) };
+        b.mask(branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
+        self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
         Ok(())
     }
 

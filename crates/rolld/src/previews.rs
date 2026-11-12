@@ -437,6 +437,16 @@ impl Brancher for Nosql {
         }
     }
 
+    /// Merge masks onto the branch's own policy (inherited from its parent at branching).
+    async fn mask(&self, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        let d = self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await?;
+        let mut policy = d["masking"].as_object().cloned().unwrap_or_default();
+        for (col, f) in columns {
+            policy.insert(col.clone(), json!(f));
+        }
+        self.0.call(Method::PATCH, &format!("/v1/nosql/databases/{}", seg(branch)), Some(json!({ "masking": policy }))).await.map(|_| ())
+    }
+
     /// NoSQL resets in place: same id, endpoint and credentials.
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         match self.0.post(&format!("/v1/nosql/databases/{}/reset", seg(branch)), json!({})).await {

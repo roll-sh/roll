@@ -248,6 +248,10 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   NoSQL, streams, queues and tasks. A `schema` rule for Postgres, Redis or a bucket is refused.
   With `data: "schema"` those kinds are left out unless a rule says `branch`, so a project that
   asked for no rows never gets a full copy by default.
+- **Masked columns.** `masking` adds column masks (Cassandra 5's mask functions) to a NoSQL
+  branch's policy each time it's made or reset, on top of what it inherits from its parent. The
+  preview reads masked values; the parent's policy is untouched. For other products, a `seed`
+  anonymises the rows instead.
 - **Queues branch without what moves messages in.** Shovels and federation upstreams (and the
   `federation-upstream*` keys of policies) aren't copied, so a branch can't pull production
   messages or carry the production broker's credentials.
@@ -448,6 +452,7 @@ type Settings = {
   github: { comment: boolean; status: boolean; deployment: boolean };   // all true
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   seed: { image: string; run: string; timeout_s?: number /* 600 */; memory_mb?: number /* 1024 */ } | null;
+  masking: Record<string, Record<string, string>>; // "nosql:<ref>" → {"ks.table.column": "mask_default()"}
 };
 ```
 
@@ -490,7 +495,8 @@ Ranked by what a person notices first. Done so far:
 - a running parent's Postgres copied by reflinks;
 - roll apps end to end;
 - previews spread across a cluster's nodes, a lease each (tested);
-- roll apps' `pv-…` environments private, their 401 page linked through roll.
+- roll apps' `pv-…` environments private, their 401 page linked through roll;
+- NoSQL column masks per preview.
 
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
@@ -498,5 +504,5 @@ Ranked by what a person notices first. Done so far:
    backup plus WAL with lazy pages (no full copy on ext4). Also `schema` mode for Postgres.
 3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
-   `own_bytes` from roll search so a search branch's cost counts only what it wrote.
+4. **roll search's `own_bytes`** (asked for), so a search branch's cost counts only what it
+   wrote; the adapter already reads it.
