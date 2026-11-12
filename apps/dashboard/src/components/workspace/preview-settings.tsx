@@ -231,6 +231,12 @@ function Form({
         </Field>
       </Section>
 
+      <Section title="Who can open them">
+        <Field group label="Access" note="Previews run on branches of real data. Private ones answer only to their link (from roll, the change or the pull request).">
+          <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />
+        </Field>
+      </Section>
+
       <Section title="GitHub pull requests">
         <Toggle label="A comment with the URLs and cost" checked={s.github.comment} onChange={(v) => set("github", { ...s.github, comment: v })} />
         <Toggle label="A commit status (roll/preview)" checked={s.github.status} onChange={(v) => set("github", { ...s.github, status: v })} />

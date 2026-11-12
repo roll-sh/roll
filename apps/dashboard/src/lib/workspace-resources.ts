@@ -8,7 +8,8 @@
 import { codeApi, type Repo } from "./code-api";
 import { DIALECT_LABEL, nosqlApi, type NosqlDb } from "./nosql-api";
 import { redisApi, type RedisDb } from "./redis-api";
-import { api, formatBytes, maskUri, streams, type Product, type Project as PgProject, type StreamInfo } from "./roll-api";
+import { api, call, formatBytes, maskUri, streams, type Product, type Project as PgProject, type StreamInfo } from "./roll-api";
+import { qapi, type VHost } from "./queues-api";
 import { storageApi, type Bucket } from "./storage-api";
 import { RESOURCE_KINDS, type PlacedResource, type ResourceKind } from "./workspace-api";
 
@@ -42,6 +43,8 @@ export const KIND_LABEL: Record<ResourceKind, string> = {
   stream: "Stream",
   bucket: "Bucket",
   nosql: "NoSQL",
+  queue: "Queues",
+  tasks: "Tasks",
   repo: "Repository",
 };
 
@@ -51,6 +54,8 @@ const KIND_PRODUCT: Record<ResourceKind, Product> = {
   stream: "streams",
   bucket: "storage",
   nosql: "nosql",
+  queue: "queues",
+  tasks: "tasks",
   repo: "code",
 };
 
@@ -190,6 +195,40 @@ function repo(r: Repo): ResourceView {
   };
 }
 
+function vhost(v: VHost): ResourceView {
+  const asleep = v.state === "sleeping" || v.sleeping;
+  return {
+    kind: "queue",
+    ref: v.name,
+    name: v.name,
+    sub: maskUri(v.amqp_url),
+    state: asleep ? "idle" : "online",
+    stateLabel: asleep ? "Scaled to zero" : "Running",
+    meta: formatBytes(v.stored_bytes),
+    connect: maskUri(v.amqp_url),
+    href: `/dashboard/queues/queues?vhost=${encodeURIComponent(v.name)}`,
+    facts: [
+      ["queues", String(v.queues)],
+      ["messages", String(v.messages_ready + v.messages_unacked)],
+      ["connections", String(v.connections)],
+    ],
+  };
+}
+
+function tenant(id: string): ResourceView {
+  return {
+    kind: "tasks",
+    ref: id,
+    name: id,
+    sub: `/t/${id}/v1/tasks`,
+    state: "online",
+    stateLabel: "Tenant",
+    meta: "",
+    href: "/dashboard/tasks",
+    facts: [["api", `/t/${id}/v1/tasks`]],
+  };
+}
+
 /** A placed resource its product no longer has (deleted elsewhere). */
 export function missing(p: { kind: ResourceKind; ref: string }): ResourceView {
   return {
@@ -226,6 +265,8 @@ export async function loadInventory(): Promise<Inventory> {
     on("stream") ? streams.list().then((l) => l.map(stream), () => []) : [],
     on("bucket") ? storageApi.buckets().then((l) => l.map(bucket), () => []) : [],
     on("nosql") ? nosqlApi.list().then((l) => l.map(nosql), () => []) : [],
+    on("queue") ? qapi.vhosts().then((l) => l.map(vhost), () => []) : [],
+    on("tasks") ? call<{ tenants: string[] }>("GET", "/_roll/tenants").then((t) => t.tenants.map(tenant), () => []) : [],
     on("repo") ? codeApi.repos().then((l) => l.map(repo), () => []) : [],
   ]);
   return { views: new Map(lists.flat().map((v) => [resourceKey(v), v])), kinds };
@@ -240,12 +281,14 @@ export const KIND_BLURB: Record<ResourceKind, string> = {
   nosql: "ScyllaDB / Cassandra",
   stream: "Kafka-compatible topics",
   bucket: "S3-compatible storage",
+  queue: "RabbitMQ-compatible vhost",
+  tasks: "Messages, schedules, workflows",
   repo: "Source for this project",
 };
 
 /** What a new resource of `kind` would be called in `project` (unique among `taken`). */
 export function suggestName(kind: ResourceKind, project: string, taken: Set<string>) {
-  const base = `${project}-${{ postgres: "db", redis: "cache", nosql: "nosql", stream: "events", bucket: "files", repo: "repo" }[kind]}`;
+  const base = `${project}-${{ postgres: "db", redis: "cache", nosql: "nosql", stream: "events", bucket: "files", queue: "jobs", tasks: "tasks", repo: "repo" }[kind]}`;
   let name = base;
   for (let i = 2; taken.has(name); i++) name = `${base}-${i}`;
   return name;
@@ -264,6 +307,12 @@ export async function createResource(kind: ResourceKind, name: string): Promise<
       return (await storageApi.createBucket(name)).name;
     case "nosql":
       return (await nosqlApi.create({ name })).id;
+    case "queue":
+      await qapi.createVhost({ name });
+      return name;
+    case "tasks":
+      await call("POST", "/_roll/tenants", { id: name });
+      return name;
     case "repo":
       throw new Error("Repositories are connected, not created, from a project.");
   }
@@ -308,6 +357,8 @@ export async function spentThisMonth(kind: ResourceKind, ref: string, m: Month):
       const u = await streams.usage(ref, days * 24);
       return (u.estimate.monthly_usd.total * m.elapsed) / m.days;
     }
+    case "queue":
+    case "tasks":
     case "repo":
       return 0;
   }

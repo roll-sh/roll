@@ -1,6 +1,6 @@
 import { ExternalLink, GitBranch, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { previewsApi, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
+import { openUrl, previewsApi, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { Inspector } from "./inspector";
@@ -161,7 +161,7 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
           {p.services.map((s) => (
             <a
               key={s.name}
-              href={s.url}
+              href={openUrl(s)}
               target="_blank"
               rel="noreferrer"
               className="pointer-events-auto flex min-w-0 items-center gap-1 font-mono text-[11px] text-accent hover:underline"

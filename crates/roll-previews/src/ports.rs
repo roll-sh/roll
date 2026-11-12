@@ -142,7 +142,14 @@ pub struct Target {
     /// The branches' URLs and the project's overrides, for backends that take variables at
     /// deploy time ([`crate::runtime::Runtime`] reads them fresh when it starts instead).
     pub vars: Vec<(String, String)>,
+    /// Each branched resource (kind, parent) with its own variables, unprefixed: a backend
+    /// whose services link resources under a prefix (`ORDERS_DATABASE_URL`) points each link
+    /// to a branched parent at the branch.
+    pub branches: Vec<BranchVars>,
 }
+
+/// A branched resource's kind and parent, and its own variables (unprefixed).
+pub type BranchVars = (Kind, String, Vec<(String, String)>);
 
 /// A service in a project's catalog (roll apps): a repo's (built at a revision) or an image's.
 #[derive(Clone, Debug, PartialEq)]
@@ -178,8 +185,9 @@ pub trait Apps: Send + Sync {
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()>;
     /// Stop it now; the next request starts it again.
     async fn sleep(&self, preview: &str, service: &str);
-    /// Stop it for good.
-    async fn remove(&self, preview: &str, service: &str);
+    /// Stop it for good. Ok when it's already gone; an error is retried (the preview keeps the
+    /// service until it succeeds, so nothing is left running).
+    async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()>;
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String>;
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;

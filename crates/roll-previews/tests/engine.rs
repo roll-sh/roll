@@ -134,9 +134,10 @@ impl Apps for FakeApps {
         Ok(())
     }
     async fn sleep(&self, _: &str, _: &str) {}
-    async fn remove(&self, p: &str, s: &str) {
+    async fn remove(&self, p: &str, s: &str) -> anyhow::Result<()> {
         self.deployed.lock().remove(&(p.to_string(), s.to_string()));
         self.removed.lock().push((p.to_string(), s.to_string()));
+        Ok(())
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         Vec::new()

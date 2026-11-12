@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { previewsApi, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
+import { openUrl, previewsApi, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
@@ -90,7 +90,7 @@ export function PreviewSheet({
         actions={
           p.url && (
             <a
-              href={p.url}
+              href={openUrl(p)}
               target="_blank"
               rel="noreferrer"
               className="flex h-6 items-center gap-1 rounded-md border border-line-2 bg-raised px-2 text-[11px] text-muted inset-shadow-highlight hover:border-line-3 hover:text-fg"
@@ -122,7 +122,7 @@ export function PreviewSheet({
                       <span className="text-[11px] text-subtle">{s.state}</span>
                       {s.deployed && <span className="ml-auto font-mono text-[10.5px] text-subtle">{s.deployed.slice(0, 8)}</span>}
                     </div>
-                    <a href={s.url} target="_blank" rel="noreferrer" className="mt-0.5 flex items-center gap-1 font-mono text-[11px] text-accent hover:underline">
+                    <a href={openUrl(s)} target="_blank" rel="noreferrer" className="mt-0.5 flex items-center gap-1 font-mono text-[11px] text-accent hover:underline">
                       <span className="truncate">{host(s.url)}</span>
                       <ExternalLink className="size-3 shrink-0" />
                     </a>

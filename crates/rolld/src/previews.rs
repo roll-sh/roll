@@ -64,6 +64,8 @@ pub fn start(
     if on.queues {
         branchers.push(Arc::new(Queue(api.clone())));
     }
+    // roll search (feature/roll-search): its routes answer once it's in this rolld.
+    branchers.push(Arc::new(Search(api.clone())));
     if on.tasks {
         let public = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
         branchers.push(Arc::new(Tasks { api: api.clone(), public }));
@@ -695,6 +697,73 @@ impl Brancher for Tasks {
     }
 }
 
+// ── Search: a zero-copy branch of an Elasticsearch-compatible cluster (roll search) ──
+
+pub struct Search(pub Api);
+
+impl Search {
+    /// `url` with the branch's credentials in it (the password is shown once, so it's kept).
+    fn kept(v: &Value) -> anyhow::Result<String> {
+        let url = s(&v["url"]).ok_or_else(|| anyhow::anyhow!("a search branch without a url"))?;
+        let (user, pass) = (s(&v["username"]).unwrap_or_default(), s(&v["password"]).unwrap_or_default());
+        let with = match url.split_once("://") {
+            Some((scheme, rest)) if !user.is_empty() => format!("{scheme}://{}:{}@{rest}", seg(&user), seg(&pass)),
+            _ => url,
+        };
+        Ok(json!({ "ELASTICSEARCH_URL": with }).to_string())
+    }
+}
+
+#[async_trait]
+impl Brancher for Search {
+    fn kind(&self) -> Kind {
+        Kind::Search
+    }
+
+    async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        let path = format!("/v1/search/clusters/{}/branches", seg(parent));
+        match self.0.post(&path, json!({ "name": name })).await {
+            Ok(v) => Ok(Branched { r#ref: s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a search branch without an id"))?, kept: Some(Self::kept(&v)?) }),
+            // From before a crash: its password is gone, and it holds nothing yet. Make it again.
+            Err(e) if conflict_is_ours(&e) => {
+                let c = self.0.get(&format!("/v1/search/clusters/{}", seg(name))).await?;
+                self.delete(parent, &s(&c["id"]).unwrap_or_default(), name).await?;
+                let v = self.0.post(&path, json!({ "name": name })).await?;
+                let _ = mode;
+                Ok(Branched { r#ref: s(&v["id"]).unwrap_or_default(), kept: Some(Self::kept(&v)?) })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
+        self.delete(parent, branch, name).await?;
+        self.branch(parent, name, mode).await
+    }
+
+    async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
+        let c = match self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await {
+            Ok(c) => c,
+            Err(e) if is_404(&e) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let of_parent = c["parent_id"] == parent || c["parent_name"] == parent;
+        anyhow::ensure!(c["name"] == name && of_parent && branch != parent, "refusing to delete search cluster {branch}: it isn't {parent}'s branch {name}");
+        self.0.delete(&format!("/v1/search/clusters/{}", seg(branch))).await
+    }
+
+    async fn connect(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
+        let kept: Value = kept.and_then(|k| serde_json::from_str(k).ok()).ok_or_else(|| anyhow::anyhow!("the search branch {branch} has no credentials: reset it"))?;
+        Ok(kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
+    }
+
+    async fn usage(&self, _parent: &str, branch: &str) -> anyhow::Result<Usage> {
+        let c = self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await?;
+        let bytes = c["stored_bytes"].as_i64().or_else(|| c["usage"]["stored_bytes"].as_i64()).unwrap_or(0);
+        Ok(Usage { bytes, storage_usd_month: gb(bytes) * 0.023, active_usd_hour: 0.0, month_to_date_usd: 0.0 })
+    }
+}
+
 // ── Services: roll apps' catalog when the project has one, else roll.toml containers ──
 
 /// roll apps (docs/apps/) over this node's API: a preview is an ephemeral environment
@@ -766,15 +835,33 @@ impl roll_previews::ports::Apps for RollApps {
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((t.preview.clone(), t.service.clone()), id.clone());
         let path = Self::env_path(&id, &t.environment);
         self.api.call(Method::PUT, &path, Some(json!({ "branch": null, "ephemeral": true }))).await?;
-        let set: serde_json::Map<String, Value> = t.vars.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        // Every variable the preview sets: the branches' plain names and the project's overrides,
+        // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
+        // own variable, which would still reach production).
+        let mut set: serde_json::Map<String, Value> = t.vars.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let links = self.api.get(&format!("/v1/apps/services/{}/links", seg(&id))).await.unwrap_or(Value::Null);
+        for l in links.as_array().into_iter().flatten() {
+            let Some((_, _, vars)) = t.branches.iter().find(|(k, parent, _)| l["kind"] == k.as_str() && l["ref"] == parent.as_str()) else { continue };
+            let prefix = l["prefix"].as_str().unwrap_or("");
+            for name in l["vars"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if let Some((_, v)) = vars.iter().find(|(k, _)| name.strip_prefix(prefix) == Some(k.as_str())) {
+                    set.insert(name.to_string(), json!(v));
+                }
+            }
+        }
         if !set.is_empty() {
             self.api.call(Method::PATCH, &format!("{path}/variables"), Some(json!({ "set": set }))).await?;
         }
-        let body = match &t.git {
-            Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
-            None => json!({ "message": format!("roll preview {}", t.preview) }),
-        };
-        self.api.post(&format!("{path}/deploys"), body).await?;
+        // Deploys aren't idempotent: skip one the environment already has (or is building).
+        let env = self.api.get(&path).await?;
+        let has = |v: &Value| t.git.is_some() && v["revision"].as_str() == t.git.as_deref();
+        if !(has(&env["active"]) || has(&env["latest"])) {
+            let body = match &t.git {
+                Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
+                None => json!({ "message": format!("roll preview {}", t.preview) }),
+            };
+            self.api.post(&format!("{path}/deploys"), body).await?;
+        }
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
     }
@@ -790,11 +877,13 @@ impl roll_previews::ports::Apps for RollApps {
         }
     }
 
-    async fn remove(&self, preview: &str, service: &str) {
+    async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
         if let Some((id, env)) = self.find(preview, service).await {
-            let _ = self.api.delete(&Self::env_path(&id, &env)).await;
+            // Gone already counts as done; anything else is retried.
+            self.api.delete(&Self::env_path(&id, &env)).await?;
         }
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
+        Ok(())
     }
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
@@ -845,9 +934,9 @@ impl roll_previews::ports::Apps for Services {
         }
     }
 
-    async fn remove(&self, preview: &str, service: &str) {
-        self.runtime.remove(preview, service).await;
-        self.apps.remove(preview, service).await;
+    async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
+        self.runtime.remove(preview, service).await?;
+        self.apps.remove(preview, service).await
     }
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {

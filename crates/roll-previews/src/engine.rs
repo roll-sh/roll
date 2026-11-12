@@ -552,6 +552,7 @@ impl Engine {
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
         let urls = self.resource_env(&r.id).await?;
+        let branches = self.branch_vars(&r.id).await?;
         let mut vars: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for (k, v) in urls {
             set(&mut vars, &k, v);
@@ -608,6 +609,7 @@ impl Engine {
                     sleep_after: Duration::from_secs(s.sleep_after_s as u64),
                     environment: env_name(&r.id),
                     vars: vars.clone(),
+                    branches: branches.clone(),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {
@@ -629,7 +631,7 @@ impl Engine {
         }
         for svc in self.store.services(&r.id)? {
             if !keep.contains(&svc.name) {
-                self.apps.remove(&r.id, &svc.name).await;
+                self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;
                 self.store.drop_service(&r.id, &svc.name)?;
                 self.store.log(&r.id, &format!("removed service {}", svc.name))?;
             }
@@ -656,17 +658,26 @@ impl Engine {
     async fn resource_env(&self, id: &str) -> anyhow::Result<Vec<(String, String)>> {
         let mut seen: BTreeMap<Kind, usize> = BTreeMap::new();
         let mut env = Vec::new();
-        for res in self.store.resources(id)? {
-            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
-            let n = seen.entry(res.kind).or_default();
-            let suffix = (*n > 0).then(|| env_suffix(&res.parent));
+        for (kind, parent, vars) in self.branch_vars(id).await? {
+            let n = seen.entry(kind).or_default();
+            let suffix = (*n > 0).then(|| env_suffix(&parent));
             *n += 1;
-            let vars = b.connect(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("connecting to the {} branch: {e:#}", res.kind.as_str()))?;
             for (k, v) in suffixed(vars, suffix.as_deref()) {
                 set(&mut env, &k, v);
             }
         }
         Ok(env)
+    }
+
+    /// Every branch's own variables, unprefixed, with its kind and parent.
+    async fn branch_vars(&self, id: &str) -> anyhow::Result<Vec<crate::ports::BranchVars>> {
+        let mut out = Vec::new();
+        for res in self.store.resources(id)? {
+            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            let vars = b.connect(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("connecting to the {} branch: {e:#}", res.kind.as_str()))?;
+            out.push((res.kind, res.parent.clone(), vars));
+        }
+        Ok(out)
     }
 
     async fn delete_branch(&self, id: &str, res: &ResourceRow, name: &str) -> anyhow::Result<()> {
@@ -688,7 +699,7 @@ impl Engine {
             self.report(row).await;
         }
         for svc in self.store.services(&r.id)? {
-            self.apps.remove(&r.id, &svc.name).await;
+            self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;
             self.store.drop_service(&r.id, &svc.name)?;
         }
         self.secrets.delete(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
@@ -962,6 +973,7 @@ impl EnvSource for Engine {
             sleep_after: Duration::from_secs(s.sleep_after_s as u64),
             environment: env_name(&r.id),
             vars: Vec::new(),
+            branches: Vec::new(),
         };
         Ok((t, env))
     }

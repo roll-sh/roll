@@ -14,6 +14,8 @@ export interface PreviewService {
   name: string;
   repo: string;
   url: string;
+  /** `url` with the preview's access token (link access): the link to open and hand out. */
+  share_url: string | null;
   /** The changeset it should run. */
   revision: string | null;
   /** The changeset it was last deployed at. */
@@ -62,6 +64,8 @@ export interface Preview {
   error: string | null;
   /** The first service's URL. */
   url: string | null;
+  /** `url` with the access token, when the project's previews need a link. */
+  share_url: string | null;
   services: PreviewService[];
   resources: PreviewResource[];
   cost: PreviewCost;
@@ -98,6 +102,8 @@ export interface PreviewSettings {
   /** A patch replaces the whole map. */
   env: Record<string, string>;
   github: { comment: boolean; status: boolean; deployment: boolean };
+  /** "link": a preview's URLs need its link (its access token once, then a cookie). */
+  access: "link" | "public";
 }
 
 /** A partial update: objects merge (except `resources` and `env`, which are replaced whole). */
@@ -157,3 +163,6 @@ export const BUSY: ReadonlySet<PreviewState> = new Set(["creating", "updating", 
 
 /** Production's environment names (crates/roll-previews `is_production`). */
 export const isProduction = (env: string) => ["production", "prod", "live"].includes(env.toLowerCase());
+
+/** The URL to open: with the access token when the preview is private. */
+export const openUrl = (x: { url: string | null; share_url?: string | null }) => x.share_url ?? x.url ?? undefined;

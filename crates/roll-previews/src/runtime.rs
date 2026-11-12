@@ -468,7 +468,7 @@ impl Apps for Runtime {
         }
     }
 
-    async fn remove(&self, preview: &str, service: &str) {
+    async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
         let live = self.live.lock().remove(&(preview.to_string(), service.to_string()));
         if let Some(live) = live {
             self.stop(preview, service, &live, None).await;
@@ -477,6 +477,7 @@ impl Apps for Runtime {
             // Whichever node started it.
             self.iso.remove(&container_name(&host)).await;
         }
+        Ok(())
     }
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
