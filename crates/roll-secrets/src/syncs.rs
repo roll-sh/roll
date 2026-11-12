@@ -84,6 +84,8 @@ pub struct Push<'a> {
     pub removed: &'a [String],
     /// The sync's signing secret, for kinds that are [`SyncTarget::signed`].
     pub secret: Option<&'a Value>,
+    /// The keys [`SyncTarget::credentials`] named and their resolved values (by roll's key).
+    pub credentials: &'a BTreeMap<String, Value>,
 }
 
 /// One kind of outside platform. Calls block (they run on the store's blocking threads). Errors
@@ -99,6 +101,13 @@ pub trait SyncTarget: Send + Sync {
     /// Whether the sync gets a signing secret, made at creation and shown once.
     fn signed(&self) -> bool {
         false
+    }
+    /// Keys of the sync's own environment and folder that the target needs as credentials (a
+    /// platform's API token, named in the target): resolved at each push, never stored in the
+    /// sync and never pushed themselves.
+    fn credentials(&self, target: &Json) -> Vec<String> {
+        let _ = target;
+        vec![]
     }
     /// A target this kind can push to, for this project: on create and before every push.
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
@@ -284,6 +293,12 @@ impl Secrets {
             return Err(Error::BadRequest("prefix is at most 64 characters of [A-Za-z0-9_]".into()));
         }
         target.check(project, &self.members(project)?, &n.target)?;
+        for k in target.credentials(&n.target) {
+            names::key(&k)?;
+            if keys.as_ref().is_some_and(|ks| ks.contains(&k)) {
+                return Err(Error::BadRequest(format!("{k} is the sync's credential: it's never pushed, so leave it out of keys")));
+            }
+        }
         let id = names::new_id("syn", 16);
         let secret = target.signed().then(|| Value::new(names::new_id("whsec", 40)));
         let sealed = secret.as_ref().map(|s| dek.seal(&secret_aad(project, &id), s));
@@ -468,19 +483,17 @@ impl Secrets {
         let dek = self.project(project)?;
         let resources = self.members(project)?;
         target.check(project, &resources, &r.info.target)?;
-        let entries: Vec<_> = self
-            .view(project, env, path, caller, false, Action::Reveal)?
-            .into_iter()
-            .filter(|e| e.row.owner.is_empty() && r.info.keys.as_ref().is_none_or(|k| k.contains(&e.row.key)))
-            .collect();
+        let creds = target.credentials(&r.info.target);
+        let all: Vec<_> = self.view(project, env, path, caller, false, Action::Reveal)?.into_iter().filter(|e| e.row.owner.is_empty()).collect();
+        let entries: Vec<_> = all.iter().filter(|e| !creds.contains(&e.row.key) && r.info.keys.as_ref().is_none_or(|k| k.contains(&e.row.key))).collect();
         let name = |k: &str| format!("{}{k}", r.info.prefix);
         let mut stamps: BTreeMap<String, String> = entries.iter().map(|e| (name(&e.row.key), stamp(e))).collect();
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut skipped = BTreeSet::new();
+        let mut resolver = Resolver::new(self, project, &dek, caller, true, &caller.principal);
+        resolver.no_dynamic = true;
         if target.values() {
-            let mut resolver = Resolver::new(self, project, &dek, caller, true, &caller.principal);
-            resolver.no_dynamic = true;
             for e in &entries {
                 match resolver.entry(e) {
                     (v, None) => {
@@ -499,21 +512,45 @@ impl Secrets {
                     }
                 }
             }
-            // Dynamic links are refused, so nothing is issued; record anything that was.
-            resolver.finish(env)?;
         }
         let changed: Vec<String> = stamps.iter().filter(|(n, s)| !skipped.contains(*n) && (force || r.state.get(*n) != Some(s))).map(|(n, _)| n.clone()).collect();
         let removed: Vec<String> = r.state.keys().filter(|n| !stamps.contains_key(*n)).cloned().collect();
         let state = stamps;
         let problems = (!problems.is_empty()).then(|| clip(format!("not synced: {}", problems.join("; "))));
         if changed.is_empty() && removed.is_empty() && !force {
+            resolver.finish(env)?;
             return Ok(Outcome { digest, state, keys: vec![], summary: String::new(), problems });
         }
+        // The platform's own credentials, from this environment and folder.
+        let mut credentials = BTreeMap::new();
+        for k in &creds {
+            let e = all.iter().find(|e| e.row.key == *k).ok_or_else(|| Error::BadRequest(format!("{k} (the {} sync's credential) isn't set in {env}:{path}", r.info.kind)))?;
+            match resolver.entry(e) {
+                (v, None) if !v.expose().is_empty() => credentials.insert(k.clone(), v),
+                (_, None) => return Err(Error::BadRequest(format!("{k} (the {} sync's credential) is empty in {env}:{path}", r.info.kind))),
+                (_, Some(p)) => return Err(Error::BadRequest(format!("{k} (the {} sync's credential): {p}", r.info.kind))),
+            };
+        }
+        // Dynamic links are refused, so nothing is issued; record anything that was.
+        resolver.finish(env)?;
         let secret = r.sealed.as_ref().map(|ct| dek.open(&secret_aad(project, &r.info.id), ct)).transpose()?;
         let now = self.db.now_ms()?;
         target.push(
             &r.info.target,
-            &Push { sync: &r.info.id, project, resources: &resources, environment: env, path, digest: &digest, at: now, values: &values, changed: &changed, removed: &removed, secret: secret.as_ref() },
+            &Push {
+                sync: &r.info.id,
+                project,
+                resources: &resources,
+                environment: env,
+                path,
+                digest: &digest,
+                at: now,
+                values: &values,
+                changed: &changed,
+                removed: &removed,
+                secret: secret.as_ref(),
+                credentials: &credentials,
+            },
         )?;
         let summary = match target.values() {
             true => format!("pushed {} to {}", crate::write::plural(changed.len(), "value"), r.info.kind),

@@ -60,6 +60,7 @@ http-body-util.workspace = true
 tower.workspace = true
 url.workspace = true
 s3-api.workspace = true
+s3-proto.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true

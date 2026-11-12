@@ -432,9 +432,10 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, an endpoint of the team's own, or a deploy hook that only hears
-that something changed. Infisical's "secret syncs" are the reference. roll secrets stays the source
-of truth: a sync never reads from its target, and a value edited there is overwritten at the next
+they change: GitHub Actions secrets, Vercel, Cloudflare Workers, AWS Parameter Store, an endpoint
+of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
+syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
+target, and a value edited there is overwritten at the next
 change of that key.
 
 roll-secrets knows no platform. Each kind is a `SyncTarget` (`crates/roll-secrets/src/syncs.rs`)
@@ -447,10 +448,11 @@ pub trait SyncTarget: Send + Sync {
     fn fields(&self) -> &[SyncField];                         // what the dashboard asks for
     fn values(&self) -> bool { true }                         // false: pushes carry key names only
     fn signed(&self) -> bool { false }                        // a signing secret, shown once
+    fn credentials(&self, target: &Json) -> Vec<String> { vec![] } // keys holding its token
     // On create and before every push; `resources`: the project's canvas, as (kind, ref).
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
     // `push`: the values by target name, which names changed, which were removed, the digest,
-    // the signing secret.
+    // the signing secret, the resolved credentials.
     fn push(&self, target: &Json, push: &Push) -> Result<()>;
 }
 ```
@@ -490,6 +492,9 @@ last_synced_at, error}`:
 | `github` | `{repo: "owner/name", environment?: "production"}` | Repository Actions secrets, or a GitHub environment's secrets, through roll's GitHub App |
 | `webhook` | `{url, recipient}` (a base64url X25519 public key) | Every synced value, sealed to `recipient`, POSTed to `url` |
 | `notify` | `{url}` | No values: that the environment changed, and which keys, POSTed to `url` (deploy hooks) |
+| `vercel` | `{project: "<id or name>", team?: "<team id>", target: ["production" \| "preview" \| "development", …], token_key: "VERCEL_TOKEN"}` | A Vercel project's environment variables (`type: "encrypted"`) for those environments |
+| `cloudflare` | `{account: "<account id>", script: "<worker>", token_key: "CLOUDFLARE_API_TOKEN"}` | A Worker's secrets (`secret_text`) |
+| `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
 
 ### `github`
 
@@ -504,6 +509,33 @@ last_synced_at, error}`:
   done).
 - GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
   an error naming it (rename it or use `keys`/`prefix`).
+
+### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`)
+
+A platform's own credential is never in the sync. The target names **keys of the sync's own
+environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
+`secret_access_key_key`, an IAM user's key the team stores, not a roll bucket's managed key).
+They are resolved at each push like any value (references work), never pushed themselves (they're
+left out of the synced keys, and `keys` can't list them), and never stored, logged or put in an
+error. A credential key that isn't set, is empty or doesn't resolve fails the push with an error
+naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cloudflare.com`,
+`ssm.<region>.amazonaws.com`; `region` is `[a-z0-9-]`), with timeouts, no redirects and at most
+1 MiB of an answer read; an error carries the platform's status and error code, never its message.
+
+- **`vercel`**: changed names are upserted in batches of 50 (`POST /v10/projects/{project}/env?upsert=true`,
+  `type: "encrypted"`, the target's environments). A removed name is looked up by id
+  (`GET …/env`) and deleted (`DELETE /v9/projects/{project}/env/{id}`) only where every
+  environment it serves is one of the sync's: a variable that also serves another environment is
+  the team's own. `target` may also be a comma-separated string (the dashboard's form). Values are
+  at most 64 KB.
+- **`cloudflare`**: `PUT /client/v4/accounts/{account}/workers/scripts/{script}/secrets` with
+  `{name, text, type: "secret_text"}` per changed name, `DELETE …/secrets/{name}` per removed one
+  (a 404 counts as done). Values are at most 5 KB.
+- **`aws-ssm`**: `PutParameter` (`SecureString`, standard tier, `Overwrite`, `KeyId` when
+  `kms_key_id` is set) and `DeleteParameter` (`ParameterNotFound` counts as done) over AWS JSON 1.1,
+  signed with SigV4 by hand from s3-proto's primitives (no AWS SDK in rolld). `prefix` is a path
+  that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
+  it.
 
 ### `webhook` and `notify`
 
@@ -797,7 +829,8 @@ free again and its history stays readable by key.
 Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
 streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
-sealed webhooks, deploy notifications), the dashboard's Secrets surface, and the fixes from a
+sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), the
+dashboard's Secrets surface, and the fixes from a
 security review. `pnpm test:code` is green on the head. Reviewed on 2026-11-12 against Infisical,
 Doppler, Vercel and 1Password Developer, and against the apps, previews, MCP and search branches.
 Ranked:
@@ -813,6 +846,3 @@ Ranked:
    a version's history shows the old and new value side by side on reveal.
 3. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
-4. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
-   Cloudflare Workers; the platform's token is a reference to a secret of the same project,
-   resolved at push time, never stored in the sync.

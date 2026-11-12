@@ -6547,6 +6547,7 @@ dependencies = [
  "roll-workspace",
  "s3-api",
  "s3-control",
+ "s3-proto",
  "s3-server",
  "s3-store",
  "serde_json",
