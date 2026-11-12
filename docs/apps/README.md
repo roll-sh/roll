@@ -482,11 +482,11 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
 2. **First run and the dashboard.** GitHub repos inline in New service (mirror and pick in one
-   step); the service type (worker, cron) in New service; a new environment and its branch from
-   the switcher; a build/deploy step summary with durations on each deployment; metrics tiles
-   that total the window. (Done: variables before the first deploy, `roll up`'s commit message
-   and sha, people-readable CLI output, slugs that don't repeat the project, a cron service's
-   next run and its scheduled runs.)
+   step); a build/deploy step summary with durations on each deployment. (Done: the service
+   type and a cron schedule in New service, variables before the first deploy, a new environment
+   and its branch from the switcher, metric headlines that total or peak the window, `roll up`'s
+   commit message and sha, people-readable CLI output, slugs that don't repeat the project, a
+   cron service's next run and its scheduled runs.)
 3. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
    output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
    `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.

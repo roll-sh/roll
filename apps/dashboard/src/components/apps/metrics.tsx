@@ -32,7 +32,10 @@ function niceMax(v: number) {
   return ([1, 2, 2.5, 5, 10].find((m) => m * p >= v) ?? 10) * p;
 }
 
-function Chart({ title, minutes, series, format, summary }: { title: string; minutes: number[]; series: Series[]; format: (v: number) => string; summary: string }) {
+/** What a chart's headline says when nothing is hovered: the window's total (counts per minute) or its peak (gauges, latencies). */
+type Agg = "total" | "peak";
+
+function Chart({ title, minutes, series, format, summary, agg }: { title: string; minutes: number[]; series: Series[]; format: (v: number) => string; summary: string; agg: Agg }) {
   const [hover, setHover] = useState<number | null>(null);
   const n = minutes.length;
   const top = niceMax(Math.max(0, ...series.flatMap((s) => s.values)));
@@ -52,13 +55,15 @@ function Chart({ title, minutes, series, format, summary }: { title: string; min
     <figure className={`${panel} p-4`}>
       <figcaption className="flex items-baseline justify-between gap-2">
         <span className="text-[12px] text-muted">{title}</span>
-        <span className="font-mono text-[11px] text-subtle tabular-nums">{hover !== null && minutes[hover] ? clock(minutes[hover] * 60_000).slice(0, 5) : "last hour"}</span>
+        <span className="font-mono text-[11px] text-subtle tabular-nums">{hover !== null && minutes[hover] ? clock(minutes[hover] * 60_000).slice(0, 5) : `${agg} · last hour`}</span>
       </figcaption>
       <div className="mt-1 flex flex-wrap items-baseline gap-x-3">
         {series.map((s) => (
           <span key={s.label} className="inline-flex items-baseline gap-1.5">
             {series.length > 1 && <i className="inline-block size-2 rounded-[3px]" style={{ background: s.color }} aria-hidden />}
-            <span className="font-mono text-[17px] font-semibold tracking-[-0.03em] tabular-nums">{n ? format(s.values[at] ?? 0) : "—"}</span>
+            <span className="font-mono text-[17px] font-semibold tracking-[-0.03em] tabular-nums">
+              {!n ? "—" : hover !== null ? format(s.values[at] ?? 0) : format(agg === "total" ? s.values.reduce((a, v) => a + v, 0) : Math.max(0, ...s.values))}
+            </span>
             {series.length > 1 && <span className="text-[11px] text-subtle">{s.label}</span>}
           </span>
         ))}
@@ -125,10 +130,11 @@ export function MetricsTab({ service, env }: { service: string; env: string }) {
     const sum = (a: number[]) => a.reduce((s, v) => s + v, 0);
     const peak = (a: number[]) => Math.max(0, ...a);
     return [
-      { title: "Requests / min", series: [{ label: "requests", values: m.requests, color: ink }], format: count, summary: `${sum(m.requests)} in the hour` },
-      { title: "5xx / min", series: [{ label: "5xx", values: m.errors, color: ink }], format: count, summary: `${sum(m.errors)} in the hour` },
+      { title: "Requests / min", agg: "total" as Agg, series: [{ label: "requests", values: m.requests, color: ink }], format: count, summary: `${sum(m.requests)} in the hour` },
+      { title: "5xx / min", agg: "total" as Agg, series: [{ label: "5xx", values: m.errors, color: ink }], format: count, summary: `${sum(m.errors)} in the hour` },
       {
         title: "Latency",
+        agg: "peak" as Agg,
         series: [
           { label: "p50", values: m.p50_ms, color: "var(--viz-1)" },
           { label: "p95", values: m.p95_ms, color: "var(--viz-2)" },
@@ -137,11 +143,11 @@ export function MetricsTab({ service, env }: { service: string; env: string }) {
         format: formatMs,
         summary: `p99 peaked at ${formatMs(peak(m.p99_ms))}`,
       },
-      { title: "CPU (cores)", series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
-      { title: "Memory", series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}` },
-      { title: "Instances", series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}` },
-      { title: "Cold starts / min", series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the hour` },
-      { title: "Cold start time", series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
+      { title: "CPU (cores)", agg: "peak" as Agg, series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
+      { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}` },
+      { title: "Instances", agg: "peak" as Agg, series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}` },
+      { title: "Cold starts / min", agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the hour` },
+      { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
     ];
   }, [m]);
 

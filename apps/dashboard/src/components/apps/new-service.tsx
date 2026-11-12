@@ -1,6 +1,6 @@
 import { ChevronRight, GitBranch, Image, LoaderCircle, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type Source } from "@/lib/apps-api";
+import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
@@ -49,6 +49,8 @@ export function NewServiceSheet({
   const [name, setName] = useState("");
   const [named, setNamed] = useState(false);
   const [port, setPort] = useState("");
+  const [kind, setKind] = useState<ServiceType>("web");
+  const [schedule, setSchedule] = useState("");
   const [env, setEnv] = useState("");
   const [plan, setPlan] = useState<{ key: string; plan?: Plan; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -97,7 +99,8 @@ export function NewServiceSheet({
   const portN = port.trim() ? Number(port) : undefined;
   const portOk = portN === undefined || (Number.isInteger(portN) && portN > 0 && portN < 65536);
   const parsed = useMemo(() => parseEnv(env), [env]);
-  const ready = !!source && SERVICE_NAME.test(name) && portOk && parsed.errors.length === 0 && !busy;
+  const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
+  const ready = !!source && SERVICE_NAME.test(name) && portOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
     if (!source) return;
@@ -105,7 +108,8 @@ export function NewServiceSheet({
     setError(null);
     try {
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
-      const s = await appsApi.create({ project: project.id, name, source, ...(portN ? { run: { port: portN } } : {}), ...variables, ...spot });
+      const run = kind === "web" ? (portN ? { port: portN } : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
+      const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -188,10 +192,40 @@ export function NewServiceSheet({
               className={`${field} ${name && !SERVICE_NAME.test(name) ? "border-danger/60" : ""}`}
               spellCheck={false}
             />
-            <Label>
-              Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
-            </Label>
-            <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+            <Label>Type</Label>
+            <div role="radiogroup" aria-label="Type" className="grid grid-cols-3 gap-1 rounded-lg border border-line p-0.5">
+              {(["web", "worker", "cron"] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={kind === k}
+                  onClick={() => setKind(k)}
+                  className={`rounded-md px-2 py-1 text-[11.5px] transition-colors duration-150 ${kind === k ? "bg-white/[0.08] text-fg" : "text-muted hover:text-fg"}`}
+                >
+                  {k === "web" ? "Web" : k === "worker" ? "Worker" : "Cron"}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">
+              {kind === "web" ? "Answers HTTP; sleeps when idle and wakes on the first request." : kind === "worker" ? "Runs all the time, with no public URL." : "Runs on a schedule, to its exit."}
+            </p>
+            {kind === "web" && (
+              <>
+                <Label>
+                  Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
+                </Label>
+                <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+              </>
+            )}
+            {kind === "cron" && (
+              <>
+                <Label>
+                  Schedule <span className="font-normal">five fields, UTC</span>
+                </Label>
+                <input value={schedule} onChange={(e) => setSchedule(e.target.value)} placeholder="0 3 * * *" spellCheck={false} className={`${field} font-mono ${schedule && !scheduleOk ? "border-danger/60" : ""}`} />
+              </>
+            )}
             <Label>
               Variables <span className="font-normal">optional: KEY=value lines, a .env pasted as is</span>
             </Label>
