@@ -73,6 +73,25 @@ pub fn check_rel_path(what: &str, p: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(Error::BadRequest(format!("{what} is a relative path inside the tree"))) }
 }
 
+/// `rel` under `tree`, reached only through real directories and ending in a directory (`dir`)
+/// or a regular file. A pushed tree can hold symlinks, and a build root or Dockerfile reached
+/// through one would be the host's.
+pub fn in_tree(tree: &std::path::Path, what: &str, rel: &str, dir: bool) -> Result<std::path::PathBuf> {
+    check_rel_path(what, rel)?;
+    let mut at = tree.to_path_buf();
+    let segs: Vec<&str> = rel.split('/').collect();
+    for (i, seg) in segs.iter().enumerate() {
+        at.push(seg);
+        let last = i + 1 == segs.len();
+        let real = std::fs::symlink_metadata(&at).is_ok_and(|m| if last && !dir { m.is_file() } else { m.is_dir() });
+        if !real {
+            let kind = if dir { "directory" } else { "file" };
+            return Err(Error::BadRequest(format!("{what} {rel} isn't a {kind} in the tree (symlinks aren't followed)")));
+        }
+    }
+    Ok(at)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Build {

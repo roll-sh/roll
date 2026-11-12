@@ -544,6 +544,21 @@ impl Store {
         Ok(self.db.query_row("SELECT upload FROM deployments WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten())
     }
 
+    /// Uploads no build will read again (the deployment is past building, or never will build):
+    /// `(service, deployment, key)`.
+    pub fn spent_uploads(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.query(
+            "SELECT service, id, upload FROM deployments WHERE upload IS NOT NULL AND status NOT IN ('queued', 'building') LIMIT ?",
+            [limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    }
+
+    pub fn clear_upload(&self, id: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET upload = NULL WHERE id = ?", [id])?;
+        Ok(())
+    }
+
     pub fn deployments(&self, service: &str, env: &str, limit: usize) -> Result<Vec<Deployment>> {
         Ok(self.db.query(
             &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? ORDER BY created_at DESC, id DESC LIMIT ?"),

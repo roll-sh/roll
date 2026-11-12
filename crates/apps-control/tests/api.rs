@@ -58,7 +58,10 @@ impl Sources for FakeCode {
         for (k, v) in self.files.lock().iter() {
             let p = dir.join(k);
             std::fs::create_dir_all(p.parent().unwrap())?;
-            std::fs::write(p, v)?;
+            match v.strip_prefix("symlink:") {
+                Some(target) => std::os::unix::fs::symlink(target, p)?,
+                None => std::fs::write(p, v)?,
+            }
         }
         Ok(())
     }
@@ -206,6 +209,14 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(d1["plan"]["provider"], "node", "{d1}");
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{first}/logs"), None).await;
     assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("generated Dockerfile")), "the build log shows the Dockerfile");
+    // A root reached through a symlink in the pushed tree would build from the host: refused.
+    let host = tempfile::tempdir().unwrap();
+    std::fs::create_dir(host.path().join("app")).unwrap();
+    std::fs::write(host.path().join("app/package.json"), r#"{"scripts":{"start":"node host.js"}}"#).unwrap();
+    w.code.files.lock().insert("web".into(), format!("symlink:{}", host.path().display()));
+    let (st, v) = call(&w.api, "POST", "/v1/apps/plan", Some(json!({"repo": "acme/site", "root": "web/app"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    w.code.files.lock().remove("web");
     // A push to main deploys it.
     w.code.push("b2b2b2b2b2b2", "second", &[("server.js", "require('http') // v2")]);
     let mut d2 = Value::Null;
@@ -325,6 +336,9 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!((d["status"].as_str(), d["trigger"].as_str(), d["plan"]["provider"].as_str()), (Some("active"), Some("upload"), Some("static")), "{d}");
+    // The image is the deployment's now; the uploaded tree isn't kept.
+    let uploads = w.apps.cfg.home.join("apps/uploads");
+    assert!(std::fs::read_dir(&uploads).map(|mut d| d.next().is_none()).unwrap_or(true), "the upload is deleted after its build");
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;

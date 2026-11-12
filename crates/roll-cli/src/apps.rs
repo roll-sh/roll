@@ -298,41 +298,70 @@ fn env_path(svc: &Value, env: &str) -> String {
     format!("/v1/apps/services/{}/environments/{}", enc(&s(&svc["id"])), enc(env))
 }
 
-/// Pack a directory as a `roll-bundle-1` (what the server unpacks), leaving out what never
-/// belongs in a build.
+/// Pack a directory as a `roll-bundle-1` (what the server unpacks). Left out: what `.gitignore`
+/// (also a parent's, as in a monorepo), `.dockerignore` and `.rollignore` leave out, build output
+/// that never belongs in a build, and every `.env` file but a template: an upload is kept with its
+/// deployment, so a developer's local secrets must never be in it.
 fn pack(dir: &Path) -> anyhow::Result<Vec<u8>> {
-    const SKIP: &[&str] = &[".git", ".roll", "node_modules", "target", ".venv", "__pycache__", ".next", ".turbo", ".DS_Store"];
     let staging = tempfile::tempdir()?;
-    fn copy(from: &Path, to: &Path, files: &mut u64) -> anyhow::Result<()> {
-        for e in std::fs::read_dir(from)? {
-            let e = e?;
-            let name = e.file_name();
-            if SKIP.iter().any(|s| name == *s) {
-                continue;
-            }
-            let ty = e.file_type()?;
-            let dest = to.join(&name);
-            if ty.is_dir() {
-                std::fs::create_dir(&dest)?;
-                copy(&e.path(), &dest, files)?;
-            } else if ty.is_file() {
-                std::fs::copy(e.path(), &dest)?;
-                *files += 1;
-            } else if ty.is_symlink() {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(std::fs::read_link(e.path())?, &dest)?;
-            }
-        }
-        Ok(())
-    }
     let mut files = 0;
-    copy(dir, staging.path(), &mut files)?;
+    let mut skipped_env = Vec::new();
+    for entry in walk(dir) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(dir)?;
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if secret_env_file(&name) {
+            skipped_env.push(rel.display().to_string());
+            continue;
+        }
+        let ty = entry.file_type().context("a walked entry has a type")?;
+        let dest = staging.path().join(rel);
+        if ty.is_dir() {
+            std::fs::create_dir(&dest)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), &dest)?;
+            files += 1;
+        } else if ty.is_symlink() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &dest)?;
+        }
+    }
+    if !skipped_env.is_empty() {
+        eprintln!("not uploaded: {} (set variables with `roll apps set` instead)", skipped_env.join(", "));
+    }
     if files == 0 {
         bail!("{} has nothing to deploy", dir.display());
     }
     let mut out = Vec::new();
     roll_fetch::pack(&mut out, &Default::default(), Some(staging.path()), roll_fetch::Limits::default())?;
     Ok(out)
+}
+
+/// The tree `roll up` sends, parents before children, symlinks not followed.
+fn walk(dir: &Path) -> ignore::Walk {
+    const SKIP: &[&str] = &[".git", ".roll", "node_modules", "target", ".venv", "__pycache__", ".next", ".turbo", ".DS_Store"];
+    ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .require_git(false)
+        .git_global(false)
+        .add_custom_ignore_filename(".dockerignore")
+        .add_custom_ignore_filename(".rollignore")
+        .filter_entry(|e| !SKIP.iter().any(|s| e.file_name() == *s))
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .build()
+}
+
+/// `.env`, `.env.local`, `.env.production`…, but not `.env.example`, `.env.sample` or
+/// `.env.template`, which hold names, not values.
+fn secret_env_file(name: &str) -> bool {
+    match name.strip_prefix(".env") {
+        Some("") => true,
+        Some(rest) => rest.starts_with('.') && ![".example", ".sample", ".template"].contains(&rest),
+        None => false,
+    }
 }
 
 /// Print a log's lines (SSE `data:` JSON) until the stream ends.
@@ -719,4 +748,53 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roll_up_leaves_out_ignored_files_and_local_env_files() {
+        let d = tempfile::tempdir().unwrap();
+        let w = |p: &str, body: &str| {
+            let p = d.path().join(p);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // The app lives in a monorepo: the parent's .gitignore counts too.
+        w(".gitignore", "*.log\n");
+        w("app/.gitignore", "dist/\n");
+        w("app/.dockerignore", "notes.md\n");
+        w("app/.rollignore", "fixtures/\n");
+        for f in ["server.js", ".env.example", ".npmrc", "src/index.js"] {
+            w(&format!("app/{f}"), "ok");
+        }
+        for f in [".env", ".env.local", "src/.env.production", "dist/bundle.js", "debug.log", "notes.md", "fixtures/big.json", "node_modules/x/index.js"] {
+            w(&format!("app/{f}"), "secret or ignored");
+        }
+        let bundle = pack(&d.path().join("app")).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::fs::create_dir(out.path().join("t")).unwrap();
+        roll_fetch::unpack(bundle.as_slice(), &out.path().join("t"), &out.path().join("env"), roll_fetch::Limits::default()).unwrap();
+        let mut got = walkdir(&out.path().join("t"));
+        got.sort();
+        assert_eq!(got, [".dockerignore", ".env.example", ".gitignore", ".npmrc", ".rollignore", "server.js", "src/index.js"]);
+    }
+
+    fn walkdir(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p.strip_prefix(root).unwrap().display().to_string());
+                }
+            }
+        }
+        out
+    }
 }

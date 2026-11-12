@@ -170,6 +170,7 @@ curve25519-dalek = "4"
 hkdf = "0.12"
 toml = "1"
 http-body-util = "0.1"
+ignore = "0.4"
 http-body = "1"
 comrak = { version = "0.56", default-features = false }
 ammonia = "4"

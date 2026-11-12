@@ -127,10 +127,7 @@ async fn plan(State(apps): S, b: Bytes) -> R {
     let result = async {
         sources.materialize(&repo, &rev.sha, &dir).await?;
         let root = match v.get("root").and_then(Value::as_str) {
-            Some(r) => {
-                crate::model::check_rel_path("root", r)?;
-                dir.join(r)
-            }
+            Some(r) => crate::model::in_tree(&dir, "root", r, true)?,
             None => dir.clone(),
         };
         let o = overrides.overrides();

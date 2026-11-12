@@ -89,7 +89,7 @@ type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_
 type Source =
   | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }
   | { kind: "image"; image: string /* docker.io/library/nginx:1.27 */ }
-  | { kind: "upload" } /* `roll up`: each deploy carries its tree */;
+  | { kind: "upload" } /* `roll up`: each deploy carries its tree, kept only until its build ends */;
 
 type Build = {
   /** auto: detect (a Dockerfile wins); dockerfile: use `dockerfile`. */

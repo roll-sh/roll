@@ -384,6 +384,10 @@ impl Apps {
             if let Some(img) = &d.image {
                 self.deps.builder.remove_image(img).await;
             }
+            let id = d.id.clone();
+            if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
+                self.drop_upload(&d.id, &key).await;
+            }
             self.logs.delete(&format!("build:{}", d.id)).await;
         }
         let sid = id.to_string();

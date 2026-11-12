@@ -320,6 +320,11 @@ impl Apps {
         tokio::fs::create_dir_all(&dir).await?;
         let result = self.build_in(svc, d, log, cancel, &dir).await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
+        // The image is the deployment's from here (a rollback never rebuilds): the upload goes.
+        let id = d.id.clone();
+        if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
+            self.drop_upload(&d.id, &key).await;
+        }
         self.live(&svc.id, &d.environment).meter.lock().build(code_sql::now_ms(), began.elapsed().as_secs_f64());
         result
     }
@@ -351,10 +356,9 @@ impl Apps {
             (Source::Image { .. }, _) => unreachable!("images aren't built"),
         };
         let context: PathBuf = match &root {
-            Some(r) => tree.join(r),
+            Some(r) => crate::model::in_tree(&tree, "the root directory", r, true)?,
             None => tree.clone(),
         };
-        anyhow::ensure!(std::fs::symlink_metadata(&context).is_ok_and(|m| m.is_dir()), "the root directory {} isn't in the tree", root.as_deref().unwrap_or("."));
         let overrides = svc.build.overrides();
         let ctx = context.clone();
         let plan = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(ctx), &overrides)).await?.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -362,7 +366,9 @@ impl Apps {
             log.line(format!("plan: {n}"));
         }
         let dockerfile = if plan.provider == apps_build::Provider::Dockerfile {
-            svc.build.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into())
+            let df = svc.build.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into());
+            crate::model::in_tree(&context, "the Dockerfile", &df, false)?;
+            df
         } else {
             let name = "Dockerfile.roll";
             anyhow::ensure!(std::fs::symlink_metadata(context.join(name)).is_err(), "the tree already has a {name}");
@@ -511,6 +517,30 @@ impl Apps {
         }
     }
 
+    /// Delete a stored upload, then forget it. A failed delete leaves the row for the sweep.
+    pub(crate) async fn drop_upload(self: &Arc<Self>, deployment: &str, key: &str) {
+        let gone = match &self.deps.objects {
+            Some(o) => o.delete(key).await.is_ok(),
+            None => match tokio::fs::remove_file(self.cfg.home.join(key)).await {
+                Ok(()) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            },
+        };
+        if gone {
+            let id = deployment.to_string();
+            let _ = self.db(move |s| s.clear_upload(&id)).await;
+        }
+    }
+
+    /// Uploads of owned services that no build will read: superseded or canceled before they
+    /// built, or left by a process that stopped mid-build.
+    async fn sweep_uploads(self: &Arc<Self>) {
+        let Ok(spent) = self.db(|s| s.spent_uploads(100)).await else { return };
+        for (_, id, key) in spent.into_iter().filter(|(service, _, _)| self.owns(service)) {
+            self.drop_upload(&id, &key).await;
+        }
+    }
+
     /// The reaper: every second, each owned environment's tick; every minute, the meters.
     async fn reaper(self: Arc<Self>) {
         let mut every = tokio::time::interval(Duration::from_secs(1));
@@ -539,6 +569,9 @@ impl Apps {
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
                 self.cron_tick().await;
+            }
+            if n.is_multiple_of(60) {
+                self.sweep_uploads().await;
             }
             if n.is_multiple_of(3600) {
                 let before = code_sql::now_ms() / 60_000 - 7 * 24 * 60;
