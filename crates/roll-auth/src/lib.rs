@@ -17,13 +17,21 @@
 //!
 //! Without a token (a daemon on loopback, local development) the gate lets everything through
 //! and products behave as they always have.
+//!
+//! Scoped tokens (docs/permissions.md) are an [`Authorizer`]'s: a request bearing one goes to it
+//! whatever the route and whether or not the operator's token is set, so a token's limits hold
+//! everywhere. It sends allowed requests on with [`Operator`] and a [`Grant`] in their extensions.
+
+pub mod scope;
 
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::fmt;
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tower_http::cors::{AllowHeaders, AllowOrigin, Any, CorsLayer};
 
@@ -78,6 +86,49 @@ impl Operator {
     }
 }
 
+/// In a request's extensions when a scoped token or an OAuth connection made it (with
+/// [`Operator`]: the request goes on as the operator's, narrowed by the gate). Products that need
+/// a second check inside one request ask [`Grant::allows`]; the operator's requests have none.
+#[derive(Clone)]
+pub struct Grant {
+    /// `tok_…`: the stable principal id.
+    pub id: Arc<str>,
+    pub name: Arc<str>,
+    pub kind: GrantKind,
+    pub scope: Arc<scope::Scope>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrantKind {
+    Token,
+    Oauth,
+}
+
+impl Grant {
+    pub fn on(extensions: &axum::http::Extensions) -> Option<&Grant> {
+        extensions.get::<Grant>()
+    }
+
+    /// What the grant says about `action` on one resource.
+    pub fn allows(&self, resource: &scope::Resource, action: scope::Action) -> scope::Outcome {
+        self.scope.outcome(&scope::Target::One(resource.clone()), action)
+    }
+}
+
+impl fmt::Debug for Grant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).finish()
+    }
+}
+
+/// The evaluator for scoped tokens (`roll-access`).
+pub trait Authorizer: Send + Sync + 'static {
+    /// Whether `token` is one of its own (by its prefix): then it alone decides the request.
+    fn claims(&self, token: &str) -> bool;
+    /// Decide the request: answer it, or run it through `next`.
+    fn handle(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
+}
+
 /// Who may call a route; the text says why (or which credential).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
@@ -108,11 +159,17 @@ pub struct Rule {
 pub struct Gate {
     token: Option<AdminToken>,
     rules: Vec<Rule>,
+    authorizer: OnceLock<Arc<dyn Authorizer>>,
 }
 
 impl Gate {
     pub fn new(token: Option<AdminToken>, rules: Vec<Rule>) -> Arc<Self> {
-        Arc::new(Self { token, rules })
+        Arc::new(Self { token, rules, authorizer: OnceLock::new() })
+    }
+
+    /// Scoped tokens' evaluator, set once when it's ready (before serving).
+    pub fn set_authorizer(&self, a: Arc<dyn Authorizer>) {
+        let _ = self.authorizer.set(a);
     }
 
     /// The access of a route pattern (as the router has it): its longest matching rule's, else
@@ -134,11 +191,20 @@ impl Gate {
 /// The middleware: `router.layer(axum::middleware::from_fn_with_state(gate, roll_auth::check))`.
 /// It reads the matched route, so it goes on the router whose routes it guards.
 pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) -> Response {
-    let Some(token) = &gate.token else { return next.run(req).await };
-    if bearer(req.headers()).is_some_and(|t| token.matches(t)) {
+    let presented = bearer(req.headers());
+    if let (Some(token), Some(p)) = (&gate.token, presented)
+        && token.matches(p)
+    {
         req.extensions_mut().insert(Operator);
         return next.run(req).await;
     }
+    // A grant, or something that looks like one, never passes as anything else.
+    if let (Some(a), Some(p)) = (gate.authorizer.get(), presented)
+        && a.claims(p)
+    {
+        return a.handle(req, next).await;
+    }
+    let Some(_) = &gate.token else { return next.run(req).await };
     let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
     match access {
         Access::Public(_) | Access::Product(_) => next.run(req).await,

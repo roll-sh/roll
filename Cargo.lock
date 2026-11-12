@@ -6268,6 +6268,7 @@ name = "roll-auth"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "serde",
  "serde_json",
  "tower-http 0.7.1",
 ]
