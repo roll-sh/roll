@@ -1503,6 +1503,56 @@ fn known_modelled(db: &Database, t: u32, indexes: &[BoundIndex]) -> bool {
     })
 }
 
+thread_local! {
+    /// Heaps' read sides (`heapsim::ReadSide`) as this thread last took them, with the btrees
+    /// of each it found modelled (a watch on each), by database instance and table: index and
+    /// bitmap scans start without the shard's lock while they are current. Every
+    /// transaction's scans of a table its writers keep busy waited behind them for the lock.
+    static READ_SIDES: std::cell::RefCell<FastMap<(u64, u32), (heapsim::ReadSide, Vec<(u32, heapsim::SizeWatch)>)>> =
+        Default::default();
+}
+
+/// `f` of table `table`'s heap read side and the btrees this thread found modelled, without
+/// the shard's lock when this thread kept a current one (else taken under the read lock,
+/// with `wait`: or not while a writer holds it). None when the heap isn't modelled (or the
+/// lock wasn't taken).
+fn with_read_side<R>(
+    db: &Database,
+    table: u32,
+    wait: bool,
+    f: impl FnOnce(&heapsim::ReadSide, &[(u32, heapsim::SizeWatch)]) -> R,
+) -> Option<R> {
+    let key = (db.instance, table);
+    READ_SIDES.with(|m| {
+        let mut m = m.borrow_mut();
+        if !m.get(&key).is_some_and(|(r, _)| r.current()) {
+            let shard = db.relfiles.of(table);
+            let rf = if wait { shard.read() } else { shard.try_read()? };
+            let r = rf.heaps.get(&table)?.read_side();
+            drop(rf);
+            if m.len() >= 4096 {
+                m.retain(|_, (r, _)| r.current());
+            }
+            m.insert(key, (r, Vec::new()));
+        }
+        let (r, btrees) = m.get(&key)?;
+        Some(f(r, btrees))
+    })
+}
+
+/// Btree `index` of table `table` was found modelled (`Kills::new`): kept with the table's
+/// read side, when this thread has a current one.
+fn note_btree_read(db: &Database, table: u32, index: u32, watch: heapsim::SizeWatch) {
+    READ_SIDES.with(|m| {
+        if let Some((r, btrees)) = m.borrow_mut().get_mut(&(db.instance, table))
+            && r.current()
+        {
+            btrees.retain(|(o, w)| *o != index && w.alive());
+            btrees.push((index, watch));
+        }
+    })
+}
+
 /// Make sure the table's heap and btree indexes are modelled, laying out those that
 /// aren't from the rows there now. False when the table is too big to model.
 fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
@@ -1874,18 +1924,6 @@ pub fn persist_estimates(db: &Database) {
     }
 }
 
-fn check_size(db: &Database, t: &Table) {
-    let big = db
-        .relfiles
-        .of(t.oid).read()
-        .heaps
-        .get(&t.oid)
-        .is_some_and(|h| h.versions() > max_versions());
-    if big {
-        untrack(db, t, None);
-    }
-}
-
 /// The pruning horizon for `table` (GlobalVisTestFor): a temporary table's (or its TOAST
 /// table's) is its session's own transaction, everything else's the running transactions'
 /// and held snapshots'.
@@ -2110,6 +2148,7 @@ pub fn inserted_with(
     let xids = db.xids();
     // (The horizon before the shard's lock: it only gets older while the lock is waited for.)
     let v = vis_of(&xids, t, ctx);
+    let big;
     let tid = {
         let mut rf = db.relfiles.of(t.oid).write();
         let RelFiles {
@@ -2174,9 +2213,13 @@ pub fn inserted_with(
         let entries = entries.into_iter().map(|(o, k)| (o, k, false)).collect();
         index_insert(btrees, heap, &v, entries, tid);
         gist_log(gist_logs, &gist, tid);
+        // (`check_size`, without taking the lock again.)
+        big = heap.versions() > max_versions();
         tid
     };
-    check_size(db, t);
+    if big {
+        untrack(db, t, None);
+    }
     Ok(Some(tid))
 }
 
@@ -2267,86 +2310,103 @@ pub fn updated(
         return Ok(None);
     }
     let db = &ctx.sess.db;
-    // Out-of-line values the new version keeps as they are (none without a TOAST relation:
-    // no shard lock taken for them).
-    let old_exts: Vec<Ext> = if t.toast == 0 {
-        Vec::new()
-    } else {
+    // Out-of-line values the new version keeps as they are (none without a TOAST relation).
+    // A new version with no value of its own out of line is laid out as if the old one had
+    // none either (the usual case), which its write checks under the shard's write lock:
+    // no read lock before it. Otherwise they are looked up first.
+    let old_toast = || -> Vec<Ext> {
         (db.relfiles.of(t.oid).read().toast.get(&t.oid))
             .and_then(|tt| tt.rows.get(old_key).cloned())
             .unwrap_or_default()
     };
-    let pinned: HashSet<usize> = old_exts
-        .iter()
-        .filter(|e| new.get(e.col).is_some_and(|v| value_sig(v) == e.sig))
-        .map(|e| e.col)
-        .collect();
-    let (len, exts) = layout_len(t, new, ctx, &pinned, Some(tuple));
-    // New values saved out of line, or old ones deleted (toast_save_datum /
-    // toast_delete_datum): the TOAST relation is opened.
-    if !exts.is_empty() || old_exts.iter().any(|e| !pinned.contains(&e.col)) {
-        lock_toast(t, ctx)?;
-    }
-    // (A summarizing index, BRIN, doesn't keep an update from being HOT.)
-    let hot_ok = old_key == new_key
-        && indexes
-            .iter()
-            .filter(|b| b.index.method != "brin")
-            .all(|bix| columns_unchanged(bix, old, new));
-    let xid = ctx.txn.borrow_mut().cur_xid();
+    let mut known: Option<Vec<Ext>> = (t.toast == 0).then(Vec::new);
     let xids = db.xids();
-    // (The horizon before the shard's lock: other sessions' readers wait while it is held.)
-    let v = vis_of(&xids, t, ctx);
-    let big;
-    let (tid, hot) = {
-        let mut rf = db.relfiles.of(t.oid).write();
-        let RelFiles {
-            heaps,
-            btrees,
-            toast,
-            ..
-        } = &mut *rf;
-        if !heaps.contains_key(&t.oid) {
-            return Ok(None);
+    let (tid, hot, v, big) = loop {
+        let assumed = known.is_none();
+        let old_exts: Vec<Ext> = known.take().unwrap_or_default();
+        let pinned: HashSet<usize> = old_exts
+            .iter()
+            .filter(|e| new.get(e.col).is_some_and(|v| value_sig(v) == e.sig))
+            .map(|e| e.col)
+            .collect();
+        let (len, exts) = layout_len(t, new, ctx, &pinned, Some(tuple));
+        if assumed && !exts.is_empty() {
+            known = Some(old_toast());
+            continue;
         }
-        if !old_exts.is_empty() || !exts.is_empty() {
-            let tt = toast.entry(t.oid).or_default();
-            let mut keep: Vec<Ext> = Vec::new();
-            let mut gone: Vec<Ext> = Vec::new();
-            for e in old_exts {
-                if pinned.contains(&e.col) {
-                    keep.push(e);
+        // New values saved out of line, or old ones deleted (toast_save_datum /
+        // toast_delete_datum): the TOAST relation is opened.
+        if !exts.is_empty() || old_exts.iter().any(|e| !pinned.contains(&e.col)) {
+            lock_toast(t, ctx)?;
+        }
+        // (A summarizing index, BRIN, doesn't keep an update from being HOT.)
+        let hot_ok = old_key == new_key
+            && indexes
+                .iter()
+                .filter(|b| b.index.method != "brin")
+                .all(|bix| columns_unchanged(bix, old, new));
+        let xid = ctx.txn.borrow_mut().cur_xid();
+        // (The horizon before the shard's lock: other sessions' readers wait while it is held.)
+        let v = vis_of(&xids, t, ctx);
+        let big;
+        let (tid, hot) = {
+            let mut rf = db.relfiles.of(t.oid).write();
+            let RelFiles {
+                heaps,
+                btrees,
+                toast,
+                ..
+            } = &mut *rf;
+            if !heaps.contains_key(&t.oid) {
+                return Ok(None);
+            }
+            if assumed
+                && let Some(o) = toast.get(&t.oid).and_then(|tt| tt.rows.get(old_key)).filter(|o| !o.is_empty())
+            {
+                // (The old version has values out of line after all: laid out again with them.)
+                known = Some(o.clone());
+                continue;
+            }
+            if !old_exts.is_empty() || !exts.is_empty() {
+                let tt = toast.entry(t.oid).or_default();
+                let mut keep: Vec<Ext> = Vec::new();
+                let mut gone: Vec<Ext> = Vec::new();
+                for e in old_exts {
+                    if pinned.contains(&e.col) {
+                        keep.push(e);
+                    } else {
+                        gone.push(e);
+                    }
+                }
+                keep.extend(save_toast(heaps, btrees, tt, &v, t.toast, exts, xid, true));
+                delete_toast(heaps, t.toast, &gone, xid, &v);
+                if old_key != new_key {
+                    tt.rows.remove(old_key);
+                }
+                if keep.is_empty() {
+                    tt.rows.remove(new_key);
                 } else {
-                    gone.push(e);
+                    tt.rows.insert(new_key.to_vec(), keep);
                 }
             }
-            keep.extend(save_toast(heaps, btrees, tt, &v, t.toast, exts, xid, true));
-            delete_toast(heaps, t.toast, &gone, xid, &v);
-            if old_key != new_key {
-                tt.rows.remove(old_key);
-            }
-            if keep.is_empty() {
-                tt.rows.remove(new_key);
-            } else {
-                tt.rows.insert(new_key.to_vec(), keep);
-            }
-        }
-        let Some(heap) = heaps.get_mut(&t.oid) else {
-            return Ok(None);
+            let Some(heap) = heaps.get_mut(&t.oid) else {
+                return Ok(None);
+            };
+            let cid = ctx.txn.borrow_mut().output_cid();
+            // (The old version's command id as HeapTupleHeaderAdjustCmax sets it, within the update's lookup.)
+            let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
+                Ok(mut txn) => {
+                    let here = txn.is_current_xid(o.xmin);
+                    txn.adjust_cmax(o.cid, here)
+                }
+                Err(_) => o.cid,
+            };
+            let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut cmax);
+            heap.settle_left(&v);
+            big = heap.versions() > max_versions();
+            r
         };
-        let cid = ctx.txn.borrow_mut().output_cid();
-        // (The old version's command id as HeapTupleHeaderAdjustCmax sets it, within the update's lookup.)
-        let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
-            Ok(mut txn) => {
-                let here = txn.is_current_xid(o.xmin);
-                txn.adjust_cmax(o.cid, here)
-            }
-            Err(_) => o.cid,
-        };
-        let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut cmax);
-        heap.settle_left(&v);
-        big = heap.versions() > max_versions();
-        r
+        break (tid, hot, v, big);
     };
     if !hot {
         let mut ents = Vec::new();
@@ -2488,11 +2548,7 @@ impl Fetcher {
     /// None when the table's heap isn't modelled.
     pub fn new(table: u32, ctx: &ExecCtx) -> Option<Fetcher> {
         let db = ctx.sess.db.clone();
-        let (visible, hints) = {
-            let rf = db.relfiles.of(table).read();
-            let h = rf.heaps.get(&table)?;
-            (h.visibility_watch(), h.prune_hints())
-        };
+        let (visible, hints) = with_read_side(&db, table, true, |r, _| (r.watch(), r.prune_hints()))?;
         let cat = ctx.catalog();
         let rel = cat.tables.get(&table).or_else(|| cat.toast_owner(table).map(|(o, _)| o));
         let temp = rel
@@ -2802,13 +2858,22 @@ impl Kills {
         if is_estimated(table, &ctx.sess.db) {
             return None;
         }
-        let mut visible = None;
-        if let Some(rf) = ctx.sess.db.relfiles.of(table).try_read() {
-            if !rf.btrees.contains_key(&index) {
-                return None;
-            }
-            visible = rf.heaps.get(&table).and_then(Heap::visibility_watch);
-        }
+        let db = &ctx.sess.db;
+        // (A btree this thread found modelled, of a heap whose read side it keeps: no lock.)
+        let known = with_read_side(db, table, false, |r, btrees| {
+            btrees.iter().any(|(o, w)| *o == index && w.alive()).then(|| r.watch())
+        });
+        let visible = match known.flatten() {
+            Some(visible) => visible,
+            None => match db.relfiles.of(table).try_read() {
+                Some(rf) => {
+                    let bt = rf.btrees.get(&index)?;
+                    note_btree_read(db, table, index, bt.sizes.watch());
+                    rf.heaps.get(&table).and_then(Heap::visibility_watch)
+                }
+                None => None,
+            },
+        };
         let cat = ctx.catalog();
         let temp = cat
             .tables

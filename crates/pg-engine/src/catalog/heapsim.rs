@@ -846,6 +846,10 @@ impl VisWatch {
 pub struct PruneHints {
     slots: Box<[std::sync::atomic::AtomicU64]>,
     retired: std::sync::atomic::AtomicBool,
+    /// One past the heap's visibility change count (`VisPages::changes`) when every page was
+    /// last found all-visible (`Heap::publish_visibility`); 0: not found so. While the count
+    /// is still that, every page still is (`ReadSide::watch`).
+    visible_at: std::sync::atomic::AtomicU64,
 }
 
 impl PruneHints {
@@ -860,6 +864,41 @@ impl PruneHints {
             let x = h.load(Acquire);
             x != 0 && x < horizon
         }))
+    }
+}
+
+/// What a reader needs of a heap without its shard's lock (`Heap::read_side`), kept by a
+/// session between statements: its prune hints, whether rows' stored TIDs are the model's,
+/// and its visibility watch as last published. Good while the hints aren't retired (the
+/// heap outgrew them, or went).
+#[derive(Clone, Debug)]
+pub struct ReadSide {
+    hints: std::sync::Arc<PruneHints>,
+    stamped: bool,
+    changes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    model: SizeWatch,
+}
+
+impl ReadSide {
+    /// Whether this is still the heap's (false: take it again under the lock).
+    pub fn current(&self) -> bool {
+        !self.hints.retired.load(std::sync::atomic::Ordering::Acquire) && self.model.alive()
+    }
+
+    /// `Heap::prune_hints`.
+    pub fn prune_hints(&self) -> (std::sync::Arc<PruneHints>, bool) {
+        (self.hints.clone(), self.stamped)
+    }
+
+    /// `Heap::visibility_watch` as the heap last published it: Some only while every page
+    /// is still all-visible since then (a page losing it or one added moves the count). None
+    /// may also mean it wasn't published since every page became all-visible: the readers'
+    /// slower paths find the same then.
+    pub fn watch(&self) -> Option<VisWatch> {
+        use std::sync::atomic::Ordering::Acquire;
+        let at = self.hints.visible_at.load(Acquire);
+        let w = VisWatch { changes: self.changes.clone(), seen: at.wrapping_sub(1), model: self.model.clone() };
+        (at != 0 && w.holds()).then_some(w)
     }
 }
 
@@ -1060,7 +1099,7 @@ impl Heap {
                 .map(|i| AtomicU64::new(old.get(i).map_or(0, |x| x.load(std::sync::atomic::Ordering::Relaxed))))
                 .collect();
             // (The old ones are retired as they go.)
-            self.hints = HintsHandle(std::sync::Arc::new(PruneHints { slots, retired: Default::default() }));
+            self.hints = HintsHandle(std::sync::Arc::new(PruneHints { slots, retired: Default::default(), visible_at: Default::default() }));
         }
         self.hints.0.slots[blk as usize].store(h, Release);
     }
@@ -1072,13 +1111,41 @@ impl Heap {
         }
     }
 
-    /// A watch on every page being all-visible, when they are now.
+    /// A watch on every page being all-visible, when they are now (published for readers
+    /// without the lock as well: `publish_visibility`).
     pub fn visibility_watch(&self) -> Option<VisWatch> {
+        self.publish_visibility();
         (self.visible_pages.n >= self.nblocks()).then(|| VisWatch {
             seen: self.visible_pages.changes.load(std::sync::atomic::Ordering::Acquire),
             changes: self.visible_pages.changes.clone(),
             model: self.sizes.watch(),
         })
+    }
+
+    /// Publish whether every page is all-visible now, for `ReadSide::watch` (under the
+    /// shard's lock, read or write: only writers move the count, and readers publish the
+    /// same). Nothing depends on it being published: a reader that finds nothing published
+    /// takes the paths that look at the pages.
+    pub fn publish_visibility(&self) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        let at = match self.visible_pages.n >= self.nblocks() {
+            true => self.visible_pages.changes.load(Acquire) + 1,
+            false => 0,
+        };
+        if self.hints.0.visible_at.load(Acquire) != at {
+            self.hints.0.visible_at.store(at, Release);
+        }
+    }
+
+    /// What readers keep of the heap to read its hints and visibility without the lock.
+    pub fn read_side(&self) -> ReadSide {
+        self.publish_visibility();
+        ReadSide {
+            hints: self.hints.0.clone(),
+            stamped: !self.unstamped,
+            changes: self.visible_pages.changes.clone(),
+            model: self.sizes.watch(),
+        }
     }
 
     /// The visibility map as a database opened afresh finds it: its first `n` pages
@@ -1087,6 +1154,7 @@ impl Heap {
         for p in self.pages.iter_mut().take(n as usize) {
             p.set_all_visible(true, &mut self.visible_pages);
         }
+        self.publish_visibility();
     }
 
     /// Whether the visibility map marks page `blk` all-visible.
@@ -1487,6 +1555,9 @@ impl Heap {
         let tid = self.put_quiet(blk, t, frozen);
         self.visible_pages.changed();
         self.publish_page(blk);
+        if frozen {
+            self.publish_visibility();
+        }
         tid
     }
 
@@ -1611,6 +1682,9 @@ impl Heap {
             // (The page's tuples went in under its buffer lock: published once.)
             self.visible_pages.changed();
             self.publish_page(blk);
+            if mode.frozen {
+                self.publish_visibility();
+            }
             done += n;
         }
         out
@@ -2220,6 +2294,7 @@ impl Heap {
         self.publish_pages();
         res.all_visible = self.all_visible_pages();
         self.note_size();
+        self.publish_visibility();
         res
     }
 
@@ -2571,6 +2646,7 @@ impl Heap {
         self.publish_pages();
         self.note_size();
         self.freeze_pages();
+        self.publish_visibility();
         Some(())
     }
 
@@ -2781,6 +2857,7 @@ mod tests {
         let mut x = 11u64;
         let mut keys: Vec<Vec<u8>> = Vec::new();
         let mut watch = None;
+        let side = h.read_side();
         for i in 0..6000u32 {
             x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             match (x >> 33) % 10 {
@@ -2800,6 +2877,9 @@ mod tests {
                 8 => h.prune_opt((x >> 24) as u32 % h.nblocks().max(1), &v),
                 _ if i % 500 == 0 => {
                     h.vacuum(&v, 1, false, Skip::AllVisible, false);
+                    // (VACUUM publishes what it leaves: a reader without the lock sees it.)
+                    let side = h.read_side();
+                    assert_eq!(side.watch().is_some(), h.all_visible_pages() >= h.nblocks(), "published at {i}");
                     watch = h.visibility_watch();
                 }
                 _ => {}
@@ -2807,12 +2887,150 @@ mod tests {
             for b in 0..h.nblocks() {
                 if h.prune_wanted(b, &v) {
                     assert_eq!(h.hints.0.may_prune(b, v.horizon), Some(true), "page {b} at {i}");
+                    // (So a reader without the watch prunes no page one with it would leave.)
+                    assert!(!h.page_all_visible(b), "all-visible page {b} prunable at {i}");
                 }
             }
             if watch.as_ref().is_some_and(VisWatch::holds) {
                 assert!(h.all_visible_pages() >= h.nblocks(), "watch held at {i}");
             }
+            // (The read side taken at the start: current until the hints are outgrown, and its
+            // watch, published or not, never holds while a page isn't all-visible.)
+            if side.current() && side.watch().is_some() {
+                assert!(h.all_visible_pages() >= h.nblocks(), "published watch held at {i}");
+            }
         }
+    }
+
+    /// Writers changing one heap under its lock while readers use only its read side
+    /// (`ReadSide`, as scans do without the shard's lock): a watch the readers find holding
+    /// is never held while a page isn't all-visible, and hints never claim nothing to prune
+    /// for a page that would be pruned. The writers' operations, replayed one at a time on
+    /// the same session threads in the order they took the lock, make the same heap.
+    #[test]
+    fn read_side_under_concurrent_writers() {
+        #[derive(Clone, Copy)]
+        enum Op {
+            Insert(u32, usize),
+            Update(u32, usize, bool),
+            Delete(u32),
+            Prune(u32),
+            Vacuum,
+        }
+        fn apply(h: &mut Heap, op: Op, v: &Vis) {
+            let key = |k: u32| k.to_be_bytes();
+            match op {
+                Op::Insert(k, len) => {
+                    h.insert(&key(k), len, 2, 0, &mut InsertMode::single());
+                }
+                Op::Update(k, len, hot) => {
+                    h.update(&key(k), &key(k), len, 2, hot, v);
+                }
+                Op::Delete(k) => h.delete(&key(k), 2, v),
+                Op::Prune(b) => h.prune_opt(b % h.nblocks().max(1), v),
+                Op::Vacuum => {
+                    h.vacuum(v, 1, true, Skip::AllVisible, false);
+                }
+            }
+        }
+        const WRITERS: usize = 4;
+        let xids = Xids::new(10, |_| {});
+        let mut x = 7u64;
+        let ops: Vec<Vec<Op>> = (0..WRITERS as u32)
+            .map(|w| {
+                let mut live: Vec<u32> = Vec::new();
+                (0..1500u32)
+                    .map(|i| {
+                        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        let len = 40 + (x >> 50) as usize % 500;
+                        match (x >> 33) % 12 {
+                            _ if i % 300 == 299 => Op::Vacuum,
+                            0..=3 => {
+                                live.push(w << 20 | i);
+                                Op::Insert(w << 20 | i, len)
+                            }
+                            4..=7 if !live.is_empty() => Op::Update(live[(x >> 20) as usize % live.len()], len, (x >> 9) % 3 != 0),
+                            8 if !live.is_empty() => Op::Delete(live.swap_remove((x >> 20) as usize % live.len())),
+                            _ => Op::Prune((x >> 24) as u32),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        // The concurrent run: (heap, the log of (writer, op) in the order they took the lock).
+        let heap = parking_lot::RwLock::new((Heap::new(90), Vec::<(usize, Op)>::new()));
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let side = heap.read().0.read_side();
+        std::thread::scope(|s| {
+            for r in 0..4u32 {
+                let (heap, done, xids) = (&heap, &done, &xids);
+                let mut side = side.clone();
+                s.spawn(move || {
+                    let mut n = r;
+                    while !done.load(std::sync::atomic::Ordering::Acquire) {
+                        if !side.current() {
+                            side = heap.read().0.read_side();
+                        }
+                        n = n.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                        if let Some(w) = side.watch() {
+                            let g = heap.read();
+                            if w.holds() {
+                                assert!(g.0.all_visible_pages() >= g.0.nblocks(), "a published watch held");
+                            }
+                        }
+                        let (hints, _) = side.prune_hints();
+                        let g = heap.read();
+                        let b = n % g.0.nblocks().max(1);
+                        let v = Vis::new(xids);
+                        if g.0.prune_wanted(b, &v) {
+                            assert_ne!(hints.may_prune(b, v.horizon), Some(false), "page {b} hinted unprunable");
+                        }
+                    }
+                });
+            }
+            let writers: Vec<_> = (ops.into_iter().enumerate())
+                .map(|(w, ops)| {
+                    let (heap, xids) = (&heap, &xids);
+                    s.spawn(move || {
+                        let v = Vis::new(xids);
+                        for op in ops {
+                            let mut g = heap.write();
+                            apply(&mut g.0, op, &v);
+                            g.1.push((w, op));
+                        }
+                    })
+                })
+                .collect();
+            writers.into_iter().for_each(|w| w.join().unwrap());
+            done.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let (h, log) = heap.into_inner();
+        let mut shape = Vec::new();
+        h.write_shape(&mut shape, &|_| true);
+        // The replay: each op on a thread of its writer's own (insertion targets are per
+        // session), one at a time in the log's order.
+        let turn = (parking_lot::Mutex::new(0usize), parking_lot::Condvar::new());
+        let heap = parking_lot::Mutex::new(Heap::new(90));
+        std::thread::scope(|s| {
+            for w in 0..WRITERS {
+                let (turn, heap, log, xids) = (&turn, &heap, &log, &xids);
+                s.spawn(move || {
+                    let v = Vis::new(xids);
+                    for (i, (_, op)) in log.iter().enumerate().filter(|(_, (o, _))| *o == w) {
+                        let mut t = turn.0.lock();
+                        while *t != i {
+                            turn.1.wait(&mut t);
+                        }
+                        apply(&mut heap.lock(), *op, &v);
+                        *t += 1;
+                        turn.1.notify_all();
+                    }
+                });
+            }
+        });
+        let mut replayed = Vec::new();
+        heap.into_inner().write_shape(&mut replayed, &|_| true);
+        assert_eq!(shape, replayed);
     }
 
     #[test]
