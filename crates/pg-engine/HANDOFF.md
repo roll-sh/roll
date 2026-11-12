@@ -9840,6 +9840,123 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 5 (agent 218)
+
+Nothing kept; BENCH.md "Short write transactions, round 5" has the pairs, the same-day
+three-server table and the PGO measurement. The stack is on origin `wip/a218` (branch
+`work-a218-final`, ten commits on `dd3de66c1`; patches and numbers in `~/.cache/a218/patches/`).
+It took user cycles per transaction down in every pair of every series (8 clients -3.4% to
+-6.0% at the median, 32 clients -7.7% to -9.2%, tps +2% to +7% and +9% to +12%), but 8
+clients' median reached the gate's -5% in one series of four against the origin head, and a
+pair's tps went down in three of them. Its steps, each its own commit:
+
+1. *Scans of a modelled table start without the size models' shard lock* (216's step 1).
+2. *Group commits' WAL records written by the fsync that covers them* (216's step 2). Why every
+   acknowledged commit is durable: a group commit appends its record to the writer's buffer
+   under the commit lock and returns only from `wait_durable` once `durable` is at least its
+   timestamp; `durable` moves only in `made_durable`, after a leader took the commit lock, wrote
+   every record appended so far in one write (`WalWriter::flush`), read `assigned` under that
+   same lock (every timestamp up to it is in the file), let the lock go and fsynced the file. A
+   record is only in memory between its append and that write, and nothing reads the WAL file
+   but recovery at startup; the paths that publish a commit before its fsync (`commit_async`,
+   synchronous_commit off; `commit_with`, a store without fsync) and a WAL rotation write the
+   buffer first (`append_now`, `sync`, `flush`), so the file keeps commit order. A crash loses
+   only commits nobody was told about; a failed write closes the store as a failed fsync did.
+   Measured: fdatasync per commit 0.76 -> 0.77 at 8 clients, 0.48 -> 0.50 at 32 (not lower),
+   pwrite per commit 1.01 -> 0.77 and 0.50.
+3. *Lock bookkeeping without an allocation per lock* (213's candidate 2, 216's rebase).
+4. *Commit borrows its database; the store's commit and snapshot fields, the id table's lock and
+   the database's counts on lines of their own*: 213's candidate 3 less what agent 210's point
+   reads round 3 landed meanwhile (the catalog, the id table and the store's view behind
+   `published::Published`, the server's spin counters padded).
+5. *The transaction id table by reference, the newest ids' states without its mutex*:
+   `Database::xids` returns `&Arc<Xids>` (a `OnceLock` set as the database opens, else the
+   database's own) instead of a clone, a count every statement and model update wrote; and
+   `Xids::status` reads a ring of the newest 4,096 ids' states, written under the mutex as an
+   id is assigned, ends or runs again at recovery, before it takes the mutex. The size models
+   ask 22 times a transaction (`Vis::state` for writers their thread hasn't seen end).
+6. *Fewer allocations*: the server log's command tag a `Cow<'static, str>`, a simple query's
+   text borrowed from its message, the cached BEGIN / COMMIT parse copied into the session's
+   source buffer, a statement trigger's empty transition made only when one fires, a table's
+   statistics levels and the end-of-transaction counts inline (`SmallVec`), DML targets'
+   columns by position (names only for a failing row), btree entries sized in place, the
+   transaction-start settings' strings reused. Allocations a transaction about 155 -> 140.
+7. *Memtable keys inline when short* (213's `memkey`): the commit's skiplist insert 7.1 -> 5.6
+   µs at 8 clients, the memtable reads' comparisons in the node.
+8. *The catalog read by reference* (`ExecCtx::with_catalog`) where every statement took a count
+   every session's statements write: the privilege checks (three a statement, with the user's
+   and the database owner's lookups), nextval, UPDATE's and INSERT's per-execution checks, the
+   size models' scan setup, a scan's materialized-view check; `begin_statement` takes the
+   catalog anew only when it changed; UPDATE's key-column check in place. `ExecCtx::catalog`
+   calls 25.6 -> 8.7 a transaction, `Database::catalog` 4.2 -> 1.0.
+9. *The btree model's deduplication pass over a page with no equal neighbours and no LP_DEAD
+   item leaves its items in place* (their sizes recomputed): the pass took every item out and
+   put it back unchanged, most of a distinct-valued index's page-full events.
+10. *Bind reads its names, formats and parameters in place* (`Session::bind_message_in`; the
+    owned-parameter `bind_message` stays for embedders and tests).
+
+Dropped on the way: the kill marker of a kept plan's index scan reused with its key buffers
+(`Kills::again` for every rescan): 8 allocations fewer a transaction, but `bind_scan` +0.5 µs
+and `rescan_index` +0.6 µs in the LBR profile.
+
+Not run: the verification train (queued, then cancelled when the gate failed).
+
+**PGO** (measured, not landed): a profile-guided dist build of the stack at `937058ab2` against
+the same commit: short_txn +23.2% tps and -27.8% user cycles at 8 clients, +26.5% and -28.6% at
+32, point reads +35.3% and -38.2% (BENCH.md). The dist profile has no PGO today (no rustflags,
+no `.cargo/config`). The recipe, scripts in `~/.cache/a218/tools/pgo.sh`, `pgo2.sh` and
+`~/.cache/a218/bench/pgotrain.sh`: `rustup component add llvm-tools` (llvm-profdata of the
+toolchain's LLVM, 23; Debian's llvm-19 can't read its profiles); build with
+`RUSTFLAGS=-Cprofile-generate=<dir>`; run the engine through the training workloads with
+`LLVM_PROFILE_FILE=<dir>/roll-%p-%m.profraw` and stop it with SIGTERM (a smart shutdown runs
+the exit handlers that write the profile; 12 MB raw); `llvm-profdata merge -o x.profdata`
+(19 MB); build with `RUSTFLAGS="-Cprofile-use=x.profdata -Cllvm-args=-no-pgo-warn-mismatch"`
+from the **same source path** as the instrumented build (a path dependency's symbol hashes
+follow its path: from another directory nothing matches and the profile does nothing). Both
+builds rebuild every crate (RUSTFLAGS is in every fingerprint). What landing needs: cargo has
+no per-profile rustflags on stable, so every dist build (the bench harnesses, the deploy
+images) would set RUSTFLAGS from a script, and a profile either checked in (about 4 MB
+compressed) or made in the build (a second build and a training run); a stale profile only
+loses the functions that changed. A/B comparisons then need both arms built against the same
+profile.
+
+**Where a transaction's time goes now** (8 clients, LBR profiles, user µs per transaction; roll
+is the stack, 173 with its background threads' 6):
+
+| part | roll | PostgreSQL |
+|---|---:|---:|
+| protocol and per-message session work (Bind 6.6, Describe 3.6, reads, ReadyForQuery, activity) | ~25 | not split (inlined in `PostgresMain`) |
+| UPDATE (finding the row ~25 of it, the models 8: pruning 5.2, the kill walk 3.3) | 42.6 | 5.9 (+ its index scan, below) |
+| index scans of UPDATE and SELECT (PostgreSQL's `IndexNext`) | in the rows above / ~13 for SELECT | 20.1 (heap pruning 9.1 of it) |
+| INSERT (identity key's unique check 7, models 9) | ~25 | 10.2 |
+| COMMIT (memtable 5.6, lock release 3.3, statistics 1.8, durable wait 1.0) | ~19 | 7.5 |
+| executor start / end, portals | in the rows above | 17.4 + 8.4 |
+| allocator | ~15 (spread) | ~5 (palloc, AllocSet) |
+
+PostgreSQL's 121 µs include about 28 of its other processes (WAL writer, checkpointer). pgrust's
+image is stripped (its total is 115-117 µs; no split). Roll's IPC is 0.43 (PostgreSQL 0.64):
+`_mi_page_malloc`'s pop of a free block misses (7% of user cycles, 1,270 dTLB walks and 1,000
+iTLB walks a transaction with transparent huge pages off), and a fifth of the cycles are
+instruction-fetch stalls, which is what PGO's layout removes.
+
+What the round found, for the next one:
+
+- **PGO is the lever**: -28% user cycles on short transactions, -38% on point reads, more than
+  every code step of five rounds together. Decide the pipeline (above) first; then measure
+  rounds with both arms built against one profile.
+- The code steps are real but each is under the noise: the same binaries moved 3-4% between
+  series (other tenants at 0.2-0.6 cores, a busy build queue). A 5% gate at 8 clients needs
+  either a bigger single change or longer runs; 32 clients clears it when the host is quiet.
+- Contention is not the 8-client cost: c2c shows no line above 5% of the HITMs; contended
+  lock acquisitions are under 1 a transaction.
+- Next code targets by size: the identity key's unique check (7 µs: the store probe 3.9, the
+  unique-key lock 1.4; a btree model that knows the index's largest key could answer "absent"
+  for a sequence's next value, with the model's exactness conditions), the commit's memtable
+  insert (5.6 µs of skiplist cache misses), the ExecCtx made per statement (four allocations,
+  a catalog count, `CatalogNames` each time), the kill walk's binary searches (two dependent
+  misses per probe in a non-plain leaf: a prefix array would halve them, at memory cost).
+- Bind's allocations (step 10) and the ExecCtx are agent 210's area too (point reads): rebase.
+
 ## Short write transactions, round 4 (agent 216)
 
 Nothing kept; BENCH.md "Short write transactions, round 4" has the same-night table (lane A, 2

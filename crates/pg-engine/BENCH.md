@@ -533,6 +533,89 @@ Patches and a note of each in `~/.cache/a217/patches/` (HANDOFF lists them):
 - count(*) (2.75x): `parscan::partial_row` and `LazyBuf::read`, a row decoded lazily per
   row; the storage scan is 14% of it.
 
+## Short write transactions, round 5 (2026-11-12, agent 218)
+
+Nothing kept: a stack of ten steps (agent 216's four rebased, then six of this round) took user
+cycles per transaction down in every pair of every series, but 8 clients' median reached the
+gate's -5% in one series of four against the origin head. Patches and numbers in
+`~/.cache/a218/patches/` (`MEASURED.txt`), code on origin `wip/a218` (branch
+`work-a218-final`). HANDOFF.md "Short write transactions, round 5" has the steps, the PGO
+measurement and the leads.
+
+Harness: 216's (`~/.cache/a218/bench`), lane A (servers on CPUs 6,7,24,25, 8 GiB, `--cpu-shares
+2`; clients on 8,9,26,27), `short_txn` of 100,000 accounts, fsync and synchronous_commit on,
+`CHECKPOINT` and 5 s of quiet before each run, user cycles and instructions of the connection
+threads over 0.8-9.6 s of the 10 s run. Gate: user cycles per transaction down in every
+unflagged pair and -5% at the median, tps up at the median and in no unflagged pair down.
+
+**Three servers, same day** (`tri3`, one round; roll is the stack at `4b190d7ae` less its last
+step, its base `dd3de66c1` shown too):
+
+| clients | server | tps | CPU µs/txn (user+sys) | p50 / p99 ms | peak MiB | other tenants (cores) |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | roll | 2,486 | 347.8 (170.5+177.3) | 0.344 / 1.113 | 131 | 0.85 |
+| | roll base | 2,716 | 334.8 (168.5+166.3) | 0.332 / 0.990 | 140 | 0.58 |
+| | PostgreSQL | 1,956 | 307.3 (140.7+166.6) | 0.447 / 1.293 | 212 | 0.59 |
+| | pgrust | 2,326 | 251.3 (142.3+109.1) | 0.389 / 1.251 | 442 | 1.07 |
+| 8 | roll | 11,290 | 291.2 (171.8+119.4) | 0.622 / 2.358 | 136 | 0.21 |
+| | roll base | 10,737 | 305.0 (182.1+122.9) | 0.652 / 2.519 | 151 | 0.24 |
+| | PostgreSQL | 12,338 | 263.2 (127.2+136.0) | 0.576 / 1.981 | 257 | 0.24 |
+| | pgrust | 15,088 | 217.3 (117.1+100.2) | 0.477 / 1.548 | 516 | 0.16 |
+| 32 | roll | 10,651 | 330.2 (202.1+128.2) | 2.374 / 13.235 | 147 | 0.23 |
+| | roll base | 9,600 | 353.5 (208.0+145.5) | 2.489 / 15.286 | 159 | 0.27 |
+| | PostgreSQL | 9,974 | 310.1 (164.6+145.5) | 2.285 / 14.521 | 299 | 0.52 |
+| | pgrust | 14,908 | 237.7 (138.1+99.6) | 1.900 / 8.525 | 600 | 0.23 |
+
+The stack ÷ PostgreSQL 1.27x / 0.92x / 1.07x, ÷ pgrust 1.07x / 0.75x / 0.71x at 1 / 8 / 32
+clients (the 1-client cells had 0.6-1.1 cores of other tenants: the 1-client pairs below are the
+comparison).
+
+**Pairs against the origin head `dd3de66c1`** (medians of 5; "every": in every pair):
+
+| series | stack | clients | Δ tps | Δ user cycles/txn | Δ user instr/txn | gate |
+|---|---|---:|---|---|---:|---|
+| g4 | 0001-0009 | 8 | +7.1% (every up) | -6.0% (every down) | -6.6% | pass |
+| g4 | 0001-0009 | 32 | +12.2% (every up) | -8.7% (every down) | -0.1% | pass |
+| g5 | 0001-0009 | 8 | +3.0% (one -0.8%) | -3.5% (every down) | -2.5% | fail |
+| g5 | 0001-0009 | 1 (3 pairs) | +3.1% (every up) | -3.9% (every down) | -3.2% | (not worse) |
+| g6a | 0001-0010 | 8 | +2.0% (two down) | -3.4% (two up) | -1.3% | fail |
+| g6b | 0001-0010 | 8 | +4.2% (two down) | -3.9% (every down) | +0.9% | fail |
+| g6b | 0001-0010 | 32 | -1.5% (one pair flagged: 1.36 cores) | -9.2% (every down) | -5.8% | fail |
+
+Against the earlier head `7bb008378`: 0001-0006 (with a step dropped later) 8 clients +1.5% tps,
+-2.6% cycles, 32 clients +8.2%, -4.0%; with 0007 8 clients -4.3% cycles; with part of 0008
+8 clients +2.9% tps (every up), -4.3% cycles (every down) and 32 clients +9.3% (every up),
+-7.7% (every down). Point reads at 8 clients: instructions -1.2% (cycles -3.5%), range reads
+-0.5% (cycles -0.1%). The g6 series ran while the host was busier (0.3-0.6 cores of other
+tenants on the server CPUs, 0.2 before).
+
+**Per transaction, base -> stack** (8 clients; uprobe counts, which slow the server): allocations
+153-163 -> 139-143; context switches 8.34 -> 8.32 (32 clients 9.77 -> 9.27), `sched_yield` 2.42
+-> 1.81 (2.55 -> 1.68), futex 1.85 -> 1.87 (3.61 -> 3.93); contended lock acquisitions
+(parking_lot's slow paths) mutex 0.81 -> 0.82, rwlock shared 0.59 -> 0.27, exclusive 0.24 ->
+0.37; fdatasync per commit 0.76 -> 0.77 (32 clients 0.48 -> 0.50), pwrite 1.01 -> 0.77 (1.01 ->
+0.50); `ExecCtx::catalog` 25.6 -> 8.7, `Database::catalog` 4.2 -> 1.0; `Xids::status` 22.4 (now a
+ring read for the newest ids).
+
+**Footprint**: 100 idle sessions 36.8 / 36.9 MiB against 37.0 / 36.7; peak memory not higher.
+Right after a run the stack holds a few MiB more (its memtable has more transactions of the 10
+s past the 32 MiB flush); after a `CHECKPOINT` and 3 s, four pairs: base 72.1 / 65.4 / 71.3 /
+59.2 MiB, stack 69.0 / 67.6 / 67.4 / 72.6 (medians 68.4, 68.3).
+
+**PGO** (measured, not landed): the stack at `937058ab2` built with `-Cprofile-use` (profile
+from a ~50 s training run of that build with `-Cprofile-generate`: short_txn at 8, 32 and 1
+clients, point and range reads at 8; merged with the toolchain's `llvm-profdata`), against the
+same commit built as usual, 3 pairs each:
+
+| workload | Δ tps | Δ user cycles/txn | Δ user instr/txn |
+|---|---|---|---|
+| short_txn, 8 clients | +23.2% | -27.8% | -16.4% |
+| short_txn, 32 clients | +26.5% | -28.6% | -22.4% |
+| point reads, 8 clients | +35.3% | -38.2% | -20.5% |
+
+That puts short transactions at about 14,300-14,500 tps at 8 clients and 13,700-14,000 at 32
+on this lane, ahead of PostgreSQL's 12,338 and 9,974 the same day.
+
 ## Short write transactions, round 4 (2026-11-11/12, agent 216)
 
 Nothing kept: four steps measured, none met the keep gate (user cycles per transaction down in
