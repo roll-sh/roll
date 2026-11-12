@@ -95,6 +95,9 @@ export type Review = { by: string; verdict: "approve" | "reject"; comment: strin
 /** One item of a change request with its values: `now` is null for a new key or a live/dynamic link. */
 export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null };
 
+export type KeyInsight = { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean };
+export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
+
 export type ChangeRequest = {
   id: string;
   environment: string;
@@ -140,7 +143,11 @@ export type Share = { id: string; note: string; views_left: number; created_by: 
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
 export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
-export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; limit?: number };
+/** `since`: rows at or after this time (ms); `before`: rows older than this id. */
+export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number };
+export type AuditFormat = "csv" | "jsonl";
+/** An audit stream to a SIEM: signed batches of new rows, in order. */
+export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
 export type ImportedAsRequest = { request: ChangeRequest; skipped: string[] };
 export type ExportFormat = "dotenv" | "json" | "shell" | "yaml";
@@ -219,6 +226,23 @@ export function qs(q: Record<string, string | number | boolean | undefined | nul
   return parts.length ? `?${parts.join("&")}` : "";
 }
 
+/** A route that answers a file (an export): its text, or the API's error. */
+async function text(url: string): Promise<string> {
+  const res = await fetch(`${ROLL_API}${url}`, { headers: apiHeaders(), cache: "no-store" });
+  onApiStatus(res.status);
+  const body = await res.text();
+  if (!res.ok) {
+    let err: { error?: string; code?: string } = {};
+    try {
+      err = JSON.parse(body);
+    } catch {
+      // not JSON: the status says it
+    }
+    throw new SecretsError(err.error ?? `${res.status} ${res.statusText}`.trim(), res.status, err.code ?? null);
+  }
+  return body;
+}
+
 /** The client for one project. */
 export function secretsApi(project: string) {
   const P = `/v1/secrets/projects/${enc(project)}`;
@@ -258,22 +282,7 @@ export function secretsApi(project: string) {
 
     values: (env: string, path = "/", resolve = true) => req<Values>("GET", `${E(env)}/values${qs({ path, resolve: resolve ? undefined : "false" })}`),
     /** The environment's values as a file (`dotenv`, `json`, `shell`, `yaml`): text, not JSON. */
-    exportText: async (env: string, format: ExportFormat, path = "/"): Promise<string> => {
-      const url = `${E(env)}/values${qs({ path, format })}`;
-      const res = await fetch(`${ROLL_API}${url}`, { headers: apiHeaders(), cache: "no-store" });
-      onApiStatus(res.status);
-      const text = await res.text();
-      if (!res.ok) {
-        let err: { error?: string; code?: string } = {};
-        try {
-          err = JSON.parse(text);
-        } catch {
-          // not JSON: the status says it
-        }
-        throw new SecretsError(err.error ?? `${res.status} ${res.statusText}`.trim(), res.status, err.code ?? null);
-      }
-      return text;
-    },
+    exportText: (env: string, format: ExportFormat, path = "/") => text(`${E(env)}/values${qs({ path, format })}`),
 
     changes: (env: string, before?: number, limit?: number) => req<Change[]>("GET", `${E(env)}/changes${qs({ before, limit })}`),
     batch: (env: string, b: Batch) => req<Applied>("POST", `${E(env)}/changes`, b),
@@ -287,6 +296,8 @@ export function secretsApi(project: string) {
 
     requests: (env: string, state?: RequestState) => req<ChangeRequest[]>("GET", `${E(env)}/requests${qs({ state })}`),
     openRequest: (env: string, b: Batch) => req<ChangeRequest>("POST", `${E(env)}/requests`, b),
+    /** When each key of a folder was last read and changed, and which are stale. */
+    insights: (env: string, path = "/") => req<Insights>("GET", `${E(env)}/insights${qs({ path })}`),
     request: (env: string, id: string) => req<ChangeRequest>("GET", `${E(env)}/requests/${enc(id)}`),
     /** A request's values now and proposed, for an approver who may reveal them (audited). */
     requestValues: (env: string, id: string) => req<RequestValue[]>("GET", `${E(env)}/requests/${enc(id)}/values`),
@@ -317,6 +328,12 @@ export function secretsApi(project: string) {
     runSync: (id: string) => req<Sync>("POST", `${P}/syncs/${enc(id)}/run`),
 
     audit: (f: AuditFilter = {}) => req<AuditEntry[]>("GET", `${P}/audit${qs(f)}`),
+    /** The audit log with these filters as a file (up to 10,000 rows): text, not JSON. */
+    auditText: (f: AuditFilter, format: AuditFormat) => text(`${P}/audit${qs({ ...f, before: undefined, limit: undefined, format })}`),
+    sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),
+    /** The `whsec_…` signing secret comes back once. */
+    createSink: (url: string, fromStart = false) => req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart }),
+    deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
   };
 }
 

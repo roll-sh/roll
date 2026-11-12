@@ -619,3 +619,18 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let csv = csv.as_str().unwrap();
     assert!(csv.starts_with("id,at,actor,action,") && csv.contains("\"secrets.export\"") && !csv.contains("sk_live"));
 }
+
+#[tokio::test]
+async fn insights_show_when_each_key_was_last_read_and_changed() {
+    let api = Api::new().await;
+    api.set("production", "USED", "u").await;
+    api.ok(Method::PUT, "/environments/production/secrets/IDLE?path=/old", Some(json!({ "value": "i" }))).await;
+    api.values("production", "/").await;
+    api.ok(Method::PATCH, "/environments/production", Some(json!({ "max_age_days": 90 }))).await;
+    let i = api.ok(Method::GET, "/environments/production/insights", None).await;
+    assert_eq!(i["max_age_days"], 90);
+    let used = &i["keys"][0];
+    assert_eq!((used["key"].as_str(), used["reads_30d"].as_i64(), used["last_read_by"].as_str(), used["stale"].as_bool()), (Some("USED"), Some(1), Some("operator"), Some(false)));
+    let idle = api.ok(Method::GET, "/environments/production/insights?path=/old", None).await;
+    assert_eq!((idle["keys"][0]["key"].as_str(), idle["keys"][0]["last_read_at"].clone()), (Some("IDLE"), Value::Null));
+}

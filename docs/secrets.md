@@ -233,6 +233,15 @@ required key it lacks as a problem (`required, but staging doesn't set it`), so 
 and resolves refuse to start without it, as they do for an unresolved reference. An ephemeral
 environment counts what its base defines.
 
+### Insights
+
+`GET …/environments/{env}/insights?path=` shows, for each key of a folder, when it last changed
+and by whom, when its value was last read and by whom, how often in the last 30 days, and whether
+it's **stale**: unchanged for longer than the environment's `max_age_days`
+(`PATCH …/environments/{env} {max_age_days}`, 1–3650, `null` for never). Reads come from the audit
+log (reveal, export, resolve and sync pushes) over the last 90 days; nothing is decrypted. A stale
+key is only flagged: it doesn't stop `roll run`, a deploy or a check.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -674,7 +683,7 @@ isn't in the workspace is 404.
 | `DELETE /environments?label=k=v` | | `{deleted: string[]}` (ephemeral only) |
 | `PUT /environments/order` | `{order: slug[]}` | `Environment[]` |
 | `GET /environments/{env}` | | `Environment` |
-| `PATCH /environments/{env}` | `{slug?, name?, expires_at?}` | `Environment` |
+| `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?}` | `Environment` |
 | `GET /environments/{env}/folders?path=` | | `{path, folders: Folder[]}` |
@@ -691,6 +700,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
+| `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
@@ -775,6 +785,7 @@ type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: strin
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
+type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
@@ -847,11 +858,8 @@ Ranked:
    a version's history shows the old and new value side by side on reveal.
 3. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
-4. **Insights**: when each key was last read (from the audit log) and changed, so unused and stale
-   credentials stand out in the grid (`GET …/insights?env=&path=`), with a per-environment
-   `max_age_days` that reports keys older than it as problems. In progress.
-5. **`roll secrets edit`** (an environment as a `.env` in `$EDITOR`, in a 0600 file under
+4. **`roll secrets edit`** (an environment as a `.env` in `$EDITOR`, in a 0600 file under
    `$XDG_RUNTIME_DIR`, applied as one change) and `roll secrets set KEY --generate 32` (a random
    value made locally).
-6. **Search links live** once roll search (#22) lands its workspace kind: check the provider
+5. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
