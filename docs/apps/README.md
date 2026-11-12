@@ -123,6 +123,12 @@ every deployment is immutable with instant rollback.
   serving. A service scaled to zero rolls out without starting anything: the pointer moves, and
   the next request wakes the new deployment (a health check runs at the first wake instead, and
   failing it there rolls the pointer back automatically).
+- **Pre-deploy command** (`run.pre_deploy`, `roll apps set --pre-deploy`, the settings page):
+  once per deploy, after the image is ready and before anything starts, in a container of the
+  new image with the deployment's variables on the project network (not the volume: the old
+  instance may still have it), as Railway's pre-deploy command and Render's do. Its output is in
+  the deploy log; a non-zero exit, a timeout (the build timeout) or a cancel fails the deploy, and
+  the old one keeps serving. For migrations, which must suit both the old and the new code.
 - **Redeploy** (`POST …/redeploy`, `roll apps redeploy`, the dashboard's banner after a change
   of variables or settings): the active image again with the service's current run settings and
   variables, same revision, no build. It's how a `roll up` service takes new variables.
@@ -434,8 +440,7 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-2. **Builds people need.** A pre-deploy (release) command that gates the switch, for migrations;
-   `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
+2. **Builds people need.** `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
 3. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
    `roll ssh` / exec into an instance, with the API routes under the service.
 4. **First run and the dashboard.** GitHub repos inline in New service; type, variables and

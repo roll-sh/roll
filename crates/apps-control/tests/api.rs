@@ -260,6 +260,18 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     assert_eq!((st, body["deployment"].clone()), (StatusCode::OK, d1["id"].clone()));
     // Only the old deployment's instance is left.
     assert!(w.fake.instances(id).iter().all(|(_, dep, _)| *dep == d1["id"]));
+    // A pre-deploy command (a migration) that fails stops the deploy before anything starts.
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"unset": ["FAKE_UNHEALTHY"]}))).await;
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": "exit 3"}}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, d3) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d3 = settled(&w, id, "production", d3["id"].as_str().unwrap()).await;
+    assert_eq!(d3["status"], "failed", "{d3}");
+    assert!(d3["error"].as_str().unwrap().contains("pre-deploy command exited with 3"), "{d3}");
+    assert!(w.fake.instances(id).iter().all(|(_, dep, _)| *dep == d1["id"]), "nothing of it ran, its container is gone");
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": "exit 0"}}))).await;
+    let (_, d4) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    assert_eq!(settled(&w, id, "production", d4["id"].as_str().unwrap()).await["status"], "active");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

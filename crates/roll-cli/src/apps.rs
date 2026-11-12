@@ -147,6 +147,9 @@ pub enum AppsCmd {
         port: Option<u16>,
         #[arg(long)]
         start: Option<String>,
+        /// Run once per deploy before the switch (a migration); a failure stops the deploy.
+        #[arg(long)]
+        pre_deploy: Option<String>,
         #[arg(long)]
         health: Option<String>,
         #[arg(long)]
@@ -620,7 +623,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, health, schedule } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule } => {
             let svc = service(api, &target).await?;
             let mut run = serde_json::Map::new();
             for (k, v) in [
@@ -630,6 +633,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("memory_mb", memory.map(Value::from)),
                 ("port", port.map(Value::from)),
                 ("start", start.map(Value::from)),
+                ("pre_deploy", pre_deploy.map(Value::from)),
                 ("health_path", health.map(Value::from)),
                 ("schedule", schedule.map(Value::from)),
             ] {

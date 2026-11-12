@@ -328,6 +328,9 @@ impl Apps {
         dep.image = Some(image);
         dep.run = run;
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
+        if let Some(cmd) = tpl.run.pre_deploy.clone() {
+            self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
+        }
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)
@@ -375,6 +378,43 @@ impl Apps {
         }
         live.commit(tpl, prepared).await;
         Ok(())
+    }
+
+    /// The deployment's pre-deploy command, to its exit: a container of the new image with the
+    /// deployment's variables on the project network, without the volume (the old instance may
+    /// still be using it) and without a port. Removed afterwards, whatever happened.
+    async fn pre_deploy(self: &Arc<Self>, tpl: &Template, cmd: &str, log: &LogSink, cancel: &CancellationToken) -> anyhow::Result<()> {
+        let mut spec = tpl.spec.clone();
+        let svc = spec.service.strip_prefix("svc_").unwrap_or(&spec.service).to_string();
+        spec.name = format!("roll-apps-{svc}-{}-pre-{}", spec.env, random(6).to_ascii_lowercase());
+        spec.command = Some(cmd.to_string());
+        spec.port = None;
+        spec.volume = None;
+        spec.aliases.clear();
+        let limit = self.cfg.build_timeout;
+        log.stream(Stream::System).line(format!("pre-deploy: {cmd}"));
+        let rt = &self.deps.runtime;
+        rt.create(&spec).await?;
+        let ran = async {
+            rt.start(&spec.name, log.clone()).await?;
+            tokio::select! {
+                code = tokio::time::timeout(limit, rt.wait(&spec.name)) => match code {
+                    Ok(code) => code,
+                    Err(_) => anyhow::bail!("the pre-deploy command took longer than {} minutes", limit.as_secs() / 60),
+                },
+                _ = cancel.cancelled() => anyhow::bail!("canceled"),
+            }
+        }
+        .await;
+        let _ = rt.stop(&spec.name, Duration::from_secs(5)).await;
+        rt.remove(&spec.name).await;
+        match ran? {
+            0 => {
+                log.stream(Stream::System).line("pre-deploy done");
+                Ok(())
+            }
+            n => anyhow::bail!("the pre-deploy command exited with {n}: nothing was switched"),
+        }
     }
 
     /// Build the deployment's tree into an image: the tree from its source, the plan from

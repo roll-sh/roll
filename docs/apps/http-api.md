@@ -109,6 +109,9 @@ type Run = {
   type: "web" | "worker" | "cron";
   port?: number;            // web: the port the app listens on (default from the plan, else 8080; PORT is set to it)
   start?: string;           // overrides the image's command
+  pre_deploy?: string;      // once per deploy, in a container of the new image with its variables and
+                            // the project network (no volume), before the switch: a migration. A
+                            // non-zero exit fails the deploy; the old one keeps serving
   schedule?: string;        // cron: five fields, UTC
   timeout_s?: number;       // cron: a run's limit (default 3600)
   min_instances: number;    // web: 0 scales to zero (default 0); worker: at least 1

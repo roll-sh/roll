@@ -43,6 +43,8 @@ export interface Run {
   type: ServiceType;
   port?: number;
   start?: string;
+  /** Once per deploy before the switch (a migration); a non-zero exit fails the deploy. */
+  pre_deploy?: string;
   schedule?: string;
   timeout_s?: number;
   min_instances: number;

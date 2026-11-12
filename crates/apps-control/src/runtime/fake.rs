@@ -145,7 +145,9 @@ impl Runtime for Fake {
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
             i.spec.clone()
         };
-        if let Some(code) = var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok()) {
+        // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
+        let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
+        if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {
             log.line("job ran");
             let mut m = self.instances.lock();
             let i = m.get_mut(name).expect("exists");

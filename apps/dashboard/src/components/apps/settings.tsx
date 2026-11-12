@@ -24,6 +24,7 @@ interface Form {
   type: Run["type"];
   port: string;
   start: string;
+  preDeploy: string;
   schedule: string;
   timeout: string;
   min: string;
@@ -56,6 +57,7 @@ export function formOf(s: Service): Form {
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
+    preDeploy: str(s.run.pre_deploy),
     schedule: str(s.run.schedule),
     timeout: str(s.run.timeout_s),
     min: str(s.run.min_instances),
@@ -97,6 +99,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.type !== before.type) run.type = f.type;
   if (f.port !== before.port) run.port = num(f.port);
   if (f.start !== before.start) run.start = text(f.start);
+  if (f.preDeploy !== before.preDeploy) run.pre_deploy = text(f.preDeploy);
   if (f.schedule !== before.schedule) run.schedule = text(f.schedule);
   if (f.timeout !== before.timeout) run.timeout_s = num(f.timeout);
   if (f.min !== before.min) run.min_instances = num(f.min);
@@ -214,6 +217,11 @@ export function SettingsTab({ service, runner, onDeleted }: { service: Service; 
           <Field label="Start command" hint="overrides the image's command">
             {t("start", "the image's")}
           </Field>
+          {form.type !== "cron" && (
+            <Field label="Pre-deploy command" hint="runs before each switch: a failure stops the deploy">
+              {t("preDeploy", "npx prisma migrate deploy")}
+            </Field>
+          )}
           {form.type === "cron" && (
             <>
               <Field label="Schedule" hint="five fields, UTC">

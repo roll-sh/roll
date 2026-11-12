@@ -72,7 +72,7 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
 
-    let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "build": {"build": "test \"$GREETING\" = hej"}, "run": {"memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
+    let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "build": {"build": "test \"$GREETING\" = hej"}, "run": {"memory_mb": 256, "cpu": 0.25, "pre_deploy": "test \"$GREETING\" = hej"} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     // The build step sees the environment's variables (a BuildKit secret): it fails without.
@@ -98,6 +98,7 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let first_deploy = built.elapsed();
     let (_, log) = call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/logs?tail=400"), None, "application/json", None).await;
     assert_eq!(d["status"], "active", "{d}\n{log}");
+    assert!(log.as_array().unwrap().iter().any(|l| l["text"] == "pre-deploy done"), "the pre-deploy command ran in a container of the new image");
     let (_, env) = call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
     let live = apps.live(&id, "production");

@@ -167,6 +167,10 @@ pub struct Run {
     pub port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
+    /// Runs once per deploy in a container of the new image, before anything switches (a
+    /// migration): a failure fails the deploy and the old deployment keeps serving.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_deploy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,6 +195,7 @@ impl Default for Run {
             kind: RunType::Web,
             port: None,
             start: None,
+            pre_deploy: None,
             schedule: None,
             timeout_s: None,
             min_instances: 0,
@@ -240,6 +245,9 @@ impl Run {
         }
         if self.start.as_ref().is_some_and(|c| c.len() > 2000 || c.contains('\0')) {
             return bad("start is a command of at most 2000 characters");
+        }
+        if self.pre_deploy.as_ref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
+            return bad("pre_deploy is a command of at most 2000 characters");
         }
         if let Some(v) = &self.volume {
             if !v.mount.starts_with('/') || v.mount == "/" || v.mount.len() > 200 || v.mount.contains("..") {
