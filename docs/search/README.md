@@ -211,7 +211,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    replayed from S3 on the new owner). Next: the edge's hostnames in the same run, and search in
    `deploy/cloud`'s fleet test (`rolld/tests/fleet_e2e.rs`).
 3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`, `logsdb`,
-   runtime fields, `otel-data`, transforms, ES|QL, watcher, downsampling, KQL.
+   runtime fields, `otel-data`, transforms, ES|QL, watcher, downsampling. KQL (0 of 34) is in
+   progress.
 4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
    checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
 5. **Metering on the fleet**: cluster lists show which node a cluster is loaded on without one

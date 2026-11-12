@@ -1,5 +1,11 @@
 # roll search — handoff (2026-10-26)
 
+> Historical: the state at the end of round 6, before search moved onto rolld's products and
+> the roll cloud fleet (2026-11-12). The current state, numbers and the ranked work list are in
+> [../README.md](../README.md) ("Status", "Next"); the fleet design is "On the fleet" in
+> [../architecture.md](../architecture.md). search-proxy and the search-only AWS stack described
+> below were removed.
+
 Goal: an Elasticsearch-compatible search engine in Rust, written from scratch. The targets:
 - 1:1 compatibility with Elasticsearch 9.5.5, plus an OpenSearch 3.9 dialect;
 - faster than Elasticsearch;
