@@ -536,7 +536,7 @@ impl Broker {
         Ok(name)
     }
 
-    /// The fleet and one node alike: put a stream made in the catalog in memory too.
+    /// Put a stream the catalog just got (with its topics) in memory.
     pub(crate) fn add_stream(&self, row: StreamRow, topics: Vec<TopicRow>) -> Arc<Stream> {
         let stream = Arc::new(self.stream_from(row));
         *stream.topics.write().unwrap() = self.topic_map(topics);
