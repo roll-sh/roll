@@ -1180,6 +1180,16 @@ impl Btree {
         if p.items.is_empty() {
             return;
         }
+        // (No neighbours with equal keys, as on most pages of an index of distinct values, and
+        // none LP_DEAD (the deletion pass before it took them): the pass would lay every item
+        // out again as it is. Their sizes are what it would leave, without taking them out
+        // and putting them back.)
+        if p.items.iter().all(|it| !it.dead)
+            && (1..p.items.len()).all(|i| p.items.get(i - 1).key.keep_natts(p.items.get(i).key, nkey) <= nkey)
+        {
+            p.used = p.items.iter().map(|it| it.size()).sum();
+            return;
+        }
         let mut maxposting = MAX_ITEM / 2;
         let mut singleval = !bottomup
             && newkey.keep_natts(p.items.get(0).key, nkey) > nkey
