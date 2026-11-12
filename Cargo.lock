@@ -6264,6 +6264,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-access"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "ipnet",
+ "percent-encoding",
+ "roll-auth",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "roll-auth"
 version = "0.1.0"
 dependencies = [

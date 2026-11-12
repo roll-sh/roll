@@ -214,6 +214,11 @@ impl Workspace {
         })
     }
 
+    /// The project a resource is in, if any (`kind` as stored: `postgres`, `repo`, …).
+    pub fn project_of(&self, kind: &str, r#ref: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT project_id FROM resources WHERE kind = ? AND ref = ?", [kind, r#ref], |r| r.get(0)).optional())?)
+    }
+
     /// Remove a project and its membership rows (never the resources themselves).
     pub fn delete(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
