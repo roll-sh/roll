@@ -27,7 +27,6 @@ import { Route as DashboardAgentsSharesRouteImport } from './routes/dashboard/ag
 import { Route as DashboardCodeIndexRouteImport } from './routes/dashboard/code/index'
 import { Route as DashboardNosqlIndexRouteImport } from './routes/dashboard/nosql/index'
 import { Route as DashboardNosqlIdRouteImport } from './routes/dashboard/nosql/$id'
-import { Route as DashboardProjectsIdRouteImport } from './routes/dashboard/projects/$id'
 import { Route as DashboardQueuesIndexRouteImport } from './routes/dashboard/queues/index'
 import { Route as DashboardQueuesConnectionsRouteImport } from './routes/dashboard/queues/connections'
 import { Route as DashboardQueuesExchangesRouteImport } from './routes/dashboard/queues/exchanges'
@@ -48,6 +47,8 @@ import { Route as OwnerRepoInfoRefsRouteImport } from './routes/$owner/$repo/inf
 import { Route as AgentsSIdIndexRouteImport } from './routes/agents/s/$id/index'
 import { Route as AgentsSIdOpengraphImageRouteImport } from './routes/agents/s/$id/opengraph-image'
 import { Route as DashboardCodeOwnerIndexRouteImport } from './routes/dashboard/code/$owner/index'
+import { Route as DashboardProjectsIdIndexRouteImport } from './routes/dashboard/projects/$id/index'
+import { Route as DashboardProjectsIdSecretsRouteImport } from './routes/dashboard/projects/$id/secrets'
 import { Route as DashboardQueuesQueuesIndexRouteImport } from './routes/dashboard/queues/queues/index'
 import { Route as DashboardStorageChar91Char93AccountsRouteImport } from './routes/dashboard/storage/[-]/accounts'
 import { Route as DashboardStorageChar91Char93ApiRouteImport } from './routes/dashboard/storage/[-]/api'
@@ -148,11 +149,6 @@ const DashboardNosqlIndexRoute = DashboardNosqlIndexRouteImport.update({
 const DashboardNosqlIdRoute = DashboardNosqlIdRouteImport.update({
   id: '/dashboard/nosql/$id',
   path: '/dashboard/nosql/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DashboardProjectsIdRoute = DashboardProjectsIdRouteImport.update({
-  id: '/dashboard/projects/$id',
-  path: '/dashboard/projects/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardQueuesIndexRoute = DashboardQueuesIndexRouteImport.update({
@@ -257,6 +253,18 @@ const DashboardCodeOwnerIndexRoute = DashboardCodeOwnerIndexRouteImport.update({
   path: '/dashboard/code/$owner/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DashboardProjectsIdIndexRoute =
+  DashboardProjectsIdIndexRouteImport.update({
+    id: '/dashboard/projects/$id/',
+    path: '/dashboard/projects/$id/',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DashboardProjectsIdSecretsRoute =
+  DashboardProjectsIdSecretsRouteImport.update({
+    id: '/dashboard/projects/$id/secrets',
+    path: '/dashboard/projects/$id/secrets',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const DashboardQueuesQueuesIndexRoute =
   DashboardQueuesQueuesIndexRouteImport.update({
     id: '/dashboard/queues/queues/',
@@ -337,7 +345,6 @@ export interface FileRoutesByFullPath {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
-  '/dashboard/projects/$id': typeof DashboardProjectsIdRoute
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
   '/dashboard/queues/exchanges': typeof DashboardQueuesExchangesRoute
   '/dashboard/queues/migrate': typeof DashboardQueuesMigrateRoute
@@ -359,6 +366,7 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/commits/$rev': typeof OwnerRepoCommitsRevRoute
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
+  '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
   '/dashboard/storage/-/iam': typeof DashboardStorageChar91Char93IamRoute
@@ -366,6 +374,7 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/changes/': typeof OwnerRepoChangesIndexRoute
   '/agents/s/$id/': typeof AgentsSIdIndexRoute
   '/dashboard/code/$owner/': typeof DashboardCodeOwnerIndexRoute
+  '/dashboard/projects/$id/': typeof DashboardProjectsIdIndexRoute
   '/dashboard/queues/queues/': typeof DashboardQueuesQueuesIndexRoute
   '/$owner/$repo/blob/$rev/$': typeof OwnerRepoBlobRevSplatRoute
   '/$owner/$repo/tree/$rev/$': typeof OwnerRepoTreeRevSplatRoute
@@ -388,7 +397,6 @@ export interface FileRoutesByTo {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
-  '/dashboard/projects/$id': typeof DashboardProjectsIdRoute
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
   '/dashboard/queues/exchanges': typeof DashboardQueuesExchangesRoute
   '/dashboard/queues/migrate': typeof DashboardQueuesMigrateRoute
@@ -410,6 +418,7 @@ export interface FileRoutesByTo {
   '/$owner/$repo/commits/$rev': typeof OwnerRepoCommitsRevRoute
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
+  '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
   '/dashboard/storage/-/iam': typeof DashboardStorageChar91Char93IamRoute
@@ -417,6 +426,7 @@ export interface FileRoutesByTo {
   '/$owner/$repo/changes': typeof OwnerRepoChangesIndexRoute
   '/agents/s/$id': typeof AgentsSIdIndexRoute
   '/dashboard/code/$owner': typeof DashboardCodeOwnerIndexRoute
+  '/dashboard/projects/$id': typeof DashboardProjectsIdIndexRoute
   '/dashboard/queues/queues': typeof DashboardQueuesQueuesIndexRoute
   '/$owner/$repo/blob/$rev/$': typeof OwnerRepoBlobRevSplatRoute
   '/$owner/$repo/tree/$rev/$': typeof OwnerRepoTreeRevSplatRoute
@@ -441,7 +451,6 @@ export interface FileRoutesById {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
-  '/dashboard/projects/$id': typeof DashboardProjectsIdRoute
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
   '/dashboard/queues/exchanges': typeof DashboardQueuesExchangesRoute
   '/dashboard/queues/migrate': typeof DashboardQueuesMigrateRoute
@@ -463,6 +472,7 @@ export interface FileRoutesById {
   '/$owner/$repo/commits/$rev': typeof OwnerRepoCommitsRevRoute
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
+  '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
   '/dashboard/storage/-/iam': typeof DashboardStorageChar91Char93IamRoute
@@ -470,6 +480,7 @@ export interface FileRoutesById {
   '/$owner/$repo/changes/': typeof OwnerRepoChangesIndexRoute
   '/agents/s/$id/': typeof AgentsSIdIndexRoute
   '/dashboard/code/$owner/': typeof DashboardCodeOwnerIndexRoute
+  '/dashboard/projects/$id/': typeof DashboardProjectsIdIndexRoute
   '/dashboard/queues/queues/': typeof DashboardQueuesQueuesIndexRoute
   '/$owner/$repo/blob/$rev/$': typeof OwnerRepoBlobRevSplatRoute
   '/$owner/$repo/tree/$rev/$': typeof OwnerRepoTreeRevSplatRoute
@@ -495,7 +506,6 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/nosql/$id'
-    | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
     | '/dashboard/queues/exchanges'
     | '/dashboard/queues/migrate'
@@ -517,6 +527,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/commits/$rev'
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
+    | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
     | '/dashboard/storage/-/iam'
@@ -524,6 +535,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/changes/'
     | '/agents/s/$id/'
     | '/dashboard/code/$owner/'
+    | '/dashboard/projects/$id/'
     | '/dashboard/queues/queues/'
     | '/$owner/$repo/blob/$rev/$'
     | '/$owner/$repo/tree/$rev/$'
@@ -546,7 +558,6 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/nosql/$id'
-    | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
     | '/dashboard/queues/exchanges'
     | '/dashboard/queues/migrate'
@@ -568,6 +579,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/commits/$rev'
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
+    | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
     | '/dashboard/storage/-/iam'
@@ -575,6 +587,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/changes'
     | '/agents/s/$id'
     | '/dashboard/code/$owner'
+    | '/dashboard/projects/$id'
     | '/dashboard/queues/queues'
     | '/$owner/$repo/blob/$rev/$'
     | '/$owner/$repo/tree/$rev/$'
@@ -598,7 +611,6 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/nosql/$id'
-    | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
     | '/dashboard/queues/exchanges'
     | '/dashboard/queues/migrate'
@@ -620,6 +632,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/commits/$rev'
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
+    | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
     | '/dashboard/storage/-/iam'
@@ -627,6 +640,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/changes/'
     | '/agents/s/$id/'
     | '/dashboard/code/$owner/'
+    | '/dashboard/projects/$id/'
     | '/dashboard/queues/queues/'
     | '/$owner/$repo/blob/$rev/$'
     | '/$owner/$repo/tree/$rev/$'
@@ -647,7 +661,6 @@ export interface RootRouteChildren {
   DashboardAgentsConnectRoute: typeof DashboardAgentsConnectRoute
   DashboardAgentsSharesRoute: typeof DashboardAgentsSharesRoute
   DashboardNosqlIdRoute: typeof DashboardNosqlIdRoute
-  DashboardProjectsIdRoute: typeof DashboardProjectsIdRoute
   DashboardQueuesConnectionsRoute: typeof DashboardQueuesConnectionsRoute
   DashboardQueuesExchangesRoute: typeof DashboardQueuesExchangesRoute
   DashboardQueuesMigrateRoute: typeof DashboardQueuesMigrateRoute
@@ -664,12 +677,14 @@ export interface RootRouteChildren {
   DashboardRedisIndexRoute: typeof DashboardRedisIndexRoute
   DashboardStorageIndexRoute: typeof DashboardStorageIndexRoute
   AgentsSIdOpengraphImageRoute: typeof AgentsSIdOpengraphImageRoute
+  DashboardProjectsIdSecretsRoute: typeof DashboardProjectsIdSecretsRoute
   DashboardStorageChar91Char93AccountsRoute: typeof DashboardStorageChar91Char93AccountsRoute
   DashboardStorageChar91Char93ApiRoute: typeof DashboardStorageChar91Char93ApiRoute
   DashboardStorageChar91Char93IamRoute: typeof DashboardStorageChar91Char93IamRoute
   DashboardStorageChar91Char93SigninRoute: typeof DashboardStorageChar91Char93SigninRoute
   AgentsSIdIndexRoute: typeof AgentsSIdIndexRoute
   DashboardCodeOwnerIndexRoute: typeof DashboardCodeOwnerIndexRoute
+  DashboardProjectsIdIndexRoute: typeof DashboardProjectsIdIndexRoute
   DashboardQueuesQueuesIndexRoute: typeof DashboardQueuesQueuesIndexRoute
   DashboardCodeOwnerRepoTabRoute: typeof DashboardCodeOwnerRepoTabRoute
   DashboardQueuesQueuesVhostNameRoute: typeof DashboardQueuesQueuesVhostNameRoute
@@ -803,13 +818,6 @@ declare module '@tanstack/react-router' {
       path: '/dashboard/nosql/$id'
       fullPath: '/dashboard/nosql/$id'
       preLoaderRoute: typeof DashboardNosqlIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/projects/$id': {
-      id: '/dashboard/projects/$id'
-      path: '/dashboard/projects/$id'
-      fullPath: '/dashboard/projects/$id'
-      preLoaderRoute: typeof DashboardProjectsIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard/queues/': {
@@ -952,6 +960,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardCodeOwnerIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/dashboard/projects/$id/': {
+      id: '/dashboard/projects/$id/'
+      path: '/dashboard/projects/$id'
+      fullPath: '/dashboard/projects/$id/'
+      preLoaderRoute: typeof DashboardProjectsIdIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/projects/$id/secrets': {
+      id: '/dashboard/projects/$id/secrets'
+      path: '/dashboard/projects/$id/secrets'
+      fullPath: '/dashboard/projects/$id/secrets'
+      preLoaderRoute: typeof DashboardProjectsIdSecretsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/dashboard/queues/queues/': {
       id: '/dashboard/queues/queues/'
       path: '/dashboard/queues/queues'
@@ -1077,7 +1099,6 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardAgentsConnectRoute: DashboardAgentsConnectRoute,
   DashboardAgentsSharesRoute: DashboardAgentsSharesRoute,
   DashboardNosqlIdRoute: DashboardNosqlIdRoute,
-  DashboardProjectsIdRoute: DashboardProjectsIdRoute,
   DashboardQueuesConnectionsRoute: DashboardQueuesConnectionsRoute,
   DashboardQueuesExchangesRoute: DashboardQueuesExchangesRoute,
   DashboardQueuesMigrateRoute: DashboardQueuesMigrateRoute,
@@ -1094,6 +1115,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRedisIndexRoute: DashboardRedisIndexRoute,
   DashboardStorageIndexRoute: DashboardStorageIndexRoute,
   AgentsSIdOpengraphImageRoute: AgentsSIdOpengraphImageRoute,
+  DashboardProjectsIdSecretsRoute: DashboardProjectsIdSecretsRoute,
   DashboardStorageChar91Char93AccountsRoute:
     DashboardStorageChar91Char93AccountsRoute,
   DashboardStorageChar91Char93ApiRoute: DashboardStorageChar91Char93ApiRoute,
@@ -1102,6 +1124,7 @@ const rootRouteChildren: RootRouteChildren = {
     DashboardStorageChar91Char93SigninRoute,
   AgentsSIdIndexRoute: AgentsSIdIndexRoute,
   DashboardCodeOwnerIndexRoute: DashboardCodeOwnerIndexRoute,
+  DashboardProjectsIdIndexRoute: DashboardProjectsIdIndexRoute,
   DashboardQueuesQueuesIndexRoute: DashboardQueuesQueuesIndexRoute,
   DashboardCodeOwnerRepoTabRoute: DashboardCodeOwnerRepoTabRoute,
   DashboardQueuesQueuesVhostNameRoute: DashboardQueuesQueuesVhostNameRoute,

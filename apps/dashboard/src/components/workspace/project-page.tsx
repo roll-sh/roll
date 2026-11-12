@@ -1,5 +1,6 @@
-import { Bot, Lock, Moon, Plus, Search, Settings } from "lucide-react";
+import { Bot, KeyRound, Lock, Moon, Plus, Search, Settings } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "@/components/link";
 import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
 import {
   CREATABLE,
@@ -117,6 +118,10 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
               </button>
             </span>
           )}
+          <Link href={`/dashboard/projects/${project.id}/secrets`} className={btn} title="This project's secrets and environment variables">
+            <KeyRound className="size-3.5" />
+            Secrets
+          </Link>
           <button className={`${btn} ${agentsOpen ? "border-line-3 bg-white/[0.06]" : ""}`} onClick={() => setAgentsOpen((o) => !o)} aria-pressed={agentsOpen} title="This project's agents">
             <Bot className="size-3.5" />
             Agents
