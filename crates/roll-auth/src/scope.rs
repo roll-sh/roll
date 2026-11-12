@@ -311,10 +311,10 @@ impl Scope {
                 Resources::All => {}
             }
             for (name, list) in [("environments", &r.environments), ("paths", &r.paths)] {
-                if let Some(l) = list {
-                    if l.is_empty() || l.len() > 32 || l.iter().any(|e| e.is_empty() || e.len() > 200) {
-                        out.push(format!("{at}: {name} must list 1-32 non-empty names"));
-                    }
+                if let Some(l) = list
+                    && (l.is_empty() || l.len() > 32 || l.iter().any(|e| e.is_empty() || e.len() > 200))
+                {
+                    out.push(format!("{at}: {name} must list 1-32 non-empty names"));
                 }
             }
             if let Some(paths) = &r.paths
