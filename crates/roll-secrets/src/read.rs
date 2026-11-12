@@ -124,6 +124,8 @@ pub struct GridRow {
     pub key: String,
     pub cells: BTreeMap<String, Option<Cell>>,
     pub status: &'static str,
+    /// Every standard environment must define it (`…/required`).
+    pub required: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -284,6 +286,10 @@ impl Secrets {
             values.insert(e.row.key.clone(), v);
         }
         let leases = r.finish(slug)?;
+        let have: Vec<String> = values.keys().cloned().collect();
+        for m in self.missing_required(project, &path, &have)? {
+            problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
+        }
         let action = if consumer.is_some() { "secrets.resolve" } else { "secrets.export" };
         let keys: Vec<String> = values.keys().cloned().collect();
         let summary = match consumer {
@@ -387,6 +393,8 @@ impl Secrets {
         for v in &views {
             keys.extend(v.iter().map(|e| e.row.key.clone()));
         }
+        let required: BTreeSet<String> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).map(|r| r.key).collect();
+        keys.extend(required.iter().cloned());
         let rows = keys
             .into_iter()
             .map(|key| {
@@ -416,7 +424,7 @@ impl Secrets {
                 } else {
                     "different"
                 };
-                GridRow { key, cells, status }
+                GridRow { required: required.contains(&key), key, cells, status }
             })
             .collect();
         Ok(Grid { path, environments: envs.into_iter().map(|e| e.slug).collect(), rows, folders: folders.into_iter().collect(), previews })

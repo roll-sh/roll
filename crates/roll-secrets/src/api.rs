@@ -62,6 +62,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/tokens"), get(tokens).post(create_token))
         .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
         .route(&format!("{P}/audit"), get(audit))
+        .route(&format!("{P}/required"), get(required).put(set_required))
         .with_state(s)
 }
 
@@ -509,6 +510,15 @@ async fn create_token(State(s): S, Who(c): Who, Path(project): Path<String>, b: 
 async fn revoke_token(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.revoke_token(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn required(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.required(&project, &c)).await?))
+}
+
+async fn set_required(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let list: Vec<crate::Required> = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_required(&project, list, &c)).await?))
 }
 
 async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::AuditFilter>) -> crate::Result<Response> {

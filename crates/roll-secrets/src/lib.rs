@@ -21,6 +21,7 @@ pub mod names;
 mod read;
 pub mod refs;
 mod requests;
+mod required;
 mod sweep;
 mod tokens;
 mod write;
@@ -33,6 +34,7 @@ pub use envs::{EnvChange, Environment, Folder, Import, Kind as EnvironmentKind, 
 pub use links::{Link, LinkProvider, Links, Mode};
 pub use read::{Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, Review, Verdict};
+pub use required::Required;
 pub use sweep::{Lease, Swept};
 pub use tokens::{NewToken, Token};
 pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
@@ -195,6 +197,14 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS audit_project ON audit (project_id, id);
 CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
+CREATE TABLE IF NOT EXISTS required (
+    project_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    key TEXT NOT NULL,
+    comment TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, path, key)
+) WITHOUT ROWID;
 ";
 
 /// The environments a project starts with, in order.
@@ -349,7 +359,7 @@ impl Secrets {
     pub fn forget_project(&self, project: &str) -> Result<()> {
         self.revoke_leases_where("project_id = ?", project);
         self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit"] {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;

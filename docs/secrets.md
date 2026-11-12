@@ -173,6 +173,15 @@ imports in the order listed, and then the base environment (for an ephemeral env
 are followed up to 8 deep, and cycles are ignored and reported. Imported keys are marked with where
 they come from.
 
+### Required keys
+
+A project can list keys every standard environment must define, each in a folder
+(`PUT …/required [{key, path?, comment?}]`). The overview grid shows a required key as a row even
+before any environment sets it (`required: true`). Reading an environment's values reports each
+required key it lacks as a problem (`required, but staging doesn't set it`), so `roll run`, checks
+and resolves refuse to start without it, as they do for an unresolved reference. An ephemeral
+environment counts what its base defines.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -315,7 +324,7 @@ action:
 
 | Action | Routes |
 | --- | --- |
-| `read` | names, metadata, versions, history, compare, folders, imports, requests, links, leases, audit |
+| `read` | names, metadata, versions, history, compare, folders, imports, requests, links, leases, audit, required keys |
 | `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/resolve` |
 | `write` | set, batch changes, rotate, rollback, promote, folders, imports, create an environment, open or apply a request |
 | `delete` | a secret, an environment, ephemeral environments by label, a lease |
@@ -422,6 +431,8 @@ isn't in the workspace is 404.
 | `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
 | `DELETE /tokens/{id}` | | 204 |
 | `GET /audit?env=&key=&actor=&action=&before=&limit=` | | `AuditEntry[]` newest first |
+| `GET /required` | | `Required[]` |
+| `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 
 - 400: a bad slug, path, key, value, body or query.
@@ -467,7 +478,8 @@ type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: strin
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[] }; // leases: ids of dynamic credentials issued
-type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing" }[]; folders: string[]; previews: number };
+type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
+type Required = { key: string; path: string; comment: string };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
@@ -518,7 +530,5 @@ the dashboard's Secrets surface. Ranked:
    environment, and showing rotate only for links that can rotate.
 4. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-5. **Required keys**: a project-wide list of keys every standard environment must define. The grid
-   flags a missing one, and promote and `roll run` warn about it.
-6. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-7. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
+5. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+6. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.

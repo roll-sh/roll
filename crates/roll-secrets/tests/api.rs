@@ -248,9 +248,12 @@ async fn the_grid_flags_differences_and_promote_copies_them() {
     }
     api.set("development", "NEW", "n").await;
     api.set("development", "OTHER", "o").await;
+    // A required key nobody set yet is a row of its own, and reading values reports it.
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "STRIPE_KEY", "comment": "payments" }]))).await;
     let grid = api.ok(Method::GET, "/grid", None).await;
     let status: BTreeMap<&str, &str> = grid["rows"].as_array().unwrap().iter().map(|r| (r["key"].as_str().unwrap(), r["status"].as_str().unwrap())).collect();
-    assert_eq!(status, BTreeMap::from([("NEW", "missing"), ("OTHER", "missing"), ("SAME_OR_NOT", "different")]));
+    assert_eq!(status, BTreeMap::from([("NEW", "missing"), ("OTHER", "missing"), ("SAME_OR_NOT", "different"), ("STRIPE_KEY", "missing")]));
+    assert_eq!(api.values("staging", "/").await["problems"], json!([{ "key": "STRIPE_KEY", "problem": "required, but staging doesn't set it" }]));
     assert!(!grid.to_string().contains("\"a\""), "no values in the grid");
 
     let cmp = api.ok(Method::GET, "/compare?from=development&to=staging", None).await;
