@@ -284,7 +284,7 @@ impl Conn for InProc {
         let name = &self.names[id];
         let r = self
             .s
-            .bind_message("", name, ps, &[0], Vec::new())
+            .bind_message("", name, ps, &[0], Vec::new(), false)
             .and_then(|_| self.s.execute_portal("", 0));
         let n = match r {
             Ok((Outcome::Done(r), _)) => {
@@ -309,7 +309,7 @@ impl Conn for InProc {
     }
     fn read(&mut self, id: usize, params: &[i64], check: ReadCheck) -> Res<()> {
         let ps = params.iter().map(|p| Some(p.to_string().into_bytes())).collect();
-        let result = self.s.bind_message("", &self.names[id], ps, &[0], Vec::new())
+        let result = self.s.bind_message("", &self.names[id], ps, &[0], Vec::new(), false)
             .and_then(|_| self.s.execute_portal("", 0));
         // Sync even when execution or validation fails, as on the cardinality-only path.
         let sync = self.s.sync().map_err(pg_err);
@@ -382,7 +382,7 @@ impl Target {
                 password,
             } => Ok(Box::new(Wire::connect(host, *port, password, db)?)),
             Target::InProc { engine } => {
-                let (pid, _, _) = engine.register_backend(None, None);
+                let (pid, _, _) = engine.register_backend(None, None, 0);
                 let s = engine
                     .connect(pid, db, "postgres", "bench")
                     .map_err(pg_err)?;
