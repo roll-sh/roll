@@ -308,6 +308,15 @@ function Logs({ preview: p }: { preview: Preview }) {
       live = false;
     };
   }, [p.id, service, n]);
+  // Follow a running service's log while the page is in view.
+  const running = p.services.some((x) => x.name === service && x.state === "running");
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") setN((x) => x + 1);
+    }, 3000);
+    return () => clearInterval(t);
+  }, [running]);
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no logs.</p>;
   return (
     <>

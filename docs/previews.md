@@ -503,7 +503,8 @@ Ranked by what a person notices first. Done so far:
 - previews spread across a cluster's nodes, a lease each (tested);
 - roll apps' `pv-…` environments private, their 401 page linked through roll;
 - NoSQL column masks per preview;
-- copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode.
+- copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode;
+- a monthly budget per project, `roll preview open`, and following logs in the dashboard.
 
 1. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. The fleet's XFS volumes already
@@ -512,3 +513,10 @@ Ranked by what a person notices first. Done so far:
    run is in the measurements).
 3. **roll search's `own_bytes`** (asked for), so a search branch's cost counts only what it
    wrote; the adapter already reads it.
+4. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+   first service's page, and the comment shows it (Vercel does). Store it in roll storage and
+   drop it with the preview.
+5. **Live logs as a stream** (`…/logs?follow=1`, SSE) rather than the dashboard's 3-second
+   re-read.
+6. **A cost alert**: tell the project's owners when its previews pass a share of
+   `max_usd_month`.
