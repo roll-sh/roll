@@ -10,7 +10,9 @@ import { useSlashFocus } from "./grid";
 import { HistoryDrawer, type Drawer } from "./history";
 import { ImportDialog } from "./import-dialog";
 import { ImportsPanel } from "./imports";
+import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
 import { ShareDialog, type ShareSource } from "./share-dialog";
+import { BulkBar } from "./bulk";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
@@ -38,14 +40,6 @@ import {
   Warnings,
 } from "./ui";
 
-/** References in a value: `${KEY}`, `${env.KEY}`, `${env.a.b.KEY}` (not `$${`, a literal). */
-export function referencesIn(value: string): string[] {
-  const out: string[] = [];
-  const re = /(\$?)\$\{([^}]*)\}/g;
-  for (let m = re.exec(value); m; m = re.exec(value)) if (!m[1]) out.push(m[2]);
-  return out;
-}
-
 /** One environment: its folder's secrets (inline edit, reveal, add, delete, overrides), requests and history. */
 export function EnvView({ env }: { env: Environment }) {
   const { api, search, go, project, reloadEnvs, standard } = useSecrets();
@@ -63,6 +57,9 @@ export function EnvView({ env }: { env: Environment }) {
   const [linking, setLinking] = useState(false);
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const [sharing, setSharing] = useState<ShareSource | null>(null);
+  /** Selected rows (`key:type`), and the last one clicked, for shift-click ranges. */
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const anchor = useRef<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<{ text: string; warnings: string[] } | null>(null);
@@ -78,6 +75,7 @@ export function EnvView({ env }: { env: Environment }) {
         e.preventDefault();
         setAdding(true);
       } else if (e.key === "h") setDrawer({ kind: "changes" });
+      else if (e.key === "Escape") setSelected(new Set());
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -85,9 +83,29 @@ export function EnvView({ env }: { env: Environment }) {
 
   const secrets = list.data ?? [];
   const keys = useMemo(() => new Set(secrets.map((s) => s.key)), [secrets]);
+  const refSource = useRefSource(env.slug, keys);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const shown = secrets.filter((s) => words.every((w) => s.key.toLowerCase().includes(w) || s.comment.toLowerCase().includes(w) || s.tags.some((t) => t.includes(w))));
   const childFolders = folders.data?.folders ?? [];
+  const rowId = (s: Secret) => `${s.key}:${s.type}`;
+  const selectable = shown.filter((s) => s.source.kind === "own");
+  const picked = secrets.filter((s) => selected.has(rowId(s)));
+  useEffect(() => {
+    setSelected(new Set());
+    anchor.current = null;
+  }, [env.slug, path]);
+  const select = (s: Secret, on: boolean, range: boolean) => {
+    const id = rowId(s);
+    const ids = selectable.map(rowId);
+    const from = anchor.current ? ids.indexOf(anchor.current) : -1;
+    const span = range && from >= 0 ? ids.slice(Math.min(from, ids.indexOf(id)), Math.max(from, ids.indexOf(id)) + 1) : [id];
+    anchor.current = id;
+    setSelected((cur) => {
+      const next = new Set(cur);
+      for (const x of span) on ? next.add(x) : next.delete(x);
+      return next;
+    });
+  };
   const p = path === "/" ? undefined : path;
 
   const refresh = () => {
@@ -274,6 +292,7 @@ export function EnvView({ env }: { env: Environment }) {
             {adding && (
               <AddSecret
                 keys={keys}
+                refs={refSource}
                 onCancel={() => setAdding(false)}
                 onAdd={async (op) => {
                   const batch: Batch = { path, ops: [op], message: `added ${op.key}` };
@@ -292,7 +311,37 @@ export function EnvView({ env }: { env: Environment }) {
                 {standard.length > 1 && " Compare promotes keys from another environment."} From the CLI:
               </Teach>
             ) : (
-              <div role="table" aria-label={`Secrets in ${env.name}`} className="@container text-[12.5px]">
+              <div role="table" aria-label={`Secrets in ${env.name}`} aria-multiselectable className="@container text-[12.5px]">
+                {picked.length > 0 && (
+                  <BulkBar
+                    env={env}
+                    path={path}
+                    picked={picked}
+                    onWrite={write}
+                    onNote={(text) => setNote({ text, warnings: [] })}
+                    onClear={() => setSelected(new Set())}
+                    onDone={() => {
+                      setSelected(new Set());
+                      refresh();
+                    }}
+                  />
+                )}
+                {selectable.length > 1 && (
+                  <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-subtle">
+                    <input
+                      type="checkbox"
+                      checked={selectable.every((s) => selected.has(rowId(s)))}
+                      ref={(el) => {
+                        if (el) el.indeterminate = picked.length > 0 && !selectable.every((s) => selected.has(rowId(s)));
+                      }}
+                      onChange={(e) => setSelected(e.target.checked ? new Set(selectable.map(rowId)) : new Set())}
+                      aria-label="Select all"
+                      className="accent-[var(--accent)]"
+                    />
+                    {picked.length ? `${picked.length} of ${selectable.length}` : "Select"}
+                    <span className="text-faint max-sm:hidden">· shift-click a range</span>
+                  </label>
+                )}
                 {shown.map((s) => (
                   <SecretRow
                     key={`${s.key}:${s.type}`}
@@ -300,6 +349,9 @@ export function EnvView({ env }: { env: Environment }) {
                     secret={s}
                     path={path}
                     keys={keys}
+                    refs={refSource}
+                    selected={selected.has(rowId(s))}
+                    onSelect={s.source.kind === "own" ? (on, range) => select(s, on, range) : undefined}
                     focus={search.key === s.key}
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
@@ -356,17 +408,7 @@ function NewFolder({ path, onCreate }: { path: string; onCreate: (path: string) 
 
 const parseTags = (s: string) => s.split(/[\s,]+/).filter(Boolean);
 
-/** Client-side warnings before saving: `${KEY}` references to keys this folder doesn't have. */
-function draftWarnings(value: string, keys: Set<string>, self: string): string[] {
-  return referencesIn(value).flatMap((r) => {
-    if (!r) return ["an empty reference ${}"];
-    if (r.includes(".")) return [];
-    if (r === self) return [`${self} references itself`];
-    return keys.has(r) ? [] : [`\${${r}}: ${r} isn't in this folder`];
-  });
-}
-
-function AddSecret({ keys, onAdd, onCancel }: { keys: Set<string>; onAdd: (op: Op) => Promise<boolean>; onCancel: () => void }) {
+function AddSecret({ keys, refs, onAdd, onCancel }: { keys: Set<string>; refs: RefSource; onAdd: (op: Op) => Promise<boolean>; onCancel: () => void }) {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [comment, setComment] = useState("");
@@ -376,7 +418,7 @@ function AddSecret({ keys, onAdd, onCancel }: { keys: Set<string>; onAdd: (op: O
   const keyOk = SECRET_KEY.test(key);
   const tagList = parseTags(tags);
   const tagsOk = tagList.every((t) => TAG.test(t));
-  const warn = draftWarnings(value, keys, key);
+  const warn = useRefWarnings(value, key, refs);
   const exists = keys.has(key) && !personal;
   const submit = async () => {
     if (!keyOk || !tagsOk || busy) return;
@@ -406,7 +448,7 @@ function AddSecret({ keys, onAdd, onCancel }: { keys: Set<string>; onAdd: (op: O
         </label>
         <label>
           <span className={label}>Value</span>
-          <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
+          <RefInput value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
         </label>
         <label>
           <span className={label}>Comment</span>
@@ -445,6 +487,9 @@ function SecretRow({
   secret: s,
   path,
   keys,
+  refs,
+  selected,
+  onSelect,
   focus,
   onWrite,
   onHistory,
@@ -455,6 +500,10 @@ function SecretRow({
   secret: Secret;
   path: string;
   keys: Set<string>;
+  refs: RefSource;
+  selected: boolean;
+  /** Imported and inherited rows aren't selectable. */
+  onSelect?: (on: boolean, range: boolean) => void;
   focus: boolean;
   onWrite: WriteFn;
   onHistory: () => void;
@@ -477,9 +526,19 @@ function SecretRow({
   const rotate = () => onWrite(() => api.rotate(env.slug, s.key, path), { path, ops: [] }, `Rotated ${s.key}`);
 
   return (
-    <div ref={row} role="row" className={`group/row border-t border-line first:border-t-0 ${focus ? "bg-accent/[0.05]" : ""}`}>
+    <div ref={row} role="row" aria-selected={onSelect ? selected : undefined} className={`group/row border-t border-line first:border-t-0 ${selected ? "bg-accent/[0.06]" : focus ? "bg-accent/[0.05]" : ""}`}>
       <div className="grid min-h-9 grid-cols-[minmax(0,1.1fr)_minmax(0,1.6fr)_minmax(0,1fr)_minmax(6.5rem,auto)] items-center gap-3 px-2 py-1 @max-4xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)_minmax(6.5rem,auto)] @max-xl:grid-cols-[minmax(0,1fr)_minmax(6.5rem,auto)] @max-xl:gap-y-0.5">
         <div role="cell" className="flex min-w-0 items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={selected}
+            disabled={!onSelect}
+            onChange={() => {}}
+            onClick={(e) => onSelect?.(!selected, e.shiftKey)}
+            aria-label={`Select ${s.key}${personal ? " (your override)" : ""}`}
+            title={onSelect ? undefined : "Read-only here: it comes from elsewhere"}
+            className={`shrink-0 accent-[var(--accent)] transition-opacity ${selected ? "" : "opacity-40 group-hover/row:opacity-100 focus-visible:opacity-100"} disabled:opacity-0`}
+          />
           <span className={`truncate font-mono text-[12px] ${own ? "text-fg" : "text-muted"}`} title={s.key}>
             {s.key}
           </span>
@@ -578,7 +637,7 @@ function SecretRow({
       {editing && (
         <Editor
           secret={s}
-          keys={keys}
+          refs={refs}
           mode={editing}
           onCancel={() => setEditing(null)}
           onSave={async (body) => {
@@ -596,13 +655,13 @@ function SecretRow({
 /** Inline edit: a new value (blank keeps the current one), the comment and the tags; a linked secret can be unlinked. */
 function Editor({
   secret: s,
-  keys,
+  refs,
   mode,
   onSave,
   onCancel,
 }: {
   secret: Secret;
-  keys: Set<string>;
+  refs: RefSource;
   mode: EditMode;
   onSave: (body: { value?: string; comment?: string; tags?: string[]; link?: null }) => Promise<void>;
   onCancel: () => void;
@@ -617,7 +676,7 @@ function Editor({
   const linked = !!s.link && !unlink && !fresh;
   const tagList = parseTags(tags);
   const tagsOk = tagList.every((t) => TAG.test(t));
-  const warn = touched ? draftWarnings(value, keys, s.key) : [];
+  const warn = useRefWarnings(value, s.key, refs, touched && !linked);
   const save = async () => {
     if (!tagsOk || busy) return;
     setBusy(true);
@@ -663,11 +722,12 @@ function Editor({
               </button>
             </div>
           ) : (
-            <textarea
+            <RefInput
               autoFocus
               value={value}
-              onChange={(e) => {
-                setValue(e.target.value);
+              source={refs}
+              onValue={(v) => {
+                setValue(v);
                 setTouched(true);
               }}
               rows={value.includes("\n") ? 4 : 1}
