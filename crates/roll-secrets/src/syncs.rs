@@ -237,6 +237,21 @@ fn stamp(e: &crate::read::Entry) -> String {
     h[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A sync as it's shown: a URL in its target (a deploy hook's or a chat's, which are often
+/// credentials themselves) only by its host.
+fn masked(mut s: SecretSync) -> SecretSync {
+    if let Some(o) = s.target.as_object_mut() {
+        for (k, v) in o.iter_mut() {
+            if (k == "url" || k.ends_with("_url"))
+                && let Some(u) = v.as_str()
+            {
+                *v = Json::String(format!("https://{}/…", names::url_host(u)));
+            }
+        }
+    }
+    s
+}
+
 fn clip(s: String) -> String {
     if s.len() <= ERROR_MAX {
         return s;
@@ -268,7 +283,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? ORDER BY s.created_at"), [project], row))?;
-        Ok(rows.into_iter().map(|r| r.info).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
+        Ok(rows.into_iter().map(|r| masked(r.info)).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
     }
 
     pub fn create_sync(&self, project: &str, n: NewSync, caller: &Caller) -> Result<SecretSync> {
@@ -280,8 +295,12 @@ impl Secrets {
             return Err(Error::BadRequest(format!("target is a JSON object of at most {TARGET_MAX} bytes")));
         }
         let keys = match n.keys {
-            Some(k) if k.is_empty() => return Err(Error::BadRequest("keys lists at least one key (leave it out to sync every key)".into())),
-            Some(k) if k.len() > 500 => return Err(Error::BadRequest("keys lists at most 500 keys".into())),
+            Some(k) if k.is_empty() => {
+                return Err(Error::BadRequest("keys lists at least one key (leave it out to sync every key)".into()));
+            }
+            Some(k) if k.len() > 500 => {
+                return Err(Error::BadRequest("keys lists at most 500 keys".into()));
+            }
             Some(k) => {
                 k.iter().try_for_each(|k| names::key(k))?;
                 Some(k.into_iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>())
@@ -316,7 +335,7 @@ impl Secrets {
             )?;
             audit::record(c, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
         })?;
-        Ok(SecretSync {
+        Ok(masked(SecretSync {
             id,
             environment: n.environment,
             path,
@@ -333,7 +352,7 @@ impl Secrets {
             created_at: now,
             created_by: caller.principal.clone(),
             signing_secret: secret.map(|s| s.expose().to_string()),
-        })
+        }))
     }
 
     fn sync_row(&self, project: &str, id: &str) -> Result<Row> {
@@ -361,16 +380,19 @@ impl Secrets {
         self.project(project)?;
         let r = self.sync_row(project, id)?;
         caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
-        let hold = self.claim_sync(id)?.ok_or_else(|| Error::Conflict("running", format!("sync {id} is being pushed right now")))?;
+        let hold = self.claim_sync(id, r.info.last_digest.as_deref())?.ok_or_else(|| Error::Conflict("running", format!("sync {id} is being pushed right now")))?;
         self.push_sync(r, hold, None, true);
         Ok(self.sync_row(project, id)?.info)
     }
 
     /// Claim a sync for one push: `Some(hold)` when this caller won it.
-    fn claim_sync(&self, id: &str) -> Result<Option<i64>> {
+    /// The claim also checks the digest the caller read: a node that read the row before another
+    /// pushed and released it doesn't push the same change twice.
+    fn claim_sync(&self, id: &str, read_digest: Option<&str>) -> Result<Option<i64>> {
         let now = self.db.now_ms()?;
         let hold = now + HOLD_MS;
-        let n = self.db.write(|c| c.execute("UPDATE syncs SET running_until = ? WHERE id = ? AND running_until <= ?", params![hold, id, now]))?;
+        let seen = read_digest.unwrap_or("");
+        let n = self.db.write(|c| c.execute("UPDATE syncs SET running_until = ? WHERE id = ? AND running_until <= ? AND COALESCE(last_digest, '') = ?", params![hold, id, now, seen]))?;
         Ok((n == 1).then_some(hold))
     }
 
@@ -410,13 +432,20 @@ impl Secrets {
         // Syncs of deleted environments and projects go with them.
         self.db.write(|c| c.execute("DELETE FROM syncs WHERE env_id NOT IN (SELECT id FROM environments)", ()))?;
         let rows = self.db.read(|c| {
-            c.query(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? ORDER BY s.last_synced_at LIMIT 500"), params![now, now], row)
+            // Least recently checked first: every sync gets its turn, however many there are.
+            c.query(
+                &format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT 500"),
+                params![now, now],
+                row,
+            )
         })?;
         let (mut pushed, mut failed) = (0, 0);
+        let mut checked: Vec<String> = vec![];
         for r in rows {
             if pushed + failed >= PER_SWEEP {
                 break;
             }
+            checked.push(r.info.id.clone());
             // Only a sync whose environment changed, or that never ran. One whose creator lost
             // access fails here, and waits out `retry_at` like any failed push.
             let digest = self.sync_caller(&r).and_then(|c| self.digest(&r.project, &r.info.environment, &r.info.path, &c));
@@ -425,11 +454,22 @@ impl Secrets {
             {
                 continue;
             }
-            let Some(hold) = self.claim_sync(&r.info.id)? else { continue };
+            let Some(hold) = self.claim_sync(&r.info.id, r.info.last_digest.as_deref())? else {
+                continue;
+            };
             match self.push_sync(r, hold, digest.ok(), false) {
                 true => pushed += 1,
                 false => failed += 1,
             }
+        }
+        if !checked.is_empty() {
+            let at = self.db.now_ms()?;
+            self.db.write(|c| {
+                for id in &checked {
+                    c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![at, id])?;
+                }
+                Ok::<_, Error>(())
+            })?;
         }
         Ok((pushed, failed))
     }
@@ -443,7 +483,7 @@ impl Secrets {
         let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None };
         let ok = outcome.is_ok();
         let res = self.db.write(|c| {
-            let n = match &outcome {
+            match &outcome {
                 Ok(o) => c.execute(
                     "UPDATE syncs SET status = ?, error = ?, last_digest = ?, state = ?, last_synced_at = ?, running_until = 0, retry_at = 0 WHERE id = ? AND running_until = ?",
                     params![if o.problems.is_some() { "error" } else { "ok" }, o.problems, o.digest, json(&o.state), now, id, hold],
@@ -454,12 +494,11 @@ impl Secrets {
                     params![clip(e.to_string()), now + RETRY_MS, id, hold],
                 )?,
             };
-            if n == 1 {
-                match &outcome {
-                    Ok(o) if !o.keys.is_empty() || force => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
-                    Ok(_) => {}
-                    Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed: {e}", r.info.kind)), now)?,
-                }
+            // The audit row whether or not the hold was still ours: values went out either way.
+            match &outcome {
+                Ok(o) if !o.keys.is_empty() || force => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &o.keys, &o.summary, now)?,
+                Ok(_) => {}
+                Err(e) => audit::record(c, project, &actor, "sync.push", Some(env), Some(path), &[], &clip(format!("{} sync failed: {e}", r.info.kind)), now)?,
             }
             Ok::<_, Error>(())
         });
@@ -484,8 +523,15 @@ impl Secrets {
         let resources = self.members(project)?;
         target.check(project, &resources, &r.info.target)?;
         let creds = target.credentials(&r.info.target);
+        // No sync pushes a platform credential, whichever sync of this folder it belongs to.
+        let others: Vec<(String, Json)> = self.db.read(|c| {
+            c.query("SELECT s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND e.slug = ? AND s.path = ?", params![project, env, path], |x| {
+                Ok((x.get::<_, String>(0)?, serde_json::from_str::<Json>(&x.get::<_, String>(1)?).unwrap_or(Json::Null)))
+            })
+        })?;
+        let all_creds: BTreeSet<String> = others.iter().filter_map(|(k, t)| self.syncs.get(k).ok().map(|tg| tg.credentials(t))).flatten().chain(creds.iter().cloned()).collect();
         let all: Vec<_> = self.view(project, env, path, caller, false, Action::Reveal)?.into_iter().filter(|e| e.row.owner.is_empty()).collect();
-        let entries: Vec<_> = all.iter().filter(|e| !creds.contains(&e.row.key) && r.info.keys.as_ref().is_none_or(|k| k.contains(&e.row.key))).collect();
+        let entries: Vec<_> = all.iter().filter(|e| !all_creds.contains(&e.row.key) && r.info.keys.as_ref().is_none_or(|k| k.contains(&e.row.key))).collect();
         let name = |k: &str| format!("{}{k}", r.info.prefix);
         let mut stamps: BTreeMap<String, String> = entries.iter().map(|e| (name(&e.row.key), stamp(e))).collect();
         let mut values = BTreeMap::new();
@@ -493,23 +539,30 @@ impl Secrets {
         let mut skipped = BTreeSet::new();
         let mut resolver = Resolver::new(self, project, &dek, caller, true, &caller.principal);
         resolver.no_dynamic = true;
-        if target.values() {
-            for e in &entries {
-                match resolver.entry(e) {
-                    (v, None) => {
-                        values.insert(name(&e.row.key), v);
+        // Every entry resolves, values or not: its stamp takes the resolved value's fingerprint,
+        // so a change that only comes through a reference is pushed too.
+        for e in &entries {
+            match resolver.entry(e) {
+                (v, None) => {
+                    let n = name(&e.row.key);
+                    if let Some(st) = stamps.get_mut(&n) {
+                        st.push(':');
+                        st.push_str(&dek.fingerprint(v.expose()));
                     }
-                    (_, Some(p)) => {
-                        problems.push(format!("{}: {p}", e.row.key));
-                        // Not pushed: the target keeps what it had, and the key counts as
-                        // changed until it resolves.
-                        let n = name(&e.row.key);
-                        match r.state.get(&n) {
-                            Some(old) => stamps.insert(n.clone(), old.clone()),
-                            None => stamps.remove(&n),
-                        };
-                        skipped.insert(n);
+                    if target.values() {
+                        values.insert(n, v);
                     }
+                }
+                (_, Some(p)) => {
+                    problems.push(format!("{}: {p}", e.row.key));
+                    // Not pushed: the target keeps what it had, and the key counts as
+                    // changed until it resolves.
+                    let n = name(&e.row.key);
+                    match r.state.get(&n) {
+                        Some(old) => stamps.insert(n.clone(), old.clone()),
+                        None => stamps.remove(&n),
+                    };
+                    skipped.insert(n);
                 }
             }
         }
@@ -527,8 +580,12 @@ impl Secrets {
             let e = all.iter().find(|e| e.row.key == *k).ok_or_else(|| Error::BadRequest(format!("{k} (the {} sync's credential) isn't set in {env}:{path}", r.info.kind)))?;
             match resolver.entry(e) {
                 (v, None) if !v.expose().is_empty() => credentials.insert(k.clone(), v),
-                (_, None) => return Err(Error::BadRequest(format!("{k} (the {} sync's credential) is empty in {env}:{path}", r.info.kind))),
-                (_, Some(p)) => return Err(Error::BadRequest(format!("{k} (the {} sync's credential): {p}", r.info.kind))),
+                (_, None) => {
+                    return Err(Error::BadRequest(format!("{k} (the {} sync's credential) is empty in {env}:{path}", r.info.kind)));
+                }
+                (_, Some(p)) => {
+                    return Err(Error::BadRequest(format!("{k} (the {} sync's credential): {p}", r.info.kind)));
+                }
             };
         }
         // Dynamic links are refused, so nothing is issued; record anything that was.

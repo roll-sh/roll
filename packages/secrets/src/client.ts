@@ -119,11 +119,16 @@ export function createClient(options: ClientOptions) {
       try {
         const now = await digest(environment, o.path);
         if (last === null || now !== last) {
-          const first = last === null;
+          const before = last;
           last = now;
-          // A change that doesn't resolve keeps what's running; the next change tries again.
-          await take(await load()).catch((e) => {
-            if (first) last = null;
+          // A load that failed (the network, the server) is retried on the next tick; a change
+          // that doesn't resolve keeps what's running, and the next change tries again.
+          const v = await load().catch((e) => {
+            last = before;
+            throw e;
+          });
+          await take(v).catch((e) => {
+            if (before === null) last = null;
             fail(e);
           });
         }

@@ -116,6 +116,8 @@ export type LinkTarget = { kind: string; ref: string; name: string; fields: Link
 export type Lease = {
   id: string;
   environment: string;
+  /** The folder of the secret it was issued for (`/` for a retired credential's). */
+  path: string;
   key: string;
   kind: "dynamic" | "retired";
   link: Link | null;

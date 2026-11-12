@@ -304,7 +304,7 @@ A link is `{kind, ref, field, mode, options}`:
   revokes the previous one after `grace_minutes` (default 60), so running services have time to
   pick up the new value.
 - **`dynamic`** (short-lived credentials): each resolve that asks for it (`roll run`, an app's
-  start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at most 7 days), recorded
+  start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at least 15 minutes, at most 7 days), recorded
   as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`. A
   long-running consumer renews instead of restarting: `POST …/leases/{id}/renew` pushes the expiry
   out by the link's TTL (at most 30 days from issue), and the provider follows where the product
@@ -449,6 +449,11 @@ the change`. The blocker names keys and environments, never the value or the lin
   checked is caught when the head or its merge base moves. A repo on no project's canvas, or a
   server without roll secrets, gets no blocker; if roll secrets can't answer, the change isn't
   blocked and the check runs again next time.
+- **What it tells.** A blocker says a value is a secret's, so a writer of the repo could confirm a
+  guess at a value they may not reveal by pushing it. That's accepted: they confirm a guess they
+  already hold (never learn a value), only credential-like guesses count, every guess is a pushed
+  change in the repo's history, and the alternative, landing a live credential, is worse. A
+  project whose secrets its repo's writers must not even confirm keeps the repo off its canvas.
 - **Way around.** Rotate the secret and remove the value from the change. For a false positive, an
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
@@ -682,7 +687,9 @@ An environment can be **protected** with a policy: `{"approvals": 1, "approvers"
 sealed, the environment shows only its host as `notify`), each request opened on it is announced:
 the notice is written in the request's own transaction and delivered by the sweeper with retries,
 as `{text, content, project, environment, request: {id, by, message, keys}, link}` (key names,
-never values).
+never values; Slack markup in `text` is escaped and Discord mentions are off, since the message is
+the requester's). Notices aren't signed: an incoming webhook's URL is its own credential, and the
+notice carries nothing a receiver should act on without opening the request in roll.
 A write to a protected environment doesn't apply. It answers 409 `approval_required`, and the
 client opens a **change request** with the same operations (`POST …/requests`). A request:
 
@@ -759,7 +766,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
-| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
+| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
@@ -847,7 +854,7 @@ type Cell = { fp: string; version: number; updated_at: number; link: Link | null
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
-type Lease = { id: string; environment: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
+type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";

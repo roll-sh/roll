@@ -467,6 +467,9 @@ struct ImportBody {
     /// change (never a linked or a personal one). Implies `overwrite`.
     #[serde(default)]
     replace: bool,
+    /// Only if the environment's last change is still this one (`stale` otherwise).
+    #[serde(default)]
+    if_seq: Option<i64>,
 }
 
 /// A `.env` file as one change (bulk paste, `roll secrets import`).
@@ -479,8 +482,11 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
     };
     let path = crate::names::path(i.path.as_deref().unwrap_or("/"))?;
     let v = blocking(s, move |s| {
-        let own: Vec<crate::Secret> = s.secrets(&project, &env, &path, &c)?.into_iter().filter(|x| x.source == crate::read::Source::Own && x.kind == crate::SecretType::Shared).collect();
-        let existing: Vec<String> = own.iter().map(|x| x.key.clone()).collect();
+        let mine: Vec<crate::Secret> = s.secrets(&project, &env, &path, &c)?.into_iter().filter(|x| x.source == crate::read::Source::Own).collect();
+        // A key exists whichever entry of it the caller sees (their personal one hides the shared
+        // one); only shared keys are ever deleted.
+        let existing: std::collections::HashSet<String> = mine.iter().map(|x| x.key.clone()).collect();
+        let own: Vec<&crate::Secret> = mine.iter().filter(|x| x.kind == crate::SecretType::Shared).collect();
         let in_file: std::collections::HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
         let removed: Vec<Op> = if i.replace {
             own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None }).collect()
@@ -510,7 +516,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
             .chain(removed)
             .collect();
         let message = i.message.or_else(|| Some("imported a .env file".into()));
-        let b = Batch { path: Some(path), message, ops, if_seq: None };
+        let b = Batch { path: Some(path), message, ops, if_seq: i.if_seq };
         if i.request {
             let r = s.open_request(&project, &env, b, &c)?;
             return Ok(json!({ "request": r, "skipped": skipped }));

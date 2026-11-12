@@ -139,6 +139,12 @@ pub fn new_id(prefix: &str, n: usize) -> String {
     format!("{prefix}_{suffix}")
 }
 
+/// A URL's host (no user info, path or query): what's shown of a URL that's a credential, such as
+/// a chat's incoming webhook.
+pub(crate) fn url_host(u: &str) -> String {
+    u.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or_default().rsplit('@').next().unwrap_or_default().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1123,10 +1123,49 @@ fn random_value(n: usize) -> anyhow::Result<String> {
 /// `roll secrets edit`: the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under
 /// `$XDG_RUNTIME_DIR` when there is one, removed afterwards), and what changed as one change.
 async fn edit(c: &Client<'_>, env: &str, request: bool, json_out: bool) -> anyhow::Result<()> {
+    let (seq, text) = edit_text(c, env).await?;
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
+    let file = tempfile::Builder::new().prefix("roll-secrets-").suffix(".env").tempfile_in(dir)?;
+    std::fs::write(file.path(), &text)?;
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let status = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(file.path()).status().with_context(|| format!("running {editor}"))?;
+    anyhow::ensure!(status.success(), "{editor} exited with {status}: nothing applied");
+    let edited = std::fs::read_to_string(file.path())?;
+    drop(file);
+    if edited == text {
+        println!("No changes");
+        return Ok(());
+    }
+    // Only over what was edited: a change to the environment meanwhile is retried once when it
+    // left this folder as it was, and otherwise nothing is applied.
+    let body = |seq: i64| json!({ "dotenv": edited, "path": c.at.path, "replace": true, "request": request, "message": "edited with roll secrets edit", "if_seq": seq });
+    let v = match c.call(Method::POST, &format!("{env}/import"), Some(body(seq))).await {
+        Err(e) if e.to_string().contains("changed after #") => {
+            let (seq, now) = edit_text(c, env).await?;
+            anyhow::ensure!(now == text, "{}:{} changed while you were editing: nothing applied (run roll secrets edit again)", c.at.env, c.at.path);
+            c.call(Method::POST, &format!("{env}/import"), Some(body(seq))).await
+        }
+        v => v,
+    }
+    .map_err(approval_hint)?;
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else if let Some(r) = v.get("request").filter(|r| r.is_object()) {
+        println!("Opened change request {} on {}", s(&r["id"]), c.at.env);
+    } else {
+        summary(&v);
+    }
+    Ok(())
+}
+
+/// The environment's last change, then the folder's own keys as the `.env` that `edit` opens.
+async fn edit_text(c: &Client<'_>, env: &str) -> anyhow::Result<(i64, String)> {
+    let changes = c.call(Method::GET, &format!("{env}/changes?limit=1"), None).await?;
+    let seq = changes.as_array().and_then(|a| a.first()).and_then(|ch| ch["seq"].as_i64()).unwrap_or(0);
     let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
     let own: Vec<&Value> = list.as_array().into_iter().flatten().filter(|s| s["source"]["kind"] == "own" && s["type"] == "shared").collect();
     let values = c.call(Method::GET, &format!("{env}/values?{}&resolve=false", c.q()), None).await?;
-    let mut text = format!("# {}:{} of {} (roll secrets edit). Save to apply what changed as one change; remove a line to delete its key.\n", c.at.env, c.at.path, c.project);
+    let mut text = format!("# {}:{} of {} (roll secrets edit). Save to apply what changed as one change; remove a line to delete its key.\n\n", c.at.env, c.at.path, c.project);
     let mut linked = vec![];
     for s in &own {
         let key = s["key"].as_str().unwrap_or_default();
@@ -1143,28 +1182,7 @@ async fn edit(c: &Client<'_>, env: &str, request: bool, json_out: bool) -> anyho
     if !linked.is_empty() {
         text.push_str(&format!("# Linked, not editable here: {}\n", linked.join(", ")));
     }
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
-    let file = tempfile::Builder::new().prefix("roll-secrets-").suffix(".env").tempfile_in(dir)?;
-    std::fs::write(file.path(), &text)?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
-    let status = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(file.path()).status().with_context(|| format!("running {editor}"))?;
-    anyhow::ensure!(status.success(), "{editor} exited with {status}: nothing applied");
-    let edited = std::fs::read_to_string(file.path())?;
-    drop(file);
-    if edited == text {
-        println!("No changes");
-        return Ok(());
-    }
-    let body = json!({ "dotenv": edited, "path": c.at.path, "replace": true, "request": request, "message": "edited with roll secrets edit" });
-    let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint)?;
-    if json_out {
-        println!("{}", serde_json::to_string_pretty(&v)?);
-    } else if let Some(r) = v.get("request").filter(|r| r.is_object()) {
-        println!("Opened change request {} on {}", s(&r["id"]), c.at.env);
-    } else {
-        summary(&v);
-    }
-    Ok(())
+    Ok((seq, text))
 }
 
 /// A value as a dotenv line's right-hand side: as is when plain, else double-quoted.

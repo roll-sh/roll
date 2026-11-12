@@ -109,6 +109,7 @@ struct Api {
     sent: Arc<Sent>,
     router: Router,
     secrets: Arc<Secrets>,
+    db: code_sql::Db,
     fake: Arc<Fake>,
     sync: Arc<FakeSync>,
     project: String,
@@ -129,9 +130,9 @@ impl Api {
         syncs.register(sync.clone());
         let sent = Arc::new(Sent::default());
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()) };
-        let secrets = Arc::new(Secrets::new(db, ws.clone(), opts).unwrap());
+        let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, router, secrets, fake, sync, project: String::new(), _dir: dir };
+        let mut api = Api { sent, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -619,6 +620,15 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     assert_eq!(audit[0]["keys"], json!(["DB_URL", "STRIPE_KEY"]));
     assert_eq!(audit.as_array().unwrap().len(), 2);
     assert!(!audit.to_string().contains("sk_live_123") && !audit.to_string().contains("postgres://"));
+
+    // A change that only comes through a reference is pushed too.
+    api.set("production", "HOST", "db.one").await;
+    api.set("staging", "REF", "${production.HOST}/x").await;
+    api.secrets.sweep().unwrap();
+    api.set("production", "HOST", "db.two").await;
+    api.secrets.sweep().unwrap();
+    let (values, changed, _) = pushes(3);
+    assert_eq!((values["REF"].as_str(), changed), ("db.two/x", vec!["REF".to_string()]));
 }
 
 #[tokio::test]
@@ -632,6 +642,11 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     // From now on: rows after the sink was made, once each, in order.
     api.set("production", "STRIPE_KEY", "sk_live_never_sent").await;
     api.values("production", "/").await;
+    // Rows go out once they've settled (a late commit can't be skipped).
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert!(api.sent.0.lock().unwrap().is_empty());
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || {
         s.sweep().unwrap();
