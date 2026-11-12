@@ -77,11 +77,11 @@ docker run -d --name "$CLI" --network host --user "$(id -u):$(id -g)" ${PGO_CLIE
 T0=$(date +%s)
 # Startup: a new data directory (bootstrap), first sessions, a restart that recovers it.
 start
+b createdb
 if want startup; then
   b startup; b startup-catalog
   stop; start; b startup-catalog
 fi
-b createdb
 b oltp-load --rows 100000
 
 # Point reads: extended protocol with binary results (the bench client), simple protocol
