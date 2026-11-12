@@ -393,15 +393,16 @@ impl IntoResponse for Unavailable {
 
 #[async_trait]
 impl Apps for Runtime {
-    async fn deploy(&self, t: &Target) -> anyhow::Result<()> {
+    async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>> {
         // Whatever runs serves an older revision (or older URLs): the next request starts the
         // new one.
         let live = self.live(&t.preview, &t.service);
         *live.sleep_after.lock() = t.sleep_after;
-        if !matches!(*live.phase.borrow(), Phase::Stopped) {
+        let running = !matches!(*live.phase.borrow(), Phase::Stopped);
+        if running {
             self.stop(&t.preview, &t.service, &live, None).await;
         }
-        Ok(())
+        Ok(None)
     }
 
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {

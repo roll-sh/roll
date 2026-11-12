@@ -126,9 +126,9 @@ struct FakeApps {
 
 #[async_trait]
 impl Apps for FakeApps {
-    async fn deploy(&self, t: &Target) -> anyhow::Result<()> {
+    async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>> {
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
-        Ok(())
+        Ok(None)
     }
     async fn wake(&self, _: &str, _: &str) -> anyhow::Result<()> {
         Ok(())

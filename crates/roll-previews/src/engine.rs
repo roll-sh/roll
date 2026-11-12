@@ -3,7 +3,7 @@
 //! state. Every step looks before it makes, so a pass after a crash carries on where the last
 //! one stopped.
 
-use crate::ports::{Apps, Brancher, ChangeInfo, EnvSource, Secrets, Source, Target};
+use crate::ports::{Apps, Brancher, ChangeInfo, EnvSource, Secrets, ServiceSpec, Source, Target};
 use crate::settings::{Settings, is_production};
 use crate::store::{New, ResourceRow, Row, Store};
 use crate::{Desired, Error, Kind, Mode, Preview, ResourceState, Result, ServiceState, State, branch_name};
@@ -559,37 +559,70 @@ impl Engine {
         self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
 
         // 4. Services: the change's repo at its head, every other repo at its default head.
+        // From roll apps' catalog when the project has services there, else the repos'
+        // `roll.toml`.
         let repos: Vec<String> = project.resources.iter().filter(|x| x.kind == roll_workspace::Kind::Repo).map(|x| x.r#ref.clone()).collect();
-        let mut keep: Vec<String> = Vec::new();
-        for repo in &repos {
-            let rev = if *repo == r.repo { Some(r.head.clone()) } else { self.source.head(repo, None).await? };
-            let Some(rev) = rev else { continue };
-            for spec in self.source.services(repo, &rev).await.map_err(|e| anyhow::anyhow!("reading {repo}'s services: {e:#}"))? {
-                keep.push(spec.name.clone());
-                let svc = self.store.want_service(&r.id, &spec.name, repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
-                // A redeploy (or a reset, whose URLs are new) restarts it on its next request.
-                if svc.deployed.as_deref() != Some(&rev) || reset_any {
-                    let t = Target {
-                        preview: r.id.clone(),
-                        service: spec.name.clone(),
-                        host: svc.host.clone(),
-                        repo: repo.clone(),
-                        revision: rev.clone(),
-                        spec: spec.clone(),
-                        sleep_after: Duration::from_secs(s.sleep_after_s as u64),
+        let mut wanted: Vec<(ServiceSpec, String, String)> = Vec::new(); // (spec, repo, revision)
+        let head_of = |repo: String| async move {
+            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.head.clone())) } else { self.source.head(&repo, None).await }
+        };
+        match self.apps.catalog(&r.project_id).await.map_err(|e| anyhow::anyhow!("reading the project's services: {e:#}"))? {
+            Some(catalog) if !catalog.is_empty() => {
+                for c in catalog {
+                    let rev = match &c.repo {
+                        Some(repo) => match head_of(repo.clone()).await? {
+                            Some(rev) => rev,
+                            None => continue,
+                        },
+                        None => String::new(),
                     };
-                    self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
-                    match self.apps.deploy(&t).await {
-                        Ok(()) => {
-                            let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
-                            self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
-                            self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
+                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new() };
+                    wanted.push((spec, c.repo.unwrap_or_default(), rev));
+                }
+            }
+            _ => {
+                for repo in &repos {
+                    let Some(rev) = head_of(repo.clone()).await? else { continue };
+                    for spec in self.source.services(repo, &rev).await.map_err(|e| anyhow::anyhow!("reading {repo}'s services: {e:#}"))? {
+                        wanted.push((spec, repo.clone(), rev.clone()));
+                    }
+                }
+            }
+        }
+        let mut keep: Vec<String> = Vec::new();
+        for (spec, repo, rev) in wanted {
+            keep.push(spec.name.clone());
+            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
+            // A redeploy (or a reset, whose URLs are new) restarts it on its next request.
+            if svc.deployed.as_deref() != Some(&rev) || reset_any {
+                let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
+                let t = Target {
+                    project: r.project_id.clone(),
+                    preview: r.id.clone(),
+                    service: spec.name.clone(),
+                    host: svc.host.clone(),
+                    repo: repo.clone(),
+                    revision: rev.clone(),
+                    git,
+                    spec: spec.clone(),
+                    sleep_after: Duration::from_secs(s.sleep_after_s as u64),
+                    environment: env_name(&r.id),
+                    vars: vars.clone(),
+                };
+                self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
+                match self.apps.deploy(&t).await {
+                    Ok(url) => {
+                        if let Some(url) = url {
+                            self.store.set_service_url(&r.id, &spec.name, &url)?;
                         }
-                        Err(e) => {
-                            let msg = format!("{e:#}");
-                            self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                            anyhow::bail!("deploying {}: {msg}", spec.name);
-                        }
+                        let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
+                        self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
+                        self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
+                    }
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                        anyhow::bail!("deploying {}: {msg}", spec.name);
                     }
                 }
             }
@@ -918,13 +951,17 @@ impl EnvSource for Engine {
             set(&mut env, "ROLL_CHANGE", c.clone());
         }
         let t = Target {
+            project: r.project_id.clone(),
             preview: r.id.clone(),
             service: service.to_string(),
             host: svc.host.clone(),
             repo: svc.repo.clone(),
             revision: rev,
+            git: None,
             spec,
             sleep_after: Duration::from_secs(s.sleep_after_s as u64),
+            environment: env_name(&r.id),
+            vars: Vec::new(),
         };
         Ok((t, env))
     }

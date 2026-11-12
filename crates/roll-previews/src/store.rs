@@ -585,6 +585,14 @@ impl Store {
         })
     }
 
+    /// A service's URL as its backend chose it (roll apps' own hostnames).
+    pub fn set_service_url(&self, id: &str, name: &str, url: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE services SET url = ? WHERE preview_id = ? AND name = ?", params![url, id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// Add `ms` of running time to a service (its share of the month's cost).
     pub fn add_active(&self, id: &str, name: &str, ms: i64) -> Result<()> {
         self.db.write(|c| {

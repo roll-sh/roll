@@ -176,6 +176,12 @@ impl Source for CodeSource {
         Ok(specs)
     }
 
+    async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
+        let r = self.repo(repo)?;
+        let cs = self.code.store.resolve_or_404(&r.id, revision)?;
+        Ok(self.code.store.git_of(&r.id, &cs)?.map(|(commit, _)| commit.hex()))
+    }
+
     async fn report(&self, p: &Preview, s: &Settings) {
         let Some(change) = &p.change else { return };
         let summary = self.summary(p, s);

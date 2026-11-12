@@ -110,6 +110,10 @@ pub trait Source: Send + Sync {
     async fn head(&self, repo: &str, branch: Option<&str>) -> anyhow::Result<Option<String>>;
     /// The services `repo` runs at `revision`.
     async fn services(&self, repo: &str, revision: &str) -> anyhow::Result<Vec<ServiceSpec>>;
+    /// The git commit of a changeset.
+    async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
     /// Tell the change (and its pull request) where its preview is. Called after every state
     /// change; must be cheap to repeat.
     async fn report(&self, preview: &Preview, settings: &crate::Settings);
@@ -119,16 +123,34 @@ pub trait Source: Send + Sync {
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>>;
 }
 
-/// What a service should run.
-#[derive(Clone, Debug, PartialEq)]
+/// What a service should run. (No `Debug`: `vars` holds the branches' passwords.)
+#[derive(Clone)]
 pub struct Target {
+    pub project: String,
     pub preview: String,
     pub service: String,
     pub host: String,
     pub repo: String,
+    /// The changeset (empty for a service from an image).
     pub revision: String,
+    /// The git commit of `revision`, for backends that build from git.
+    pub git: Option<String>,
     pub spec: ServiceSpec,
     pub sleep_after: Duration,
+    /// The preview's environment name in roll apps and roll secrets (`pv-<id>`).
+    pub environment: String,
+    /// The branches' URLs and the project's overrides, for backends that take variables at
+    /// deploy time ([`crate::runtime::Runtime`] reads them fresh when it starts instead).
+    pub vars: Vec<(String, String)>,
+}
+
+/// A service in a project's catalog (roll apps): a repo's (built at a revision) or an image's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CatalogService {
+    pub name: String,
+    /// `owner/name` for a repo source.
+    pub repo: Option<String>,
+    pub memory_mb: u32,
 }
 
 /// Builds a service's environment when it starts (the runtime starts lazily, on a request).
@@ -143,9 +165,15 @@ pub trait EnvSource: Send + Sync {
 /// Where services run: roll apps once it lands, [`crate::runtime::Runtime`] until then.
 #[async_trait]
 pub trait Apps: Send + Sync {
+    /// The project's services, when this backend keeps a catalog (roll apps). `None`: the
+    /// services are the project's repos' `roll.toml` `[preview]`.
+    async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<CatalogService>>> {
+        Ok(None)
+    }
+
     /// From now on the service runs `t` (it may start on the first request). Whatever runs an
-    /// older revision stops.
-    async fn deploy(&self, t: &Target) -> anyhow::Result<()>;
+    /// older revision stops. Returns the service's URL when the backend chooses it.
+    async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>>;
     /// Start it now, if it isn't running.
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()>;
     /// Stop it now; the next request starts it again.
