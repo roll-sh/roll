@@ -259,26 +259,27 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **Read-only SQL enforced by Postgres.** `POST /v1/endpoints/{id}/query` with `read_only: true`
-   runs as a short-lived login role holding only `pg_read_all_data` (dropped after), so a write
-   fails in Postgres whatever the SQL says (Supabase's approach). Until it lands the gate's `read`
-   classification of that body isn't backed by the database. Needs its e2e test (`pnpm test:pg`).
-2. **Dashboard "MCP & access"** (`/dashboard/access`): connect instructions per client, tokens and
-   connections with last use, the permission builder, pending approvals (also in the header), the
-   audit log, revoke. The OAuth consent screen at `/oauth/authorize` (a reserved name on both
-   sides). Typed client `apps/dashboard/src/lib/access-api.ts`.
-3. **CLI:** `roll token create|list|show|revoke` and `roll mcp config|approvals|approve|deny|audit`.
-4. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
+1. **Green runs and review findings.** The read-only SQL e2e (`pnpm test:pg`,
+   `read_only_sql_cannot_write`), then fix what an independent security review of the evaluator,
+   OAuth and MCP finds.
+2. **Edit and rotate tokens.** Change a token's rules, name, expiry and addresses from the
+   dashboard (the builder, prefilled) and `roll token edit`; `POST /v1/access/tokens/{id}/rotate`
+   for a new secret with the same rules (GitHub's "regenerate"). Expiring-soon shown in the list.
+3. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
    and tools from their contracts; check them against the merged routes, and wire previews'
-   `Store::environment_of` (a Postgres branch's environment comes from its `{branch}`).
-5. **Approvals in chat ops:** post pending approvals to the owner's Slack/Discord install with
-   approve/deny buttons (docs/code/chatops.md), as roll code's agent requests are.
-6. **Storage on a fleet:** check the operator's marker (and a grant's) survives the hop to the
+   `Store::environment_of` (a Postgres branch's environment comes from its `{branch}`) and search's
+   name → id resolver.
+4. **Approvals where people are:** browser notifications from the dashboard, and pending
+   approvals posted to the owner's Slack/Discord install with approve/deny buttons
+   (docs/code/chatops.md).
+5. **Storage on a fleet:** check the operator's marker (and a grant's) survives the hop to the
    metadata owner, as tasks now does.
-7. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
+6. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
    the public-only client.
-8. **`POST /v1/access/check`:** the decision for a method and path without running it (the builder's
+7. **`POST /v1/access/check`:** the decision for a method and path without running it (the builder's
    "test this token").
-9. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
+8. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
    `deploy`.
-10. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+9. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+10. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
+    last day in the list.
