@@ -95,7 +95,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         tracing::error!("roll secrets is unavailable: {why}");
     }
     let pg = code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() };
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api), open, trust_forwarded_for: args.code_trust_forwarded_for };
+    let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // A deleted project's secrets go with it.
@@ -135,7 +136,8 @@ fn links(api: Api) -> Links {
     l.register(Arc::new(Redis(api.clone())));
     l.register(Arc::new(Stream(api.clone())));
     l.register(Arc::new(Bucket(api.clone())));
-    l.register(Arc::new(Nosql(api)));
+    l.register(Arc::new(Nosql(api.clone())));
+    l.register(Arc::new(Search(api)));
     l
 }
 
@@ -443,6 +445,54 @@ impl LinkProvider for Nosql {
     }
     fn rotate_source(&self, r#ref: &str) -> roll_secrets::Result<bool> {
         self.0.call(Method::POST, &format!("/v1/nosql/databases/{}/password", enc(r#ref)), Some(json!({}))).map(|_| true)
+    }
+}
+
+/// Search clusters (roll search): where clients reach one (live), and API keys of their own
+/// (managed or dynamic) from `POST /v1/search/clusters/{id}/keys`; never the cluster's own
+/// password, which rotating would take from everyone else.
+struct Search(Api);
+
+impl LinkProvider for Search {
+    fn kind(&self) -> &str {
+        "search"
+    }
+    fn fields(&self) -> &[Field] {
+        const F: &[Field] = &[
+            live("url", "URL", false, "ELASTICSEARCH_URL"),
+            live("host", "Host", false, "ELASTICSEARCH_HOST"),
+            live("port", "Port", false, "ELASTICSEARCH_PORT"),
+            live("username", "Cluster name", false, "ELASTICSEARCH_USERNAME"),
+            issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
+        ];
+        F
+    }
+    fn name(&self, r#ref: &str) -> Option<String> {
+        self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["name"].as_str().map(Into::into)
+    }
+    fn read(&self, r#ref: &str, field: &str, _: &Link) -> roll_secrets::Result<Value> {
+        let c = self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None)?;
+        match field {
+            "port" => Ok(Value::new(c["port"].to_string())),
+            f => text(&c, &format!("/{f}")),
+        }
+    }
+    fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
+        let mut body = json!({ "name": label.chars().take(64).collect::<String>() });
+        // A dynamic key expires by itself a little after its lease, should a revoke fail.
+        if let Some(m) = ttl {
+            body["expires_in_s"] = json!((m + 5) * 60);
+        }
+        let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
+        let id = text(&k, "/id")?;
+        Ok(Issued { parts: BTreeMap::from([("api_key".to_string(), text(&k, "/api_key")?)]), handle: json!({ "id": id.expose() }) })
+    }
+    fn revoke(&self, r#ref: &str, h: &Json) -> roll_secrets::Result<()> {
+        let Some(id) = h["id"].as_str() else { return Ok(()) };
+        match self.0.call(Method::DELETE, &format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id)), None) {
+            Err(Error::Link(m)) if m.contains("404") || m.contains("no ") => Ok(()),
+            r => r.map(|_| ()),
+        }
     }
 }
 

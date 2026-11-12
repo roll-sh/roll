@@ -16,8 +16,6 @@ const MAX_CANDIDATES: usize = 20_000;
 const MAX_LINE: usize = 4096;
 /// Files larger than this (bytes, either side) aren't diffed.
 const MAX_FILE: u64 = 1 << 20;
-/// Shorter tokens are never candidates (`true`, `8080`); roll secrets applies the same rule.
-const MIN_LEN: usize = 8;
 
 /// (key, environment) of every secret whose value a change adds.
 pub(crate) type Leaks = Arc<Vec<(String, String)>>;
@@ -100,11 +98,46 @@ impl Code {
     }
 }
 
+/// Whether `s` could be a credential rather than ordinary configuration that's also kept as an
+/// environment variable (`https://shop.example`, `production`, `staging-database`): at least 12
+/// characters, two kinds of character (a digit or a capital among them), 3 bits of entropy a character, and never a URL without a
+/// password in it. A low-entropy password slips through; a shared URL never blocks a landing.
+pub fn credential_like(s: &str) -> bool {
+    let n = s.chars().count();
+    if n < CREDENTIAL_MIN_LEN {
+        return false;
+    }
+    if let Some((_, rest)) = s.split_once("://") {
+        let userinfo = rest.split(['/', '?', '#']).next().unwrap_or_default().rsplit_once('@').map(|(u, _)| u);
+        if !userinfo.is_some_and(|u| u.contains(':')) {
+            return false;
+        }
+    }
+    let kinds = [s.chars().any(|c| c.is_ascii_lowercase()), s.chars().any(|c| c.is_ascii_uppercase()), s.chars().any(|c| c.is_ascii_digit()), s.chars().any(|c| !c.is_ascii_alphanumeric())];
+    // Hyphenated words (`staging-database`) are configuration: a credential has a digit or a
+    // capital in it.
+    if kinds.iter().filter(|k| **k).count() < 2 || !(kinds[1] || kinds[2]) {
+        return false;
+    }
+    let mut counts = std::collections::HashMap::new();
+    for c in s.chars() {
+        *counts.entry(c).or_insert(0usize) += 1;
+    }
+    let entropy: f64 = counts.values().map(|&k| {
+        let p = k as f64 / n as f64;
+        -p * p.log2()
+    }).sum();
+    entropy >= 3.0
+}
+
+/// The shortest candidate (roll secrets also never matches values under 8 characters).
+const CREDENTIAL_MIN_LEN: usize = 12;
+
 /// A line's candidates: runs of `[A-Za-z0-9_\-+/=.:@~]`, the right-hand side of `KEY=VALUE` and
 /// `key: value` (quotes and a trailing `,` or `;` stripped), and the whole trimmed line.
 fn candidates(line: &str, out: &mut HashSet<String>) {
     let mut add = |s: &str| {
-        if s.chars().count() >= MIN_LEN {
+        if credential_like(s) {
             out.insert(s.to_string());
         }
     };
@@ -118,5 +151,18 @@ fn candidates(line: &str, out: &mut HashSet<String>) {
         let rhs = trimmed[i + 1..].trim().trim_end_matches([',', ';']).trim();
         let unquoted = ['"', '\'', '`'].iter().find_map(|q| rhs.strip_prefix(*q).and_then(|s| s.strip_suffix(*q))).unwrap_or(rhs);
         add(unquoted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn configuration_never_looks_like_a_credential() {
+        for plain in ["https://shop.example.com/api", "production", "staging-database", "aaaaaaaaaaaaaaaa", "postgres://db.internal:5432/app"] {
+            assert!(!super::credential_like(plain), "{plain}");
+        }
+        for secret in ["sk_live_51Hx9Q2abc", "postgres://app:s3cr3t-Pw@db.internal/app", "AKIAIOSFODNN7EXAMPLE"] {
+            assert!(super::credential_like(secret), "{secret}");
+        }
     }
 }

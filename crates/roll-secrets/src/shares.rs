@@ -60,6 +60,10 @@ pub struct Share {
     pub opened_at: Option<i64>,
     /// Whether it can still be opened.
     pub open: bool,
+    /// `<dashboard>/share/<id>` when the server knows the dashboard's address (`ROLL_WEB_URL`);
+    /// the client appends `#<key>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 /// What a share's page shows before it's opened (public).
@@ -96,7 +100,8 @@ impl Secrets {
                 params![id, project, n.note, raw, views, caller.principal, now, now + ttl * 60_000],
             )?;
             audit::record(c, project, caller, "share.create", None, None, &[], &format!("shared a value ({views} open{}, {ttl} min): {}", if views == 1 { "" } else { "s" }, n.note), now)?;
-            Ok(Share { id: id.clone(), note: n.note.clone(), views_left: views, created_by: caller.principal.clone(), created_at: now, expires_at: now + ttl * 60_000, opened_at: None, open: true })
+            let link = self.web_url.as_ref().map(|w| format!("{}/share/{id}", w.trim_end_matches('/')));
+            Ok(Share { id: id.clone(), note: n.note.clone(), views_left: views, created_by: caller.principal.clone(), created_at: now, expires_at: now + ttl * 60_000, opened_at: None, open: true, link })
         })
     }
 
@@ -119,6 +124,7 @@ impl Secrets {
                         expires_at,
                         opened_at: r.get(6)?,
                         open: r.get::<_, i64>(7)? != 0 && expires_at > now,
+                        link: None,
                     })
                 },
             )?)

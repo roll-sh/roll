@@ -679,8 +679,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             let body = json!({ "ciphertext": ciphertext, "note": note, "views": views, "ttl_minutes": minutes(&ttl)? });
             let v = c.call(Method::POST, &format!("{}/shares", c.base()), Some(body)).await?;
             let id = s(&v["id"]);
-            match std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.is_empty()) {
-                Some(web) => println!("{}/share/{id}#{secret}", web.trim_end_matches('/')),
+            // The server's link (it knows the dashboard), else ROLL_WEB_URL here, else `<id>#<key>`
+            // for `roll secrets open`.
+            match v["link"].as_str().map(String::from).or_else(|| std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.is_empty()).map(|w| format!("{}/share/{id}", w.trim_end_matches('/')))) {
+                Some(link) => println!("{link}#{secret}"),
                 None => println!("{id}#{secret}"),
             }
             eprintln!("Opens {views} time{}, until {}. The key is only in this link: send it, don't store it.", if views == 1 { "" } else { "s" }, chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());

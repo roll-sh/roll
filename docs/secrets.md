@@ -245,8 +245,11 @@ Revoking a role ends
 its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
 a credential never drops data.
 
-Products without a workspace kind yet (queues, tasks, roll search, roll apps) join by adding their
-kind to the workspace and registering a provider.
+| `search` | `url`, `host`, `port`, `username` | an API key of its own, credential `key`: `api_key` (`Authorization: ApiKey …`; a dynamic one expires by itself 5 minutes after its lease) | no (never the cluster's password) |
+
+`search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
+Products without a workspace kind yet (queues, tasks, roll apps) join by adding their kind to the
+workspace and registering a provider.
 
 ## Consumption
 
@@ -327,9 +330,13 @@ can't be queued or landed: `adds the value of STRIPE_KEY (production): rotate it
 the change`. The blocker names keys and environments, never the value or the line.
 
 - **What is checked.** The lines the change adds since its merge base (its own diff, so the check is
-  O(change)). Each added line gives candidates: every run of `[A-Za-z0-9_\-+/=.:@~]` of 8 characters
-  or more, the right-hand side of `KEY=VALUE` and `key: value` (quotes and a trailing `,` or `;`
-  stripped), and the whole trimmed line. Binary files, files over 1 MiB and lines over 4 KiB are
+  O(change)). Each added line gives candidates: every run of `[A-Za-z0-9_\-+/=.:@~]`, the right-hand side
+  of `KEY=VALUE` and `key: value` (quotes and a trailing `,` or `;` stripped), and the whole trimmed
+  line, kept only if it looks like a credential (`credential_like`): at least 12 characters, two
+  kinds of character with a digit or a capital among them, 3 bits of entropy a character, and never
+  a URL without a password. Configuration kept as an environment variable (`https://shop.example`,
+  `production`, `staging-database`) never blocks a landing; a low-entropy password can slip
+  through. Binary files, files over 1 MiB and lines over 4 KiB are
   skipped, and at most 20,000 candidates are checked per change.
 - **How it matches.** `Secrets::leaks` (`crates/roll-secrets/src/leaks.rs`) fingerprints each
   candidate with the project's data key and compares it with the stored `fp` of every secret, in
@@ -341,8 +348,9 @@ the change`. The blocker names keys and environments, never the value or the lin
   checked is caught when the head or its merge base moves. A repo on no project's canvas, or a
   server without roll secrets, gets no blocker; if roll secrets can't answer, the change isn't
   blocked and the check runs again next time.
-- **Way around.** None beyond the existing admin `bypass` of a queue repo (audited). Rotate the
-  secret and remove the value from the change.
+- **Way around.** Rotate the secret and remove the value from the change. For a false positive, an
+  admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
+  review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
 
 ### Sharing a value once
 
@@ -351,6 +359,8 @@ link that opens once, or `--views` times, before it expires (5 minutes to 7 days
 credential to someone outside roll. `roll secrets open <link>` and the dashboard's share page
 open it.
 
+- With `ROLL_WEB_URL` (the dashboard's address) set on rolld, `POST …/shares` answers `link`
+  (`<dashboard>/share/<id>`), and `roll secrets share` prints `link#key`.
 - **The server never sees the value.** The client encrypts it with a random 256-bit key
   (AES-256-GCM, `roll-share-v1` as associated data) and puts the key in the link's `#fragment`,
   which browsers never send. The server keeps the ciphertext, and drops it at the last open, at
@@ -593,23 +603,18 @@ free again and its history stays readable by key.
 
 ## Next
 
-Done and in PR #20: the store and crypto, rolld's mount and link providers (a Postgres role checked
-against a real compute), `roll secrets`, `roll secrets setup` and `roll run`, checks and sandboxes,
-the dashboard's Secrets surface. Ranked:
+Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
+streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
+checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, the dashboard's
+Secrets surface, and the fixes from a security review. Ranked:
 
-1. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
+1. **A green `pnpm test:code` run** on the branch's head. The last runs, under a load average of
+   33–52, failed only timing-sensitive tests outside this work (`webhooks.rs`,
+   `cluster.rs::health_follows_each_node`, `roll-cluster`'s suite), each green when rerun alone.
+2. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
    merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto
    the routes above.
-2. **Leaked secrets don't land** (roll-native: roll hosts the repos too). A change whose added
-   lines contain a value of its repo's project's secrets gets a `secret_leak` blocker
-   (`Code::blockers`), found by fingerprinting candidate tokens in the change's diff (O(change)),
-   and the key's name, never the value, is in the message. In progress.
 3. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
 4. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-5. **The dashboard's share page** (`/share/$id`, public; opens with the key from the fragment)
-   and "Share once" on a secret's menu.
-6. **Search links**: a `search` provider (kind `search`, ref the cluster id) once roll search's key
-   routes land (`POST|DELETE /v1/search/clusters/{id}/keys`): live `url`, `host`, `port`,
-   `username`; issued `api_key` (managed or dynamic).

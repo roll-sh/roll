@@ -900,11 +900,22 @@ impl Code {
             self.prepare_leaks(r, c).await;
             let blockers: Vec<Blocker> =
                 self.blockers(r, c, &settings).into_iter().filter(|b| b.kind != "untrusted" && b.kind != "checks").collect();
-            let (review, other): (Vec<Blocker>, Vec<Blocker>) = blockers.into_iter().partition(|b| crate::review::REVIEW_BLOCKERS.contains(&b.kind.as_str()));
+            // An admin may land over reviews and over a `secret_leak` that's a false positive
+            // (a value that only looks like a secret's); each is audited.
+            let bypassable = |k: &str| crate::review::REVIEW_BLOCKERS.contains(&k) || k == "secret_leak";
+            let (review, other): (Vec<Blocker>, Vec<Blocker>) = blockers.into_iter().partition(|b| bypassable(&b.kind));
             if !other.is_empty() || (!review.is_empty() && !bypass) {
                 return Err(Error::Blocked(other.into_iter().chain(review).collect()));
             }
-            if !review.is_empty() {
+            if review.iter().any(|b| b.kind == "secret_leak") {
+                if *caller != Caller::Admin {
+                    return Err(Error::Forbidden("landing a change that adds a secret's value needs the admin token".into()));
+                }
+                let keys: Vec<&str> = review.iter().filter(|b| b.kind == "secret_leak").map(|b| b.message.as_str()).collect();
+                self.db.audit(&r.id, "admin", "secret_leak_bypass", &json!({ "change": c.id, "changeset": cs_id(&head), "blockers": keys }))?;
+                tracing::warn!(repo = %r.full_name(), change = %c.id, "landed a change that adds a secret's value (admin bypass)");
+            }
+            if review.iter().any(|b| b.kind != "secret_leak") {
                 self.audit_review_bypass(r, caller, Some(&c.id), &head)?;
             }
         }

@@ -268,6 +268,8 @@ pub struct Options {
     /// Record the first X-Forwarded-For address in the audit log, not the peer's (behind a proxy
     /// that sets it: `ROLL_CODE_TRUST_FORWARDED_FOR`).
     pub trust_forwarded_for: bool,
+    /// The dashboard's address (`ROLL_WEB_URL`): a share's link is `<it>/share/<id>#<key>`.
+    pub web_url: Option<String>,
 }
 
 /// The secrets store.
@@ -279,6 +281,7 @@ pub struct Secrets {
     links: Links,
     open: bool,
     trust_forwarded_for: bool,
+    web_url: Option<String>,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -302,7 +305,7 @@ impl Secrets {
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
     }
 
     pub fn links(&self) -> &Links {
