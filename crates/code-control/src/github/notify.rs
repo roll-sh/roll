@@ -174,7 +174,9 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
             // it there: find it by its marker rather than make a second one.
             let marker = format!("<!-- roll-preview:{} -->", c.id);
             let existing = hub.client.issue_comments(l.installation_id, &l.owner, &l.repo, pr).await.map_err(gh)?;
-            let id = match existing.iter().find(|x| x.body.as_deref().is_some_and(|b| b.contains(&marker))) {
+            // Only an app's own comment (anyone can paste the marker; editing theirs would fail).
+            let ours = |x: &&code_github::model::Comment| x.user.as_ref().is_some_and(|u| u.kind.as_deref() == Some("Bot") && u.login.ends_with("[bot]"));
+            let id = match existing.iter().filter(ours).find(|x| x.body.as_deref().is_some_and(|b| b.contains(&marker))) {
                 Some(found) => {
                     hub.client.update_comment(l.installation_id, &l.owner, &l.repo, found.id, &body).await.map_err(gh)?;
                     found.id

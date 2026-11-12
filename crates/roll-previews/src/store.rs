@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS services (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, name)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS spend (
+    project_id TEXT NOT NULL,
+    month INTEGER NOT NULL,
+    usd REAL NOT NULL,
+    PRIMARY KEY (project_id, month)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS dismissed (
     change_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
@@ -244,11 +250,12 @@ fn service_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Service, i64)> {
             memory_mb: r.get(8)?,
             share_url: None,
         },
-        r.get(9)?,
+        // Running time counts for the month it was recorded in.
+        if r.get::<_, i64>(10)? == month_start(code_sql::now_ms()) { r.get(9)? } else { 0 },
     ))
 }
 
-const SERVICE_COLUMNS: &str = "name, repo, host, url, revision, deployed, state, error, memory_mb, active_ms";
+const SERVICE_COLUMNS: &str = "name, repo, host, url, revision, deployed, state, error, memory_mb, active_ms, active_month";
 
 fn json_list(v: &Option<Vec<String>>) -> Option<String> {
     v.as_ref().map(|l| serde_json::to_string(l).expect("JSON"))
@@ -278,6 +285,12 @@ impl Store {
             let t = new_token();
             db.write(|c| c.execute("UPDATE previews SET token = ? WHERE id = ? AND (token IS NULL OR token = '')", params![t, id]).map(drop))?;
         }
+        if !db.has_column("services", "active_month")? {
+            db.add_column("services", "active_month", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        if !db.has_column("services", "config")? {
+            db.add_column("services", "config", "TEXT")?;
+        }
         if !db.has_column("previews", "idled")? {
             db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
         }
@@ -304,6 +317,40 @@ impl Store {
     pub fn enabled_projects(&self) -> Result<Vec<(String, Settings)>> {
         let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, json FROM settings ORDER BY project_id", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
         Ok(rows.into_iter().filter_map(|(p, j)| serde_json::from_str::<Settings>(&j).ok().filter(|s| s.enabled).map(|s| (p, s))).collect())
+    }
+
+    /// Projects whose stored rules parse and say previews are off (rules that don't parse,
+    /// a newer version's, say, are neither on nor off: nothing is deleted for them).
+    pub fn disabled_projects(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, json FROM settings ORDER BY project_id", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
+        Ok(rows.into_iter().filter(|(_, j)| serde_json::from_str::<Settings>(j).is_ok_and(|s| !s.enabled)).map(|(p, _)| p).collect())
+    }
+
+    /// What deleted previews of `project` cost this month (live ones count their own).
+    pub fn spent(&self, project: &str, month: i64) -> Result<f64> {
+        Ok(self.db.read(|c| c.query_row("SELECT usd FROM spend WHERE project_id = ? AND month = ?", params![project, month], |r| r.get::<_, f64>(0)).optional())?.unwrap_or(0.0))
+    }
+
+    pub fn add_spend(&self, project: &str, month: i64, usd: f64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO spend (project_id, month, usd) VALUES (?, ?, ?) ON CONFLICT (project_id, month) DO UPDATE SET usd = spend.usd + excluded.usd",
+                params![project, month, usd],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A service's deploy fingerprint (what it was deployed with: variables, access).
+    pub fn service_config(&self, id: &str, name: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT config FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
+    pub fn set_service_config(&self, id: &str, name: &str, config: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE services SET config = ? WHERE preview_id = ? AND name = ?", params![config, id, name])?;
+            Ok::<_, Error>(())
+        })
     }
 
     pub fn put_settings(&self, project: &str, s: &Settings) -> Result<Settings> {
@@ -623,9 +670,14 @@ impl Store {
     }
 
     /// Add `ms` of running time to a service (its share of the month's cost).
+    /// Add `ms` of running time to a service, this month's (a new month starts from zero).
     pub fn add_active(&self, id: &str, name: &str, ms: i64) -> Result<()> {
+        let month = month_start(self.now_ms()?);
         self.db.write(|c| {
-            c.execute("UPDATE services SET active_ms = active_ms + ? WHERE preview_id = ? AND name = ?", params![ms, id, name])?;
+            c.execute(
+                "UPDATE services SET active_ms = CASE WHEN active_month = ? THEN active_ms + ? ELSE ? END, active_month = ? WHERE preview_id = ? AND name = ?",
+                params![month, ms, ms, month, id, name],
+            )?;
             Ok::<_, Error>(())
         })
     }

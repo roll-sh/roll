@@ -183,3 +183,22 @@ async fn previews_wait_once_the_month_s_budget_is_spent() {
     assert_eq!(second.state, State::Queued, "a new preview waits once the budget is spent");
     assert!(e.engine.store.activity(&second.id).unwrap().iter().any(|a| a.message.contains("max_usd_month")));
 }
+
+#[tokio::test]
+async fn a_changed_rule_reaches_existing_previews() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_m", 6));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    assert_eq!(e.pg.made.load(Ordering::SeqCst), 1);
+    // The project moves Postgres to structure-only: the preview's full copy goes, a structure-only
+    // branch takes its place (as the API does: the rules saved, every preview converging).
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "resources": { "postgres:prj_db": "schema" } })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    let pg = e.engine.store.resources(&p.id).unwrap().into_iter().find(|r| r.kind == Kind::Postgres).unwrap();
+    assert_eq!(pg.mode, roll_previews::Mode::Schema);
+    assert_eq!(e.pg.made.load(Ordering::SeqCst), 2, "branched again in its new mode");
+    assert_eq!(e.pg.branches.lock().len(), 1, "the full copy is gone");
+}

@@ -364,6 +364,19 @@ impl Control {
         parent: Option<&str>,
         at: Option<Target>,
     ) -> Result<Branch> {
+        self.create_branch_with(project_id, name, parent, at, false).await
+    }
+
+    /// [`Control::create_branch`], and with `schema_only` emptied of every row before it exists
+    /// ([`DockerDriver::empty_offline`]): nothing ever serves or records the parent's rows.
+    pub async fn create_branch_with(
+        &self,
+        project_id: &str,
+        name: &str,
+        parent: Option<&str>,
+        at: Option<Target>,
+        schema_only: bool,
+    ) -> Result<Branch> {
         let project = self.project_or_404(project_id)?;
         let name = name.trim();
         if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_/.".contains(c)) {
@@ -410,6 +423,16 @@ impl Control {
             if let Err(e) = result {
                 let _ = std::fs::remove_dir_all(&dest);
                 return Err(e);
+            }
+        }
+        if schema_only {
+            if branch.pending_recovery {
+                let _ = std::fs::remove_dir_all(&dest);
+                return Err(ControlError::Invalid("a structure-only branch can't be taken from a point in time".into()));
+            }
+            if let Err(e) = self.driver.empty_offline(&dest, project.pg_version, &self.config.image(project.pg_version)).await {
+                let _ = std::fs::remove_dir_all(&dest);
+                return Err(e.into());
             }
         }
         self.store.insert_branch(&branch)?;

@@ -999,7 +999,17 @@ impl roll_previews::ports::Apps for RollApps {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
-            let key = format!("{}@{}", t.environment, t.git.as_deref().unwrap_or("image"));
+            // The key names what's deployed: the commit and what it's deployed with (a retry
+            // after a crash returns the same deployment; new variables make a new one).
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut sorted: Vec<_> = set.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in sorted {
+                for b in k.bytes().chain([0]).chain(v.to_string().into_bytes()).chain([0]) {
+                    h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+            let key = format!("{}@{}@{h:016x}{}", t.environment, t.git.as_deref().unwrap_or("image"), if t.access_token.is_some() { "p" } else { "" });
             self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&key)).await?;
         }
         let env = self.api.get(&path).await?;

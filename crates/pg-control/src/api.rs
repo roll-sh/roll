@@ -232,14 +232,7 @@ async fn create_branch(
     Json(body): Json<CreateBranch>,
 ) -> Result<Response, ControlError> {
     let started = std::time::Instant::now();
-    let branch = c.create_branch(&id, &body.name, body.parent.as_deref(), body.point.target()?).await?;
-    if body.schema_only
-        && let Err(e) = c.truncate_branch(&id, &branch.id).await
-    {
-        // A branch that should hold no rows but might: it doesn't stay.
-        let _ = c.delete_branch(&id, &branch.id).await;
-        return Err(e);
-    }
+    let branch = c.create_branch_with(&id, &body.name, body.parent.as_deref(), body.point.target()?, body.schema_only).await?;
     let project = c.store.project(&id)?.ok_or_else(|| ControlError::NotFound(id.clone()))?;
     let ep = c.store.endpoint_for_branch(&branch.id)?;
     let body = json!({
@@ -290,10 +283,7 @@ struct ResetBody {
 async fn reset_branch(State(c): State<AppState>, Path((id, branch)): Path<(String, String)>, body: Option<Json<ResetBody>>) -> ApiResult<Value> {
     let started = std::time::Instant::now();
     let branch = c.branch_in(&id, &branch)?;
-    let branch = c.reset_branch(&id, &branch.id).await?;
-    if body.is_some_and(|Json(b)| b.schema_only) {
-        c.truncate_branch(&id, &branch.id).await?;
-    }
+    let branch = c.reset_branch(&id, &branch.id, body.is_some_and(|Json(b)| b.schema_only)).await?;
     Ok(Json(json!({ "branch": branch, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 

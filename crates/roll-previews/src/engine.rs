@@ -178,9 +178,10 @@ impl Engine {
                     warn!(%project, error = %e, "previews: discovering");
                 }
             }
-            // Previews turned off: the project's previews go.
+            // Previews turned off: the project's previews go (never for rules that don't parse).
+            let off = self.store.disabled_projects()?;
             for r in self.store.rows(None)? {
-                if r.desired == Desired::Active && !enabled.iter().any(|(p, _)| *p == r.project_id) {
+                if r.desired == Desired::Active && off.contains(&r.project_id) {
                     self.mark_deleted(&r.id, "previews were turned off for the project")?;
                 }
             }
@@ -200,9 +201,17 @@ impl Engine {
             };
             let this = self.clone();
             let permit = sem.clone().acquire_owned().await.map_err(|e| Error::Internal(e.to_string()))?;
+            let cluster = self.cluster.get().cloned();
             set.spawn(async move {
                 let id = r.id.clone();
-                this.converge_one(r).await;
+                // Cut short if this node loses the preview's lease meanwhile (a partition): the
+                // new holder converges it, never both at once.
+                match (&cluster, &guard) {
+                    (Some(c), Some(g)) => {
+                        let _ = c.while_guarded(g, this.converge_one(r)).await;
+                    }
+                    _ => this.converge_one(r).await,
+                }
                 drop((permit, guard));
                 id
             });
@@ -387,7 +396,8 @@ impl Engine {
         let busy = rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
         let mut free = (s.max_previews as usize).saturating_sub(busy);
         // The month's budget: once spent, no new preview starts this month.
-        let spent: f64 = rows.iter().filter_map(|r| self.store.view(r.clone()).ok()).map(|p| p.cost.month_to_date_usd).sum();
+        let month = crate::store::month_start(self.store.now_ms()?);
+        let spent: f64 = self.store.spent(project_id, month)? + rows.iter().filter_map(|r| self.store.view(r.clone()).ok()).map(|p| p.cost.month_to_date_usd).sum::<f64>();
         let over_budget = s.max_usd_month > 0.0 && spent >= s.max_usd_month;
         if over_budget {
             free = 0;
@@ -515,6 +525,19 @@ impl Engine {
             .filter_map(|res| Kind::of_workspace(res.kind).map(|k| (k, res.r#ref.clone())))
             .filter_map(|(k, parent)| s.mode_of(k, &parent).map(|m| (k, parent, m)))
             .collect();
+        // A resource whose rule changed (branch ↔ schema) is branched again in its new mode: a
+        // project that moves to structure-only stops keeping full copies at once.
+        let changed: Vec<ResourceRow> = self
+            .store
+            .resources(&r.id)?
+            .into_iter()
+            .filter(|x| wanted.iter().any(|(k, p, m)| *k == x.kind && *p == x.parent && *m != x.mode))
+            .collect();
+        for res in changed {
+            self.delete_branch(&r.id, &res, &name).await?;
+            self.store.drop_resource(&r.id, res.kind, &res.parent)?;
+            self.store.log(&r.id, &format!("{}:{} moves to {} mode: branched again", res.kind.as_str(), res.parent, res.mode.as_str()))?;
+        }
         for gone in self.store.want_resources(&r.id, &wanted)? {
             self.delete_branch(&r.id, &gone, &name).await?;
             self.store.drop_resource(&r.id, gone.kind, &gone.parent)?;
@@ -524,6 +547,14 @@ impl Engine {
         let asked: Vec<String> = r.reset_requested.clone().unwrap_or_default();
         let mut reset_any = false;
         let mut problems: Vec<String> = Vec::new();
+        // Nothing serves data while it's replaced (and until its seed and masks have run again).
+        let resetting = self.store.resources(&r.id)?.iter().any(|x| x.r#ref.is_some() && (reset_due || asked.iter().any(|a| a == "*" || *a == format!("{}:{}", x.kind.as_str(), x.parent))));
+        if resetting {
+            for svc in self.store.services(&r.id)? {
+                self.apps.sleep(&r.id, &svc.name).await;
+                self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
+            }
+        }
         for res in self.store.resources(&r.id)? {
             let key = format!("{}:{}", res.kind.as_str(), res.parent);
             let b = match self.brancher(res.kind) {
@@ -541,15 +572,17 @@ impl Engine {
             match &res.r#ref {
                 None => {
                     let made = b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?;
+                    // Recorded at once (a crash mustn't lose it), Ready only once it's masked.
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.r#ref = Some(made.r#ref.clone());
                         x.kept = made.kept.clone();
-                        x.state = ResourceState::Ready;
+                        x.state = ResourceState::Pending;
                         x.error = None;
                     })?;
                     self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                     self.store.set_seed_needed(&r.id, true)?;
                     self.mask(&r.id, &b, &key, &made.r#ref, &s).await?;
+                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
                 }
                 Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
@@ -557,16 +590,19 @@ impl Engine {
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.r#ref = Some(fresh.r#ref.clone());
                         x.kept = fresh.kept.clone();
-                        x.state = ResourceState::Ready;
+                        x.state = ResourceState::Resetting;
                         x.error = None;
                         x.bytes = 0;
                     })?;
                     self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                     self.store.set_seed_needed(&r.id, true)?;
                     self.mask(&r.id, &b, &key, &fresh.r#ref, &s).await?;
+                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
                     reset_any = true;
                 }
-                Some(_) if res.state != ResourceState::Ready => {
+                // Made (or reset) but not finished: masks again, then Ready.
+                Some(branch) if res.state != ResourceState::Ready => {
+                    self.mask(&r.id, &b, &key, branch, &s).await?;
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.state = ResourceState::Ready;
                         x.error = None;
@@ -577,7 +613,10 @@ impl Engine {
         }
         if reset_any || reset_due || !asked.is_empty() {
             self.store.update(&r.id, |row| {
-                row.reset_requested = None;
+                // Only what this converge did: a reset asked for meanwhile stays asked.
+                if row.reset_requested == r.reset_requested {
+                    row.reset_requested = None;
+                }
                 if reset_any || reset_due {
                     row.last_reset_at = Some(now);
                 }
@@ -685,8 +724,12 @@ impl Engine {
         for (spec, repo, rev) in wanted {
             keep.push(spec.name.clone());
             let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
-            // A redeploy (or a reset, whose URLs are new) restarts it on its next request.
-            if svc.deployed.as_deref() != Some(&rev) || reset_any {
+            // A redeploy when the revision moved, or what it's deployed with did (its variables:
+            // a reset's new URLs, changed overrides; its access): the runtime restarts it on its
+            // next request, roll apps redeploys it.
+            let fingerprint = config_fingerprint(&vars, access_token.is_some());
+            let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
+            if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved {
                 let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
                 let t = Target {
                     project: r.project_id.clone(),
@@ -711,6 +754,7 @@ impl Engine {
                         }
                         let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
                         self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
+                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
                         self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
                     }
                     Err(e) => {
@@ -825,7 +869,12 @@ impl Engine {
         }
         let view = self.store.preview(&r.id)?;
         self.source.forget(&view).await;
+        // What it cost this month stays counted against the project's budget.
+        self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;
+        if let Some(c) = self.cluster.get() {
+            c.retire(&preview_key(&r.id));
+        }
         self.usage_read.lock().remove(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
@@ -1013,6 +1062,19 @@ impl Engine {
     }
 }
 
+/// What a service is deployed with, as a digest (FNV-1a: change detection, not a secret).
+fn config_fingerprint(vars: &[(String, String)], private: bool) -> String {
+    let mut sorted: Vec<&(String, String)> = vars.iter().collect();
+    sorted.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (k, v) in sorted {
+        for b in k.bytes().chain([0]).chain(v.bytes()).chain([0]) {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}{}", if private { "p" } else { "" })
+}
+
 /// Whether a change gets a preview under the project's rules (approval aside).
 fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     c.open && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*"))
@@ -1053,7 +1115,12 @@ impl EnvSource for Engine {
         if svc.repo == r.repo && rev != r.head {
             anyhow::bail!("{service} is being redeployed at the change's new head");
         }
-        let bytes: i64 = self.store.resources(preview)?.iter().map(|x| x.bytes).sum();
+        // Data being replaced, seeded or masked isn't served yet.
+        let resources = self.store.resources(preview)?;
+        if resources.iter().any(|x| matches!(x.state, crate::ResourceState::Pending | crate::ResourceState::Resetting)) || (s.seed.is_some() && self.store.seed_needed(preview)?) {
+            anyhow::bail!("its data is being prepared (branched, reset, seeded or masked)");
+        }
+        let bytes: i64 = resources.iter().map(|x| x.bytes).sum();
         if bytes as u64 > s.max_bytes {
             anyhow::bail!("its branches hold {bytes} bytes, over the project's max_bytes: reset it to start again");
         }

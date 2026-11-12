@@ -121,7 +121,7 @@ async fn comment(State(m): S, Path((o, r, n)): Path<(String, String, u64)>, Json
 
 async fn list_comments(State(m): S, Path((o, r, n)): Path<(String, String, u64)>) -> Json<Value> {
     let path = format!("/repos/{o}/{r}/issues/{n}/comments");
-    let made: Vec<Value> = m.calls.lock().iter().filter(|(meth, p, _)| meth == "POST" && *p == path).map(|(_, _, b)| json!({ "id": 1, "body": b["body"] })).collect();
+    let made: Vec<Value> = m.calls.lock().iter().filter(|(meth, p, _)| meth == "POST" && *p == path).map(|(_, _, b)| json!({ "id": 1, "body": b["body"], "user": { "login": "roll[bot]", "type": "Bot" } })).collect();
     Json(json!(made))
 }
 

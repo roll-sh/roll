@@ -91,7 +91,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     until one is deleted.
   - `max_usd_month` (no cap by default) is the project's monthly budget for previews. Once what
     they've cost this month reaches it, new previews wait as `queued` (saying why), and the
-    running ones carry on.
+    running ones carry on. Previews deleted this month still count (`spend`, a per-project,
+    per-month ledger).
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches own. A preview
     over the cap goes to sleep with `error`, and resetting it brings it back under.
 
@@ -248,10 +249,24 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
   code's own previews: the container started for a visit now refuses an unapproved head.
 - **Structure-only means structure-only.** `schema` is accepted only for kinds that can do it:
-  Postgres (branched, then every user table truncated in every database: the rows' files are
-  dropped), NoSQL, streams, queues and tasks. A `schema` rule for Redis or a bucket is refused.
+  Postgres, NoSQL, streams, queues and tasks. A `schema` rule for Redis or a bucket is refused.
+  A structure-only Postgres branch is emptied offline, before it exists. A throwaway server with
+  no network runs on the copied directory and, in every database but `template0`:
+  - truncates every table, unlogged ones included;
+  - empties materialized views;
+  - unlinks large objects;
+  - drops user mappings, so foreign tables reach nowhere.
+
+  It then checkpoints, stops and removes the WAL from before the checkpoint. No endpoint,
+  receiver or history ever sees the rows, and a reset does the same before its swap.
   With `data: "schema"` those kinds are left out unless a rule says `branch`, so a project that
   asked for no rows never gets a full copy by default.
+- **Nothing serves data that isn't ready.** A reset first stops the preview's services. A
+  service doesn't start while any of its preview's data is being branched, reset, masked or
+  seeded. A mask that fails is retried before its branch counts as ready.
+- **Rules reach existing previews.** Saving a project's rules makes every preview converge again:
+  - a resource whose mode changed is branched again in its new mode;
+  - services whose variables or access changed are redeployed.
 - **Masked columns.** `masking` adds column masks (Cassandra 5's mask functions) to a NoSQL
   branch's policy each time it's made or reset, on top of what it inherits from its parent. The
   preview reads masked values; the parent's policy is untouched. For other products, a `seed`
@@ -387,6 +402,7 @@ services(preview_id TEXT NOT NULL, name TEXT NOT NULL, repo TEXT NOT NULL, host 
          revision TEXT, deployed TEXT, state TEXT NOT NULL, error TEXT, memory_mb INTEGER NOT NULL,
          active_ms INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (preview_id, name))
 dismissed(change_id TEXT PRIMARY KEY, head TEXT NOT NULL, at INTEGER NOT NULL)
+spend(project_id TEXT NOT NULL, month INTEGER NOT NULL, usd REAL NOT NULL, PRIMARY KEY (project_id, month))
 activity(preview_id TEXT NOT NULL, at INTEGER NOT NULL, seq INTEGER NOT NULL, message TEXT NOT NULL,
          PRIMARY KEY (preview_id, seq))   -- newest 200 per preview
 ```
@@ -504,7 +520,8 @@ Ranked by what a person notices first. Done so far:
 - roll apps' `pv-…` environments private, their 401 page linked through roll;
 - NoSQL column masks per preview;
 - copy-on-write stream branches (shared chunks, refcounted deletes) and Postgres `schema` mode;
-- a monthly budget per project, `roll preview open`, and following logs in the dashboard.
+- a monthly budget per project, `roll preview open`, and following logs in the dashboard;
+- a second adversarial review and its fixes.
 
 1. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. The fleet's XFS volumes already
@@ -520,3 +537,7 @@ Ranked by what a person notices first. Done so far:
    re-read.
 6. **A cost alert**: tell the project's owners when its previews pass a share of
    `max_usd_month`.
+7. **A stream branch's cut and an aborting transaction**: a transaction that aborts between its
+   abort marker and its `aborted_txns` row, while a branch is cut, shows its records as
+   committed in the branch. Record the abort before the marker is visible, or hold the log
+   lock across both.

@@ -469,19 +469,23 @@ async fn branches_are_isolated_copies() {
     // A reset (roll previews) brings back the parent's current state on the same endpoint, so
     // the connection string doesn't change; the branch's own history starts again.
     drop(d);
-    let reset = h.control.reset_branch(&db.project.id, &dev.id).await.unwrap();
+    let reset = h.control.reset_branch(&db.project.id, &dev.id, false).await.unwrap();
     assert_eq!((reset.id.as_str(), h.primary(&reset).id.as_str()), (dev.id.as_str(), dev_ep.id.as_str()));
     let d = h.connect(&db, &dev_ep.id).await;
     assert_eq!(count(&d, "SELECT count(*) FROM t").await, 400, "the parent's rows, not the branch's old ones");
     d.batch_execute("INSERT INTO t VALUES (100002, 'after reset')").await.unwrap();
     h.wait_for_base(&dev.id).await;
-    assert!(h.control.reset_branch(&db.project.id, "main").await.is_err(), "the root branch has no parent");
+    assert!(h.control.reset_branch(&db.project.id, "main", false).await.is_err(), "the root branch has no parent");
 
-    // Structure only (previews' `schema` mode): the tables stay, the rows go, from disk too.
-    let empty = h.control.create_branch(&db.project.id, "schema-only", None, None).await.unwrap();
-    h.control.truncate_branch(&db.project.id, &empty.id).await.unwrap();
+    // Structure only (previews' `schema` mode): emptied before it exists, so nothing serves or
+    // records the rows: tables, materialized views and large objects empty; structure kept.
+    c.batch_execute("CREATE MATERIALIZED VIEW mv AS SELECT * FROM t; SELECT lo_from_bytea(0, 'secret')").await.unwrap();
+    let empty = h.control.create_branch_with(&db.project.id, "schema-only", None, None, true).await.unwrap();
     let e = h.connect(&db, &h.primary(&empty).id).await;
     assert_eq!(count(&e, "SELECT count(*) FROM t").await, 0);
+    assert_eq!(count(&e, "SELECT count(*) FROM pg_largeobject_metadata").await, 0);
+    assert!(e.query("SELECT * FROM mv", &[]).await.is_err(), "the materialized view holds no data until refreshed");
+    assert_eq!(count(&e, "SELECT count(*) FROM pg_class WHERE relname = 'mv'").await, 1, "the structure stays");
     assert_eq!(count(&c, "SELECT count(*) FROM t").await, 400, "the parent keeps its rows");
     drop(e);
     h.control.delete_branch(&db.project.id, &empty.id).await.unwrap();

@@ -196,7 +196,15 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
     let s = blocking(e.clone(), move |e| {
         e.workspace_project(&project)?;
         let s = e.store.settings(&project)?.patched(&patch)?;
-        e.store.put_settings(&project, &s)
+        let s = e.store.put_settings(&project, &s)?;
+        // Every preview of the project converges on the new rules (modes, masks, variables,
+        // access): nothing waits for its next push.
+        for r in e.store.rows(Some(&project))? {
+            if r.desired == crate::Desired::Active {
+                e.store.update(&r.id, |row| row.next_at = 0)?;
+            }
+        }
+        Ok(s)
     })
     .await?;
     e.kick();
