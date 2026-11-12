@@ -37,7 +37,8 @@ export type NewEnvironment = {
   ttl_minutes?: number;
   secrets?: Op[];
 };
-export type Overview = { project: string; environments: Environment[]; previews: number };
+/** `history_days`: how long old values are kept (null: for good). */
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null };
 export type Folder = { path: string; name: string; secrets: number; folders: number };
 export type Import = { environment: string; path: string };
 export type Link = { kind: string; ref: string; field: string; mode: LinkMode; options?: Record<string, unknown> };

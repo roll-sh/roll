@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, GripVertical, Lock, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Bell, GripVertical, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { ENV_SLUG, LABEL_PART, type Environment } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
@@ -87,6 +87,8 @@ export function EnvironmentsView() {
 
       <Previews previews={previews} onError={setError} onChanged={reloadEnvs} />
 
+      <Retention onError={setError} />
+
       <DeleteEnvironment
         env={deleting}
         project={project.name}
@@ -143,6 +145,7 @@ function EnvRow({ env: e, first, last, onMove, onDelete, onError }: { env: Envir
           <Trash2 className="size-3.5" />
         </button>
       </div>
+      {e.protected && <Notify env={e} onError={onError} />}
       {e.protected && (
         <div className="mt-2 flex flex-wrap items-end gap-2 pl-12">
           <label>
@@ -161,6 +164,129 @@ function EnvRow({ env: e, first, last, onMove, onDelete, onError }: { env: Envir
       <MaxAge env={e} onError={onError} />
       {renaming && <Rename env={e} onDone={() => setRenaming(false)} onError={onError} />}
     </div>
+  );
+}
+
+/**
+ * Where a protected environment announces new change requests: a Slack or Discord incoming webhook,
+ * or any HTTPS URL. The server keeps the URL sealed and shows only its host (`notify`).
+ */
+function Notify({ env, onError }: { env: Environment; onError: (e: string) => void }) {
+  const { api, reloadEnvs } = useSecrets();
+  const [editing, setEditing] = useState(false);
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ok = /^https:\/\/[^\s/]+/.test(url.trim());
+  // The policy is replaced whole: keep its approvals and approvers.
+  const save = async (notify_url: string | null) => {
+    setBusy(true);
+    try {
+      await api.policy(env.slug, { protected: true, approvals: Math.max(1, env.approvals), approvers: env.approvers, notify_url });
+      setEditing(false);
+      setUrl("");
+      reloadEnvs();
+    } catch (e) {
+      onError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-2 pl-12 text-[11.5px] text-muted">
+      {editing ? (
+        <form
+          className="flex flex-wrap items-center gap-1.5"
+          onSubmit={(ev) => {
+            ev.preventDefault();
+            if (ok && !busy) void save(url.trim());
+          }}
+        >
+          <Bell className="size-3.5 shrink-0" />
+          <input
+            autoFocus
+            value={url}
+            onChange={(ev) => setUrl(ev.target.value)}
+            placeholder="https://hooks.slack.com/services/…"
+            aria-label={`Notify on new change requests in ${env.name}`}
+            spellCheck={false}
+            autoComplete="off"
+            className={`${sized} h-7 w-96 max-w-full font-mono text-[12px]`}
+          />
+          <button type="submit" className={button} disabled={!ok || busy}>
+            {busy ? "Saving…" : "Save"}
+          </button>
+          <button type="button" className={ghost} onClick={() => (setEditing(false), setUrl(""))}>
+            Cancel
+          </button>
+          <span className="basis-full pl-5 text-[11px] text-subtle">A Slack or Discord incoming webhook, or any HTTPS URL. It gets the request&apos;s id, author, message and key names, never values. roll keeps the URL sealed.</span>
+        </form>
+      ) : env.notify ? (
+        <span className="flex flex-wrap items-center gap-1.5">
+          <Bell className="size-3.5 text-accent" /> New change requests are announced to <span className="font-mono text-soft">{env.notify}</span>
+          <button className={`${ghost} h-6`} onClick={() => setEditing(true)}>
+            Change
+          </button>
+          <button className={`${ghost} h-6`} disabled={busy} onClick={() => save(null)}>
+            Stop notifying
+          </button>
+        </span>
+      ) : (
+        <button className={`${ghost} -ml-2 h-6`} onClick={() => setEditing(true)}>
+          <Bell className="size-3.5" /> Notify on new change requests…
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** How long old values stay readable: the sweeper destroys older versions' values after that (never a current one). */
+function Retention({ onError }: { onError: (e: string) => void }) {
+  const { api, historyDays, reloadEnvs } = useSecrets();
+  const [days, setDays] = useState(historyDays?.toString() ?? "");
+  const [seen, setSeen] = useState(historyDays);
+  if (seen !== historyDays) {
+    setSeen(historyDays);
+    setDays(historyDays?.toString() ?? "");
+  }
+  const [busy, setBusy] = useState(false);
+  const n = Number(days);
+  const ok = days === "" || (Number.isInteger(n) && n >= 1 && n <= 3650);
+  const next = days === "" ? null : n;
+  return (
+    <Section title="Old values" aside={<span className="text-[11.5px] text-subtle">For every environment of the project.</span>}>
+      <form
+        className="flex flex-wrap items-center gap-2 text-[12.5px]"
+        onSubmit={async (ev) => {
+          ev.preventDefault();
+          if (!ok || next === historyDays) return;
+          setBusy(true);
+          try {
+            await api.setHistoryDays(next);
+            reloadEnvs();
+          } catch (e) {
+            onError(errorText(e));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <label className="flex items-center gap-2">
+          Keep old values for
+          <input value={days} onChange={(ev) => setDays(ev.target.value.trim())} inputMode="numeric" placeholder="∞" aria-label="Days to keep old values" className={`${sized} h-7 w-20 text-center font-mono`} />
+          days
+        </label>
+        <span className="text-[11.5px] text-subtle">{days === "" ? "(blank: forever)" : ""}</span>
+        {next !== historyDays && ok && (
+          <button type="submit" className={button} disabled={busy}>
+            {busy ? "Saving…" : next === null ? "Keep forever" : "Save"}
+          </button>
+        )}
+        {!ok && <span className="text-[11px] text-danger">1–3650 days, or blank for forever</span>}
+      </form>
+      <p className="mt-1.5 text-[11.5px] text-muted">
+        After that, an old version&apos;s value is destroyed for good: history still shows the change, but it can&apos;t be revealed or rolled back to. A secret&apos;s current value is never removed.
+      </p>
+    </Section>
   );
 }
 

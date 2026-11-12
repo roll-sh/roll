@@ -28,6 +28,8 @@ type Ctx = {
   standard: Environment[];
   previews: Environment[];
   reloadEnvs: () => void;
+  /** How long old values are kept, in days (null: for good). */
+  historyDays: number | null;
   search: Search;
   /** Goes to the surface with these search params (`env`, `path`, `view`, `key`, `tab`…). */
   go: (next: Search, replace?: boolean) => void;
@@ -76,6 +78,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
     standard,
     previews,
     reloadEnvs: overview.reload,
+    historyDays: overview.data?.history_days ?? null,
     search,
     go: (next, replace) => navigate({ href: secretsHref(project.id, next), replace }),
     resourceName: (l) => ws.inventory.get(resourceKey({ kind: l.kind as never, ref: l.ref }))?.name ?? l.ref,
