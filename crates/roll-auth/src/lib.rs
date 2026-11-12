@@ -121,6 +121,12 @@ impl fmt::Debug for Grant {
     }
 }
 
+/// In an allowed grant's request: the client's address as the gate saw it. Requests a product
+/// makes on the caller's behalf (roll code's agents relay) carry it on, so an IP allowlist holds
+/// for them too. Set only by the gate: extensions never come from the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientIp(pub std::net::IpAddr);
+
 /// Prefixes of the tokens a grant opens requests with: scoped tokens and OAuth access tokens.
 pub const GRANT_PREFIXES: [&str; 2] = ["rlt_", "rlo_"];
 

@@ -259,6 +259,9 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
               {describeRule(x, projectName)}
             </li>
           ))}
+          <li>
+            <TryIt grant={g.id} />
+          </li>
           <li className="pt-1">
             <Link href={`/dashboard/access/audit?grant=${encodeURIComponent(g.id)}`} className="text-[12px] text-accent hover:underline">
               What it did →
@@ -313,5 +316,40 @@ function EditGrant({ g, onDone }: { g: Grant; onDone: () => Promise<void> }) {
       </div>
       <p className="text-[12px] text-subtle">Changes take effect on the token&apos;s next request.</p>
     </div>
+  );
+}
+
+/** "Could this token…?": the evaluator's decision for a method and path, without running it. */
+function TryIt({ grant }: { grant: string }) {
+  const [method, setMethod] = useState("DELETE");
+  const [path, setPath] = useState("");
+  const [answer, setAnswer] = useState<string | null>(null);
+  const run = async () => {
+    try {
+      const r = await accessApi.check(method, path.trim(), { token: grant });
+      setAnswer(r.why ?? `${r.decision}: ${r.action ?? ""} ${r.product ?? ""} ${r.resource ?? ""} (${r.route ?? ""})`);
+    } catch (e) {
+      setAnswer(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <form
+      className="flex flex-wrap items-center gap-1.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (path.trim()) void run();
+      }}
+    >
+      <select value={method} onChange={(e) => setMethod(e.target.value)} className={`${input} font-mono text-[11px]`} aria-label="Method">
+        {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => (
+          <option key={m}>{m}</option>
+        ))}
+      </select>
+      <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/v1/projects/prj_…" className={`${input} min-w-0 flex-1 font-mono text-[11px]`} aria-label="Path" />
+      <button type="submit" className={btn}>
+        Could it?
+      </button>
+      {answer && <span className="w-full font-mono text-[11px] text-muted">{answer}</span>}
+    </form>
   );
 }

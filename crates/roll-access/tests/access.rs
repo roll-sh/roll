@@ -141,6 +141,10 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(d.call(&token, Method::POST, "/v1/endpoints/ep_pa/query", Some(json!({ "sql": "drop table t" }))).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&token, Method::POST, "/v1/endpoints/ep_pb/query", Some(json!({ "sql": "select 1", "read_only": true }))).await.0, StatusCode::FORBIDDEN);
 
+    // It can ask what it may do without doing it.
+    let (_, c) = d.call(&token, Method::POST, "/v1/access/check", Some(json!({ "method": "DELETE", "path": "/v1/projects/pa" }))).await;
+    assert_eq!((c["decision"].as_str(), c["action"].as_str()), (Some("deny"), Some("delete")), "{c}");
+
     // The operator's routes stay the operator's, and the token's own info is its own.
     let (s, me) = d.call(&token, Method::GET, "/v1/access", None).await;
     assert_eq!((s, me["grant"]["id"].as_str()), (StatusCode::OK, Some(grant.as_str())));

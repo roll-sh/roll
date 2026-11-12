@@ -326,6 +326,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | --- | --- | --- |
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
+| `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets) |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |

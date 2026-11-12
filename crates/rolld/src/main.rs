@@ -467,7 +467,12 @@ async fn run() -> anyhow::Result<()> {
         None => Vec::new(),
     };
     let mcp_config = roll_mcp::Config { api_url: access::api_url(&args), web_url: args.web_url.clone(), locked: auth.enforcing(), products: mcp_products, access: Some(access.clone()) };
-    let mcp = roll_mcp::routes(auth.layer(router.clone()), mcp_config, tool_sets);
+    let gated = auth.layer(router.clone());
+    // roll code's agents relay acts on a caller's behalf through the gate too.
+    if let Some(c) = &code {
+        c.code.relay_through(gated.clone());
+    }
+    let mcp = roll_mcp::routes(gated, mcp_config, tool_sets);
     router = router.merge(mcp);
     // The operator token in front of every product's routes (auth.rs); `/v1/info`, OAuth's public
     // endpoints and the 404s of products that are off answer before it. The gated router merges

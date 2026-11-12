@@ -161,6 +161,13 @@ export const accessApi = {
   revoke: (id: string) => call<Grant>("DELETE", token(id)),
   /** A new secret, the same rules; the old one stops at once. Shown this once. */
   rotate: (id: string) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`),
+  /** What the evaluator would decide for a request, without running it (`token`: the operator asks for one). */
+  check: (method: string, path: string, opts: { body?: unknown; token?: string } = {}) =>
+    call<{ decision: "allow" | "ask" | "deny"; product?: string; action?: Action; resource?: string | null; route?: string; why?: string }>(
+      "POST",
+      "/v1/access/check",
+      { method, path, ...opts },
+    ),
   approvals: (state?: ApprovalState) => call<Approval[]>("GET", `/v1/access/approvals${query({ state })}`),
   approve: (id: string) => call<Approval>("POST", `${approval(id)}/approve`),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),

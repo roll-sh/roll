@@ -148,6 +148,7 @@ previews are listed once those products are on.
 | --- | --- | --- |
 | `access_whoami` | The connection's identity: the operator, or the token or OAuth connection and the rules it has. | `GET /v1/access` |
 | `access_wait_approval` | Wait (up to 55 s) for a person to decide an approval this connection asked for; then call the original tool again with approval. | `GET /v1/access/approvals/{approval_id}` |
+| `access_check` | Whether this connection may make a request (allow, ask or deny), and as which action on what, without making it. | `POST /v1/access/check` |
 | `access_list_approvals` | Approvals, newest first: pending ones wait for the operator. | `GET /v1/access/approvals` |
 | `access_audit_log` | Every request made with a token and every MCP tool call, newest first. | `GET /v1/access/audit` |
 | `workspace_list_projects` | Workspace projects, each with the resources on its canvas (kind, ref, position). | `GET /v1/workspace/projects` |
@@ -259,28 +260,24 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **The agents relay through the gate.** `roll code`'s relay (`agents/code.rs`) calls roll code's
-   own router for `thread.publish`, landing, `link_work` and `take_work`; with a scoped token those
-   fail closed today (401). Route them through rolld's gated router, so each is decided as the same
-   request would be, and check a command that names a repo against the token's `code` rules.
-2. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
+1. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
    and tools from their contracts; check them against the merged routes, and wire previews'
    `Store::environment_of` (a Postgres branch's environment comes from its `{branch}`) and search's
    `resolve_id` (async: through the runtime handle). Whichever of secrets and this lands second
    makes `Secrets::caller` read `roll_auth::Grant` first.
-3. **Approvals in chat ops:** pending approvals posted to the owner's Slack/Discord install with
+2. **Approvals in chat ops:** pending approvals posted to the owner's Slack/Discord install with
    approve/deny buttons (docs/code/chatops.md). Browser notifications are done.
-4. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
+3. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
    reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
    branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
-5. **Storage on a fleet:** check the operator's marker (and a grant's) survives the hop to the
+4. **Storage on a fleet:** check the operator's marker (and a grant's) survives the hop to the
    metadata owner, as tasks now does.
-6. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
+5. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
    the public-only client.
-7. **`POST /v1/access/check`:** the decision for a method and path without running it (the builder's
+6. **`POST /v1/access/check`:** the decision for a method and path without running it (the builder's
    "test this token").
-8. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
+7. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
    `deploy`.
-9. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
-10. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
+8. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+9. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
     last day in the list.

@@ -505,6 +505,7 @@ static ROWS: &[Row] = &[
     // ── access (this crate) ──
     row("GET", "/v1/access", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/catalog", "access", R, Tgt::AnyGrant),
+    row("POST", "/v1/access/check", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/tokens", "access", R, Tgt::Product),
     row("POST", "/v1/access/tokens", "access", ADMIN, Tgt::Product),
     row("GET", "/v1/access/tokens/{id}", "access", R, Tgt::Product),
@@ -541,6 +542,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/projects/{id}/branches/{branch}/history", "postgres", R, one(PG, "postgres-project")),
     // Rewinds the branch in place (the old state is kept as a branch, but clients see it gone).
     row("POST", "/v1/projects/{id}/branches/{branch}/restore", "postgres", D, one(PG, "postgres-project")),
+    // Re-branches from the parent in place (roll previews): the branch's own writes are gone.
+    row("POST", "/v1/projects/{id}/branches/{branch}/reset", "postgres", D, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/backup", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/evict", "postgres", W, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches/{branch}/replicas", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),

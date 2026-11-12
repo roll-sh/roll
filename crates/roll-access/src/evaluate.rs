@@ -58,6 +58,9 @@ pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
     if let Some(c) = req.extensions().get::<McpCall>() {
         return c.ip;
     }
+    if let Some(roll_auth::ClientIp(ip)) = req.extensions().get::<roll_auth::ClientIp>() {
+        return Some(*ip);
+    }
     if trust_forwarded_for
         && let Some(ip) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).and_then(|v| v.trim().parse().ok())
     {
@@ -84,7 +87,7 @@ fn invalid_token(access: &Access) -> Response {
 }
 
 /// What a request is about, from its row and path.
-fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap) -> Target {
+pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap) -> Target {
     let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let product = row.product.to_string();
     // Storage acts in the account a request names; bucket names repeat across accounts, so a
@@ -123,7 +126,7 @@ fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option
     }
 }
 
-fn describe(t: &Target) -> Option<String> {
+pub(crate) fn describe(t: &Target) -> Option<String> {
     match t {
         Target::One(r) => r.id.clone(),
         Target::Create { project: Some(p), .. } => Some(format!("new in {p}")),
@@ -308,6 +311,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         parts.headers.insert("x-roll-agent", v);
     }
     parts.extensions.insert(roll_auth::Operator);
+    if let Some(ip) = ctx.ip {
+        parts.extensions.insert(roll_auth::ClientIp(ip));
+    }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),

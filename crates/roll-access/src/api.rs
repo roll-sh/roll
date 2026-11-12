@@ -21,6 +21,7 @@ pub fn router(access: Arc<Access>) -> Router {
     Router::new()
         .route("/v1/access", get(me))
         .route("/v1/access/catalog", get(catalog_view))
+        .route("/v1/access/check", post(check))
         .route("/v1/access/tokens", get(list).post(create))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
@@ -114,6 +115,55 @@ pub fn presets() -> Value {
         },
         { "id": "full", "name": "Full access", "description": "Everything the operator can do, until it expires.", "rules": [all(json!({ "read": "allow", "write": "allow", "delete": "allow", "reveal": "allow", "deploy": "allow", "admin": "allow" }))] },
     ])
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Check {
+    method: String,
+    /// The path with its query, as a request would send it (`/v1/projects/prj_x?days=7`).
+    path: String,
+    #[serde(default)]
+    body: Option<Value>,
+    /// Whose decision (the operator only; a grant checks itself).
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// What the evaluator would decide for a request, without running it: the builder's "test this
+/// token", and an agent asking before it tries. Same catalogue and resolvers as a real request;
+/// a nested or catch-all route is matched by its path, as the gate matches it.
+async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Result<Json<Value>> {
+    let scope = match (who(&a, &ext)?, &c.token) {
+        (Who::Grant(g), None) => g.scope.as_ref().clone(),
+        (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
+        (Who::Operator, Some(id)) => {
+            let id = id.clone();
+            blocking(a.clone(), move |a| a.store.get(&id)).await?.rules
+        }
+        (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
+    };
+    let method = c.method.to_ascii_uppercase();
+    let uri: axum::http::Uri = c.path.parse().map_err(|_| Error::BadRequest("path isn't a request path".into()))?;
+    let Some(found) = catalog::by_path(&method, uri.path()) else {
+        return Ok(Json(json!({ "decision": "deny", "why": "no grant can call this route: it's the operator's" })));
+    };
+    let row = found.row;
+    let params = found.params.unwrap_or_default();
+    let (a2, q) = (a.clone(), uri.query().map(str::to_string));
+    let params2 = params.clone();
+    let target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &axum::http::HeaderMap::new()))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    let action = row.action(&method, &params, c.body.as_ref());
+    let outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    Ok(Json(json!({
+        "decision": outcome,
+        "product": row.product,
+        "action": action,
+        "resource": crate::evaluate::describe(&target),
+        "route": format!("{} {}", row.method, row.route),
+    })))
 }
 
 async fn list(State(a): S) -> crate::Result<Json<Value>> {

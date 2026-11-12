@@ -154,7 +154,7 @@ pub fn router(code: Arc<Code>) -> Router {
     }
     // The agents relay calls the rest of the API on a caller's behalf, like MCP tools. It's a
     // request extension on the outer router, so `all` itself never holds it (no cycle).
-    let calls = crate::agents::ApiRouter(all.clone());
+    let calls = crate::agents::ApiRouter(all.clone(), code.relay_api.clone());
     let all = all.layer(axum::Extension(calls));
     // MCP tools call the rest of the API on the caller's behalf (so they're routed the same way).
     let mcp = crate::mcp::routes(code.clone(), all.clone()).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
@@ -827,6 +827,14 @@ async fn events(State(code): S, caller: Caller, parts: Parts, Path((owner, repo)
         Ok::<_, std::convert::Infallible>(SseEvent::default().event(kind).data(data.to_string()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
+}
+
+impl Code {
+    /// Send the agents relay's calls on a caller's behalf through `router` (rolld's whole API
+    /// behind its gate), once, before serving.
+    pub fn relay_through(&self, router: axum::Router) {
+        let _ = self.relay_api.set(router);
+    }
 }
 
 impl Code {

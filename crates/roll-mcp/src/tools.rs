@@ -270,6 +270,15 @@ static TOOLS: &[Tool] = &[
     // ── access ──
     t("access_whoami", "Who am I", "The connection's identity: the operator, or the token or OAuth connection and the rules it has.", "access", "GET", "/v1/access", &[]),
     t("access_wait_approval", "Wait for an approval", "Wait (up to 55 s) for a person to decide an approval this connection asked for; then call the original tool again with approval.", "access", "GET", "/v1/access/approvals/{approval_id}", &[req("approval_id", "The approval id (apr_…)"), q("wait", Ty::Int, "Seconds to wait (at most 55; default 55)")]),
+    t(
+        "access_check",
+        "Check before acting",
+        "Whether this connection may make a request (allow, ask or deny), and as which action on what, without making it.",
+        "access",
+        "POST",
+        "/v1/access/check",
+        &[breq("method", Ty::Str, "HTTP method, e.g. DELETE"), breq("path", Ty::Str, "The API path, e.g. /v1/projects/prj_x"), b("body", Ty::Obj, "The JSON body, for SQL, Redis or CQL")],
+    ),
     t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
     // ── workspace ──
