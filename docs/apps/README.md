@@ -477,8 +477,11 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **Jobs and the shell in the dashboard**: run a command, its output and history; a terminal
-   (xterm.js) on the shell route.
+2. **A terminal in the dashboard** (xterm.js): browsers can't send the operator token on a
+   WebSocket, so the dashboard's shell is HTTP sessions on the owner, as the agents' terminals
+   are: `POST …/shell/sessions` (a TTY exec), its screen over SSE (fetch, with the token), keys and
+   resizes as POSTs, closed on `DELETE` or idle. The CLI keeps the WebSocket. (Jobs are in the
+   dashboard: the Jobs tab runs a command, streams its output, lists the recent ones.)
 3. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics

@@ -330,10 +330,15 @@ export const appsApi = {
  * so the caller drops what it had. Returns the function that stops it.
  */
 export function followLog(
-  kind: { runtime: { service: string; env: string } } | { build: { service: string; env: string; deployment: string } },
+  kind: { runtime: { service: string; env: string } } | { build: { service: string; env: string; deployment: string } } | { job: { service: string; env: string; job: string } },
   opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },
 ): () => void {
-  const path = "runtime" in kind ? `${env(kind.runtime.service, kind.runtime.env)}/logs` : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
+  const path =
+    "runtime" in kind
+      ? `${env(kind.runtime.service, kind.runtime.env)}/logs`
+      : "job" in kind
+        ? `${env(kind.job.service, kind.job.env)}/jobs/${encodeURIComponent(kind.job.job)}/logs`
+        : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
   return streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500 })}`, {
     headers: operatorHeaders,
     onOpen: (open) => {
@@ -367,6 +372,17 @@ const DEPLOY: Record<DeployStatus, { label: string; tone: Tone }> = {
 };
 
 export const deployStatus = (s: DeployStatus) => DEPLOY[s];
+
+const RUN: Record<RunStatus, { label: string; tone: Tone }> = {
+  running: { label: "Running", tone: "busy" },
+  succeeded: { label: "Succeeded", tone: "ok" },
+  failed: { label: "Failed", tone: "error" },
+  timed_out: { label: "Timed out", tone: "error" },
+  canceled: { label: "Canceled", tone: "muted" },
+  skipped: { label: "Skipped", tone: "muted" },
+};
+
+export const runStatus = (s: RunStatus) => RUN[s];
 
 /** Still on its way: queued, building or rolling out. */
 export const isPending = (s: DeployStatus) => DEPLOY[s].tone === "busy";
