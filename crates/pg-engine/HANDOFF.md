@@ -9713,8 +9713,12 @@ permutations (intra-grant-inplace, as before), and `roll-point-update` matching.
 `10d70e555`): golden (golden_wire, golden_shuffled), wire, twophase, crash_random seeds 1-30,
 the isolation run (141/142 specs, 1823/1824 permutations) and the regress files test_setup,
 select, prepare, plancache, portals, privileges, rowsecurity, transactions, btree_index,
-insert, update against the same reference: 4530/4530 units. The verification train runs on the
-pushed head (its result follows in this section).
+insert, update against the same reference: 4530/4530 units. The verification train on origin's
+`d6e642356` (this round's commits and one after them): release crate tests, Clippy (19
+warnings), crash_random seeds 1-30 x 4, the power stage (power_cut, seeds 1-30 x 4 with
+CRASH_POWER=1, with and without CRASH_ASYNC=1), debug crate tests, the full regression suite
+(newly differing units: 0), isolation 1647/1648 permutations, pg_dump_tap 14609 passed, 0
+failed: all passed.
 
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
