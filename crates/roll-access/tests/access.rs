@@ -205,6 +205,14 @@ async fn escalation_paths_are_shut() {
     assert_eq!(d.call(&admin, Method::PUT, &pull, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::OK);
     d.workspace.remove(roll_workspace::Scope::All, &a.id, roll_workspace::Kind::Postgres, "pb").unwrap();
 
+    // Each user places resources in their own projects: a token for one user's project reaches
+    // what's in it, even when the operator's project has it too.
+    let mine = d.workspace.create("usr_alice", "mine", "", None).unwrap();
+    d.workspace.place(roll_workspace::Scope::All, &mine.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
+    let (alice, _) = d.token(json!([{ "product": "postgres", "resources": [{ "project": mine.id }], "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, list) = d.call(&alice, Method::GET, "/v1/projects", None).await;
+    assert_eq!((s, ids(&list)), (StatusCode::OK, vec!["pa"]));
+
     // A narrower allow doesn't turn an ask for every project into a free full list.
     let (mixed, _) = d
         .token(json!([{ "product": "postgres", "resources": [{ "project": a.id }], "actions": { "read": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "read": "ask" } }]), json!({}))
