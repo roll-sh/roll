@@ -86,6 +86,13 @@ export function ProjectPreviews({
                   <>
                     {usage.previews} {usage.previews === 1 ? "preview" : "previews"} · {money(usage.month_to_date_usd)} this month · {money(usage.sleeping_usd_month)}/mo asleep ·{" "}
                     {money(usage.active_usd_hour)}/h active
+                    {!!usage.max_usd_month && (
+                      <span className={(usage.spent_usd_month ?? 0) >= usage.max_usd_month * 0.8 ? "text-danger" : undefined}>
+                        {" "}
+                        · {money(usage.spent_usd_month ?? 0)} of the {money(usage.max_usd_month)} budget
+                        {(usage.spent_usd_month ?? 0) >= usage.max_usd_month ? ": new previews wait" : ""}
+                      </span>
+                    )}
                   </>
                 ) : (
                   " "

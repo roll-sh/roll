@@ -539,5 +539,5 @@ Ranked by what a person notices first. Done so far:
    drop it with the preview.
 4. **Live logs as a stream** (`…/logs?follow=1`, SSE) rather than the dashboard's 3-second
    re-read.
-5. **A cost alert**: tell the project's owners when its previews pass a share of
-   `max_usd_month`.
+5. **A cost alert outside the dashboard**: tell the project's owners (webhook, chat) when its
+   previews pass 80% of `max_usd_month`; the Previews tab shows it today.

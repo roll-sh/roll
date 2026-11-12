@@ -221,12 +221,18 @@ async fn usage(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json
             total.add(&e.store.view(r)?.cost);
         }
         let t = total.rounded();
+        // This month against the budget: live previews and the ones deleted this month.
+        let now = e.store.now_ms()?;
+        let spent = e.store.spent(&project, crate::store::month_start(now))? + t.month_to_date_usd;
+        let budget = e.store.settings(&project)?.max_usd_month;
         Ok(json!({
             "previews": n,
             "sleeping_usd_month": t.sleeping_usd_month,
             "active_usd_hour": t.active_usd_hour,
             "month_to_date_usd": t.month_to_date_usd,
             "bytes": t.bytes,
+            "spent_usd_month": (spent * 1e6).round() / 1e6,
+            "max_usd_month": budget,
         }))
     })
     .await

@@ -124,6 +124,10 @@ export interface PreviewUsage {
   active_usd_hour: number;
   month_to_date_usd: number;
   bytes: number;
+  /** This month, deleted previews included (what the budget counts). */
+  spent_usd_month?: number;
+  /** The project's monthly budget for previews, USD (0: no cap). */
+  max_usd_month?: number;
 }
 
 export type PreviewSource = { branch: string; change?: never } | { change: string; branch?: never };
