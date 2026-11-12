@@ -232,7 +232,22 @@ pub fn lock_mode(m: RowMark) -> RowLockMode {
 /// unique indexes without expressions or a predicate, as a foreign key could reference.
 /// An UPDATE changing one locks its row FOR UPDATE, else FOR NO KEY UPDATE.
 pub fn key_columns(t: &Table, cat: &crate::catalog::Catalog) -> Vec<usize> {
-    let mut v: Vec<usize> = t.pkey.clone().unwrap_or_default();
+    let mut v: Vec<usize> = Vec::new();
+    any_key_column(t, cat, |i| {
+        if !v.contains(&i) {
+            v.push(i);
+        }
+        false
+    });
+    v
+}
+
+/// Whether `f` holds for one of the table's key columns (`key_columns`, in its order,
+/// possibly more than once): an UPDATE asks of every row whether it changes one.
+pub fn any_key_column(t: &Table, cat: &crate::catalog::Catalog, mut f: impl FnMut(usize) -> bool) -> bool {
+    if t.pkey.iter().flatten().any(|&i| f(i)) {
+        return true;
+    }
     for oid in t.indexes.iter().chain(t.pkey_index.iter()) {
         let Some(ix) = cat.index(*oid) else { continue };
         if !ix.unique
@@ -243,13 +258,13 @@ pub fn key_columns(t: &Table, cat: &crate::catalog::Catalog) -> Vec<usize> {
         }
         for c in &ix.columns {
             if let crate::catalog::IndexKey::Column(i) = c.key
-                && !v.contains(&i)
+                && f(i)
             {
-                v.push(i);
+                return true;
             }
         }
     }
-    v
+    false
 }
 
 pub fn wait_policy(w: Wait) -> WaitPolicy {
@@ -514,12 +529,11 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
     if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {
         return epq_scan(s, test.as_ref(), ctx);
     }
-    if let Some(v) = ctx.catalog().views.get(&s.table.oid)
-        && !v.populated
-    {
+    // (The catalog by reference: a count every session's statements write.)
+    if let Some(name) = ctx.with_catalog(|cat| cat.views.get(&s.table.oid).filter(|v| !v.populated).map(|v| v.name.clone())) {
         return Err(Error::new(
             code::OBJECT_NOT_IN_PREREQUISITE_STATE,
-            format!("materialized view \"{}\" has not been populated", v.name),
+            format!("materialized view \"{name}\" has not been populated"),
         )
         .hint("Use the REFRESH MATERIALIZED VIEW command."));
     }
@@ -5770,12 +5784,11 @@ impl Node for ScanNode {
     fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {
         // `open_scan`'s check, then its ranges and binding (`rescan_index`'s).
         let s: &ScanPlan = &self.plan;
-        if let Some(v) = ctx.catalog().views.get(&s.table.oid)
-            && !v.populated
-        {
+        // (The catalog by reference: a count every session's statements write.)
+        if let Some(name) = ctx.with_catalog(|cat| cat.views.get(&s.table.oid).filter(|v| !v.populated).map(|v| v.name.clone())) {
             return Err(Error::new(
                 code::OBJECT_NOT_IN_PREREQUISITE_STATE,
-                format!("materialized view \"{}\" has not been populated", v.name),
+                format!("materialized view \"{name}\" has not been populated"),
             )
             .hint("Use the REFRESH MATERIALIZED VIEW command."));
         }

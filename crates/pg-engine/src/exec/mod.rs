@@ -1182,6 +1182,16 @@ impl<'a> ExecCtx<'a> {
             .unwrap_or_else(|| self.txn.borrow().catalog())
     }
 
+    /// `f` of `catalog()`, without a reference of its own (a count every session's
+    /// statements write): `f` runs with the transaction borrowed, so it must not borrow it
+    /// mutably.
+    pub fn with_catalog<R>(&self, f: impl FnOnce(&Arc<Catalog>) -> R) -> R {
+        match &self.catalog_snapshot {
+            Some(c) => f(c),
+            None => self.txn.borrow().with_catalog(f),
+        }
+    }
+
     /// `catalog().version`, without a reference to the catalog (`Txn::with_catalog`).
     pub fn catalog_version(&self) -> u64 {
         match &self.catalog_snapshot {

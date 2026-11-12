@@ -1928,13 +1928,19 @@ pub fn persist_estimates(db: &Database) {
 /// table's) is its session's own transaction, everything else's the running transactions'
 /// and held snapshots'.
 fn vis_for<'a>(xids: &'a Xids, table: u32, ctx: &ExecCtx) -> Vis<'a> {
-    let cat = ctx.catalog();
-    let rel = cat.tables.get(&table).or_else(|| cat.toast_owner(table).map(|(o, _)| o));
-    if rel.is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp")) {
+    if temp_rel(table, ctx) {
         Vis::temp(xids, ctx.txn.borrow().xid_if_assigned())
     } else {
         Vis::new(xids)
     }
+}
+
+/// Whether relation `table` is a temporary table (or a temporary table's TOAST table).
+fn temp_rel(table: u32, ctx: &ExecCtx) -> bool {
+    ctx.with_catalog(|cat| {
+        let rel = cat.tables.get(&table).or_else(|| cat.toast_owner(table).map(|(o, _)| o));
+        rel.is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+    })
 }
 
 /// `vis_for` of a table at hand: a temporary one's versions are its session's alone.
@@ -2548,11 +2554,7 @@ impl Fetcher {
     pub fn new(table: u32, ctx: &ExecCtx) -> Option<Fetcher> {
         let db = ctx.sess.db.clone();
         let (visible, hints) = with_read_side(&db, table, true, |r, _| (r.watch(), r.prune_hints()))?;
-        let cat = ctx.catalog();
-        let rel = cat.tables.get(&table).or_else(|| cat.toast_owner(table).map(|(o, _)| o));
-        let temp = rel
-            .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
-            .then(|| ctx.txn.borrow().xid_if_assigned());
+        let temp = temp_rel(table, ctx).then(|| ctx.txn.borrow().xid_if_assigned());
         Some(Fetcher { table, db, temp, visible, hints, last: None })
     }
 
@@ -2873,11 +2875,8 @@ impl Kills {
                 None => None,
             },
         };
-        let cat = ctx.catalog();
-        let temp = cat
-            .tables
-            .get(&table)
-            .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+        let temp = ctx
+            .with_catalog(|cat| cat.tables.get(&table).is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp")))
             .then(|| ctx.txn.borrow().xid_if_assigned());
         let strip = |k: &[u8]| k.strip_prefix(prefix).map(<[u8]>::to_vec);
         let ranges = ranges.iter().map(|(lo, hi)| (strip(lo), strip(hi))).collect();

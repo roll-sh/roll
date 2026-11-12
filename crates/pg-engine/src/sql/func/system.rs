@@ -395,7 +395,11 @@ fn seq_by_oid(cat: &Catalog, oid: u32) -> Result<Arc<crate::catalog::Sequence>> 
 }
 
 fn seq_arg(v: &Value, c: &FnCtx) -> Result<Arc<crate::catalog::Sequence>> {
-    let cat = c.exec.catalog();
+    // (The catalog by reference: nextval runs for every row an identity column fills.)
+    c.exec.with_catalog(|cat| seq_arg_in(v, cat, c))
+}
+
+fn seq_arg_in(v: &Value, cat: &crate::catalog::Catalog, c: &FnCtx) -> Result<Arc<crate::catalog::Sequence>> {
     let oid = match v {
         Value::Oid(o) => *o,
         Value::Text(t) => {
@@ -415,7 +419,7 @@ fn seq_arg(v: &Value, c: &FnCtx) -> Result<Arc<crate::catalog::Sequence>> {
         }
         v => v.as_i64().unwrap_or(0) as u32,
     };
-    seq_by_oid(&cat, oid)
+    seq_by_oid(cat, oid)
 }
 
 /// nextval's lock on the sequence (lock_and_open_sequence: ROW EXCLUSIVE), and the
@@ -432,10 +436,11 @@ fn lock_sequence(
         WaitPolicy::Block,
         &|| name.clone(),
     )?;
-    let cat = txn.catalog();
+    // (Looked up again only when the lock's wait let a catalog change in.)
+    let version = txn.catalog_version();
     drop(txn);
-    if cat.version != c.exec.catalog().version
-        && let Ok(fresh) = seq_by_oid(&cat, seq.oid)
+    if version != c.exec.catalog_version()
+        && let Ok(fresh) = c.exec.txn.borrow().with_catalog(|cat| seq_by_oid(cat, seq.oid))
     {
         return Ok(fresh);
     }
@@ -444,10 +449,10 @@ fn lock_sequence(
 
 /// A sequence privilege check: any of `privs` will do.
 fn seq_priv(seq: &crate::catalog::Sequence, c: &FnCtx, privs: u32) -> Result<()> {
-    let cat = c.exec.catalog();
-    let (held, _) = cat
-        .rel_mask(seq.oid, c.exec.current_user(), c.exec.db_owner())
-        .unwrap_or((0, 0));
+    let (held, _) = c.exec.with_catalog(|cat| {
+        cat.rel_mask(seq.oid, c.exec.sess.current_role(cat), c.exec.sess.db_owner(cat))
+            .unwrap_or((0, 0))
+    });
     if held & privs == 0 {
         bail!(
             INSUFFICIENT_PRIVILEGE,

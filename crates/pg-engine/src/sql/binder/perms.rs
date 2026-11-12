@@ -393,11 +393,18 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
                 .extend(p.select_cols.iter().copied());
         }
     }
-    let cat = ctx.catalog();
-    let me = ctx.current_user();
+    // (The catalog by reference: a count every session's statements write, three times
+    // a statement with the user and the database owner.)
+    ctx.with_catalog(|cat| check_privileges(perms, cat, ctx))?;
+    check_xact_read_only(perms, ctx)
+}
+
+/// `check`'s privileges of the relations and functions, over `cat`.
+fn check_privileges(perms: &Perms, cat: &crate::catalog::Catalog, ctx: &ExecCtx) -> Result<()> {
+    let me = ctx.sess.current_role(cat);
     // (Looked up only when a check needs it: a superuser's need none.)
     let owner_cell = std::cell::OnceCell::new();
-    let db_owner = || *owner_cell.get_or_init(|| ctx.db_owner());
+    let db_owner = || *owner_cell.get_or_init(|| ctx.sess.db_owner(cat));
     for p in &perms.rels {
         let user = p.as_user.unwrap_or(me);
         if cat.is_superuser(user) {
@@ -416,7 +423,7 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
             continue;
         }
         let denied = || {
-            let (word, name) = rel_word(&cat, p.oid);
+            let (word, name) = rel_word(cat, p.oid);
             Error::new(
                 code::INSUFFICIENT_PRIVILEGE,
                 format!("permission denied for {word} {name}"),
@@ -504,7 +511,7 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
             ));
         }
     }
-    check_xact_read_only(perms, ctx)
+    Ok(())
 }
 
 /// ExecCheckXactReadOnly: in a read-only transaction, a statement needing more than SELECT

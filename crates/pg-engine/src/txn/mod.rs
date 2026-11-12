@@ -1330,9 +1330,17 @@ impl Txn {
         self.loading = None;
         self.held = None;
         if self.catalog.is_none() {
-            let c = self.db.catalog();
-            self.read_catalog = Some(c.clone());
-            self.stmt_catalog = Some(c);
+            // (Unchanged since the last statement, as it mostly is: no new references to it,
+            // counts every session's statements write.)
+            let rc = &self.read_catalog;
+            if let Some(now) = self.db.with_catalog(|now| (!rc.as_ref().is_some_and(|rc| Arc::ptr_eq(rc, now))).then(|| now.clone())) {
+                self.read_catalog = Some(now);
+            }
+            if let Some(rc) = &self.read_catalog
+                && !self.stmt_catalog.as_ref().is_some_and(|s| Arc::ptr_eq(s, rc))
+            {
+                self.stmt_catalog = Some(rc.clone());
+            }
         }
         self.stmt_snapshot = needs_snapshot;
         // A transaction snapshot is taken by the first statement that needs one.

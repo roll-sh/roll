@@ -397,11 +397,12 @@ pub fn check_replica_identity(
     cmd: crate::catalog::pubsub::RiCmd,
     ctx: &ExecCtx,
 ) -> Result<()> {
-    let cat = ctx.catalog();
-    if cat.publications.is_empty() {
-        return Ok(());
-    }
-    cat.check_replica_identity(t, cmd)
+    ctx.with_catalog(|cat| {
+        if cat.publications.is_empty() {
+            return Ok(());
+        }
+        cat.check_replica_identity(t, cmd)
+    })
 }
 
 /// ExecBuildSlotPartitionKeyDescription: whether the user may see the partition key's
@@ -3978,7 +3979,7 @@ impl InsertNode {
         // (ExecutorStart: es_output_cid, which the next command moves past.)
         ctx.txn.borrow_mut().output_cid();
         let rules = &plan.rules;
-        if let Some(e) = ctx.catalog().fdw_modify_error(&rules.table, "insert into") {
+        if let Some(e) = ctx.with_catalog(|cat| cat.fdw_modify_error(&rules.table, "insert into")) {
             return Err(e);
         }
         if !rules.view
@@ -5049,9 +5050,8 @@ impl UpdateNode {
             for m in &plan.members {
                 check_replica_identity(&m.rules.table, crate::catalog::pubsub::RiCmd::Update, ctx)?;
             }
-            let cat = ctx.catalog();
             let tables = std::iter::once(&plan.rules.table).chain(plan.members.iter().map(|m| &m.rules.table));
-            if let Some(e) = tables.filter_map(|t| cat.fdw_modify_error(t, "update")).next() {
+            if let Some(e) = ctx.with_catalog(|cat| tables.filter_map(|t| cat.fdw_modify_error(t, "update")).next()) {
                 return Err(e);
             }
         }
@@ -5520,8 +5520,7 @@ impl Node for UpdateNode {
             }
             // heap_update: changing a key column takes the row FOR UPDATE (what FOR KEY
             // SHARE lockers, foreign key checks among them, conflict with).
-            let keys = crate::exec::scan::key_columns(&t, &ctx.catalog());
-            if keys.iter().any(|&i| old.get(i) != new.get(i)) {
+            if ctx.with_catalog(|cat| crate::exec::scan::any_key_column(&t, cat, |i| old.get(i) != new.get(i))) {
                 lock_row_mode(&t, &dkey, RowLockMode::Update, Wait::Block, Xltw::Update, ctx)?;
             }
             // A row leaving its partition moves through the partitioned table updated. (Not
