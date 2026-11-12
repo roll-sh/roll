@@ -283,7 +283,7 @@ fn fire(rules: &TableRules, mut after: Vec<AfterRow>, event: u16, set_cols: &[us
 pub fn insert(tg: &Target, row: Row, ctx: &ExecCtx) -> Result<()> {
     let rules = &tg.rules;
     let all: Vec<usize> = (0..row.len()).collect();
-    let _target = dml::DmlTarget::push(rules.table.clone(), &rules.table, &[]);
+    let _target = dml::DmlTarget::push(rules.table.clone(), []);
     match &tg.route {
         None => {
             let mut after = Vec::new();
@@ -310,7 +310,7 @@ fn fire_routed(routing: &PartRouting, routed: Vec<(usize, AfterRow)>, ctx: &Exec
 /// `set_cols` the publisher sent (UPDATE OF triggers).
 pub fn update(rules: &TableRules, dkey: &[u8], old: Row, new: Row, set_cols: &[usize], search: &[Value], ctx: &ExecCtx) -> Result<()> {
     let t = &rules.table;
-    let _target = dml::DmlTarget::push(t.clone(), t, set_cols);
+    let _target = dml::DmlTarget::push(t.clone(), set_cols.iter().copied());
     let mut new = new;
     if trigger::any(&rules.triggers, true, true, tt::UPDATE, ctx) {
         match trigger::before_row(&rules.triggers, t, tt::UPDATE, Some(&old), new, set_cols, ctx)? {

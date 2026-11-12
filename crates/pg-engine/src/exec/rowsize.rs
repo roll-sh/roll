@@ -28,7 +28,7 @@ const GIN_ARRAY_OPS: u32 = 10064;
 
 /// An upper bound on unpadded values under which no limit can be reached. Non-ASCII
 /// text uses the full sizing path because database encoding can change its byte length.
-fn surely_small(vals: &[Value]) -> bool {
+fn surely_small<'v>(vals: impl IntoIterator<Item = &'v Value>) -> bool {
     let mut n = 16usize;
     for v in vals {
         n += match v {
@@ -51,14 +51,16 @@ pub fn form_error(size: usize) -> Error {
 
 /// A btree entry's tuple size: its key values `vals` and INCLUDE columns' of `row`.
 fn btree_size(t: &Table, bix: &BoundIndex, vals: &[Value], row: &[Value], ctx: &ExecCtx) -> Option<usize> {
-    let include = bix.index.include.iter().map(|&i| row.get(i).cloned().unwrap_or(Value::Null));
-    let all: Vec<Value> = vals.iter().cloned().chain(include).collect();
-    if surely_small(&all)
+    // (Sized from the values in place: an entry is almost always surely small, and copying
+    // them first was an allocation per entry formed.)
+    let include = || bix.index.include.iter().map(|&i| row.get(i).unwrap_or(&Value::Null));
+    if surely_small(vals.iter().chain(include()))
         && !bix.keys.iter().any(|k| matches!(k.ty(), DataType::Bpchar(_)))
         && !bix.index.include.iter().any(|&i| matches!(t.columns[i].ty, DataType::Bpchar(_)))
     {
         return None;
     }
+    let all: Vec<Value> = vals.iter().chain(include()).cloned().collect();
     let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
     types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
     let fmt = ctx.fmt();

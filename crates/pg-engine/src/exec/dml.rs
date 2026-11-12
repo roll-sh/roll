@@ -27,21 +27,19 @@ use std::sync::Arc;
 thread_local! {
     /// The target of each running INSERT / UPDATE / MERGE (innermost last) and the columns
     /// it assigns: what a failing row's description may show (ExecBuildSlotValueDescription).
-    static DML_TARGETS: std::cell::RefCell<Vec<(Arc<Table>, Vec<String>)>> =
+    /// (The columns by position, inline: their names are looked up only for a failing row.)
+    static DML_TARGETS: std::cell::RefCell<Vec<(Arc<Table>, smallvec::SmallVec<[usize; 8]>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// While alive, `table` is the running statement's target, assigning columns `cols` (of
-/// `layout`, which may be a child of `table`).
+/// While alive, `table` is the running statement's target, assigning columns `cols` (its
+/// own, by position).
 pub struct DmlTarget;
 
 impl DmlTarget {
-    pub fn push(table: Arc<Table>, layout: &Table, cols: &[usize]) -> DmlTarget {
-        let names = cols
-            .iter()
-            .filter_map(|&i| layout.columns.get(i).map(|c| c.name.clone()))
-            .collect();
-        DML_TARGETS.with(|s| s.borrow_mut().push((table, names)));
+    pub fn push(table: Arc<Table>, cols: impl IntoIterator<Item = usize>) -> DmlTarget {
+        let cols = cols.into_iter().collect();
+        DML_TARGETS.with(|s| s.borrow_mut().push((table, cols)));
         DmlTarget
     }
 }
@@ -64,6 +62,7 @@ pub fn failing_row(t: &Table, row: &[Value], ctx: &ExecCtx) -> Option<String> {
     let mut vals: Vec<Value> = row.to_vec();
     let mut modified: Vec<String> = Vec::new();
     if let Some((root, cols)) = target {
+        let cols: Vec<String> = cols.iter().filter_map(|&i| root.columns.get(i).map(|c| c.name.clone())).collect();
         if root.oid == t.oid {
             modified = cols;
         } else if cat.inheritors(root.oid).contains(&t.oid) {
@@ -4674,11 +4673,7 @@ impl Node for InsertNode {
     }
 
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        let _target = DmlTarget::push(
-            self.plan.rules.table.clone(),
-            &self.plan.rules.table,
-            &self.plan.target,
-        );
+        let _target = DmlTarget::push(self.plan.rules.table.clone(), self.plan.target.iter().copied());
         if self.done {
             return Ok(None);
         }
@@ -5391,12 +5386,7 @@ impl Node for UpdateNode {
     }
 
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        let sets: Vec<usize> = self.plan.sets.iter().map(|s| s.0).collect();
-        let _target = DmlTarget::push(
-            self.plan.rules.table.clone(),
-            &self.plan.rules.table,
-            &sets,
-        );
+        let _target = DmlTarget::push(self.plan.rules.table.clone(), self.plan.sets.iter().map(|s| s.0));
         let n = self.plan.rules.table.columns.len();
         if self.done {
             return Ok(None);

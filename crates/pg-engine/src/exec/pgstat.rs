@@ -299,7 +299,8 @@ impl Trans {
 /// counts its aborted subtransactions left (applied with the rest at its end).
 #[derive(Clone, Debug, Default)]
 pub struct XactStats {
-    levels: HashMap<u32, Vec<Trans>>,
+    /// (A table's levels inline: one, the top, for all but a subtransaction's changes.)
+    levels: HashMap<u32, smallvec::SmallVec<[Trans; 1]>>,
     done: HashMap<u32, TabCounts>,
     /// The WAL records its row changes logged.
     wal_records: i64,
@@ -414,7 +415,8 @@ impl XactStats {
     }
 
     /// AtEOXact_PgStat_Relations: the counts the transaction leaves, by table.
-    pub fn end_xact(mut self, commit: bool) -> HashMap<u32, TabCounts> {
+    /// (By table, inline: a short transaction's few tables need no map of their own.)
+    pub fn end_xact(mut self, commit: bool) -> smallvec::SmallVec<[(u32, TabCounts); 4]> {
         // Subtransactions still open end with it.
         let depth = self
             .levels
@@ -425,10 +427,20 @@ impl XactStats {
         for nest in (2..=depth).rev() {
             self.end_subxact(nest, commit);
         }
-        let mut out = std::mem::take(&mut self.done);
+        let mut out: smallvec::SmallVec<[(u32, TabCounts); 4]> = std::mem::take(&mut self.done).into_iter().collect();
         for (rel, v) in self.levels {
+            if v.is_empty() {
+                continue;
+            }
+            let at = match out.iter().position(|(r, _)| *r == rel) {
+                Some(at) => at,
+                None => {
+                    out.push((rel, TabCounts::default()));
+                    out.len() - 1
+                }
+            };
             for mut t in v {
-                let c = out.entry(rel).or_default();
+                let c = &mut out[at].1;
                 if !commit {
                     t.restore_truncdrop();
                 }

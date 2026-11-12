@@ -431,6 +431,9 @@ pub struct Settings {
     /// level: the GUC stack entries its SET LOCALs make, until something needs them there
     /// (`stack_txn_start`).
     txn_start: Option<(usize, [Option<String>; 2])>,
+    /// The strings `start_transaction` set last time, back from `end_transaction`: the next
+    /// transaction's values are written into them (no allocation per transaction).
+    txn_spare: [String; 2],
     /// The configuration files' values as of the last reload this session took
     /// (`adopt_file_layer`): below role / database defaults and `config`, above the built-in
     /// defaults (PGC_S_FILE).
@@ -473,6 +476,7 @@ impl Default for Settings {
             derived: DerivedCache::default(),
             stats_fetch: (1, 0),
             txn_start: None,
+            txn_spare: Default::default(),
             file: crate::sysconf::Loaded::empty(),
             argv: Vec::new(),
             pending: Vec::new(),
@@ -2077,9 +2081,14 @@ impl Settings {
         // (What `set` does with these: user-context parameters, values in canonical form,
         // neither reported nor read by `Derived`.)
         let mut priors = [None, None];
-        for ((name, v), prior) in TXN_START.iter().zip(values).zip(&mut priors) {
+        for (((name, v), prior), spare) in TXN_START.iter().zip(values).zip(&mut priors).zip(&mut self.txn_spare) {
             *prior = match self.values.get_mut(*name) {
-                Some(slot) => Some(std::mem::replace(slot, v.to_string())),
+                Some(slot) => {
+                    let mut new = std::mem::take(spare);
+                    new.clear();
+                    new.push_str(v);
+                    Some(std::mem::replace(slot, new))
+                }
                 None => {
                     self.values.insert(name.to_string(), v.to_string());
                     None
@@ -2352,11 +2361,11 @@ impl Settings {
             && let Some((_, priors)) = self.txn_start.take()
         {
             // Just `start_transaction`'s SET LOCALs: what `at_eoxact` does with their entries.
-            for (name, prior) in TXN_START.iter().zip(priors) {
+            for ((name, prior), spare) in TXN_START.iter().zip(priors).zip(&mut self.txn_spare) {
                 match prior {
                     Some(v) => {
                         if let Some(slot) = self.values.get_mut(*name) {
-                            *slot = v;
+                            *spare = std::mem::replace(slot, v);
                         } else {
                             self.values.insert(name.to_string(), v);
                         }

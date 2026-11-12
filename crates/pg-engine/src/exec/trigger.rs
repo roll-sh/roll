@@ -1424,12 +1424,14 @@ pub fn statement(
     {
         return Ok(());
     }
-    let empty = Transition::default();
+    // (Made for the first trigger that fires: most statements have none.)
+    let mut empty: Option<Transition> = None;
     for bt in trigs
         .iter()
         .filter(|b| applies(b, false, before, event, ctx) && columns_hit(b, event, set_cols))
     {
-        call_with(bt, t, before, false, event, None, None, Some(&empty), ctx)?;
+        let empty = empty.get_or_insert_with(Transition::default);
+        call_with(bt, t, before, false, event, None, None, Some(&*empty), ctx)?;
     }
     Ok(())
 }

@@ -316,8 +316,9 @@ impl PortalRun {
 
 pub struct Session {
     pub state: SessionState,
-    /// The command running, as the server log's %i shows it.
-    pub log_tag: std::cell::RefCell<String>,
+    /// The command running, as the server log's %i shows it (set for every message: a
+    /// static tag, not a copy).
+    pub log_tag: std::cell::RefCell<std::borrow::Cow<'static, str>>,
     /// The backend is exiting (its log lines have no virtual transaction id).
     pub log_exiting: std::cell::Cell<bool>,
     txn: Option<RefCell<Txn>>,
@@ -1163,7 +1164,9 @@ impl Session {
         if let Some((_, p)) = self.txn_cmds.iter().find(|(t, _)| **t == *sql) {
             let p = p.clone();
             self.take_lex_warnings();
-            self.source = sql.to_string();
+            // (Into the last statement's buffer: BEGIN and COMMIT come every transaction.)
+            self.source.clear();
+            self.source.push_str(sql);
             crate::sql::scs::set_source(None);
             return Ok(vec![p]);
         }

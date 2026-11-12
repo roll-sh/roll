@@ -1940,8 +1940,9 @@ fn message_loop(
         let r: Result<()> = match t {
             b'Q' => {
                 let mut b = Body::new(body);
-                let sql = match b.cstr().and_then(|q| b.end().map(|()| q)) {
-                    Ok(q) => q.to_string(),
+                // (Borrowed from the message's body: no copy per query.)
+                let sql: &str = match b.cstr().and_then(|q| b.end().map(|()| q)) {
+                    Ok(q) => q,
                     Err(e) => {
                         s.on_error();
                         c.error(&e);
@@ -1950,19 +1951,19 @@ fn message_loop(
                         continue;
                     }
                 };
-                start_activity(&act, s, "active", Some(&sql));
+                start_activity(&act, s, "active", Some(sql));
                 s.start_xact_command();
                 if let Some(mode) = c.repl
-                    && (crate::repl::cmd::is_command(&sql) || mode == crate::repl::walsender::Mode::Physical)
+                    && (crate::repl::cmd::is_command(sql) || mode == crate::repl::walsender::Mode::Physical)
                 {
                     let r = guard(c, s, |c, s| {
-                        if !crate::repl::cmd::is_command(&sql) {
+                        if !crate::repl::cmd::is_command(sql) {
                             return Err(Error::new(
                                 code::FEATURE_NOT_SUPPORTED,
                                 "cannot execute SQL commands in WAL sender for physical replication",
                             ));
                         }
-                        let cmd = crate::repl::cmd::parse(&sql)?;
+                        let cmd = crate::repl::cmd::parse(sql)?;
                         let mut exported = c.exported.take();
                         let r = crate::repl::walsender::exec(c, s, mode, cmd, &mut exported);
                         c.exported = exported;
@@ -1974,13 +1975,13 @@ fn message_loop(
                         c.error(&e);
                     }
                 } else {
-                    match guard(c, s, |c, s| Ok(simple_query(c, s, &sql))) {
+                    match guard(c, s, |c, s| Ok(simple_query(c, s, sql))) {
                         Ok(r) => r?,
                         Err(e) => c.error(&e),
                     }
                 }
                 statement_done_activity(&act, s);
-                c.log_sent(Some(s), pid, Some(&sql));
+                c.log_sent(Some(s), pid, Some(sql));
                 s.finish_xact_command();
                 // (COPY FROM STDIN met a message it can't skip.)
                 if c.sync_lost {

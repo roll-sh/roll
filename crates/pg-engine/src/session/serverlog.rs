@@ -43,7 +43,7 @@ impl Session {
                 database: conn.startup.as_ref().map_or_else(|| self.state.database.clone(), |s| s.database.clone()),
                 // (Not applied yet while authenticating.)
                 application_name: if *self.log_tag.borrow() == "authentication" { String::new() } else { st.show_value("application_name") },
-                command_tag: self.log_tag.borrow().clone(),
+                command_tag: self.log_tag.borrow().to_string(),
                 // (pg_locks' virtual transaction id; a local id of 0 between transactions.)
                 vxid: match self.log_exiting.get() {
                     true => String::new(),
@@ -64,7 +64,7 @@ impl Session {
     /// command tag while it runs (only kept while the log is written).
     pub fn set_ps(&self, p: &Prepared) {
         if crate::log::active() {
-            *self.log_tag.borrow_mut() = p.stmt.shape().and_then(inner).map_or_else(|| "???".into(), ps_tag);
+            *self.log_tag.borrow_mut() = p.stmt.shape().and_then(inner).map_or(std::borrow::Cow::Borrowed("???"), ps_tag);
             // (log_lock_waits, nested auto_explain: lines from inside the statement.)
             if self.state.settings.borrow().logs_inside() {
                 let st = self.state.settings.borrow();
@@ -311,7 +311,7 @@ fn random_unit() -> f64 {
 }
 
 /// CreateCommandTag's tag of `n`, as the process title shows it while the statement runs.
-fn ps_tag(n: &NodeEnum) -> String {
+fn ps_tag(n: &NodeEnum) -> std::borrow::Cow<'static, str> {
     use NodeEnum as N;
     use pg_query::protobuf::TransactionStmtKind as K;
     let t = match n {
@@ -355,7 +355,7 @@ fn ps_tag(n: &NodeEnum) -> String {
             K::TransStmtRollbackPrepared => "ROLLBACK PREPARED",
             _ => "???",
         },
-        n => return crate::session::ddl::event_trigger::event_tag(n).unwrap_or_else(|| "???".into()),
+        n => return crate::session::ddl::event_trigger::event_tag(n).map_or(std::borrow::Cow::Borrowed("???"), std::borrow::Cow::Owned),
     };
     t.into()
 }
