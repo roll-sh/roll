@@ -404,7 +404,7 @@ impl Store {
         let h = hash(secret);
         let row = self.db.read(|c| {
             c.query_row(
-                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN {GRANT_FROM} ON g.id = s.grant_id WHERE s.hash = ?"),
+                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
                 |r| Ok((grant_row(r)?, r.get::<_, String>(17)?, r.get::<_, Option<i64>>(18)?)),
             )

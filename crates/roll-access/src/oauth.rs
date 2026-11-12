@@ -192,7 +192,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     let a2 = a.clone();
     let cid = c.client_id.clone();
     let client = tokio::task::spawn_blocking(move || a2.store.client(&cid)).await.map_err(|e| Error::Internal(e.to_string()))??.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
-    if !client.redirect_uris.iter().any(|u| *u == c.redirect_uri) {
+    if !client.redirect_uris.contains(&c.redirect_uri) {
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, ip_allow: c.ip_allow.clone() };

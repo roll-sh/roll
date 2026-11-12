@@ -265,7 +265,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             let request_hash = hash(&format!("{}\n{}\n{}", ctx.method, parts.uri.path_and_query().map_or("", |p| p.as_str()), hex::encode(sha2_of(&bytes))));
             match ask(&ctx, row, action, resource.clone(), &parts, &bytes, request_hash).await {
                 Ok(id) => approval_used = Some(id),
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             }
         }
         Outcome::Allow => {}
@@ -319,16 +319,16 @@ async fn ask(
     parts: &axum::http::request::Parts,
     body: &[u8],
     request_hash: String,
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let access = &ctx.access;
     let existing = parts.headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     let approval = match existing {
         Some(id) => {
             let a = access.clone();
             let id2 = id.clone();
-            let found = blocking(move || a.store.approval(&id2)).await.map_err(IntoResponse::into_response)?;
+            let found = blocking(move || a.store.approval(&id2)).await.map_err(|e| Box::new(e.into_response()))?;
             if found.grant_id != ctx.grant.id || found.request_hash != request_hash {
-                return Err(deny(StatusCode::FORBIDDEN, "approval_mismatch", format!("{id} was asked for another request"), json!({})));
+                return Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_mismatch", format!("{id} was asked for another request"), json!({}))));
             }
             found
         }
@@ -356,35 +356,36 @@ async fn ask(
                 })
             })
             .await
-            .map_err(IntoResponse::into_response)?
+            .map_err(|e| Box::new(e.into_response()))?
         }
     };
-    let decided = wait(access, &approval.id, access.config.approval_wait).await.map_err(IntoResponse::into_response)?;
+    let decided = wait(access, &approval.id, access.config.approval_wait).await.map_err(|e| Box::new(e.into_response()))?;
     let url = format!("{}/dashboard/access/approvals?id={}", access.config.web_url.trim_end_matches('/'), decided.id);
     match decided.state.as_str() {
         "approved" => {
             let (a, id, g, h) = (access.clone(), decided.id.clone(), ctx.grant.id.clone(), decided.request_hash.clone());
-            if blocking(move || a.store.consume(&id, &g, &h)).await.map_err(IntoResponse::into_response)? {
+            if blocking(move || a.store.consume(&id, &g, &h)).await.map_err(|e| Box::new(e.into_response()))? {
                 Ok(decided.id)
             } else {
-                Err(deny(StatusCode::FORBIDDEN, "approval_used", format!("{} was already used", decided.id), json!({ "approval": decided.id })))
+                Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_used", format!("{} was already used", decided.id), json!({ "approval": decided.id }))))
             }
         }
         "denied" => {
             ctx.audit(Some(row), Some(action), resource, "deny", Some(&decided.id), StatusCode::FORBIDDEN);
             let why = decided.reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default();
-            Err(deny(StatusCode::FORBIDDEN, "denied", format!("a person denied this request{why}"), json!({ "approval": decided.id })))
+            Err(Box::new(deny(StatusCode::FORBIDDEN, "denied", format!("a person denied this request{why}"), json!({ "approval": decided.id }))))
         }
         "pending" => {
             ctx.audit(Some(row), Some(action), resource, "ask", Some(&decided.id), StatusCode::FORBIDDEN);
-            Err(deny(
+            Err(Box::new(deny(
                 StatusCode::FORBIDDEN,
                 "approval_pending",
                 format!("waiting for a person to approve this request: {url}. Send it again with X-Roll-Approval: {} to wait more, or run it once approved", decided.id),
                 json!({ "approval": decided.id, "url": url }),
-            ))
+            )))
         }
-        other => Err(deny(StatusCode::FORBIDDEN, "approval_expired", format!("the approval is {other}: send the request again to ask again"), json!({ "approval": decided.id }))),
+        "used" => Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_used", format!("{} was already used: send the request again to ask again", decided.id), json!({ "approval": decided.id })))),
+        other => Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_expired", format!("the approval is {other}: send the request again to ask again"), json!({ "approval": decided.id })))),
     }
 }
 
