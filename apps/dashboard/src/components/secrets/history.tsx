@@ -1,10 +1,11 @@
-import { ArrowLeft, History as HistoryIcon, RotateCcw, X } from "lucide-react";
+import { ArrowLeft, Columns2, History as HistoryIcon, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { needsApproval, type Change, type Environment, type SecretType } from "@/lib/secrets-api";
+import { needsApproval, type Change, type Environment, type SecretType, type Version } from "@/lib/secrets-api";
 import { Dialog } from "../agents/ui/dialog";
 import { ItemWhat } from "./requests";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, ErrorNote, errorText, field, ghost, LinkChip, primary, Reveal, stamp, useLoad } from "./ui";
+import { ActorMark, ago, button, ErrorNote, errorText, field, ghost, LinkChip, primary, Reveal, stamp, useLoad, useMaskAgain } from "./ui";
+import { ValueCompare, type Shown } from "./value-compare";
 
 export type Drawer = { kind: "changes" } | { kind: "change"; seq: number } | { kind: "versions"; key: string; type: SecretType };
 
@@ -20,7 +21,7 @@ const KIND_LABEL: Record<Change["kind"], string> = {
 /**
  * The history sheet over the environment's right side: its changes newest first, a change's
  * detail (what each key did, by fingerprint), a rollback to any change, and one secret's versions
- * with old values revealed one at a time.
+ * with old values revealed one at a time or next to the version before.
  */
 export function HistoryDrawer({ env, drawer, onClose, onDrawer, onChanged }: { env: Environment; drawer: Drawer | null; onClose: () => void; onDrawer: (d: Drawer) => void; onChanged: () => void }) {
   const open = !!drawer;
@@ -220,13 +221,38 @@ function Rollback({ env, seq, open, onClose, onDone }: { env: Environment; seq: 
 function Versions({ env, secretKey, type, onClose, onChanges }: { env: Environment; secretKey: string; type: SecretType; onClose: () => void; onChanges: () => void }) {
   const { api, search, resourceName } = useSecrets();
   const path = search.path || "/";
-  const versions = useLoad(() => api.versions(env.slug, secretKey, path, type === "personal" ? "personal" : undefined), [api, env.slug, secretKey, path, type]);
+  const owner = type === "personal" ? "personal" : undefined;
+  const versions = useLoad(() => api.versions(env.slug, secretKey, path, owner), [api, env.slug, secretKey, path, type]);
+  // A version next to the one before it: both revealed (each read audited), masked again like Reveal.
+  const [cmp, setCmp] = useState<{ version: number; before: Shown; after: Shown; labels: [string, string] } | null>(null);
+  const [loading, setLoading] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useMaskAgain(cmp, () => setCmp(null));
+  const side = async (v: Version): Promise<Shown> => {
+    if (v.op === "delete") return { value: null, link: null, empty: "deleted" };
+    if (v.link && v.link.mode !== "managed") return { value: null, link: v.link, empty: "" };
+    return { value: (await api.versionValue(env.slug, secretKey, v.version, path, owner)).value, link: v.link, empty: "" };
+  };
+  const compare = async (v: Version, prev: Version) => {
+    if (cmp?.version === v.version) return setCmp(null);
+    setLoading(v.version);
+    setError(null);
+    try {
+      const [before, after] = await Promise.all([side(prev), side(v)]);
+      setCmp({ version: v.version, before, after, labels: [`v${prev.version}`, `v${v.version}`] });
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setLoading(null);
+    }
+  };
+  const list = versions.data ?? [];
   return (
     <>
       <Head title={<span className="font-mono">{secretKey}</span>} sub={`Versions in ${env.name}${type === "personal" ? " (your override)" : ""}`} onClose={onClose} onBack={onChanges} />
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-        <ErrorNote error={versions.error} className="m-1.5" />
-        {versions.data?.map((v) => (
+        <ErrorNote error={error ?? versions.error} onDismiss={error ? () => setError(null) : undefined} className="m-1.5" />
+        {list.map((v, i) => (
           <div key={v.version} className="rounded-lg px-2 py-2 hover:bg-fg/[0.03]">
             <div className="flex items-center gap-2 text-[11.5px]">
               <span className="font-mono text-fg tabular-nums">v{v.version}</span>
@@ -247,9 +273,13 @@ function Versions({ env, secretKey, type, onClose, onChanges }: { env: Environme
               </div>
             )}
             {v.comment && <p className="mt-1 text-[11.5px] text-muted">{v.comment}</p>}
-            {v.op === "set" && !(v.link && v.link.mode !== "managed") && (
-              <Reveal className="mt-1" load={() => api.versionValue(env.slug, secretKey, v.version, path, type === "personal" ? "personal" : undefined)} />
+            {v.op === "set" && !(v.link && v.link.mode !== "managed") && <Reveal className="mt-1" load={() => api.versionValue(env.slug, secretKey, v.version, path, owner)} />}
+            {list[i + 1] && (
+              <button className={`${ghost} mt-0.5 -ml-1 h-6 text-[11.5px]`} onClick={() => compare(v, list[i + 1])} aria-expanded={cmp?.version === v.version} title="Reveals both values (audited)">
+                <Columns2 className="size-3.5" /> {cmp?.version === v.version ? "Hide the comparison" : loading === v.version ? "Revealing…" : `Compare with the previous version`}
+              </button>
             )}
+            {cmp?.version === v.version && <ValueCompare before={cmp.before} after={cmp.after} labels={cmp.labels} />}
           </div>
         ))}
       </div>

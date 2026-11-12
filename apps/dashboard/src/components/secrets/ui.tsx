@@ -187,6 +187,25 @@ export const ActorMark = ({ who }: { who: string }) => (
 /** How long a revealed value stays on screen. */
 export const REVEAL_MS = 20_000;
 
+/** Hides revealed values again (`hide`) `REVEAL_MS` after `shown` changes, and when the window loses focus or the tab hides. */
+export function useMaskAgain(shown: unknown, hide: () => void) {
+  const latest = useRef(hide);
+  latest.current = hide;
+  useEffect(() => {
+    if (!shown) return;
+    const go = () => latest.current();
+    const timer = setTimeout(go, REVEAL_MS);
+    const onVisibility = () => document.visibilityState === "hidden" && go();
+    window.addEventListener("blur", go);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("blur", go);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [shown]);
+}
+
 /**
  * A secret's value, masked until asked for. A click fetches it (an audited reveal) and shows it;
  * it masks again after `REVEAL_MS`, when the window loses focus or the tab hides, and when the
@@ -199,19 +218,7 @@ export function Reveal({ load, className = "" }: { load: () => Promise<{ value: 
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!shown) return;
-    const hide = () => setShown(null);
-    const timer = setTimeout(hide, REVEAL_MS);
-    const onVisibility = () => document.visibilityState === "hidden" && hide();
-    window.addEventListener("blur", hide);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener("blur", hide);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [shown]);
+  useMaskAgain(shown, () => setShown(null));
 
   const fetchValue = async () => {
     setBusy(true);
