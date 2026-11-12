@@ -72,8 +72,10 @@ pub trait Runtime: Send + Sync {
     /// Make the instance, ready to start; nothing runs yet.
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()>;
     /// Start a created (or stopped) instance and say where its port answers. Its output goes
-    /// to `log` until it stops.
+    /// to `log` until it stops. It may start with more CPU than its limit (a startup boost).
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>>;
+    /// The instance is up: it runs within its CPU limit from here.
+    async fn settle(&self, _name: &str) {}
     /// Freeze a running instance (memory kept). Only called when [`Runtime::can_suspend`].
     async fn suspend(&self, name: &str) -> anyhow::Result<()>;
     async fn resume(&self, name: &str) -> anyhow::Result<()>;

@@ -36,6 +36,8 @@ pub struct Inspect {
     pub id: String,
     pub running: bool,
     pub host_port: Option<u16>,
+    /// The CPU limit roll gave it (`sh.roll.apps.cpu`, nano-CPUs), whatever it runs with now.
+    pub cpu_nanos: Option<i64>,
 }
 
 impl Engine {
@@ -174,6 +176,12 @@ impl Engine {
         Ok(serde_json::from_slice::<Waited>(&body)?.status as i32)
     }
 
+    /// Change a container's CPU cap (`NanoCpus`), running or not.
+    pub async fn set_cpus(&self, name: &str, nanos: i64) -> anyhow::Result<()> {
+        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({ "NanoCpus": nanos }))?);
+        self.call_within(Method::POST, &Self::container(name, "update"), Some(body), Some(QUICK)).await.map(|_| ())
+    }
+
     pub async fn inspect(&self, name: &str) -> anyhow::Result<Inspect> {
         let (_, body) = self.call(Method::GET, &Self::container(name, "json")).await?;
         parse_inspect(&body)
@@ -210,6 +218,13 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
         state: State,
         #[serde(rename = "HostConfig")]
         host: Host,
+        #[serde(rename = "Config", default)]
+        config: Option<Config>,
+    }
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(rename = "Labels", default)]
+        labels: Option<std::collections::BTreeMap<String, String>>,
     }
     #[derive(Deserialize)]
     struct State {
@@ -228,7 +243,8 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     }
     let c: Container = serde_json::from_slice(body).context("reading an inspect")?;
     let host_port = c.host.ports.into_iter().flatten().flat_map(|(_, b)| b.into_iter().flatten()).find_map(|b| b.port.parse().ok());
-    Ok(Inspect { id: c.id, running: c.state.running, host_port })
+    let cpu_nanos = c.config.and_then(|c| c.labels).and_then(|l| l.get("sh.roll.apps.cpu").and_then(|v| v.parse().ok()));
+    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos })
 }
 
 /// Splits Docker's multiplexed log stream (a container without a TTY): frames of an 8-byte header
@@ -279,7 +295,7 @@ mod tests {
     #[test]
     fn inspect_reads_id_state_and_the_published_port() {
         let body = br#"{"Id":"abc","State":{"Running":true},"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41234"}]}}}"#;
-        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234) });
+        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None });
         let none = br#"{"Id":"w","State":{"Running":false},"HostConfig":{"PortBindings":null}}"#;
         assert_eq!(parse_inspect(none).unwrap().host_port, None);
     }

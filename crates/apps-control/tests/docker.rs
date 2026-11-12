@@ -163,6 +163,19 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
         assert_eq!(st, StatusCode::OK);
         thaw.push(t);
     }
+    // It started with the boost and runs within its own limit once it answered.
+    let (st, _) = get(&public, &host).await;
+    assert_eq!(st, StatusCode::OK);
+    let name = live.instances()[0].name.clone();
+    let mut nanos = String::new();
+    for _ in 0..50 {
+        nanos = apps_control::runtime::docker::docker(&["inspect", "-f", "{{.HostConfig.NanoCpus}}", &name]).await.unwrap();
+        if nanos == "250000000" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(nanos, "250000000", "a running instance is held to its cpu: 0.25");
     // Idle: stopped, and nothing metered meanwhile.
     live.sleep().await;
     eprintln!(

@@ -405,6 +405,7 @@ impl Apps {
         rt.create(&spec).await?;
         let ran = async {
             rt.start(&spec.name, log.clone()).await?;
+            rt.settle(&spec.name).await;
             tokio::select! {
                 code = tokio::time::timeout(limit, rt.wait(&spec.name)) => match code {
                     Ok(code) => code,

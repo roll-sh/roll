@@ -294,6 +294,9 @@ impl EnvLive {
         }
         *inst.phase.lock() = Phase::Running(addr);
         *inst.last_used.lock() = Instant::now();
+        // Up: from here it runs within its CPU limit (it started with a boost).
+        let (rt, name) = (self.runtime.clone(), inst.name.clone());
+        tokio::spawn(async move { rt.settle(&name).await });
         Ok(addr)
     }
 
@@ -807,6 +810,8 @@ impl EnvLive {
         let began = Instant::now();
         let ran = async {
             self.runtime.start(&inst.name, log).await?;
+            // A one-off runs within its limit from the start.
+            self.runtime.settle(&inst.name).await;
             tokio::select! {
                 code = tokio::time::timeout(timeout, self.runtime.wait(&inst.name)) => Ok::<_, anyhow::Error>(match code {
                     Ok(code) => (code.ok(), false, false),

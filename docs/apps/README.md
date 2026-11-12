@@ -396,7 +396,7 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 | --- | --- | --- |
 | warm | a request to a running instance through the proxy | 1 ms |
 | resume from suspended | unpause → first byte | 13 ms |
-| cold start from stopped (busybox static site) | start → first byte | 270 ms |
+| cold start from stopped (busybox static site, 0.25 CPU) | start → first byte | 260 ms |
 | cold start from stopped (Node 22, `node server.js` run directly) | the same, Node booting | 360 ms (static in the same run: 364 ms) |
 | first deploy, static site | upload → build (base image pulled) → health check → live | 12.5 s |
 | first deploy, Node | `roll up` → build (`node:22-slim` pulled) → health check → live | 11.1 s |
@@ -406,6 +406,15 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   296/293/299/325 ms against 270/263/270/285 ms (all four pairs won, about 9%); resume
   48/41/45/45 ms against 14/13/16/13 ms (3.3×). What's left of a cold start is dockerd starting
   the container and the app's own boot.
+- **Startup CPU boost** (Cloud Run's): an instance starts with 4× its CPU (at least 1, at most
+  4 cores) and is held to its own limit once it answers (`Runtime::settle`; the limit is the
+  container's `sh.roll.apps.cpu` label, so a new process of rolld still applies it); a stop
+  gives the next start the boost again, off the wake's path. Measured on the static site at
+  0.25 CPU, 5 alternating pairs: medians 291/326/294/274/354 ms without it against
+  243/260/267/268/249 ms with it (all five won, 294 → 260 ms overall, and a far tighter spread);
+  the tiny Node server at 0.5 CPU: 329/324/328 against 315/320/319 ms (three of three, about
+  3%). The Docker test checks that a running instance is back at its 0.25 CPU. What it uses is
+  metered from the cgroup, so the boost is billed as used.
 - A start script that is just `node …` runs without npm in front of it (apps-build,
   `Pm::start`). Before that and the socket, a Node cold start was 665 ms against 443 ms for the
   static site in the same conditions; now the two are the same within noise (360 and 364 ms,
@@ -491,9 +500,10 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **What dockerd's own ~250 ms of a cold start is made of** (network attach, `--init`, the log
-   driver, the cgroup setup): measured one by one in matched pairs, kept only where it's a clear
-   win.
+2. **The rest of a cold start**: with the CPU boost in, what's left is dockerd starting the
+   container on its network (≈250 ms here; the network, `--init` and the log driver each
+   measured within noise, `bench.sh` in the 2026-11-13 notes). Snapshot restore (CRIU, or
+   Firecracker on the fleet) is the next step for it.
 3. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
 4. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.

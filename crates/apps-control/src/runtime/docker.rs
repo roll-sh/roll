@@ -53,8 +53,8 @@ pub async fn available() -> bool {
 
 #[derive(Default)]
 struct Known {
-    /// Container name → (full id, published host port).
-    containers: HashMap<String, (String, Option<u16>)>,
+    /// Container name → (full id, published host port, CPU limit in nano-CPUs).
+    containers: HashMap<String, (String, Option<u16>, Option<i64>)>,
 }
 
 pub struct Docker {
@@ -73,20 +73,25 @@ impl Docker {
     }
 
     async fn id_and_port(&self, name: &str) -> anyhow::Result<(String, Option<u16>)> {
+        self.known_of(name).await.map(|(id, port, _)| (id, port))
+    }
+
+    async fn known_of(&self, name: &str) -> anyhow::Result<(String, Option<u16>, Option<i64>)> {
         if let Some(k) = self.known.lock().containers.get(name).cloned() {
             return Ok(k);
         }
         // Made by an earlier process of this node: ask docker.
         if let Some(e) = &self.engine {
             let i = e.inspect(name).await?;
-            self.known.lock().containers.insert(name.to_string(), (i.id.clone(), i.host_port));
-            return Ok((i.id, i.host_port));
+            self.known.lock().containers.insert(name.to_string(), (i.id.clone(), i.host_port, i.cpu_nanos));
+            return Ok((i.id, i.host_port, i.cpu_nanos));
         }
         let id = docker(&["inspect", "-f", "{{.Id}}", name]).await?;
         let ports = docker(&["inspect", "-f", "{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}", name]).await?;
         let port = ports.split_whitespace().next().and_then(|p| p.parse().ok());
-        self.known.lock().containers.insert(name.to_string(), (id.clone(), port));
-        Ok((id, port))
+        let cpu = docker(&["inspect", "-f", "{{index .Config.Labels \"sh.roll.apps.cpu\"}}", name]).await.ok().and_then(|c| c.parse().ok());
+        self.known.lock().containers.insert(name.to_string(), (id.clone(), port, cpu));
+        Ok((id, port, cpu))
     }
 
     fn cgroup_dir(id: &str) -> Option<PathBuf> {
@@ -148,7 +153,7 @@ impl Runtime for Docker {
         if let Some(engine) = &self.engine {
             match engine.create(&spec.name, &engine_config(spec, host_port)?).await {
                 Ok(id) => {
-                    self.known.lock().containers.insert(spec.name.clone(), (id, host_port));
+                    self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
                     return Ok(());
                 }
                 // An image this host no longer has: the CLI pulls it on create.
@@ -170,8 +175,11 @@ impl Runtime for Docker {
             format!("{}m", spec.memory_mb),
             "--memory-swap".into(),
             format!("{}m", spec.memory_mb),
+            // Started with the boost; `settle` sets the limit once it answers.
             "--cpus".into(),
-            format!("{}", spec.cpu),
+            format!("{}", boost(spec.cpu)),
+            "--label".into(),
+            format!("{LABEL}.cpu={}", nanos(spec.cpu)),
             "--pids-limit".into(),
             "4096".into(),
             "--security-opt".into(),
@@ -222,7 +230,7 @@ impl Runtime for Docker {
         let made = docker(&argv).await;
         let _ = tokio::fs::remove_file(&env_path).await;
         let id = made?;
-        self.known.lock().containers.insert(spec.name.clone(), (id, host_port));
+        self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
         Ok(())
     }
 
@@ -266,6 +274,17 @@ impl Runtime for Docker {
         Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))))
     }
 
+    async fn settle(&self, name: &str) {
+        let Ok((_, _, Some(cpu))) = self.known_of(name).await else { return };
+        let r = match &self.engine {
+            Some(e) => e.set_cpus(name, cpu).await,
+            None => docker(&["update", "--cpus", &format!("{}", cpu as f64 / 1e9), name]).await.map(|_| ()),
+        };
+        if let Err(e) = r {
+            tracing::warn!(name, error = %e, "apps: an instance's CPU limit couldn't be set after its start");
+        }
+    }
+
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {
         match &self.engine {
             Some(e) => e.pause(name).await,
@@ -284,10 +303,19 @@ impl Runtime for Docker {
         // A paused container must thaw before it can take SIGTERM.
         let _ = self.resume(name).await;
         let secs = grace.as_secs().max(1);
-        match &self.engine {
+        let stopped = match &self.engine {
             Some(e) => e.stop(name, secs).await,
             None => docker_within(&["stop", "-t", &secs.to_string(), name], Some(Duration::from_secs(secs + 60))).await.map(|_| ()),
+        };
+        // The next start gets the boost again (set now, off the wake's path).
+        if let (Ok(()), Ok((_, _, Some(cpu)))) = (&stopped, self.known_of(name).await) {
+            let boosted = nanos(boost(cpu as f64 / 1e9));
+            let _ = match &self.engine {
+                Some(e) => e.set_cpus(name, boosted).await,
+                None => docker(&["update", "--cpus", &format!("{}", boosted as f64 / 1e9), name]).await.map(|_| ()),
+            };
         }
+        stopped
     }
 
     async fn remove(&self, name: &str) {
@@ -363,6 +391,17 @@ impl Runtime for Docker {
     }
 }
 
+/// A start's CPU: 4× the limit, at least 1 and at most 4 cores (Cloud Run's startup CPU boost):
+/// a boot throttled to a quarter of a core is measurably slower, and the limit applies once the
+/// instance answers (`settle`). What it uses is metered either way.
+fn boost(cpu: f64) -> f64 {
+    (cpu * 4.0).clamp(1.0, 4.0).max(cpu)
+}
+
+fn nanos(cpu: f64) -> i64 {
+    (cpu * 1e9).round() as i64
+}
+
 /// Capabilities Docker grants by default that no app here needs: raw sockets (spoofing on the
 /// project network), device nodes, the audit log and file capabilities. What images commonly use
 /// (binding low ports, chown and setuid in entrypoints) stays.
@@ -381,7 +420,7 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<
     let mut host = json!({
         "Memory": (spec.memory_mb as i64) << 20,
         "MemorySwap": (spec.memory_mb as i64) << 20,
-        "NanoCpus": (spec.cpu * 1e9) as i64,
+        "NanoCpus": nanos(boost(spec.cpu)),
         "PidsLimit": 4096,
         "SecurityOpt": ["no-new-privileges"],
         "CapDrop": CAP_DROP,
@@ -397,6 +436,7 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<
             LABEL: spec.service,
             format!("{LABEL}.env"): spec.env,
             format!("{LABEL}.deployment"): spec.deployment,
+            format!("{LABEL}.cpu"): nanos(spec.cpu).to_string(),
         },
     });
     if let (Some(p), Some(hp)) = (spec.port, host_port) {
