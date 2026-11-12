@@ -152,8 +152,13 @@ impl Default for StoreOptions {
     }
 }
 
+/// A memtable key: a user key with its version (`mvcc_key`), its bytes inline when short.
+/// A skiplist search compares the key of every node it passes; one held inline is in the
+/// node's own cache lines, not behind another pointer (and is no allocation of its own).
+type MemKey = smallvec::SmallVec<[u8; 40]>;
+
 pub struct Memtable {
-    map: SkipMap<Vec<u8>, Option<Bytes>>,
+    map: SkipMap<MemKey, Option<Bytes>>,
     size: AtomicUsize,
     max_ts: AtomicU64,
     /// WAL file holding this memtable's commits.
@@ -170,7 +175,11 @@ impl Memtable {
         }
     }
 
-    fn insert(&self, key: Vec<u8>, value: Option<Bytes>, ts: u64) {
+    /// Version `ts` of user key `user`.
+    fn insert(&self, user: &[u8], value: Option<Bytes>, ts: u64) {
+        let mut key = MemKey::with_capacity(user.len() + 8);
+        key.extend_from_slice(user);
+        key.extend_from_slice(&(!ts).to_be_bytes());
         let n = key.len() + value.as_ref().map(|v| v.len()).unwrap_or(0) + 48;
         self.map.insert(key, value);
         self.size.fetch_add(n, Ordering::Relaxed);
@@ -508,7 +517,7 @@ impl Store {
                 }
                 let g = &groups[barriers.partition_point(|&b| b < ts)];
                 for (k, v) in entries {
-                    g.insert(mvcc_key(&k, ts), v, ts);
+                    g.insert(&k, v, ts);
                 }
                 replayed += 1;
             })?;
@@ -796,7 +805,7 @@ impl Store {
         }
         for m in v.memtables() {
             if m.max_ts.load(Ordering::Acquire) > ts
-                && m.map.range(start.to_vec()..end.to_vec()).any(|e| sst::key_ts(e.key()) > ts)
+                && m.map.range::<[u8], _>((Bound::Included(start), Bound::Excluded(end))).any(|e| sst::key_ts(e.key()) > ts)
             {
                 return true;
             }
@@ -1191,7 +1200,7 @@ impl Store {
             self.note_untouched(&writes);
             let mem = view.mem.clone();
             for (k, v) in writes {
-                mem.insert(mvcc_key(&k, ts), v, ts);
+                mem.insert(&k, v, ts);
             }
             appended(ts);
             rotate = mem.bytes() >= self.opts.memtable_bytes;
@@ -1245,7 +1254,7 @@ impl Store {
             self.note_untouched(&writes);
             let mem = view.mem.clone();
             for (k, v) in writes {
-                mem.insert(mvcc_key(&k, ts), v, ts);
+                mem.insert(&k, v, ts);
             }
             rotate = mem.bytes() >= self.opts.memtable_bytes;
         }
@@ -1347,7 +1356,7 @@ impl Store {
                 self.note_untouched(&writes);
                 let mem = view.mem.clone();
                 for (k, v) in writes {
-                    mem.insert(mvcc_key(&k, ts), v, ts);
+                    mem.insert(&k, v, ts);
                 }
                 self.made_durable(ts);
                 after(ts);
@@ -2290,7 +2299,7 @@ impl Cursor {
                         Bound::Unbounded => Bound::Unbounded,
                     };
                     for e in mem.map.range::<[u8], _>((lower, upper)).take(*batch) {
-                        buf.push_back((e.key().clone(), e.value().clone()));
+                        buf.push_back((e.key().to_vec(), e.value().clone()));
                     }
                     if buf.len() < *batch {
                         *done = true;
@@ -3136,7 +3145,7 @@ impl RevCursor {
                     };
                     let lower = Bound::Included(start.as_slice());
                     for e in mem.map.range::<[u8], _>((lower, upper)).rev().take(BATCH) {
-                        buf.push_back((e.key().clone(), e.value().clone()));
+                        buf.push_back((e.key().to_vec(), e.value().clone()));
                     }
                     if buf.len() < BATCH {
                         *done = true;
