@@ -1,0 +1,180 @@
+/**
+ * The roll secrets HTTP API's shapes (docs/secrets.md, "Shapes"): what `crates/roll-secrets`
+ * answers and takes. The dashboard's client (apps/dashboard/src/lib/secrets-api.ts) and this
+ * package's both use them; change them with the contract.
+ */
+
+export type Action = "read" | "reveal" | "write" | "delete" | "admin";
+export type SecretType = "shared" | "personal";
+export type LinkMode = "live" | "managed" | "dynamic";
+
+export type Environment = {
+  id: string;
+  slug: string;
+  name: string;
+  position: number;
+  kind: "standard" | "ephemeral";
+  base: string | null;
+  labels: Record<string, string>;
+  expires_at: number | null;
+  protected: boolean;
+  approvals: number;
+  approvers: string[];
+  created_at: number;
+  secrets: number;
+  /** Keys unchanged for longer are flagged stale (insights); null: never. */
+  max_age_days: number | null;
+};
+export type NewEnvironment = {
+  slug: string;
+  name?: string;
+  kind?: "standard" | "ephemeral";
+  base?: string;
+  labels?: Record<string, string>;
+  expires_at?: number;
+  ttl_minutes?: number;
+  secrets?: Op[];
+};
+export type Overview = { project: string; environments: Environment[]; previews: number };
+export type Folder = { path: string; name: string; secrets: number; folders: number };
+export type Import = { environment: string; path: string };
+export type Link = { kind: string; ref: string; field: string; mode: LinkMode; options?: Record<string, unknown> };
+export type Source = { kind: "own" } | { kind: "import"; environment: string; path: string } | { kind: "base"; environment: string };
+export type Secret = {
+  id: string;
+  key: string;
+  path: string;
+  type: SecretType;
+  version: number;
+  comment: string;
+  tags: string[];
+  link: Link | null;
+  fp: string;
+  references: string[];
+  updated_at: number;
+  updated_by: string;
+  source: Source;
+  /** A personal value of the caller replaces it. */
+  overridden: boolean;
+};
+export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string };
+/** `path`: another folder for this one operation (default: the batch's). */
+export type Op =
+  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string }
+  | { op: "delete"; key: string; type?: SecretType; path?: string };
+export type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
+export type ChangeKind = "write" | "rollback" | "promote" | "rotate" | "request" | "rename";
+export type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: ChangeKind };
+/** `what`: added | changed | deleted | comment | tags | link | rotated */
+export type Item = { key: string; path: string; type: SecretType; what: string[]; from_fp: string | null; to_fp: string | null };
+export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
+/** `change` is null when nothing changed. */
+/** `request`: the change request opened instead (a promotion into a protected environment). */
+export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
+export type StateRow = { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number };
+export type ChangeDetail = Change & { items: Item[]; state?: StateRow[] };
+export type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
+export type Problem = { key: string; problem: string };
+/** `leases`: ids of dynamic credentials issued. */
+/** `dynamic`: the keys holding a dynamic link's short-lived credential. */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[] };
+export type CellSource = "own" | "import" | "base";
+export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean };
+export type RowStatus = "same" | "different" | "missing";
+export type GridRow = { key: string; cells: Record<string, Cell | null>; status: RowStatus };
+export type Grid = { path: string; environments: string[]; rows: GridRow[]; folders: string[]; previews: number };
+export type CompareStatus = "same" | "different" | "only_from" | "only_to";
+export type CompareRow = { key: string; status: CompareStatus; from: number | null; to: number | null };
+export type Compare = { from: string; to: string; path: string; rows: CompareRow[] };
+export type RequestState = "open" | "approved" | "rejected" | "applied" | "closed" | "stale";
+export type Review = { by: string; verdict: "approve" | "reject"; comment: string; at: number };
+/** One item of a change request with its values: `now` is null for a new key or a live/dynamic link. */
+export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null };
+
+export type KeyInsight = { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean };
+export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
+
+export type ChangeRequest = {
+  id: string;
+  environment: string;
+  path: string;
+  message: string;
+  by: string;
+  at: number;
+  state: RequestState;
+  items: Item[];
+  reviews: Review[];
+  approvals: number;
+  approvals_needed: number;
+  applied_seq: number | null;
+};
+export type LinkField = { field: string; label: string; modes: LinkMode[]; secret: boolean; suggest: string; credential?: string };
+export type LinkTarget = { kind: string; ref: string; name: string; fields: LinkField[] };
+export type Lease = {
+  id: string;
+  environment: string;
+  key: string;
+  kind: "dynamic" | "retired";
+  link: Link | null;
+  consumer: string;
+  issued_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+};
+export type Token = {
+  id: string;
+  name: string;
+  environments: string[] | null;
+  paths: string[] | null;
+  actions: Action[];
+  expires_at: number | null;
+  created_at: number;
+  created_by: string;
+  last_used_at: number | null;
+  prefix: string;
+};
+/** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
+export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
+/** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
+export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
+export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
+export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
+/** `since`: rows at or after this time (ms); `before`: rows older than this id. */
+export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number };
+export type AuditFormat = "csv" | "jsonl";
+/** An audit stream to a SIEM: signed batches of new rows, in order. */
+export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+export type Imported = Applied & { skipped: string[] };
+export type ImportedAsRequest = { request: ChangeRequest; skipped: string[] };
+export type ExportFormat = "dotenv" | "json" | "shell" | "yaml";
+/** A one-way push of an environment's values to a platform outside roll (docs/secrets.md, "Syncs"). Never holds a value. */
+export type Sync = {
+  id: string;
+  environment: string;
+  path: string;
+  kind: string;
+  target: Record<string, unknown>;
+  keys: string[] | null;
+  prefix: string;
+  status: "pending" | "ok" | "error";
+  error: string | null;
+  last_digest: string | null;
+  last_synced_at: number | null;
+  /** Names at the target. */
+  synced: number;
+  signed: boolean;
+  created_at: number;
+  created_by: string;
+};
+export type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
+export type SyncField = { name: string; label: string; required: boolean; placeholder: string };
+/** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
+export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
+/** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
+export type Health = { ok: boolean; key: "env" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
+export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
+
+/** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */
+export type Sealed = { v: number; epk: string; nonce: string; ct: string };
+/** A resolve sealed to the caller's key: `sealed` opens to the JSON of `Values.values`, with `context` as the associated data. */
+export type SealedValues = { sealed: Sealed; context: string; problems: Problem[]; leases: string[] };
