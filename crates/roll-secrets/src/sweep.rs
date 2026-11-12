@@ -132,7 +132,7 @@ impl Secrets {
                     return Err(Error::BadRequest(format!("{} {} has no credential to rotate", link.kind, link.r#ref)));
                 }
                 self.audit_now(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref));
-                Ok(Applied { change: None, items: vec![], warnings: vec![] })
+                Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })
             }
             Mode::Dynamic => Err(Error::BadRequest(format!("{key} is dynamic: every resolve issues a fresh credential"))),
             Mode::Managed => {
@@ -168,7 +168,7 @@ impl Secrets {
                     Ok::<_, Error>(r)
                 });
                 match res {
-                    Ok((change, items)) => Ok(Applied { change: Some(change), items, warnings: vec![] }),
+                    Ok((change, items)) => Ok(Applied { change: Some(change), items, warnings: vec![], request: None }),
                     Err(e) => {
                         let _ = provider.revoke(&link.r#ref, &handle);
                         let _ = env;

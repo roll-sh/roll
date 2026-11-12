@@ -191,6 +191,12 @@ impl Secrets {
         let message = b.message.unwrap_or_default();
         names::message(&message)?;
         let items = items(&path, &b.ops, caller)?;
+        self.open_request_items(project, slug, &path, message, items, caller)
+    }
+
+    /// Open a request for `items` (a batch's, or a promotion's into a protected environment).
+    pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, caller: &Caller) -> Result<Request> {
+        let path = path.to_string();
         for i in &items {
             caller.need(if matches!(i.action, ItemAction::Delete) { Action::Delete } else { Action::Write }, &Scope::at(project, slug, &i.path))?;
             if let ItemAction::Set { link: Some(Some(l)), .. } = &i.action {

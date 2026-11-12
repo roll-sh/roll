@@ -290,6 +290,13 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     api.ok(Method::POST, &format!("/environments/production/requests/{}/apply", r["id"].as_str().unwrap()), Some(json!({ "bypass": true }))).await;
     let audit = api.ok(Method::GET, "/audit?action=approval", None).await;
     assert_eq!(audit[0]["action"], "approval.bypass");
+
+    // A promotion into it is a change request too, with the values the browser never had.
+    api.set("staging", "KEY", "from-staging").await;
+    let p = api.ok(Method::POST, "/environments/production/promote?from=staging", Some(json!({ "keys": ["KEY"] }))).await;
+    assert_eq!((p["change"].clone(), p["request"]["state"].as_str()), (Value::Null, Some("open")));
+    api.ok(Method::POST, &format!("/environments/production/requests/{}/apply", p["request"]["id"].as_str().unwrap()), Some(json!({ "bypass": true }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["KEY"], "from-staging");
 }
 
 #[tokio::test]

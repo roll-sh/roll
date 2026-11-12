@@ -418,6 +418,9 @@ pub struct Applied {
     pub change: Option<Change>,
     pub items: Vec<ItemDiff>,
     pub warnings: Vec<String>,
+    /// The change request opened instead, on a protected environment (promote).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<crate::requests::Request>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -567,7 +570,7 @@ impl Secrets {
             apply(c, &dek, &env, &prepared.items, kind, message, caller, now)
         });
         match res {
-            Ok((change, items)) => Ok(Applied { change: (!items.is_empty()).then_some(change), items, warnings }),
+            Ok((change, items)) => Ok(Applied { change: (!items.is_empty()).then_some(change), items, warnings, request: None }),
             Err(e) => {
                 self.discard(&prepared);
                 Err(e)
@@ -683,6 +686,14 @@ impl Secrets {
         let items = self.promotion(project, from, to, &path, p.keys.as_deref())?;
         let message = p.message.unwrap_or_else(|| format!("promoted {} from {from}", plural(items.len(), "key")));
         names::message(&message)?;
+        // Into a protected environment, a promotion is a change request with the values in it.
+        if self.db.read(|c| envs::by_slug(c, project, to))?.protected {
+            if items.is_empty() {
+                return Ok(Applied { change: None, items: vec![], warnings: vec![], request: None });
+            }
+            let request = self.open_request_items(project, to, &path, message, items, caller)?;
+            return Ok(Applied { change: None, items: vec![], warnings: vec![], request: Some(request) });
+        }
         self.commit(project, to, items, "promote", &message, None, false, caller)
     }
 

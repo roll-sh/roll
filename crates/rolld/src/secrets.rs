@@ -247,6 +247,8 @@ impl LinkProvider for Postgres {
         ]);
         Ok(Issued { parts, handle: json!({ "role": role, "endpoint": endpoint }) })
     }
+    /// Ends the role's sessions and drops it. What it made (tables from a migration) is given to
+    /// `roll` first, so revoking a credential never drops data.
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
         let (Some(role), Some(endpoint)) = (h["role"].as_str(), h["endpoint"].as_str()) else { return Ok(()) };
         if !role.starts_with("roll_") || !role[5..].bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {
@@ -254,7 +256,7 @@ impl LinkProvider for Postgres {
         }
         let sql = format!(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'; \
-             DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN EXECUTE 'DROP OWNED BY {role}'; EXECUTE 'DROP ROLE {role}'; END IF; END $$;"
+             DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN EXECUTE 'REASSIGN OWNED BY {role} TO CURRENT_USER'; EXECUTE 'DROP OWNED BY {role}'; EXECUTE 'DROP ROLE {role}'; END IF; END $$;"
         );
         self.0.call(Method::POST, &format!("/v1/endpoints/{}/query", enc(endpoint)), Some(json!({ "sql": sql }))).map(|_| ())
     }

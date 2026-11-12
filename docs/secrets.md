@@ -229,7 +229,9 @@ and in the table below.
 Secrets of one environment linked to the same resource and credential share one issue: linking
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` gives one access key, and rotating either rotates
 both, in one change. A Postgres role made for a branch also exists in branches made from it later
-(roles live in the branch's data); it expires with `VALID UNTIL` either way.
+(roles live in the branch's data); it expires with `VALID UNTIL` either way. Revoking a role ends
+its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
+a credential never drops data.
 
 Products without a workspace kind yet (queues, tasks, roll search, roll apps) join by adding their
 kind to the workspace and registering a provider.
@@ -454,7 +456,7 @@ type Op =
   | { op: "delete"; key: string; type?: "shared" | "personal" };
 type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
 type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
-type Applied = { change: Change | null; items: Item[]; warnings: string[] }; // change: null when nothing changed
+type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: Request }; // change: null when nothing changed; request: opened instead (promote into a protected environment)
 type Item = { key: string; path: string; type: "shared" | "personal"; what: string[]; from_fp: string | null; to_fp: string | null };
 type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: "write" | "rollback" | "promote" | "rotate" | "request" | "rename" };
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
@@ -508,17 +510,15 @@ and `roll run`, checks and sandboxes. Ranked:
 2. **Two nodes on one schema**: the store's tests pass on Postgres
    (`ROLL_CODE_TEST_DATABASE=postgres://… cargo test -p roll-secrets`); add a test of two stores on
    one schema racing on the same environment (seq, credentials, sweeps).
-3. **Postgres roles for real**: issue and revoke a dynamic role against a running compute
-   (`pnpm test:pg`), and check `VALID UNTIL` and the grants.
-4. **Open the PR to `main`** with screenshots, after 1–3.
-5. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` lands
+3. **Open the PR to `main`** with screenshots, after 1–3.
+4. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant first, and `rls_` tokens migrate to
    roll-access tokens. Its MCP tools map onto the routes above.
-6. **A directory's default project**: `roll secrets setup` remembers the project and environment
+5. **A directory's default project**: `roll secrets setup` remembers the project and environment
    for a directory (as `doppler setup` does), so `roll run -- npm start` needs no flags.
-7. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+6. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-8. **Required keys**: a project-wide list of keys every standard environment must define. The grid
+7. **Required keys**: a project-wide list of keys every standard environment must define. The grid
    flags a missing one, and promote and `roll run` warn about it.
-9. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-10. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
+8. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+9. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.

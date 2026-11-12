@@ -1,7 +1,7 @@
 import { ArrowRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "@/components/link";
-import { needsApproval, type CompareStatus } from "@/lib/secrets-api";
+import type { CompareStatus } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
 import { FolderCrumbs } from "./folders";
 import { secretsHref, useSecrets } from "./secrets-page";
@@ -46,12 +46,17 @@ export function CompareView() {
     setError(null);
     try {
       const r = await api.promote(to, from, { path, keys: [...picked], message: message || undefined });
-      setDone({ text: r.change ? `Promoted ${r.items.length} ${r.items.length === 1 ? "key" : "keys"} to ${toName} as change #${r.change.seq}` : "Nothing to promote: they already match", warnings: r.warnings });
+      const text = r.request
+        ? `${toName} is protected: opened change request ${r.request.id} with ${r.request.items.length} ${r.request.items.length === 1 ? "key" : "keys"} (it needs ${r.request.approvals_needed} approval${r.request.approvals_needed === 1 ? "" : "s"})`
+        : r.change
+          ? `Promoted ${r.items.length} ${r.items.length === 1 ? "key" : "keys"} to ${toName} as change #${r.change.seq}`
+          : "Nothing to promote: they already match";
+      setDone({ text, warnings: r.warnings });
       setMessage("");
       cmp.reload();
       reloadEnvs();
     } catch (e) {
-      setError(needsApproval(e) ? `${e.message}. Promotion doesn't open a change request yet: set the keys in ${toName} (each write offers one), or an admin lifts protection under Environments.` : errorText(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }

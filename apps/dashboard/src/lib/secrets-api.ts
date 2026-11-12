@@ -72,7 +72,8 @@ export type Change = { seq: number; environment: string; path: string; message: 
 export type Item = { key: string; path: string; type: SecretType; what: string[]; from_fp: string | null; to_fp: string | null };
 export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
 /** `change` is null when nothing changed. */
-export type Applied = { change: Change | null; items: Item[]; warnings: string[] };
+/** `request`: the change request opened instead (a promotion into a protected environment). */
+export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
 export type StateRow = { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number };
 export type ChangeDetail = Change & { items: Item[]; state?: StateRow[] };
 export type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
