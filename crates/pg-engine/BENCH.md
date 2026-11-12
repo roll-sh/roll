@@ -285,6 +285,78 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic path, round 1 (2026-11-12, agent 220)
+
+HANDOFF "Analytic path against pgrust" has the phase study and what changed: a parallel scan's
+run of rows aggregated a batch at a time (`Partials::batch_run`, `vector::Lanes`). **base** is
+`abfa993e5`; `c001` the batch aggregation, `c004` it with the lanes as one graph (`c002`, a decode
+change, dropped; `c003` was c002 + the graph). Dist builds (fat LTO, line tables) of one checkout,
+equal-length paths (`~/.cache/a220/bin`). Lane C: each server in its own container on CPUs
+14,15,32,33 (two cores and their hyperthreads; `--memory 8g`, host network), the client on
+16,17,34,35, every pass under `flock ~/.cache/lane-c.lock`. Settings: all three
+`max_parallel_workers_per_gather = 2` (pgrust's default is 4: set to 2 with ALTER SYSTEM); cache
+budgets 2 GB each (the engine `--cache-mb 2048`, PostgreSQL and pgrust `shared_buffers = 2GB`;
+pgrust's default is 128 MB). PostgreSQL 18.6 with the bench settings, pgrust `malisper/pgrust`
+0.4-beta (build 20911cc). TPC-H SF1 from `bench tpch-load --sf 1`, the engine's data directory
+restored before every start. A gate pass: a fresh engine, a warm-up pass, then per query three
+runs inside one `perf stat -e instructions:u,cycles:u` window. Load 9-25 during the runs (other
+tenants unpinned): an A/A run of `c001` against a copy of itself moved q14 / q17 / q19 / q22's
+cycles by up to +-6% a round and q17 / q22's instructions by up to -2.4%, so the gate reads
+instructions first.
+
+### TPC-H SF1, the round's final run (base and c004, three alternating rounds; PostgreSQL and pgrust, three passes; medians)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 2.42 | 0.22 | 0.43 | 0.17 | 0.32 | 0.46 | 0.39 | 0.18 | 1.38 | 0.71 | 0.07 | 0.65 | 0.78 | 0.17 | 0.32 | 0.26 | 0.82 | 2.97 | 0.08 | 0.10 | 0.62 | 0.11 | 13.63 |
+| pgrust s | 0.56 | 0.15 | 0.33 | 0.16 | 0.18 | 0.39 | 0.43 | 0.16 | 1.40 | 0.83 | 0.05 | 0.62 | 0.39 | 0.08 | 0.26 | 0.27 | 0.57 | 2.05 | 0.02 | 0.10 | 0.49 | 0.05 | 9.55 |
+| base s | 1.35 | 0.72 | 0.53 | 0.27 | 0.42 | 0.53 | 0.57 | 0.32 | 1.31 | 0.77 | 0.19 | 0.60 | 1.00 | 0.22 | 0.49 | 0.33 | 0.80 | 2.14 | 0.12 | 0.34 | 0.75 | 0.22 | 14.00 |
+| c004 s | 0.54 | 0.72 | 0.54 | 0.26 | 0.45 | 0.46 | 0.62 | 0.32 | 1.32 | 0.76 | 0.19 | 0.55 | 1.01 | 0.19 | 0.42 | 0.32 | 0.79 | 2.13 | 0.13 | 0.33 | 0.69 | 0.23 | 12.97 |
+| pg CPU, s | 7.23 | 0.34 | 1.19 | 0.49 | 0.92 | 1.20 | 1.13 | 0.51 | 3.64 | 1.81 | 0.08 | 1.87 | 1.99 | 0.45 | 0.87 | 0.65 | 0.91 | 7.43 | 0.20 | 0.10 | 1.78 | 0.33 | 35.12 |
+| pgrust CPU, s | 1.16 | 0.19 | 0.68 | 0.32 | 0.34 | 0.76 | 0.90 | 0.30 | 2.96 | 0.92 | 0.05 | 0.99 | 0.80 | 0.17 | 0.44 | 0.38 | 0.62 | 2.26 | 0.06 | 0.11 | 0.97 | 0.11 | 15.49 |
+| base CPU, s | 4.00 | 0.71 | 1.48 | 0.80 | 0.97 | 1.47 | 1.55 | 0.61 | 3.88 | 2.12 | 0.19 | 1.69 | 2.45 | 0.48 | 1.39 | 0.95 | 1.76 | 6.81 | 0.25 | 0.37 | 2.19 | 0.46 | 36.58 |
+| c004 CPU, s | 1.58 | 0.72 | 1.54 | 0.81 | 1.04 | 1.30 | 1.62 | 0.64 | 3.78 | 2.06 | 0.20 | 1.57 | 2.46 | 0.47 | 1.20 | 0.96 | 1.74 | 6.77 | 0.26 | 0.36 | 1.97 | 0.45 | 33.50 |
+
+- The engine against PostgreSQL: wall 14.00 -> 12.97 s against 13.63 (1.027x -> 0.952x), CPU
+  36.58 -> 33.50 s against 35.12. Against pgrust: 1.47x -> 1.36x wall, 2.36x -> 2.16x CPU. q01
+  1.35 -> 0.54 s (pgrust 0.56, PostgreSQL 2.42).
+- Peak memory (anon + shmem of each container, sampled; the largest of a run): PostgreSQL
+  1,696 MB, pgrust 1,873 (2 GB `shared_buffers`; 554 at its default 128 MB), base 1,682,
+  c004 1,678; VmHWM base 1,703-1,719, c004 1,701-1,712.
+- All 22 result hashes equal PostgreSQL's in every pass of every build.
+- User instructions base -> c004 per round: q01 -57.6 x3, q06 -5.2/-5.3/-5.2, q15 -6.1 x3, q12
+  -3.3 x3, q10 / q21 -2.1..-2.3; q17 +1.3 / +2.1 / +2.0 (+1.0 / -0.4 / +1.7 in c001's gate,
+  -0.2 x3 c001 -> c004; its scan probes a hash table and never reaches `batch_run`: the
+  `live` selection `Pre::decode` now makes for every batch, used or not, is the likely cost);
+  sum 192.5 -> 172.7 G (-10.31%, -10.20%, -10.19%), cycles -8.28 / -6.51 / -8.91%.
+- Point read, range read and short transaction smoke (a fresh 100,000-row fixture, 8 clients,
+  10 s, user instructions over 9 s, five alternating pairs, base against c004): point_select
+  54.0k against 54.2k instructions an operation (medians), 77.1k against 79.2k ops/s;
+  range_scan_100 353.9k against 354.9k, 27.8k against 27.9k ops/s; short_txn 316.8k against
+  308.3k, 10.9k against 10.6k ops/s (runs 10.2-11.2k against 10.5-11.2k).
+
+### The changes, gated
+
+| change | targets, user instructions % per round | cycles % per round | wall medians | others | 22-query instructions |
+|---|---|---|---|---|---|
+| c001 batch aggregation (against base) | q01 -47.3 x3; q06 -5.2/-5.2/-5.1 | q01 -50.3/-49.7/-49.6; q06 -10.2/-9.2/-9.5 | q01 1.334 -> 0.673, q06 0.511 -> 0.478 | none over +2% instructions; cycles over +2% once each (q11, q13, q22, q19) | -8.45 / -8.44 / -8.50% |
+| c004 lanes as one graph (against c001) | q01 -19.5 x3 | -20.1/-20.5/-17.6 | 0.685 -> 0.551 | instructions: q22 +2.3 once; cycles: q09 +2.9 / +2.4 (instructions +1.0 / +1.2 / +0.6), others over +2% once | -1.83 / -1.63 / -1.82% |
+| c002 decode (against c001), dropped | q01 -6.7 x3, q06 -8.7 x3 | q01 -3.6..-4.1, q06 -4.8..-6.7 | q01 0.679 -> 0.653, q06 0.471 -> 0.439 | cycles q03 +2.4 / +2.6, q22 +4.1 / +4.7 / +4.9 with instructions flat; a 4-round recheck: q13 +2.2 / +2.6 | -2.2%; cycles +0.02 / +0.19 / -1.25% |
+
+c002 and c004 together (c003, against c001): q01 -26.2%, q06 -8.8% instructions, wall 0.673 -> 0.494
+and 0.470 -> 0.442 (a 4-round recheck), q17 cycles +2.9 / +3.7 / +2.5, q22 +3.1 / +2.4 / +4.7: c002
+was dropped and c004 gated alone. Patch and numbers: `~/.cache/a220/patches/c002-decode-word-loads.*`.
+
+### Memory at smaller block caches
+
+The engine (c002) on q01, q06, q13 and q22 alone at `--cache-mb` 2048 / 1024 / 512 / 256: anon
+1,188 / 1,183 / 662 / 381 MB; q01 CPU 1.99 / 1.91 / 2.65 / 3.37 s, q06 1.28 / 1.32 / 2.12 / 2.77 s.
+At 256 MB, a block not cached costs its zstd decompression (q06: 25.6% of the cycles in
+`ZSTD_decompressSequences`, 5% in its tables), `Block::decode_with` (5.5%) and the pread's copy
+(1.3%). pgrust at 128 MB `shared_buffers`: 331 MB, q01 1.12 s CPU (its 8 kB pages copied from
+the OS page cache: 12-22% of its cycles in the kernel's copy). PostgreSQL with
+`shared_buffers = 2GB`: 1,204-1,243 MB on the same four.
+
 ## Range reads, round 7 (2026-11-11, agent 215)
 
 HANDOFF.md, "Range reads round 7", has what changed: a kept index scan's rows go to a text-format

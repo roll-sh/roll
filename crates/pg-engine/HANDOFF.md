@@ -3361,6 +3361,13 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Analytic path, round 1: a parallel scan's runs aggregated a batch at a time** (agent 220;
+  HANDOFF "Analytic path against pgrust", BENCH.md "Analytic path, round 1"). TPC-H SF1 on lane
+  C, all three servers at `max_parallel_workers_per_gather = 2` and 2 GB caches: 14.00 -> 12.97 s
+  against PostgreSQL's 13.63 and pgrust's 9.55; CPU 36.58 -> 33.50 s against 35.12 and 15.49;
+  q01 1.35 -> 0.54 s (pgrust 0.56, PostgreSQL 2.42); peak 1,682 -> 1,678 MB against 1,696 and
+  1,873. The gap to pgrust that remains is row decode (q01 / q06), the row path (q13, q22, q02's
+  hash join batches), and memory at pgrust's default budget.
 - **Executor, round 14: dense bitmap counts, lookup scans sought on, decoded blocks of their
   own size** (agent 212; BENCH.md "Executor, round 14"). TPC-H SF1 12.23 -> 11.80 s against
   PostgreSQL's 11.27 (1.085x -> 1.047x), CPU 30.70 -> 30.15 s against 29.08, peak memory 1,828
@@ -9627,6 +9634,116 @@ when it loses; an index none of whose key columns a clause reads still runs
 `match_quals`; `lit_env` is read twice per Bind (`param_custom`, `values_custom`), 0.5%;
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
+
+## Analytic path against pgrust (agent 220)
+
+TPC-H SF1 on lane C (servers on CPUs 14,15,32,33, i.e. two cores with their hyperthreads;
+clients on 16,17,34,35), each server in its own container (`--memory 8g`), all three with
+`max_parallel_workers_per_gather = 2`. pgrust's own default is 4 (`max_parallel_workers` 16),
+so the pgrust numbers before this round (BENCH "Executor, round 14") ran it twice as wide as
+the engine and PostgreSQL: q01 0.35 s at 4 against 0.67 s at 2. At 2, pgrust runs two pool
+threads and its leader waits; the engine and PostgreSQL run two workers and the leader.
+Cache budgets: the engine `--cache-mb 2048`, PostgreSQL `shared_buffers = 2GB`; pgrust ran with
+its default `shared_buffers = 128MB` before (its peak, 554 MB, did not count the OS page cache
+its heap pages are read from); here it runs with 2 GB too.
+
+q01 (6.0 million lineitem rows, filter, 8 aggregates over 4 groups): CPU nanoseconds per row
+by phase, from `perf record` of each server (the engine's symbols; pgrust's JIT perf map,
+`pgrust.gravity_jit_perfmap = tags`, its binary stripped; PostgreSQL's symbols):
+
+| phase | engine | pgrust | PostgreSQL | cause |
+|---|---|---|---|---|
+| block / page read | 42 | 32 kernel copy + ~42 host | 29 | engine: warm decoded blocks; pgrust: 8 kB pages copied from the OS page cache |
+| row decode to columns | 136 | 23 (fused with the filter) | ~70 (JIT deform) | the engine walks every value up to the last column needed (varint-tagged rows); a numeric read through a 16-byte buffer and `memcpy` |
+| filter | 19 | in the loop | 9 | |
+| numeric expressions | 116 | 112, everything below fused in one JIT pipeline | 390 | `VN::eval`: an `Option<Option<(i128, u32)>>` per row and node, a vector made per operator, scales checked per value |
+| aggregate transitions | 90 | | 90 | `SumNum::add_wide`: scale alignment with `checked_pow` / `checked_mul` per row |
+| group lookup, per-row dispatch | 207 | | 99 | `batch_row`: a byte key hashed per row, each aggregate's `Partial` matched per row |
+| all | 647 | 212 | 1,200 | |
+
+User instructions / cycles per q01 row: PostgreSQL 7,540 / 4,800, the engine 5,100 / 2,640,
+pgrust 1,300 / 713 (plus ~140 kernel cycles). pgrust: plans compiled by TPDE into fused
+pipelines (x86-64 too); numeric sum / avg over typmod'd columns in packed scaled i128
+registers (`class.num_packed`, an i256 path past 37 digits), exact; the other queries' hash
+probes and filters JIT too. Not cached in pgrust: no condition cache for heap tables (its
+`condition_cache` is for its columnar tables only).
+
+The other three (wall / CPU s, PostgreSQL, engine, pgrust): q06 0.40/1.09, 0.54/1.48,
+0.69/1.39 (the engine ahead of pgrust: its dense bitmap count; its time is row decode, 50%);
+q13 0.80/2.04, 1.01/2.40, 0.44/0.85 (hash probes, LIKE and the merge: agent 219's and the row
+path); q22 0.115/0.34, 0.227/0.46, 0.052/0.11 (row path, `heap_order`'s sort).
+
+Memory, the same four queries, anon + shmem of each container after a pass: the engine 1,188
+MB at `--cache-mb 2048` (its block cache holding every block read, decoded), 249 MB at 128;
+pgrust 331 MB at 128 MB `shared_buffers`, 554 MB at 2 GB (a big table's scan reads through a
+ring, its pages stay in the OS page cache, uncounted); PostgreSQL 1,204-1,243 MB. At 128 MB
+the engine's q01 takes 42% more CPU and q06 twice as much: a block not cached is read,
+decompressed (zstd) and decoded again each time, where pgrust copies an uncompressed page.
+
+### Analytic path, round 1 (agent 220; BENCH.md "Analytic path, round 1")
+
+- **Whole runs aggregated a batch at a time** (`Partials::batch_run`, `parscan::Pre::aggregate`,
+  `vector::Lanes`). A worker's run of a fill (the rows of a `RowBatch`, decoded as columns)
+  whose every row the batch decides (none odd, none the filter leaves to the row path, no
+  hash probe) is aggregated in one go:
+  - every numeric argument's numbers as lanes (`Lanes`: the aggregates' arguments as one
+    graph of their distinct subexpressions, each computed once a batch into buffers kept
+    from batch to batch, exact i128s at one scale with a magnitude bound, so the loops over
+    them carry no overflow checks; a column whose rows have more than one scale, a product
+    past numeric's scale, a bound past 2^100 or a constant expression that overflows send the
+    batch the row way);
+  - each row's group: a key packed in a word (a kind byte and the value's bytes, a string's
+    length first, bpchar's trimmed) looked up in a 32-slot direct-mapped table of the batch,
+    then `pidx` (packed word to group), then the existing byte-key and value maps; words
+    specs (`Layout`) by their key words;
+  - per aggregate a loop over the rows adding into per-batch sums and counts by group slot,
+    then each touched group's state takes the batch's sum once (`SumNum::add_sum`, a words
+    state's checked adds).
+  Two-phase: groups new to the part are numbered provisionally; the states' merges are
+  checked first (a words sum past an i128, an integer average's sum), and only then are the
+  groups made (in the order their first rows came) and the sums added; a run that fails any
+  check changes nothing and goes through `batch_row` row by row as before, so groups,
+  their order, `seq`, errors and the rows read are the row path's. Aggregates taken:
+  count(*), count(col), sum / avg of numerics and integers to numeric (`SumNum`), integer
+  averages (`AvgInt`); integer sums (`SumInt`, which raise at the row whose running sum
+  overflows) and min / max / float aggregates go the row way. The partial-aggregate part
+  format is unchanged (`Part`, `Groups`).
+  - q01 -57% user instructions, wall 1.33 -> 0.55 s (pgrust's at the same width: 0.55);
+    q06 -5%, q15 -6%, q12 -3%, q10 / q21 -2%; the 22: -10% instructions.
+  - Tests: `parallel_scan`'s `vector_batches_match_rows` runs 80 random aggregations (keys,
+    counts, sums and averages of numeric expressions over columns of one scale, mixed scales,
+    numerics past an i128, NaN, NULLs, integers, constants; filters, one dividing by zero)
+    through the row path and the batches and requires the same rows, and that whole batches
+    were aggregated (`parscan::RUN_ROWS`). Golden `a220_batch_numeric_agg`, recorded from
+    PostgreSQL 18.6: sums and averages over numeric(15,2) columns and their products (the
+    scales and avg's rounding), groups of NULLs only, no rows, NaN and Infinity, products past
+    an i128, a filter dividing by zero, negative values and zeros of every scale.
+  - Dropped: numerics of up to 8 bytes read as one sign-extended word and `decode_cols` with
+    the batch's fields borrowed apart (q01 -6.7%, q06 -8.7% instructions; cycles of the 22 flat,
+    q03 / q13 / q22 cycles +2-5% in two rounds with instructions flat: unclear;
+    `~/.cache/a220/patches/c002-decode-word-loads.patch`).
+  - Measured, not changed (memory): peak (cgroup anon + shmem) on lane C with the 2 GB
+    budgets: the engine 1,670 MB, PostgreSQL 1,698, pgrust 2,035 with `shared_buffers = 2GB`
+    (331-554 MB at its default 128 MB, its pages read from the OS page cache, uncounted).
+    The engine's at smaller caches (four queries): 1,188 MB at 2048 / 1024, 662 at 512, 381 at
+    256; at 512 q01 takes 33% more CPU and q06 66%; at 256 a miss is a zstd decompression
+    (25% of q06's cycles, 20% of q01's), `Block::decode_with` (5%) and a pread (1%).
+  - q17 +1.3 to +2.1% instructions (base -> c004, three rounds; within the A/A spread of -2.4
+    to +0.1, but one-sided): its scan probes a hash table and never reaches `batch_run`, but
+    `Pre::decode` now makes the `live` selection for every batch; making it only where it is
+    used (`aggregate`, `eval_nums`) is a small follow-up, not measured.
+  - Next (largest first):
+    1. Row decode: `Pre::decode` is now 30-40% of q01 / q06 (every value up to the last
+       column needed walked and tagged per row; the dropped word-load change is part of it).
+       Decoding the filter's columns first and the aggregates' only for the rows passing
+       (pgrust's late lanes), and a per-table decode plan, are the next steps.
+    2. Lanes in i64 where the bound allows (half the bytes, cheaper multiplies), and the
+       group keys packed column by column.
+    3. Memory toward pgrust's: a cheaper codec for table blocks (LZ4, or none, leaving them
+       to the OS page cache as pgrust's pages are) so a smaller block cache costs no CPU,
+       then a ring for big sequential scans; with zstd blocks a 512 MB cache costs q01 a third
+       more CPU.
+    4. q13 / q22 (the row path: LIKE, the probe, the merge; 219's for the merge).
 
 ## Point reads, round 3 (agent 210)
 
