@@ -249,11 +249,11 @@ the discovery/store plugins.
 <!-- test-search: analysis-common >= 164 -->
 <!-- test-search: data-streams >= 159 -->
 <!-- test-search: dot-prefix-validation >= 2 -->
-<!-- test-search: ingest-common >= 102 -->
-<!-- test-search: lang-expression >= 2 -->
+<!-- test-search: ingest-common >= 172 -->
+<!-- test-search: lang-expression >= 3 -->
 <!-- test-search: lang-mustache >= 18 -->
-<!-- test-search: lang-painless >= 295 -->
-<!-- test-search: mapper-extras >= 124 -->
+<!-- test-search: lang-painless >= 337 -->
+<!-- test-search: mapper-extras >= 125 -->
 <!-- test-search: parent-join >= 24 -->
 <!-- test-search: percolator >= 6 -->
 <!-- test-search: rank-eval >= 7 -->
@@ -265,9 +265,9 @@ the discovery/store plugins.
 <!-- test-search: async-search >= 1 -->
 <!-- test-search: diskbbq >= 5 -->
 <!-- test-search: downsample >= 17 -->
-<!-- test-search: ent-search >= 6 -->
+<!-- test-search: ent-search >= 366 -->
 <!-- test-search: eql >= 27 -->
-<!-- test-search: fleet >= 3 -->
+<!-- test-search: fleet >= 21 -->
 <!-- test-search: ilm >= 16 -->
 <!-- test-search: logsdb >= 136 -->
 <!-- test-search: mapper-constant-keyword >= 5 -->
@@ -283,8 +283,8 @@ the discovery/store plugins.
 <!-- test-search: transform >= 55 -->
 <!-- test-search: watcher >= 43 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 703 -->
-<!-- test-search: esql >= 346 -->
+<!-- test-search: platinum >= 829 -->
+<!-- test-search: esql >= 498 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 225/618, `analytics` 103/114,
 `spatial` 92/105, `security` 25/101, `rollup` 0/52, `exponential_histogram` 13/44, `vector-tile`

@@ -181,9 +181,10 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (66 module and x-pack suites) | running |
-| differential suite against Elasticsearch 9.5.5 | running |
-| client matrix (11 unmodified clients) | running |
+| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,258 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 20 suites at 100%; round 6 passed 3,463. Largest gaps: x-pack `platinum` (829 of 1,412), `logsdb` (136 of 234), runtime fields (172 of 248), `otel-data` (6 of 68), transforms (55 of 108), ES\|QL (498 of 549), watcher (43 of 89), downsampling (17 of 59), KQL (0 of 34) |
+| differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
+| client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
+| x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
 
 The failures on the merged tree, all fixed: rolld tests that collided on search's default port;
 two tests that depended on timing; three behaviours the uncommitted round-6 work had broken (SQL
@@ -195,38 +196,24 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Honest green status on the merged tree.** Done so far: build and clippy clean; the unit run
-   on the merged tree (2026-11-12) passed 1,949 tests, failed 8, ignored 46 in 134 test binaries.
-   Fixed since: rolld tests that collided on search's default port, two timing-dependent tests,
-   SQL `CAST … AS VARCHAR`, ES|QL keys under a `flattened` field in a union. Left: the
-   connector key order after `_name` (entsearch fixture) and the data-source list order (ignored
-   test), both to be re-captured against ES 9.5.5; `by_query_scans_are_child_searches_of_the_run`
-   hangs (a by-query run's search can't be listed or cancelled while an endless script runs).
-   Then the YAML suites, the differential suite and the client matrix, with numbers here.
-2. **The fleet on roll-cluster** (architecture.md, "On the fleet"): built. Lease
-   `search:cluster:<name>` from rolld's handle, the REST front dispatching to owners, owner-run
-   `/v1/search/clusters/{id}/…`, idle leases given up, store epochs from ownership markers, acks
-   checking the guard, catalog on code-sql in the system database. The old search-only fleet
-   (search-proxy, its AWS stack, PgLeases) is deleted. Left: a rolld test with two nodes on
-   Postgres leases (like `rolld/tests/fleet_e2e.rs`), search in the fleet's `ROLL_PRODUCTS`.
-3. **The edge**: `<cluster>.search.<region>.<domain>` on the HTTPS listener, routed by `Host` to
-   the search REST front, connection details naming it (`edge::Public`), logs and metrics through
-   `logs.rs` route patterns.
-4. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** on this machine (idle RAM per tenant, cold
-   start from object storage, indexing throughput, p50/p99 latency, RAM/CPU per query; Rally
-   nyc_taxis, http_logs, geonames, so): docs/benchmarks/search.md; optimise where roll loses
-   (round 6 lost k-NN on HNSW, range fields, nyc_taxis histograms, nested aggregations). One
-   allocator policy: rolld's (purge delay 0, collect on park) vs search-dev's purge governor,
-   decided by a matched benchmark.
-5. **Control plane per index** for roll MCP's permission catalogue: the routes are in (README
-   table); `roll search index …` CLI commands and the dashboard on them are next. Credential
-   fields stay `password` and `url`.
-6. **Dashboard polish**: index browser, query console, mappings, analyzers (`_analyze`
-   playground), usage; checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
-7. **Metering on the fleet**: cluster lists show which node a cluster is loaded on without one
-   lease read per cluster; metering of a cluster that moves mid-interval accounted once.
-8. **Previews, secrets, apps**: a search cluster branches for a preview environment
-   (`roll_previews::Brancher`), endpoints and passwords as bindable secrets
-   (`roll_secrets::LinkProvider`, fields `url` and `password`), private networking for services.
-9. **Test gate**: `pnpm test:search` like the other products', an AGENTS.md line, CI under a
-   minute; then the PR to `main`.
+1. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** on this machine, pinned and repeated with
+   the variance reported: idle RAM per tenant, cold start (wake from object storage), indexing
+   throughput, p50/p99 latency and RAM/CPU per query; Rally nyc_taxis, http_logs, geonames, so.
+   Write docs/benchmarks/search.md fresh for this round, then optimise where roll loses (round 6
+   lost k-NN on HNSW, range fields, nyc_taxis histograms, nested aggregations), landing a change
+   only on a measured win. Settle one allocator policy: rolld's (purge delay 0, collect on park)
+   against search-dev's purge governor, by a matched benchmark.
+2. **Fleet end to end in rolld**: two real `rolld` nodes on Postgres leases and S3 (MinIO),
+   requests through either node and the edge, a drain mid-load losing nothing
+   (`rolld/tests/fleet_e2e.rs` style).
+3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`, `logsdb`,
+   runtime fields, `otel-data`, transforms, ES|QL, watcher, downsampling, KQL.
+4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
+   checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
+5. **Metering on the fleet**: cluster lists show which node a cluster is loaded on without one
+   lease read per cluster; a cluster that moves mid-interval is metered once.
+6. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset), a
+   `roll_secrets::LinkProvider` (fields `url`, `username`, `password`), private networking for
+   apps; wire `resolve_id` into roll-access once #19 lands.
+7. **CI**: measure on GitHub whether a search crate's lib tests fit the one-minute gate; the
+   extended workflow (`search.yml`) runs on demand.
