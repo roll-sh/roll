@@ -9718,6 +9718,14 @@ decompressed (zstd) and decoded again each time, where pgrust copies an uncompre
     PostgreSQL 18.6: sums and averages over numeric(15,2) columns and their products (the
     scales and avg's rounding), groups of NULLs only, no rows, NaN and Infinity, products past
     an i128, a filter dividing by zero, negative values and zeros of every scale.
+  - Verified: release build, clippy (no warning in the changed code), lib tests, golden
+    (in-process, wire, shuffled), parallel_scan, big_tables, the regress subset (create_misc,
+    create_index, aggregates, numeric, select_parallel, join, subselect, groupingsets,
+    partition_aggregate, window, select_distinct, union, select: 5,159 / 5,160, none newly
+    differing); the verification train on `8e779cc2e`: release crate tests 0 failed, clippy 19
+    warnings, crash_random and the power stage pass, debug crate tests 0 failed, the full
+    regression 51,148 / 51,150 (none newly differing), isolation 1,647 / 1,648, pg_dump_tap
+    14,609 passed. The difftest guard was not run (no planner change).
   - Dropped: numerics of up to 8 bytes read as one sign-extended word and `decode_cols` with
     the batch's fields borrowed apart (q01 -6.7%, q06 -8.7% instructions; cycles of the 22 flat,
     q03 / q13 / q22 cycles +2-5% in two rounds with instructions flat: unclear;
