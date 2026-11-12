@@ -183,7 +183,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,258 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 20 suites at 100%; round 6 passed 3,463. Largest gaps: x-pack `platinum` (829 of 1,412), `logsdb` (136 of 234), runtime fields (172 of 248), `otel-data` (6 of 68), transforms (55 of 108), ES\|QL (498 of 549), watcher (43 of 89), downsampling (17 of 59), KQL (0 of 34) |
+| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,292 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 21 suites at 100% (KQL 34 of 34); round 6 passed 3,463. Largest gaps: x-pack `platinum` (829 of 1,412), `logsdb` (136 of 234), runtime fields (172 of 248), `otel-data` (6 of 68), transforms (55 of 108), ES\|QL (498 of 549), watcher (43 of 89), downsampling (17 of 59) |
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
@@ -211,12 +211,14 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    replayed from S3 on the new owner). Next: the edge's hostnames in the same run, and search in
    `deploy/cloud`'s fleet test (`rolld/tests/fleet_e2e.rs`).
 3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`, `logsdb`,
-   runtime fields, `otel-data`, transforms, ES|QL, watcher, downsampling. KQL (0 of 34) is in
-   progress.
+   runtime fields, `otel-data`, transforms, ES|QL, watcher, downsampling. KQL is done (34 of 34);
+   its parse-error wording is still to be checked against the reference once Rally frees it.
 4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
    checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
-5. **Metering on the fleet**: cluster lists show which node a cluster is loaded on without one
-   lease read per cluster; a cluster that moves mid-interval is metered once.
+5. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
+   read where a cluster is loaded from the catalog). Previews asked for `own_bytes` on
+   `GET /v1/search/clusters/{id}`: the bytes a branch's commit points reference that its parent's
+   don't.
 6. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset), a
    `roll_secrets::LinkProvider` (fields `url`, `username`, `password`), private networking for
    apps; wire `resolve_id` into roll-access once #19 lands.
