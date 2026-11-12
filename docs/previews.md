@@ -437,5 +437,7 @@ and its cost.
 6. **Spread preview services across nodes** (a lease per preview rather than one leader). Today
    one node serves every preview host in a cluster.
 7. **Search branches** (roll search, `search_control::Control::branch`) when it lands.
-8. **Seeds and anonymised data**: a per-resource `seed` command run once after branching, and
+8. **Link access for roll apps services**: hand roll apps the preview's token (or a check hook)
+   so `pv-…` environments are private like `roll.toml` services.
+9. **Seeds and anonymised data**: a per-resource `seed` command run once after branching, and
    NoSQL masking surfaced in the settings.
