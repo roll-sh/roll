@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeftRight, ChevronRight, KeyRound, LayoutGrid, Lock, ScrollText, Settings2, ShieldCheck } from "lucide-react";
+import { ArrowLeftRight, ChevronRight, KeyRound, LayoutGrid, Lock, RefreshCw, ScrollText, Settings2, ShieldCheck } from "lucide-react";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { secretsApi, type Environment, type Link as SecretLink, type SecretsApi } from "@/lib/secrets-api";
@@ -15,9 +15,10 @@ import { CompareView } from "./compare";
 import { EnvView } from "./env-view";
 import { EnvironmentsView } from "./environments";
 import { OverviewGrid } from "./grid";
+import { SyncsView } from "./syncs";
 import { ErrorNote, useLoad } from "./ui";
 
-export type View = "overview" | "compare" | "environments" | "access" | "audit";
+export type View = "overview" | "compare" | "environments" | "access" | "syncs" | "audit";
 
 type Ctx = {
   project: WorkspaceProject;
@@ -81,7 +82,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   };
 
   const env = search.env ? envs.find((e) => e.slug === search.env) : undefined;
-  const view: View = (["compare", "environments", "access", "audit"] as const).find((v) => v === search.view) ?? "overview";
+  const view: View = (["compare", "environments", "access", "syncs", "audit"] as const).find((v) => v === search.view) ?? "overview";
 
   let body: ReactNode;
   if (overview.error && !overview.data) body = <ErrorNote error={`Secrets didn't load: ${overview.error}`} className="m-4" />;
@@ -91,6 +92,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   else if (view === "compare") body = <CompareView />;
   else if (view === "environments") body = <EnvironmentsView />;
   else if (view === "access") body = <AccessView />;
+  else if (view === "syncs") body = <SyncsView />;
   else if (view === "audit") body = <AuditView />;
   else body = <OverviewGrid />;
 
@@ -140,6 +142,7 @@ function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
     { view: "compare", label: "Compare", icon: <ArrowLeftRight className="size-3.5" /> },
     { view: "environments", label: "Environments", icon: <Settings2 className="size-3.5" /> },
     { view: "access", label: "Access", icon: <ShieldCheck className="size-3.5" /> },
+    { view: "syncs", label: "Syncs", icon: <RefreshCw className="size-3.5" /> },
     { view: "audit", label: "Audit", icon: <ScrollText className="size-3.5" /> },
   ];
   return (

@@ -139,8 +139,31 @@ export type AuditFilter = { env?: string; key?: string; actor?: string; action?:
 export type Imported = Applied & { skipped: string[] };
 export type ImportedAsRequest = { request: ChangeRequest; skipped: string[] };
 export type ExportFormat = "dotenv" | "json" | "shell" | "yaml";
-/** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`: the kinds with a link provider. */
-export type Health = { ok: boolean; key: "env" | "file" | "missing"; resealed: "all" | number | null; links: string[] };
+/** A one-way push of an environment's values to a platform outside roll (docs/secrets.md, "Syncs"). Never holds a value. */
+export type Sync = {
+  id: string;
+  environment: string;
+  path: string;
+  kind: string;
+  target: Record<string, unknown>;
+  keys: string[] | null;
+  prefix: string;
+  status: "pending" | "ok" | "error";
+  error: string | null;
+  last_digest: string | null;
+  last_synced_at: number | null;
+  /** Names at the target. */
+  synced: number;
+  signed: boolean;
+  created_at: number;
+  created_by: string;
+};
+export type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
+export type SyncField = { name: string; label: string; required: boolean; placeholder: string };
+/** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
+export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
+/** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
+export type Health = { ok: boolean; key: "env" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** An answer that isn't 2xx: the API's `error`, its `code` (`approval_required`, `stale`, `conflict`…) and the status. */
@@ -276,6 +299,13 @@ export function secretsApi(project: string) {
     shares: () => req<Share[]>("GET", `${P}/shares`),
     createShare: (s: NewShare) => req<Share>("POST", `${P}/shares`, s),
     revokeShare: (id: string) => req<null>("DELETE", `${P}/shares/${enc(id)}`),
+
+    listSyncs: () => req<{ syncs: Sync[]; kinds: SyncKind[] }>("GET", `${P}/syncs`),
+    /** `signing_secret`: for a signed kind, shown once. */
+    createSync: (s: NewSync) => req<Sync & { signing_secret?: string }>("POST", `${P}/syncs`, s),
+    deleteSync: (id: string) => req<null>("DELETE", `${P}/syncs/${enc(id)}`),
+    /** Pushes every key now; 409 `running` while another push holds it. */
+    runSync: (id: string) => req<Sync>("POST", `${P}/syncs/${enc(id)}/run`),
 
     audit: (f: AuditFilter = {}) => req<AuditEntry[]>("GET", `${P}/audit${qs(f)}`),
   };
