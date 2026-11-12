@@ -416,9 +416,9 @@ feature/roll-previews and feature/roll-search found these. Ours are in `## Next`
 
 ## Next
 
-Ranked; the top item is what's being worked on.
+Ranked; the top item not marked *waiting* is what's being worked on.
 
-1. **roll secrets as the env store** (after #20 merges): an apps environment is a project
+1. *Waiting on #20.* **roll secrets as the env store**: an apps environment is a project
    environment of roll secrets (checked on `PUT`, ephemeral from its kind, deleted with it);
    service variables live in secrets at `/services/<name>`; values are resolved only when a
    container is made (never for a dashboard read; `needs_deploy` from fingerprints); links become
