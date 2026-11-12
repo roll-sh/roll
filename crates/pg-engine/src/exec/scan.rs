@@ -4643,10 +4643,8 @@ const INLINE_MIN_PAGES: u32 = 32;
 const INLINE_MAX_PAGES: u32 = 1024;
 
 fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
-    let s = ctx.sess.settings.borrow();
-    let num = |n: &str, d: usize| s.get_str(n).and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
-    let pool = num("max_parallel_workers", 8);
-    let n = num("max_parallel_workers_per_gather", 2).min(pool);
+    let (pool, per_gather) = ctx.sess.settings.borrow().hot().parallel_workers;
+    let n = per_gather.min(pool);
     (if n == 0 { 0 } else { (n + 1).min(8) }, pool.max(n + 1))
 }
 

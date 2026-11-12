@@ -65,9 +65,15 @@ pub fn may_hold_rows(start: &[u8], end: &[u8]) -> bool {
         Some(b) => u32::from_be_bytes(b.try_into().unwrap()),
         None => 0,
     };
-    // (The first table whose rows can come at or after `start`.)
-    let t = if start < &index_prefix(t, 1)[..] { t } else { t.saturating_add(1) };
-    index_prefix(t.max(1), 0).as_slice() < end
+    // (The first table whose rows can come at or after `start`; `index_prefix`'s bytes.)
+    let prefix = |t: u32, index: u32| {
+        let mut k = [0; 8];
+        k[..4].copy_from_slice(&t.to_be_bytes());
+        k[4..].copy_from_slice(&index.to_be_bytes());
+        k
+    };
+    let t = if start < &prefix(t, 1)[..] { t } else { t.saturating_add(1) };
+    prefix(t.max(1), 0).as_slice() < end
 }
 
 /// Whether the stored row `v` points at out-of-line values.

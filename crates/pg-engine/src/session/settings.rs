@@ -557,6 +557,9 @@ pub struct Hot {
     pub default_deferrable: bool,
     /// application_name, as SHOW gives it.
     pub application_name: String,
+    /// max_parallel_workers and max_parallel_workers_per_gather (their defaults when
+    /// unparsable).
+    pub parallel_workers: (usize, usize),
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1501,6 +1504,10 @@ impl Settings {
                         .then(|| self.int("wal_writer_delay").max(1) as u64),
                     default_deferrable: self.bool("default_transaction_deferrable"),
                     application_name: self.show("application_name").unwrap_or_default(),
+                    parallel_workers: {
+                        let num = |n: &str, d: usize| self.get_str(n).and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
+                        (num("max_parallel_workers", 8), num("max_parallel_workers_per_gather", 2))
+                    },
                 },
             })
         })

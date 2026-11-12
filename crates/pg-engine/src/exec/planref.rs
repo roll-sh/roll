@@ -9,27 +9,33 @@
 use crate::sql::plan::{DeletePlan, InsertPlan, Plan, ScanPlan, UpdatePlan};
 use std::sync::Arc;
 
-pub enum PlanRef<T: 'static> {
-    /// `part` of the plan node `plan`.
-    Shared { plan: Arc<Plan>, part: fn(&Plan) -> &T },
+/// A plan node's part a `PlanRef` reads (`Plan::Scan`'s `ScanPlan`, ...).
+pub trait Part: 'static {
+    /// The part of `p`, a plan node of its kind.
+    fn of(p: &Plan) -> &Self;
+}
+
+pub enum PlanRef<T: Part> {
+    /// The part of the plan node `plan` (of its kind: `planref::scan` and the like check).
+    Shared(Arc<Plan>),
     Own(Box<T>),
 }
 
-impl<T> std::ops::Deref for PlanRef<T> {
+impl<T: Part> std::ops::Deref for PlanRef<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
         match self {
-            PlanRef::Shared { plan, part } => part(plan),
+            PlanRef::Shared(plan) => T::of(plan),
             PlanRef::Own(t) => t,
         }
     }
 }
 
-impl<T: Clone> Clone for PlanRef<T> {
+impl<T: Part + Clone> Clone for PlanRef<T> {
     fn clone(&self) -> Self {
         match self {
-            PlanRef::Shared { plan, part } => PlanRef::Shared { plan: plan.clone(), part: *part },
+            PlanRef::Shared(plan) => PlanRef::Shared(plan.clone()),
             PlanRef::Own(t) => PlanRef::Own(t.clone()),
         }
     }
@@ -38,15 +44,19 @@ impl<T: Clone> Clone for PlanRef<T> {
 macro_rules! plan_parts {
     ($($f:ident: $variant:ident => $ty:ty;)*) => {
         $(
-            /// The plan node's part, shared (None: `plan` is another kind of node).
-            pub fn $f(plan: &Arc<Plan>) -> Option<PlanRef<$ty>> {
-                fn part(p: &Plan) -> &$ty {
+            impl Part for $ty {
+                #[inline]
+                fn of(p: &Plan) -> &$ty {
                     match p {
                         Plan::$variant(x) => x,
                         _ => unreachable!("a {} plan part of another plan", stringify!($variant)),
                     }
                 }
-                matches!(&**plan, Plan::$variant(_)).then(|| PlanRef::Shared { plan: plan.clone(), part })
+            }
+
+            /// The plan node's part, shared (None: `plan` is another kind of node).
+            pub fn $f(plan: &Arc<Plan>) -> Option<PlanRef<$ty>> {
+                matches!(&**plan, Plan::$variant(_)).then(|| PlanRef::Shared(plan.clone()))
             }
         )*
     };

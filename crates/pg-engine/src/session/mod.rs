@@ -192,6 +192,11 @@ fn result_row(cols: &[OutCol]) -> Vec<(String, u32, i32)> {
         .collect()
 }
 
+/// Whether `cols` are the result row `fixed` (`result_row`) describes.
+fn is_result_row(fixed: &[(String, u32, i32)], cols: &[OutCol]) -> bool {
+    fixed.len() == cols.len() && fixed.iter().zip(cols).all(|((n, t, m), c)| *n == c.name && *t == c.type_oid() && *m == c.ty.typmod())
+}
+
 impl Drop for Prepared {
     fn drop(&mut self) {
         // A long statement's trees are as deep as it nests; their drops recurse that deep.
@@ -1790,7 +1795,7 @@ impl Session {
         // (A Parse's binding: `litplan::ParamPlans` may plan its analysis again.)
         self.last_unplanned = unplanned;
         if let Some(fixed) = &p.plans.lock().fixed_result
-            && *fixed != result_row(&b.cols)
+            && !is_result_row(fixed, &b.cols)
         {
             return Err(Error::new(
                 code::FEATURE_NOT_SUPPORTED,
@@ -1851,7 +1856,7 @@ impl Session {
             None => Arc::new(self.bound_custom_afresh(p, stmt, params)?),
         };
         if let Some(fixed) = &p.plans.lock().fixed_result
-            && *fixed != result_row(&b.cols)
+            && !is_result_row(fixed, &b.cols)
         {
             return Err(Error::new(
                 code::FEATURE_NOT_SUPPORTED,

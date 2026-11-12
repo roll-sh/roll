@@ -450,7 +450,6 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
             }
             // Cheapest first (order_qual_clauses); quals already there (row security) stay
             // ahead.
-            let mut parts = parts;
             // Equalities go into equivalence classes and come back after the other quals.
             // (A user function's call costs its COST; with row-level security in the
             // statement its own quals keep their security level's order.)
@@ -466,11 +465,13 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
                     full_qual_cost(cat, e)
                 }
             };
-            parts.sort_by(|a, b| {
-                cost(a)
-                    .total_cmp(&cost(b))
-                    .then(ec_order_clause(a).cmp(&ec_order_clause(b)))
-            });
+            // (Each qual's cost and place found once: `sort_by` with them, stable as it is.)
+            let by_cost = |v: Vec<Expr>| {
+                let mut keyed: Vec<_> = v.into_iter().map(|e| (cost(&e), ec_order_clause(&e), e)).collect();
+                keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                keyed.into_iter().map(|(_, _, e)| e).collect::<Vec<Expr>>()
+            };
+            let parts = by_cost(parts);
             // Row-level security quals added under the statement's own; else the new quals
             // after those there (row security), cheap leakproof ones among them.
             let all = if SECURITY_QUALS.with(|f| f.get()) {
@@ -483,8 +484,7 @@ fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
                 // (No security barrier: one level, all of them by cost.)
                 let mut merged = all;
                 merged.extend(parts);
-                merged.sort_by(|a, b| cost(a).total_cmp(&cost(b)).then(ec_order_clause(a).cmp(&ec_order_clause(b))));
-                merged
+                by_cost(merged)
             };
             let mut all = all;
             // restriction_is_always_true / _false: IS [NOT] NULL of a NOT NULL column.
