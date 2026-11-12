@@ -505,6 +505,16 @@ mod term {
     }
 }
 
+/// The git commit `dir` is checked out at: its sha, its subject, and whether the tree has local
+/// changes. None outside a git checkout (or without git).
+fn git_head(dir: &Path) -> Option<(String, String, bool)> {
+    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let head = git(&["log", "-1", "--format=%H%x00%s"])?;
+    let (sha, subject) = head.split_once('\0')?;
+    let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+    Some((sha.to_string(), subject.chars().take(500).collect(), dirty))
+}
+
 /// Arguments as one `sh -c` command, each quoted when the shell would split or expand it.
 fn shell_join(args: &[String]) -> String {
     args.iter()
@@ -581,6 +591,7 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     };
     let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}", dir.display()))?;
     let link = read_link(&dir);
+    let git = git_head(&dir);
     let svc = match (&u.target.service, &link) {
         (Some(_), _) => service(api, &u.target).await?,
         (None, Some(l)) => api.get(&format!("/v1/apps/services/{}", enc(&s(&l["service"])))).await?,
@@ -608,8 +619,14 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     if let Some(k) = &api.key {
         req = req.bearer_auth(k);
     }
-    if let Some(m) = &u.message {
-        req = req.header("x-roll-message", m);
+    // The message: the one given, else the checkout's last commit (said to have local changes
+    // when the tree isn't clean), percent-encoded since a subject needn't be ASCII.
+    let message = u.message.clone().or_else(|| git.as_ref().map(|(_, subject, dirty)| if *dirty { format!("{subject} (with local changes)") } else { subject.clone() }));
+    if let Some(m) = &message {
+        req = req.header("x-roll-message", urlencoding::encode(m).into_owned());
+    }
+    if let Some((sha, _, _)) = &git {
+        req = req.header("x-roll-revision", sha);
     }
     let res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
     let status = res.status();
@@ -964,6 +981,21 @@ mod tests {
         let mut got = walkdir(&out.path().join("t"));
         got.sort();
         assert_eq!(got, [".dockerignore", ".env.example", ".gitignore", ".npmrc", ".rollignore", "server.js", "src/index.js"]);
+    }
+
+    #[test]
+    fn roll_up_names_the_checkouts_commit() {
+        let d = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(d.path()).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        std::fs::write(d.path().join("a"), "1").unwrap();
+        git(&["add", "a"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Café ✓ ready"]);
+        let (sha, subject, dirty) = git_head(d.path()).unwrap();
+        assert_eq!((sha.len(), subject.as_str(), dirty), (40, "Café ✓ ready", false));
+        std::fs::write(d.path().join("b"), "2").unwrap();
+        assert!(git_head(d.path()).unwrap().2, "an untracked file is a local change");
+        assert!(git_head(tempfile::tempdir().unwrap().path()).is_none());
     }
 
     #[test]

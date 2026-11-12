@@ -285,7 +285,10 @@ impl Apps {
 
     async fn ensure_environment(self: &Arc<Self>, svc: &ServiceRow, env: &str, branch: Option<Option<&str>>, ephemeral: Option<bool>, project_name: &str) -> Result<EnvRow> {
         check_name("an environment name", env)?;
-        let base = if env == PRODUCTION { format!("{}-{}", svc.name, project_name) } else { format!("{}-{}-{}", svc.name, project_name, env) };
+        // `<service>-<project>[-<env>]`, the project left out when it has the service's name
+        // (`roll up` names both after the directory: `web`, not `web-web`).
+        let who = if label(project_name, 56) == svc.name { svc.name.clone() } else { format!("{}-{}", svc.name, project_name) };
+        let base = if env == PRODUCTION { who } else { format!("{who}-{env}") };
         let base = label(&base, 56);
         let mut slugs = vec![base.clone()];
         for _ in 0..4 {

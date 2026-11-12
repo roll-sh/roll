@@ -80,6 +80,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 - `…/usage` counts whole UTC days (`day` is days since 1970-01-01), today included, days without
   use as zeros.
 
+A `roll up` upload (`application/gzip`) may carry `X-Roll-Message` (percent-encoded UTF-8: the
+checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment.
+
 `POST …/deploys` takes an `Idempotency-Key` header (1–200 printable ASCII): a retry with the same
 key in the same environment, within a day, answers the deployment the first call queued instead of
 queuing another.

@@ -251,8 +251,10 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         None => None,
     };
     let d = if ct.starts_with("application/gzip") || ct.starts_with("application/x-gzip") {
-        let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-        apps.deploy(&id, &env, json!({ "message": message }), Trigger::Upload, Some(b), key).await?
+        // Percent-encoded UTF-8 (a commit subject isn't ASCII): `roll up` sends it so.
+        let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
+        let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision }), Trigger::Upload, Some(b), key).await?
     } else {
         apps.deploy(&id, &env, body(&b)?, Trigger::Manual, None, key).await?
     };

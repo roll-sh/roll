@@ -85,7 +85,8 @@ impl Apps {
         };
         let mut message = message.unwrap_or_default();
         let (revision, image, trigger) = match (&svc.source, upload.is_some(), image) {
-            (_, true, _) => (None, None, Trigger::Upload),
+            // An upload from a git checkout names its commit (for the list; nothing reads it).
+            (_, true, _) => (revision.clone(), None, Trigger::Upload),
             (_, false, Some(img)) => {
                 Source::Image { image: img.clone() }.check()?;
                 (None, Some(img), trigger)

@@ -252,7 +252,8 @@ every deployment is immutable with instant rollback.
 ### Networking
 
 - **Public URLs**: every service in an environment gets
-  `https://<service>-<project>[-<env>].up.roll.site` (production omits the env; a taken name
+  `https://<service>-<project>[-<env>].up.roll.site` (production omits the env, and the project
+  is left out when it has the service's name, as `roll up` names both; a taken name
   gets a 4-character suffix). `up.roll.site` keeps apps off the bucket namespace
   (`<bucket>.roll.site`) and on roll.site, which only serves user content. Cloudflare proxies it
   (`*.up.roll.site` needs Advanced Certificate Manager on the zone, a fixed $10 a month; the
