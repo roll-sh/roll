@@ -395,8 +395,7 @@ impl Control {
             let result = if !parent_local {
                 self.restore_into(&dir, &project, &parent.id, Target::Latest, None).await
             } else if parent_ep.state == EndpointState::Running {
-                let image = self.config.image(project.pg_version);
-                self.driver.basebackup(&parent_ep.id, &image, project.pg_version, &project.password, &dir).await.map(|_| false).map_err(Into::into)
+                self.online_copy(&project, &parent, &parent_ep.id, &dir).await.map(|_| false)
             } else {
                 clone_dir(&self.branch_path(&parent), &dir).await.map(|_| false).map_err(Into::into)
             };

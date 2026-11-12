@@ -403,11 +403,7 @@ impl Control {
                     .await
                     .map(|recover| branch.pending_recovery = recover)
             } else if parent_ep.state == EndpointState::Running {
-                let image = self.config.image(project.pg_version);
-                self.driver
-                    .basebackup(&parent_ep.id, &image, project.pg_version, &project.password, &dest)
-                    .await
-                    .map_err(Into::into)
+                self.online_copy(&project, &parent, &parent_ep.id, &dest).await
             } else {
                 clone_dir(&self.branch_path(&parent), &dest).await.map_err(Into::into)
             };
@@ -419,6 +415,20 @@ impl Control {
         self.store.insert_branch(&branch)?;
         self.insert_endpoint(project_id, &branch.id, READ_WRITE)?;
         Ok(branch)
+    }
+
+    /// A running parent's data into `dest`: a file-system copy under the backup API (shares
+    /// blocks on XFS and btrfs), else `pg_basebackup`.
+    pub(crate) async fn online_copy(&self, project: &Project, parent: &Branch, parent_ep: &str, dest: &std::path::Path) -> Result<()> {
+        match self.driver.online_clone(parent_ep, &project.password, &self.branch_path(parent), dest, project.pg_version).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, endpoint = parent_ep, "file-system branch copy failed; using pg_basebackup");
+                let _ = std::fs::remove_dir_all(dest);
+                let image = self.config.image(project.pg_version);
+                self.driver.basebackup(parent_ep, &image, project.pg_version, &project.password, dest).await.map_err(Into::into)
+            }
+        }
     }
 
     /// Remove an endpoint's compute and local data.

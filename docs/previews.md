@@ -143,7 +143,7 @@ database's or a stream's lease, storage's metadata owner) wherever the reconcile
 
 | Kind | Branch | Reset | Sleeping cost | Notes |
 | --- | --- | --- | --- | --- |
-| `postgres` | `pg_control::Control::create_branch` from the project's `main` | In place (`POST /v1/projects/{id}/branches/{branch}/reset`): the same branch, endpoint and `DATABASE_URL`, its own history started again | Its local data directory until eviction (24 h), then its own base backup in object storage | The weakest copy-on-write here: a branch is a full data directory on ext4 (reflinks on btrfs/XFS). See `## Next`. |
+| `postgres` | `pg_control::Control::create_branch` from the project's `main`. A running parent is copied by the file system between `pg_backup_start` and `pg_backup_stop` (`cp --reflink=auto`): blocks are shared on XFS and btrfs (the fleet's gp3 volumes are XFS), a plain copy on ext4 | In place (`POST /v1/projects/{id}/branches/{branch}/reset`): the same branch, endpoint and `DATABASE_URL`, its own history started again | Its local data directory until the preview has been idle an hour (then evicted), then its own base backup in object storage | Copy-on-write where the file system reflinks; a full directory on ext4 (this machine). |
 | `redis` | `redis_control::Control::branch` | Delete and branch again | Nothing in memory; its manifest and the segments it pins | Copy-on-write in storage. Loading replays the parent into memory. |
 | `bucket` | `s3_store::Store::branch_bucket` | Delete and branch again | The objects it wrote, plus the parent's writes pushed down to it | One row to create. Credentials are a write key scoped to the branch. |
 | `nosql` | `nosql_control::Control::branch` (`schema_only` for `schema`) | `nosql_control::Control::reset`: same id, endpoint and credentials | The SSTables it wrote | Zero copy. Masking policies are inherited. |
@@ -475,9 +475,8 @@ Ranked by what a person notices first. Done so far:
 
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
-2. **Postgres branches that don't copy the data directory on ext4**: start from the parent's
-   latest base backup plus WAL with lazy pages, or use reflinks with
-   `pg_backup_start`/`pg_backup_stop` on XFS and btrfs. Also `schema` mode for Postgres.
+2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+   backup plus WAL with lazy pages (no full copy on ext4). Also `schema` mode for Postgres.
 3. **roll apps end to end**: run `scripts/preview-cost.sh` against a rolld with roll apps (once
    `feature/roll-apps` lands), and measure a built service's cold start and cost. Also link
    access for its `pv-…` environments.

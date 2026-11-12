@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
@@ -317,6 +317,73 @@ impl DockerDriver {
         ])
         .await
         .map(drop)
+    }
+
+    /// Consistent copy of a running compute's data directory into `dest` by the file system:
+    /// `cp --reflink=auto` between `pg_backup_start` and `pg_backup_stop` (the low-level backup
+    /// API), then the WAL up to the stop and its `backup_label`. On XFS or btrfs the copy shares
+    /// every block with the parent (instant, nothing written); on other file systems it's a
+    /// plain copy, as fast as the disk. The branch replays the WAL from the backup's start on
+    /// its first start.
+    pub async fn online_clone(&self, source_endpoint: &str, password: &str, src: &Path, dest: &Path, pg_version: u32) -> anyhow::Result<()> {
+        let (mount, pgdata) = mount_and_pgdata(src, pg_version);
+        let rel = pgdata.strip_prefix(mount).unwrap_or("").trim_start_matches('/').to_string();
+        let pw = format!("PGPASSWORD={password}");
+        let name = container_name(source_endpoint);
+        // One session holds the backup from start to stop.
+        let mut psql = Command::new("docker")
+            .args(["exec", "-i", "-e", &pw, &name, "psql", "-h", "127.0.0.1", "-U", "roll", "-d", "postgres", "-qAtX", "-v", "ON_ERROR_STOP=1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = psql.stdin.take().context("psql's stdin")?;
+        let mut out = BufReader::new(psql.stdout.take().context("psql's stdout")?).lines();
+        stdin.write_all(b"SELECT pg_backup_start('roll-branch', true);\n").await?;
+        stdin.flush().await?;
+        let started = tokio::time::timeout(Duration::from_secs(120), out.next_line()).await.context("pg_backup_start timed out")??;
+        if started.is_none() {
+            let mut err = String::new();
+            if let Some(mut e) = psql.stderr.take() {
+                let _ = e.read_to_string(&mut err).await;
+            }
+            bail!("pg_backup_start: {}", err.trim());
+        }
+        let copied = clone_dir(src, dest).await;
+        stdin.write_all(b"SELECT labelfile FROM pg_backup_stop(false);\nSELECT 'roll-end';\n").await?;
+        stdin.flush().await?;
+        let mut label = String::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(120), out.next_line()).await.context("pg_backup_stop timed out")?? {
+                Some(l) if l == "roll-end" => break,
+                Some(l) => {
+                    label.push_str(&l);
+                    label.push('\n');
+                }
+                None => bail!("psql ended before pg_backup_stop answered"),
+            }
+        }
+        drop(stdin);
+        let _ = psql.wait().await;
+        copied?;
+        let (src_pg, dest_pg) = (src.join(&rel), dest.join(&rel));
+        // The WAL written while the copy ran, up to the backup's end.
+        let _ = std::fs::remove_dir_all(dest_pg.join("pg_wal"));
+        clone_dir(&src_pg.join("pg_wal"), &dest_pg.join("pg_wal")).await?;
+        std::fs::write(dest_pg.join("backup_label"), label.trim_end_matches('\n').to_string() + "\n")?;
+        // Not the parent's: its process, its replication slots, its statistics' scratch.
+        for f in ["postmaster.pid", "postmaster.opts"] {
+            let _ = std::fs::remove_file(dest_pg.join(f));
+        }
+        for d in ["pg_replslot", "pg_stat_tmp"] {
+            if let Ok(entries) = std::fs::read_dir(dest_pg.join(d)) {
+                for e in entries.flatten() {
+                    let _ = if e.path().is_dir() { std::fs::remove_dir_all(e.path()) } else { std::fs::remove_file(e.path()) };
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Online base image of a running compute, streamed to object storage (zstd tar of PGDATA).
