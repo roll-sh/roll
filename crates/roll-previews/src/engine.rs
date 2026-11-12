@@ -561,7 +561,7 @@ impl Engine {
             let Some(rev) = rev else { continue };
             for spec in self.source.services(repo, &rev).await.map_err(|e| anyhow::anyhow!("reading {repo}'s services: {e:#}"))? {
                 keep.push(spec.name.clone());
-                let svc = self.store.want_service(&r.id, &r.slug, &spec.name, repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
+                let svc = self.store.want_service(&r.id, &spec.name, repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
                 // A redeploy (or a reset, whose URLs are new) restarts it on its next request.
                 if svc.deployed.as_deref() != Some(&rev) || reset_any {
                     let t = Target {
@@ -608,7 +608,7 @@ impl Engine {
             row.next_at = SETTLED;
         })?;
         if was != row.state || was == State::Creating || was == State::Updating {
-            self.store.log(&r.id, &format!("{}", row.state.as_str()))?;
+            self.store.log(&r.id, row.state.as_str())?;
         }
         self.report(row).await;
         Ok(())

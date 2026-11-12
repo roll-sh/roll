@@ -516,9 +516,10 @@ impl Store {
 
     /// Make sure `name` has a row with a host of its own (`<name>-<slug>`, the id's end added
     /// on a clash), and set the revision it should run. Returns the service.
-    pub fn want_service(&self, id: &str, slug: &str, name: &str, repo: &str, revision: &str, memory_mb: u32, url: &dyn Fn(&str) -> String) -> Result<Service> {
+    pub fn want_service(&self, id: &str, name: &str, repo: &str, revision: &str, memory_mb: u32, url: &dyn Fn(&str) -> String) -> Result<Service> {
         let now = self.now_ms()?;
         self.db.write(|c| {
+            let slug: String = c.query_row("SELECT slug FROM previews WHERE id = ?", [id], |r| r.get(0))?;
             let existing = c
                 .query_row(&format!("SELECT {SERVICE_COLUMNS} FROM services WHERE preview_id = ? AND name = ?"), [id, name], service_row)
                 .optional()?;
@@ -705,7 +706,7 @@ mod tests {
         assert_ne!(b.slug, a.slug);
         assert!(b.slug.starts_with("pr7-shop-"));
         let url = |h: &str| format!("http://{h}.preview.test");
-        let web = s.want_service(&a.id, &a.slug, "web", "acme/web", "cs_1", 512, &url).unwrap();
+        let web = s.want_service(&a.id, "web", "acme/web", "cs_1", 512, &url).unwrap();
         assert_eq!(web.host, "web-pr7-shop");
         assert_eq!(web.url, "http://web-pr7-shop.preview.test");
         assert_eq!(s.service_for_host("web-pr7-shop").unwrap(), Some((a.id.clone(), "web".into())));

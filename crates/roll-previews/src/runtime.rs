@@ -505,7 +505,7 @@ mod tests {
                 created_by: "roll".into(),
             })
             .unwrap();
-        store.want_service(&row.id, &row.slug, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
         let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let up = upstream.local_addr().unwrap();

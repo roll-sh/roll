@@ -2,14 +2,14 @@
 //! branch of every data resource, every service deployed at the change's head, and a secrets
 //! environment wired to the branches, all asleep until someone looks.
 //!
-//! - [`store`]: previews, their resources and services, and each project's rules, in one
+//! - [`store`] holds previews, their resources and services, and each project's rules, in one
 //!   `code_sql` database (SQLite on one node, the system database's `previews` schema on many).
-//! - [`ports`]: what previews drive: a [`ports::Brancher`] per data product, [`ports::Apps`] for
-//!   services, [`ports::Secrets`], and [`ports::Source`] (roll code's changes and trees).
-//! - [`engine`]: the reconciler that converges every preview to its desired state.
-//! - [`runtime`]: services as containers that start on the first request and stop when idle,
-//!   until roll apps provides [`ports::Apps`].
-//! - [`api`]: `/v1/previews`.
+//! - [`ports`] is what previews drive: a [`ports::Brancher`] per data product, [`ports::Apps`]
+//!   for services, [`ports::Secrets`], and [`ports::Source`] (roll code's changes and trees).
+//! - [`engine`] is the reconciler that converges every preview to its desired state.
+//! - [`runtime`] runs services as containers that start on the first request and stop when
+//!   idle, until roll apps provides [`ports::Apps`].
+//! - [`api`] serves `/v1/previews`.
 
 pub mod api;
 pub mod code;
