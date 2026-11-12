@@ -437,6 +437,12 @@ impl Control {
 
     // --- clusters -------------------------------------------------------------------------
 
+    /// The id (`srch_…`) of the cluster `id_or_name` names, if it exists: one indexed catalog
+    /// read, for resolvers that key rules by id (roll's access catalogue).
+    pub async fn resolve_id(&self, id_or_name: &str) -> Option<String> {
+        self.get(id_or_name).await.ok().map(|c| c.id)
+    }
+
     pub async fn get(&self, id_or_name: &str) -> Result<SearchCluster> {
         if let Some(c) = self.store.get(id_or_name).await? {
             return Ok(c);

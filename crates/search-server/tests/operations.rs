@@ -413,7 +413,9 @@ async fn by_query_scans_are_child_searches_of_the_run() {
     let addr = t.addr;
     let body = format!(r#"{{"query":{{"script":{{"script":{{"source":"{} return true;"}}}}}}}}"#, ENDLESS.trim_end_matches(" return s % 7;"));
     let run = tokio::spawn(async move { send(addr, "POST", "/slow/_delete_by_query", &[("Content-Type", "application/json"), ("X-Opaque-Id", "dbq1")], body.as_bytes()).await });
-    let listing = wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
+    wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
+    // The whole tree (the wait's listing has only the shard tasks).
+    let listing = json(&send(t.addr, "GET", "/_tasks?detailed=true", &[], b"").await);
     let node = node_id(&listing);
     let tasks = at(&listing, &format!("nodes/{node}/tasks")).and_then(Value::as_object).unwrap().clone();
     let find = |action: &str| tasks.iter().find(|(_, v)| v.get("action").and_then(Value::as_str) == Some(action)).map(|(k, v)| (k.clone(), v.clone())).unwrap_or_else(|| panic!("no {action} in {tasks:?}"));
