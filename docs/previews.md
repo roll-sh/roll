@@ -277,8 +277,9 @@ default) with the project's `env` overrides and the branched resources' URLs on 
     comment, statuses, deployments and repo webhooks get the plain URL (which answers 401 to
     anyone without the link). The dashboard and `roll preview` hand out `share_url`.
   - The redirect only ever goes to a path on the preview's own host.
-  - Services on roll apps are reached through roll apps' own hostnames and are protected by its
-    rules, not this one (see `## Next`).
+  - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
+    roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
+    else 401 without waking anything.
 - **Who.** `/v1/previews` sits behind the operator token like every product's API. Scoped tokens
   (`feature/roll-mcp`) classify these routes: `GET` is `read`; create, refresh, sleep and wake are
   `write`; reset and `DELETE` are `delete`. `Store::environment_of(kind, ref)` tells the
@@ -494,9 +495,8 @@ Ranked by what a person notices first. Done so far:
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
 2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages (no full copy on ext4). Also `schema` mode for Postgres.
-3. **Link access for roll apps' `pv-…` environments**: they answer on roll apps' own hostnames
-   without previews' token today. Hand roll apps the token, or add a check hook. Also put the
-   roll apps run in `scripts/preview-cost.sh` once `feature/roll-apps` lands.
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+   run is in the measurements).
 4. **A cluster test of previews' leases**: several nodes in one process (like
    `code-control/tests/cluster.rs`): a preview converged and served on its holder, moved on a
    node's loss.

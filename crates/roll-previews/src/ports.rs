@@ -158,6 +158,9 @@ pub struct Target {
     /// whose services link resources under a prefix (`ORDERS_DATABASE_URL`) points each link
     /// to a branched parent at the branch.
     pub branches: Vec<BranchVars>,
+    /// The preview's access token when its project's previews are private (`access: "link"`):
+    /// a backend that serves the service itself (roll apps) checks it like the runtime does.
+    pub access_token: Option<String>,
 }
 
 /// A branched resource's kind and parent, and its own variables (unprefixed).

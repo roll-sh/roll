@@ -608,6 +608,10 @@ impl Engine {
         }
         let urls = self.resource_env(&r.id).await?;
         let branches = self.branch_vars(&r.id).await?;
+        let access_token = match self.store.access(&r.id)? {
+            Some((t, true)) if !t.is_empty() => Some(t),
+            _ => None,
+        };
         let mut vars: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for (k, v) in urls {
             set(&mut vars, &k, v);
@@ -683,6 +687,7 @@ impl Engine {
                     environment: env_name(&r.id),
                     vars: vars.clone(),
                     branches: branches.clone(),
+                    access_token: access_token.clone(),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {
@@ -1073,6 +1078,7 @@ impl EnvSource for Engine {
             environment: env_name(&r.id),
             vars: Vec::new(),
             branches: Vec::new(),
+            access_token: None,
         };
         Ok((t, env))
     }

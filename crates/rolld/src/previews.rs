@@ -937,7 +937,9 @@ impl roll_previews::ports::Apps for RollApps {
         let id = self.service_in(&t.project, &t.service).await?.ok_or_else(|| anyhow::anyhow!("roll apps has no service {} in the project", t.service))?;
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((t.preview.clone(), t.service.clone()), id.clone());
         let path = Self::env_path(&id, &t.environment);
-        self.api.call(Method::PUT, &path, Some(json!({ "branch": null, "ephemeral": true }))).await?;
+        // Private like the preview (link access): roll apps' proxy checks the same token.
+        let access = t.access_token.as_ref().map(|token| json!({ "token": token }));
+        self.api.call(Method::PUT, &path, Some(json!({ "branch": null, "ephemeral": true, "access": access }))).await?;
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
         // own variable, which would still reach production).
