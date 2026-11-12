@@ -42,11 +42,19 @@ fn median(mut v: Vec<Duration>) -> Duration {
     v[v.len() / 2]
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_static_site_builds_and_its_cold_starts_are_measured() {
+struct World {
+    _dir: tempfile::TempDir,
+    apps: Arc<Apps>,
+    api: axum::Router,
+    public: axum::Router,
+    project: String,
+}
+
+/// roll apps on this host's Docker, or None when the Docker tests aren't asked for.
+async fn docker_world() -> Option<World> {
     if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") || !apps_control::runtime::docker::available().await {
         eprintln!("skipped: set ROLL_APPS_DOCKER=1 with Docker running");
-        return;
+        return None;
     }
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
@@ -71,6 +79,12 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     apps.start();
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
+    Some(World { _dir: dir, apps, api, public, project })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_site_builds_and_its_cold_starts_are_measured() {
+    let Some(World { _dir, apps, api, public, project }) = docker_world().await else { return };
 
     let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "build": {"build": "test \"$GREETING\" = hej"}, "run": {"memory_mb": 256, "cpu": 0.25, "pre_deploy": "test \"$GREETING\" = hej"} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
@@ -165,4 +179,71 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &net]).await;
     assert!(apps_control::runtime::docker::docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap().is_empty(), "nothing left");
     apps.shutdown().await;
+}
+
+/// A service from an upload of `files`, built from its generated Dockerfile and live: its id and host.
+async fn deploy_tree(w: &World, name: &str, files: &[(&str, &str)]) -> (String, String) {
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    for (path, body) in files {
+        std::fs::write(tree.path().join(path), body).unwrap();
+    }
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (st, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let dep = d["id"].as_str().unwrap().to_string();
+    let mut d = Value::Null;
+    for _ in 0..3000 {
+        let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            d = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}/logs?tail=200"), None, "application/json", None).await;
+    assert_eq!(d["status"], "active", "{name}: {d}\n{log}");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
+    (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
+}
+
+/// What the generated Dockerfiles of Node, Python and Go make actually builds and answers, and a
+/// Node cold start (node started directly, no npm in front) is measured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generated_node_python_and_go_images_build_and_answer() {
+    let Some(w) = docker_world().await else { return };
+    let node = deploy_tree(&w, "node", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
+        ("server.js", "require('http').createServer((q, r) => r.end('node ok')).listen(process.env.PORT)"),
+    ]).await;
+    let python = deploy_tree(&w, "python", &[
+        ("requirements.txt", ""),
+        ("main.py", "import os, http.server\nclass H(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200); self.end_headers(); self.wfile.write(b'python ok')\nhttp.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()\n"),
+    ]).await;
+    let go = deploy_tree(&w, "go", &[
+        ("go.mod", "module example.com/g\n\ngo 1.24\n"),
+        ("main.go", "package main\n\nimport (\n\t\"net/http\"\n\t\"os\"\n)\n\nfunc main() {\n\thttp.HandleFunc(\"/\", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(\"go ok\")) })\n\thttp.ListenAndServe(\":\"+os.Getenv(\"PORT\"), nil)\n}\n"),
+    ]).await;
+    for ((_, host), want) in [(&node, "node ok"), (&python, "python ok"), (&go, "go ok")] {
+        let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{want}");
+        assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..], want.as_bytes());
+    }
+    let live = w.apps.live(&node.0, "production");
+    let mut cold = Vec::new();
+    for _ in 0..5 {
+        live.sleep().await;
+        let (st, t) = get(&w.public, &node.1).await;
+        assert_eq!(st, StatusCode::OK);
+        cold.push(t);
+    }
+    eprintln!("MEASURED Node 22 cold start from stopped (node server.js, no npm): median {} ms (all {:?})", median(cold.clone()).as_millis(), cold.iter().map(|d| d.as_millis()).collect::<Vec<_>>());
+    for (id, _) in [&node, &python, &go] {
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    }
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
 }

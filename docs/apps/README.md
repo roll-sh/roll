@@ -395,7 +395,7 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 | warm | a request to a running instance through the proxy | 1 ms |
 | resume from suspended | unpause → first byte | 13 ms |
 | cold start from stopped (busybox static site) | start → first byte | 270 ms |
-| cold start from stopped (Node 22, `npm run start`, before the two changes below) | the same, Node booting | 665 ms |
+| cold start from stopped (Node 22, `node server.js` run directly) | the same, Node booting | 360 ms (static in the same run: 364 ms) |
 | first deploy, static site | upload → build (base image pulled) → health check → live | 12.5 s |
 | first deploy, Node | `roll up` → build (`node:22-slim` pulled) → health check → live | 11.1 s |
 
@@ -404,8 +404,11 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   296/293/299/325 ms against 270/263/270/285 ms (all four pairs won, about 9%); resume
   48/41/45/45 ms against 14/13/16/13 ms (3.3×). What's left of a cold start is dockerd starting
   the container and the app's own boot.
-- A start script that is just `node …` now runs without npm in front of it (apps-build,
-  `Pm::start`). The Node row above predates both changes and hasn't been measured again.
+- A start script that is just `node …` runs without npm in front of it (apps-build,
+  `Pm::start`). Before that and the socket, a Node cold start was 665 ms against 443 ms for the
+  static site in the same conditions; now the two are the same within noise (360 and 364 ms,
+  `generated_node_python_and_go_images_build_and_answer` and the static test, one run). That
+  test also builds the generated Node, Python and Go Dockerfiles for real.
 - Idle cost: a service asleep (stopped) meters nothing: no CPU-seconds, no GB-seconds, $0.00.
   The only idle cost is the image on disk (roll's, not the user's). Suspended instances keep their
   memory on the host (roll's cost, not billed) for `sleep_after` (10 minutes by default).
@@ -486,9 +489,10 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **Real builds in tests, and the Node cold start again.** Build the generated Node, Python and
-   Go Dockerfiles in `tests/docker.rs` (images this host already has); measure a Node cold start
-   with `node` started directly; Next's standalone output when `next.config` asks for it.
+2. **Next.js standalone output** when `next.config` sets `output: "standalone"` (copy
+   `.next/standalone` and `.next/static`, start `node server.js`): a far smaller image; and
+   what dockerd's own ~250 ms of a cold start is made of (network attach, `--init`, the log
+   driver).
 3. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
 4. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
