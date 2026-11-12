@@ -25,7 +25,7 @@ import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, useDeployMark } from "./live";
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
-import { StateBadge, useRunner } from "./shared";
+import { clock, StateBadge, until, useRunner } from "./shared";
 import { UsageTab } from "./usage";
 import { VariablesTab } from "./variables";
 
@@ -220,6 +220,14 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             <span className="truncate font-mono text-[12px] text-subtle">{sourceLabel(service.source)}</span>
             <span className="text-subtle">·</span>
             <span className="font-mono text-[12px] text-subtle">{service.run.type}</span>
+            {env?.next_run_at && (
+              <>
+                <span className="text-subtle">·</span>
+                <span className="text-[12px] text-muted" title={new Date(env.next_run_at).toISOString()}>
+                  next run {clock(env.next_run_at, true)} ({until(env.next_run_at)})
+                </span>
+              </>
+            )}
           </p>
           <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
             {env?.url && (
@@ -287,7 +295,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "variables" ? (
           <VariablesTab service={service.id} project={service.project} env={env!} runner={runner} onRedeploy={redeploy} />
         ) : tab === "jobs" ? (
-          <JobsTab service={service.id} env={envName} runner={runner} />
+          <JobsTab service={service.id} env={envName} runner={runner} cron={service.run.type === "cron"} />
         ) : tab === "shell" ? (
           <ShellTab service={service.id} env={envName} />
         ) : tab === "domains" ? (

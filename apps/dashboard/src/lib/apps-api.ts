@@ -169,6 +169,8 @@ export interface Environment extends EnvironmentSummary {
   needs_deploy: boolean;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
+  /** A cron service's next scheduled run, once deployed. */
+  next_run_at: number | null;
   created_at: number;
 }
 

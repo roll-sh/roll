@@ -1,13 +1,13 @@
 import { Play, Square, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appsApi, followLog, runStatus, type Job, type LogLine } from "@/lib/apps-api";
+import { appsApi, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
 import { btn, EmptyPanel, input, Panel, primary } from "../ui";
 import { clock, LogView, message, type Runner } from "./shared";
 
 const MAX_LINES = 5000;
 
-/** A job's status: a dot (the accent while it runs) and its word, with the exit code when it failed. */
-function JobBadge({ job }: { job: Job }) {
+/** A job's or a run's status: a dot (the accent while it runs) and its word, with the exit code when it failed. */
+function JobBadge({ job }: { job: Pick<Job, "status" | "exit_code"> }) {
   const s = runStatus(job.status);
   const dot = { busy: "bg-accent pulse-dot", ok: "bg-ok", error: "bg-danger", muted: "bg-subtle" }[s.tone];
   return (
@@ -23,7 +23,7 @@ function JobBadge({ job }: { job: Job }) {
  * One-off jobs (`roll apps run`): a command in a fresh container of the live deployment, with
  * the environment's variables. Run one, watch its output live, cancel it; the recent ones below.
  */
-export function JobsTab({ service, env, runner }: { service: string; env: string; runner: Runner }) {
+export function JobsTab({ service, env, runner, cron = false }: { service: string; env: string; runner: Runner; cron?: boolean }) {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [command, setCommand] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -97,6 +97,7 @@ export function JobsTab({ service, env, runner }: { service: string; env: string
 
   return (
     <div className="space-y-6">
+      {cron && <ScheduledRuns service={service} env={env} />}
       <Panel title="Run a command" aside={<span className="text-[12px] text-muted">in a fresh container of the live deployment, with its variables</span>}>
         <form
           className="flex flex-wrap gap-2 px-5 py-4"
@@ -170,5 +171,39 @@ export function JobsTab({ service, env, runner }: { service: string; env: string
         )
       )}
     </div>
+  );
+}
+
+/** A cron service's recent runs: when, how it ended, how long it took. */
+function ScheduledRuns({ service, env }: { service: string; env: string }) {
+  const [runs, setRuns] = useState<CronRun[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => appsApi.runs(service, env).then((r) => live && setRuns(r)).catch(() => {});
+    void load();
+    const t = setInterval(load, 10_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [service, env]);
+  return (
+    <Panel title="Scheduled runs">
+      {!runs?.length ? (
+        <p className="px-5 py-4 text-[13px] text-muted">No runs yet. The schedule starts one; Run now on this page starts one at once.</p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {runs.slice(0, 10).map((r) => (
+            <li key={r.id} className="flex items-center justify-between gap-3 px-5 py-2.5">
+              <JobBadge job={r} />
+              <span className="font-mono text-[11.5px] text-subtle">
+                {clock(r.started_at, true)}
+                {r.finished_at ? ` · ${Math.max(1, Math.round((r.finished_at - r.started_at) / 1000))} s` : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
   );
 }

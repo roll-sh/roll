@@ -372,6 +372,8 @@ pub struct Environment {
     pub needs_deploy: bool,
     /// Visitors need the environment's access token (`PUT … {access: {token}}`).
     pub private: bool,
+    /// A cron service's next scheduled run (unix ms), once it has a deployment.
+    pub next_run_at: Option<i64>,
     pub created_at: i64,
 }
 

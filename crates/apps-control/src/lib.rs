@@ -467,12 +467,16 @@ impl Apps {
             None => Vec::new(),
         };
         let domains = self.domains(&r.service, &r.name).await?;
+        let sid = r.service.clone();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let next_run_at = match (&svc.run.schedule, &r.active) {
+            (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched).ok().and_then(|s| s.next_after(code_sql::now_ms())),
+            _ => None,
+        };
         let needs_deploy = match &r.active {
             Some(a) => {
                 let a = a.clone();
                 let dep = self.db(move |s| s.deployment(&a)).await?;
-                let sid = r.service.clone();
-                let svc = self.db(move |s| s.service(&sid)).await?;
                 match self.resolve_vars(&svc, &r, &dep.id).await {
                     Ok(v) => fingerprint(&v.vars_for_hash(), &svc) != dep.vars_hash,
                     Err(_) => false,
@@ -481,7 +485,7 @@ impl Apps {
             None => false,
         };
         let private = self.access_hash(&r.service, &r.name).await?.is_some();
-        Ok(Environment { summary, service: r.service.clone(), branch: r.branch.clone(), ephemeral: r.ephemeral, instances, domains, port: r.port, needs_deploy, private, created_at: r.created_at })
+        Ok(Environment { summary, service: r.service.clone(), branch: r.branch.clone(), ephemeral: r.ephemeral, instances, domains, port: r.port, needs_deploy, private, next_run_at, created_at: r.created_at })
     }
 
     /// `PUT …/environments/{env}`: make it (a preview environment, a staging one) or change its

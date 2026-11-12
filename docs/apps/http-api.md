@@ -187,6 +187,7 @@ type Environment = EnvironmentSummary & {
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
   needs_deploy: boolean;     // variables or settings changed since the active deployment
   private: boolean;          // its hostnames answer only visitors with its access token
+  next_run_at: number | null; // a cron service's next scheduled run, once deployed
   created_at: number;
 };
 

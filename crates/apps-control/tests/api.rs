@@ -436,6 +436,11 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let dep = cron["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &cid, "production", &dep).await["status"], "active");
     let base = format!("/v1/apps/services/{cid}/environments/production");
+    // Its next run is the schedule's next 03:00 UTC.
+    let next = call(&w.api, "GET", &base, None).await.1["next_run_at"].as_i64().unwrap();
+    let at = chrono::DateTime::from_timestamp_millis(next).unwrap();
+    assert_eq!((chrono::Timelike::hour(&at), chrono::Timelike::minute(&at)), (3, 0));
+    assert!(next > chrono::Utc::now().timestamp_millis() && next <= chrono::Utc::now().timestamp_millis() + 86_400_000);
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_EXIT": "0"}}))).await;
     // The variable reaches runs of a new deployment.
     let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;

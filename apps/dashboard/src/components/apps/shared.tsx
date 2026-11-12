@@ -73,6 +73,15 @@ export function since(t: number, now = Date.now()) {
   return `${Math.round(s / 86400)}d ago`;
 }
 
+/** How far ahead `t` is: "in 4m", "in 3h", "in 2d". */
+export function until(t: number, now = Date.now()) {
+  const s = Math.max(0, Math.floor((t - now) / 1000));
+  if (s < 60) return "in under a minute";
+  if (s < 3600) return `in ${Math.round(s / 60)}m`;
+  if (s < 86400) return `in ${Math.round(s / 3600)}h`;
+  return `in ${Math.round(s / 86400)}d`;
+}
+
 const STREAM_TEXT: Record<LogLine["stream"], string> = {
   stdout: "text-fg",
   stderr: "text-danger",
