@@ -73,7 +73,11 @@ pub fn start(
     let domain = args.code_preview_domain.trim_matches('.').to_ascii_lowercase();
     let source = roll_previews::code::CodeSource::new(code.code.clone());
     let runtime = roll_previews::runtime::Runtime::new(
-        roll_previews::runtime::RuntimeConfig { domain: domain.clone(), ..Default::default() },
+        roll_previews::runtime::RuntimeConfig {
+            domain: domain.clone(),
+            dashboard: Some(code.code.config.web_url.clone()).filter(|w| !w.trim().is_empty()),
+            ..Default::default()
+        },
         code.isolation.clone(),
         source.clone(),
         store.clone(),

@@ -61,11 +61,20 @@ pub struct RuntimeConfig {
     pub wait: Duration,
     /// How long a service may take to answer before it counts as failed.
     pub start_timeout: Duration,
+    /// The dashboard (`https://roll.example`): a private preview's 401 page links there, where a
+    /// signed-in person is sent on with the preview's link.
+    pub dashboard: Option<String>,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        RuntimeConfig { domain: "preview.localhost".into(), scheme: "http".into(), wait: Duration::from_secs(60), start_timeout: Duration::from_secs(600) }
+        RuntimeConfig {
+            domain: "preview.localhost".into(),
+            scheme: "http".into(),
+            wait: Duration::from_secs(60),
+            start_timeout: Duration::from_secs(600),
+            dashboard: None,
+        }
     }
 }
 
@@ -303,7 +312,7 @@ impl Runtime {
     /// Link access: a request carries the preview's token in its query (it gets a cookie and is
     /// sent to the same URL without it) or in that cookie; anything else is refused. `None`:
     /// let it through.
-    fn gate(&self, preview: &str, req: &Request) -> Option<Response> {
+    fn gate(&self, preview: &str, service: &str, req: &Request) -> Option<Response> {
         let (token, required) = match self.store.access(preview) {
             Ok(Some(a)) => a,
             Ok(None) => return None,
@@ -341,7 +350,16 @@ impl Runtime {
             }
             return Some(r);
         }
-        Some(page(StatusCode::UNAUTHORIZED, "This preview is private", "Open it from its link in roll, the change or the pull request.", false))
+        let through = match (&self.cfg.dashboard, self.store.row(preview)) {
+            (Some(web), Ok(row)) => Some(format!(
+                "{}/dashboard/projects/{}/previews?preview={preview}&go={}",
+                web.trim_end_matches('/'),
+                row.project_id,
+                service
+            )),
+            _ => None,
+        };
+        Some(private_page(through.as_deref()))
     }
 
     async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request) -> Response {
@@ -398,6 +416,25 @@ impl Runtime {
         *live.started.lock() = Some(Instant::now());
         live.phase.send_replace(Phase::Running { addr });
     }
+}
+
+/// A private preview's answer to a request without its link: where to get in, if roll knows.
+fn private_page(through: Option<&str>) -> Response {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let action = match through {
+        Some(u) => format!("<p><a href=\"{}\">Open it through roll</a>: sign in, and you're sent on with its link.</p>", esc(u)),
+        None => "<p>Open it from its link in roll.</p>".into(),
+    };
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Private preview · roll</title><style>\
+         :root{{color-scheme:dark light;--bg:#000;--fg:#ededed;--muted:#8f8f8f;--accent:#4c8dff}}\
+         @media (prefers-color-scheme:light){{:root{{--bg:#fff;--fg:#111;--muted:#666}}}}\
+         body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);\
+         font:14px/1.5 ui-sans-serif,system-ui,sans-serif}}main{{max-width:520px;padding:24px}}\
+         h1{{font-size:20px;font-weight:600;letter-spacing:-0.04em;margin:0 0 8px}}p{{color:var(--muted);margin:0}}\
+         a{{color:var(--accent)}}</style></head><body><main><h1>This preview is private</h1>{action}</main></body></html>"
+    );
+    (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], html).into_response()
 }
 
 /// Equal, in time that doesn't depend on where they differ.
@@ -537,7 +574,7 @@ impl Apps for Runtime {
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
     let Some((preview, service)) = host.and_then(|h| rt.service_for_host(&h)) else { return next.run(req).await };
-    if let Some(r) = rt.gate(&preview, &req) {
+    if let Some(r) = rt.gate(&preview, &service, &req) {
         return r;
     }
     match rt.cluster.get().cloned() {

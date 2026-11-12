@@ -263,7 +263,10 @@ default) with the project's `env` overrides and the branched resources' URLs on 
     `roll preview show`) carry the token as `?roll_access=…`. A request with it gets an
     `HttpOnly`, `SameSite=Lax` cookie for that preview and is redirected to the same URL without
     the token, so the token doesn't stay in the address bar or in `Referer`.
-  - Anything else gets a 401 page. `access: "public"` opens a project's previews to anyone who
+  - Anything else gets a 401 page. It links "through roll": the project's Previews tab with
+    `?preview=<id>&go=<service>`. A person signed in to roll is sent on to the service with its
+    link, so a reviewer who comes from the pull request's plain URL gets in, and the token is
+    never public. `access: "public"` opens a project's previews to anyone who
     can reach the domain.
   - The token is 120 random bits per preview, compared in constant time.
   - The token never goes where people outside roll can read it. The change, the pull request
@@ -465,21 +468,19 @@ Ranked by what a person notices first. Done so far:
 - `roll preview`;
 - the dashboard's Previews tab and canvas overlay;
 - the end-to-end run and its cost;
-- an adversarial review and its fixes.
+- an adversarial review and its fixes;
+- the private page's way in through roll.
 
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
-2. **Opening a private preview from GitHub**: a short-lived signed link (or roll sign-in) behind
-   the plain URL the pull request shows, so reviewers who only use GitHub get in without the
-   token ever being public.
-3. **Postgres branches that don't copy the data directory on ext4**: start from the parent's
+2. **Postgres branches that don't copy the data directory on ext4**: start from the parent's
    latest base backup plus WAL with lazy pages, or use reflinks with
    `pg_backup_start`/`pg_backup_stop` on XFS and btrfs. Also `schema` mode for Postgres.
-4. **roll apps end to end**: run `scripts/preview-cost.sh` against a rolld with roll apps (once
+3. **roll apps end to end**: run `scripts/preview-cost.sh` against a rolld with roll apps (once
    `feature/roll-apps` lands), and measure a built service's cold start and cost. Also link
    access for its `pv-…` environments.
-5. **Build caches**: keep a `roll.toml` service's package caches between starts, in a per-repo
+4. **Build caches**: keep a `roll.toml` service's package caches between starts, in a per-repo
    volume shared by every preview of the repo.
-6. **Spread preview services across nodes**, with a lease per preview rather than one leader.
-7. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
+5. **Spread preview services across nodes**, with a lease per preview rather than one leader.
+6. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
    `own_bytes` from roll search so a search branch's cost counts only what it wrote.

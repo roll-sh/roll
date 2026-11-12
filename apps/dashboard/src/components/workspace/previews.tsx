@@ -1,5 +1,5 @@
 import { ExternalLink, GitBranch, Settings2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl, previewsApi, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
@@ -21,7 +21,17 @@ export function resourceNames(project: WorkspaceProject, inventory: Map<string, 
  * `/dashboard/projects/$id/previews`: the project's previews (a copy of the project per change),
  * what they cost, the rules that make them, and a preview of any branch.
  */
-export function ProjectPreviews({ project, inventory, open: initial }: { project: WorkspaceProject; inventory: Map<string, ResourceView>; open?: string }) {
+export function ProjectPreviews({
+  project,
+  inventory,
+  open: initial,
+  go,
+}: {
+  project: WorkspaceProject;
+  inventory: Map<string, ResourceView>;
+  open?: string;
+  go?: string;
+}) {
   const { list, error, reload, put } = usePreviews(project.id);
   const [openId, setOpenId] = useState<string | null>(initial ?? null);
   const [settings, setSettings] = useState<PreviewSettings | null>(null);
@@ -37,6 +47,17 @@ export function ProjectPreviews({ project, inventory, open: initial }: { project
   const act = usePreviewMark(opened ? [opened] : list);
 
   useEffect(() => setOpenId(initial ?? null), [initial]);
+  // `&go=<service>`: on to that service's link, once (the preview's own 401 page sends here).
+  const went = useRef(false);
+  useEffect(() => {
+    if (!go || went.current) return;
+    const svc = opened?.services.find((s) => s.name === go);
+    const url = svc && openUrl(svc);
+    if (url) {
+      went.current = true;
+      window.location.assign(url);
+    }
+  }, [go, opened]);
   useEffect(() => {
     previewsApi.settings(project.id).then(setSettings, (e) => setSettingsError(errorText(e)));
   }, [project.id]);
