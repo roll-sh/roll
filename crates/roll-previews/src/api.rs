@@ -23,7 +23,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/reset", post(reset))
-        // These act on running services, which live on the reconciler's node in a cluster.
+        // These act on running services, which live on the preview's holder in a cluster.
         .merge(
             Router::new()
                 .route("/v1/previews/{id}/sleep", post(sleep))
@@ -38,12 +38,13 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .with_state(engine)
 }
 
-/// Run on the node that runs the reconciler (`singleton:previews`), forwarding if need be.
+/// Run on the preview's holder (`preview:<id>`), which runs its services, forwarding if need be.
 async fn on_leader(AxState(e): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let id = req.uri().path().split('/').nth(3).unwrap_or_default().to_string();
     match e.cluster.get().cloned() {
         Some(cluster) => {
             cluster
-                .dispatch(crate::engine::LEADER_KEY, req, move |req, guard| async move {
+                .dispatch(&crate::engine::preview_key(&id), req, move |req, guard| async move {
                     let resp = next.run(req).await;
                     drop(guard);
                     resp

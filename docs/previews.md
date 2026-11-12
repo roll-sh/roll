@@ -129,8 +129,11 @@ state. A pass of the reconciler:
 
 The reconciler runs every 15 s, and right away when roll code emits a `change` or `landed`
 event (the broadcast is only a nudge, so a dropped event costs at most one interval). In a
-cluster it runs on one node (`singleton("previews")`), and preview hosts forward to that node,
-which runs the services' containers. Only the reconciler writes a preview's resources and
+cluster, discovering previews is one node's job (`singleton("previews")`). Each preview has a
+lease of its own (`preview:<id>`), placed by rendezvous so previews spread over the nodes, and
+the lease's holder converges it, runs its services and serves its hosts. The other nodes
+forward its hosts, and its `sleep`, `wake` and `logs`, to that holder, and a node that loses a
+preview's lease stops its containers. Only the reconciler writes a preview's resources and
 services. The API writes only the desired state (and asks the reconciler to run).
 
 ## Branches per product
@@ -484,7 +487,8 @@ Ranked by what a person notices first. Done so far:
 - the private page's way in through roll;
 - per-repo build caches;
 - a running parent's Postgres copied by reflinks;
-- roll apps end to end.
+- roll apps end to end;
+- previews spread across a cluster's nodes, a lease each.
 
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
@@ -493,6 +497,8 @@ Ranked by what a person notices first. Done so far:
 3. **Link access for roll apps' `pv-…` environments**: they answer on roll apps' own hostnames
    without previews' token today. Hand roll apps the token, or add a check hook. Also put the
    roll apps run in `scripts/preview-cost.sh` once `feature/roll-apps` lands.
-4. **Spread preview services across nodes**, with a lease per preview rather than one leader.
+4. **A cluster test of previews' leases**: several nodes in one process (like
+   `code-control/tests/cluster.rs`): a preview converged and served on its holder, moved on a
+   node's loss.
 5. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
    `own_bytes` from roll search so a search branch's cost counts only what it wrote.

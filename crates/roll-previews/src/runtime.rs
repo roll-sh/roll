@@ -84,8 +84,8 @@ pub struct Runtime {
     trees: Arc<dyn Trees>,
     store: Arc<Store>,
     engine: OnceLock<Weak<Engine>>,
-    /// In a cluster, services run on the node that runs the reconciler (the holder of
-    /// `singleton:previews`): requests for their hosts are forwarded there.
+    /// In a cluster, a preview's services run on the holder of its lease (`preview:<id>`):
+    /// requests for their hosts are forwarded there.
     cluster: OnceLock<Arc<roll_cluster::Cluster>>,
     me: Weak<Runtime>,
     live: Mutex<HashMap<(String, String), Arc<Live>>>,
@@ -132,9 +132,25 @@ impl Runtime {
         });
     }
 
-    /// Serve preview hosts on the cluster's reconciler node.
-    pub fn set_cluster(&self, cluster: Arc<roll_cluster::Cluster>) {
+    /// Serve preview hosts on their preview's holder, and stop a preview's containers here when
+    /// its lease moves to another node.
+    pub fn set_cluster(self: &Arc<Self>, cluster: Arc<roll_cluster::Cluster>) {
+        let mut ownership = cluster.subscribe_ownership();
         let _ = self.cluster.set(cluster);
+        let this = Arc::downgrade(self);
+        tokio::spawn(async move {
+            while let Some(o) = ownership.recv().await {
+                let roll_cluster::Ownership::Lost { key } = o else { continue };
+                let Some(preview) = key.strip_prefix("preview:") else { continue };
+                let Some(rt) = this.upgrade() else { return };
+                let lives: Vec<((String, String), Arc<Live>)> = rt.live.lock().iter().filter(|((p, _), _)| p == preview).map(|(k, l)| (k.clone(), l.clone())).collect();
+                for ((p, s), live) in lives {
+                    info!(preview = %p, service = %s, "the preview moved to another node; stopping its service here");
+                    rt.stop(&p, &s, &live, None).await;
+                    rt.live.lock().remove(&(p, s));
+                }
+            }
+        });
     }
 
     fn engine(&self) -> anyhow::Result<Arc<Engine>> {
@@ -595,7 +611,7 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
         Some(cluster) => {
             let rt2 = rt.clone();
             cluster
-                .dispatch(crate::engine::LEADER_KEY, req, move |req, guard| async move {
+                .dispatch(&crate::engine::preview_key(&preview.clone()), req, move |req, guard| async move {
                     let resp = rt2.proxy(&preview, &service, req).await;
                     drop(guard);
                     resp

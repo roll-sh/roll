@@ -16,9 +16,12 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
-/// The lease of the node that runs the reconciler and serves preview hosts in a cluster
+/// A preview's lease in a cluster: its holder converges it, runs its services and serves its
+/// hosts, so previews spread over the nodes. Discovering previews is the singleton's
 /// (`Cluster::singleton("previews")`).
-pub const LEADER_KEY: &str = "singleton:previews";
+pub fn preview_key(id: &str) -> String {
+    format!("preview:{id}")
+}
 
 /// Settled previews aren't converged again until something changes.
 const SETTLED: i64 = i64::MAX;
@@ -137,9 +140,8 @@ impl Engine {
         tokio::spawn(async move {
             loop {
                 let Some(e) = this.upgrade() else { return };
-                if (e.leader)()
-                    && let Err(err) = e.pass().await
-                {
+                // Every node converges the previews it holds; the leader also discovers.
+                if let Err(err) = e.pass().await {
                     warn!(error = %err, "previews: a pass failed");
                 }
                 let interval = e.cfg.interval;
@@ -169,16 +171,18 @@ impl Engine {
     /// One pass: discover, then converge every preview that's due.
     pub async fn pass(self: &Arc<Self>) -> Result<()> {
         let _one = self.passing.lock().await;
-        let enabled = self.store.enabled_projects()?;
-        for (project, settings) in &enabled {
-            if let Err(e) = self.discover(project, settings).await {
-                warn!(%project, error = %e, "previews: discovering");
+        if (self.leader)() {
+            let enabled = self.store.enabled_projects()?;
+            for (project, settings) in &enabled {
+                if let Err(e) = self.discover(project, settings).await {
+                    warn!(%project, error = %e, "previews: discovering");
+                }
             }
-        }
-        // Previews turned off: the project's previews go.
-        for r in self.store.rows(None)? {
-            if r.desired == Desired::Active && !enabled.iter().any(|(p, _)| *p == r.project_id) {
-                self.mark_deleted(&r.id, "previews were turned off for the project")?;
+            // Previews turned off: the project's previews go.
+            for r in self.store.rows(None)? {
+                if r.desired == Desired::Active && !enabled.iter().any(|(p, _)| *p == r.project_id) {
+                    self.mark_deleted(&r.id, "previews were turned off for the project")?;
+                }
             }
         }
         let now = self.store.now_ms()?;
@@ -186,12 +190,20 @@ impl Engine {
         let sem = Arc::new(tokio::sync::Semaphore::new(PARALLEL));
         let mut set = tokio::task::JoinSet::new();
         for r in due {
+            // In a cluster, only the preview's holder converges it (and runs its services).
+            let guard = match self.cluster.get() {
+                Some(c) => match c.route_async(&preview_key(&r.id)).await {
+                    Ok(roll_cluster::Route::Local(g)) => Some(g),
+                    _ => continue,
+                },
+                None => None,
+            };
             let this = self.clone();
             let permit = sem.clone().acquire_owned().await.map_err(|e| Error::Internal(e.to_string()))?;
             set.spawn(async move {
                 let id = r.id.clone();
                 this.converge_one(r).await;
-                drop(permit);
+                drop((permit, guard));
                 id
             });
         }
