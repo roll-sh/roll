@@ -324,18 +324,19 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 let link_json = link_now.as_ref().map(json);
                 let tags_json = json(&tags_now);
                 let state_json = state.as_ref().map(json);
+                let refs_json = json(&stored_value.as_ref().map(|v| crate::refs::refs(v.expose()).iter().map(crate::refs::Ref::display).collect::<Vec<_>>()).unwrap_or_default());
                 match &cur {
                     Some(_) => {
                         c.execute(
-                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, updated_at = ?, updated_by = ? WHERE id = ?",
-                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, now, caller.principal, id],
+                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, id],
                         )?;
                     }
                     None => {
                         c.execute(
-                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, updated_at, updated_by)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, now, caller.principal],
+                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal],
                         )?;
                         envs::ensure_folders(c, &env.id, &item.path, now)?;
                     }

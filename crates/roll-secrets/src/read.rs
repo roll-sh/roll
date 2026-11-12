@@ -32,9 +32,22 @@ pub(crate) struct Row {
     pub link: Option<Link>,
     pub updated_at: i64,
     pub updated_by: String,
+    /// The references in the value, as written (`None`: a row from before they were kept).
+    pub refs: Option<Vec<String>>,
 }
 
-const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by";
+impl Row {
+    /// The references in its value, decrypting only a row from before they were kept.
+    fn references(&self, dek: &Dek, project: &str) -> Vec<String> {
+        match (&self.refs, &self.value) {
+            (Some(r), _) => r.clone(),
+            (None, Some(ct)) => dek.open(&value_aad(project, &self.id, self.version), ct).map(|v| refs::refs(v.expose()).iter().map(refs::Ref::display).collect()).unwrap_or_default(),
+            (None, None) => vec![],
+        }
+    }
+}
+
+const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -51,6 +64,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         link: r.get::<_, Option<String>>(10)?.and_then(|s| serde_json::from_str(&s).ok()),
         updated_at: r.get(11)?,
         updated_by: r.get(12)?,
+        refs: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -222,10 +236,7 @@ impl Secrets {
     /// could otherwise test guesses against values it can't read.
     fn secret_of(&self, dek: &Dek, project: &str, e: Entry, caller: &Caller) -> Secret {
         let fp = if caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path)) { e.row.fp.clone() } else { String::new() };
-        let references = match &e.row.value {
-            Some(ct) => dek.open(&value_aad(project, &e.row.id, e.row.version), ct).map(|v| refs::refs(v.expose()).iter().map(refs::Ref::display).collect()).unwrap_or_default(),
-            None => vec![],
-        };
+        let references = e.row.references(dek, project);
         Secret {
             id: e.row.id,
             key: e.row.key,
@@ -424,7 +435,7 @@ impl Secrets {
                         version: e.row.version,
                         updated_at: e.row.updated_at,
                         link: e.row.link.clone(),
-                        reference: e.row.value.as_ref().is_some_and(|ct| dek.open(&value_aad(project, &e.row.id, e.row.version), ct).is_ok_and(|v| !refs::refs(v.expose()).is_empty())),
+                        reference: !e.row.references(&dek, project).is_empty(),
                         source: match e.source {
                             Source::Own => "own",
                             Source::Import { .. } => "import",

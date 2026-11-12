@@ -294,6 +294,9 @@ impl Secrets {
 
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
+        // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
+        // written before it, which are decrypted to find them.
+        db.add_column("secrets", "refs", "TEXT")?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for })
     }
 

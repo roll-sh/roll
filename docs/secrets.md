@@ -522,7 +522,7 @@ environments(id PK, project_id, slug, name, position, kind, base_id, labels, exp
 folders(env_id, path, created_at, PRIMARY KEY (env_id, path))
 imports(env_id, path, position, from_env_id, from_path, PRIMARY KEY (env_id, path, position))
 secrets(id PK, project_id, env_id, path, key, owner, version, value BLOB, fp, comment, tags, link,
-        link_state, updated_at, updated_by, UNIQUE(env_id, path, key, owner))
+        link_state, refs, updated_at, updated_by, UNIQUE(env_id, path, key, owner))  -- refs: the references' names, so listings decrypt nothing
 versions(secret_id, version, seq, env_id, path, key, owner, op, value BLOB, fp, comment, tags, link,
          at, by, PRIMARY KEY (secret_id, version))
 changes(project_id, seq, env_id, path, kind, message, by, at, keys, PRIMARY KEY (project_id, seq))
@@ -550,4 +550,3 @@ the dashboard's Secrets surface. Ranked:
 2. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
 3. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-4. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
