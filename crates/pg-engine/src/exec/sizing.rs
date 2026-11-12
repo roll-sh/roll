@@ -2957,6 +2957,12 @@ impl Kills {
         }
     }
 
+    /// Nothing left to mark: dropping it now or later does nothing (a scan that ended,
+    /// `done`, or passed nothing).
+    pub fn idle(&self) -> bool {
+        self.at.is_none() && self.queued.is_none()
+    }
+
     fn mark(&self, (lo, hi): (Option<Vec<u8>>, Option<Vec<u8>>)) {
         if let (Some(l), Some(h)) = (&lo, &hi)
             && l >= h

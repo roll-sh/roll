@@ -296,6 +296,51 @@ fn ranges(
     ranges_from(ix, b, index_prefix(t.oid, ix.id), 0, ctx)
 }
 
+/// `ranges` of a rescan, into the last scan's (`last`) buffers when both are one key's range
+/// of a btree index (equalities on its columns, nothing else): a kept point lookup's rescan
+/// makes its key without allocating.
+fn ranges_again(
+    t: &Table,
+    ix: &Index,
+    b: &IndexBounds,
+    mut last: Vec<(Vec<u8>, Vec<u8>)>,
+    ctx: &ExecCtx,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    if last.len() != 1 || ix.method != "btree" || b.any.is_some() || b.lower.is_some() || b.upper.is_some() {
+        return ranges(t, ix, b, ctx);
+    }
+    let (mut start, mut end) = last.pop().expect("a range");
+    start.clear();
+    start.extend_from_slice(&t.oid.to_be_bytes());
+    start.extend_from_slice(&ix.id.to_be_bytes());
+    for (i, e) in b.eq.iter().enumerate() {
+        let v = eval(e, &[], ctx)?;
+        if v.is_null() {
+            return Ok(Vec::new());
+        }
+        let v = padded(v, b.pad(i));
+        let c = &ix.columns[i];
+        encode_index_value(&mut start, &v, c.desc, c.nulls_first, b.coll(i));
+    }
+    // (`prefix_end`.)
+    end.clear();
+    end.extend_from_slice(&start);
+    while let Some(l) = end.last_mut() {
+        if *l < 0xFF {
+            *l += 1;
+            break;
+        }
+        end.pop();
+    }
+    if end.is_empty() {
+        end.resize(start.len() + 1, 0xFF);
+    }
+    last.push((start, end));
+    #[cfg(debug_assertions)]
+    assert_eq!(last, ranges(t, ix, b, ctx)?, "a rescan's range");
+    Ok(last)
+}
+
 /// A bpchar probe of a char(`pad`) key as the key is stored: without its trailing spaces,
 /// padded to `pad` characters. One longer than that stays trimmed: bytewise it equals no
 /// key (every key is `pad` characters), and a key collation keys both trimmed, so under a
@@ -2563,6 +2608,10 @@ struct ScanNode {
 #[doc(hidden)]
 pub static INDEX_RESCANS: crate::counter::Counter = crate::counter::Counter::new();
 
+/// Unique keys' scans read by their probe (`ScanNode::point_probe`), for tests.
+#[doc(hidden)]
+pub static POINT_PICKS: crate::counter::Counter = crate::counter::Counter::new();
+
 /// Rows index-only scans made from index entries alone (`ScanNode::index_row`), for tests.
 #[doc(hidden)]
 pub static ROWS_FROM_INDEX_ENTRIES: crate::counter::Counter = crate::counter::Counter::new();
@@ -3109,7 +3158,7 @@ impl ScanNode {
         {
             return Ok(false);
         }
-        let r = ranges(&s.table, ix, b, ctx)?;
+        let r = ranges_again(&s.table, ix, b, std::mem::take(&mut self.ranges), ctx)?;
         // (The entries the last scan passed are marked as it goes; its marker starts over.)
         let last = self.kills.take();
         let bound = bind_scan(s, r, false, self.rev, last, ctx)?;
@@ -5351,15 +5400,22 @@ impl Node for ScanNode {
         }
         if !self.par_tried {
             self.par_tried = true;
-            if self.sorted.is_none() && !self.streamed {
+            if self.sorted.is_none() && !self.streamed && !self.point {
                 self.par = self.start_parallel(None, Vec::new(), super::Computed::default(), ctx)?;
             }
         }
         if self.par.is_some() {
             return Ok(None);
         }
-        // (A copy: `emit`, for a row `pick` can't offer as stored, reads the scan's own.)
-        let cols = self.proj.clone().expect("a projection");
+        // (A copy: `emit`, for a row `pick` can't offer as stored, reads the scan's own. A scan
+        // making the table's whole rows, `whole_rows`: every column.)
+        let cols = match &self.proj {
+            Some(c) => c.clone(),
+            None => (0..self.plan.table.columns.len() as u32).collect(),
+        };
+        if self.point {
+            return self.each_picked_point(&cols, f, ctx).map(Some);
+        }
         loop {
             ctx.check()?;
             if !self.next_raw_ref(ctx)? {
@@ -5519,8 +5575,8 @@ impl Node for ScanNode {
         // Everything else as `open_scan_as` makes it, and nothing held that dropping the node
         // would let go of: what the plan alone decides is kept; what one execution read,
         // decided or holds (its snapshot's iterators and rows, the LP_DEAD marks still
-        // queued, the heap model's watch, a temporary table's transaction) goes now. (Every
-        // field named: a new one is decided here.)
+        // queued, the heap model's watch unless its marker is idle, a temporary table's
+        // transaction) goes now. (Every field named: a new one is decided here.)
         let ScanNode {
             key: _,
             need: _,
@@ -5583,7 +5639,8 @@ impl Node for ScanNode {
             ios_cols,
             am: _,
         } = self;
-        ranges.clear();
+        // (One range's buffers stay for the restart to write its key into: `ranges_again`.)
+        ranges.truncate(1);
         *cur_range = 0;
         *iter = None;
         rb.clear();
@@ -5595,7 +5652,12 @@ impl Node for ScanNode {
         *hstream_tried = false;
         *any_order = false;
         *skip = None;
-        *kills = None;
+        // (A marker with nothing left to mark stays for the restart to start over,
+        // `Kills::again`: its drop would do nothing, now or later, and a new one would take
+        // the heap model's watch again, a count every session's scans write.)
+        if !kills.as_ref().is_some_and(super::sizing::Kills::idle) {
+            *kills = None;
+        }
         *emitted = 0;
         *ios_entries = None;
         *sorted = None;
@@ -5686,7 +5748,9 @@ impl Node for ScanNode {
         }
         loop {
             ctx.check()?;
-            if !self.next_raw_ref(ctx)? {
+            if self.point && self.probe == Probe::Not && let Some(r) = self.point_probe(ctx)? {
+                self.one = Some(r);
+            } else if !self.next_raw_ref(ctx)? {
                 // (The entries after the last row returned were passed too.)
                 if let Some(e) = &mut self.ios_entries {
                     let n = e.rest();
@@ -5708,15 +5772,7 @@ impl Node for ScanNode {
                 // (Debug builds read on, and check that the key has no other visible row.)
                 debug_assert!(!self.point || self.emitted <= 1, "a second visible row of a unique key");
                 if self.point && !cfg!(debug_assertions) {
-                    // (The key's one visible row: the range is done, its entries after it
-                    // name versions the snapshot doesn't see.)
-                    self.cur_range = self.ranges.len();
-                    self.fetched.clear();
-                    self.erow.clear();
-                    self.epos = 0;
-                    if let Some(it) = self.iter.take() {
-                        self.spare = Some(it);
-                    }
+                    self.end_point_range();
                 }
                 return Ok(Some(row));
             }
@@ -5725,6 +5781,18 @@ impl Node for ScanNode {
 }
 
 impl ScanNode {
+    /// A unique key's one visible row was returned: the range is done, its entries after it
+    /// name versions the snapshot doesn't see.
+    fn end_point_range(&mut self) {
+        self.cur_range = self.ranges.len();
+        self.fetched.clear();
+        self.erow.clear();
+        self.epos = 0;
+        if let Some(it) = self.iter.take() {
+            self.spare = Some(it);
+        }
+    }
+
     /// What `next` returns for the stored row `bytes` under `key`: counted, read, checked
     /// against the filter and locked (None: skipped).
     /// A row handed out, counted as its scan counts it.
@@ -5756,13 +5824,12 @@ impl ScanNode {
     /// instrumentation, no predicate locks, an index scan of the table's rows by reference.
     fn picks(&self, ctx: &ExecCtx) -> bool {
         let p = &self.plan;
-        self.proj.is_some()
+        (self.proj.is_some() || self.whole_rows())
             && self.emitted == 0
             && self.par.is_none()
             && self.secondary
             && !self.ios
             && self.ios_cols.is_none()
-            && !self.point
             && self.am.is_none()
             && self.keys.is_none()
             && self.only.is_none()
@@ -5779,8 +5846,21 @@ impl ScanNode {
             && !p.table.columns.iter().any(|c| c.virtual_gen)
     }
 
+    /// Without a projection above (`proj`), whether the scan's rows are its table's rows
+    /// whole, every column decoded in order, nothing after them: then `projected_row` of every
+    /// column is the row `full_row` makes (no dropped column, no column left undecoded).
+    fn whole_rows(&self) -> bool {
+        let p = &self.plan;
+        self.proj.is_none()
+            && self.need.as_ref().is_none_or(|n| n.len() >= p.table.columns.len() && n.iter().all(|&b| b))
+            && !p.with_key
+            && !p.sys
+            && !p.table.columns.iter().any(|c| c.dropped || c.virtual_gen)
+    }
+
     /// One row of `each_picked` (`key`, stored as `bytes`) offered to `f`: its stored values
     /// with the columns `proj` (`Stored::Cols`), else decoded as `emit` makes it.
+    #[inline(always)]
     fn pick(&mut self, key: &[u8], bytes: &[u8], cols: &[u32], f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<()> {
         if (self.toast.is_some() && crate::storage::toast::has_external(bytes)) || super::sizing::tracked(self.plan.table.oid) {
             if let Some(row) = self.emit(key, bytes, ctx)? {
@@ -5803,6 +5883,95 @@ impl ScanNode {
             f(super::Stored::Row(row))?;
         }
         Ok(())
+    }
+
+    /// `each_picked` of a unique key's scan (`point`): its rows as the loop over
+    /// `next_raw_ref` makes them, the key's entry and row read by the probe first
+    /// (`point_probe`), the range ended at the key's one visible row as `next` ends it.
+    #[inline(never)]
+    fn each_picked_point(&mut self, cols: &[u32], f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<()> {
+        loop {
+            ctx.check()?;
+            if self.point && self.probe == Probe::Not && let Some(r) = self.point_probe(ctx)? {
+                self.one = Some(r);
+            } else if !self.next_raw_ref(ctx)? {
+                return Ok(());
+            }
+            let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
+            let (key, bytes) = match &one {
+                Some((k, v)) => (&k[..], &v[..]),
+                None => rb.peek().expect("a row handed out"),
+            };
+            let r = self.pick(key, bytes, cols, f, ctx);
+            self.rb = rb;
+            r?;
+            debug_assert!(self.emitted <= 1, "a second visible row of a unique key");
+            if !cfg!(debug_assertions) {
+                self.end_point_range();
+            }
+        }
+    }
+
+    /// A unique key's scan (`point`) at its start: its entry read by one probe
+    /// (`probe_point`'s `first_snap`) and its row fetched (`fetch_stored`), as `next_raw`'s
+    /// run of one has them, the entry passed for the dead-entry marker: (data key, row).
+    /// None: the loop over `next_raw_ref` goes on as it would after `probe_point` (the probe
+    /// declined: nothing done; no entry: the scan ends there; the entry's row not visible:
+    /// the range is read as a scan, as `fetch_entries` has it).
+    fn point_probe(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, bytes::Bytes)>> {
+        if !self.point
+            || self.probe != Probe::Not
+            || self.rev
+            || self.cur_range != 0
+            || self.iter.is_some()
+            || self.ranges.len() != 1
+            || self.skip.is_some()
+            || self.ios_cols.is_some()
+            || self.emitted != 0
+            || !self.tid_order
+            || !self.secondary
+            || self.am.is_some()
+            || self.keys.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(snap) = ctx.snapshot() else {
+            return Ok(None);
+        };
+        let found = {
+            let (start, end) = &self.ranges[0];
+            ctx.txn.borrow().first_snap(start, end, &snap)?
+        };
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        // (Debug builds: what the range's scan finds first.)
+        #[cfg(debug_assertions)]
+        {
+            let (start, end) = &self.ranges[0];
+            let mut it = ctx.txn.borrow().scan_snap(start, end, &snap);
+            let scanned = it.next().transpose()?;
+            assert_eq!(found.as_ref().map(|(k, v)| (k.as_slice(), &v[..])), scanned.as_ref().map(|(k, v)| (k.as_slice(), &v[..])), "a point probe's entry");
+        }
+        POINT_PICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.cur_range = 1;
+        self.probe = Probe::Fetching;
+        let Some((ikey, dkey)) = found else {
+            return Ok(None);
+        };
+        let dkey = dkey.to_vec();
+        let row = self.fetch_stored(std::slice::from_ref(&dkey), ctx)?.pop().flatten();
+        self.probe = Probe::Done;
+        let Some(row) = row else {
+            self.cur_range = 0;
+            return Ok(None);
+        };
+        // (The entry's key columns: the entry key less the data key's suffix, `next_entry`.)
+        let cut = ikey.len().saturating_sub(dkey.len().saturating_sub(8));
+        if let Some(k) = &mut self.kills {
+            k.passed(&ikey[..cut]);
+        }
+        Ok(Some((dkey, row)))
     }
 
     fn emit(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Option<Row>> {

@@ -2040,13 +2040,14 @@ fn put_data_row_fixed(b: &mut BytesMut, row: &[crate::types::Value], formats: &[
 /// `put_data_row` of a row as its stored values (`data`, `storage::row`: the row is its
 /// columns `picked`, ascending, of the result's columns `cols`), made from the stored bytes
 /// without decoding them: each value null, of fixed width in binary (the bytes
-/// `put_data_row_fixed` writes for the row decoded), or in text one `put_text_fast` writes
-/// (a bool, int2/4/8 or oid of its own type, a valid UTF-8 string of a string type for a
-/// UTF-8 client): the bytes `put_data_row` writes for the row decoded. False: another row
-/// (nothing written).
+/// `put_data_row_fixed` writes for the row decoded; a date, and a valid UTF-8 text or
+/// varchar for a UTF-8 client, textsend's bytes), or in text one `put_text_fast` writes (a
+/// bool, int2/4/8 or oid of its own type, a valid UTF-8 string of a string type for a UTF-8
+/// client): the bytes `put_data_row` writes for the row decoded. False: another row (nothing
+/// written).
 fn put_data_row_stored(b: &mut BytesMut, data: &[u8], picked: &[u32], cols: &[OutCol], formats: &[i16]) -> Result<bool> {
-    use crate::types::DataType as T;
     use crate::storage::row::tag;
+    use crate::types::DataType as T;
     let mut m = [0u8; 256];
     let mut at = 7;
     let mut pos = 0;
@@ -2139,6 +2140,22 @@ fn put_data_row_stored(b: &mut BytesMut, data: &[u8], picked: &[u32], cols: &[Ou
                 col += 1;
                 continue;
             }
+            tag::TEXT if matches!(cols.get(i).map(|c| &c.ty), Some(T::Text | T::Varchar(_))) && plain_utf8() => {
+                let mut p = pos + 1;
+                let n = crate::storage::sst::get_varint(data, &mut p)? as usize;
+                let v = data.get(p..p + n).ok_or_else(|| crate::error::internal("truncated row"))?;
+                // (Invalid UTF-8 fails decoding the row: its error, from there.)
+                if at + 4 + n > m.len() || std::str::from_utf8(v).is_err() {
+                    return Ok(false);
+                }
+                m[at..at + 4].copy_from_slice(&(n as i32).to_be_bytes());
+                m[at + 4..at + 4 + n].copy_from_slice(v);
+                at += 4 + n;
+                pos = p + n;
+                col += 1;
+                continue;
+            }
+            tag::DATE if matches!(cols.get(i).map(|c| &c.ty), Some(T::Date)) => 4,
             tag::FALSE | tag::TRUE => 0,
             tag::INT2 => 2,
             tag::INT4 | tag::FLOAT4 | tag::OID => 4,
@@ -2658,14 +2675,12 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let mut b = Body::new(body);
     let portal = b.cstr()?.to_string();
     let max_rows = b.i32()?.max(0) as usize;
-    let (formats, sql, empty) = match s.portals.get(&portal) {
-        Some(p) => (
-            p.result_formats.clone(),
-            p.stmt.sql.clone(),
-            p.stmt.stmt.is_none(),
-        ),
-        None => (Vec::new(), String::new(), false),
+    // (The statement held, for its text: not a copy of it per Execute.)
+    let (formats, stmt, empty) = match s.portals.get(&portal) {
+        Some(p) => (p.result_formats.clone(), Some(p.stmt.clone()), p.stmt.stmt.is_none()),
+        None => (Vec::new(), None, false),
     };
+    let sql = stmt.as_ref().map_or("", |p| p.sql.as_str());
     if empty {
         c.msg(b'I', |_| {});
         return Ok(());
@@ -2694,7 +2709,7 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         }
     }
     send_notices(c, s);
-    let (o, more) = r.map_err(|e| e.in_chars(&sql))?;
+    let (o, more) = r.map_err(|e| e.in_chars(sql))?;
     match o {
         Outcome::Done(r) if more => {
             data_rows(c, s, &r, &formats)?;

@@ -1943,6 +1943,52 @@ fn stored_rows_go_out_as_decoded_ones() {
     s.engine.shutdown();
 }
 
+/// A prepared unique-key lookup ends at its probe's row, the row sent from its stored values
+/// (text, varchar and date in binary too): every DataRow and CommandComplete the same as the
+/// same lookup's under a LIMIT, which decodes its row, in binary, text and mixed formats; for
+/// a missing key, an updated, a deleted and a NULL-valued row, a non-ASCII string, a value
+/// longer than a stack row, an Execute with a row limit and an int8 parameter.
+#[test]
+fn point_lookups_go_out_as_decoded_ones() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query(
+        "CREATE TABLE pk (id int PRIMARY KEY, owner int NOT NULL, t text, v varchar(20), d date, n int8);
+         INSERT INTO pk SELECT g, g % 7, 'note ' || g, 'v' || g, date '2024-01-01' + g, CASE WHEN g % 5 = 0 THEN NULL ELSE -g END
+           FROM generate_series(1, 5000) g;
+         UPDATE pk SET t = 'grüße ' || id, d = NULL WHERE id = 7;
+         UPDATE pk SET t = repeat('x', 300) WHERE id = 8;
+         DELETE FROM pk WHERE id = 9;
+         ANALYZE pk",
+    );
+    let before = pg_engine::exec::scan::POINT_PICKS.load(Relaxed);
+    for (i, cols) in ["id, owner, t, v, d, n", "t, id", "d", "n, v"].iter().enumerate() {
+        for (j, ty) in ["", "::int8"].iter().enumerate() {
+            let q = format!("SELECT {cols} FROM pk WHERE id = $1{ty}");
+            c.parse(&format!("p{i}{j}"), &q);
+            c.parse(&format!("l{i}{j}"), &format!("SELECT {cols} FROM pk WHERE id = $1{ty} LIMIT 1000"));
+            assert_eq!(c.sync(), Vec::<String>::new());
+            let two = cols.matches(',').count() == 1;
+            for formats in [&[1][..], &[0], &[1, 0], &[0, 1]].into_iter().filter(|f| f.len() == 1 || two) {
+                for v in ["1", "5", "7", "8", "9", "400", "10", "1"] {
+                    for max_rows in [0, 1] {
+                        let mut got = Vec::new();
+                        for stmt in [format!("p{i}{j}"), format!("l{i}{j}")] {
+                            c.bind_with("", &stmt, &[v], formats);
+                            c.execute("", max_rows);
+                            got.push(c.sync_messages());
+                        }
+                        assert_eq!(got[0], got[1], "{q} ({v}, formats {formats:?}, max_rows {max_rows})");
+                    }
+                }
+            }
+        }
+    }
+    assert!(pg_engine::exec::scan::POINT_PICKS.load(Relaxed) > before + 60, "point lookups ended at their probe");
+    s.engine.shutdown();
+}
+
 /// exec_parse_message: a parameter nothing gives a type (an "any" argument, IS NULL, a ROW()
 /// field) is refused; the select list and operators type theirs.
 #[test]

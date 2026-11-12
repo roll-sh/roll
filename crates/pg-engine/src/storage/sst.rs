@@ -493,6 +493,12 @@ const TOMBSTONE: u32 = u32::MAX;
 const DERIVED: u32 = u32::MAX - 1;
 
 impl BlockPos {
+    /// Room for `n` bytes in the key buffer (a point read's keys: made once, not grown entry
+    /// by entry).
+    pub fn reserve_key(&mut self, n: usize) {
+        self.key.reserve(n);
+    }
+
     pub fn index(&self) -> usize {
         self.i
     }

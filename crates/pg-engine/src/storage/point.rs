@@ -49,6 +49,15 @@ impl PointReader {
         self.ts
     }
 
+    /// Room for a storage key in the buffers every read writes into, made at the first
+    /// read (a key grown into them entry by entry reallocated each a few times).
+    fn room(&mut self) {
+        if self.seek.capacity() == 0 {
+            self.seek.reserve(KEY_ROOM);
+            self.pos.reserve_key(KEY_ROOM);
+        }
+    }
+
     pub(super) fn view(&self) -> &Arc<View> {
         &self.view
     }
@@ -56,6 +65,7 @@ impl PointReader {
     /// The newest version of `key` visible at the reader's snapshot, range deletions applied;
     /// values as stored (out-of-line ones not put back).
     pub fn get_raw(&mut self, key: &[u8]) -> Result<Option<Version>> {
+        self.room();
         self.seek.clear();
         self.seek.extend_from_slice(key);
         self.seek.extend_from_slice(&(!self.ts).to_be_bytes());
@@ -69,10 +79,11 @@ impl PointReader {
     /// none. Err-free `Unknown` (`First::Unknown`): more than a few keys in the range had no
     /// visible version (deleted ones): a scan is cheaper.
     pub fn first_raw(&mut self, start: &[u8], end: &[u8]) -> Result<First> {
+        self.room();
         let mut from = std::mem::take(&mut self.seek);
         from.clear();
         from.extend_from_slice(start);
-        let mut cand = Vec::new();
+        let mut cand = Vec::with_capacity(KEY_ROOM);
         let mut tries = 0;
         let out = loop {
             if !smallest_key(&self.view, &from, &mut self.held, &mut self.pos, &mut cand)? {
@@ -108,6 +119,10 @@ impl PointReader {
         Ok(out)
     }
 }
+
+/// The bytes a point read's key buffers are made with: a table's or an index's storage key
+/// and its version fit (longer ones grow them).
+const KEY_ROOM: usize = 64;
 
 /// `PointReader::first_raw`'s answer.
 #[derive(Debug, PartialEq)]
