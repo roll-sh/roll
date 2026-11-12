@@ -341,6 +341,9 @@ type AuditEvent = {
   changes its own addresses.
 - A grant reviews and comments in roll code only as itself (`token:<name>`): the gate drops
   `X-Roll-User` and sets `X-Roll-Agent`.
+- The operator's policy (`/v1/access/policy`, `roll token policy`) caps every grant's lifetime
+  (`max_days`) and can require that every grant expires; a grant made or changed after must fit,
+  OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs).
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
@@ -380,6 +383,8 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry}`: roll's rules for every grant |
+| `PUT /v1/access/policy` | operator | change them; a grant made or changed after must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel} \| null}` |
 | `GET /v1/access/oauth/clients` | access read | MCP clients with a live connection |

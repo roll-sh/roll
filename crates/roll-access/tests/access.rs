@@ -329,6 +329,13 @@ async fn a_token_never_makes_a_stronger_one() {
         d.call(&admin, Method::POST, "/v1/access/tokens", Some(body))
     };
     let read = json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]);
+    // The operator's policy: tokens live at most a week.
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "max_days": 7 }))).await.0, StatusCode::OK);
+    let forever = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "forever", "rules": read }))).await;
+    assert_eq!(forever.0, StatusCode::BAD_REQUEST, "{}", forever.1);
+    let month = json!({ "name": "month", "rules": read, "expires_at": code_sql::now_ms() + 30 * 86_400_000 });
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(month)).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(make(read.clone(), None).await.0, StatusCode::FORBIDDEN, "outlives its maker");
     assert_eq!(make(read, Some(end - 1000)).await.0, StatusCode::CREATED);

@@ -30,6 +30,15 @@ pub enum Token {
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
+    /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`; nothing to show them.
+    Policy {
+        #[arg(long)]
+        max_days: Option<u32>,
+        #[arg(long)]
+        require_expiry: Option<bool>,
+        #[arg(long, conflicts_with = "max_days")]
+        no_limit: bool,
+    },
 }
 
 #[derive(Args)]
@@ -357,6 +366,28 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("the operator: everything");
             } else {
                 print_grant(&me["grant"]);
+            }
+        }
+        Token::Policy { max_days, require_expiry, no_limit } => {
+            let mut p = api.get("/v1/access/policy").await?;
+            if max_days.is_some() || require_expiry.is_some() || no_limit {
+                if let Some(d) = max_days {
+                    p["max_days"] = json!(d);
+                }
+                if no_limit {
+                    p["max_days"] = Value::Null;
+                }
+                if let Some(r) = require_expiry {
+                    p["require_expiry"] = json!(r);
+                }
+                p = api.call(reqwest::Method::PUT, "/v1/access/policy", Some(p)).await?;
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&p)?);
+            } else {
+                let days = p["max_days"].as_u64().map_or_else(|| "no limit".to_string(), |d| format!("at most {d} days"));
+                let must = if p["require_expiry"].as_bool() == Some(true) { ", and must expire" } else { "" };
+                println!("tokens live {days}{must}");
             }
         }
         Token::Presets => {
