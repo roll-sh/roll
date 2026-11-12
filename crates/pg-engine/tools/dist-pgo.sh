@@ -16,7 +16,7 @@
 # Environment: PGO_DIR (scratch: target dirs and raw profiles, default <root>/target/pgo; each
 # target dir is deleted once its binary is copied out, PGO_KEEP=1 keeps them), PGO_CLIENT,
 # PGO_BUILD_CPUS (taskset of the builds), and pgo-train.sh's PGO_PORT, PGO_SERVER_CPUS,
-# PGO_CLIENT_CPUS. Plain `cargo build --profile dist` is unchanged: the flags go through
+# PGO_CLIENT_CPUS; PGO_LLVM_ARGS (space-separated LLVM options for the optimised build). Plain `cargo build --profile dist` is unchanged: the flags go through
 # RUSTFLAGS of these builds only.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -75,7 +75,10 @@ fi
 T4=$(t)
 # (A function whose code changed since the profile has a different hash and just goes
 # unprofiled; the warnings for each would bury the build log.)
-build "$W/t-use" "-Cprofile-use=$PROF -Cllvm-args=-no-pgo-warn-mismatch"
+USE="-Cprofile-use=$PROF -Cllvm-args=-no-pgo-warn-mismatch"
+for a in ${PGO_LLVM_ARGS:-}; do USE="$USE -Cllvm-args=$a"; done
+note "rustflags $USE"
+build "$W/t-use" "$USE"
 cp "$W/t-use/dist/roll-engine" "$OUT/roll-engine"
 [ -n "${PGO_KEEP:-}" ] || rm -rf "$W/t-use"
 T5=$(t)
