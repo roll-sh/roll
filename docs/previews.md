@@ -171,7 +171,10 @@ behind the `Apps` trait:
   - Each gets an ephemeral environment `pv-<preview id>`: `PUT …/environments/pv-…`
     `{branch: null, ephemeral: true}`.
   - The branches' URLs and the project's overrides are set as its variables.
-  - It is deployed at the change's git commit (or its image, for an image service).
+  - It is deployed at the change's git commit (or its image, for an image service), with an
+    `Idempotency-Key` of `pv-<id>@<sha>`, so a retry after a crash returns the same deployment.
+    When the environment already runs that commit (a reset's new URLs), it's redeployed: the
+    same image with the new variables, no build.
   - roll apps injects the roll secrets environment of the same name, builds once, scales to
     zero, and answers on its own hostnames (`<slug>.up.<site>`). A preview's service URLs are
     those.
@@ -302,6 +305,10 @@ clicking through one costs about a cent.
 What dominates, from most to least:
 
 - **Postgres while connected.** A compute at its minimum size.
+
+An hour after a preview's last request, with nothing running, its branches are told it's idle:
+a Postgres branch is evicted (its directory goes to object storage as a base backup, and the
+next connection restores it). That's what keeps a sleeping preview's Postgres cheap on ext4.
 - **The Postgres branch's local directory on ext4.** Until eviction it's a full copy (see
   `## Next`).
 - **The service's container while it runs.**

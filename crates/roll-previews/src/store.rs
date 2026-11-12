@@ -264,6 +264,9 @@ impl Store {
         if !db.has_column("previews", "token")? {
             db.add_column("previews", "token", "TEXT")?;
         }
+        if !db.has_column("previews", "idled")? {
+            db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
@@ -424,7 +427,7 @@ impl Store {
     pub fn touch(&self, id: &str) -> Result<()> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            c.execute("UPDATE previews SET last_active_at = ? WHERE id = ? AND last_active_at < ?", params![now, id, now - 60_000])?;
+            c.execute("UPDATE previews SET last_active_at = ?, idled = 0 WHERE id = ? AND last_active_at < ?", params![now, id, now - 60_000])?;
             Ok::<_, Error>(())
         })
     }
@@ -612,6 +615,18 @@ impl Store {
     pub fn drop_service(&self, id: &str, name: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM services WHERE preview_id = ? AND name = ?", [id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Whether the preview's branches were told it's idle (and nothing used it since).
+    pub fn idled(&self, id: &str) -> Result<bool> {
+        Ok(self.db.read(|c| c.query_row("SELECT idled FROM previews WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional())?.unwrap_or(0) != 0)
+    }
+
+    pub fn set_idled(&self, id: &str, idled: bool) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET idled = ? WHERE id = ?", params![idled as i64, id])?;
             Ok::<_, Error>(())
         })
     }

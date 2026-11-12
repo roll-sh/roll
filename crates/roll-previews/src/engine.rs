@@ -25,6 +25,9 @@ const SETTLED: i64 = i64::MAX;
 /// The first retry after a failed step, doubling up to [`MAX_BACKOFF_MS`].
 const BACKOFF_MS: i64 = 15_000;
 const MAX_BACKOFF_MS: i64 = 600_000;
+/// A preview unused this long has its branches told it's idle ([`Brancher::idle`]).
+pub const IDLE_AFTER_MS: i64 = 3_600_000;
+
 /// Previews converged at once.
 const PARALLEL: usize = 4;
 
@@ -324,6 +327,20 @@ impl Engine {
                 }
                 self.mark_deleted(&r.id, &format!("unused for {} hours (ttl)", s.ttl_hours))?;
                 continue;
+            }
+            // Unused for a while, nothing running: let the branches drop what they keep warm.
+            if r.last_active_at + IDLE_AFTER_MS <= now && matches!(r.state, State::Ready | State::Sleeping) && !self.store.idled(&r.id)? {
+                let running = self.store.services(&r.id)?.iter().any(|x| x.state == ServiceState::Running);
+                if !running {
+                    for res in self.store.resources(&r.id)? {
+                        let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+                        if let Err(e) = b.idle(&res.parent, branch).await {
+                            warn!(preview = %r.id, kind = res.kind.as_str(), error = %e, "previews: idling a branch");
+                        }
+                    }
+                    self.store.set_idled(&r.id, true)?;
+                    self.store.log(&r.id, "idle for an hour: its branches went cold")?;
+                }
             }
             // A service from another repo of the project follows that repo's default branch.
             let stale = self.store.services(&r.id)?.into_iter().any(|svc| {

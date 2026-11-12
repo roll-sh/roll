@@ -58,6 +58,12 @@ pub trait Brancher: Send + Sync {
     async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>>;
 
     async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage>;
+
+    /// The preview has been idle a while: drop what the branch keeps for a quick start (a
+    /// Postgres branch's local data directory, to object storage). Its next use brings it back.
+    async fn idle(&self, _parent: &str, _branch: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// A change (or branch) as previews see it.

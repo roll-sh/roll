@@ -155,7 +155,15 @@ impl Api {
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+        self.call_with(method, path, body, None).await
+    }
+
+    /// [`Api::call`] with an `Idempotency-Key`.
+    async fn call_with(&self, method: Method, path: &str, body: Option<Value>, key: Option<&str>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method.clone(), format!("{}{path}", self.base));
+        if let Some(k) = key {
+            req = req.header("idempotency-key", k);
+        }
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
         }
@@ -278,6 +286,16 @@ impl Brancher for Postgres {
         let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
         let uri = s(&b["connection_uri"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
         Ok(vec![("DATABASE_URL".into(), uri)])
+    }
+
+    /// Evict the branch: its local data directory goes to object storage (a base backup); the
+    /// next connection restores it. On ext4 this is what makes an idle Postgres branch cheap.
+    async fn idle(&self, parent: &str, branch: &str) -> anyhow::Result<()> {
+        match self.0.post(&format!("/v1/projects/{}/branches/{}/evict", seg(parent), seg(branch)), json!({})).await {
+            Ok(_) => Ok(()),
+            Err(e) if is_404(&e) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// A branch's own bytes (its local data directory, else its objects), at Postgres's rates.
@@ -852,15 +870,19 @@ impl roll_previews::ports::Apps for RollApps {
         if !set.is_empty() {
             self.api.call(Method::PATCH, &format!("{path}/variables"), Some(json!({ "set": set }))).await?;
         }
-        // Deploys aren't idempotent: skip one the environment already has (or is building).
+        // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
+        // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let env = self.api.get(&path).await?;
-        let has = |v: &Value| t.git.is_some() && v["revision"].as_str() == t.git.as_deref();
-        if !(has(&env["active"]) || has(&env["latest"])) {
+        let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
+        if at_sha {
+            self.api.post(&format!("{path}/redeploy"), json!({ "message": format!("roll preview {}: new variables", t.preview) })).await?;
+        } else {
             let body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
-            self.api.post(&format!("{path}/deploys"), body).await?;
+            let key = format!("{}@{}", t.environment, t.git.as_deref().unwrap_or("image"));
+            self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&key)).await?;
         }
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
