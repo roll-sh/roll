@@ -477,6 +477,15 @@ async fn branches_are_isolated_copies() {
     h.wait_for_base(&dev.id).await;
     assert!(h.control.reset_branch(&db.project.id, "main").await.is_err(), "the root branch has no parent");
 
+    // Structure only (previews' `schema` mode): the tables stay, the rows go, from disk too.
+    let empty = h.control.create_branch(&db.project.id, "schema-only", None, None).await.unwrap();
+    h.control.truncate_branch(&db.project.id, &empty.id).await.unwrap();
+    let e = h.connect(&db, &h.primary(&empty).id).await;
+    assert_eq!(count(&e, "SELECT count(*) FROM t").await, 0);
+    assert_eq!(count(&c, "SELECT count(*) FROM t").await, 400, "the parent keeps its rows");
+    drop(e);
+    h.control.delete_branch(&db.project.id, &empty.id).await.unwrap();
+
     // From a suspended parent (copy of its data directory), and a branch of a branch.
     drop(d);
     h.control.suspend(&dev_ep.id).await.unwrap();

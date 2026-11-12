@@ -219,6 +219,9 @@ struct CreateBranch {
     name: String,
     /// Parent branch id or name; defaults to `main`.
     parent: Option<String>,
+    /// The parent's structure without its rows: every user table emptied after branching.
+    #[serde(default)]
+    schema_only: bool,
     #[serde(flatten)]
     point: PointInTime,
 }
@@ -230,6 +233,13 @@ async fn create_branch(
 ) -> Result<Response, ControlError> {
     let started = std::time::Instant::now();
     let branch = c.create_branch(&id, &body.name, body.parent.as_deref(), body.point.target()?).await?;
+    if body.schema_only
+        && let Err(e) = c.truncate_branch(&id, &branch.id).await
+    {
+        // A branch that should hold no rows but might: it doesn't stay.
+        let _ = c.delete_branch(&id, &branch.id).await;
+        return Err(e);
+    }
     let project = c.store.project(&id)?.ok_or_else(|| ControlError::NotFound(id.clone()))?;
     let ep = c.store.endpoint_for_branch(&branch.id)?;
     let body = json!({
@@ -269,11 +279,21 @@ async fn restore_branch(
     Ok(Json(json!({ "backup_branch": backup, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 
+#[derive(Deserialize, Default)]
+struct ResetBody {
+    /// Empty every user table after the reset (a structure-only branch).
+    #[serde(default)]
+    schema_only: bool,
+}
+
 /// Back to the parent's current state, same endpoint and connection string.
-async fn reset_branch(State(c): State<AppState>, Path((id, branch)): Path<(String, String)>) -> ApiResult<Value> {
+async fn reset_branch(State(c): State<AppState>, Path((id, branch)): Path<(String, String)>, body: Option<Json<ResetBody>>) -> ApiResult<Value> {
     let started = std::time::Instant::now();
     let branch = c.branch_in(&id, &branch)?;
     let branch = c.reset_branch(&id, &branch.id).await?;
+    if body.is_some_and(|Json(b)| b.schema_only) {
+        c.truncate_branch(&id, &branch.id).await?;
+    }
     Ok(Json(json!({ "branch": branch, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 

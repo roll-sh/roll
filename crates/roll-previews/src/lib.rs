@@ -95,7 +95,7 @@ impl Kind {
     /// The others only branch everything, so a `schema` rule for them is refused rather than
     /// silently copying production.
     pub fn has_schema_mode(self) -> bool {
-        matches!(self, Kind::Nosql | Kind::Stream | Kind::Queue | Kind::Tasks)
+        matches!(self, Kind::Postgres | Kind::Nosql | Kind::Stream | Kind::Queue | Kind::Tasks)
     }
 
     /// The data kind of a workspace resource (`None` for a repo).

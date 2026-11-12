@@ -256,13 +256,17 @@ impl Brancher for Postgres {
         }
     }
 
+    /// `Mode::Schema`: branched, then every user table emptied (`schema_only`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
-        // Structure-only Postgres branches are in docs/previews.md's `## Next`.
-        anyhow::ensure!(mode == Mode::Branch, "a Postgres branch can't be structure-only yet");
         if let Some(b) = self.find(parent, name).await? {
-            return Ok(Branched::plain(s(&b["id"]).unwrap_or_default()));
+            let id = s(&b["id"]).unwrap_or_default();
+            // From before a crash: it may still hold rows, so empty it again (idempotent).
+            if mode == Mode::Schema {
+                self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
+            }
+            return Ok(Branched::plain(id));
         }
-        match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name })).await {
+        match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema })).await {
             Ok(v) => Ok(Branched::plain(s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?)),
             Err(e) if conflict_is_ours(&e) => {
                 let b = self.find(parent, name).await?.ok_or(e)?;
@@ -274,7 +278,7 @@ impl Brancher for Postgres {
 
     /// In place: same branch, endpoint and `DATABASE_URL`.
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
-        match self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(branch)), json!({})).await {
+        match self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(branch)), json!({ "schema_only": mode == Mode::Schema })).await {
             Ok(_) => Ok(Branched::plain(branch)),
             // Gone (or an older node without the route): branch again.
             Err(e) if is_404(&e) => {

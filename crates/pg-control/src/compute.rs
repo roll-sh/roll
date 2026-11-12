@@ -319,6 +319,13 @@ impl DockerDriver {
         .map(drop)
     }
 
+    /// Run SQL in a running compute, as `roll`, in database `db`: its output.
+    pub async fn sql(&self, endpoint: &str, password: &str, db: &str, sql: &str) -> anyhow::Result<String> {
+        let pw = format!("PGPASSWORD={password}");
+        let name = container_name(endpoint);
+        docker(&["exec", "-e", &pw, &name, "psql", "-h", "127.0.0.1", "-U", "roll", "-d", db, "-qAtX", "-v", "ON_ERROR_STOP=1", "-c", sql]).await
+    }
+
     /// Consistent copy of a running compute's data directory into `dest` by the file system:
     /// `cp --reflink=auto` between `pg_backup_start` and `pg_backup_stop` (the low-level backup
     /// API), then the WAL up to the stop and its `backup_label`. On XFS or btrfs the copy shares

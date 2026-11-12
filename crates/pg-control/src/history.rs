@@ -372,6 +372,29 @@ impl Control {
 
     /// Restore a branch in place to an earlier point. The current state is kept as a new branch
     /// (`<name>_old_<unix time>`), and the endpoint — and connection string — stay the same.
+    /// Empty every user table of a branch, in every database, keeping the schema (sequences
+    /// restart): a structure-only branch (roll previews' `schema` mode). TRUNCATE drops the
+    /// tables' files, so the rows are gone from disk, not just hidden. The compute is started for
+    /// it and suspended after.
+    pub async fn truncate_branch(self: &Arc<Self>, project_id: &str, branch_id: &str) -> Result<()> {
+        let project = self.project_or_404(project_id)?;
+        let branch = self.branch_in(project_id, branch_id)?;
+        if branch.parent_id.is_none() {
+            return Err(ControlError::Invalid("the root branch can't be emptied".into()));
+        }
+        let ep = self.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
+        self.ensure_running(&ep.id).await?;
+        let dbs = self.driver.sql(&ep.id, &project.password, "postgres", "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate").await?;
+        const TRUNCATE: &str = "DO $$ DECLARE r record; BEGIN FOR r IN SELECT format('%I.%I', n.nspname, c.relname) AS t FROM pg_class c \
+            JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition \
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' \
+            LOOP EXECUTE 'TRUNCATE TABLE ' || r.t || ' RESTART IDENTITY CASCADE'; END LOOP; END $$";
+        for db in dbs.lines().map(str::trim).filter(|d| !d.is_empty()) {
+            self.driver.sql(&ep.id, &project.password, db, TRUNCATE).await?;
+        }
+        self.suspend(&ep.id).await
+    }
+
     /// Make a branch its parent's current state again, keeping its id, endpoint and connection
     /// string (a preview's `DATABASE_URL` stays the same). The branch's own history goes: it
     /// starts a new one from the parent's state. The parent never stops serving, as for

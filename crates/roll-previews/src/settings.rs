@@ -281,9 +281,10 @@ mod tests {
         assert_eq!(r.mode_of(Kind::Nosql, "n1"), Some(Mode::Schema));
         assert_eq!(r.mode_of(Kind::Bucket, "b"), Some(Mode::Branch));
         // Structure-only where a kind can't do it: refused, never a silent full copy.
-        assert!(Settings::default().patched(&json!({ "resources": { "postgres:prj_1": "schema" } })).is_err());
+        assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
         let schema = Settings::default().patched(&json!({ "data": "schema" })).unwrap();
-        assert_eq!(schema.mode_of(Kind::Postgres, "prj_1"), None);
+        assert_eq!(schema.mode_of(Kind::Redis, "rdb_1"), None);
+        assert_eq!(schema.mode_of(Kind::Postgres, "prj_1"), Some(Mode::Schema));
         assert_eq!(schema.mode_of(Kind::Stream, "st_1"), Some(Mode::Schema));
         assert!(Settings::default().patched(&json!({ "masking": { "nosql:n1": { "app.users.email": "mask_default()" } } })).is_ok());
         assert!(Settings::default().patched(&json!({ "masking": { "postgres:p1": { "a.b.c": "mask_null()" } } })).is_err(), "only NoSQL masks");

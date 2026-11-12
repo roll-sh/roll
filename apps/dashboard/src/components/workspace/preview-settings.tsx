@@ -131,7 +131,7 @@ function Form({
               const id = resourceKey(r);
               const rule = s.resources[id];
               // Structure-only exists for these; for the rest a `schema` rule is refused.
-              const schema = r.kind === "nosql" || r.kind === "stream" || r.kind === "queue" || r.kind === "tasks";
+              const schema = r.kind === "postgres" || r.kind === "nosql" || r.kind === "stream" || r.kind === "queue" || r.kind === "tasks";
               const masks = Object.entries(s.masking?.[id] ?? {})
                 .map(([col, f]) => `${col} = ${f}`)
                 .join("\n");

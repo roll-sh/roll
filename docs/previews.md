@@ -245,7 +245,8 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
   code's own previews: the container started for a visit now refuses an unapproved head.
 - **Structure-only means structure-only.** `schema` is accepted only for kinds that can do it:
-  NoSQL, streams, queues and tasks. A `schema` rule for Postgres, Redis or a bucket is refused.
+  Postgres (branched, then every user table truncated in every database: the rows' files are
+  dropped), NoSQL, streams, queues and tasks. A `schema` rule for Redis or a bucket is refused.
   With `data: "schema"` those kinds are left out unless a rule says `branch`, so a project that
   asked for no rows never gets a full copy by default.
 - **Masked columns.** `masking` adds column masks (Cassandra 5's mask functions) to a NoSQL
@@ -502,8 +503,7 @@ Ranked by what a person notices first. Done so far:
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
 2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. The fleet's XFS volumes already
-   share blocks through reflinks. Also `schema` mode for Postgres (a `pg_dump --schema-only`
-   restore into a fresh branch).
+   share blocks through reflinks.
 3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
 4. **roll search's `own_bytes`** (asked for), so a search branch's cost counts only what it
