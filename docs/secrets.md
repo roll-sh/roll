@@ -320,6 +320,48 @@ secrets when the service starts. It uses one call:
 `code_control::SecretEnv` is the one interface roll code uses, and `crates/rolld/src/secrets.rs`
 (`ForCode`) implements it.
 
+#### Leaked secrets don't land
+
+A change that adds the value of a secret of its repo's project gets a `secret_leak` blocker, so it
+can't be queued or landed: `adds the value of STRIPE_KEY (production): rotate it and remove it from
+the change`. The blocker names keys and environments, never the value or the line.
+
+- **What is checked.** The lines the change adds since its merge base (its own diff, so the check is
+  O(change)). Each added line gives candidates: every run of `[A-Za-z0-9_\-+/=.:@~]` of 8 characters
+  or more, the right-hand side of `KEY=VALUE` and `key: value` (quotes and a trailing `,` or `;`
+  stripped), and the whole trimmed line. Binary files, files over 1 MiB and lines over 4 KiB are
+  skipped, and at most 20,000 candidates are checked per change.
+- **How it matches.** `Secrets::leaks` (`crates/roll-secrets/src/leaks.rs`) fingerprints each
+  candidate with the project's data key and compares it with the stored `fp` of every secret, in
+  every environment, that holds a value (plain values and managed links; live and dynamic links
+  store none). Nothing is decrypted. Candidates shorter than 8 characters never match, so values
+  like `true` or `8080` don't block. Every project that has the repo on its canvas is checked.
+- **When.** The answer is computed before a change is queued or landed and when a single change is
+  read, and cached per (repo, merge base, head), as review facts are. A secret set after a head was
+  checked is caught when the head or its merge base moves. A repo on no project's canvas, or a
+  server without roll secrets, gets no blocker; if roll secrets can't answer, the change isn't
+  blocked and the check runs again next time.
+- **Way around.** None beyond the existing admin `bypass` of a queue repo (audited). Rotate the
+  secret and remove the value from the change.
+
+### Sharing a value once
+
+`roll secrets share STRIPE_KEY [--views 1] [--ttl 24h] [--note …]` (or a value on stdin) prints a
+link that opens once, or `--views` times, before it expires (5 minutes to 7 days), for handing a
+credential to someone outside roll. `roll secrets open <link>` and the dashboard's share page
+open it.
+
+- **The server never sees the value.** The client encrypts it with a random 256-bit key
+  (AES-256-GCM, `roll-share-v1` as associated data) and puts the key in the link's `#fragment`,
+  which browsers never send. The server keeps the ciphertext, and drops it at the last open, at
+  expiry or when it's revoked.
+- **Opening is a `POST`** (`/v1/secrets/shares/{id}/open`), so a chat's link preview, which only
+  `GET`s, can't use it up. `GET /v1/secrets/shares/{id}` shows the note and the opens left. Both
+  routes are public; the id is 120 random bits.
+- Creating, opening (with the opener's address) and revoking are in the project's audit log.
+  `GET …/shares` lists a project's shares (never their ciphertext); `DELETE …/shares/{id}` revokes
+  one. A project has at most 200 open at once.
+
 ## Governance
 
 ### Access
@@ -461,6 +503,11 @@ isn't in the workspace is 404.
 | `GET /audit?env=&key=&actor=&action=&before=&limit=` | | `AuditEntry[]` newest first |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
+| `GET /shares` | | `Share[]` newest first |
+| `POST /shares` | `{ciphertext, note?, views?, ttl_minutes?}` | 201 `Share` |
+| `DELETE /shares/{id}` | | 204 |
+| `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
+| `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 
 - 400: a bad slug, path, key, value, body or query.
@@ -508,6 +555,7 @@ type Version = { version: number; seq: number; op: "set" | "delete"; what: strin
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[] }; // leases: ids of dynamic credentials issued
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Required = { key: string; path: string; comment: string };
+type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
@@ -560,5 +608,8 @@ the dashboard's Secrets surface. Ranked:
 3. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
 4. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-5. **One-time sharing**: a link that reveals a value once and expires (Infisical and Doppler have
-   it), for handing a credential to someone outside roll.
+5. **The dashboard's share page** (`/share/$id`, public; opens with the key from the fragment)
+   and "Share once" on a secret's menu.
+6. **Search links**: a `search` provider (kind `search`, ref the cluster id) once roll search's key
+   routes land (`POST|DELETE /v1/search/clusters/{id}/keys`): live `url`, `host`, `port`,
+   `username`; issued `api_key` (managed or dynamic).

@@ -271,6 +271,7 @@ impl Secrets {
                 }
             }
         }
+        self.expire_shares()?;
         let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
         self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
         Ok(out)

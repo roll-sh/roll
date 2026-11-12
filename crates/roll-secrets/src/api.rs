@@ -64,6 +64,11 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/required"), get(required).put(set_required))
+        .route(&format!("{P}/shares"), get(shares).post(create_share))
+        .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
+        // Public: a share's link (docs/secrets.md, "Sharing a value once").
+        .route("/v1/secrets/shares/{id}", get(peek_share))
+        .route("/v1/secrets/shares/{id}/open", post(open_share))
         .with_state(s)
 }
 
@@ -525,6 +530,30 @@ async fn required(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
 async fn set_required(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let list: Vec<crate::Required> = body(&b)?;
     Ok(ok(blocking(s, move |s| s.set_required(&project, list, &c)).await?))
+}
+
+async fn shares(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.shares(&project, &c)).await?))
+}
+
+async fn create_share(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewShare = body(&b)?;
+    Ok(created(blocking(s, move |s| s.create_share(&project, n, &c)).await?))
+}
+
+async fn revoke_share(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.revoke_share(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn peek_share(State(s): S, Path(id): Path<String>) -> crate::Result<Response> {
+    Ok(secret_response(ok(blocking(s, move |s| s.peek_share(&id)).await?)))
+}
+
+async fn open_share(State(s): S, Path(id): Path<String>, parts: Parts) -> crate::Result<Response> {
+    let ip = s.client_ip(&parts);
+    let ct = blocking(s, move |s| s.open_share(&id, ip)).await?;
+    Ok(secret_response(ok(json!({ "ciphertext": ct }))))
 }
 
 async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::AuditFilter>) -> crate::Result<Response> {

@@ -22,6 +22,7 @@ mod read;
 pub mod refs;
 mod requests;
 mod required;
+mod shares;
 mod sweep;
 mod tokens;
 mod write;
@@ -35,6 +36,7 @@ pub use links::{Link, LinkProvider, Links, Mode};
 pub use read::{Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, Review, Verdict};
 pub use required::Required;
+pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};
 pub use tokens::{NewToken, Token};
 pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
@@ -294,6 +296,7 @@ impl Secrets {
 
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
+        db.ensure_schema(shares::SCHEMA)?;
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
@@ -363,7 +366,7 @@ impl Secrets {
         self.revoke_leases_where("project_id = ?", project);
         let managed = self.managed_where("project_id = ?", project);
         let done = self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required"] {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;

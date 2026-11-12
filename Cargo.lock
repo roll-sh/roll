@@ -6276,6 +6276,7 @@ dependencies = [
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "agent-host",
  "agent-proto",
  "anyhow",

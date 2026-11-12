@@ -15,6 +15,7 @@ path = "src/main.rs"
 roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"]
 
 [dependencies]
+aes-gcm.workspace = true
 agent-host.workspace = true
 agent-proto.workspace = true
 libc.workspace = true

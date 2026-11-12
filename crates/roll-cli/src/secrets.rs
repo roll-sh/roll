@@ -179,6 +179,22 @@ pub enum Secrets {
     /// Scoped tokens for CI and services: list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
+    /// Hand a value to someone outside roll: a link that opens once (or `--views`) and expires.
+    /// The value is encrypted here; the key is only in the link.
+    Share {
+        /// A secret of the environment (default: the value on stdin).
+        key: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        views: i64,
+        /// How long the link lives: 30m, 12h, 7d.
+        #[arg(long, default_value = "24h")]
+        ttl: String,
+        /// What it is, for whoever opens it (never the value).
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Open a share's link (or `<id>#<key>`) and print its value; it counts as one of its opens.
+    Open { link: String },
     /// Who read and changed what (never values).
     Audit {
         #[arg(long)]
@@ -401,6 +417,10 @@ fn approval_hint(e: anyhow::Error) -> anyhow::Error {
 pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyhow::Result<()> {
     if let Secrets::Setup { show, clear } = cmd {
         return setup_dir(api, &args, show, clear).await;
+    }
+    // Opening a link needs no project: the link names its share.
+    if let Secrets::Open { link } = &cmd {
+        return open_share(api, link).await;
     }
     let at = args.resolve();
     let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
@@ -642,6 +662,30 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
+        Secrets::Share { key, views, ttl, note } => {
+            let value = match &key {
+                Some(k) => {
+                    let v = c.call(Method::GET, &format!("{env}/secrets/{}/value?{}", enc(k), c.q()), None).await?;
+                    s(&v["value"])
+                }
+                None => {
+                    let mut v = String::new();
+                    std::io::stdin().read_to_string(&mut v).context("reading the value from stdin")?;
+                    v.strip_suffix('\n').map(String::from).unwrap_or(v)
+                }
+            };
+            let (ciphertext, secret) = share_seal(&value);
+            let note = if note.is_empty() { key.clone().unwrap_or_default() } else { note };
+            let body = json!({ "ciphertext": ciphertext, "note": note, "views": views, "ttl_minutes": minutes(&ttl)? });
+            let v = c.call(Method::POST, &format!("{}/shares", c.base()), Some(body)).await?;
+            let id = s(&v["id"]);
+            match std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.is_empty()) {
+                Some(web) => println!("{}/share/{id}#{secret}", web.trim_end_matches('/')),
+                None => println!("{id}#{secret}"),
+            }
+            eprintln!("Opens {views} time{}, until {}. The key is only in this link: send it, don't store it.", if views == 1 { "" } else { "s" }, chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
+        }
+        Secrets::Open { .. } => unreachable!("handled above"),
         Secrets::Audit { key, actor, limit } => {
             let mut q = format!("limit={limit}");
             if let Some(k) = &key {
@@ -776,6 +820,41 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
         println!("{}", list.iter().map(|e| s(&e["slug"])).collect::<Vec<_>>().join(" → "));
     } else {
         println!("{} ({})", s(&v["slug"]), s(&v["name"]));
+    }
+    Ok(())
+}
+
+/// A value encrypted for a share: (base64url(nonce ‖ ciphertext), base64url(key)). AES-256-GCM
+/// with `roll-share-v1` as associated data, the dashboard's share page's format.
+fn share_seal(value: &str) -> (String, String) {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    let (mut key, mut nonce) = ([0u8; 32], [0u8; 12]);
+    getrandom::fill(&mut key).expect("system randomness");
+    getrandom::fill(&mut nonce).expect("system randomness");
+    let ct = aes_gcm::Aes256Gcm::new_from_slice(&key).expect("32 bytes").encrypt(&nonce.into(), Payload { msg: value.as_bytes(), aad: b"roll-share-v1" }).expect("encrypt");
+    (B64.encode([&nonce[..], &ct].concat()), B64.encode(key))
+}
+
+/// `roll secrets open <link>`: one of the share's opens, decrypted here.
+async fn open_share(api: &Api, link: &str) -> anyhow::Result<()> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    let (head, key) = link.trim().rsplit_once('#').context("a share's link ends with #<key>")?;
+    let id = head.rsplit('/').next().unwrap_or(head);
+    let key = B64.decode(key).ok().filter(|k| k.len() == 32).context("the link's key isn't a share key")?;
+    let v = api.call(Method::POST, &format!("/v1/secrets/shares/{}/open", enc(id)), None).await?;
+    let raw = B64.decode(s(&v["ciphertext"])).context("the share isn't base64url")?;
+    anyhow::ensure!(raw.len() > 12, "the share is too short");
+    let plain = aes_gcm::Aes256Gcm::new_from_slice(&key)
+        .expect("32 bytes")
+        .decrypt(raw[..12].into(), Payload { msg: &raw[12..], aad: b"roll-share-v1" })
+        .map_err(|_| anyhow::anyhow!("the link's key doesn't open this share"))?;
+    print!("{}", String::from_utf8_lossy(&plain));
+    if !plain.ends_with(b"\n") {
+        println!();
     }
     Ok(())
 }
