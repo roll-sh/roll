@@ -38,6 +38,9 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/storage/console/signin", access: Access::Public("storage sign-in: checks the IAM user's password and MFA") },
     Rule { route: "/v1/storage/console/session", access: Access::Product("storage: who a console session is, for that session's token only") },
     Rule { route: "/v1/storage", access: Access::Credential("a storage console session") },
+    // roll secrets: the operator, or a secrets token (`rls_…`) scoped to a project's
+    // environments and folders, checked on every request (docs/secrets.md, "Access").
+    Rule { route: "/v1/secrets", access: Access::Credential("a secrets token (rls_…)") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },
     // Hosted tenants (`/t/<tenant>/v1/tasks`) take only their own API keys; the tasks token

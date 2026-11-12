@@ -218,7 +218,21 @@ Which fields and modes each kind offers is in `GET …/links` (the catalogue of 
 resources and their fields). The providers rolld registers are listed in `crates/rolld/src/secrets.rs`
 and in the table below.
 
-<!-- links-table -->
+| Kind | Live fields | Issued (managed or dynamic) | Rotate the resource |
+| --- | --- | --- | --- |
+| `postgres` | `url`, `host`, `port`, `user`, `password`, `database` (option `branch`, default `main`) | a role of its own, credential `role`: `role_url`, `role_user`, `role_password` (`CREATE ROLE … VALID UNTIL` through the console's query route; option `permission` `read` or `write`) | no |
+| `redis` | `url`, `host`, `port`, `password`, `rest_url`, `rest_token` | no (ACL users don't survive an unload) | yes: a new password |
+| `stream` | `bootstrap`, `security_protocol` | an API key, credential `key`: `username`, `password`, `properties` | no |
+| `bucket` | `bucket`, `endpoint`, `region` | an access key limited to the bucket, credential `key`: `access_key_id`, `secret_access_key` (option `permission` `read`, `write` or `admin`) | no |
+| `nosql` | `cql`, `username`, `password`, `http_token`, `alternator` | no | yes: a new password |
+
+Secrets of one environment linked to the same resource and credential share one issue: linking
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` gives one access key, and rotating either rotates
+both, in one change. A Postgres role made for a branch also exists in branches made from it later
+(roles live in the branch's data); it expires with `VALID UNTIL` either way.
+
+Products without a workspace kind yet (queues, tasks, roll search, roll apps) join by adding their
+kind to the workspace and registering a provider.
 
 ## Consumption
 
@@ -335,7 +349,7 @@ isn't in the workspace is 404.
 | Route | Body | Answer |
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed}` |
-| `GET` | | `Overview` |
+| `GET` | | `{project, environments: Environment[], previews: number}` |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -347,25 +361,26 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?}` | `Environment` |
 | `GET /environments/{env}/folders?path=` | | `{path, folders: Folder[]}` |
 | `POST /environments/{env}/folders` | `{path}` | 201 `Folder` |
-| `DELETE /environments/{env}/folders?path=` | | `Change` |
+| `DELETE /environments/{env}/folders?path=` | | `{change: Change \| null}` |
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
-| `GET /environments/{env}/secrets/{key}?path=` | | `Secret` |
+| `GET /environments/{env}/secrets/{key}?path=&type=` | | `Secret` |
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written` |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=` | | `Written` |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
-| `GET /environments/{env}/secrets/{key}/versions?path=` | | `Version[]` newest first |
-| `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=` | | `{value}` |
-| `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Written` |
+| `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
+| `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
+| `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed}` |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
-| `POST /environments/{env}/changes` | `Batch` | 201 `Change` |
+| `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
+| `POST /environments/{env}/import` | `{dotenv, path?, overwrite?, message?, request?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
-| `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?}` | 201 `Change` |
+| `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |
-| `POST /environments/{env}/promote?from=` | `{path?, keys?, message?}` | 201 `Change` |
+| `POST /environments/{env}/promote?from=` | `{path?, keys?, message?}` | 201 `Applied` |
 | `GET /environments/{env}/requests?state=` | | `Request[]` |
 | `POST /environments/{env}/requests` | `Batch` | 201 `Request` |
 | `GET /environments/{env}/requests/{id}` | | `Request` |
@@ -392,7 +407,6 @@ isn't in the workspace is 404.
 ### Shapes
 
 ```ts
-type Overview = { project: string; environments: Environment[]; counts: Record<string, number>; previews: number };
 type Environment = {
   id: string; slug: string; name: string; position: number; kind: "standard" | "ephemeral";
   base: string | null; labels: Record<string, string>; expires_at: number | null;
@@ -417,18 +431,21 @@ type Op =
   | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null }
   | { op: "delete"; key: string; type?: "shared" | "personal" };
 type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
-type Written = { change: Change; secret: Secret | null; warnings: string[] };
+type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
+type Applied = { change: Change | null; items: Item[]; warnings: string[] }; // change: null when nothing changed
+type Item = { key: string; path: string; type: "shared" | "personal"; what: string[]; from_fp: string | null; to_fp: string | null };
 type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: "write" | "rollback" | "promote" | "rotate" | "request" | "rename" };
-type ChangeDetail = Change & { items: { key: string; path: string; what: string[]; from_fp: string | null; to_fp: string | null }[]; state?: Secret[] };
-type Version = { version: number; seq: number; op: "set" | "delete"; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[] };
-type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing" }[]; folders: string[] };
-type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean };
-type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to" }[] };
-type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: ChangeDetail["items"]; reviews: { by: string; verdict: string; comment: string; at: number }[]; applied_seq: number | null };
-type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean }[] };
-type Lease = { id: string; environment: string; key: string; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; last_used_at: number | null; prefix: string };
+type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
+// what: added | changed | deleted | comment | tags | link | rotated
+type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[] }; // leases: ids of dynamic credentials issued
+type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing" }[]; folders: string[]; previews: number };
+type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean };
+type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
+type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
+type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
+type Lease = { id: string; environment: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
+type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
 type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };

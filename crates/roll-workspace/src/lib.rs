@@ -117,9 +117,13 @@ pub struct Resource {
     pub added_at: i64,
 }
 
+/// Called with a project's id after the project is deleted (roll secrets forgets its secrets).
+pub type OnDelete = Box<dyn Fn(&str) + Send + Sync>;
+
 /// The workspace store.
 pub struct Workspace {
     db: Db,
+    on_delete: std::sync::RwLock<Vec<OnDelete>>,
 }
 
 impl Workspace {
@@ -139,7 +143,7 @@ impl Workspace {
             c.execute("ALTER TABLE projects ADD COLUMN icon TEXT", ())?;
             Ok(())
         })?;
-        Ok(Workspace { db })
+        Ok(Workspace { db, on_delete: Default::default() })
     }
 
     /// Every project with its resources, oldest first.
@@ -214,14 +218,24 @@ impl Workspace {
         })
     }
 
-    /// Remove a project and its membership rows (never the resources themselves).
+    /// Remove a project and its membership rows (never the resources themselves), then tell
+    /// what [`Workspace::on_delete`] registered.
     pub fn delete(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             exists(c, id)?;
             c.execute("DELETE FROM resources WHERE project_id = ?", [id])?;
             c.execute("DELETE FROM projects WHERE id = ?", [id])?;
-            Ok(())
-        })
+            Ok::<_, Error>(())
+        })?;
+        for f in self.on_delete.read().expect("on_delete").iter() {
+            f(id);
+        }
+        Ok(())
+    }
+
+    /// Run `f` after each project is deleted, outside the transaction.
+    pub fn on_delete(&self, f: OnDelete) {
+        self.on_delete.write().expect("on_delete").push(f);
     }
 
     /// Put a resource in project `id` at (`x`, `y`): add it, move it on the canvas, or move it

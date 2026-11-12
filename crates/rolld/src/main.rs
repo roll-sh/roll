@@ -27,6 +27,7 @@ mod redis;
 mod storage_events;
 mod streams;
 mod tasks;
+mod secrets;
 mod workspace;
 
 use products::{Product, Products};
@@ -438,8 +439,13 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
-    // Workspace projects: always on, behind the same operator token.
-    router = router.merge(roll_workspace::router(workspace::open(&args, &home)?));
+    // Workspace projects and roll secrets: always on, behind the same operator token (secrets
+    // also take their scoped tokens). Secrets' links call the products' routes in process.
+    let ws = workspace::open(&args, &home)?;
+    let products_api = secrets::Api::default();
+    let secrets = secrets::open(&args, &home, ws.clone(), !auth.enforcing(), products_api.clone())?;
+    router = router.merge(roll_workspace::router(ws)).merge(roll_secrets::router(secrets));
+    products_api.set(router.clone());
     // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
     // products that are off answer before it. The gated router merges last so its fallback (401
     // without the token) stays the fallback.
