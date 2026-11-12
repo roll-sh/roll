@@ -91,6 +91,8 @@ pub struct AppsConfig {
     pub prices: Prices,
     /// The biggest `roll up` upload.
     pub upload_max: usize,
+    /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
+    pub web_url: Option<String>,
 }
 
 impl AppsConfig {
@@ -107,6 +109,7 @@ impl AppsConfig {
             live: LiveConfig::default(),
             prices: Prices::default(),
             upload_max: 512 << 20,
+            web_url: None,
         }
     }
 }

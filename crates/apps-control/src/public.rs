@@ -92,7 +92,7 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     }
     if let Some(t) = token {
         if !same(&token_hash(&t), &hash) {
-            return Some(denied());
+            return Some(denied(apps, service, env).await);
         }
         let path = req.uri().path();
         let location = if rest.is_empty() { path.to_string() } else { format!("{path}?{}", rest.join("&")) };
@@ -106,7 +106,7 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
             h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             return Some(r);
         }
-        return Some(denied());
+        return Some(denied(apps, service, env).await);
     }
     // Every Cookie header, minus ours; ours must match.
     let mut ok = false;
@@ -120,7 +120,7 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         }
     }
     if !ok {
-        return Some(denied());
+        return Some(denied(apps, service, env).await);
     }
     req.headers_mut().remove(header::COOKIE);
     if !kept.is_empty()
@@ -131,8 +131,25 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     None
 }
 
-fn denied() -> Response {
-    page(StatusCode::UNAUTHORIZED, "This environment is private", "Open it from its link in roll (the change, the pull request or the dashboard).")
+/// The 401 of a private environment. A preview's (`pv-…`) links into the dashboard, which signs
+/// the reviewer in and sends them on with the link that has the token.
+async fn denied(apps: &Arc<Apps>, service: &str, env: &str) -> Response {
+    let text = "Open it from its link in roll (the change, the pull request or the dashboard).";
+    let link = async {
+        let web = apps.cfg.web_url.clone()?;
+        let preview = env.strip_prefix("pv-")?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row) = apps.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await.ok()?;
+        if !row.ephemeral {
+            return None;
+        }
+        let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+        Some(format!("{web}/dashboard/projects/{}/previews?preview=pv_{}&go={}", q(&svc.project), q(preview), q(&svc.name)))
+    };
+    match link.await {
+        Some(url) => page(StatusCode::UNAUTHORIZED, "This preview is private", &format!("<a href=\"{url}\" style=\"color:#4c8dff\">Open it through roll</a>: sign in, and you're sent on with its link.")),
+        None => page(StatusCode::UNAUTHORIZED, "This environment is private", text),
+    }
 }
 
 /// A 503 the client may retry in a second (a restart or a crowd that clears quickly).
