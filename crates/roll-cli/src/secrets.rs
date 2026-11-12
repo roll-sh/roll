@@ -8,23 +8,91 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::io::Read;
 
-/// Which project, environment and folder (flags, then `ROLL_PROJECT`, `ROLL_ENV`,
-/// `ROLL_SECRETS_PATH`; a scoped token implies its project).
+/// Which project, environment and folder: flags, then `ROLL_PROJECT`, `ROLL_ENV` and
+/// `ROLL_SECRETS_PATH`, then what `roll secrets setup` remembered for this directory or a parent,
+/// then `development` and `/`. A scoped token implies its project.
 #[derive(Args, Clone, Debug)]
-pub struct At {
+pub struct AtArgs {
     /// The workspace project: a name or a `prj_…` id.
     #[arg(short, long, env = "ROLL_PROJECT", global = true)]
     pub project: Option<String>,
-    /// The environment's slug.
-    #[arg(short, long = "env", env = "ROLL_ENV", default_value = "development", global = true)]
+    /// The environment's slug (default: this directory's, else development).
+    #[arg(short, long = "env", env = "ROLL_ENV", global = true)]
+    pub env: Option<String>,
+    /// The folder (default: this directory's, else /).
+    #[arg(long, env = "ROLL_SECRETS_PATH", global = true)]
+    pub path: Option<String>,
+}
+
+/// [`AtArgs`] with the directory's defaults filled in.
+#[derive(Clone, Debug)]
+pub struct At {
+    pub project: Option<String>,
     pub env: String,
-    /// The folder.
-    #[arg(long, env = "ROLL_SECRETS_PATH", default_value = "/", global = true)]
     pub path: String,
+}
+
+impl AtArgs {
+    pub fn resolve(&self) -> At {
+        let here = std::env::current_dir().ok().and_then(|d| setup::nearest(&d));
+        At {
+            project: self.project.clone().or_else(|| here.as_ref().map(|h| h.project.clone())),
+            env: self.env.clone().or_else(|| here.as_ref().map(|h| h.env.clone())).unwrap_or_else(|| "development".into()),
+            path: self.path.clone().or_else(|| here.as_ref().map(|h| h.path.clone())).unwrap_or_else(|| "/".into()),
+        }
+    }
+}
+
+/// What `roll secrets setup` remembers per directory, in `~/.config/roll/secrets.json` (the
+/// user's own config, never the repo: like `doppler setup`).
+mod setup {
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct Dir {
+        pub project: String,
+        pub name: String,
+        pub env: String,
+        pub path: String,
+    }
+
+    fn file() -> Option<PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        Some(base.join("roll").join("secrets.json"))
+    }
+
+    pub fn load() -> BTreeMap<String, Dir> {
+        file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    pub fn save(all: &BTreeMap<String, Dir>) -> anyhow::Result<PathBuf> {
+        let f = file().ok_or_else(|| anyhow::anyhow!("no HOME to keep the setup in"))?;
+        std::fs::create_dir_all(f.parent().expect("a parent"))?;
+        std::fs::write(&f, serde_json::to_string_pretty(all)? + "\n")?;
+        Ok(f)
+    }
+
+    /// The setup of `dir` or its nearest parent that has one, and the directory it's for.
+    pub fn nearest(dir: &Path) -> Option<Dir> {
+        let all = load();
+        dir.ancestors().find_map(|d| all.get(&d.to_string_lossy().to_string()).cloned())
+    }
 }
 
 #[derive(Subcommand)]
 pub enum Secrets {
+    /// Remember the project, environment and folder for this directory (and the ones under it),
+    /// so `roll run -- <cmd>` needs no flags here.
+    Setup {
+        /// Show what applies here.
+        #[arg(long)]
+        show: bool,
+        /// Forget this directory's setup.
+        #[arg(long, conflicts_with = "show")]
+        clear: bool,
+    },
     /// List a folder's secrets (values masked; `--reveal` to show them).
     #[command(alias = "list")]
     Ls {
@@ -220,7 +288,7 @@ pub enum Tokens {
 #[derive(Args)]
 pub struct Run {
     #[command(flatten)]
-    pub at: At,
+    pub at: AtArgs,
     /// Run even if a reference doesn't resolve (it keeps its `${…}` text).
     #[arg(long)]
     pub allow_unresolved: bool,
@@ -325,7 +393,11 @@ fn approval_hint(e: anyhow::Error) -> anyhow::Error {
     e
 }
 
-pub async fn run(api: &Api, json_out: bool, at: At, cmd: Secrets) -> anyhow::Result<()> {
+pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyhow::Result<()> {
+    if let Secrets::Setup { show, clear } = cmd {
+        return setup_dir(api, &args, show, clear).await;
+    }
+    let at = args.resolve();
     let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
     let env = c.env(&c.at.env);
     let print = |v: &Value| -> anyhow::Result<()> {
@@ -333,6 +405,7 @@ pub async fn run(api: &Api, json_out: bool, at: At, cmd: Secrets) -> anyhow::Res
         Ok(())
     };
     match cmd {
+        Secrets::Setup { .. } => unreachable!("handled above"),
         Secrets::Ls { reveal } => {
             let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
             let values = if reveal { c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?["values"].take() } else { Value::Null };
@@ -702,14 +775,46 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `roll secrets setup`: remember (or show, or forget) where this directory's secrets are.
+async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow::Result<()> {
+    let here = std::env::current_dir()?;
+    let key = here.to_string_lossy().to_string();
+    let mut all = setup::load();
+    if show {
+        match setup::nearest(&here) {
+            Some(d) => println!("{} ({})  -e {}  --path {}", d.name, d.project, d.env, d.path),
+            None => println!("Nothing set up for {key}: roll secrets setup -p <project> -e <environment>"),
+        }
+        return Ok(());
+    }
+    if clear {
+        let gone = all.remove(&key).is_some();
+        setup::save(&all)?;
+        println!("{}", if gone { format!("Forgot the setup of {key}") } else { format!("{key} had no setup of its own") });
+        return Ok(());
+    }
+    let name = args.project.clone().context("which project? roll secrets setup -p <project> [-e <environment>] [--path /folder]")?;
+    let id = project(api, Some(&name)).await?;
+    let env = args.env.clone().unwrap_or_else(|| "development".into());
+    let path = args.path.clone().unwrap_or_else(|| "/".into());
+    // The environment must exist (and be readable) before it's remembered.
+    api.get(&format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(&env))).await?;
+    let display = if name.starts_with("prj_") { id.clone() } else { name };
+    all.insert(key.clone(), setup::Dir { project: id, name: display.clone(), env: env.clone(), path: path.clone() });
+    let file = setup::save(&all)?;
+    println!("{key} → {display}, {env}{}  (kept in {})", if path == "/" { String::new() } else { format!(" {path}") }, file.display());
+    Ok(())
+}
+
 /// `roll run`: resolve, then exec the command with the values in its environment.
 pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
-    let project = project(api, r.at.project.as_deref()).await?;
-    let c = Client { project, api, at: r.at.clone() };
-    let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&r.at.env), c.q()), None).await?;
+    let at = r.at.resolve();
+    let project = project(api, at.project.as_deref()).await?;
+    let c = Client { project, api, at: at.clone() };
+    let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
-        bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), r.at.env, r.at.path, problems.join("\n  "));
+        bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
     cmd.args(&r.command[1..]);

@@ -255,9 +255,12 @@ roll secrets audit   [--key KEY]
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] -- <command…>
 ```
 
-- The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV` (default
-  `development`), the path `--path`/`ROLL_SECRETS_PATH` (default `/`). A scoped token
-  (`ROLL_TOKEN`) implies its project.
+- The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
+  `--path`/`ROLL_SECRETS_PATH`. Without them, `roll secrets setup -p shop -e staging [--path /api]`
+  remembers them for the current directory and the ones under it, in the user's own
+  `~/.config/roll/secrets.json` (never the repo), so `roll run -- npm start` needs no flags there
+  (`--show`, `--clear`). Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
+  project.
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
@@ -501,24 +504,22 @@ free again and its history stays readable by key.
 
 ## Next
 
-Done: the store and crypto (`crates/roll-secrets`), rolld's mount and link providers, `roll secrets`
-and `roll run`, checks and sandboxes. Ranked:
+Done and in PR #20: the store and crypto, rolld's mount and link providers (a Postgres role checked
+against a real compute), `roll secrets`, `roll secrets setup` and `roll run`, checks and sandboxes,
+the dashboard's Secrets surface. Ranked:
 
-1. **The dashboard's Secrets surface** in each project: overview grid, inline edit, reveal, bulk
-   `.env` paste, history and rollback, compare and promote, environments, requests, links, tokens,
-   audit. In progress.
-2. **Two nodes on one schema**: the store's tests pass on Postgres
-   (`ROLL_CODE_TEST_DATABASE=postgres://… cargo test -p roll-secrets`); add a test of two stores on
-   one schema racing on the same environment (seq, credentials, sweeps).
-3. **Open the PR to `main`** with screenshots, after 1–3.
-4. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` lands
-   `roll_auth::Grant`: `Secrets::caller` reads the Grant first, and `rls_` tokens migrate to
-   roll-access tokens. Its MCP tools map onto the routes above.
-5. **A directory's default project**: `roll secrets setup` remembers the project and environment
-   for a directory (as `doppler setup` does), so `roll run -- npm start` needs no flags.
-6. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+1. **Act on the security review** of PR #20 (running now): fix what it confirms.
+2. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
+   `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
+   merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto
+   the routes above.
+3. **Two nodes on one schema**: a test of two stores on one Postgres schema racing on the same
+   environment (seq, shared credentials, sweeps).
+4. **The dashboard's missing pieces**: folder imports (`…/imports`), creating an ephemeral
+   environment, and showing rotate only for links that can rotate.
+5. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-7. **Required keys**: a project-wide list of keys every standard environment must define. The grid
+6. **Required keys**: a project-wide list of keys every standard environment must define. The grid
    flags a missing one, and promote and `roll run` warn about it.
-8. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-9. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
+7. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+8. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.

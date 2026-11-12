@@ -11,6 +11,7 @@ struct Out {
     stderr: String,
 }
 
+/// Runs in `$ROLL_TEST_CWD` when it's set (the setup check), with its own config home.
 async fn roll(api: &str, env: &[(&str, &str)], args: &[&str], stdin: Option<&str>) -> Out {
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"));
     cmd.args(args)
@@ -23,6 +24,10 @@ async fn roll(api: &str, env: &[(&str, &str)], args: &[&str], stdin: Option<&str
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in env {
+        if *k == "ROLL_TEST_CWD" {
+            cmd.current_dir(v);
+            continue;
+        }
         cmd.env(k, v);
     }
     let mut child = cmd.spawn().unwrap();
@@ -78,6 +83,17 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     assert_eq!(ok(&api, &t, &["run", "-e", "production", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
     let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
     assert_ne!(denied.code, Some(0));
+
+    // `roll secrets setup` remembers the project and environment for a directory and the ones
+    // under it, in the user's config: then `roll run` needs no flags there.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("app/web")).unwrap();
+    let (app, web) = (home.path().join("app"), home.path().join("app/web"));
+    let cfg = home.path().join("config");
+    let (app, web, cfg) = (app.to_str().unwrap(), web.to_str().unwrap(), cfg.to_str().unwrap());
+    ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", app)], &["secrets", "setup", "-p", "shop", "-e", "production"], None).await;
+    let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--", "sh", "-c", "echo $HOST"], None).await;
+    assert_eq!(here.trim(), "db.internal");
 
     ok(&api, &[], &[&at[..], &["set", "BROKEN=${NOPE}"]].concat(), None).await;
     let refused = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--", "true"], None).await;

@@ -80,7 +80,7 @@ enum Cmd {
     #[command(alias = "env")]
     Secrets {
         #[command(flatten)]
-        at: secrets::At,
+        at: secrets::AtArgs,
         #[command(subcommand)]
         cmd: secrets::Secrets,
     },
