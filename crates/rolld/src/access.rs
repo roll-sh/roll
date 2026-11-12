@@ -45,6 +45,8 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
         r.by_kind.insert("stream", Arc::new(ResolveFn(move |id: &str| broker.find_stream(id).map(|s| s.id.clone()))));
     }
     if let Some(code) = p.code {
+        let c = code.clone();
+        r.by_kind.insert("default-branch", Arc::new(ResolveFn(move |repo: &str| c.default_branch_of(repo))));
         for kind in ["change", "thread", "work"] {
             let code = code.clone();
             r.by_kind.insert(kind, Arc::new(ResolveFn(move |id: &str| code.repo_of(kind, id))));

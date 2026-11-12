@@ -76,6 +76,22 @@ pub fn bearer(headers: &HeaderMap) -> Option<&str> {
     Some(token.trim()).filter(|t| scheme.eq_ignore_ascii_case("bearer") && !t.is_empty())
 }
 
+/// A grant's token as a request presents it: `Authorization: Bearer <token>`, or as the password
+/// of `Basic` (what git sends). Only grant tokens are taken from `Basic`.
+pub fn grant_credential(headers: &HeaderMap) -> Option<String> {
+    if let Some(t) = bearer(headers) {
+        return Some(t.to_string());
+    }
+    use base64::Engine;
+    let (scheme, value) = headers.get(header::AUTHORIZATION)?.to_str().ok()?.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD.decode(value.trim()).ok()?;
+    let (_, password) = String::from_utf8(decoded).ok()?.split_once(':').map(|(u, p)| (u.to_string(), p.to_string()))?;
+    (is_grant_token(&password) || password.starts_with("rlf_")).then_some(password)
+}
+
 /// In a request's extensions when it carried the operator's token.
 #[derive(Clone, Copy, Debug)]
 pub struct Operator;
@@ -135,6 +151,12 @@ pub const GRANT_PREFIXES: [&str; 2] = ["rlt_", "rlo_"];
 /// on may take such a token as decided.
 pub fn is_grant_token(token: &str) -> bool {
     GRANT_PREFIXES.iter().any(|p| token.starts_with(p))
+}
+
+/// Grants looked up outside a request (a product acting later on a grant's behalf, like secrets'
+/// syncs): the grant as it is now, `None` once it's revoked, expired or gone. Never cache it.
+pub trait Grants: Send + Sync + 'static {
+    fn grant(&self, id: &str) -> Option<Grant>;
 }
 
 /// The evaluator for scoped tokens (`roll-access`).
@@ -214,9 +236,12 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         req.extensions_mut().insert(Operator);
         return next.run(req).await;
     }
+    // A public route is public whatever a request carries (a grant holder opening a shared link).
+    let public = req.extensions().get::<MatchedPath>().is_some_and(|m| matches!(gate.access(m.as_str()), Access::Public(_)));
     // A grant, or something that looks like one, never passes as anything else.
-    if let (Some(a), Some(p)) = (gate.authorizer.get(), presented)
-        && a.claims(p)
+    if !public
+        && let (Some(a), Some(p)) = (gate.authorizer.get(), grant_credential(req.headers()))
+        && a.claims(&p)
     {
         return a.handle(req, next).await;
     }

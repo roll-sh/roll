@@ -116,10 +116,21 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   `write`.
 - NoSQL CQL: `SELECT` is `read`, `DROP` and `TRUNCATE` are `delete`, the rest `write`.
 - Storage IAM: `Get…`, `List…`, `Simulate…` are `read`, the rest `admin`.
+- git pushes (`POST /git/{owner}/{repo}/git-receive-pack`): from the ref updates at the start
+  of the body (read without buffering the pack): moving the repo's default branch is `deploy`,
+  deleting a ref `delete`, anything else `write`; a body that can't be read that far (or is
+  gzipped) is `deploy`. Fetches are `read`. git sends the token as a Basic password (any user
+  name), which the gate takes like a bearer token; roll code's git server then takes the gate's
+  word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
+  ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
   projects, the machine's settings, and any type it doesn't know `admin`.
+
+A public route (`Access::Public` in rolld's `auth.rs`: health, a shared link, OAuth's endpoints)
+stays public for a request carrying a grant: it's served as anyone's, with no grant and no
+operator marker.
 
 Routes not in the catalogue are the operator's alone. A product that adds a route gets nothing
 for scoped tokens until its row exists, and `crates/rolld/tests/auth.rs` fails until every route
@@ -227,6 +238,13 @@ On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token st
 request **with** a scoped token is still evaluated. That keeps a well-behaved client to its rules,
 but it contains nothing: whatever holds the token can drop it and act as the operator. Scoped
 tokens protect a daemon that requires `ROLL_ADMIN_TOKEN`; the dashboard says so on an open one.
+
+## Grants outside a request
+
+A product that acts later on a grant's behalf (secrets' syncs push with their creator's access)
+looks the grant up when it acts, through `roll_auth::Grants` (rolld gives it roll-access): the
+grant as it is then, `None` once it's revoked, expired or gone, and `Grant::allows` for what it may
+do. Never cache it.
 
 ## Approvals
 

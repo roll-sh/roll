@@ -20,6 +20,9 @@ pub enum Act {
     ProductionIf(&'static str),
     /// Decided from the JSON body.
     Body(fn(&Value) -> Action),
+    /// A git push: from the ref updates at the start of its body (the evaluator reads them):
+    /// `deploy` onto the default branch, `delete` for a ref deleted, else `write`.
+    GitPush,
 }
 
 /// What the request is about.
@@ -81,6 +84,8 @@ impl Row {
                 if params.iter().any(|(k, v)| k == p && v == "production") { Action::Deploy } else { Action::Write }
             }
             Act::Body(f) => f(body.unwrap_or(&Value::Null)),
+            // The strongest it can be, unless its commands were read (`git_push_action`).
+            Act::GitPush => Action::Deploy,
         }
     }
 }
@@ -346,6 +351,7 @@ pub fn view(r: &Row) -> RowView {
         Act::ByMethod => "by method".into(),
         Act::ProductionIf(p) => format!("deploy when {{{p}}} is production, else write"),
         Act::Body(_) => "from the body".into(),
+        Act::GitPush => "deploy onto the default branch, delete for a deleted ref, else write".into(),
     };
     let target = match r.target {
         Tgt::Param(..) => "one",
@@ -766,6 +772,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
+    // The caller and its grant's project (`roll run`), and health: any grant.
+    row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),
+    row("GET", "/v1/secrets/health", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -844,6 +853,10 @@ static ROWS: &[Row] = &[
     row("*", "/v1/code/review-apps/{id}/", "code", ADMIN, Tgt::Product),
     row("GET", "/v1/code/github", "code", R, Tgt::Product),
     row("GET", "/v1/code/github/installations", "code", ADMIN, Tgt::Product),
+    // git smart HTTP with a scoped token (Basic: any user name, the token as password).
+    row("GET", "/git/{owner}/{repo}/info/refs", "code", R, one(REPO, "git-repo")),
+    row("POST", "/git/{owner}/{repo}/git-upload-pack", "code", R, one(REPO, "git-repo")),
+    row("POST", "/git/{owner}/{repo}/git-receive-pack", "code", Act::GitPush, one(REPO, "git-repo")),
     // ── agents (roll code agents, under /v1/code/agents/{owner}) ──
     row("*", "/v1/code/agents/{owner}/", "agents", M, one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/machines/{machine}/commands", "agents", Act::Body(agent_command_action), one(&["owner"], "owner")),
@@ -861,6 +874,43 @@ static ROWS: &[Row] = &[
     row("*", "/v1/code/agents/{owner}/automations/{id}/secrets/{name}", "agents", ADMIN, one(&["owner"], "owner")),
     row("POST", "/v1/code/agents/{owner}/automations/{id}/webhook/secret", "agents", REVEAL, one(&["owner"], "owner")),
 ];
+
+/// What a push's commands make it (`old new ref` pkt-lines before the first flush): `deploy` when
+/// one moves `default_branch` (unknown: any branch), `delete` when one deletes a ref, else
+/// `write`. `None` when the commands aren't all there (the evaluator then takes it as `deploy`).
+pub fn git_push_action(prefix: &[u8], default_branch: Option<&str>) -> Option<Action> {
+    let mut rest = prefix;
+    let mut out = Action::Write;
+    let mut any = false;
+    loop {
+        let len = std::str::from_utf8(rest.get(..4)?).ok().and_then(|h| usize::from_str_radix(h, 16).ok())?;
+        if len == 0 {
+            return any.then_some(out);
+        }
+        if len < 4 || rest.len() < len {
+            return None;
+        }
+        let line = &rest[4..len];
+        rest = &rest[len..];
+        let line = line.split(|b| *b == 0).next().unwrap_or(line);
+        let text = std::str::from_utf8(line).ok()?.trim_end();
+        let mut parts = text.split(' ');
+        let (_old, new, name) = (parts.next()?, parts.next()?, parts.next()?);
+        any = true;
+        let to_default = match default_branch {
+            Some(b) => name == format!("refs/heads/{b}"),
+            None => name.starts_with("refs/heads/"),
+        };
+        let a = if to_default {
+            Action::Deploy
+        } else if new.bytes().all(|c| c == b'0') {
+            Action::Delete
+        } else {
+            Action::Write
+        };
+        out = out.max(a);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -907,6 +957,16 @@ mod tests {
         assert_eq!(agent_command_action(&serde_json::json!({ "type": "thread.configure", "runtime_mode": "full_access" })), Action::Admin);
         assert_eq!(agent_command_action(&serde_json::json!({ "type": "message.send" })), Action::Write);
         assert_eq!(agent_command_action(&serde_json::json!({ "type": "something.new" })), Action::Admin);
+        // A push is read from its commands: the default branch ships, a deleted ref deletes.
+        let pkt = |s: &str| format!("{:04x}{s}", s.len() + 4);
+        let (z, a) = ("0".repeat(40), "a".repeat(40));
+        let push = |cmds: &[String]| format!("{}0000PACK…", cmds.join("")).into_bytes();
+        assert_eq!(git_push_action(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0report-status\n"))]), Some("main")), Some(Action::Write));
+        assert_eq!(git_push_action(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0caps\n")), pkt(&format!("{z} {a} refs/heads/main\n"))]), Some("main")), Some(Action::Deploy));
+        assert_eq!(git_push_action(&push(&[pkt(&format!("{a} {z} refs/tags/v1\0caps\n"))]), Some("main")), Some(Action::Delete));
+        assert_eq!(git_push_action(b"00", Some("main")), None);
+        let f = find("POST", "/git/{*path}", "/git/acme/site.git/git-receive-pack").unwrap();
+        assert_eq!(f.row.route, "/git/{owner}/{repo}/git-receive-pack");
         let mut routes: Vec<_> = ROWS.iter().map(|r| (r.method, r.route)).collect();
         let n = routes.len();
         routes.sort();

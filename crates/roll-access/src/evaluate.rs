@@ -3,6 +3,7 @@
 //! on as the operator's, with the [`roll_auth::Grant`] in its extensions.
 
 use crate::catalog::{self, EnvFrom, Row, Tgt};
+use futures::StreamExt;
 use crate::store::{Ask, AuditEvent, Grant, REFRESH_PREFIX};
 use crate::{Access, Error, hash, new_id, redact};
 use axum::body::Body;
@@ -184,7 +185,7 @@ impl Ctx {
 
 async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let started = Instant::now();
-    let Some(token) = roll_auth::bearer(req.headers()).map(str::to_string) else { return invalid_token(&access) };
+    let Some(token) = roll_auth::grant_credential(req.headers()) else { return invalid_token(&access) };
     if token.starts_with(REFRESH_PREFIX) {
         return invalid_token(&access);
     }
@@ -199,7 +200,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     };
     let ip = client_ip(&req, access.config.trust_forwarded_for);
     let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
-    let ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route };
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route };
     {
         let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
         tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
@@ -226,6 +227,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         return deny(StatusCode::FORBIDDEN, "operator_only", format!("{} {} is the operator's: no token can call it", ctx.method, ctx.route), json!({}));
     };
     let row = found.row;
+    // Matched by its real path (a catch-all, a nest, a signed hop): the log names the real route.
+    if found.params.is_some() {
+        ctx.route = row.route.to_string();
+    }
     let scope = Arc::new(ctx.grant.rules.clone());
     let (mut parts, body) = req.into_parts();
     let params: Vec<(String, String)> = match found.params {
@@ -256,7 +261,20 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
-    let action = row.action(&ctx.method, &params, json_body.as_ref());
+    let mut action = row.action(&ctx.method, &params, json_body.as_ref());
+    // A git push: its ref updates come first; the pack after them streams on untouched.
+    let mut git_commands: Option<bytes::Bytes> = None;
+    if matches!(row.act, catalog::Act::GitPush) {
+        let (prefix, rest) = peek_push(body.take().unwrap_or_default()).await;
+        let gzipped = parts.headers.get(axum::http::header::CONTENT_ENCODING).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
+        let repo = describe(&target).unwrap_or_default();
+        let a2 = access.clone();
+        let default = tokio::task::spawn_blocking(move || a2.resolvers.resolve("default-branch", &repo).map(|r| r.id)).await.ok().flatten();
+        action = if gzipped { Action::Deploy } else { catalog::git_push_action(&prefix, default.as_deref()).unwrap_or(Action::Deploy) };
+        let head = prefix.clone();
+        body = Some(Body::from_stream(futures::stream::once(async move { Ok::<_, axum::Error>(head) }).chain(rest)));
+        git_commands = Some(prefix);
+    }
     let mut outcome = if matches!(row.target, Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
     // Putting a resource in a workspace project (or taking it out) changes which tokens reach it:
     // it also needs `admin` on that resource, where it is now, allowed outright.
@@ -282,6 +300,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             );
         }
         Outcome::Ask => {
+            // A push is bound to its ref updates (the pack isn't read to ask about it).
+            if let Some(c) = &git_commands {
+                buffered = Some(c.clone());
+            }
             if buffered.is_none() {
                 match axum::body::to_bytes(body.take().unwrap_or_default(), MAX_BODY).await {
                     Ok(b) => buffered = Some(b),
@@ -334,9 +356,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         (Tgt::Create { place: Some(kind), id_field, .. }, Target::Create { project: Some(p), .. }) => Some((*kind, *id_field, p.clone())),
         _ => None,
     };
-    let body = match buffered {
-        Some(b) => Body::from(b),
-        None => body.take().unwrap_or_default(),
+    let body = match (buffered, git_commands.is_some()) {
+        (Some(b), false) => Body::from(b),
+        _ => body.take().unwrap_or_default(),
     };
     let resp = next.run(Request::from_parts(parts, body)).await;
     let status = resp.status();
@@ -354,6 +376,21 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
 fn reviewer_name(g: &Grant) -> String {
     let name: String = g.name.chars().map(|c| if c.is_ascii_alphanumeric() || "._@/+-".contains(c) { c } else { '-' }).take(90).collect();
     format!("token:{name}")
+}
+
+/// The start of a push's body: its commands (pkt-lines to the first flush, at most 1 MiB), and
+/// the rest of the stream.
+async fn peek_push(body: Body) -> (bytes::Bytes, axum::body::BodyDataStream) {
+    use futures::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut prefix = bytes::BytesMut::new();
+    while catalog::git_push_action(&prefix, None).is_none() && prefix.len() < (1 << 20) {
+        match stream.next().await {
+            Some(Ok(chunk)) => prefix.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    (prefix.freeze(), stream)
 }
 
 fn sha2_of(b: &[u8]) -> [u8; 32] {

@@ -244,7 +244,6 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/t/", "hosted tasks tenants: their own API keys"),
         ("/_roll/tenants", "hosted tasks tenants: the tasks token"),
         ("/kafka/v3", "Confluent REST: stream API keys"),
-        ("/git", "git: roll code tokens"),
         ("/internal", "signed hops between nodes"),
         ("/v1/code/chat/", "Slack and Discord: signed by the platform"),
         ("/v1/code/github", "the GitHub App: signed webhooks and the installation flow"),
