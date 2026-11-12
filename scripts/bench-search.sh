@@ -187,6 +187,13 @@ local_track() {
   if ! grep -rq include_target_throughput "$dst"; then
     find "$dst" -name '*.json' -exec perl -0pi -e 's/,\s*"target-throughput": *[0-9.]+//g' {} +
   fi
+  # OpenSearch has no index.mapping.source.mode: nyc_taxis sets it to its default ("stored", also
+  # Elasticsearch's), so without a source_mode parameter the line becomes another default both
+  # accept (a line, not a deletion: the setting before it ends in a comma).
+  if [[ ${RALLY_PARAMS:-} != *source_mode* ]]; then
+    find "$dst" -name '*.json' -exec perl -pi -e \
+      's/"index\.mapping\.source\.mode": *\{\{ *source_mode *\| *default\("stored"\) *\| *tojson *\}\}/"index.max_result_window": 10000/' {} +
+  fi
   # RALLY_DOCS: index only the first N documents of each larger corpus (RALLY_CORPORA: a regex on
   # <corpus>/<source-file> limiting which ones); streamed once into the data directory.
   if [[ -n ${RALLY_DOCS:-} ]]; then
