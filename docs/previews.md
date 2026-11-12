@@ -311,7 +311,7 @@ sessions, debug build).
 
 | What | Measured |
 | --- | --- |
-| Change opened → preview ready (7 branches, 1 service deployed) | 12.3 s with Postgres (its `pg_basebackup` of the running parent is most of it); 1.2–2.1 s without |
+| Change opened → preview ready (7 branches, 1 service deployed) | 12.3–12.8 s with Postgres, most of it the parent compute's own first start (a branch of a running parent is a file-system copy under the backup API); 1.2–2.1 s without |
 | The bucket branch: parent's bytes / its own after writing 1 MiB / objects it sees | 20 MiB / 1 MiB / 21 |
 | The Postgres branch's data directory (a full copy on ext4; the parent's: 94 MiB) | 62 MiB |
 | First request (cold start of the service's container, image cached) | 3.6–13.6 s (13.6 under the heaviest load) |

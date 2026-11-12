@@ -350,7 +350,7 @@ impl DockerDriver {
             }
             bail!("pg_backup_start: {}", err.trim());
         }
-        let copied = clone_dir(src, dest).await;
+        let copied = clone_live(src, dest).await;
         stdin.write_all(b"SELECT labelfile FROM pg_backup_stop(false);\nSELECT 'roll-end';\n").await?;
         stdin.flush().await?;
         let mut label = String::new();
@@ -370,7 +370,7 @@ impl DockerDriver {
         let (src_pg, dest_pg) = (src.join(&rel), dest.join(&rel));
         // The WAL written while the copy ran, up to the backup's end.
         let _ = std::fs::remove_dir_all(dest_pg.join("pg_wal"));
-        clone_dir(&src_pg.join("pg_wal"), &dest_pg.join("pg_wal")).await?;
+        clone_live(&src_pg.join("pg_wal"), &dest_pg.join("pg_wal")).await?;
         std::fs::write(dest_pg.join("backup_label"), label.trim_end_matches('\n').to_string() + "\n")?;
         // Not the parent's: its process, its replication slots, its statistics' scratch.
         for f in ["postmaster.pid", "postmaster.opts"] {
@@ -553,6 +553,25 @@ pub async fn clone_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
         bail!("cp: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
+}
+
+/// [`clone_dir`] of a directory a running server writes to: a file that vanishes during the
+/// copy (a WAL temp file, a statistics file) is fine, as it is for `pg_basebackup`; the WAL
+/// replay from the backup's start makes the copy consistent.
+async fn clone_live(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let out = Command::new("cp").args(["-a", "--reflink=auto"]).arg(src).arg(dest).output().await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let real: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty() && !l.contains("No such file or directory")).collect();
+    if real.is_empty() && dest.exists() {
+        return Ok(());
+    }
+    bail!("cp: {}", err.trim())
 }
 
 /// Logical size of a directory tree.
