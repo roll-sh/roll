@@ -253,10 +253,22 @@ impl Ddl<'_, '_> {
                         self.vacuum_delay_point(1)
                     };
                     page()?;
-                    let scan = self.ctx.txn.borrow().scan(&ranges[i].0, &ranges[j - 1].1);
-                    for r in scan {
-                        let (k, bytes) = r?;
-                        while k >= ranges[at].1 {
+                    // (A batch at a time: the rows by reference, as a scan node reads them,
+                    // not a copy of each row's key and value.)
+                    let mut scan = self.ctx.txn.borrow().scan(&ranges[i].0, &ranges[j - 1].1);
+                    let mut batch = crate::storage::batch::RowBatch::default();
+                    loop {
+                        if batch.pos() >= batch.len() {
+                            batch.clear();
+                            scan.fill_batch(&mut batch, 256)?;
+                            if batch.is_empty() {
+                                break;
+                            }
+                        }
+                        let row = batch.pos();
+                        batch.advance();
+                        let (k, bytes) = batch.get(row);
+                        while k >= ranges[at].1.as_slice() {
                             at += 1;
                             page()?;
                         }
@@ -272,10 +284,25 @@ impl Ddl<'_, '_> {
                 // (totalrows = floor(liverows / blocks read * total blocks + 0.5).)
                 all_rows = (seen as f64 / ranges.len().max(1) as f64 * pages as f64 + 0.5) as usize;
             } else {
-                let scan = self.ctx.txn.borrow().scan(&start, &end);
-                for (i, r) in scan.enumerate() {
+                // (A batch at a time: the rows by reference, as a scan node reads them, not a
+                // copy of each row's key and value.)
+                let mut scan = self.ctx.txn.borrow().scan(&start, &end);
+                let mut batch = crate::storage::batch::RowBatch::default();
+                let mut i = 0usize;
+                loop {
+                    if batch.pos() >= batch.len() {
+                        batch.clear();
+                        scan.fill_batch(&mut batch, 256)?;
+                        if batch.is_empty() {
+                            break;
+                        }
+                    }
+                    let at = batch.pos();
+                    batch.advance();
+                    let (_, bytes) = batch.get(at);
+                    i += 1;
+                    let i = i - 1;
                     self.ctx.check()?;
-                    let (_, bytes) = r?;
                     all_rows += 1;
                     // (The page row i is on, the rows filling the pages evenly in table order.)
                     let b = ((i as f64 * pages as f64 / tuples.max(1.0)) as usize).min(pages.max(1) - 1);

@@ -190,7 +190,7 @@ impl Plan<'_> {
     /// (the leader's cancel checks), stopping early once `stop` is set (another failed).
     fn run(
         &self,
-        chunks: &Mutex<VecDeque<(usize, crate::exec::parscan::Chunk)>>,
+        chunks: &Mutex<VecDeque<(usize, Rows)>>,
         stop: &AtomicBool,
         check: &dyn Fn() -> Result<()>,
         progress: (&IndexProgress, &AtomicU64),
@@ -198,9 +198,10 @@ impl Plan<'_> {
         let mut g = Gathered::default();
         loop {
             let next = chunks.lock().unwrap().pop_front();
-            let Some((n, chunk)) = next else { break };
+            let Some((n, mut chunk)) = next else { break };
             let mut part = Part::default();
-            for (i, r) in chunk.enumerate() {
+            let mut i = 0usize;
+            while let Some((dkey, bytes)) = chunk.next()? {
                 if i % 1024 == 0 {
                     if stop.load(Ordering::Relaxed) {
                         return Ok(g);
@@ -210,8 +211,8 @@ impl Plan<'_> {
                         progress.0.scanned_now(progress.1.fetch_add(1024, Ordering::Relaxed) + 1024);
                     }
                 }
-                let (dkey, bytes) = r?;
-                self.row(&mut g, &mut part, &dkey, &bytes)?;
+                i += 1;
+                self.row(&mut g, &mut part, dkey, bytes)?;
             }
             g.parts.push((n, part));
         }
@@ -219,6 +220,37 @@ impl Plan<'_> {
         // (Each participant's keys sorted here, merged by the leader: `btree_pages_sorted`.)
         g.keys.sort_unstable();
         Ok(g)
+    }
+}
+
+/// A chunk's rows (data key, stored row) a batch at a time, by reference: no key or value
+/// made per row (`TxnScan::fill_batch`).
+struct Rows {
+    src: Box<dyn crate::storage::batch::FillRows>,
+    batch: crate::storage::batch::RowBatch,
+}
+
+impl Rows {
+    /// A chunk's scan, as a bulk read when `bulk` (`Store::bulk_range`).
+    fn new(scan: crate::txn::TxnScan, bulk: bool) -> Rows {
+        let src: Box<dyn crate::storage::batch::FillRows> = match bulk {
+            true => Box::new(crate::storage::batch::BulkFill(scan)),
+            false => Box::new(scan),
+        };
+        Rows { src, batch: Default::default() }
+    }
+
+    fn next(&mut self) -> Result<Option<(&[u8], &[u8])>> {
+        if self.batch.pos() >= self.batch.len() {
+            self.batch.clear();
+            self.src.fill(&mut self.batch, 256)?;
+            if self.batch.is_empty() {
+                return Ok(None);
+            }
+        }
+        let at = self.batch.pos();
+        self.batch.advance();
+        Ok(Some(self.batch.get(at)))
     }
 }
 
@@ -440,7 +472,7 @@ impl Ddl<'_, '_> {
 
     /// `t`'s rows cut by key into chunks for `got` workers and the leader, in the table's
     /// order, read at the transaction's view now (None: no rows).
-    fn build_chunks(&self, t: &Table, got: usize) -> Result<Option<VecDeque<(usize, crate::exec::parscan::Chunk)>>> {
+    fn build_chunks(&self, t: &Table, got: usize) -> Result<Option<VecDeque<(usize, Rows)>>> {
         let start = crate::storage::keys::index_prefix(t.oid, 0);
         let end = crate::storage::keys::prefix_end(&start);
         let txn = self.ctx.txn.borrow();
@@ -461,7 +493,7 @@ impl Ddl<'_, '_> {
             bounds
                 .windows(2)
                 .enumerate()
-                .map(|(i, w)| (i, crate::exec::parscan::chunk(txn.scan_snap(&w[0], &w[1], &snap), bulk)))
+                .map(|(i, w)| (i, Rows::new(txn.scan_snap(&w[0], &w[1], &snap), bulk)))
                 .collect(),
         ))
     }
@@ -556,9 +588,9 @@ impl Ddl<'_, '_> {
             let (mut part, mut counts, mut oversized) = (AmPart::default(), Vec::new(), None);
             loop {
                 let next = chunks.lock().unwrap().pop_front();
-                let Some((c, chunk)) = next else { break };
+                let Some((c, mut chunk)) = next else { break };
                 let mut n = 0u32;
-                for r in chunk {
+                while let Some((_, bytes)) = chunk.next()? {
                     if n.is_multiple_of(1024) {
                         if stop.load(Ordering::Relaxed) {
                             return Ok((part, counts, oversized));
@@ -568,8 +600,7 @@ impl Ddl<'_, '_> {
                             progress.scanned_now(done.fetch_add(1024, Ordering::Relaxed) + 1024);
                         }
                     }
-                    let (_, bytes) = r?;
-                    let row = crate::exec::scan::decode_table_row_need(t, &bytes, &need)?;
+                    let row = crate::exec::scan::decode_table_row_need(t, bytes, &need)?;
                     if form
                         && let Some(e) = crate::exec::rowsize::gin_form_error_with(ix, true, std::slice::from_ref(&row[cols[0]]), &fmt)
                         && oversized.as_ref().is_none_or(|o: &crate::exec::rowsize::GinFormError| e.precedes(o))

@@ -1695,10 +1695,22 @@ impl Ddl<'_, '_> {
         let mut sampled: Option<(u32, usize)> = None;
         let mut sample_bytes = 0usize;
         let unpinned = std::collections::HashSet::new();
-        let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
-        for r in scan {
+        // (A batch at a time: the rows by reference, as a scan node reads them, not a copy of
+        // each row's key and value.)
+        let mut scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
+        let mut batch = crate::storage::batch::RowBatch::default();
+        loop {
+            if batch.pos() >= batch.len() {
+                batch.clear();
+                scan.fill_batch(&mut batch, 256)?;
+                if batch.is_empty() {
+                    break;
+                }
+            }
+            let at = batch.pos();
+            batch.advance();
+            let (dkey, bytes) = batch.get(at);
             self.ctx.check()?;
-            let (dkey, bytes) = r?;
             rows += 1;
             if let Some(old) = frozen {
                 let x = crate::exec::scan::row_xmin(&bytes)?;
@@ -1795,7 +1807,7 @@ impl Ddl<'_, '_> {
                 if let Some(own) = &mut ix.own {
                     own.row(&vals, tid);
                 } else if let Some(keys) = &mut ix.btree_keys {
-                    keys.push((crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx), dkey.clone()));
+                    keys.push((crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx), dkey.to_vec()));
                 } else if let Some(big) = &mut ix.big {
                     big.add(&vals);
                 } else if ix.modelled.is_none() {

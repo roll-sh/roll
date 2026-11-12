@@ -2906,17 +2906,37 @@ impl Scan {
     /// stay in the blocks holding them. Rows with out-of-line values a resolving scan puts
     /// back, and a hot range's rows, are pushed owned.
     pub fn fill_batch(&mut self, batch: &mut batch::RowBatch, max: usize) -> Result<()> {
-        let target = batch.len() + max;
+        self.fill_batch_with(batch, max, None)
+    }
+
+    /// `fill_batch` of a raw scan whose reader puts rows' out-of-line values back itself
+    /// (`put_back`, by key: `TxnScan`'s source of values): such a row only as the first of
+    /// a call, owned, so values are read only for the rows a reader takes (it stops the
+    /// call's batch otherwise).
+    pub fn fill_batch_with(
+        &mut self,
+        batch: &mut batch::RowBatch,
+        max: usize,
+        mut put_back: Option<&mut dyn FnMut(&[u8], Bytes) -> Result<Bytes>>,
+    ) -> Result<()> {
+        let (first, target) = (batch.len(), batch.len() + max);
+        let resolve = self.resolve || put_back.is_some();
         if let Some(rows) = &mut self.rows {
             // (A hot range's rows, their keys shared with its chains: none copied.)
             while batch.len() < target {
+                let Some((k, v)) = rows.as_slice().first() else { break };
+                let external = resolve && toast::has_external(v);
+                if external && put_back.is_some() && batch.len() > first && !self.rdels.holds(k) {
+                    break;
+                }
                 let Some((k, v)) = rows.next() else { break };
                 if self.rdels.holds(&k) {
                     continue;
                 }
-                let v = match self.resolve && toast::has_external(&v) {
-                    true => toast::resolve(&self._view, &k, v, self.ts)?,
-                    false => v,
+                let v = match (external, &mut put_back) {
+                    (false, _) => v,
+                    (true, Some(f)) => f(&k, v)?,
+                    (true, None) => toast::resolve(&self._view, &k, v, self.ts)?,
                 };
                 batch.push(&k, v);
             }
@@ -2928,10 +2948,22 @@ impl Scan {
             };
             let c = &mut self.merge.sources[i];
             let (k, v) = c.head().expect("a head entry");
-            if self.resolve && v.is_some_and(toast::has_external) {
+            if resolve && v.is_some_and(toast::has_external) {
+                if put_back.is_some() && batch.len() > first {
+                    // (Left at the head for the next call, which `position` finds again: not
+                    // as a key decided already.)
+                    if let Some(d) = &mut self.decided {
+                        d.clear();
+                    }
+                    break;
+                }
                 let (mut k, v) = c.take();
                 k.truncate(k.len().saturating_sub(8));
-                let v = toast::resolve(&self._view, &k, v.expect("a value"), self.ts)?;
+                let v = v.expect("a value");
+                let v = match &mut put_back {
+                    Some(f) => f(&k, v)?,
+                    None => toast::resolve(&self._view, &k, v, self.ts)?,
+                };
                 batch.push(&k, v);
                 continue;
             }
@@ -2943,7 +2975,7 @@ impl Scan {
                 continue;
             }
             let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
-            let (n, last) = c.run_into(self.ts, bound, self.resolve, batch, target - batch.len());
+            let (n, last) = c.run_into(self.ts, bound, resolve, batch, target - batch.len());
             if n > 0 {
                 let d = self.decided.get_or_insert_with(Vec::new);
                 d.clear();

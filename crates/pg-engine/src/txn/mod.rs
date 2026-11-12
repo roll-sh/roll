@@ -4591,22 +4591,22 @@ impl TxnScan {
     }
 
     /// Up to `max` more rows into `batch` (none: the scan is done). With none of the
-    /// transaction's writes left in the range and no values to put back, the store's rows
-    /// pass through by reference, a batch at a time (`Scan::fill_batch`); else rows as
-    /// `next` gives them, and only one when it puts values back (they are read only for the
-    /// rows a reader takes).
+    /// transaction's writes left in the range, the store's rows pass through by reference,
+    /// a batch at a time (`Scan::fill_batch`), a row with values to put back only first in
+    /// a call (they are read only for the rows a reader takes); else rows as `next` gives
+    /// them, only one when it puts values back.
     pub fn fill_batch(&mut self, batch: &mut crate::storage::batch::RowBatch, max: usize) -> Result<()> {
         let resolving = self.resolve && self.src.is_some();
         let o = &mut self.inner;
-        if !resolving && o.upper_head.is_none() && !o.upper_done {
+        if o.upper_head.is_none() && !o.upper_done {
             match o.upper.next() {
                 Some(e) => o.upper_head = Some(e?),
                 None => o.upper_done = true,
             }
         }
-        if !resolving
-            && o.upper_done
+        if o.upper_done
             && o.upper_head.is_none()
+            && (!resolving || o.lower_head.is_none())
             && let Lower::Store(s) = &mut o.lower
         {
             let target = batch.len() + max;
@@ -4614,7 +4614,17 @@ impl TxnScan {
                 batch.push(&k, v);
             }
             if !o.lower_done && batch.len() < target {
-                s.fill_batch(batch, target - batch.len())?;
+                match (resolving, &self.src) {
+                    (true, Some(src)) => {
+                        let reader = self.reader.get_or_insert_with(|| toast::Reader::new(src.clone()));
+                        let put_back = &mut |k: &[u8], v: Bytes| match crate::storage::toast::is_row_key(k) {
+                            true => reader.splice(k, &v, None),
+                            false => Ok(v),
+                        };
+                        s.fill_batch_with(batch, target - batch.len(), Some(put_back))?;
+                    }
+                    _ => s.fill_batch(batch, target - batch.len())?,
+                }
             }
             return Ok(());
         }
