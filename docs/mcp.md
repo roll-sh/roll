@@ -268,8 +268,9 @@ Ranked; the top item is in progress. A watchdog reads this list.
 2. **Users' own tokens (with accounts, PR #18):** a signed-in user who isn't an admin makes
    tokens for what they can reach (their roll code owner, agents and workspace projects), the same
    model and evaluator; `integrate/mcp-accounts` has both branches merged and green.
-3. **Approvals in chat ops:** pending approvals posted to the owner's Slack/Discord install with
-   approve/deny buttons (docs/code/chatops.md). Browser notifications are done.
+3. **Approvals in chat ops:** pending approvals posted to a chosen Slack/Discord install with
+   approve/deny buttons, through chat ops' own queue (designed in docs/permissions.md, "Approvals
+   in chat"). Browser notifications are done.
 4. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
    reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
    branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
@@ -278,5 +279,3 @@ Ranked; the top item is in progress. A watchdog reads this list.
 6. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
    `deploy`.
 7. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
-8. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
-    last day in the list.

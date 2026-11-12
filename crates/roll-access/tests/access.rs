@@ -189,6 +189,10 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let decisions: Vec<_> = log.as_array().unwrap().iter().map(|e| e["decision"].as_str().unwrap()).collect();
     assert!(decisions.contains(&"allow") && decisions.contains(&"deny"), "{log}");
     assert!(log.as_array().unwrap().iter().all(|e| e["route"].as_str().unwrap().starts_with('/')), "routes, not paths: {log}");
+    // The list says what each token did lately.
+    let (_, grants) = d.call(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    let mine = grants.as_array().unwrap().iter().find(|g| g["id"] == grant.as_str()).unwrap();
+    assert!(mine["activity"]["allowed"].as_i64().unwrap() > 0 && mine["activity"]["denied"].as_i64().unwrap() > 0, "{mine}");
 }
 
 /// The ways around a token's rules stay shut: pulling another resource into its project, a list

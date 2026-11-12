@@ -166,9 +166,19 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     })))
 }
 
+/// Grants, newest first, each with its last day's requests (`activity`: allowed, denied, asked).
 async fn list(State(a): S) -> crate::Result<Json<Value>> {
-    let grants = blocking(a, |a| a.store.list()).await?;
-    Ok(Json(json!(grants)))
+    let (grants, activity) = blocking(a, |a| Ok((a.store.list()?, a.store.activity()?))).await?;
+    let out: Vec<Value> = grants
+        .into_iter()
+        .map(|g| {
+            let (allowed, denied, asked) = activity.get(&g.id).copied().unwrap_or_default();
+            let mut v = json!(g);
+            v["activity"] = json!({ "allowed": allowed, "denied": denied, "asked": asked });
+            v
+        })
+        .collect();
+    Ok(Json(json!(out)))
 }
 
 async fn get_one(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
@@ -311,8 +321,20 @@ async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::
     Ok(Json(json!(blocking(a, move |a| a.store.decide(&id, false, "operator", reason.as_deref())).await?)))
 }
 
-async fn audit(State(a): S, Query(q): Query<AuditQuery>) -> crate::Result<Json<Value>> {
-    Ok(Json(json!(blocking(a, move |a| a.store.audit_log(&q)).await?)))
+/// The audit log; `?format=jsonl`: one event per line, as a download (what a SIEM or `jq` reads).
+async fn audit(State(a): S, Query(q): Query<AuditQuery>) -> crate::Result<Response> {
+    let jsonl = q.format.as_deref() == Some("jsonl");
+    let events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    if jsonl {
+        let mut out = String::new();
+        for e in &events {
+            out.push_str(&serde_json::to_string(e).unwrap_or_default());
+            out.push('\n');
+        }
+        let headers = [(axum::http::header::CONTENT_TYPE, "application/x-ndjson"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.jsonl\"")];
+        return Ok((headers, out).into_response());
+    }
+    Ok(Json(json!(events)).into_response())
 }
 
 async fn clients(State(a): S) -> crate::Result<Json<Value>> {

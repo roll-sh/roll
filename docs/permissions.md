@@ -263,6 +263,23 @@ type Approval = {
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
+### Approvals in chat (designed, next)
+
+roll code's chat ops (docs/code/chatops.md) already post an agent's requests to Slack and
+Discord as cards with buttons, recorded durably and answered as the automation that bound them.
+Access approvals will use the same machinery rather than a second one:
+
+- The operator picks an install and a channel for approvals (`PUT /v1/access/notify
+  {chat: {install, channel}}`). roll-access raises an event for each new approval and each
+  decision; rolld hands it to chat ops, which posts or edits an approval card (what would run,
+  the token, the resource, the link) through its existing outbound queue.
+- A button press arrives as a chat action like any other (verified, recorded by the platform's id,
+  claimed by a worker). Only the install's members may decide; the decision is made through
+  `/v1/access/approvals/{id}/approve|deny` as the operator, with `decided_by` naming the platform
+  user (`slack:U123`). A card for an approval already decided, used or expired says so.
+- Nothing about an approval's binding changes: it still runs exactly the request it was asked
+  for, once, within ten minutes of the decision.
+
 ## Audit
 
 Every request made with a grant, and every MCP tool call by anyone, writes one audit row:
@@ -328,7 +345,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
-| `GET /v1/access/tokens` | access read | grants, newest first (no secrets) |
+| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}` |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?}`: narrow or widen (within the caller's own) |
@@ -338,7 +355,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&decision=&before=&limit=` |
+| `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
 | `GET /v1/access/oauth/clients` | access read | MCP clients with a live connection |
 | `GET /v1/access/oauth/clients/{id}` | access read | a registered client (the consent screen shows it) |
 | `POST /v1/access/oauth/authorize` | operator | the consent screen's answer: `{client_id, redirect_uri, code_challenge, state, resource, name, rules, expires_at?}` → `{redirect}` |

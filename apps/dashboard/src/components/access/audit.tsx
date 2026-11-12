@@ -35,6 +35,19 @@ export function Audit({ grant }: { grant?: string }) {
     return () => clearInterval(t);
   }, [load]);
 
+  const download = async () => {
+    try {
+      const blob = await accessApi.auditExport({ ...filter, limit: 1000 });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "roll-audit.jsonl";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
   const set = (k: keyof AuditFilter) => (e: { target: { value: string } }) => setFilter((f) => ({ ...f, [k]: e.target.value || undefined }));
   return (
     <AccessShell tab="audit">
@@ -53,6 +66,9 @@ export function Audit({ grant }: { grant?: string }) {
             <option value="mcp">MCP tool calls</option>
             <option value="api">API requests</option>
           </select>
+          <button onClick={() => void download()} className={`${btn} ml-auto`} title="The newest 1,000 matching events, one JSON object per line">
+            Export
+          </button>
         </div>
         <ErrorNote error={error} />
         {events === null ? (
