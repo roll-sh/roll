@@ -35,6 +35,10 @@ pub struct AppsArgs {
     /// DNS over HTTPS, for checking custom domains.
     #[arg(id = "apps_doh", long = "apps-doh", env = "ROLL_APPS_DOH", default_value = "https://cloudflare-dns.com/dns-query")]
     pub doh: String,
+    /// Builds this node runs at once; more wait their turn (a build uses the CPUs and memory
+    /// BuildKit asks for, which `docker build` can't limit per build).
+    #[arg(id = "apps_builds", long = "apps-builds", env = "ROLL_APPS_BUILDS", default_value_t = 2)]
+    pub builds: usize,
 }
 
 fn parse_ports(s: &str) -> anyhow::Result<(u16, u16)> {
@@ -246,7 +250,7 @@ pub async fn start(
     let runtime = Arc::new(apps_control::runtime::docker::Docker::new(home.join("apps").join("scratch")));
     let deps = Deps {
         runtime,
-        builder: Arc::new(apps_control::runtime::docker::DockerBuilder),
+        builder: Arc::new(apps_control::runtime::docker::DockerBuilder::new(a.builds.max(1))),
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         secrets: Arc::new(NoSecrets),
         resources: Arc::new(RollResources { postgres, redis }),

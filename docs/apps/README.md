@@ -76,8 +76,10 @@ every deployment is immutable with instant rollback.
   makes dependency installs incremental, multi-stage builds give slim runtime images (cold
   starts scale with image size), and one build path (Dockerfile → BuildKit) serves detected and
   user Dockerfiles alike.
-- **Where builds run**: locally, `docker build` (BuildKit) on this host, under a
-  `roll-apps-build-*` builder name, CPU and memory limited, with the build's own network. On the
+- **Where builds run**: locally, `docker build` (BuildKit) on this host, at most
+  `ROLL_APPS_BUILDS` (2) at once per node; more wait their turn, saying so in their log.
+  BuildKit takes no per-build CPU or memory limit through `docker build`, so the cap on
+  concurrent builds is what bounds them on one node. On the
   fleet, a build is customer code and never runs on a node: it is an AWS CodeBuild build
   (serverless, per-minute, privileged BuildKit inside CodeBuild's own VM) that pushes to the
   stack's ECR repository (`apps/<service>`), behind the same `Builder` trait. CodeBuild was
@@ -190,8 +192,16 @@ every deployment is immutable with instant rollback.
 
 - Customer code never runs on a fleet node: instances, cron runs and builds are Fargate tasks
   and CodeBuild builds. Locally they're Docker containers with no host mounts (sources are
-  copied into the build context, never bind-mounted), resource limits, no privileges, and the
-  default seccomp/AppArmor profiles.
+  copied into the build context, never bind-mounted), CPU and memory limits (memory without
+  swap), a pids limit, `no-new-privileges`, Docker's default seccomp/AppArmor profiles, and the
+  capabilities nothing here needs dropped (`NET_RAW`, `MKNOD`, `AUDIT_WRITE`, `SETFCAP`). Disk
+  isn't capped locally: a writable-layer quota (`--storage-opt size=`) and `volume.size_gb`
+  need overlay2 on XFS with project quotas, which a plain ext4 host doesn't have; on the fleet
+  Fargate's ephemeral storage bounds it.
+- Variables reach a container as values of the Engine API's create call: never argv, never a
+  file, and multi-line values (PEM keys) work. Only over the CLI (a daemon that isn't a local
+  socket) do they go through a 0600 env file, removed right after the create; that path refuses
+  a value with a line break.
 - Every container, network, volume and image roll apps makes is named `roll-apps-…` and carries
   the label `sh.roll.apps=<service id>`, so leftovers are found and removed by exact name.
 - A service's variables reach only its own instances. They're stored sealed
@@ -408,37 +418,32 @@ feature/roll-previews and feature/roll-search found these. Ours are in `## Next`
 
 Ranked; the top item is what's being worked on.
 
-1. **Containers.** Variables go in through the Engine API's `Env` (no env file on disk, and
-   multi-line values such as PEM keys work; roll secrets moved code-preview off `K=V` argv for the
-   same reason). `--cap-drop` what apps don't need, the writable layer and `volume.size_gb` get
-   quotas, builds get their CPU and memory limits and a concurrency cap. Logs cap unflushed bytes
-   and forget a build's ring once it's stored.
-2. **roll secrets as the env store** (after #20 merges): an apps environment is a project
+1. **roll secrets as the env store** (after #20 merges): an apps environment is a project
    environment of roll secrets (checked on `PUT`, ephemeral from its kind, deleted with it);
    service variables live in secrets at `/services/<name>`; values are resolved only when a
    container is made (never for a dashboard read; `needs_deploy` from fingerprints); links become
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-3. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
+2. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
    `DATABASE_URL`); a pre-deploy (release) command that gates the switch, for migrations;
    `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
-4. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
+3. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
    `roll ssh` / exec into an instance, with the API routes under the service.
-5. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
+4. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics
    tiles that total the window; CLI output for people, not JSON; a project slug that isn't
    repeated in the URL.
-6. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
+5. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
    output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
    `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
-7. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
+6. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
-8. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
-9. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+7. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+8. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.
-10. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+9. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
     node; pending claims expire.
-11. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+10. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

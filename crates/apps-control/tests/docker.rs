@@ -58,7 +58,7 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     cfg.live.probe_every = Duration::from_millis(5);
     let deps = Deps {
         runtime: Arc::new(Docker::new(dir.path().join("scratch"))),
-        builder: Arc::new(DockerBuilder),
+        builder: Arc::new(DockerBuilder::new(2)),
         sources: None,
         secrets: Arc::new(NoSecrets),
         resources: Arc::new(NoResources),

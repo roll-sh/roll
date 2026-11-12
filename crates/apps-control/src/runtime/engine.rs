@@ -8,7 +8,7 @@
 use crate::logs::LineWriter;
 use anyhow::{Context, bail};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Empty, Limited};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
@@ -53,29 +53,32 @@ impl Engine {
         socket.exists().then_some(Engine { socket })
     }
 
-    async fn send(&self, method: Method, path: &str) -> anyhow::Result<Response<Incoming>> {
+    async fn send(&self, method: Method, path: &str, json: Option<Bytes>) -> anyhow::Result<Response<Incoming>> {
         let stream = UnixStream::connect(&self.socket).await.with_context(|| format!("connecting to {}", self.socket.display()))?;
         let (mut tx, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
         tokio::spawn(conn);
-        let req = Request::builder().method(method).uri(path).header("host", "docker").body(Empty::<Bytes>::new())?;
-        Ok(tx.send_request(req).await?)
+        let mut req = Request::builder().method(method).uri(path).header("host", "docker");
+        if json.is_some() {
+            req = req.header("content-type", "application/json");
+        }
+        Ok(tx.send_request(req.body(Full::new(json.unwrap_or_default()))?).await?)
     }
 
     /// A quick call whose answer is small: its status and body. Errors carry the daemon's
     /// message.
     async fn call(&self, method: Method, path: &str) -> anyhow::Result<(StatusCode, Bytes)> {
-        self.call_within(method, path, Some(QUICK)).await
+        self.call_within(method, path, None, Some(QUICK)).await
     }
 
-    async fn call_within(&self, method: Method, path: &str, within: Option<Duration>) -> anyhow::Result<(StatusCode, Bytes)> {
+    async fn call_within(&self, method: Method, path: &str, json: Option<Bytes>, within: Option<Duration>) -> anyhow::Result<(StatusCode, Bytes)> {
         match within {
-            Some(d) => tokio::time::timeout(d, self.call_unbounded(method, path)).await.map_err(|_| anyhow::anyhow!("docker didn't answer {path} within {} s", d.as_secs()))?,
-            None => self.call_unbounded(method, path).await,
+            Some(d) => tokio::time::timeout(d, self.call_unbounded(method, path, json)).await.map_err(|_| anyhow::anyhow!("docker didn't answer {path} within {} s", d.as_secs()))?,
+            None => self.call_unbounded(method, path, json).await,
         }
     }
 
-    async fn call_unbounded(&self, method: Method, path: &str) -> anyhow::Result<(StatusCode, Bytes)> {
-        let res = self.send(method, path).await?;
+    async fn call_unbounded(&self, method: Method, path: &str, json: Option<Bytes>) -> anyhow::Result<(StatusCode, Bytes)> {
+        let res = self.send(method, path, json).await?;
         let status = res.status();
         let body = Limited::new(res.into_body(), ANSWER_MAX).collect().await.map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?.to_bytes();
         if !status.is_success() && status != StatusCode::NOT_MODIFIED {
@@ -93,6 +96,19 @@ impl Engine {
         format!("/containers/{}/{action}", utf8_percent_encode(name, NAME))
     }
 
+    /// Create a container from an Engine API config (`POST /containers/create`): its id. The
+    /// config carries the environment as values, never through a file or argv.
+    pub async fn create(&self, name: &str, config: &serde_json::Value) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Created {
+            #[serde(rename = "Id")]
+            id: String,
+        }
+        let path = format!("/containers/create?name={}", utf8_percent_encode(name, NAME));
+        let (_, body) = self.call_within(Method::POST, &path, Some(Bytes::from(serde_json::to_vec(config)?)), Some(QUICK)).await?;
+        Ok(serde_json::from_slice::<Created>(&body)?.id)
+    }
+
     /// Start it; already running is fine (304).
     pub async fn start(&self, name: &str) -> anyhow::Result<()> {
         self.call(Method::POST, &Self::container(name, "start")).await.map(|_| ())
@@ -108,7 +124,7 @@ impl Engine {
 
     /// SIGTERM, then SIGKILL after `secs`; already stopped is fine (304).
     pub async fn stop(&self, name: &str, secs: u64) -> anyhow::Result<()> {
-        self.call_within(Method::POST, &format!("{}?t={secs}", Self::container(name, "stop")), Some(Duration::from_secs(secs) + QUICK)).await.map(|_| ())
+        self.call_within(Method::POST, &format!("{}?t={secs}", Self::container(name, "stop")), None, Some(Duration::from_secs(secs) + QUICK)).await.map(|_| ())
     }
 
     /// Wait for it to exit: its exit code.
@@ -118,7 +134,7 @@ impl Engine {
             #[serde(rename = "StatusCode")]
             status: i64,
         }
-        let (_, body) = self.call_within(Method::POST, &Self::container(name, "wait"), None).await?;
+        let (_, body) = self.call_within(Method::POST, &Self::container(name, "wait"), None, None).await?;
         Ok(serde_json::from_slice::<Waited>(&body)?.status as i32)
     }
 
@@ -130,7 +146,7 @@ impl Engine {
     /// Follow its stdout and stderr from `since` (unix seconds and nanoseconds) until it stops.
     pub async fn follow(&self, name: &str, since: (i64, u32), mut out: LineWriter, mut err: LineWriter) -> anyhow::Result<()> {
         let path = format!("{}?follow=1&stdout=1&stderr=1&since={}.{:09}", Self::container(name, "logs"), since.0, since.1);
-        let res = self.send(Method::GET, &path).await?;
+        let res = self.send(Method::GET, &path, None).await?;
         if !res.status().is_success() {
             bail!("logs: {}", res.status());
         }

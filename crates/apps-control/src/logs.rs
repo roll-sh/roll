@@ -16,6 +16,9 @@ use tokio::sync::broadcast;
 pub const RING: usize = 5_000;
 /// The longest line kept; the rest is cut.
 pub const LINE_MAX: usize = 16 << 10;
+/// Bytes a log holds between two flushes (about 10 s); a chattier process's further lines are
+/// counted and dropped, and a line in their place says how many.
+pub const UNFLUSHED_MAX: usize = 8 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,15 +40,17 @@ pub struct LogLine {
 
 struct Log {
     ring: VecDeque<LogLine>,
-    /// Lines not written to object storage yet.
+    /// Lines not written to object storage yet, their bytes, and how many more were dropped.
     unflushed: Vec<LogLine>,
+    unflushed_bytes: usize,
+    dropped: u64,
     tx: broadcast::Sender<LogLine>,
     seq: u64,
 }
 
 impl Log {
     fn new() -> Log {
-        Log { ring: VecDeque::new(), unflushed: Vec::new(), tx: broadcast::channel(1024).0, seq: 0 }
+        Log { ring: VecDeque::new(), unflushed: Vec::new(), unflushed_bytes: 0, dropped: 0, tx: broadcast::channel(1024).0, seq: 0 }
     }
 }
 
@@ -70,7 +75,12 @@ impl LogHub {
             log.ring.pop_front();
         }
         log.ring.push_back(line.clone());
-        log.unflushed.push(line.clone());
+        if log.unflushed_bytes + line.text.len() > UNFLUSHED_MAX {
+            log.dropped += 1;
+        } else {
+            log.unflushed_bytes += line.text.len();
+            log.unflushed.push(line.clone());
+        }
         let _ = log.tx.send(line);
     }
 
@@ -122,16 +132,28 @@ impl LogHub {
     /// Write every log's new lines to object storage (each key a chunk of its own).
     pub async fn flush(&self) {
         let Some(objects) = &self.objects else {
-            self.logs.lock().values_mut().for_each(|l| l.unflushed.clear());
+            self.logs.lock().values_mut().for_each(|l| {
+                l.unflushed.clear();
+                l.unflushed_bytes = 0;
+                l.dropped = 0;
+            });
             return;
         };
         let batches: Vec<(String, Vec<LogLine>, u64)> = {
             let mut logs = self.logs.lock();
             logs.iter_mut()
-                .filter(|(_, l)| !l.unflushed.is_empty())
+                .filter(|(_, l)| !l.unflushed.is_empty() || l.dropped > 0)
                 .map(|(k, l)| {
                     l.seq += 1;
-                    (k.clone(), std::mem::take(&mut l.unflushed), l.seq)
+                    let mut lines = std::mem::take(&mut l.unflushed);
+                    if l.dropped > 0 {
+                        let t = lines.last().map_or_else(code_sql::now_ms, |x| x.t);
+                        let text = format!("… {} lines dropped: more than {} MiB of output in a few seconds", l.dropped, UNFLUSHED_MAX >> 20);
+                        lines.push(LogLine { t, stream: Stream::System, instance: None, deployment: None, text });
+                    }
+                    l.unflushed_bytes = 0;
+                    l.dropped = 0;
+                    (k.clone(), lines, l.seq)
                 })
                 .collect()
         };
@@ -143,8 +165,37 @@ impl LogHub {
             }
             let name = format!("{}{:016}-{seq:06}.ndjson", prefix(&key), lines[0].t);
             if let Err(e) = objects.put(&name, body.into()).await {
-                tracing::warn!(key, error = %e, "apps: writing a log chunk failed; the lines stay in memory only");
+                tracing::warn!(key, error = %e, "apps: writing a log chunk failed; it's tried again at the next flush");
+                // Back in front of what came since, within the cap.
+                if let Some(log) = self.logs.lock().get_mut(&key) {
+                    let room = UNFLUSHED_MAX.saturating_sub(log.unflushed_bytes);
+                    let mut kept: Vec<LogLine> = Vec::new();
+                    let mut bytes = 0;
+                    for l in lines {
+                        if bytes + l.text.len() > room {
+                            log.dropped += 1;
+                            continue;
+                        }
+                        bytes += l.text.len();
+                        kept.push(l);
+                    }
+                    log.unflushed_bytes += bytes;
+                    kept.append(&mut log.unflushed);
+                    log.unflushed = kept;
+                }
             }
+        }
+    }
+
+    /// Drop a finished log (a build's) from memory once object storage has all of it: reads come
+    /// from there after. Without object storage, memory is the only copy and it stays.
+    pub fn retire(&self, key: &str) {
+        if self.objects.is_none() {
+            return;
+        }
+        let mut logs = self.logs.lock();
+        if logs.get(key).is_some_and(|l| l.unflushed.is_empty() && l.dropped == 0) {
+            logs.remove(key);
         }
     }
 
@@ -254,4 +305,25 @@ pub async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, sink: LogSink) {
         }
     }
     w.finish();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_flood_of_output_is_capped_between_flushes_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = LogHub::new(Some(Objects::new(&pg_storage::StorageConfig::Local(dir.path().to_path_buf())).unwrap()));
+        let sink = hub.sink("env:svc_x/production", Stream::Stdout);
+        let line = "x".repeat(LINE_MAX - 1);
+        for _ in 0..(UNFLUSHED_MAX / LINE_MAX + 100) {
+            sink.line(&line);
+        }
+        assert!(hub.logs.lock()["env:svc_x/production"].unflushed_bytes <= UNFLUSHED_MAX);
+        hub.flush().await;
+        hub.forget("env:svc_x/production");
+        let stored = hub.tail("env:svc_x/production", 1, None).await;
+        assert!(stored[0].text.contains("lines dropped"), "{:?}", stored[0].text);
+    }
 }

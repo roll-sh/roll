@@ -258,7 +258,12 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
     if !truthy(&q.follow) {
         return ok(apps.logs.tail(&key, tail, q.since).await);
     }
-    let (mut first, mut rx) = apps.logs.follow(&key, tail);
+    // A finished build's log is read, not followed: nothing more comes, and following would
+    // bring a retired log back into memory.
+    let (mut first, mut rx) = match &done {
+        Some(d) if *d.borrow() => (Vec::new(), tokio::sync::broadcast::channel(1).1),
+        _ => apps.logs.follow(&key, tail),
+    };
     if first.is_empty() {
         first = apps.logs.tail(&key, tail, q.since).await;
     }

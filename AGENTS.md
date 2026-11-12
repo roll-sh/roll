@@ -292,7 +292,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     environment's active deployment moves only through `Store::switch_active` (a compare-and-swap).
   - Customer code never runs on a fleet node: instances and builds go through the `Runtime` and
     `Builder` traits. Everything made is named `roll-apps-…` and labelled `sh.roll.apps=<service>`.
-    Variables are sealed at rest, go to containers through an env file (never argv), and are
+    Variables are sealed at rest, go to containers as Engine API `Env` values (a 0600 env file
+    only over the CLI; never argv), and are
     returned in the clear only by `…/variables/values`.
   - An idle service costs nothing: only running instances are metered. Keep cold starts measured
     (`pnpm test:apps --docker` prints them; the numbers live in docs/apps/README.md, "Measured").

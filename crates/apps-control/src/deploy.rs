@@ -290,6 +290,7 @@ impl Apps {
             }
         }
         self.logs.flush().await;
+        self.logs.retire(&format!("build:{}", d.id));
     }
 
     async fn run_inner(self: &Arc<Self>, d: &Deployment, log: &LogSink, cancel: CancellationToken) -> anyhow::Result<()> {

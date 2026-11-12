@@ -2,8 +2,11 @@
 //!
 //! - A container is created at deploy time with its port published on a loopback port chosen
 //!   then, so a wake is `docker start` and nothing else (no create, no `docker port`).
-//! - Variables go in through an `--env-file` written 0600 and removed right after the create, so
-//!   they never show in a process list.
+//! - Variables go in as values of the Engine API's create call (`Env`): never argv, never a file,
+//!   and multi-line values work. Over the CLI (a daemon that isn't a local socket) they go in
+//!   through an `--env-file` written 0600 and removed right after the create.
+//! - Capabilities no app needs are dropped ([`CAP_DROP`]); `no-new-privileges`, a pids limit and
+//!   memory without swap bound the rest.
 //! - Suspending is `docker pause` (the cgroup freezer): memory stays, CPU stops, and `unpause`
 //!   answers in milliseconds.
 //! - CPU and memory come straight from the container's cgroup (`cpu.stat`, `memory.current`),
@@ -138,6 +141,21 @@ impl Runtime for Docker {
     }
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
+        let host_port = match spec.port {
+            Some(_) => Some(free_port()?),
+            None => None,
+        };
+        if let Some(engine) = &self.engine {
+            match engine.create(&spec.name, &engine_config(spec, host_port)?).await {
+                Ok(id) => {
+                    self.known.lock().containers.insert(spec.name.clone(), (id, host_port));
+                    return Ok(());
+                }
+                // An image this host no longer has: the CLI pulls it on create.
+                Err(e) if e.to_string().contains("No such image") => {}
+                Err(e) => return Err(e),
+            }
+        }
         let mut args: Vec<String> = vec![
             "create".into(),
             "--name".into(),
@@ -168,14 +186,12 @@ impl Runtime for Docker {
             "--log-driver".into(),
             "local".into(),
         ];
-        let host_port = match spec.port {
-            Some(p) => {
-                let hp = free_port()?;
-                args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{p}")]);
-                Some(hp)
-            }
-            None => None,
-        };
+        for c in CAP_DROP {
+            args.extend(["--cap-drop".into(), c.into()]);
+        }
+        if let (Some(p), Some(hp)) = (spec.port, host_port) {
+            args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{p}")]);
+        }
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
             for a in &spec.aliases {
@@ -332,6 +348,62 @@ impl Runtime for Docker {
     }
 }
 
+/// Capabilities Docker grants by default that no app here needs: raw sockets (spoofing on the
+/// project network), device nodes, the audit log and file capabilities. What images commonly use
+/// (binding low ports, chown and setuid in entrypoints) stays.
+pub const CAP_DROP: [&str; 4] = ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"];
+
+/// The Engine API's create config for an instance: the same container the CLI path makes.
+fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<serde_json::Value> {
+    use serde_json::json;
+    let mut env = Vec::with_capacity(spec.vars.len());
+    for (k, v) in &spec.vars {
+        if v.contains('\0') {
+            bail!("variable {k} holds a NUL byte");
+        }
+        env.push(format!("{k}={v}"));
+    }
+    let mut host = json!({
+        "Memory": (spec.memory_mb as i64) << 20,
+        "MemorySwap": (spec.memory_mb as i64) << 20,
+        "NanoCpus": (spec.cpu * 1e9) as i64,
+        "PidsLimit": 4096,
+        "SecurityOpt": ["no-new-privileges"],
+        "CapDrop": CAP_DROP,
+        "RestartPolicy": {"Name": "no"},
+        "Init": true,
+        "ExtraHosts": ["host.docker.internal:host-gateway"],
+        "LogConfig": {"Type": "local", "Config": {}},
+    });
+    let mut config = json!({
+        "Image": spec.image,
+        "Env": env,
+        "Labels": {
+            LABEL: spec.service,
+            format!("{LABEL}.env"): spec.env,
+            format!("{LABEL}.deployment"): spec.deployment,
+        },
+    });
+    if let (Some(p), Some(hp)) = (spec.port, host_port) {
+        let port = format!("{p}/tcp");
+        config["ExposedPorts"] = json!({ &port: {} });
+        host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+    }
+    if let Some(net) = &spec.network {
+        host["NetworkMode"] = json!(net);
+        config["NetworkingConfig"] = json!({"EndpointsConfig": { net: {"Aliases": spec.aliases} }});
+    }
+    if let Some((vol, mount)) = &spec.volume {
+        host["Binds"] = json!([format!("{vol}:{mount}")]);
+    }
+    if let Some(cmd) = &spec.command {
+        config["Entrypoint"] = json!(["sh"]);
+        config["Cmd"] = json!(["-c", cmd]);
+    }
+    config["HostConfig"] = host;
+    Ok(config)
+}
+
 async fn write_private(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut o = tokio::fs::OpenOptions::new();
@@ -344,8 +416,17 @@ async fn write_private(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()
     Ok(())
 }
 
-/// Builds with BuildKit on this host (`docker build`).
-pub struct DockerBuilder;
+/// Builds with BuildKit on this host (`docker build`), at most `slots` at once: one tenant's
+/// burst of pushes queues instead of taking every CPU and all memory of the node.
+pub struct DockerBuilder {
+    slots: tokio::sync::Semaphore,
+}
+
+impl DockerBuilder {
+    pub fn new(at_once: usize) -> DockerBuilder {
+        DockerBuilder { slots: tokio::sync::Semaphore::new(at_once) }
+    }
+}
 
 #[async_trait]
 impl Builder for DockerBuilder {
@@ -354,6 +435,16 @@ impl Builder for DockerBuilder {
     }
 
     async fn build(&self, job: &BuildJob, log: &LogSink, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
+        let _slot = match self.slots.try_acquire() {
+            Ok(s) => s,
+            Err(_) => {
+                log.line("waiting for another build on this node to finish");
+                tokio::select! {
+                    s = self.slots.acquire() => s?,
+                    _ = cancel.cancelled() => bail!("canceled"),
+                }
+            }
+        };
         let dockerfile = job.context.join(&job.dockerfile);
         let mut child = Command::new("docker")
             .env("DOCKER_BUILDKIT", "1")
@@ -393,5 +484,38 @@ impl Builder for DockerBuilder {
         if image.starts_with(super::PREFIX) {
             let _ = docker(&["image", "rm", image]).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_instance_config_carries_values_verbatim_and_publishes_only_on_loopback() {
+        let pem = "-----BEGIN KEY-----\nabc\n-----END KEY-----";
+        let spec = InstanceSpec {
+            name: "roll-apps-x".into(),
+            service: "svc_x".into(),
+            env: "production".into(),
+            deployment: "dep_x".into(),
+            image: "img".into(),
+            command: None,
+            vars: vec![("TLS_KEY".into(), pem.into())],
+            port: Some(8080),
+            cpu: 0.5,
+            memory_mb: 512,
+            network: Some("roll-apps-net-p-production".into()),
+            aliases: vec!["web".into()],
+            volume: None,
+        };
+        let c = engine_config(&spec, Some(41234)).unwrap();
+        assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));
+        assert_eq!(c["HostConfig"]["PortBindings"]["8080/tcp"][0]["HostIp"], "127.0.0.1");
+        assert_eq!(c["HostConfig"]["CapDrop"][0], "NET_RAW");
+        assert_eq!(c["NetworkingConfig"]["EndpointsConfig"]["roll-apps-net-p-production"]["Aliases"][0], "web");
+        assert_eq!(c["Labels"]["sh.roll.apps"], "svc_x");
+        let nul = InstanceSpec { vars: vec![("A".into(), "a\0b".into())], ..spec };
+        assert!(engine_config(&nul, None).is_err());
     }
 }
