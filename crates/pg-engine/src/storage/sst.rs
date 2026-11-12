@@ -124,18 +124,22 @@ mod hex_bytes {
 
 /// `x % d` for a fixed `d`, by multiplication (Lemire, Kaser and Kurz, "Faster remainder by
 /// direct computation"): exactly `%`'s result, without a 64-bit division (tens of cycles,
-/// seven per bloom probe).
+/// two per key's bloom bits).
 #[derive(Clone, Copy)]
 pub(crate) struct FastMod {
     m: u128,
     d: u64,
+    /// 2^64 mod d (`bloom_bits`).
+    wrap: u64,
 }
 
 impl FastMod {
     pub(crate) fn new(d: u64) -> FastMod {
+        let d1 = d.max(1);
         FastMod {
-            m: (u128::MAX / d.max(1) as u128).wrapping_add(1),
+            m: (u128::MAX / d1 as u128).wrapping_add(1),
             d,
+            wrap: (u64::MAX % d1 + 1) % d1,
         }
     }
 
@@ -149,11 +153,32 @@ impl FastMod {
     }
 }
 
-/// The bloom filter bits of a key's hash `h` (`nbits` = the filter's bits).
+/// The bloom filter bits of a key's hash `h` (`nbits` = the filter's bits): bit i is
+/// (h1 + i h2 mod 2^64) mod nbits, for i < `BLOOM_K`. Each from the one before by additions
+/// (h2's remainder added, 2^64's taken away when the 64-bit sum wraps), not a remainder each:
+/// building a file's filter was a fifth of a compaction's instructions.
 #[inline]
 fn bloom_bits(h: u64, nbits: FastMod) -> impl Iterator<Item = usize> {
     let (h1, h2) = (h, (h >> 32) | 1);
-    (0..BLOOM_K as u64).map(move |i| nbits.rem(h1.wrapping_add(i.wrapping_mul(h2))) as usize)
+    let n = nbits.d;
+    // (Sums below 2n: a filter's bits are far fewer than 2^63.)
+    debug_assert!(n < 1 << 62);
+    let (step, wrap) = (nbits.rem(h2), nbits.wrap);
+    let (mut v, mut r) = (h1, nbits.rem(h1));
+    (0..BLOOM_K).map(move |i| {
+        if i > 0 {
+            let over;
+            (v, over) = v.overflowing_add(h2);
+            r += step;
+            if r >= n {
+                r -= n;
+            }
+            if over {
+                r = if r >= wrap { r - wrap } else { r + n - wrap };
+            }
+        }
+        r as usize
+    })
 }
 
 fn bloom_set(bloom: &mut [u8], nbits: FastMod, h: u64) {
@@ -1406,6 +1431,38 @@ mod tests {
             for _ in 0..2000 {
                 let a = next();
                 assert_eq!(m.rem(a), a % d, "{a} % {d}");
+            }
+        }
+    }
+
+    /// A filter's bits are those of the formula files were written with, wraps of the 64-bit
+    /// sums included.
+    #[test]
+    fn bloom_bits_are_the_formulas() {
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut ns: Vec<u64> = vec![64, 72, 640, 8 * 1250, 8 * 125_001, 22_600_660];
+        for _ in 0..50 {
+            ns.push(64 + next() % (1 << 30));
+        }
+        for n in ns {
+            let m = FastMod::new(n);
+            for i in 0..3000 {
+                let h = match i {
+                    0 => 0,
+                    1 => u64::MAX,
+                    2 => u64::MAX - 5,
+                    _ => next(),
+                };
+                let (h1, h2) = (h, (h >> 32) | 1);
+                let want: Vec<usize> =
+                    (0..BLOOM_K as u64).map(|i| (h1.wrapping_add(i.wrapping_mul(h2)) % n) as usize).collect();
+                assert_eq!(bloom_bits(h, m).collect::<Vec<_>>(), want, "{h} in {n}");
             }
         }
     }
