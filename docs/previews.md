@@ -89,6 +89,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
 - **Limits**:
   - `max_previews` (10 by default): previews beyond it wait as `queued`, oldest change first,
     until one is deleted.
+  - `max_usd_month` (no cap by default) is the project's monthly budget for previews. Once what
+    they've cost this month reaches it, new previews wait as `queued` (saying why), and the
+    running ones carry on.
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches own. A preview
     over the cap goes to sleep with `error`, and resetting it brings it back under.
 
@@ -449,6 +452,7 @@ type Settings = {
   ttl_hours: number;                  // 168
   max_previews: number;               // 10
   max_bytes: number;                  // 10 GiB
+  max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
   github: { comment: boolean; status: boolean; deployment: boolean };   // all true
@@ -473,7 +477,7 @@ type Settings = {
 - **Dashboard**: a Previews tab on each project, with the list, status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|create|rm|sleep|wake|reset|logs|settings`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|logs|activity|settings|usage`.
 
 Every one of them plays the mark states: `deploying` while creating or updating, `success` when
 ready, `error` on failure, and `sleep` for a sleeping preview.

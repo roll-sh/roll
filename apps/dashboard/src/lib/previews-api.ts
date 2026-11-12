@@ -98,6 +98,8 @@ export interface PreviewSettings {
   ttl_hours: number;
   max_previews: number;
   max_bytes: number;
+  /** The month's budget for the project's previews, USD (0: no cap). */
+  max_usd_month: number;
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;

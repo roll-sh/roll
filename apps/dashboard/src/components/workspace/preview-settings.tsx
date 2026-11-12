@@ -210,6 +210,9 @@ function Form({
             <Num value={s.max_previews} onChange={(v) => set("max_previews", v)} />
           </Field>
         </div>
+        <Field label="Monthly budget" note="USD the project's previews may cost in a month; once reached, new previews wait. 0 is no cap.">
+          <Num value={s.max_usd_month ?? 0} step="any" onChange={(v) => set("max_usd_month", v)} />
+        </Field>
       </Section>
 
       <Section title="Secrets">

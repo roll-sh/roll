@@ -27,6 +27,9 @@ pub struct Settings {
     pub ttl_hours: u32,
     pub max_previews: u32,
     pub max_bytes: u64,
+    /// What the project's previews may cost in a month, in USD (0: no cap). Once they've cost
+    /// that this month, new previews wait (`queued`) and the running ones carry on.
+    pub max_usd_month: f64,
     pub secrets: SecretsRule,
     pub env: BTreeMap<String, String>,
     pub github: GithubRule,
@@ -107,6 +110,7 @@ impl Default for Settings {
             ttl_hours: 168,
             max_previews: 10,
             max_bytes: 10 << 30,
+            max_usd_month: 0.0,
             secrets: SecretsRule::default(),
             env: BTreeMap::new(),
             github: GithubRule::default(),
@@ -177,6 +181,9 @@ impl Settings {
         }
         if !(1..=500).contains(&self.max_previews) {
             return bad("max_previews: 1 to 500".into());
+        }
+        if !self.max_usd_month.is_finite() || self.max_usd_month < 0.0 {
+            return bad("max_usd_month: 0 (no cap) or more".into());
         }
         if self.max_bytes < (1 << 20) {
             return bad("max_bytes: at least 1 MiB".into());

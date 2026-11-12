@@ -386,6 +386,12 @@ impl Engine {
         // A fork waiting for approval holds no slot: spam PRs can't block the project's previews.
         let busy = rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
         let mut free = (s.max_previews as usize).saturating_sub(busy);
+        // The month's budget: once spent, no new preview starts this month.
+        let spent: f64 = rows.iter().filter_map(|r| self.store.view(r.clone()).ok()).map(|p| p.cost.month_to_date_usd).sum();
+        let over_budget = s.max_usd_month > 0.0 && spent >= s.max_usd_month;
+        if over_budget {
+            free = 0;
+        }
         let mut queued: Vec<&Row> = rows.iter().filter(|r| r.desired == Desired::Active && r.state == State::Queued).collect();
         queued.sort_by_key(|r| r.created_at);
         for r in queued {
@@ -402,10 +408,16 @@ impl Engine {
         let rows = self.store.rows(Some(project_id))?;
         let mut active: Vec<&Row> = rows.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).collect();
         active.sort_by_key(|r| r.created_at);
-        for r in active.iter().skip(s.max_previews as usize) {
+        let limit = if over_budget { 0 } else { s.max_previews as usize };
+        for r in active.iter().skip(limit) {
             if r.state == State::Creating && self.store.resources(&r.id)?.iter().all(|x| x.r#ref.is_none()) {
                 self.store.update(&r.id, |row| row.state = State::Queued)?;
-                self.store.log(&r.id, &format!("waiting: the project has {} previews (max_previews)", s.max_previews))?;
+                let why = if over_budget {
+                    format!("waiting: the project's previews have cost ${spent:.2} this month, its max_usd_month")
+                } else {
+                    format!("waiting: the project has {} previews (max_previews)", s.max_previews)
+                };
+                self.store.log(&r.id, &why)?;
             }
         }
         Ok(())
