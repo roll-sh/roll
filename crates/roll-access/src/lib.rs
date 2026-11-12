@@ -111,6 +111,9 @@ pub struct Config {
     pub trust_forwarded_for: bool,
     /// How long a request waits for an approval before answering `approval_pending`.
     pub approval_wait: std::time::Duration,
+    /// Fetch MCP clients' metadata documents from private addresses and over http (local
+    /// development and tests only; `ROLL_ACCESS_METADATA_ALLOW_PRIVATE`).
+    pub metadata_allow_private: bool,
 }
 
 impl Default for Config {
@@ -122,6 +125,7 @@ impl Default for Config {
             audit_days: 90,
             trust_forwarded_for: false,
             approval_wait: std::time::Duration::from_secs(55),
+            metadata_allow_private: false,
         }
     }
 }
@@ -218,6 +222,11 @@ impl Access {
     pub fn resource(&self, product: &str, kind: &str, id: &str) -> Resource {
         // A git URL names its repo with or without `.git`.
         let (product, kind, id) = if kind == "git-repo" { (product, "repo", id.trim_end_matches(".git")) } else { (product, kind, id) };
+        // tasks' queues, topics, schedules and functions share one product: their ids say which
+        // (`queue:emails`), so a rule for a queue never matches a topic of the same name.
+        if let Some(what) = kind.strip_prefix("tasks-") {
+            return Resource { product: product.into(), id: Some(format!("{what}:{id}")), ..Default::default() };
+        }
         let resolved = self.resolvers.resolve(kind, id);
         let id = resolved.as_ref().map_or_else(|| id.to_string(), |r| r.id.clone());
         // A workspace project (kind `project`) is in itself, and so is what a product keeps per

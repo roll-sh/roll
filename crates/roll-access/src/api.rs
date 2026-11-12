@@ -382,7 +382,8 @@ async fn clients(State(a): S) -> crate::Result<Json<Value>> {
     Ok(Json(json!(seen.into_values().collect::<Vec<_>>())))
 }
 
+/// A client: registered here, or (an https URL) known by its metadata document.
 async fn client(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
-    let c = blocking(a, move |a| a.store.client(&id)).await?.ok_or_else(|| Error::NotFound("no such client".into()))?;
+    let c = crate::oauth::known_client(&a, &id).await?.ok_or_else(|| Error::NotFound("no such client".into()))?;
     Ok(Json(json!(c)))
 }

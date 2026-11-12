@@ -33,7 +33,7 @@ pub enum Tgt {
     Param(&'static [&'static str], &'static str),
     /// A list of the product's resources: items are filtered by `id_field` (in `items`, or the
     /// answer itself when it's an array) for rules that name resources.
-    List { items: Option<&'static str>, id_field: &'static str },
+    List { items: Option<&'static str>, id_field: &'static str, kind: Option<&'static str> },
     /// A new resource. With a project-scoped rule the project comes from the path parameter
     /// `project`, or the `X-Roll-Project` header; the new resource (`id_field` of the answer)
     /// is then put in it, when `place` names its workspace kind.
@@ -106,7 +106,11 @@ const fn one(params: &'static [&'static str], kind: &'static str) -> Tgt {
     Tgt::Param(params, kind)
 }
 const fn list(id_field: &'static str) -> Tgt {
-    Tgt::List { items: None, id_field }
+    Tgt::List { items: None, id_field, kind: None }
+}
+/// A list whose items are resources of `kind` (tasks' queues, topics, …).
+const fn list_of(kind: &'static str, id_field: &'static str) -> Tgt {
+    Tgt::List { items: None, id_field, kind: Some(kind) }
 }
 const fn create(place: &'static str, id_field: &'static str) -> Tgt {
     Tgt::Create { project: None, place: Some(place), id_field }
@@ -627,23 +631,23 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/tasks/dlq", "tasks", R, Tgt::Product),
     row("POST", "/v1/tasks/dlq/retry", "tasks", W, Tgt::Product),
     row("DELETE", "/v1/tasks/dlq/{id}", "tasks", D, Tgt::Product),
-    row("GET", "/v1/tasks/queues", "tasks", R, Tgt::Product),
-    row("GET", "/v1/tasks/queues/{name}", "tasks", R, Tgt::Product),
-    row("PUT", "/v1/tasks/queues/{name}", "tasks", W, Tgt::Product),
-    row("DELETE", "/v1/tasks/queues/{name}", "tasks", D, Tgt::Product),
-    row("POST", "/v1/tasks/queues/{name}/", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/topics", "tasks", R, Tgt::Product),
-    row("GET", "/v1/tasks/topics/{name}", "tasks", R, Tgt::Product),
-    row("PUT", "/v1/tasks/topics/{name}", "tasks", W, Tgt::Product),
-    row("DELETE", "/v1/tasks/topics/{name}", "tasks", D, Tgt::Product),
-    row("POST", "/v1/tasks/topics/{name}/endpoints", "tasks", W, Tgt::Product),
-    row("DELETE", "/v1/tasks/topics/{name}/endpoints", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/schedules", "tasks", R, Tgt::Product),
+    row("GET", "/v1/tasks/queues", "tasks", R, list_of("tasks-queue", "name")),
+    row("GET", "/v1/tasks/queues/{name}", "tasks", R, one(&["name"], "tasks-queue")),
+    row("PUT", "/v1/tasks/queues/{name}", "tasks", W, one(&["name"], "tasks-queue")),
+    row("DELETE", "/v1/tasks/queues/{name}", "tasks", D, one(&["name"], "tasks-queue")),
+    row("POST", "/v1/tasks/queues/{name}/", "tasks", W, one(&["name"], "tasks-queue")),
+    row("GET", "/v1/tasks/topics", "tasks", R, list_of("tasks-topic", "name")),
+    row("GET", "/v1/tasks/topics/{name}", "tasks", R, one(&["name"], "tasks-topic")),
+    row("PUT", "/v1/tasks/topics/{name}", "tasks", W, one(&["name"], "tasks-topic")),
+    row("DELETE", "/v1/tasks/topics/{name}", "tasks", D, one(&["name"], "tasks-topic")),
+    row("POST", "/v1/tasks/topics/{name}/endpoints", "tasks", W, one(&["name"], "tasks-topic")),
+    row("DELETE", "/v1/tasks/topics/{name}/endpoints", "tasks", W, one(&["name"], "tasks-topic")),
+    row("GET", "/v1/tasks/schedules", "tasks", R, list_of("tasks-schedule", "id")),
     row("POST", "/v1/tasks/schedules", "tasks", W, Tgt::Product),
-    row("GET", "/v1/tasks/schedules/{id}", "tasks", R, Tgt::Product),
-    row("PATCH", "/v1/tasks/schedules/{id}", "tasks", W, Tgt::Product),
-    row("DELETE", "/v1/tasks/schedules/{id}", "tasks", D, Tgt::Product),
-    row("POST", "/v1/tasks/schedules/{id}/", "tasks", W, Tgt::Product),
+    row("GET", "/v1/tasks/schedules/{id}", "tasks", R, one(&["id"], "tasks-schedule")),
+    row("PATCH", "/v1/tasks/schedules/{id}", "tasks", W, one(&["id"], "tasks-schedule")),
+    row("DELETE", "/v1/tasks/schedules/{id}", "tasks", D, one(&["id"], "tasks-schedule")),
+    row("POST", "/v1/tasks/schedules/{id}/", "tasks", W, one(&["id"], "tasks-schedule")),
     row("GET", "/v1/tasks/events", "tasks", R, Tgt::Product),
     row("POST", "/v1/tasks/events", "tasks", W, Tgt::Product),
     row("GET", "/v1/tasks/events/{id}", "tasks", R, Tgt::Product),
@@ -651,10 +655,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/tasks/apps", "tasks", R, Tgt::Product),
     row("POST", "/v1/tasks/apps", "tasks", W, Tgt::Product),
     row("DELETE", "/v1/tasks/apps/{id}", "tasks", D, Tgt::Product),
-    row("GET", "/v1/tasks/functions", "tasks", R, Tgt::Product),
-    row("GET", "/v1/tasks/functions/{id}", "tasks", R, Tgt::Product),
-    row("POST", "/v1/tasks/functions/{id}/", "tasks", W, Tgt::Product),
-    row("POST", "/v1/tasks/functions/{id}/cancel", "tasks", D, Tgt::Product),
+    row("GET", "/v1/tasks/functions", "tasks", R, list_of("tasks-function", "id")),
+    row("GET", "/v1/tasks/functions/{id}", "tasks", R, one(&["id"], "tasks-function")),
+    row("POST", "/v1/tasks/functions/{id}/", "tasks", W, one(&["id"], "tasks-function")),
+    row("POST", "/v1/tasks/functions/{id}/cancel", "tasks", D, one(&["id"], "tasks-function")),
     row("GET", "/v1/tasks/runs", "tasks", R, Tgt::Product),
     row("GET", "/v1/tasks/runs/{id}", "tasks", R, Tgt::Product),
     row("GET", "/v1/tasks/runs/{id}/wait", "tasks", R, Tgt::Product),

@@ -157,8 +157,10 @@ and **environment** where the product says (a secrets environment, an app enviro
 - `paths` narrows a rule to resources with a path under one of these (`/api` covers `/api/db`, not
   `/apix`). Secrets' folders come from `?path=` (`/` without it).
 - Ids are canonical: a Redis database, NoSQL database or stream named by its name is checked under
-  its id, a Postgres endpoint under its project, and a code change, thread or work item under its
-  repo (`owner/name`).
+  its id, a Postgres endpoint under its project, a Redis replica under its database, and a code
+  change, thread or work item under its repo (`owner/name`). tasks' queues, topics, schedules and
+  functions are `queue:<name>`, `topic:<name>`, `schedule:<id>` and `function:<id>`, so a rule for
+  a queue never matches a topic of the same name.
 
 Moving a resource into or out of a workspace project changes which tokens reach it, so the
 workspace's membership routes (`PUT`/`DELETE …/projects/{id}/resources/{kind}/{ref}`) need

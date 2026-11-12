@@ -182,10 +182,11 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Review app tokens (`rla_…`) are always scoped to their repos, even on an open daemon.
     Webhooks only go to public addresses unless the config allows private ones
     (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only).
-  - Any URL a tenant chooses is fetched through a client with `review::apps::PublicOnly` and no
-    redirects, plus a literal-host check, because IP literals skip the resolver. That covers
-    webhooks, review apps and owners' own provider `base_url`
-    (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow). Bound what you read from it.
+  - Any URL a tenant chooses is fetched through a client with `roll_net::PublicOnly` (one crate,
+    `crates/roll-net`; code-control and the model gateway re-export it) and no redirects, plus
+    `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
+    review apps, owners' own provider `base_url` (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow),
+    gateway upstreams and MCP clients' metadata documents. Bound what you read from it.
   - Owner-management routes check `Code::manages`/`check_manage`, not `owns`/`check_write`:
     agent tokens (`agent:<name>`) work code but never manage the owner, and review only as their
     own agent.
