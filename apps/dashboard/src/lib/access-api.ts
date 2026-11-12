@@ -120,6 +120,11 @@ export interface Catalog {
 
 export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oauth"; grant: Grant; locked: boolean };
 
+export interface Policy {
+  max_days?: number | null;
+  require_expiry?: boolean;
+}
+
 export interface Consent {
   client_id: string;
   redirect_uri: string;
@@ -180,6 +185,9 @@ export const accessApi = {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
+  /** The operator's rules for every token: at most `max_days`, and whether every token expires. */
+  policy: () => call<Policy>("GET", "/v1/access/policy"),
+  setPolicy: (p: Policy) => call<Policy>("PUT", "/v1/access/policy", p),
   /** Where approvals are posted (Slack through roll code's chat ops), or `{chat: null}`. */
   notify: () => call<{ chat: { install: string; channel: string } | null }>("GET", "/v1/access/notify"),
   setNotify: (chat: { install: string; channel: string } | null) => call<{ chat: unknown }>("PUT", "/v1/access/notify", { chat }),

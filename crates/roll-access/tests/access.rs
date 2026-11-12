@@ -64,7 +64,8 @@ impl Daemon {
         let mut resolvers = Resolvers::default();
         resolvers.by_kind.insert("endpoint", Arc::new(Endpoints));
         resolvers.workspace = Some(Arc::new(WorkspaceResolver(workspace.clone())));
-        let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), ..Config::default() };
+        // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
+        let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
         let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
         let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
@@ -149,6 +150,11 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     // A signed hop to the tasks leader is decided as the request it carries.
     let hop = d.send(&token, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", "/v1/tasks/queues")]).await;
     assert_eq!(hop.1["needs"]["product"], "tasks", "{}", hop.1);
+    // A tasks token for one queue reaches that queue, not another, nor a topic of its name.
+    let (queue, _) = d.token(json!([{ "product": "tasks", "resources": [{ "id": "queue:emails" }], "actions": { "read": "allow" } }]), json!({})).await;
+    for (uri, status) in [("/v1/tasks/queues/emails", StatusCode::OK), ("/v1/tasks/queues/billing", StatusCode::FORBIDDEN), ("/v1/tasks/topics/emails", StatusCode::FORBIDDEN)] {
+        assert_eq!(d.send(&queue, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", uri)]).await.0, status, "{uri}");
+    }
 
     // A public route is public for it too, as anyone (no grant, not the operator).
     let (s, open) = d.call(&token, Method::GET, "/v1/open", None).await;
@@ -315,6 +321,13 @@ async fn a_token_never_makes_a_stronger_one() {
         d.call(&admin, Method::POST, "/v1/access/tokens", Some(body))
     };
     let read = json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]);
+    // The operator's policy: tokens live at most a week.
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "max_days": 7 }))).await.0, StatusCode::OK);
+    let forever = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "forever", "rules": read }))).await;
+    assert_eq!(forever.0, StatusCode::BAD_REQUEST, "{}", forever.1);
+    let month = json!({ "name": "month", "rules": read, "expires_at": code_sql::now_ms() + 30 * 86_400_000 });
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(month)).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(make(read.clone(), None).await.0, StatusCode::FORBIDDEN, "outlives its maker");
     assert_eq!(make(read, Some(end - 1000)).await.0, StatusCode::CREATED);
@@ -374,6 +387,35 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     seen(format!("update chi_a C9 1700.1 {id} approved")).await;
     let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
     assert_eq!((a["state"].as_str(), a["decided_by"].as_str()), (Some("approved"), Some("slack:U1")));
+}
+
+/// An MCP client known by its metadata document (MCP 2025-11-25: its client_id is the document's
+/// URL) connects without registering; a document that names another client is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn clients_connect_by_their_metadata_document() {
+    let d = Daemon::new(50);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (b1, b2) = (base.clone(), base.clone());
+    let docs = Router::new()
+        .route("/client.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b1}/client.json"), "client_name": "Doc Client", "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }))
+        .route("/liar.json", get(move || async move { axum::Json(json!({ "client_id": format!("{b2}/other.json"), "redirect_uris": ["http://127.0.0.1:43111/cb"] })) }));
+    tokio::spawn(async move { axum::serve(listener, docs).await.unwrap() });
+    let id = format!("{base}/client.json");
+    let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+    let (s, c) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/clients/{}", enc(&id)), None).await;
+    assert_eq!((s, c["name"].as_str()), (StatusCode::OK, Some("Doc Client")), "{c}");
+    let (s, _) = d.call(OPERATOR, Method::GET, &format!("/v1/access/oauth/clients/{}", enc(&format!("{base}/liar.json"))), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (verifier, challenge) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    let consent = json!({ "client_id": id, "redirect_uri": "http://127.0.0.1:43111/cb", "code_challenge": challenge, "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] });
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent)).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let code = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap().query_pairs().find(|(k, _)| k == "code").unwrap().1.to_string();
+    let (s, tokens) = d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", "http://127.0.0.1:43111/cb"), ("client_id", &id), ("code_verifier", verifier)]).await;
+    assert_eq!(s, StatusCode::OK, "{tokens}");
+    assert_eq!(d.call(tokens["access_token"].as_str().unwrap(), Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
 }
 
 /// An MCP client connects with OAuth: it registers, the operator consents (narrowing what it

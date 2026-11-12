@@ -30,6 +30,15 @@ pub enum Token {
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
+    /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`; nothing to show them.
+    Policy {
+        #[arg(long)]
+        max_days: Option<u32>,
+        #[arg(long)]
+        require_expiry: Option<bool>,
+        #[arg(long, conflicts_with = "max_days")]
+        no_limit: bool,
+    },
 }
 
 #[derive(Args)]
@@ -118,6 +127,16 @@ pub enum Mcp {
         /// Told to the agent.
         #[arg(long)]
         reason: Option<String>,
+    },
+    /// Where approvals are also posted: a Slack or Discord channel through roll code's chat ops
+    /// (`--install chi_… --channel C…`), `--off`, or nothing to show it.
+    Notify {
+        #[arg(long, requires = "channel")]
+        install: Option<String>,
+        #[arg(long, requires = "install")]
+        channel: Option<String>,
+        #[arg(long, conflicts_with_all = ["install", "channel"])]
+        off: bool,
     },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
@@ -349,6 +368,28 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 print_grant(&me["grant"]);
             }
         }
+        Token::Policy { max_days, require_expiry, no_limit } => {
+            let mut p = api.get("/v1/access/policy").await?;
+            if max_days.is_some() || require_expiry.is_some() || no_limit {
+                if let Some(d) = max_days {
+                    p["max_days"] = json!(d);
+                }
+                if no_limit {
+                    p["max_days"] = Value::Null;
+                }
+                if let Some(r) = require_expiry {
+                    p["require_expiry"] = json!(r);
+                }
+                p = api.call(reqwest::Method::PUT, "/v1/access/policy", Some(p)).await?;
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&p)?);
+            } else {
+                let days = p["max_days"].as_u64().map_or_else(|| "no limit".to_string(), |d| format!("at most {d} days"));
+                let must = if p["require_expiry"].as_bool() == Some(true) { ", and must expire" } else { "" };
+                println!("tokens live {days}{must}");
+            }
+        }
         Token::Presets => {
             let c = api.get("/v1/access/catalog").await?;
             if json_out {
@@ -437,6 +478,20 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
         Mcp::Deny { id, reason } => {
             let a = api.post(&format!("/v1/access/approvals/{id}/deny"), json!({ "reason": reason })).await?;
             if json_out { println!("{}", serde_json::to_string_pretty(&a)?) } else { println!("denied: {}", s(&a["summary"])) }
+        }
+        Mcp::Notify { install, channel, off } => {
+            let v = match (install, channel, off) {
+                (Some(i), Some(c), _) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": i, "channel": c.trim_start_matches('#') } }))).await?,
+                (_, _, true) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await?,
+                _ => api.get("/v1/access/notify").await?,
+            };
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else if v["chat"].is_null() {
+                println!("approvals go only to the dashboard and `roll mcp approvals`");
+            } else {
+                println!("approvals are also posted to {} in {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]));
+            }
         }
         Mcp::Audit { token, product, decision, limit } => {
             let mut q = url::form_urlencoded::Serializer::new(String::new());

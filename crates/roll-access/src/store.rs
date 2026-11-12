@@ -784,6 +784,21 @@ impl Store {
         })?)
     }
 
+    /// A client known by its metadata document (its id is the document's URL): stored or
+    /// refreshed as fetched.
+    pub fn put_metadata_client(&self, c: &Client) -> Result<()> {
+        let now = code_sql::now_ms();
+        let uris = serde_json::to_string(&c.redirect_uris).unwrap_or_default();
+        self.db.write(|db| {
+            db.execute(
+                "INSERT INTO oauth_clients (id, name, uri, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (id) DO UPDATE SET name = excluded.name, uri = excluded.uri, redirect_uris = excluded.redirect_uris, created_at = excluded.created_at",
+                params![c.id, c.name, c.uri, uris, now],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// The consent screen's grant, waiting for its code to be exchanged: stored without secrets.
     pub fn issue_code(&self, client: &Client, new: &NewGrant, created_by: &str, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<String> {
         check_name(&new.name)?;

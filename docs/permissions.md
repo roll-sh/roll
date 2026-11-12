@@ -154,8 +154,10 @@ and **environment** where the product says (a secrets environment, an app enviro
 - `paths` narrows a rule to resources with a path under one of these (`/api` covers `/api/db`, not
   `/apix`). Secrets' folders come from `?path=` (`/` without it).
 - Ids are canonical: a Redis database, NoSQL database or stream named by its name is checked under
-  its id, a Postgres endpoint under its project, and a code change, thread or work item under its
-  repo (`owner/name`).
+  its id, a Postgres endpoint under its project, a Redis replica under its database, and a code
+  change, thread or work item under its repo (`owner/name`). tasks' queues, topics, schedules and
+  functions are `queue:<name>`, `topic:<name>`, `schedule:<id>` and `function:<id>`, so a rule for
+  a queue never matches a topic of the same name.
 
 Moving a resource into or out of a workspace project changes which tokens reach it, so the
 workspace's membership routes (`PUT`/`DELETE …/projects/{id}/resources/{kind}/{ref}`) need
@@ -336,6 +338,9 @@ type AuditEvent = {
   changes its own addresses.
 - A grant reviews and comments in roll code only as itself (`token:<name>`): the gate drops
   `X-Roll-User` and sets `X-Roll-Agent`.
+- The operator's policy (`/v1/access/policy`, `roll token policy`) caps every grant's lifetime
+  (`max_days`) and can require that every grant expires; a grant made or changed after must fit,
+  OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs).
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
@@ -375,6 +380,8 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry}`: roll's rules for every grant |
+| `PUT /v1/access/policy` | operator | change them; a grant made or changed after must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel} \| null}` |
 | `GET /v1/access/oauth/clients` | access read | MCP clients with a live connection |
@@ -403,5 +410,12 @@ this list:
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
 | `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify` | the operator decides |
+
+Rows match a route by its shape, not its parameters' names (`…/secrets/{key}/value` finds the row
+written `…/secrets/{name}/value`), so renaming a parameter can never change an action. To check a
+branch's routes before it merges, list them as `METHOD<TAB>PATTERN` lines and run
+`cargo run -p roll-access --example classify < routes.txt`: each line comes back with its product,
+action and row, `NONE` for a route no grant could call, and `MISSING PARAMS` when a row's resource
+or environment parameter isn't in the route.
 
 The rest of the work list is in [mcp.md](mcp.md#next).

@@ -31,6 +31,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/approvals/{id}/deny", post(deny))
         .route("/v1/access/audit", get(audit))
         .route("/v1/access/notify", get(notify).put(set_notify))
+        .route("/v1/access/policy", get(policy).put(set_policy))
         .route("/v1/access/oauth/clients", get(clients))
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
@@ -195,6 +196,7 @@ async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate:
             g.id.to_string()
         }
     };
+    a.check_policy(new.expires_at)?;
     let (grant, token) = blocking(a, move |a| a.store.create(&new, GrantKind::Token, &by, None)).await?;
     Ok((StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response())
 }
@@ -246,6 +248,9 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         let expires = change.expires_at.unwrap_or(target.expires_at);
         let ips = change.ip_allow.clone().unwrap_or(target.ip_allow.clone());
         check_within(&a, &g, &rules, expires, &ips).await?;
+    }
+    if let Some(e) = change.expires_at {
+        a.check_policy(e)?;
     }
     Ok(Json(json!(blocking(a, move |a| a.store.update(&id, &change)).await?)))
 }
@@ -346,6 +351,21 @@ async fn set_notify(State(a): S, ext: Extensions, Json(v): Json<Value>) -> crate
     Ok(Json(json!({ "chat": chat })))
 }
 
+/// The operator's rules for every grant: `{max_days, require_expiry}`.
+async fn policy(State(a): S) -> crate::Result<Json<Value>> {
+    Ok(Json(json!(blocking(a, |a| Ok(a.policy())).await?)))
+}
+
+async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "set roll's token policy")?;
+    if p.max_days == Some(0) {
+        return Err(Error::BadRequest("max_days is at least 1 (or null for no limit)".into()));
+    }
+    let v = json!(p);
+    blocking(a, move |a| a.store.set_setting("policy", &v)).await?;
+    Ok(Json(json!(p)))
+}
+
 /// The audit log; `?format=jsonl`: one event per line, as a download (what a SIEM or `jq` reads).
 async fn audit(State(a): S, Query(q): Query<AuditQuery>) -> crate::Result<Response> {
     let jsonl = q.format.as_deref() == Some("jsonl");
@@ -374,7 +394,8 @@ async fn clients(State(a): S) -> crate::Result<Json<Value>> {
     Ok(Json(json!(seen.into_values().collect::<Vec<_>>())))
 }
 
+/// A client: registered here, or (an https URL) known by its metadata document.
 async fn client(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
-    let c = blocking(a, move |a| a.store.client(&id)).await?.ok_or_else(|| Error::NotFound("no such client".into()))?;
+    let c = crate::oauth::known_client(&a, &id).await?.ok_or_else(|| Error::NotFound("no such client".into()))?;
     Ok(Json(json!(c)))
 }

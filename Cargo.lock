@@ -1646,6 +1646,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-net",
  "rsa",
  "serde",
  "serde_json",
@@ -4261,6 +4262,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.8",
  "reqwest",
+ "roll-net",
  "rsa",
  "rusqlite",
  "serde",
@@ -6322,7 +6324,9 @@ dependencies = [
  "http-body-util",
  "ipnet",
  "percent-encoding",
+ "reqwest",
  "roll-auth",
+ "roll-net",
  "roll-workspace",
  "serde",
  "serde_json",
@@ -6485,6 +6489,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "url",
+]
+
+[[package]]
+name = "roll-net"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "tokio",
  "url",
 ]
 

@@ -12,6 +12,7 @@ import {
   statusOf,
   type Catalog,
   type Grant,
+  type Policy,
   type McpClient,
   type Rule,
 } from "@/lib/access-api";
@@ -36,6 +37,7 @@ export function AccessOverview() {
           </p>
         )}
         <ConnectPanel />
+        <PolicyPanel />
         <ErrorNote error={error} />
         {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
       </div>
@@ -358,5 +360,53 @@ function TryIt({ grant }: { grant: string }) {
       </button>
       {answer && <span className="w-full font-mono text-[11px] text-muted">{answer}</span>}
     </form>
+  );
+}
+
+/** The rules every token follows: how long it may live, and whether it must expire. */
+function PolicyPanel() {
+  const [p, setP] = useState<Policy | null>(null);
+  const [days, setDays] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accessApi
+      .policy()
+      .then((v) => {
+        setP(v);
+        setDays(v.max_days ? String(v.max_days) : "");
+      })
+      .catch(() => setP(null));
+  }, []);
+  if (!p) return null;
+  const save = async (next: Policy) => {
+    setError(null);
+    try {
+      setP(await accessApi.setPolicy(next));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-3 text-[12px] text-muted">
+      <span>Every token:</span>
+      <label className="flex items-center gap-1.5">
+        lives at most
+        <input
+          value={days}
+          onChange={(e) => setDays(e.target.value.replace(/\D/g, ""))}
+          onBlur={() => void save({ ...p, max_days: days ? Number(days) : null })}
+          placeholder="∞"
+          inputMode="numeric"
+          className={`${input} w-16 text-center font-mono text-[12px]`}
+          aria-label="Longest lifetime in days"
+        />
+        days
+      </label>
+      <label className="flex items-center gap-1.5">
+        <input type="checkbox" checked={Boolean(p.require_expiry)} onChange={(e) => void save({ ...p, require_expiry: e.target.checked })} />
+        must expire
+      </label>
+      <ErrorNote error={error} />
+    </div>
   );
 }

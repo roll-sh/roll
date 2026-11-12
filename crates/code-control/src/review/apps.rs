@@ -26,7 +26,6 @@ use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use sha2::Sha256;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -110,71 +109,9 @@ pub fn signature(secret: &str, timestamp: i64, body: &[u8]) -> String {
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
-/// Loopback, private, link-local, CGNAT, multicast, unspecified and documentation ranges (and
-/// IPv4 inside IPv6): not where a webhook may go.
-pub fn private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => {
-            let o = v.octets();
-            v.is_loopback()
-                || v.is_private()
-                || v.is_link_local()
-                || v.is_unspecified()
-                || v.is_multicast()
-                || v.is_broadcast()
-                || v.is_documentation()
-                || o[0] == 0
-                || (o[0] == 100 && (o[1] & 0xc0) == 64)
-                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
-                || o[0] >= 240
-        }
-        IpAddr::V6(v) => {
-            if let Some(v4) = v.to_ipv4_mapped() {
-                return private_ip(IpAddr::V4(v4));
-            }
-            let s = v.segments();
-            // IPv4 carried inside IPv6: NAT64 (64:ff9b::/96, also the local-use 64:ff9b:1::/48)
-            // and 6to4 (2002::/16) reach whatever IPv4 address they embed.
-            let embedded = |hi: u16, lo: u16| std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
-            if (s[0] == 0x64 && s[1] == 0xff9b && (s[2..6] == [0, 0, 0, 0] || s[2] == 1)) && private_ip(IpAddr::V4(embedded(s[6], s[7]))) {
-                return true;
-            }
-            if s[0] == 0x2002 && private_ip(IpAddr::V4(embedded(s[1], s[2]))) {
-                return true;
-            }
-            v.is_loopback() || v.is_unspecified() || v.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || s[0] == 0x2001 && s[1] == 0xdb8
-        }
-    }
-}
-
-/// Resolves names, refusing private addresses.
-pub struct PublicOnly;
-
-impl reqwest::dns::Resolve for PublicOnly {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_string();
-        Box::pin(async move {
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| !private_ip(a.ip())).collect();
-            if public.is_empty() {
-                return Err(format!("{host} resolves to a private address").into());
-            }
-            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
-
-/// Is `url`'s host a private address written out (an IP literal, or `localhost`)? Names that
-/// resolve to one are refused when connecting ([`PublicOnly`]).
-pub fn literal_private_host(url: &url::Url) -> bool {
-    let literal = match url.host() {
-        Some(url::Host::Ipv4(v)) => Some(IpAddr::V4(v)),
-        Some(url::Host::Ipv6(v)) => Some(IpAddr::V6(v)),
-        Some(url::Host::Domain(d)) => d.parse::<IpAddr>().ok(),
-        None => None,
-    };
-    literal.is_some_and(private_ip) || url.host_str().is_some_and(|h| h.eq_ignore_ascii_case("localhost") || h.to_ascii_lowercase().ends_with(".localhost"))
-}
+/// The one private-address guard (`roll-net`): every URL a tenant chooses is fetched through it.
+pub use roll_net::private_ip;
+pub use roll_net::{PublicOnly, literal_private_host};
 
 pub(crate) fn check_url(raw: &str) -> Result<url::Url> {
     let u = url::Url::parse(raw.trim()).map_err(|e| Error::Invalid(format!("webhook_url: {e}")))?;
