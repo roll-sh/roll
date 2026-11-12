@@ -343,6 +343,28 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
     let d = settled(&w, &id, "pr-7", &ids[0]).await;
     assert_eq!((d["status"].as_str(), d["revision"].as_str()), (Some("active"), Some("c3c3c3c3c3c3")));
     assert!(w.fake.instances(&id).iter().any(|(_, dep, st)| *dep == d["id"] && *st == FakeState::Running), "min_instances 1 keeps one up");
+    // Private, as previews are: its hostname answers only visitors with the token.
+    let token = "aaaaaaaabbbbbbbbccccdddd";
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"access": {"token": token}}))).await;
+    assert_eq!((st, env["private"].as_bool()), (StatusCode::OK, Some(true)), "{env}");
+    let get = |path: &str, cookie: Option<&str>| {
+        let mut r = Request::builder().uri(path).header("host", host(&env["url"]));
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        w.public.clone().oneshot(r.body(Body::empty()).unwrap())
+    };
+    assert_eq!(get("/", None).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(get("/?roll_access=wrongwrongwrongwrongwrong", None).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let r = get(&format!("/pricing?roll_access={token}&plan=pro"), None).await.unwrap();
+    assert_eq!(r.status(), StatusCode::FOUND);
+    assert_eq!(r.headers()["location"], "/pricing?plan=pro", "the token leaves the URL");
+    let set = r.headers()["set-cookie"].to_str().unwrap().to_string();
+    assert!(set.starts_with(&format!("roll_access_pr-7={token};")) && set.contains("HttpOnly") && set.contains("SameSite=Lax") && !set.contains("Domain"), "{set}");
+    let r = get("/pricing", Some(&format!("theme=dark; roll_access_pr-7={token}"))).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["cookie"], "theme=dark", "the app never sees the token");
     let (st, _) = call(&w.api, "DELETE", &base, None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(!w.fake.instances(&id).iter().any(|(_, dep, _)| *dep == d["id"]), "its instances are gone");

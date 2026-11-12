@@ -159,7 +159,15 @@ type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
 type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; x?: number; y?: number };
 type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
-type EnvironmentPut = { branch?: string | null; ephemeral?: boolean };
+type EnvironmentPut = {
+  branch?: string | null;
+  ephemeral?: boolean;
+  /** Private (previews): visitors need `?roll_access=<token>` once (a host-only HttpOnly cookie
+   *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
+   *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees
+   *  the cookie. null: public again. */
+  access?: { token: string } | null;
+};
 
 type Environment = EnvironmentSummary & {
   service: string;
@@ -169,6 +177,7 @@ type Environment = EnvironmentSummary & {
   domains: Domain[];
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
   needs_deploy: boolean;     // variables or settings changed since the active deployment
+  private: boolean;          // its hostnames answer only visitors with its access token
   created_at: number;
 };
 

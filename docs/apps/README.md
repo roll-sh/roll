@@ -252,6 +252,11 @@ every deployment is immutable with instant rollback.
   `apps.localhost` on the apps listener (`ROLL_APPS_LISTEN`, `127.0.0.1:7080`), and each service
   can also get a port of its own (`ROLL_APPS_PORTS=58100-58199`) so it opens on a machine without
   wildcard DNS (a Tailscale name).
+- **Private environments** (previews): an environment with an access token answers only
+  visitors who bring it: `?roll_access=<token>` once sets a host-only `HttpOnly; SameSite=Lax`
+  cookie and redirects to the URL without the token; a request without it is a 401 that wakes
+  nothing. Only the token's SHA-256 is stored, compared in constant time, and the cookie is taken
+  out of what the app receives. roll previews sets it on every `pv-…` environment.
 - **Custom domains**: the user adds `www.example.com`, points a CNAME at the service's
   `up.roll.site` name, and roll verifies it (the CNAME, or a `_roll-challenge.<host>` TXT with the
   domain's token for apex domains behind an ALIAS/flattening provider). On the fleet, TLS is

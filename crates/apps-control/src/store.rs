@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS deployments (
     ready_ms INTEGER
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS deployments_env ON deployments (service, env, created_at);
+CREATE TABLE IF NOT EXISTS env_access (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
@@ -417,7 +423,7 @@ impl Store {
     /// Remove a service and everything that belongs to it (deployments' history included).
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["environments", "deployments", "deploy_keys", "fences", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -502,7 +508,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys"] {
+            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -830,6 +836,24 @@ impl Store {
     pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
         let now = self.now()?;
         self.db.execute("UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?", params![status.as_str(), exit_code, now, id])?;
+        Ok(())
+    }
+
+    // ── private environments ──
+
+    /// The SHA-256 (hex) of the token an environment's visitors need, if it's private.
+    pub fn access_hash(&self, service: &str, env: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT token_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_access(&self, service: &str, env: &str, token_hash: Option<&str>) -> Result<()> {
+        match token_hash {
+            Some(h) => self.db.execute(
+                "INSERT INTO env_access (service, env, token_hash) VALUES (?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash",
+                params![service, env, h],
+            )?,
+            None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
+        };
         Ok(())
     }
 

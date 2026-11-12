@@ -58,6 +58,83 @@ fn page(status: StatusCode, title: &str, text: &str) -> Response {
     r
 }
 
+/// The stored form of an environment's access token: its SHA-256, hex. The token itself is only
+/// ever in the visitor's cookie.
+pub fn token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether two hashes are equal, in time that doesn't depend on where they differ.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// A private environment's gate (previews): `?roll_access=<token>` sets the host-only cookie
+/// `roll_access_<env>` and redirects to the same URL without the token; a request with a
+/// matching cookie goes on, the cookie taken out so the app never sees the token; anything else
+/// is a 401. `None` lets the request through.
+async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Request) -> Option<Response> {
+    let hash = match apps.access_hash(service, env).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return None,
+        Err(_) => return Some(page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's access couldn't be checked. Try again in a few seconds.")),
+    };
+    let name = format!("roll_access_{env}");
+    let query = req.uri().query().unwrap_or("").to_string();
+    let mut token = None;
+    let mut rest = Vec::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        match pair.strip_prefix("roll_access=") {
+            Some(v) => token = Some(percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned()),
+            None => rest.push(pair),
+        }
+    }
+    if let Some(t) = token {
+        if !same(&token_hash(&t), &hash) {
+            return Some(denied());
+        }
+        let path = req.uri().path();
+        let location = if rest.is_empty() { path.to_string() } else { format!("{path}?{}", rest.join("&")) };
+        let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+        let cookie = format!("{name}={t}; Path=/; HttpOnly; SameSite=Lax{secure}");
+        let mut r = StatusCode::FOUND.into_response();
+        let h = r.headers_mut();
+        if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&cookie)) {
+            h.insert(header::LOCATION, l);
+            h.insert(header::SET_COOKIE, c);
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return Some(r);
+        }
+        return Some(denied());
+    }
+    // Every Cookie header, minus ours; ours must match.
+    let mut ok = false;
+    let mut kept = Vec::new();
+    for v in req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()) {
+        for c in v.split(';').map(str::trim).filter(|c| !c.is_empty()) {
+            match c.strip_prefix(&format!("{name}=")) {
+                Some(t) => ok |= same(&token_hash(t), &hash),
+                None => kept.push(c.to_string()),
+            }
+        }
+    }
+    if !ok {
+        return Some(denied());
+    }
+    req.headers_mut().remove(header::COOKIE);
+    if !kept.is_empty()
+        && let Ok(v) = HeaderValue::from_str(&kept.join("; "))
+    {
+        req.headers_mut().insert(header::COOKIE, v);
+    }
+    None
+}
+
+fn denied() -> Response {
+    page(StatusCode::UNAUTHORIZED, "This environment is private", "Open it from its link in roll (the change, the pull request or the dashboard).")
+}
+
 /// A 503 the client may retry in a second (a restart or a crowd that clears quickly).
 fn retry_soon(mut r: Response) -> Response {
     r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
@@ -83,6 +160,10 @@ fn strip_hop_by_hop(h: &mut axum::http::HeaderMap, keep_upgrade: bool) {
 /// answer metered.
 async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> Response {
     let began = Instant::now();
+    // A private environment answers only visitors with its token, before anything wakes.
+    if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
+        return turned_away;
+    }
     let live = match apps.load_live(service, env).await {
         Ok(l) => l,
         Err(e) => return page(StatusCode::NOT_FOUND, "Not deployed", &e.to_string()),

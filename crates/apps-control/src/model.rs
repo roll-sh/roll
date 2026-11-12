@@ -370,6 +370,8 @@ pub struct Environment {
     pub domains: Vec<Domain>,
     pub port: Option<u16>,
     pub needs_deploy: bool,
+    /// Visitors need the environment's access token (`PUT … {access: {token}}`).
+    pub private: bool,
     pub created_at: i64,
 }
 

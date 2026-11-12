@@ -137,6 +137,8 @@ export interface Environment extends EnvironmentSummary {
   domains: Domain[];
   port: number | null;
   needs_deploy: boolean;
+  /** Its hostnames answer only visitors with its access token (a preview). */
+  private: boolean;
   created_at: number;
 }
 
