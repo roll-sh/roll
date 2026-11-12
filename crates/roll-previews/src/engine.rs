@@ -468,17 +468,19 @@ impl Engine {
                 None => {
                     let made = b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?;
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.r#ref = Some(made.clone());
+                        x.r#ref = Some(made.r#ref.clone());
+                        x.kept = made.kept.clone();
                         x.state = ResourceState::Ready;
                         x.error = None;
                     })?;
-                    self.store.log(&r.id, &format!("branched {key} as {made}"))?;
+                    self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                 }
                 Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
-                    let fresh = b.reset(&res.parent, branch, &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?;
+                    let fresh = b.reset(&res.parent, branch, res.kept.as_deref(), &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?;
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.r#ref = Some(fresh.clone());
+                        x.r#ref = Some(fresh.r#ref.clone());
+                        x.kept = fresh.kept.clone();
                         x.state = ResourceState::Ready;
                         x.error = None;
                         x.bytes = 0;
@@ -509,7 +511,7 @@ impl Engine {
         if usage_due {
             for res in self.store.resources(&r.id)? {
                 let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
-                match b.usage(branch).await {
+                match b.usage(&res.parent, branch).await {
                     Ok(u) => self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
                         x.bytes = u.bytes;
                         x.usd_month = u.storage_usd_month;
@@ -617,7 +619,7 @@ impl Engine {
             let n = seen.entry(res.kind).or_default();
             let suffix = (*n > 0).then(|| env_suffix(&res.parent));
             *n += 1;
-            let vars = b.connect(&res.parent, branch).await.map_err(|e| anyhow::anyhow!("connecting to the {} branch: {e:#}", res.kind.as_str()))?;
+            let vars = b.connect(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("connecting to the {} branch: {e:#}", res.kind.as_str()))?;
             for (k, v) in suffixed(vars, suffix.as_deref()) {
                 set(&mut env, &k, v);
             }

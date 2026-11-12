@@ -6435,6 +6435,7 @@ name = "rolld"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
  "aws-smithy-http-client",
@@ -6485,6 +6486,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-previews",
  "roll-workspace",
  "s3-api",
  "s3-control",

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use roll_previews::engine::Config;
-use roll_previews::ports::{Apps, Brancher, ChangeInfo, NoSecrets, ServiceSpec, Source, Target, Usage};
+use roll_previews::ports::{Apps, Branched, Brancher, ChangeInfo, NoSecrets, ServiceSpec, Source, Target, Usage};
 use roll_previews::{Desired, Engine, Kind, Mode, Preview, ResourceState, ServiceState, Settings, State, Store};
 use roll_workspace::Workspace;
 use serde_json::json;
@@ -85,7 +85,7 @@ impl Brancher for FakeData {
     fn kind(&self) -> Kind {
         self.kind
     }
-    async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<String> {
+    async fn branch(&self, parent: &str, name: &str, _mode: Mode) -> anyhow::Result<Branched> {
         if self.fail_next.load(Ordering::SeqCst) > 0 {
             self.fail_next.fetch_sub(1, Ordering::SeqCst);
             anyhow::bail!("the product is busy");
@@ -95,9 +95,9 @@ impl Brancher for FakeData {
         if self.branches.lock().insert(id.clone()) {
             self.made.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(id)
+        Ok(Branched::plain(id))
     }
-    async fn reset(&self, parent: &str, branch: &str, name: &str, mode: Mode) -> anyhow::Result<String> {
+    async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
         self.branch(parent, name, mode).await
     }
@@ -106,14 +106,14 @@ impl Brancher for FakeData {
         self.branches.lock().remove(branch);
         Ok(())
     }
-    async fn connect(&self, _parent: &str, branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn connect(&self, _parent: &str, branch: &str, _kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let var = match self.kind {
             Kind::Postgres => "DATABASE_URL",
             _ => "REDIS_URL",
         };
         Ok(vec![(var.into(), format!("fake://{branch}"))])
     }
-    async fn usage(&self, _branch: &str) -> anyhow::Result<Usage> {
+    async fn usage(&self, _parent: &str, _branch: &str) -> anyhow::Result<Usage> {
         Ok(Usage { bytes: 1 << 20, storage_usd_month: 0.001, active_usd_hour: 0.04, month_to_date_usd: 0.0 })
     }
 }

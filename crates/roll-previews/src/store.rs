@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS resources (
     usd_month REAL NOT NULL,
     usd_hour REAL NOT NULL,
     spent_usd REAL NOT NULL,
+    kept TEXT,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, kind, parent)
 ) WITHOUT ROWID;
@@ -154,6 +155,8 @@ pub struct ResourceRow {
     pub usd_month: f64,
     pub usd_hour: f64,
     pub spent_usd: f64,
+    /// Credentials the product gave out once ([`crate::ports::Branched::kept`]).
+    pub kept: Option<String>,
 }
 
 pub struct Store {
@@ -211,10 +214,11 @@ fn resource_row(r: &code_sql::Row<'_>) -> code_sql::Result<ResourceRow> {
         usd_month: r.get(7)?,
         usd_hour: r.get(8)?,
         spent_usd: r.get(9)?,
+        kept: r.get(10)?,
     })
 }
 
-const RESOURCE_COLUMNS: &str = "kind, parent, mode, ref, state, error, bytes, usd_month, usd_hour, spent_usd";
+const RESOURCE_COLUMNS: &str = "kind, parent, mode, ref, state, error, bytes, usd_month, usd_hour, spent_usd, kept";
 
 fn service_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Service, i64)> {
     let state: String = r.get(6)?;
@@ -450,8 +454,8 @@ impl Store {
         self.db.write(|c| {
             for (kind, parent, mode) in wanted {
                 c.execute(
-                    "INSERT INTO resources (preview_id, kind, parent, mode, ref, state, error, bytes, usd_month, usd_hour, spent_usd, updated_at) \
-                     VALUES (?, ?, ?, ?, NULL, 'pending', NULL, 0, 0, 0, 0, ?) ON CONFLICT (preview_id, kind, parent) DO NOTHING",
+                    "INSERT INTO resources (preview_id, kind, parent, mode, ref, state, error, bytes, usd_month, usd_hour, spent_usd, kept, updated_at) \
+                     VALUES (?, ?, ?, ?, NULL, 'pending', NULL, 0, 0, 0, 0, NULL, ?) ON CONFLICT (preview_id, kind, parent) DO NOTHING",
                     params![id, kind.as_str(), parent, mode.as_str(), now],
                 )?;
             }
@@ -471,9 +475,9 @@ impl Store {
             f(&mut r);
             if r != old {
                 c.execute(
-                    "UPDATE resources SET mode = ?, ref = ?, state = ?, error = ?, bytes = ?, usd_month = ?, usd_hour = ?, spent_usd = ?, updated_at = ? \
+                    "UPDATE resources SET mode = ?, ref = ?, state = ?, error = ?, bytes = ?, usd_month = ?, usd_hour = ?, spent_usd = ?, kept = ?, updated_at = ? \
                      WHERE preview_id = ? AND kind = ? AND parent = ?",
-                    params![r.mode.as_str(), r.r#ref, r.state.as_str(), r.error, r.bytes, r.usd_month, r.usd_hour, r.spent_usd, now, id, kind.as_str(), parent],
+                    params![r.mode.as_str(), r.r#ref, r.state.as_str(), r.error, r.bytes, r.usd_month, r.usd_hour, r.spent_usd, r.kept, now, id, kind.as_str(), parent],
                 )?;
             }
             Ok::<_, Error>(())

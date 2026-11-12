@@ -18,6 +18,23 @@ pub struct Usage {
     pub month_to_date_usd: f64,
 }
 
+/// A branch as the product made it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Branched {
+    /// The branch's product id.
+    pub r#ref: String,
+    /// What the product hands out only once (a stream's SASL secret, a queue user's password, a
+    /// bucket key's secret), kept with the branch so services can be given it again. Never
+    /// returned by the API.
+    pub kept: Option<String>,
+}
+
+impl Branched {
+    pub fn plain(r#ref: impl Into<String>) -> Branched {
+        Branched { r#ref: r#ref.into(), kept: None }
+    }
+}
+
 /// One data product's branches. Every method is idempotent: the engine may call it again after
 /// a crash, a timeout or a retry.
 #[async_trait]
@@ -25,11 +42,12 @@ pub trait Brancher: Send + Sync {
     fn kind(&self) -> Kind;
 
     /// Branch `parent` as `name` (structure only for [`Mode::Schema`]), or find the branch of
-    /// `parent` already named `name`. Returns the branch's ref (its product id).
-    async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<String>;
+    /// `parent` already named `name` (minting fresh credentials if the product only gives them
+    /// out once).
+    async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched>;
 
-    /// Make `branch` the parent's current state again. Returns its ref, which may be new.
-    async fn reset(&self, parent: &str, branch: &str, name: &str, mode: Mode) -> anyhow::Result<String>;
+    /// Make `branch` the parent's current state again. Its ref may be new.
+    async fn reset(&self, parent: &str, branch: &str, kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched>;
 
     /// Delete `branch`, which must be the child of `parent` named `name` (anything else is
     /// refused). Ok when it's already gone. Never touches `parent`.
@@ -37,9 +55,9 @@ pub trait Brancher: Send + Sync {
 
     /// How a service reaches the branch, as environment variables (`DATABASE_URL`, …). Read
     /// fresh for every deploy: nothing here is stored.
-    async fn connect(&self, parent: &str, branch: &str) -> anyhow::Result<Vec<(String, String)>>;
+    async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>>;
 
-    async fn usage(&self, branch: &str) -> anyhow::Result<Usage>;
+    async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage>;
 }
 
 /// A change (or branch) as previews see it.

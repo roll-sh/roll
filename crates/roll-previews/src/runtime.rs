@@ -166,7 +166,9 @@ impl Runtime {
             e.touched(preview);
         }
         let mut rx = live.phase.subscribe();
-        let start = match rx.borrow_and_update().clone() {
+        // Clone first: a borrow held through the match would deadlock `send_replace`.
+        let phase = rx.borrow_and_update().clone();
+        let start = match phase {
             Phase::Running { addr } => return Ok(addr),
             Phase::Starting => false,
             Phase::Stopped | Phase::Failed(_) => {

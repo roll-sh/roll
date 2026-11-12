@@ -36,10 +36,29 @@ pub async fn remove(name: &str) {
     let _ = docker(&["rm", "-f", name]).await;
 }
 
-/// Remove containers of one kind left over from a previous run of the daemon.
+/// The daemon whose containers these are (`sh.roll.code.home=<its home>`): several daemons
+/// share a host in development, and one must never remove another's containers.
+static HOME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Label every container this process makes with its home, and clean up only those.
+pub fn set_home(home: &Path) {
+    let _ = HOME.set(home.display().to_string());
+}
+
+fn home_label() -> Option<String> {
+    HOME.get().map(|h| format!("{LABEL}.home={h}"))
+}
+
+/// Remove containers of one kind left over from a previous run of the daemon (of this home,
+/// when [`set_home`] was called).
 pub async fn remove_leftovers(kind: &str) {
     let filter = format!("label={LABEL}={kind}");
-    if let Ok(ids) = docker(&["ps", "-aq", "--filter", &filter]).await {
+    let mut args = vec!["ps".to_string(), "-aq".into(), "--filter".into(), filter];
+    if let Some(h) = home_label() {
+        args.extend(["--filter".into(), format!("label={h}")]);
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Ok(ids) = docker(&argv).await {
         for id in ids.split_whitespace() {
             remove(id).await;
         }
@@ -150,6 +169,9 @@ impl Isolation for Docker {
         let mut args: Vec<String> = vec!["create".into(), "--name".into(), job.name.clone(), "--label".into(), format!("{LABEL}={}", job.kind.as_str())];
         if let Some(c) = &job.change {
             args.extend(["--label".into(), format!("{LABEL}.change={c}")]);
+        }
+        if let Some(h) = home_label() {
+            args.extend(["--label".into(), h]);
         }
         if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
             args.extend(["--publish".into(), format!("127.0.0.1::{port}")]);
