@@ -264,7 +264,7 @@ roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging
 roll secrets promote --from development --to staging [KEY…]
 roll secrets audit   [--key KEY]
-roll run [-p project] [-e production] [--path /] [--allow-unresolved] -- <command…>
+roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
@@ -273,6 +273,11 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] -- <comman
   `~/.config/roll/secrets.json` (never the repo), so `roll run -- npm start` needs no flags there
   (`--show`, `--clear`). Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
   project.
+- `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
+  SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
+  effective keys, versions, fingerprints and links that decrypts nothing, issues nothing and isn't
+  audited. A change that doesn't resolve keeps the running command. A live link's resource rotating
+  doesn't change the digest.
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
@@ -432,6 +437,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
+| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?}` | `Values` or `{sealed, context, problems, leases}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
@@ -551,9 +557,8 @@ the dashboard's Secrets surface. Ranked:
    lines contain a value of its repo's project's secrets gets a `secret_leak` blocker
    (`Code::blockers`), found by fingerprinting candidate tokens in the change's diff (O(change)),
    and the key's name, never the value, is in the message. In progress.
-3. **`roll run --watch`**: restart the command when its environment changes (Infisical has it).
-4. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+3. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-5. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-6. **One-time sharing**: a link that reveals a value once and expires (Infisical and Doppler have
+4. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+5. **One-time sharing**: a link that reveals a value once and expires (Infisical and Doppler have
    it), for handing a credential to someone outside roll.

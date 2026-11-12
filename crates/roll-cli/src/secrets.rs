@@ -295,6 +295,11 @@ pub struct Run {
     /// Replace variables already set in this shell (default: the shell's value wins).
     #[arg(long = "override")]
     pub override_env: bool,
+    /// Restart the command when the environment changes (checked every `--interval` seconds).
+    #[arg(long)]
+    pub watch: bool,
+    #[arg(long, default_value_t = 5, requires = "watch")]
+    pub interval: u64,
     /// The command and its arguments.
     #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -806,24 +811,35 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
     Ok(())
 }
 
-/// `roll run`: resolve, then exec the command with the values in its environment.
-pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
-    let at = r.at.resolve();
-    let project = project(api, at.project.as_deref()).await?;
-    let c = Client { project, api, at: at.clone() };
+/// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
+/// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
+async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<Vec<(String, String)>> {
     let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
-    let mut cmd = std::process::Command::new(&r.command[0]);
-    cmd.args(&r.command[1..]);
-    for (k, val) in v["values"].as_object().into_iter().flatten() {
-        if !r.override_env && std::env::var_os(k).is_some() {
-            continue;
-        }
-        cmd.env(k, val.as_str().unwrap_or_default());
+    Ok(v["values"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| r.override_env || std::env::var_os(k).is_none())
+        .map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string()))
+        .collect())
+}
+
+/// `roll run`: resolve, then exec the command with the values in its environment; with
+/// `--watch`, run it as a child and restart it when the environment's digest changes.
+pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
+    let at = r.at.resolve();
+    let project = project(api, at.project.as_deref()).await?;
+    let c = Client { project, api, at: at.clone() };
+    let env = run_env(&c, &at, &r).await?;
+    if r.watch {
+        return watch(&c, &at, &r, env).await;
     }
+    let mut cmd = std::process::Command::new(&r.command[0]);
+    cmd.args(&r.command[1..]).envs(env);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -835,4 +851,60 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
         let status = cmd.status().with_context(|| format!("running {}", r.command[0]))?;
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+/// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
+/// the environment changes. A change that doesn't resolve keeps the running command. Exits with
+/// the command's own code when it exits by itself.
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>) -> anyhow::Result<()> {
+    let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
+    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+    let every = std::time::Duration::from_secs(r.interval.max(1));
+    loop {
+        let mut child = tokio::process::Command::new(&r.command[0]).args(&r.command[1..]).envs(env.iter().cloned()).spawn().with_context(|| format!("running {}", r.command[0]))?;
+        loop {
+            tokio::select! {
+                status = child.wait() => std::process::exit(status?.code().unwrap_or(1)),
+                _ = tokio::signal::ctrl_c() => {
+                    stop(&mut child).await;
+                    std::process::exit(130);
+                }
+                _ = tokio::time::sleep(every) => {
+                    let now = match c.call(Method::GET, &digest_path, None).await {
+                        Ok(v) => v["digest"].clone(),
+                        Err(e) => {
+                            eprintln!("roll run: couldn't check {} ({e}); still running", at.env);
+                            continue;
+                        }
+                    };
+                    if now == last {
+                        continue;
+                    }
+                    last = now;
+                    match run_env(c, at, r).await {
+                        Ok(next) => {
+                            eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
+                            env = next;
+                            stop(&mut child).await;
+                            break;
+                        }
+                        Err(e) => eprintln!("roll run: {} changed, but {e}; keeping the running command", at.env),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// SIGTERM, and SIGKILL if it hasn't exited after 10 seconds.
+async fn stop(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: kill(2) on our own child's pid.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await.is_ok() {
+            return;
+        }
+    }
+    let _ = child.kill().await;
 }

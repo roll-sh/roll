@@ -45,6 +45,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
         .route(&format!("{E}/values"), get(values))
+        .route(&format!("{E}/digest"), get(digest))
         .route(&format!("{E}/resolve"), post(resolve))
         .route(&format!("{E}/changes"), get(changes).post(batch))
         .route(&format!("{E}/changes/{{seq}}"), get(change))
@@ -330,6 +331,11 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         }
     };
     Ok(secret_response(r))
+}
+
+async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
+    let d = blocking(s, move |s| s.digest(&project, &env, &path_of(&q), &c)).await?;
+    Ok(ok(json!({ "digest": d })))
 }
 
 #[derive(Deserialize)]

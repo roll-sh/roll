@@ -325,6 +325,27 @@ impl Secrets {
         Ok(Values { values, problems, leases })
     }
 
+    /// A digest of a folder's effective secrets (keys, where they come from, versions,
+    /// fingerprints, links): it changes when what `values` would return changes, except a live
+    /// link's resource rotating. Decrypts nothing, issues nothing, isn't audited: what
+    /// `roll run --watch` polls.
+    pub fn digest(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let path = names::path(path)?;
+        caller.need(Action::Read, &Scope::at(project, slug, &path))?;
+        self.project(project)?;
+        let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
+        let mut h = Sha256::new();
+        for e in &entries {
+            h.update(format!("{}\0{}\0{}\0{}\0{}\0{}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.fp, e.row.link.as_ref().map(json).unwrap_or_default()));
+        }
+        let have: Vec<String> = entries.iter().map(|e| e.row.key.clone()).collect();
+        for m in self.missing_required(project, &path, &have)? {
+            h.update(format!("required\0{}\n", m.key));
+        }
+        Ok(h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect())
+    }
+
     pub fn versions(&self, project: &str, slug: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Vec<Version>> {
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
