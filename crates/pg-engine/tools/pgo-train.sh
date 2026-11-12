@@ -122,7 +122,7 @@ stop; start
 # Bulk: COPY in and out, index builds, INSERT ... SELECT, UPDATE, DELETE, VACUUM, ANALYZE.
 if want bulk; then
   psql -d bench -c "ALTER DATABASE bench SET maintenance_work_mem = '256MB'" >/dev/null
-  b bulk --rows 400000 --reps 1
+  b bulk --rows 1000000 --reps 1
 fi
 # TPC-H at a small scale: the load (COPY, indexes, VACUUM ANALYZE), all 22 queries, parallel.
 if want tpch; then
@@ -132,10 +132,10 @@ fi
 # Catalog: DDL as a schema grows, psql's \d family and ORM introspection (catalog-tools),
 # psql's own queries.
 if want catalog; then
-  b scale --tables 1500 --schemas 20 --parts 100 --step 500 --reps 2
+  b scale --tables 1500 --schemas 20 --parts 100 --step 500 --reps 2 --keep 1
   b catalog-tools --tables 1500 --schemas 20 --reps 3
   for c in '\d' '\dt+' '\di' '\df' '\dn' '\l' '\du' '\d+ accounts' '\d events' '\d+ lineitem' '\dv' '\dT'; do
-    psql -d bench -c "$c" >/dev/null
+    psql -d bench -c "$c" >>"$WORK/out/meta.out" 2>&1 || log "psql $c failed"
   done
 fi
 # A slice of the golden SQL suite for breadth (every 25th file, each in a new database).
