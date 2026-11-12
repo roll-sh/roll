@@ -340,6 +340,8 @@ export interface PreviewEnvironment {
   /** The preview on the dashboard (its project's Previews tab). */
   dashboard_url: string | null;
   github: { comment: boolean; status: boolean; deployment: boolean };
+  /** The changeset the preview runs. */
+  head?: string;
 }
 
 export interface Change {
