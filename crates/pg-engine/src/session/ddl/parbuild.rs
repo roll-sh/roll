@@ -202,7 +202,7 @@ impl Plan<'_> {
             let mut part = Part::default();
             let mut i = 0usize;
             while let Some((dkey, bytes)) = chunk.next()? {
-                if i % 1024 == 0 {
+                if i.is_multiple_of(1024) {
                     if stop.load(Ordering::Relaxed) {
                         return Ok(g);
                     }

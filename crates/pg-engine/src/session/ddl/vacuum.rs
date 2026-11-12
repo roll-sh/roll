@@ -1713,7 +1713,7 @@ impl Ddl<'_, '_> {
             self.ctx.check()?;
             rows += 1;
             if let Some(old) = frozen {
-                let x = crate::exec::scan::row_xmin(&bytes)?;
+                let x = crate::exec::scan::row_xmin(bytes)?;
                 if x >= old {
                     oldest_xmin = oldest_xmin.min(x);
                 }
@@ -1730,17 +1730,17 @@ impl Ddl<'_, '_> {
             let sizing = modelled.is_none() && kept_live.is_none() && (estimated.is_none() || rows <= SIZED_SAMPLE);
             let stored = match sizing {
                 true => {
-                    crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask)
+                    crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &types, &virt_mask)
                 }
                 _ => None,
             };
             may_toast |= stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD);
             if let Some(floor) = toast_frozen {
-                let x = crate::exec::scan::row_xmin(&bytes)?;
+                let x = crate::exec::scan::row_xmin(bytes)?;
                 if x >= floor
                     && x < oldest_toast
                     && stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD)
-                    && !crate::exec::sizing::layout(t, &crate::exec::scan::decode_table_row(t, &bytes)?, self.ctx, &unpinned)
+                    && !crate::exec::sizing::layout(t, &crate::exec::scan::decode_table_row(t, bytes)?, self.ctx, &unpinned)
                         .1
                         .is_empty()
                 {
@@ -1749,9 +1749,9 @@ impl Ddl<'_, '_> {
             }
             let mut row = match &need {
                 Some(need) if !sizing || stored.is_some_and(|len| len <= crate::exec::sizing::TOAST_THRESHOLD) => {
-                    crate::exec::scan::decode_table_row_need(t, &bytes, need)?
+                    crate::exec::scan::decode_table_row_need(t, bytes, need)?
                 }
-                _ => crate::exec::scan::decode_table_row(t, &bytes)?,
+                _ => crate::exec::scan::decode_table_row(t, bytes)?,
             };
             // The row's heap tuple, packed (its TID: where it went), or with the heap's kept
             // measure, a TID as if its rows were spread evenly over its pages.
@@ -1801,7 +1801,7 @@ impl Ddl<'_, '_> {
                     continue;
                 };
                 if let Some(f) = each.as_mut() {
-                    f(&dkey, &vals, &row)?;
+                    f(dkey, &vals, &row)?;
                 }
                 ix.tuples += 1;
                 if let Some(own) = &mut ix.own {
