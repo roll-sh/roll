@@ -193,5 +193,6 @@ mod tests {
         assert_eq!(Product::of_route("/v1/healthz"), None);
         assert_eq!(Product::of_route("/kafka/v3/clusters"), Some(Product::Streams));
         assert_eq!(Product::of_route("/v1/info"), None);
+        assert_eq!(Product::of_route("/v1/workspace/projects/{id}"), None, "workspace projects are always on");
     }
 }
