@@ -27,6 +27,7 @@ mod redis;
 mod storage_events;
 mod streams;
 mod tasks;
+mod workspace;
 
 use products::{Product, Products};
 
@@ -437,6 +438,8 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
+    // Workspace projects: always on, behind the same operator token.
+    router = router.merge(roll_workspace::router(workspace::open(&args, &home)?));
     // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
     // products that are off answer before it. The gated router merges last so its fallback (401
     // without the token) stays the fallback.

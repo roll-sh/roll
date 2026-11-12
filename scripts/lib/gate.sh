@@ -7,7 +7,7 @@
 
 TARGET=${CARGO_TARGET_DIR:-target}
 PKGS=(-p agent-proto -p agent-host -p model-gateway
-      -p code-sql -p roll-cluster -p code-store -p code-git -p code-github -p code-index -p code-review -p code-chat -p code-control -p code-preview -p roll-fetch
+      -p code-sql -p roll-cluster -p code-store -p code-git -p code-github -p code-index -p code-review -p code-chat -p code-control -p code-preview -p roll-fetch -p roll-workspace
       -p roll-cli -p rolld)
 # rolld is linted by the other suites; linting it here would also lint every service it links.
 CLIPPY_PKGS=("${PKGS[@]:0:${#PKGS[@]}-2}")

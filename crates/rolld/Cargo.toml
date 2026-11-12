@@ -47,6 +47,7 @@ redis-server.workspace = true
 roll-edge.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 roll-auth.workspace = true
+roll-workspace.workspace = true
 s3-api.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true

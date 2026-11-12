@@ -233,7 +233,10 @@ impl StorageNode {
                 async move { node.front(Surface::Control, req).await }
             })
         };
-        Router::new().route("/v1/storage", h(self.clone())).route("/v1/storage/{*rest}", h(self.clone()))
+        // Nested, not a `{*rest}` route: a param the outer route matched stays in the request, and
+        // the control router's own `Path` extractors then see one too many (every
+        // `/v1/storage/buckets/{name}/…` answered 500). Axum leaves a nest's tail out.
+        Router::new().nest_service("/v1/storage", h(self.clone()))
     }
 
     /// `/internal/storage/{s3,api,control}`: requests other nodes forwarded to this one

@@ -34,9 +34,10 @@ Monorepo for roll, serverless infrastructure. Use pnpm for the web side (`apps/*
   - Body text is 13–14px in the dashboard.
 - Icons are `lucide-react` at 14–16px with a 1.5 stroke.
 - Spacing is generous. Panels are flat (`bg-panel`, 1px border, radius 8–12) with no drop shadows.
-- **Exception: the agents surface** (popup, `/dashboard/agents`, desktop Agents window). At the
-  user's request it has layered surfaces, soft shadows on floating things, glass popovers and
-  Linear-style weights. Its rules are in `docs/code/agents-design.md`. Everything else above still
+- **Exception: the agents surface and the dashboard's frame** (popup, `/dashboard/agents`, desktop
+  Agents window; the dashboard shell, its projects sidebar and the project canvas). At the user's
+  request they have layered surfaces, soft shadows on floating things, glass popovers and
+  Linear-style weights. Their rules are in `docs/code/agents-design.md`. Everything else above still
   applies there (accent, no orange, Horizon, motion).
 
 ## Motion and interactivity
@@ -271,6 +272,11 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the cluster (several nodes in one process: routing, takeover, joining, draining):
       `code-control/tests/cluster.rs`
     - two nodes racing on one control database: `code-control/tests/concurrency.rs`
+- **Projects (the dashboard's workspace):** `crates/roll-workspace` stores projects and where each
+  product resource sits on its canvas (docs/workspace.md); the resources themselves stay in their
+  products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
+  with every product's own API in `lib/workspace-resources.ts`, and holds it in `lib/workspace-store.ts`
+  for the sidebar, Home and `/dashboard/projects/$id`. A new resource kind needs its row in all three.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
