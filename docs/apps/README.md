@@ -462,8 +462,11 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    service variables live in secrets at `/services/<name>`; values are resolved only when a
    container is made (never for a dashboard read; `needs_deploy` from fingerprints); links become
    per-environment secrets links (a prefixed link points staging at production today);
-   `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
-   folder; dynamic credentials are refused or the container is remade on wake.
+   `…/variables/values` returns only service-owned values; the adapter in rolld
+   (`AppSecrets`, sketched by the secrets thread) resolves as `app:<service>` and fails a deploy
+   on unresolved problems; `dynamic` links are refused for services (a container woken days later
+   never resolves again); `needs_deploy` compares roll secrets' environment digest instead of
+   resolving values on every dashboard read.
 2. **A shell in it.** `roll apps ssh`: an interactive shell in a running instance (Engine API exec
    with a TTY over a WebSocket, routed to the owner), and jobs in the dashboard (run a
    command, its output, history).
