@@ -206,12 +206,15 @@ drop_es_indices() { # [port]
 
 rally_race() { # name port track params report
   mkdir -p "$RALLY_HOME/out"
-  # Rally's client refuses a server that isn't Elasticsearch (its product check); OpenSearch runs
-  # the same tracks with that one check skipped (a no-op for Elasticsearch and roll, which pass it).
+  # Rally refuses a server that isn't Elasticsearch (its client's product check) or reports a
+  # version below the track's minimum (OpenSearch says 3.9.0); OpenSearch runs the same tracks
+  # with both checks skipped (no-ops for Elasticsearch and roll, which pass them).
+  local esrally=/rally/venv/lib/python3.13/site-packages/esrally
   local unchecked='s/if self._verified_elasticsearch is not True:/if self._verified_elasticsearch is not True and False:/'
+  local unversioned='s/if specified_version < min_es_version:/if False:/'
   docker_ run --rm --network host --cpuset-cpus "$RALLY_CPUS" -m 4g --user "$(id -u):$(id -g)" \
     -v "$RALLY_HOME:/rally/.rally" --entrypoint sh elastic/rally:latest \
-    -c "sed -i '$unchecked' /rally/venv/lib/python3.13/site-packages/esrally/client/synchronous.py && exec /entrypoint.sh \"\$@\"" sh \
+    -c "sed -i '$unchecked' $esrally/client/synchronous.py && sed -i '$unversioned' $esrally/racecontrol.py && exec /entrypoint.sh \"\$@\"" sh \
     race "$TRACK_ARG" --pipeline=benchmark-only \
     --target-hosts="127.0.0.1:$2" --track-params="$4" --kill-running-processes \
     ${RALLY_TASKS:+--include-tasks="$RALLY_TASKS"} ${RALLY_EXCLUDE:+--exclude-tasks="$RALLY_EXCLUDE"} \
