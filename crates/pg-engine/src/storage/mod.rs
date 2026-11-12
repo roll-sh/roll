@@ -4502,4 +4502,58 @@ mod tests {
         drop(v);
         check_at(&s, &model, s.visible_ts(), "compacted");
     }
+
+    #[test]
+    fn compaction_outputs_end_where_tables_and_indexes_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { sync: false, background: false, ..StoreOptions::default() }).unwrap();
+        let mut model: Model = BTreeMap::new();
+        let key = |table: u32, index: u32, i: u32| [table.to_be_bytes(), index.to_be_bytes(), i.to_be_bytes()].concat();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            format!("{seed:016x}")
+        };
+        let mut write = |s: &Arc<Store>, keys: Vec<Vec<u8>>| {
+            let writes: Vec<_> = keys
+                .into_iter()
+                .map(|k| (k, Some(Bytes::from((0..5).map(|_| noise()).collect::<String>()))))
+                .collect();
+            let ts = s.commit(writes.clone(), |_| Ok(())).unwrap();
+            for (k, v) in writes {
+                model.entry(k).or_default().push((ts, v));
+            }
+        };
+        // The store's own keys (table 0), a big table's rows and index entries (table 5), and
+        // a small table's rows (table 6).
+        let mut keys: Vec<Vec<u8>> = (0..50).map(|i| key(0, 0x22, i)).collect();
+        keys.extend((0..8000).map(|i| key(5, 0, i)));
+        keys.extend((0..8000).map(|i| key(5, 1, i)));
+        keys.extend((0..10).map(|i| key(6, 0, i)));
+        write(&s, keys);
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        let parts = |f: &SstReader| (f.meta.first_key[..8].to_vec(), f.meta.last_key[..8].to_vec());
+        let l1: Vec<(Vec<u8>, Vec<u8>)> = s.view().l1.iter().map(|f| parts(f)).collect();
+        assert_eq!(
+            l1,
+            [(0, 0x22), (5, 0), (5, 1), (6, 0)]
+                .map(|(t, i)| (key(t, i, 0)[..8].to_vec(), key(t, i, 0)[..8].to_vec()))
+                .to_vec(),
+            "one file per table and index"
+        );
+        let before: Vec<u64> = s.view().l1.iter().map(|f| f.meta.id).collect();
+        // A write of the store's own keys rewrites their file only.
+        write(&s, vec![key(0, 0x22, 7)]);
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        let after: Vec<u64> = s.view().l1.iter().map(|f| f.meta.id).collect();
+        assert_ne!(after[0], before[0]);
+        assert_eq!(after[1..], before[1..], "{before:?} -> {after:?}");
+        check_at(&s, &model, s.visible_ts(), "compacted");
+    }
 }

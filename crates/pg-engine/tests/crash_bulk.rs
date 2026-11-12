@@ -139,3 +139,97 @@ fn kill_during_big_copy_and_update() {
         }
     }
 }
+
+const PART_ROWS: i64 = 5_000;
+
+/// The child of `kill_during_compactions_of_many_tables`: batch k adds `PART_ROWS` rows to
+/// table a and, in the same transaction, empties table b (TRUNCATE) and refills it with the
+/// batch's rows, then adds a row to c; the store compacts all along, its outputs ending where
+/// a table's or an index's keys do (`storage::part_ends`), and drops b's old files whole.
+/// After its COMMIT returns, `k` goes into the log (fsynced).
+#[test]
+fn parts_child() {
+    let Ok(dir) = std::env::var("CRASH_PARTS_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let eng = pg_engine::storage::with_txn_spill_bytes(256 << 10, || open(&dir.join("data")));
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS a (id int PRIMARY KEY, v text, k int)",
+        "CREATE INDEX IF NOT EXISTS a_k ON a (k)",
+        "CREATE TABLE IF NOT EXISTS b (id int PRIMARY KEY, k int)",
+        "CREATE TABLE IF NOT EXISTS c (k int PRIMARY KEY)",
+    ] {
+        s.query(sql).unwrap();
+    }
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("committed")).unwrap();
+    let first = match &s.query("SELECT coalesce(max(k), 0) FROM a").unwrap().last().unwrap().rows[0][0] {
+        pg_engine::types::Value::Int4(m) => *m as i64 + 1,
+        v => panic!("{v:?}"),
+    };
+    for k in first..first + 1000 {
+        let mut rows = String::new();
+        for id in k * PART_ROWS..(k + 1) * PART_ROWS {
+            rows.push_str(&format!("{id}\tvalue {id} of batch {k}\t{k}\n"));
+        }
+        s.query("BEGIN").unwrap();
+        s.query_copy("COPY a FROM STDIN", rows.as_bytes()).unwrap();
+        s.query("TRUNCATE b").unwrap();
+        s.query(&format!("INSERT INTO b SELECT id, k FROM a WHERE k = {k}")).unwrap();
+        s.query(&format!("INSERT INTO c VALUES ({k})")).unwrap();
+        s.query("COMMIT").unwrap();
+        writeln!(log, "{k}").unwrap();
+        log.sync_all().unwrap();
+    }
+}
+
+#[test]
+fn kill_during_compactions_of_many_tables() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = std::env::current_exe().unwrap();
+    for (round, ms) in [900u64, 2300, 3700].into_iter().enumerate() {
+        let mut child = std::process::Command::new(&exe)
+            .args(["--exact", "parts_child", "--nocapture", "--test-threads=1"])
+            .env("CRASH_PARTS_DIR", tmp.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let committed = |p: &Path| std::fs::read_to_string(p.join("committed")).unwrap_or_default();
+        while committed(tmp.path()).lines().count() < 2 * (round + 1) && start.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(ms));
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let done: Vec<i64> = committed(tmp.path()).lines().map(|l| l.parse().unwrap()).collect();
+        assert!(!done.is_empty(), "round {round}: nothing committed");
+        let max = *done.iter().max().unwrap();
+        let eng = open(&tmp.path().join("data"));
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        // The batch cut short is all there (its COMMIT returned before the log write) or not.
+        let last = match one(&mut s, "SELECT max(k) FROM c") {
+            x if x == format!("[[Int4({max})]]") => max,
+            x if x == format!("[[Int4({})]]", max + 1) => max + 1,
+            x => panic!("round {round}: c's last {x}, logged {max}"),
+        };
+        let n = last * PART_ROWS;
+        let sum: i64 = (1..=last).map(|k| k * PART_ROWS).sum();
+        let want = format!("[[Int8({n}), Int8({sum})]]");
+        let b = format!("[[Int8({PART_ROWS}), Int4({last}), Int4({last})]]");
+        assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM a"), want, "round {round}");
+        assert_eq!(one(&mut s, "SELECT count(*), min(k), max(k) FROM b"), b, "round {round}");
+        assert_eq!(one(&mut s, "SELECT count(*) FROM c"), format!("[[Int8({last})]]"), "round {round}");
+        // The indexes agree with the rows.
+        s.query("SET enable_seqscan = off").unwrap();
+        s.query("SET enable_bitmapscan = off").unwrap();
+        assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM a WHERE k >= 0"), want, "round {round}");
+        assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM a WHERE id >= 0"), want, "round {round}");
+        assert_eq!(one(&mut s, "SELECT count(*), min(k), max(k) FROM b WHERE id >= 0"), b, "round {round}");
+        drop(s);
+        eng.shutdown();
+    }
+}
