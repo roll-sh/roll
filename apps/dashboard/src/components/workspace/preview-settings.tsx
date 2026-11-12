@@ -130,28 +130,59 @@ function Form({
             {resources.map((r) => {
               const id = resourceKey(r);
               const rule = s.resources[id];
+              // Structure-only exists for these; for the rest a `schema` rule is refused.
+              const schema = r.kind === "nosql" || r.kind === "stream" || r.kind === "queue" || r.kind === "tasks";
+              const masks = Object.entries(s.masking?.[id] ?? {})
+                .map(([col, f]) => `${col} = ${f}`)
+                .join("\n");
               return (
-                <div key={id} className="flex items-center gap-2 border-t border-line px-2.5 py-1.5 first:border-t-0">
-                  <span className="min-w-0 flex-1 truncate">
-                    {names.get(id) ?? r.ref} <span className="text-[11px] text-subtle">{KIND_LABEL[r.kind]}</span>
-                  </span>
-                  <select
-                    aria-label={`${names.get(id) ?? r.ref} in previews`}
-                    value={rule ?? ""}
-                    onChange={(e) => {
-                      const v = e.target.value as ResourceRule | "";
-                      const map = { ...s.resources };
-                      if (v) map[id] = v;
-                      else delete map[id];
-                      set("resources", map);
-                    }}
-                    className={`${field} h-7 text-[12px]`}
-                  >
-                    <option value="">Default ({s.data === "branch" ? "branch" : "schema only"})</option>
-                    <option value="branch">Branch</option>
-                    <option value="schema">Schema only</option>
-                    <option value="skip">Skip</option>
-                  </select>
+                <div key={id} className="border-t border-line first:border-t-0">
+                  <div className="flex items-center gap-2 px-2.5 py-1.5">
+                    <span className="min-w-0 flex-1 truncate">
+                      {names.get(id) ?? r.ref} <span className="text-[11px] text-subtle">{KIND_LABEL[r.kind]}</span>
+                    </span>
+                    <select
+                      aria-label={`${names.get(id) ?? r.ref} in previews`}
+                      value={rule ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value as ResourceRule | "";
+                        const map = { ...s.resources };
+                        if (v) map[id] = v;
+                        else delete map[id];
+                        set("resources", map);
+                      }}
+                      className={`${field} h-7 text-[12px]`}
+                    >
+                      <option value="">Default ({s.data === "branch" ? "branch" : schema ? "schema only" : "skipped"})</option>
+                      <option value="branch">Branch</option>
+                      {schema && <option value="schema">Schema only</option>}
+                      <option value="skip">Skip</option>
+                    </select>
+                  </div>
+                  {r.kind === "nosql" && (
+                    <div className="px-2.5 pb-2">
+                      <textarea
+                        aria-label={`Masked columns of ${names.get(id) ?? r.ref}`}
+                        defaultValue={masks}
+                        placeholder="app.users.email = mask_default()"
+                        rows={Math.max(1, masks.split("\n").length)}
+                        onBlur={(e) => {
+                          const cols: Record<string, string> = {};
+                          for (const line of e.target.value.split("\n")) {
+                            const [col, ...f] = line.split("=");
+                            if (col?.trim() && f.join("=").trim()) cols[col.trim()] = f.join("=").trim();
+                          }
+                          const map = { ...(s.masking ?? {}) };
+                          if (Object.keys(cols).length) map[id] = cols;
+                          else delete map[id];
+                          set("masking", map);
+                        }}
+                        className={`${field} w-full resize-y py-1.5 font-mono text-[11px]`}
+                        spellCheck={false}
+                      />
+                      <p className="mt-1 text-[11px] text-subtle">Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched.</p>
+                    </div>
+                  )}
                 </div>
               );
             })}
