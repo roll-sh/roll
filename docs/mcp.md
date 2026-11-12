@@ -271,16 +271,22 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
-   and tools from their contracts; check them against the merged routes, and wire previews'
-   `Store::environment_of` (a Postgres branch's environment comes from its `{branch}`) and search's
-   `resolve_id` (async: through the runtime handle). Whichever of secrets and this lands second
-   makes `Secrets::caller` read `roll_auth::Grant` first.
-2. **Users' own tokens (with accounts, PR #18):** a signed-in user who isn't an admin makes
-   tokens for what they can reach (their roll code owner, agents and workspace projects), the same
-   model and evaluator; `integrate/mcp-accounts` has both branches merged and green.
-3. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
-   reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
-   branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
-4. **Finer resources:** storage buckets in another account (today a request naming an account
-   needs a rule for every storage resource), apps' deploys by id.
+1. **The official MCP SDK against a live daemon.** Run the TypeScript SDK's Streamable HTTP client
+   (and its OAuth provider) against rolld: initialize, list, call, an approval, a refresh.
+   Fix what a real client trips on, and keep the script.
+2. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
+   `examples/classify` on their routers, and wire their lookups in `rolld/src/access.rs`:
+   - previews' `Store::environment_of` (a Postgres branch's environment comes from `{branch}`);
+   - search's `resolve_id` (async: through the runtime handle);
+   - apps' services to their projects;
+   - secrets' `Grant` swap and `roll_auth::Grants` for its syncs.
+3. **Users' own tokens (with accounts, #18):** a signed-in user who isn't an admin makes tokens for
+   what they can reach (their roll code owner, agents and workspace projects), and their grants
+   act as them, not as the operator. `integrate/mcp-accounts` has both branches merged and green.
+4. **Per-token rate limits:** requests per minute per grant (Stripe and GitHub have them), with
+   `429` and `Retry-After`. Set in the builder.
+5. **Audit sinks:** stream the audit log to a webhook (signed, through roll code's delivery queue)
+   for a SIEM, and keep a longer retention for that.
+6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+   reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
+7. **Finer resources:** storage buckets in another account, apps' deploys by id.
