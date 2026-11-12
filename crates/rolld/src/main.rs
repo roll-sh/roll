@@ -369,11 +369,13 @@ async fn run() -> anyhow::Result<()> {
         true => Some(redis::Redis::start(&args, &storage, redis::Redis::clustered(&args)).await?),
         false => None,
     };
-    // roll code: same object storage; previews branch roll Postgres and Redis.
+    // roll code: same object storage; previews branch roll Postgres and Redis; checks and
+    // sandboxes read roll secrets once it's open (below).
+    let code_secrets = secrets::ForCode::default();
     let code = match on.on(Product::Code) {
         true => {
             let data = code_preview::RollData { postgres: postgres.as_ref().map(|p| p.control.clone()), redis: redis.as_ref().map(|r| r.control.clone()) };
-            Some(start_code(&args, &auth, &home, &storage, std::sync::Arc::new(data)).await?)
+            Some(start_code(&args, &auth, &home, &storage, std::sync::Arc::new(data), code_secrets.clone()).await?)
         }
         false => None,
     };
@@ -444,6 +446,7 @@ async fn run() -> anyhow::Result<()> {
     let ws = workspace::open(&args, &home)?;
     let products_api = secrets::Api::default();
     let secrets = secrets::open(&args, &home, ws.clone(), !auth.enforcing(), products_api.clone())?;
+    code_secrets.set(secrets.clone(), ws.clone());
     router = router.merge(roll_workspace::router(ws)).merge(roll_secrets::router(secrets));
     products_api.set(router.clone());
     // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
@@ -678,6 +681,7 @@ async fn start_code(
     home: &std::path::Path,
     storage: &StorageConfig,
     data: std::sync::Arc<dyn code_preview::DataBranches>,
+    secrets: secrets::ForCode,
 ) -> anyhow::Result<CodeNode> {
     // Blobs are fsynced before a write returns (a local directory; S3 always is durable).
     let objects = pg_storage::Objects::new_durable(storage)?;
@@ -752,7 +756,8 @@ async fn start_code(
         Some(data),
         isolation.clone(),
     );
-    let runner = code_preview::CheckRunner::new(isolation, args.code_runner_concurrency);
+    let runner = code_preview::CheckRunner::new(isolation, args.code_runner_concurrency).with_secrets(std::sync::Arc::new(secrets.clone()));
+    code.set_secret_env(std::sync::Arc::new(secrets));
     let checks = code_preview::start(&code, std::sync::Arc::new(runner), previews.clone());
     Ok(CodeNode { code, previews, _checks: checks })
 }

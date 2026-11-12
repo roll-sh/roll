@@ -274,8 +274,29 @@ secrets when the service starts. It uses one call:
   data `roll-secrets:<project>:<env>:<consumer>`), so the values are never in the clear outside the
   process that holds the private key. Without `seal_to` it is plain JSON over the internal API.
 
-The same call serves `code-preview` checks and previews, agent sandboxes and roll tasks: each passes
-its own consumer (`preview:<repo>`, `sandbox:<id>`, `task:<id>`), which audit shows.
+### Checks, sandboxes and previews
+
+- **Checks**: `secrets = "development"` (or `"staging:/api"`) on a `[checks.<name>]` table in
+  `roll.toml` gives the check that environment's values, under the table's own `env`. The repo must be
+  on a workspace project's canvas. A protected environment never reaches a check, and neither does
+  one with an unresolved reference (the check fails and says which). The consumer is
+  `check:<owner/repo>#<check>`. A check's output becomes its summary, so every secret value of 6
+  characters or more is replaced by `***` there. A value cut in half by the summary's length limit
+  can still show in part.
+- **Containers never carry values on a command line**: `docker create --env NAME` takes the value
+  from the docker CLI's own environment (owner-readable only), and names docker reads itself
+  (`DOCKER_*`, `PATH`, proxies…) go in a private env file. On Fargate the env travels in the run's
+  bundle, as before.
+- **Sandboxes**: `POST /v1/code/agents/{owner}/sandboxes` takes `secrets: {project, environment}`.
+  The project must have one of the owner's repos on its canvas. The values are sealed with the rest
+  of the sandbox's env until the backend has them. The consumer is `sandbox:<id>`.
+- **Previews**: roll previews (docs/previews.md) makes an ephemeral environment per change (see
+  "Ephemeral environments") and resolves it as `preview:<slug>`.
+- **roll tasks** runs functions in the user's own app, so it has no environment to inject. The app
+  itself uses `roll run` or the resolve call.
+
+`code_control::SecretEnv` is the one interface roll code uses, and `crates/rolld/src/secrets.rs`
+(`ForCode`) implements it.
 
 ## Governance
 

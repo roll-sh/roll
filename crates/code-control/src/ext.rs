@@ -1,6 +1,7 @@
 //! Extension points that run code: previews (branched Postgres and Redis plus a container) and
 //! the checks runner. rolld plugs implementations in with [`crate::Code::set_preview_backend`]
 //! and [`crate::Code::set_runner`]; without them previews and runner checks are unavailable.
+//! [`SecretEnv`] is roll secrets, for checks and sandboxes ([`crate::Code::set_secret_env`]).
 
 use crate::model::{Change, Check, Preview, RepoRow};
 use async_trait::async_trait;
@@ -29,4 +30,17 @@ pub trait Runner: Send + Sync {
     }
     /// Remove what a previous process of this node left running; called before checks resume.
     async fn remove_leftovers(&self) {}
+}
+
+/// An environment's secrets from roll secrets (docs/secrets.md, "Consumption"). Values come back
+/// resolved; the caller puts them in a process's environment and nowhere else (no records, no
+/// logs). Every read is in the project's audit log as `consumer`.
+#[async_trait]
+pub trait SecretEnv: Send + Sync {
+    /// `environment` (`env`, or `env:/folder`) of the workspace project that has repo
+    /// `owner/name` on its canvas. Refuses a protected environment and unresolved references.
+    async fn for_repo(&self, repo: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// The same for workspace project `project` (an id or a name), which must have one of
+    /// `owner`'s repos on its canvas (sandboxes).
+    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
 }

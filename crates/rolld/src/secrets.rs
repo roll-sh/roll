@@ -419,3 +419,67 @@ impl LinkProvider for Nosql {
         self.0.call(Method::POST, &format!("/v1/nosql/databases/{}/password", enc(r#ref)), Some(json!({}))).map(|_| true)
     }
 }
+
+/// roll secrets for roll code's checks and sandboxes (`code_control::SecretEnv`), set once the
+/// store is open (it opens after roll code starts).
+#[derive(Clone, Default)]
+pub struct ForCode(Arc<OnceLock<(Arc<Secrets>, Arc<roll_workspace::Workspace>)>>);
+
+impl ForCode {
+    pub fn set(&self, secrets: Arc<Secrets>, workspace: Arc<roll_workspace::Workspace>) {
+        let _ = self.0.set((secrets, workspace));
+    }
+
+    /// `environment` (`env` or `env:/folder`) of `project`, for `consumer`: never a protected
+    /// environment, never with an unresolved reference.
+    async fn resolve(&self, project: String, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (slug, path) = environment.split_once(':').unwrap_or((environment, "/"));
+        let (slug, path, consumer) = (slug.to_string(), path.to_string(), consumer.to_string());
+        tokio::task::spawn_blocking(move || {
+            let caller = roll_secrets::Caller::consumer(&consumer);
+            let env = secrets.environment(&project, &slug, &caller)?;
+            if env.protected {
+                anyhow::bail!("{slug} is protected: protected environments never go to checks or sandboxes");
+            }
+            let v = secrets.values(&project, &slug, &path, true, Some(&consumer), &caller)?;
+            if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+        })
+        .await?
+    }
+
+    fn workspace(&self) -> anyhow::Result<Arc<roll_workspace::Workspace>> {
+        Ok(self.0.get().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?.1.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl code_control::SecretEnv for ForCode {
+    async fn for_repo(&self, repo: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let ws = self.workspace()?;
+        let r = repo.to_string();
+        let project = tokio::task::spawn_blocking(move || ws.list())
+            .await??
+            .into_iter()
+            .find(|p| p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref == r))
+            .ok_or_else(|| anyhow::anyhow!("{repo} isn't on a workspace project's canvas, so it has no secrets"))?;
+        self.resolve(project.id, environment, consumer).await
+    }
+
+    async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let ws = self.workspace()?;
+        let prefix = format!("{owner}/");
+        let p = tokio::task::spawn_blocking(move || ws.list())
+            .await??
+            .into_iter()
+            .find(|p| p.id == project || p.name == project)
+            .ok_or_else(|| anyhow::anyhow!("no project {project}"))?;
+        if !p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref.starts_with(&prefix)) {
+            anyhow::bail!("project {} has none of {owner}'s repos on its canvas", p.name);
+        }
+        self.resolve(p.id, environment, consumer).await
+    }
+}

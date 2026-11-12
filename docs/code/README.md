@@ -99,6 +99,7 @@ Put `roll.toml` at the root of the repository to declare checks and a preview.
 image = "rust:1"
 run = "cargo test"
 timeout = 900          # seconds
+secrets = "development"  # roll secrets: this environment's values (or "staging:/api"); never a protected one
 
 [preview]
 image = "node:22"

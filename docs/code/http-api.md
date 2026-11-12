@@ -809,12 +809,15 @@ shows is a `machine` event. Times are milliseconds.
 ```
 GET    /v1/code/agents/{owner}/sandboxes → {sandboxes: [Sandbox] /* oldest first */, sizes: [Size] /* the first is the default */,
        max /* per owner */, backend: "agent37" | "docker" | null /* null: sandboxes are off */}
-POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: {NAME: "value"}}
+POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: {NAME: "value"},
+       secrets?: {project /* id or name */, environment /* "development" or "staging:/api" */}}
        → 201 {sandbox: Sandbox /* status "creating" */, machine: Machine}
        env is passed to the sandbox only (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY): sealed with ROLL_SECRET_KEY
        until the backend has it, then dropped; never returned. At most 32 names (uppercase, digits, _),
        values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
-       SHELL and IS_SANDBOX are reserved. 400 bad name, size or env; 422 at the owner's limit (deleting
+       SHELL and IS_SANDBOX are reserved. secrets adds a roll secrets environment's values under env (docs/secrets.md):
+       the project must have one of the owner's repos on its canvas, the environment can't be protected, and its
+       values follow env's rules. 400 bad name, size, env or secrets; 422 at the owner's limit (deleting
        ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
 POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running" (asleep ones too: a wake now);
        409 while it's being deleted

@@ -28,10 +28,14 @@ mod write;
 pub use access::{Action, Caller, Scope};
 pub use api::router;
 pub use crypto::{Keyring, Value};
-pub use envs::{EnvChange, Environment, NewEnvironment, Policy};
+pub use audit::{AuditEntry, AuditFilter};
+pub use envs::{EnvChange, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use links::{Link, LinkProvider, Links, Mode};
-pub use read::{Grid, Values};
-pub use write::{Batch, Op};
+pub use read::{Grid, Problem, Secret, Source, Values, Version};
+pub use requests::{Request, Review, Verdict};
+pub use sweep::{Lease, Swept};
+pub use tokens::{NewToken, Token};
+pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
 
 use code_sql::{Db, OptionalExtension, Target};
 use std::sync::Arc;
