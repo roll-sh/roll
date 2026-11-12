@@ -263,7 +263,7 @@ fn hash_join_limit_temp_accounting_matches_postgres() {
     assert_no_spill_files(dir.path());
     q(&mut s, "BEGIN").unwrap();
     s.parse_message("spill", "SELECT a.id FROM hj a JOIN hj b ON a.id = b.id LIMIT 1", &[]).unwrap();
-    s.bind_message("p", "spill", Vec::new(), &[], Vec::new()).unwrap();
+    s.bind_message("p", "spill", Vec::new(), &[], Vec::new(), false).unwrap();
     let (_, more) = s.execute_portal("p", 1).unwrap();
     assert!(more);
     let (_, more) = s.execute_portal("p", 0).unwrap();

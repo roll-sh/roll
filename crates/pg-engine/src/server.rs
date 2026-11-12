@@ -19,8 +19,63 @@ use tracing::{debug, warn};
 const SSL_REQUEST: i32 = 80877103;
 const GSSENC_REQUEST: i32 = 80877104;
 const CANCEL_REQUEST: i32 = 80877102;
-const PROTOCOL_3: i32 = 196608;
-const MAX_MESSAGE: usize = 1 << 30;
+/// PG_PROTOCOL_LATEST: 3.2, whose BackendKeyData carries a longer cancel key.
+const PROTOCOL_LATEST: i32 = (3 << 16) | 2;
+/// PQ_LARGE_MESSAGE_LIMIT (MaxAllocSize - 1) and PQ_SMALL_MESSAGE_LIMIT: the longest a
+/// message may say it is, by its type.
+const LARGE_MESSAGE: usize = 0x3fff_fffe;
+const SMALL_MESSAGE: usize = 10000;
+/// MAX_STARTUP_PACKET_LENGTH: the longest startup packet (after its length word).
+const MAX_STARTUP_PACKET: usize = 10000;
+
+/// SocketBackend: the frontend messages there are, and the longest each may be; None: not
+/// one (the connection has lost track of where messages begin).
+fn frontend_limit(t: u8) -> Option<usize> {
+    match t {
+        b'Q' | b'F' | b'B' | b'P' | b'd' => Some(LARGE_MESSAGE),
+        b'X' | b'C' | b'D' | b'E' | b'H' | b'S' | b'c' | b'f' => Some(SMALL_MESSAGE),
+        _ => None,
+    }
+}
+
+/// CopyGetData: the messages COPY FROM STDIN reads, and their limits.
+fn copy_in_limit(t: u8) -> Option<usize> {
+    match t {
+        b'd' => Some(LARGE_MESSAGE),
+        b'c' | b'f' | b'H' | b'S' => Some(SMALL_MESSAGE),
+        _ => None,
+    }
+}
+
+/// Any message type, as large as a message may be (a walsender's standby messages).
+fn any_limit(_: u8) -> Option<usize> {
+    Some(LARGE_MESSAGE)
+}
+
+/// `read_message_into` found a message type its reader doesn't take (the type; its length
+/// word unread).
+#[derive(Debug)]
+struct UnexpectedType(u8);
+
+impl std::fmt::Display for UnexpectedType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unexpected message type {}", self.0)
+    }
+}
+
+impl std::error::Error for UnexpectedType {}
+
+/// pq_getmessage's COMMERROR: a length word out of range, or the message cut short. Nothing
+/// goes to the client; the connection ends.
+fn invalid_length() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid message length")
+}
+
+/// The FATAL that ends a connection whose messages can't be told apart any more (an error
+/// while a message was half read: PostgresMain's error recovery).
+fn sync_lost() -> Error {
+    Error::new(code::PROTOCOL_VIOLATION, "terminating connection because protocol synchronization was lost").fatal()
+}
 /// A connection thread's stack. An unoptimized build's frames are many times a release
 /// build's (a PL/pgSQL recursion level takes ~250 kB of it), so it gets more, to recurse
 /// as deep as Postgres does at max_stack_depth's 2 MB (subxid-overflow's 100 levels with
@@ -360,6 +415,9 @@ struct Conn {
     exported: Option<crate::repl::walsender::Exported>,
     /// ErrorResponses sent so far.
     errors: u64,
+    /// A message was cut off where an error stopped reading it (COPY FROM STDIN's
+    /// unexpected message): once the error is out, the connection ends (`sync_lost`).
+    sync_lost: bool,
 }
 
 impl crate::repl::walsender::Wire for Conn {
@@ -389,7 +447,7 @@ impl crate::repl::walsender::Wire for Conn {
                 Err(e) => return Err(e),
             }
         }
-        self.read_message()?.map(Some).ok_or_else(eof)
+        self.read_message(any_limit)?.map(Some).ok_or_else(eof)
     }
 }
 
@@ -400,32 +458,22 @@ impl Conn {
         Ok(i32::from_be_bytes(b))
     }
 
-    fn read_body(&mut self, len: i32, header: usize) -> std::io::Result<Vec<u8>> {
-        let len = len as usize;
-        if len < header || len > MAX_MESSAGE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid message length",
-            ));
-        }
-        let mut body = vec![0u8; len - header];
-        self.rd.read_exact(&mut body)?;
-        Ok(body)
-    }
-
-    /// A regular message: (type, body).
-    fn read_message(&mut self) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+    /// A message of a type `limit` takes: (type, body).
+    fn read_message(&mut self, limit: impl Fn(u8) -> Option<usize>) -> std::io::Result<Option<(u8, Vec<u8>)>> {
         let mut body = Vec::new();
-        Ok(self.read_message_into(None, &mut body)?.map(|t| (t, body)))
+        Ok(self.read_message_into(None, &mut body, limit)?.map(|t| (t, body)))
     }
 
     /// `read_message`, its body read into `body` (the message loop's, its allocation reused
     /// from message to message), its first byte awaited no later than `deadline` (an idle
-    /// timeout: the read fails with `IdleTimeout`). The message's type.
+    /// timeout: the read fails with `IdleTimeout`). The message's type. A type `limit`
+    /// doesn't take fails with `UnexpectedType` before its length is read; a length past
+    /// the type's limit, or a message cut short, with `invalid_length`.
     fn read_message_into(
         &mut self,
         deadline: Option<std::time::Instant>,
         body: &mut Vec<u8>,
+        limit: impl Fn(u8) -> Option<usize>,
     ) -> std::io::Result<Option<u8>> {
         let mut t = [0u8; 1];
         self.rd.get_mut().deadline = deadline;
@@ -438,13 +486,16 @@ impl Conn {
         if first? == 0 {
             return Ok(None);
         }
-        let len = self.read_i32()? as usize;
-        if !(4..=MAX_MESSAGE).contains(&len) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid message length"));
+        let Some(max) = limit(t[0]) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, UnexpectedType(t[0])));
+        };
+        let len = self.read_i32().map_err(|_| invalid_length())? as isize;
+        if len < 4 || len as usize > max {
+            return Err(invalid_length());
         }
         body.clear();
-        body.resize(len - 4, 0);
-        self.rd.read_exact(body)?;
+        body.resize(len as usize - 4, 0);
+        self.rd.read_exact(body).map_err(|_| invalid_length())?;
         Ok(Some(t[0]))
     }
 
@@ -775,6 +826,14 @@ impl<'a> Body<'a> {
     fn u8(&mut self) -> Result<u8> {
         Ok(self.bytes(1)?[0])
     }
+
+    /// pq_getmsgend: nothing may be left of the message.
+    fn end(&self) -> Result<()> {
+        if self.pos != self.b.len() {
+            return Err(Body::bad());
+        }
+        Ok(())
+    }
 }
 
 // ── connection ──
@@ -840,6 +899,7 @@ fn handle(
         repl: None,
         exported: None,
         errors: 0,
+        sync_lost: false,
         log: crate::log::Conn::new(peer, stream.local_addr().ok(), false),
         started: crate::types::datetime::Clock::system().now,
         pre_session_log: None,
@@ -872,61 +932,10 @@ fn handle(
     }
     let _no_sink = NoSink;
 
-    // Startup: SSL / GSS negotiation and cancel requests come first.
-    let params = loop {
-        let len = c.read_i32()?;
-        let body = c.read_body(len, 4)?;
-        let mut b = Body::new(&body);
-        let code = b.i32().map_err(io_err)?;
-        match code {
-            SSL_REQUEST | GSSENC_REQUEST => {
-                (&*c.wr).write_all(b"N")?;
-            }
-            CANCEL_REQUEST => {
-                let (pid, secret) = (b.i32().map_err(io_err)?, b.i32().map_err(io_err)?);
-                engine.cancel_request(pid, secret);
-                return Ok(());
-            }
-            v if v >> 16 == 3 => {
-                let mut params = Vec::new();
-                loop {
-                    let k = b.cstr().map_err(io_err)?;
-                    if k.is_empty() {
-                        break;
-                    }
-                    params.push((k.to_string(), b.cstr().map_err(io_err)?.to_string()));
-                }
-                // Newer 3.x minors and _pq_ options: tell the client what we speak.
-                let unknown: Vec<&str> = params
-                    .iter()
-                    .map(|(k, _)| k.as_str())
-                    .filter(|k| k.starts_with("_pq_."))
-                    .collect();
-                if v != PROTOCOL_3 || !unknown.is_empty() {
-                    c.msg(b'v', |o| {
-                        o.put_i32(PROTOCOL_3);
-                        o.put_i32(unknown.len() as i32);
-                        for u in &unknown {
-                            cstr(o, u);
-                        }
-                    });
-                }
-                break params;
-            }
-            v => {
-                let e = Error::new(
-                    code::FEATURE_NOT_SUPPORTED,
-                    format!(
-                        "unsupported frontend protocol {}.{}: server supports 3.0 to 3.0",
-                        v >> 16,
-                        v & 0xffff
-                    ),
-                )
-                .fatal();
-                c.error(&e);
-                return c.flush();
-            }
-        }
+    // Startup: SSL / GSS negotiation and cancel requests come first (ProcessStartupPacket).
+    let (proto, params) = match startup_packet(&mut c, &engine)? {
+        Some(p) => p,
+        None => return c.flush(),
     };
 
     // log_connections' receipt (the files' and the command line's value: the session's
@@ -944,8 +953,9 @@ fn handle(
     if unix {
         c.log = crate::log::Conn::new(None, None, true);
     }
-    let (pid, secret, terminated) =
-        engine.register_backend(Some(stream.clone()), peer);
+    // (A 3.2 client's cancel key is MAX_CANCEL_KEY_LENGTH bytes long, an older one's 4.)
+    let key_len = if proto >= PROTOCOL_LATEST { 32 } else { 4 };
+    let (pid, key, terminated) = engine.register_backend(Some(stream.clone()), peer, key_len);
     let _guard = BackendGuard {
         engine: &engine,
         pid,
@@ -1053,6 +1063,9 @@ fn handle(
         return c.flush();
     }
     let auth_time = auth_start.elapsed();
+    // (ClientAuthentication's AuthenticationOk: what fails after it, a missing database or
+    // role, a bad setting, follows it.)
+    c.auth(0, &[]);
     let app = get("application_name").unwrap_or("").to_string();
     if lc.authentication {
         // (set_authn_id names the identity a password proved; trust proves none.)
@@ -1112,12 +1125,17 @@ fn handle(
     // (process_startup_options: the `options` switches first, then the other parameters,
     // which win over them.)
     let mut settings: Vec<(String, String)> = Vec::new();
+    let mut switch_error = None;
     crate::session::settings::take_name_notices();
     for (k, v) in &params {
-        if k == "options" {
-            settings.extend(parse_options(v));
+        if k == "options" && switch_error.is_none() {
+            let (set, err) = parse_options(v);
+            settings.extend(set);
+            switch_error = err;
         }
     }
+    // (A switch's error comes once the switches before it are set, before the parameters.)
+    let switches = settings.len();
     for (k, v) in &params {
         match k.as_str() {
             "user" | "database" | "replication" | "options" => {}
@@ -1125,7 +1143,13 @@ fn handle(
             k => settings.push((k.to_string(), v.clone())),
         }
     }
-    for (k, v) in settings {
+    for (i, (k, v)) in settings.into_iter().enumerate() {
+        if i == switches
+            && let Some(e) = switch_error.take()
+        {
+            c.error(&e.fatal());
+            return c.flush();
+        }
         // roll's proxy routes on `endpoint`; it means nothing here.
         if k == "endpoint" {
             continue;
@@ -1135,6 +1159,10 @@ fn handle(
             c.error(&e.fatal());
             return c.flush();
         }
+    }
+    if let Some(e) = switch_error {
+        c.error(&e.fatal());
+        return c.flush();
     }
     s.state.peer.set(peer);
     s.state.local_addr.set(c.wr.local_addr().ok().filter(|_| !unix));
@@ -1153,12 +1181,11 @@ fn handle(
         (&*wr).write_all(&b)
     }));
 
-    c.auth(0, &[]);
     for e in &startup_notices {
         c.notice(e);
     }
     {
-        let st = s.state.settings.borrow();
+        let mut st = s.state.settings.borrow_mut();
         for name in crate::session::settings::REPORTED {
             if st.exists(name) {
                 let v = st.show_value(name);
@@ -1166,12 +1193,13 @@ fn handle(
                     cstr(b, name);
                     cstr(b, &v);
                 });
+                st.reported.insert(name.to_string(), v);
             }
         }
     }
     c.msg(b'K', |b| {
         b.put_i32(pid);
-        b.put_i32(secret);
+        b.put_slice(key.bytes());
     });
     // Login event triggers, before the session is ready.
     if let Err(e) = s.run_login_triggers() {
@@ -1235,13 +1263,126 @@ fn handle(
     r
 }
 
-fn io_err(e: Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, e.message)
+/// ProcessStartupPacket: SSLRequest and GSSENCRequest are refused ('N': the engine has
+/// neither), a CancelRequest is passed on, and the startup packet's protocol version and
+/// parameters come back. None: the connection ends (an error, if any, buffered).
+#[allow(clippy::type_complexity)]
+fn startup_packet(c: &mut Conn, engine: &Engine) -> std::io::Result<Option<(i32, Vec<(String, String)>)>> {
+    let (mut ssl_done, mut gss_done) = (false, false);
+    loop {
+        // (A length word out of range, or a packet cut short: COMMERROR, nothing sent.)
+        let Ok(len) = c.read_i32() else { return Ok(None) };
+        let len = len as i64 - 4;
+        if len < 4 || len > MAX_STARTUP_PACKET as i64 {
+            return Ok(None);
+        }
+        let mut buf = vec![0u8; len as usize];
+        if c.rd.read_exact(&mut buf).is_err() {
+            return Ok(None);
+        }
+        let code = i32::from_be_bytes(buf[..4].try_into().unwrap());
+        let refused = match code {
+            CANCEL_REQUEST => {
+                // ProcessCancelRequestPacket: the pid, then a key of 1 to 256 bytes.
+                if buf.len() > 8 && buf.len() - 8 <= 256 {
+                    let pid = i32::from_be_bytes(buf[4..8].try_into().unwrap());
+                    engine.cancel_request(pid, &buf[8..]);
+                }
+                return Ok(None);
+            }
+            SSL_REQUEST if !ssl_done => {
+                ssl_done = true;
+                "received unencrypted data after SSL request"
+            }
+            GSSENC_REQUEST if !gss_done => {
+                gss_done = true;
+                "received unencrypted data after GSSAPI encryption request"
+            }
+            _ => "",
+        };
+        if !refused.is_empty() {
+            (&*c.wr).write_all(b"N")?;
+            // (What came with the request, before its answer, could have been injected.)
+            if !c.rd.buffer().is_empty() {
+                c.error(
+                    &Error::new(code::PROTOCOL_VIOLATION, refused)
+                        .detail("This could be either a client-software bug or evidence of an attempted man-in-the-middle attack.")
+                        .fatal(),
+                );
+                return Ok(None);
+            }
+            continue;
+        }
+        let (major, minor) = (code as u32 >> 16, code as u32 & 0xffff);
+        if major != 3 {
+            let m = format!("unsupported frontend protocol {major}.{minor}: server supports 3.0 to 3.2");
+            if major < 3 {
+                // (FrontendProtocol is the client's: the error in the old protocol's form,
+                // its text alone.)
+                let mut b = Vec::with_capacity(m.len() + 12);
+                b.extend_from_slice(b"EFATAL:  ");
+                b.extend_from_slice(m.as_bytes());
+                b.extend_from_slice(b"\n\0");
+                (&*c.wr).write_all(&b)?;
+            } else {
+                c.error(&Error::new(code::FEATURE_NOT_SUPPORTED, m).fatal());
+            }
+            return Ok(None);
+        }
+        // Name / value pairs up to an empty name, which must be the packet's last byte (the
+        // packet read as if a zero byte followed it).
+        let at = |i: usize| -> &[u8] {
+            let rest = &buf[i.min(buf.len())..];
+            &rest[..rest.iter().position(|&b| b == 0).unwrap_or(rest.len())]
+        };
+        let mut params = Vec::new();
+        let mut unknown = Vec::new();
+        let mut offset = 4;
+        while offset < buf.len() {
+            let name = at(offset);
+            if name.is_empty() {
+                break;
+            }
+            let valoffset = offset + name.len() + 1;
+            if valoffset >= buf.len() {
+                break;
+            }
+            let value = at(valoffset);
+            let name = String::from_utf8_lossy(name).into_owned();
+            if name.starts_with("_pq_.") {
+                unknown.push(name.clone());
+            }
+            params.push((name, String::from_utf8_lossy(value).into_owned()));
+            offset = valoffset + value.len() + 1;
+        }
+        if offset != buf.len() - 1 {
+            c.error(
+                &Error::new(code::PROTOCOL_VIOLATION, "invalid startup packet layout: expected terminator as last byte")
+                    .fatal(),
+            );
+            return Ok(None);
+        }
+        // A newer 3.x minor or _pq_ options: the newest minor spoken, and the options not
+        // known (none are).
+        if minor > 2 || !unknown.is_empty() {
+            c.msg(b'v', |o| {
+                o.put_i32(code.min(PROTOCOL_LATEST));
+                o.put_i32(unknown.len() as i32);
+                for u in &unknown {
+                    cstr(o, u);
+                }
+            });
+        }
+        return Ok(Some((code, params)));
+    }
 }
 
-/// `-c name=value` / `--name=value` pairs from the startup `options` parameter.
-fn parse_options(s: &str) -> Vec<(String, String)> {
-    // Backslash escapes a space inside a value.
+/// process_postgres_switches of the startup `options` parameter (split as pg_split_opts
+/// does: blanks between words, a backslash escaping the next character): the settings its
+/// switches make, in order (`-c name=value`, `--name=value`, `-S` work_mem, `-B`
+/// shared_buffers, ...), and the error that stops it, if any (the settings before it are
+/// made first).
+fn parse_options(s: &str) -> (Vec<(String, String)>, Option<Error>) {
     let mut words = Vec::new();
     let mut cur = String::new();
     let mut chars = s.chars();
@@ -1263,21 +1404,126 @@ fn parse_options(s: &str) -> Vec<(String, String)> {
     if !cur.is_empty() {
         words.push(cur);
     }
-    let mut out = Vec::new();
-    let mut it = words.into_iter();
-    while let Some(w) = it.next() {
-        let kv = if w == "-c" {
-            it.next()
-        } else {
-            w.strip_prefix("--")
-                .or_else(|| w.strip_prefix("-c"))
-                .map(str::to_string)
-        };
-        if let Some((k, v)) = kv.as_deref().and_then(|kv| kv.split_once('=')) {
-            out.push((k.replace('-', "_"), v.to_string()));
+    let syntax = |m: String| Error::new(code::SYNTAX_ERROR, m).routine("process_postgres_switches");
+    let invalid = |arg: &str| {
+        syntax(format!("invalid command-line argument for server process: {arg}"))
+            .hint("Try \"postgres --help\" for more information.")
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    let set = |out: &mut Vec<(String, String)>, k: &str, v: &str| out.push((k.to_string(), v.to_string()));
+    // (getopt's "B:bC:c:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:"; non-options are permuted to
+    // the end, where any one is an error.)
+    let mut extra: Option<String> = None;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].clone();
+        i += 1;
+        if w == "--" {
+            break;
+        }
+        if !w.starts_with('-') || w == "-" {
+            extra.get_or_insert(w);
+            continue;
+        }
+        let flags: Vec<char> = w[1..].chars().collect();
+        let mut j = 0;
+        while j < flags.len() {
+            let f = flags[j];
+            j += 1;
+            let takes = "BCcDdfhkNprStvW-".contains(f);
+            if !takes && !"bEeFijlnOPsT".contains(f) {
+                return (out, Some(invalid(&w)));
+            }
+            let arg = if takes {
+                let rest: String = flags[j..].iter().collect();
+                j = flags.len();
+                if !rest.is_empty() {
+                    rest
+                } else if i < words.len() {
+                    i += 1;
+                    words[i - 1].clone()
+                } else {
+                    return (out, Some(invalid(&w)));
+                }
+            } else {
+                String::new()
+            };
+            match f {
+                'B' => set(&mut out, "shared_buffers", &arg),
+                '-' | 'c' => {
+                    if f == '-'
+                        && (["check", "boot", "describe-config", "single"].contains(&arg.as_str()) || arg.starts_with("forkchild"))
+                    {
+                        return (out, Some(syntax(format!("--{arg} must be first argument"))));
+                    }
+                    match arg.split_once('=') {
+                        Some((k, v)) => set(&mut out, &k.replace('-', "_"), v),
+                        None if f == '-' => return (out, Some(syntax(format!("--{arg} requires a value")))),
+                        None => return (out, Some(syntax(format!("-c {arg} requires a value")))),
+                    }
+                }
+                'd' => {
+                    let n: i64 = {
+                        let t = arg.trim_start();
+                        let d: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+                        d.parse().unwrap_or(0)
+                    };
+                    if n > 0 {
+                        set(&mut out, "log_min_messages", &format!("debug{n}"));
+                    } else {
+                        set(&mut out, "log_min_messages", "notice");
+                    }
+                    for (lvl, k, v) in [(2, "log_statement", "all"), (3, "debug_print_parse", "true"), (4, "debug_print_plan", "true"), (5, "debug_print_rewritten", "true")] {
+                        if n >= lvl {
+                            set(&mut out, k, v);
+                        }
+                    }
+                }
+                'e' => set(&mut out, "datestyle", "euro"),
+                'F' => set(&mut out, "fsync", "false"),
+                'f' => {
+                    let k = match arg.chars().next() {
+                        Some('s') => "enable_seqscan",
+                        Some('i') => "enable_indexscan",
+                        Some('o') => "enable_indexonlyscan",
+                        Some('b') => "enable_bitmapscan",
+                        Some('t') => "enable_tidscan",
+                        Some('n') => "enable_nestloop",
+                        Some('m') => "enable_mergejoin",
+                        Some('h') => "enable_hashjoin",
+                        _ => return (out, Some(invalid(&w))),
+                    };
+                    set(&mut out, k, "false");
+                }
+                'h' => set(&mut out, "listen_addresses", &arg),
+                'i' => set(&mut out, "listen_addresses", "*"),
+                'k' => set(&mut out, "unix_socket_directories", &arg),
+                'l' => set(&mut out, "ssl", "true"),
+                'N' => set(&mut out, "max_connections", &arg),
+                'O' => set(&mut out, "allow_system_table_mods", "true"),
+                'P' => set(&mut out, "ignore_system_indexes", "true"),
+                'p' => set(&mut out, "port", &arg),
+                'S' => set(&mut out, "work_mem", &arg),
+                's' => set(&mut out, "log_statement_stats", "true"),
+                't' => {
+                    let k = match (arg.chars().next(), arg.chars().nth(1)) {
+                        (Some('p'), Some('a')) => "log_parser_stats",
+                        (Some('p'), Some('l')) => "log_planner_stats",
+                        (Some('e'), _) => "log_executor_stats",
+                        _ => return (out, Some(invalid(&w))),
+                    };
+                    set(&mut out, k, "true");
+                }
+                'W' => set(&mut out, "post_auth_delay", &arg),
+                // b, C, D, E, j, n, r, T, v: nothing from a client.
+                _ => {}
+            }
         }
     }
-    out
+    if let Some(w) = extra.or_else(|| words.get(i).cloned()) {
+        return (out, Some(invalid(&w)));
+    }
+    (out, None)
 }
 
 /// check_hba: the method pg_hba.conf's first matching rule names, with the rule's line
@@ -1505,7 +1751,7 @@ fn check_role_login(engine: &Engine, user: &str, database: &str) -> Result<()> {
 }
 
 fn expect_password_message(c: &mut Conn) -> Result<Vec<u8>> {
-    match c.read_message()? {
+    match c.read_message(any_limit)? {
         Some((b'p', body)) => Ok(body),
         Some((t, _)) => Err(Error::new(
             code::PROTOCOL_VIOLATION,
@@ -1636,11 +1882,17 @@ fn message_loop(
         if raw.capacity() > 8192 {
             raw = Vec::new();
         }
-        let msg = match c.read_message_into(idle.as_ref().map(|i| i.0), &mut raw) {
+        let msg = match c.read_message_into(idle.as_ref().map(|i| i.0), &mut raw, frontend_limit) {
             Ok(m) => m,
             Err(e) if e.get_ref().is_some_and(|e| e.is::<IdleTimeout>()) => {
                 // The timeout's FATAL, then the session ends (its transaction rolls back).
                 c.error(&idle.unwrap().1);
+                return c.flush();
+            }
+            Err(e) if let Some(&UnexpectedType(t)) = e.get_ref().and_then(|e| e.downcast_ref()) => {
+                // SocketBackend: garbage where a message should start, in any state (before
+                // its length word is read).
+                c.error(&Error::new(code::PROTOCOL_VIOLATION, format!("invalid frontend message type {t}")).fatal());
                 return c.flush();
             }
             Err(e) => return Err(e),
@@ -1687,10 +1939,13 @@ fn message_loop(
         };
         let r: Result<()> = match t {
             b'Q' => {
-                let sql = match Body::new(body).cstr() {
+                let mut b = Body::new(body);
+                let sql = match b.cstr().and_then(|q| b.end().map(|()| q)) {
                     Ok(q) => q.to_string(),
                     Err(e) => {
+                        s.on_error();
                         c.error(&e);
+                        send_changed(c, s);
                         ready_for_query(c, s)?;
                         continue;
                     }
@@ -1727,10 +1982,15 @@ fn message_loop(
                 statement_done_activity(&act, s);
                 c.log_sent(Some(s), pid, Some(&sql));
                 s.finish_xact_command();
+                // (COPY FROM STDIN met a message it can't skip.)
+                if c.sync_lost {
+                    c.error(&sync_lost());
+                }
                 // A FATAL error (the session terminating itself) ends the session.
                 if c.fatal {
                     return c.flush();
                 }
+                send_changed(c, s);
                 ready_for_query(c, s)?;
                 continue;
             }
@@ -1758,7 +2018,12 @@ fn message_loop(
             b'C' => guard(c, s, |c, s| close_msg(c, s, body)),
             b'S' => {
                 skipping = false;
-                if let Err(e) = guard(c, s, |_, s| s.sync()) {
+                if !body.is_empty() {
+                    // (pq_getmsgend: the Sync isn't done; the error ends the transaction.)
+                    s.on_error();
+                    let _ = s.sync();
+                    c.error(&Body::bad());
+                } else if let Err(e) = guard(c, s, |_, s| s.sync()) {
                     send_notices(c, s);
                     c.error(&e);
                 }
@@ -1769,10 +2034,12 @@ fn message_loop(
                 ready_for_query(c, s)?;
                 continue;
             }
-            b'H' => {
+            b'H' if body.is_empty() => {
                 c.flush()?;
                 continue;
             }
+            // (Flush's pq_getmsgend: an extended-query error, skipped to the Sync.)
+            b'H' => Err(Body::bad()),
             b'X' => return Ok(()),
             // Copy messages outside COPY are ignored, as Postgres does.
             b'd' | b'c' | b'f' => continue,
@@ -1784,6 +2051,7 @@ fn message_loop(
                     c.error(&e);
                 }
                 statement_done_activity(&act, s);
+                send_changed(c, s);
                 ready_for_query(c, s)?;
                 continue;
             }
@@ -1804,6 +2072,9 @@ fn message_loop(
             send_notices(c, s);
             c.error(&e);
             skipping = true;
+            if c.sync_lost {
+                c.error(&sync_lost());
+            }
             // Like elog's send_message_to_frontend, an error goes out at once (a pipelining
             // client may be waiting for it without having sent Sync or Flush).
             c.flush()?;
@@ -1898,6 +2169,8 @@ fn send_notices(c: &mut Conn, s: &mut Session) {
     }
 }
 
+/// ReportChangedGUCOptions, just before ReadyForQuery: the reported parameters whose value
+/// changed (and differs from what the client was last told).
 fn send_changed(c: &mut Conn, s: &mut Session) {
     for (k, v) in s.take_changed_settings() {
         c.parameter_status(&k, &v);
@@ -2349,10 +2622,66 @@ impl crate::session::RowSink for WireSink {
 
 /// Run `f` (a statement) with its rows streaming to the client (`WireSink`).
 fn streamed<T>(c: &mut Conn, s: &mut Session, formats: &[i16], describe: bool, f: impl FnOnce(&mut Session) -> T) -> T {
-    s.row_sink = Some(Box::new(WireSink { wr: c.wr.clone(), formats: formats.to_vec(), describe }));
+    streamed_into(c, s, Box::new(WireSink { wr: c.wr.clone(), formats: formats.to_vec(), describe }), f)
+}
+
+/// `streamed`, the rows into `sink`.
+fn streamed_into<T>(
+    c: &mut Conn,
+    s: &mut Session,
+    sink: Box<dyn crate::session::RowSink>,
+    f: impl FnOnce(&mut Session) -> T,
+) -> T {
+    s.row_sink = Some(sink);
     let r = c.unflushed(|| f(s));
     s.row_sink = None;
     r
+}
+
+/// printtup_prepare_info's error for a result format code that's neither text nor binary.
+fn unsupported_format(f: i16) -> Error {
+    Error::new(code::INVALID_PARAMETER_VALUE, format!("unsupported format code: {f}")).routine("printtup_prepare_info")
+}
+
+/// The rows of a portal Bound with a result format code that's neither text nor binary:
+/// the first row that has columns fails (`unsupported_format`), before any of it goes out.
+/// A statement that sends no rows (or COPY's data) runs as it would.
+struct BadFormat(WireSink, i16);
+
+impl crate::session::RowSink for BadFormat {
+    fn begin(&mut self, cols: &[OutCol]) -> Result<()> {
+        self.0.begin(cols)
+    }
+
+    fn row(&mut self, row: crate::exec::Row, cols: &[OutCol], fmt: &FormatCtx) -> Result<()> {
+        if row.is_empty() {
+            return self.0.row(row, cols, fmt);
+        }
+        Err(unsupported_format(self.1))
+    }
+
+    fn row_stored(&mut self, data: &[u8], picked: &[u32], cols: &[OutCol]) -> Result<bool> {
+        if picked.is_empty() {
+            return self.0.row_stored(data, picked, cols);
+        }
+        Err(unsupported_format(self.1))
+    }
+
+    fn takes_copy(&self) -> bool {
+        self.0.takes_copy()
+    }
+
+    fn copy_begin(&mut self, binary: bool, ncols: usize) -> Result<()> {
+        self.0.copy_begin(binary, ncols)
+    }
+
+    fn copy_data(&mut self, data: &[u8]) -> Result<()> {
+        self.0.copy_data(data)
+    }
+
+    fn copy_end(&mut self) -> Result<()> {
+        self.0.copy_end()
+    }
 }
 
 fn command_complete(c: &mut Conn, tag: &str) {
@@ -2436,7 +2765,6 @@ fn simple_batch(
         send_notices(c, s);
         // (The rows a SELECT made before failing went out before the error.)
         let r = out.and_then(|o| outcome(c, s, o, &[]));
-        send_changed(c, s);
         if let Err(e) = r {
             let _ = s.end_batch();
             c.error(&e.in_chars(sql));
@@ -2510,25 +2838,36 @@ fn outcome(c: &mut Conn, s: &mut Session, o: Outcome, formats: &[i16]) -> Result
             // The data is read as the insert takes it (CopyFrom reads lines as the client
             // sends them): a bad line fails the COPY while the client is still sending, and
             // only a batch of rows is held at a time.
+            // (CopyGetData: a message of another type, or one whose length is out of range,
+            // fails the COPY in the middle of reading it: the connection can't go on.)
+            let lost = std::cell::Cell::new(false);
             let mut read = || -> Result<Option<Vec<u8>>> {
                 loop {
-                    match c.read_message()? {
+                    let m = c.read_message(copy_in_limit).map_err(|e| {
+                        lost.set(true);
+                        match e.get_ref().and_then(|e| e.downcast_ref::<UnexpectedType>()) {
+                            Some(&UnexpectedType(t)) => Error::new(
+                                code::PROTOCOL_VIOLATION,
+                                format!("unexpected message type 0x{t:02X} during COPY from stdin"),
+                            ),
+                            None => Error::new(
+                                code::CONNECTION_FAILURE,
+                                "unexpected EOF on client connection with an open transaction",
+                            )
+                            .routine("CopyGetData"),
+                        }
+                    })?;
+                    match m {
                         Some((b'd', body)) => return Ok(Some(body)),
                         Some((b'c', _)) => return Ok(None),
                         Some((b'f', body)) => {
-                            let msg = Body::new(&body).cstr().unwrap_or("").to_string();
+                            let msg = Body::new(&body).cstr()?.to_string();
                             return Err(Error::new(
                                 code::QUERY_CANCELED,
                                 format!("COPY from stdin failed: {msg}"),
                             ));
                         }
-                        Some((b'H' | b'S', _)) => {}
-                        Some((t, _)) => {
-                            return Err(Error::new(
-                                code::PROTOCOL_VIOLATION,
-                                format!("unexpected message type 0x{t:02X} during COPY from stdin"),
-                            ));
-                        }
+                        Some(_) => {}
                         None => {
                             return Err(Error::new(
                                 code::CONNECTION_EXCEPTION,
@@ -2539,6 +2878,7 @@ fn outcome(c: &mut Conn, s: &mut Session, o: Outcome, formats: &[i16]) -> Result
                 }
             };
             let r = s.copy_in_stream(cin, &mut read);
+            c.sync_lost |= lost.get();
             send_notices(c, s);
             command_complete(c, &r?.tag);
             Ok(())
@@ -2555,6 +2895,7 @@ fn parse_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     for _ in 0..n {
         oids.push(b.i32()? as u32);
     }
+    b.end()?;
     if name.is_empty() {
         s.close_statement("");
     }
@@ -2597,7 +2938,8 @@ fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         result_formats.push(b.i16()?);
     }
     let start = std::time::Instant::now();
-    s.bind_message(&portal, &stmt, params, &formats, result_formats)?;
+    // (What's left over fails the Bind after its parameters are read: `trailing`.)
+    s.bind_message(&portal, &stmt, params, &formats, result_formats, b.end().is_err())?;
     // exec_bind_message's duration line (with the parameters, as errdetail_params).
     if let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), false) {
         if with_stmt && let Some((what, detail, p)) = s.portal_log(&portal) {
@@ -2624,6 +2966,7 @@ fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let mut b = Body::new(body);
     let kind = b.u8()?;
     let name = b.cstr()?.to_string();
+    b.end()?;
     match kind {
         b'S' => {
             let Some(p) = s.prepared.get(&name).cloned() else {
@@ -2675,10 +3018,11 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let mut b = Body::new(body);
     let portal = b.cstr()?.to_string();
     let max_rows = b.i32()?.max(0) as usize;
+    b.end()?;
     // (The statement held, for its text: not a copy of it per Execute.)
-    let (formats, stmt, empty) = match s.portals.get(&portal) {
-        Some(p) => (p.result_formats.clone(), Some(p.stmt.clone()), p.stmt.stmt.is_none()),
-        None => (Vec::new(), None, false),
+    let (formats, stmt, empty, bad_format) = match s.portals.get(&portal) {
+        Some(p) => (p.result_formats.clone(), Some(p.stmt.clone()), p.stmt.stmt.is_none(), p.bad_format),
+        None => (Vec::new(), None, false, None),
     };
     let sql = stmt.as_ref().map_or("", |p| p.sql.as_str());
     if empty {
@@ -2695,7 +3039,13 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         s.log_message(&format!("execute {what}: {sql}"), detail.as_deref());
         send_notices(c, s);
     }
-    let r = streamed(c, s, &formats, false, |s| s.execute_portal(&portal, max_rows));
+    let r = match bad_format {
+        None => streamed(c, s, &formats, false, |s| s.execute_portal(&portal, max_rows)),
+        Some(f) => {
+            let sink = BadFormat(WireSink { wr: c.wr.clone(), formats: formats.clone(), describe: false }, f);
+            streamed_into(c, s, Box::new(sink), |s| s.execute_portal(&portal, max_rows))
+        }
+    };
     if r.is_ok() {
         s.note_executed();
         if let Some((what, detail, _)) = &info
@@ -2710,6 +3060,11 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     }
     send_notices(c, s);
     let (o, more) = r.map_err(|e| e.in_chars(sql))?;
+    if let (Some(f), Outcome::Done(r)) = (bad_format, &o)
+        && r.rows.iter().any(|row| !row.is_empty())
+    {
+        return Err(unsupported_format(f));
+    }
     match o {
         Outcome::Done(r) if more => {
             data_rows(c, s, &r, &formats)?;
@@ -2722,7 +3077,6 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         }
         o => outcome(c, s, o, &formats)?,
     }
-    send_changed(c, s);
     Ok(())
 }
 
@@ -2778,6 +3132,7 @@ fn close_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let mut b = Body::new(body);
     let kind = b.u8()?;
     let name = b.cstr()?.to_string();
+    b.end()?;
     match kind {
         b'S' => s.close_statement(&name),
         b'P' => s.close_portal(&name)?,
@@ -2868,7 +3223,8 @@ mod tests {
         assert_eq!(
             parse_options(
                 "-c search_path=app,public --statement-timeout=5s -cwork_mem=4MB -c a=b\\ c"
-            ),
+            )
+            .0,
             vec![
                 ("search_path".into(), "app,public".into()),
                 ("statement_timeout".into(), "5s".into()),
@@ -2876,5 +3232,12 @@ mod tests {
                 ("a".into(), "b c".into()),
             ]
         );
+        // Switches, and what stops them (process_postgres_switches).
+        let (set, e) = parse_options("-S 2000 -e -fs -q");
+        let set: Vec<String> = set.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+        assert_eq!(set, ["work_mem=2000", "datestyle=euro", "enable_seqscan=false"]);
+        assert_eq!(e.unwrap().message, "invalid command-line argument for server process: -q");
+        assert_eq!(parse_options("-c work_mem").1.unwrap().message, "-c work_mem requires a value");
+        assert_eq!(parse_options("x -S 1").1.unwrap().message, "invalid command-line argument for server process: x");
     }
 }

@@ -308,7 +308,7 @@ impl Launcher {
             return;
         }
         work.sort_by_key(|w| w.rel);
-        let (pid, _, _) = e.register_backend(None, None);
+        let (pid, _, _) = e.register_backend(None, None, 0);
         e.set_activity(pid, |a| a.backend_type = Some("autovacuum worker"));
         e.assign_proc(pid, crate::txn::procs::ProcKind::Autovacuum);
         let mut sess = match e.connect(pid, &dbname, &e.bootstrap_superuser(), "") {

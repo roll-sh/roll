@@ -12,6 +12,9 @@ use tokio_postgres::{AsyncMessage, Client, NoTls, SimpleQueryMessage};
 #[path = "common/raw.rs"]
 mod raw;
 
+#[path = "common/protocol.rs"]
+mod protocol;
+
 struct Server {
     engine: Arc<Engine>,
     addr: String,
@@ -332,11 +335,11 @@ fn extended_protocol_types() {
 #[test]
 fn text_parameters_of_reg_types() {
     let s = server(AuthMethod::ScramSha256);
-    let (pid, _, _) = s.engine.register_backend(None, None);
+    let (pid, _, _) = s.engine.register_backend(None, None, 0);
     let mut c = s.engine.connect(pid, "postgres", "postgres", "t").unwrap();
     let relkind = |c: &mut pg_engine::session::Session, name: &str| -> Result<String, String> {
         c.parse_message("", "SELECT relkind FROM pg_catalog.pg_class WHERE oid = $1::pg_catalog.regclass", &[0])
-            .and_then(|_| c.bind_message("", "", vec![Some(name.as_bytes().to_vec())], &[], Vec::new()))
+            .and_then(|_| c.bind_message("", "", vec![Some(name.as_bytes().to_vec())], &[], Vec::new(), false))
             .and_then(|_| c.execute_portal("", 0))
             .map(|(o, _)| match o {
                 pg_engine::session::Outcome::Done(r) => format!("{:?}", r.rows),
@@ -4251,4 +4254,212 @@ fn protocol_error_locations() {
     c.execute("k", 0);
     assert_eq!(err(c.sync_messages()), "25P02 exec_execute_message postgres.c:2250");
     s.engine.shutdown();
+}
+
+/// Raw-protocol cases with PostgreSQL 18.6's replies (`common/protocol.rs`): result format
+/// codes checked at the first row, COPY's lost synchronization, duplicate portals,
+/// trailing bytes, startup packet layout, unknown parameter type oids, protocol 3.2 and its
+/// cancel key, message types and lengths, SSL / GSS requests.
+#[test]
+fn protocol_cases() {
+    use protocol::*;
+    type Case = (&'static str, Box<dyn Fn(&str) -> String>);
+    fn c(name: &'static str, f: impl Fn(&str) -> String + 'static) -> Case {
+        (name, Box::new(f))
+    }
+    const RF7: &[i16] = &[7];
+    const NONE: &[Option<&[u8]>] = &[];
+    const ONE: &[Option<&[u8]>] = &[Some(b"1".as_slice())];
+    let cases: Vec<Case> = vec![
+        // Result format codes: printtup_prepare_info, at the first row sent.
+        c("rf7_exec", |a| ext(a, &[], &[parse("", "select 1", &[]), bind("", "", &[], NONE, RF7), execute("", 0)])),
+        c("rf7_norows", |a| ext(a, &[], &[parse("", "select 1 where false", &[]), bind("", "", &[], NONE, RF7), execute("", 0)])),
+        c("rf7_describe", |a| ext(a, &[], &[parse("", "select 1", &[]), bind("", "", &[], NONE, RF7), describe(b'P', ""), execute("", 0)])),
+        c("rf7_dml", |a| ext(a, &["create temp table rt(a int)"], &[parse("", "insert into rt values (1)", &[]), bind("", "", &[], NONE, RF7), execute("", 0)])),
+        c("rf7_returning_txn", |a| session(a, &["create temp table rt(a int)", "begin"], &[
+            [parse("", "insert into rt values (1) returning a", &[]), bind("", "", &[], NONE, RF7), execute("", 0), sync()].concat(),
+            query("rollback; select count(*) from rt"),
+        ])),
+        c("rf_mixed", |a| ext(a, &[], &[parse("", "select 1, 2", &[]), bind("", "", &[], NONE, &[1, 7]), execute("", 0)])),
+        c("rf_neg", |a| ext(a, &[], &[parse("", "select 1", &[]), bind("", "", &[], NONE, &[-1]), execute("", 0)])),
+        c("rf7_maxrows", |a| ext(a, &[], &[parse("", "select generate_series(1, 3)", &[]), bind("", "", &[], NONE, RF7), execute("", 1)])),
+        c("rf7_show", |a| ext(a, &[], &[parse("", "show work_mem", &[]), bind("", "", &[], NONE, RF7), execute("", 0)])),
+        c("rf7_named_again", |a| session(a, &["begin"], &[
+            [parse("s", "select generate_series(1, 3)", &[]), bind("p", "s", &[], NONE, RF7), describe(b'P', "p"), sync()].concat(),
+            [execute("p", 1), sync()].concat(),
+        ])),
+        c("rf7_fetch_none", |a| session(a, &["begin", "declare c cursor for select 1 where false"], &[
+            [parse("", "fetch c", &[]), bind("", "", &[], NONE, RF7), execute("", 0), sync()].concat(),
+        ])),
+        c("rf7_copyout", |a| ext(a, &[], &[parse("", "copy (select 1) to stdout", &[]), bind("", "", &[], NONE, RF7), execute("", 0)])),
+        // COPY FROM STDIN: a message it doesn't take, or a length out of range, ends the
+        // connection after the error.
+        c("copy_bad_parse", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), parse("", "select 1", &[])])),
+        c("copy_bad_unknown", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), msg(b'y', b"")])),
+        c("copy_bad_terminate", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), msg(b'X', b"")])),
+        c("copy_badlen", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), rawlen(b'd', 2, b"")])),
+        c("copy_done_long", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), msg(b'c', &[b'x'; 10000])])),
+        c("copy_done_trailing", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), msg(b'c', b"x")])),
+        c("copy_fail_nostr", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), msg(b'f', b"boom")])),
+        c("copy_flush_sync", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), [flush(), sync(), msg(b'd', b"1\n"), msg(b'c', b"")].concat()])),
+        c("copy_ext_bad", |a| session(a, &["create temp table cp(a int)"], &[
+            [parse("", "copy cp from stdin", &[]), bind("", "", &[], NONE, &[]), execute("", 0), sync()].concat(),
+            parse("", "select 1", &[]),
+        ])),
+        // Duplicate portals (CreatePortal), and DECLARE over a Bind's portal.
+        c("bind_dup_portal", |a| session(a, &["begin"], &[[parse("s", "select 1", &[]), bind("p", "s", &[], NONE, &[]), bind("p", "s", &[], NONE, &[]), sync()].concat()])),
+        c("bind_dup_implicit", |a| ext(a, &[], &[parse("s", "select 1", &[]), bind("p", "s", &[], NONE, &[]), bind("p", "s", &[], NONE, &[])])),
+        c("bind_dup_cursor", |a| session(a, &["begin", "declare c cursor for select 1"], &[[parse("s", "select 1", &[]), bind("c", "s", &[], NONE, &[]), sync()].concat()])),
+        c("bind_dup_badvalue", |a| session(a, &["begin"], &[[
+            parse("s", "select $1::int", &[]), bind("p", "s", &[], ONE, &[]), bind("p", "s", &[], &[Some(b"x".as_slice())], &[]), sync(),
+        ].concat()])),
+        c("bind_dup_unnamed", |a| ext(a, &[], &[parse("s", "select 1", &[]), bind("", "s", &[], NONE, &[]), bind("", "s", &[], NONE, &[]), execute("", 0)])),
+        c("bind_dup_after_close", |a| session(a, &["begin"], &[[
+            parse("s", "select 1", &[]), bind("p", "s", &[], NONE, &[]), close(b'P', "p"), bind("p", "s", &[], NONE, &[]), execute("p", 0), sync(),
+        ].concat()])),
+        c("declare_after_bind", |a| session(a, &["begin"], &[[parse("s", "select 1", &[]), bind("c", "s", &[], NONE, &[]), sync()].concat(), query("declare c cursor for select 1")])),
+        c("bind_aborted_badcount", |a| session(a, &["begin", "select 1/0"], &[[parse("", "rollback", &[]), bind("", "", &[], ONE, &[]), sync()].concat()])),
+        // Trailing bytes (pq_getmsgend).
+        c("sync_trailing", |a| session(a, &[], &[msg(b'S', b"x"), sync()])),
+        c("sync_trailing_txn", |a| session(a, &["begin"], &[msg(b'S', b"x"), sync()])),
+        c("sync_trailing_implicit", |a| session(a, &["create temp table st(a int)"], &[
+            [parse("", "insert into st values (1)", &[]), bind("", "", &[], NONE, &[]), execute("", 0), msg(b'S', b"x")].concat(),
+            sync(),
+            query("select count(*) from st"),
+        ])),
+        c("flush_trailing", |a| session(a, &[], &[[msg(b'H', b"x"), sync()].concat()])),
+        c("parse_trailing", |a| ext(a, &[], &[msg(b'P', &[cstr(""), cstr("select 1"), vec![0, 0, b'x']].concat())])),
+        c("bind_trailing", |a| ext(a, &[], &[parse("", "select 1", &[]), msg(b'B', &[cstr(""), cstr(""), vec![0, 0, 0, 0, 0, 0, b'x']].concat())])),
+        c("bind_trailing_badval", |a| ext(a, &[], &[
+            parse("", "select $1::int", &[]),
+            msg(b'B', &[cstr(""), cstr(""), vec![0, 0, 0, 1, 0, 0, 0, 1, b'x', 0, 0, b'z', b'z']].concat()),
+        ])),
+        c("execute_trailing", |a| ext(a, &[], &[parse("", "select 1", &[]), bind("", "", &[], NONE, &[]), msg(b'E', &[cstr(""), vec![0, 0, 0, 0, b'x']].concat())])),
+        c("describe_trailing", |a| ext(a, &[], &[parse("", "select 1", &[]), msg(b'D', &[vec![b'S'], cstr(""), vec![b'x']].concat())])),
+        c("describe_bad_kind_trailing", |a| ext(a, &[], &[msg(b'D', &[vec![b'X'], cstr(""), vec![b'x']].concat())])),
+        c("close_trailing", |a| ext(a, &[], &[msg(b'C', &[vec![b'S'], cstr(""), vec![b'x']].concat())])),
+        c("query_trailing_txn", |a| session(a, &["begin"], &[msg(b'Q', &[cstr("select 1"), vec![b'x']].concat()), query("select 1")])),
+        c("terminate_trailing", |a| session(a, &[], &[msg(b'X', b"x"), query("select 1")])),
+        // The startup packet's layout and length.
+        c("startup_noterm", |a| startup(a, &[15i32.to_be_bytes().to_vec(), P30.to_be_bytes().to_vec(), b"user\0abc".to_vec()].concat())),
+        c("startup_novalue", |a| startup(a, &[14i32.to_be_bytes().to_vec(), P30.to_be_bytes().to_vec(), b"user\0\0".to_vec()].concat())),
+        c("startup_only_version", |a| startup(a, &[8i32.to_be_bytes().to_vec(), P30.to_be_bytes().to_vec()].concat())),
+        c("startup_extra_after_term", |a| startup(a, &startup_packet(P30, &[], b"\0junk"))),
+        c("startup_two_terms", |a| startup(a, &startup_packet(P30, &[], b"\0\0"))),
+        c("startup_len_10004", |a| startup(a, &[10004i32.to_be_bytes().to_vec(), P30.to_be_bytes().to_vec(), vec![0; 9996]].concat())),
+        c("startup_len_10005", |a| startup(a, &[10005i32.to_be_bytes().to_vec(), P30.to_be_bytes().to_vec(), vec![0; 9997]].concat())),
+        c("startup_short", |a| startup(a, &[7i32.to_be_bytes().to_vec(), P30.to_be_bytes().to_vec()].concat())),
+        // Parameter types no type has.
+        c("parse_badtype", |a| ext(a, &[], &[parse("", "select $1", &[999999])])),
+        c("parse_badtype_unused", |a| ext(a, &[], &[parse("s", "select 1", &[999999]), describe(b'S', "s")])),
+        c("parse_badtype_cast", |a| ext(a, &[], &[parse("", "select $1::int", &[999999])])),
+        c("parse_badtype_insert", |a| ext(a, &["create temp table bt(a int)"], &[parse("", "insert into bt values ($1)", &[999999])])),
+        c("parse_badtype_where", |a| ext(a, &[], &[parse("", "select 1 where $1 = 1", &[999999])])),
+        c("parse_badtype_second", |a| ext(a, &[], &[parse("", "select $1, $2", &[23, 999999])])),
+        c("parse_badtype_sub", |a| ext(a, &[], &[parse("", "select (select $1)", &[999999])])),
+        c("parse_badtype_relation", |a| ext(a, &[], &[parse("", "select $1", &[1259])])),
+        c("parse_badtype_utility", |a| ext(a, &[], &[parse("", "set work_mem = '5MB'", &[999999])])),
+        c("parse_badtype_bind_text", |a| ext(a, &[], &[parse("", "select 1", &[999999]), bind("", "", &[], ONE, &[]), execute("", 0)])),
+        c("parse_badtype_bind_null", |a| ext(a, &[], &[parse("", "select 1", &[999999]), bind("", "", &[], &[None], &[]), execute("", 0)])),
+        c("parse_badtype_bind_binary", |a| ext(a, &[], &[parse("", "select 1", &[999999]), bind("", "", &[1], ONE, &[]), execute("", 0)])),
+        // Protocol versions, NegotiateProtocolVersion, the cancel key.
+        c("proto_30", |a| startup(a, &startup_packet(P30, &[], b"\0"))),
+        c("proto_31", |a| startup(a, &startup_packet(P30 | 1, &[], b"\0"))),
+        c("proto_32", |a| startup(a, &startup_packet(P32, &[], b"\0"))),
+        c("proto_33", |a| startup(a, &startup_packet(P30 | 3, &[], b"\0"))),
+        c("proto_3ffff", |a| startup(a, &startup_packet(P30 | 0xffff, &[], b"\0"))),
+        c("proto_30_pq", |a| startup(a, &startup_packet(P30, &[("_pq_.foo", "1"), ("_pq_.bar", "2")], b"\0"))),
+        c("proto_32_pq", |a| startup(a, &startup_packet(P32, &[("_pq_.foo", "1")], b"\0"))),
+        c("proto_35_pq", |a| startup(a, &startup_packet(P30 | 5, &[("_pq_.foo", "1")], b"\0"))),
+        c("proto_20", |a| {
+            let mut k = Conn::open(a, &startup_packet(2 << 16, &[], b"\0"));
+            let mut out = String::new();
+            loop {
+                let b = k.byte();
+                if b.len() != 1 {
+                    break;
+                }
+                out.push_str(&b);
+            }
+            out.escape_default().to_string()
+        }),
+        c("proto_40", |a| startup(a, &startup_packet(4 << 16, &[], b"\0"))),
+        c("proto_32_query", |a| session_at(a, P32, &[query("select 1")])),
+        c("cancel_30", |a| cancel(a, P30, cancel_packet)),
+        c("cancel_32", |a| cancel(a, P32, cancel_packet)),
+        c("cancel_32_short_key", |a| cancel(a, P32, |p, k| cancel_packet(p, &k[..4]))),
+        c("cancel_30_long_key", |a| cancel(a, P30, |p, k| cancel_packet(p, &[k, &[0u8; 28][..]].concat()))),
+        c("cancel_key_257", |a| cancel(a, P30, |p, _| cancel_packet(p, &[0u8; 257]))),
+        // Message types and lengths.
+        c("len_sync_10000", |a| session(a, &[], &[rawlen(b'S', 10000, &[0; 9996])])),
+        c("len_sync_10001", |a| session(a, &[], &[rawlen(b'S', 10001, &[0; 9997])])),
+        c("len_execute_10001", |a| session(a, &[], &[[parse("", "select 1", &[]), bind("", "", &[], NONE, &[]), rawlen(b'E', 10001, &[0; 9997])].concat()])),
+        c("len_query_3", |a| session(a, &[], &[rawlen(b'Q', 3, b"")])),
+        c("len_parse_huge", |a| session(a, &[], &[rawlen(b'P', 0x4000_0000, b"")])),
+        c("len_unknown_huge", |a| session(a, &[], &[rawlen(b'y', 0x7fff_ffff, b"")])),
+        c("unknown_in_skip", |a| session(a, &[], &[[parse("", "selec 1", &[]), msg(b'y', b""), sync()].concat()])),
+        c("unknown_in_failed", |a| session(a, &["begin", "select 1/0"], &[msg(b'y', b"")])),
+        c("copydata_outside", |a| session(a, &[], &[[msg(b'd', b"x"), msg(b'c', b""), msg(b'f', &cstr("x")), query("select 1")].concat()])),
+        c("copydata_in_skip", |a| session(a, &[], &[[parse("", "selec 1", &[]), msg(b'd', b"x"), sync()].concat()])),
+        c("failed_flush", |a| session(a, &[], &[[parse("", "selec 1", &[]), flush()].concat(), [parse("", "select 1", &[]), flush()].concat(), sync()])),
+        c("close_missing", |a| ext(a, &[], &[close(b'S', "nope"), close(b'P', "nope"), close(b'S', ""), close(b'P', "")])),
+        c("close_in_failed", |a| session(a, &["prepare q as select 1", "begin", "select 1/0"], &[[close(b'S', "q"), sync()].concat(), query("rollback"), query("execute q")])),
+        c("maxrows_suspend_sync", |a| session(a, &[], &[
+            [parse("", "select generate_series(1, 3)", &[]), bind("p", "", &[], NONE, &[]), execute("p", 1), sync()].concat(),
+            [execute("p", 1), sync()].concat(),
+        ])),
+        c("maxrows_dml_txn", |a| session(a, &["create temp table mt(a int)", "begin"], &[
+            [parse("", "insert into mt select generate_series(1, 3) returning a", &[]), bind("p", "", &[], NONE, &[]), execute("p", 1), execute("p", 1), sync()].concat(),
+            [execute("p", 0), sync()].concat(),
+            query("select count(*) from mt"),
+        ])),
+        c("maxrows_exact", |a| ext(a, &[], &[parse("", "select generate_series(1, 3)", &[]), bind("", "", &[], NONE, &[]), execute("", 3), execute("", 1)])),
+        // SSLRequest and GSSENCRequest (neither is supported).
+        c("ssl_n", |a| byte_replies(a, &[ssl_request(b"")], Some(&startup_packet(P30, &[], b"\0")))),
+        c("ssl_ssl", |a| byte_replies(a, &[ssl_request(b""), ssl_request(b"")], None)),
+        c("ssl_extra", |a| byte_replies(a, &[ssl_request(b"abcd")], Some(&startup_packet(P30, &[], b"\0")))),
+        c("ssl_pipelined", |a| byte_replies(a, &[[ssl_request(b""), startup_packet(P30, &[], b"\0")].concat()], None)),
+        // Startup parameters.
+        c("startup_unknown_guc", |a| startup(a, &startup_packet(P30, &[("nosuch", "1")], b"\0"))),
+        c("startup_ext_guc", |a| startup(a, &startup_packet(P30, &[("foo.bar", "1")], b"\0"))),
+        c("startup_pgc_postmaster", |a| startup(a, &startup_packet(P30, &[("shared_buffers", "1MB")], b"\0"))),
+        c("startup_internal", |a| startup(a, &startup_packet(P30, &[("server_version", "1")], b"\0"))),
+        c("startup_options_and_param", |a| startup(a, &startup_packet(P30, &[("options", "-c application_name=fromopt"), ("application_name", "fromparam")], b"\0"))),
+        c("startup_datestyle", |a| startup(a, &startup_packet(P30, &[("datestyle", "German"), ("client_encoding", "LATIN1"), ("intervalstyle", "iso_8601")], b"\0"))),
+        c("startup_search_path", |a| startup(a, &startup_packet(P30, &[("search_path", "foo")], b"\0"))),
+        // ParameterStatus after SET.
+        c("ps_set_same", |a| session(a, &["set application_name = 'x'"], &[query("set application_name = 'x'")])),
+        c("ps_set_local", |a| session(a, &["begin"], &[query("set local application_name = 'loc'"), query("commit")])),
+        c("ps_set_rollback", |a| session(a, &["begin"], &[query("set application_name = 'rb'"), query("rollback")])),
+        c("ps_set_and_back", |a| session(a, &[], &[query("begin; set application_name = 'tmp'; set application_name = ''; commit")])),
+        c("ps_reset_all", |a| session(a, &["set application_name = 'x'", "set datestyle = 'SQL, DMY'"], &[query("reset all")])),
+        c("ps_ext_set_flush", |a| session(a, &[], &[[parse("", "set application_name = 'ext'", &[]), bind("", "", &[], NONE, &[]), execute("", 0), flush()].concat(), sync()])),
+        c("ps_set_failed_stmt", |a| session(a, &[], &[query("set application_name = 'f'; select * from nope_t"), query("show application_name")])),
+        c("ps_set_config", |a| session(a, &[], &[query("select set_config('application_name', 'cfg', false)")])),
+        c("ps_set_role", |a| session(a, &["create role ps_r"], &[query("set role ps_r"), query("reset role"), query("drop role ps_r")])),
+        c("ps_discard_all", |a| session(a, &["set application_name = 'x'"], &[query("discard all")])),
+    ];
+    let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
+    if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {
+        let out: String = cases.iter().map(|(n, f)| format!("{n}\t{}\n", f(&addr))).collect();
+        std::fs::write(file, out).unwrap();
+        return;
+    }
+    let s = server(AuthMethod::Trust);
+    let expected: std::collections::HashMap<String, String> = std::fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let mut differ = Vec::new();
+    for (name, f) in &cases {
+        let got = f(&s.addr);
+        let want = expected.get(*name).map(String::as_str).unwrap_or("(not recorded)");
+        if got != want {
+            differ.push(format!("{name}\n  pg:   {want}\n  roll: {got}"));
+        }
+    }
+    s.engine.shutdown();
+    assert!(differ.is_empty(), "{} of {} cases differ:\n{}", differ.len(), cases.len(), differ.join("\n"));
 }

@@ -1078,7 +1078,7 @@ fn parallel_workers_use_execution_context_after_parse_inner() {
     use pg_engine::{session::Outcome, types::Value};
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path());
-    let (pid, _, _) = engine.register_backend(None, None);
+    let (pid, _, _) = engine.register_backend(None, None, 0);
     let mut s = engine.connect(pid, "postgres", "postgres", "parse_context").unwrap();
     s.query("CREATE TABLE p171_parallel AS SELECT g AS a FROM generate_series(1,3000000) g; ANALYZE p171_parallel").unwrap();
     let sql = "SELECT a FROM p171_parallel WHERE a % 3000000 = 0";
@@ -1103,7 +1103,7 @@ fn parallel_workers_use_execution_context_after_parse_inner() {
         println!("{name} current EXPLAIN: {:?}", plan.last().unwrap().rows);
         assert!(plan.last().unwrap().rows.iter().any(|r| format!("{:?}", r[0]).contains("Gather")), "{plan:?}");
         let before = counts(&mut s);
-        s.bind_message("", name, Vec::new(), &[], Vec::new()).unwrap();
+        s.bind_message("", name, Vec::new(), &[], Vec::new(), false).unwrap();
         match s.execute_portal("", 0).unwrap().0 {
             Outcome::Done(q) => assert_eq!(q.rows, vec![vec![Value::Int4(3000000)]]),
             _ => panic!("one-row statement not completed"),

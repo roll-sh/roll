@@ -213,8 +213,31 @@ pub struct StartupReport {
 /// order: the backends table, then an entry.
 pub type ActivitySlot = Arc<Mutex<Activity>>;
 
+/// A backend's cancel key (MyCancelKey): 4 random bytes for a protocol 3.0 or 3.1 client,
+/// 32 (MAX_CANCEL_KEY_LENGTH) for 3.2 and later; none for a backend without a client.
+#[derive(Clone, Copy)]
+pub struct CancelKey {
+    len: u8,
+    bytes: [u8; 32],
+}
+
+impl CancelKey {
+    const NONE: CancelKey = CancelKey { len: 0, bytes: [0; 32] };
+
+    /// A random key of `len` bytes (at most 32).
+    pub fn random(len: usize) -> CancelKey {
+        let mut k = CancelKey { len: len.min(32) as u8, bytes: [0; 32] };
+        let _ = getrandom::fill(&mut k.bytes[..k.len as usize]);
+        k
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+}
+
 struct Backend {
-    secret: i32,
+    key: CancelKey,
     database: u32,
     cancel: Option<Arc<AtomicBool>>,
     socket: Option<Arc<TcpStream>>,
@@ -997,16 +1020,15 @@ impl Engine {
         }
     }
 
-    /// Allocate a backend id and cancel key for a new connection.
+    /// Allocate a backend id and a cancel key of `key_len` bytes for a new connection.
     pub fn register_backend(
         &self,
         socket: Option<Arc<TcpStream>>,
         client: Option<std::net::SocketAddr>,
-    ) -> (i32, i32, Arc<AtomicBool>) {
+        key_len: usize,
+    ) -> (i32, CancelKey, Arc<AtomicBool>) {
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
-        let mut b = [0u8; 4];
-        let _ = getrandom::fill(&mut b);
-        let secret = i32::from_le_bytes(b);
+        let key = CancelKey::random(key_len);
         let terminated = Arc::new(AtomicBool::new(false));
         let activity = Activity {
             pid,
@@ -1019,7 +1041,7 @@ impl Engine {
         self.backends.lock().insert(
             pid,
             Backend {
-                secret,
+                key,
                 database: 0,
                 cancel: None,
                 socket,
@@ -1029,7 +1051,7 @@ impl Engine {
                 proc: None,
             },
         );
-        (pid, secret, terminated)
+        (pid, key, terminated)
     }
 
     /// InitProcess for backend `pid`: a proc array slot of `kind`, its startup transaction
@@ -1154,11 +1176,12 @@ impl Engine {
     /// closes; clients rely on that order (Postgrex closes its connection once the cancel's
     /// closes, and reads the error first). Acted on: the backend read its next message (the
     /// flag cleared), or no longer runs a statement.
-    pub fn cancel_request(&self, pid: i32, secret: i32) {
+    /// (SendCancelRequest: the key matches in length and bytes.)
+    pub fn cancel_request(&self, pid: i32, key: &[u8]) {
         // (Signalled under the lock, with what the backend was doing and how many messages
         // it had read: the request is acted on once it reads its next one.)
         let reads = match self.backends.lock().get(&pid) {
-            Some(b) if b.secret == secret => {
+            Some(b) if b.key.len > 0 && b.key.bytes() == key => {
                 let Some(c) = b.cancel.as_ref() else { return };
                 c.store(true, Ordering::Relaxed);
                 crate::txn::locks::interrupt(c);
@@ -2246,7 +2269,7 @@ impl Cluster for Engine {
                 ..Activity::default()
             };
             let terminated = Arc::new(AtomicBool::new(false));
-            backends.insert(pid, Backend { secret: 0, database, cancel: None, socket: None, terminated, activity: Arc::new(Mutex::new(activity)), proc: Some(proc), reads: Default::default() });
+            backends.insert(pid, Backend { key: CancelKey::NONE, database, cancel: None, socket: None, terminated, activity: Arc::new(Mutex::new(activity)), proc: Some(proc), reads: Default::default() });
             pids.push(pid);
         }
         pids

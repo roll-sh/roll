@@ -96,6 +96,12 @@ impl Session {
         // An implicit transaction (a multi-statement query, a pipeline) counts: a SET in it
         // is undone if it rolls back.
         let mut in_txn = self.status != TxnStatus::Idle || self.txn.is_some();
+        // (The first statement of several, before anything opened the transaction: a later
+        // statement's error undoes it too.)
+        if !in_txn && (self.multi_stmt || self.pipelining) {
+            self.ensure_txn();
+            in_txn = true;
+        }
         let tag = if matches!(kind, K::VarReset | K::VarResetAll) {
             "RESET"
         } else {
@@ -1031,7 +1037,10 @@ impl Session {
                 "DECLARE CURSOR can only be used in transaction blocks",
             ));
         }
-        if self.state.cursors.borrow().contains_key(&s.portalname) {
+        // (CreatePortal: a Bind's portal of the name too.)
+        if self.state.cursors.borrow().contains_key(&s.portalname)
+            || (!s.portalname.is_empty() && self.portals.contains_key(&s.portalname))
+        {
             return Err(Error::new(
                 code::DUPLICATE_CURSOR,
                 format!("cursor \"{}\" already exists", s.portalname),

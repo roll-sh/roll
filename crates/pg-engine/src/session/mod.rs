@@ -250,6 +250,9 @@ pub struct Portal {
     pub stmt: Arc<Prepared>,
     pub params: Vec<Value>,
     pub result_formats: Vec<i16>,
+    /// A result format code that's neither text (0) nor binary (1): the first row sent
+    /// fails (`unsupported_format`).
+    pub bad_format: Option<i16>,
     run: PortalRun,
     pub cols: Option<Arc<[OutCol]>>,
     /// A SELECT suspended after an Execute's row count: its executor, which the next
@@ -2394,18 +2397,20 @@ impl Session {
             ));
         }
         let mut types = Vec::new();
-        for o in param_oids {
+        // (Parameters given an oid no type has: typed as if unspecified until the statement
+        // is analyzed, then `missing_param_types`.)
+        let mut missing = Vec::new();
+        for (i, o) in param_oids.iter().enumerate() {
             types.push(if *o == 0 {
                 DataType::Unknown
             } else {
-                self.visible_catalog()
-                    .any_data_type(*o)
-                    .ok_or_else(|| {
-                        Error::new(
-                            code::UNDEFINED_OBJECT,
-                            format!("type with OID {o} does not exist"),
-                        )
-                    })?
+                match self.visible_catalog().any_data_type(*o) {
+                    Some(t) => t,
+                    None => {
+                        missing.push((i, *o));
+                        DataType::Unknown
+                    }
+                }
             });
         }
         let stmt = stmts.into_iter().next().and_then(|s| {
@@ -2633,6 +2638,9 @@ impl Session {
                 }
             }
         }
+        if !missing.is_empty() {
+            missing_param_types(&mut p, sql, &missing)?;
+        }
         Ok(Arc::new(p))
     }
 
@@ -2727,7 +2735,8 @@ impl Session {
         r
     }
 
-    /// Bind message: create a portal.
+    /// Bind message: create a portal. `trailing`: the message has bytes after its result
+    /// formats (pq_getmsgend's error, once the parameters are read).
     pub fn bind_message(
         &mut self,
         portal: &str,
@@ -2735,9 +2744,10 @@ impl Session {
         params: Vec<Option<Vec<u8>>>,
         formats: &[i16],
         result_formats: Vec<i16>,
+        trailing: bool,
     ) -> Result<()> {
         self.waits_armed = false;
-        let r = crate::stack::grow(|| self.bind_inner(portal, stmt, params, formats, result_formats));
+        let r = crate::stack::grow(|| self.bind_inner(portal, stmt, params, formats, result_formats, trailing));
         if r.is_err() {
             self.on_error();
         }
@@ -2751,16 +2761,11 @@ impl Session {
         params: Vec<Option<Vec<u8>>>,
         formats: &[i16],
         result_formats: Vec<i16>,
+        trailing: bool,
     ) -> Result<()> {
         let Some(p) = self.prepared.get(stmt).cloned() else {
             return Err(missing_statement(stmt, "exec_bind_message"));
         };
-        if self.status == TxnStatus::Failed && !ends_failed_txn(p.stmt.as_ref().and_then(inner)) {
-            return Err(Error::new(
-                code::IN_FAILED_SQL_TRANSACTION,
-                "current transaction is aborted, commands ignored until end of transaction block",
-            ).routine("exec_bind_message"));
-        }
         if formats.len() > 1 && formats.len() != params.len() {
             return Err(Error::new(
                 code::PROTOCOL_VIOLATION,
@@ -2780,6 +2785,18 @@ impl Session {
                     p.param_types.len()
                 ),
             ));
+        }
+        if self.status == TxnStatus::Failed && !ends_failed_txn(p.stmt.as_ref().and_then(inner)) {
+            return Err(Error::new(
+                code::IN_FAILED_SQL_TRANSACTION,
+                "current transaction is aborted, commands ignored until end of transaction block",
+            ).routine("exec_bind_message"));
+        }
+        // CreatePortal: a named portal can't replace one (or a cursor) of its name.
+        if !portal.is_empty()
+            && (self.portals.contains_key(portal) || self.state.cursors.borrow().contains_key(portal))
+        {
+            return Err(Error::new(code::DUPLICATE_CURSOR, format!("cursor \"{portal}\" already exists")));
         }
         // An object identifier type's input (regclassin, ...) looks its name up in the
         // transaction's catalog, through the search path; an enum's checks its labels.
@@ -2845,7 +2862,17 @@ impl Session {
                     None => e.context(c),
                 }
             };
+            // (getTypeInputInfo / getTypeBinaryInputInfo of a type no oid has: only where
+            // its input fails, which it always does.)
+            let missing = |e: Error| match ty.missing_oid() {
+                Some(o) => param_err(
+                    missing_type(o, if f == 1 { "getTypeBinaryInputInfo" } else { "getTypeInputInfo" }),
+                    None,
+                ),
+                None => e,
+            };
             values.push(match raw {
+                None if ty.missing_oid().is_some() => return Err(missing(Error::new(code::INTERNAL_ERROR, ""))),
                 None => Value::Null,
                 // Bytes the type's recv leaves over name the parameter; its own errors are its.
                 Some(b) if f == 1 => crate::types::binary::decode(&b, ty, &fmt)
@@ -2860,13 +2887,15 @@ impl Session {
                         }
                         _ => e,
                     })
-                    .map_err(|e| param_err(e, None))?,
+                    .map_err(|e| param_err(e, None))
+                    .map_err(missing)?,
                 // Text arrives in the client's encoding (pg_client_to_server, which checks it).
                 Some(b) => {
                     let s = crate::types::mbconv::server::from_client(&b, fmt.client_encoding, fmt.server_encoding)
                         .map_err(|e| param_err(e, None))?;
                     crate::types::text::parse_value(&s, ty, &fmt)
-                        .map_err(|e| param_err(e, Some(&s)))?
+                        .map_err(|e| param_err(e, Some(&s)))
+                        .map_err(missing)?
                 }
             });
             if let Some(d) = domains.as_ref().and_then(|ds| ds.iter().find(|(j, _)| *j == i)).map(|(_, d)| *d) {
@@ -2884,6 +2913,9 @@ impl Session {
                 })
                 .map_err(|e| e.context(named))?;
             }
+        }
+        if trailing {
+            return Err(Error::new(code::PROTOCOL_VIOLATION, "invalid message format"));
         }
         let cols = self.describe(&p)?;
         // PortalSetResultFormat
@@ -2909,15 +2941,9 @@ impl Session {
                 ),
             ));
         }
-        if let Some(f) = result_formats.iter().find(|f| !matches!(f, 0 | 1)) {
-            // (PostgreSQL's comes from printtup_prepare_info, at the first row Execute
-            // sends.)
-            return Err(Error::new(
-                code::INVALID_PARAMETER_VALUE,
-                format!("unsupported format code: {f}"),
-            )
-            .routine("printtup_prepare_info"));
-        }
+        // (A format code that's neither text nor binary fails the first row an Execute
+        // sends: printtup_prepare_info.)
+        let bad_format = result_formats.iter().copied().find(|f| !matches!(f, 0 | 1));
         if portal.is_empty() {
             self.close_portal(portal)?;
         }
@@ -2927,6 +2953,7 @@ impl Session {
                 stmt: p,
                 params: values,
                 result_formats,
+                bad_format,
                 run: PortalRun::Ready,
                 cols,
                 lazy: None,
@@ -3217,12 +3244,14 @@ impl Session {
         Ok(())
     }
 
-    /// Sync: end an implicit transaction; the unnamed portal goes away.
+    /// Sync: end an implicit transaction, and with it its portals (the unnamed one too). In
+    /// a transaction block the portals stay till its end: an Execute after the Sync goes on
+    /// with a suspended unnamed portal.
     pub fn sync(&mut self) -> Result<()> {
         self.pipelining = false;
-        if self.status == TxnStatus::Failed {
-            self.portals.remove("");
-        } else if let Err(e) = self.close_portal("") {
+        if !matches!(self.status, TxnStatus::InBlock | TxnStatus::Failed)
+            && let Err(e) = self.close_portal("")
+        {
             self.on_error();
             return Err(e);
         }
@@ -3721,15 +3750,30 @@ impl Session {
     }
 
     /// Changed reportable settings (for ParameterStatus), as (name, value).
+    /// ReportChangedGUCOptions: the reported parameters changed since the last report, the
+    /// last one marked first (guc_report_list takes each at its first change, at its head),
+    /// those whose value the client has already left out (ReportGUCOption).
     pub fn take_changed_settings(&mut self) -> Vec<(String, String)> {
         let mut s = self.state.settings.borrow_mut();
-        let mut names = std::mem::take(&mut s.changed);
-        names.sort();
-        names.dedup();
-        names
-            .into_iter()
-            .map(|n| (n.clone(), s.show_value(&n)))
-            .collect()
+        if s.changed.is_empty() {
+            return Vec::new();
+        }
+        let names = std::mem::take(&mut s.changed);
+        let mut marked: Vec<String> = Vec::with_capacity(names.len());
+        for n in names {
+            if !marked.contains(&n) {
+                marked.push(n);
+            }
+        }
+        let mut out = Vec::new();
+        for n in marked.into_iter().rev() {
+            let v = s.show_value(&n);
+            if s.reported.get(&n) != Some(&v) {
+                s.reported.insert(n.clone(), v.clone());
+                out.push((n, v));
+            }
+        }
+        out
     }
 }
 
@@ -4064,6 +4108,37 @@ fn max_param(n: &Node, sql: &str) -> usize {
 /// VALUES lists among them: the whole tree is read, through its Debug text, scanned as it is
 /// written: a VALUES of 65,535 parameters once made a text of hundreds of megabytes.) A text
 /// without a `$` has none: only the lexer's `$n` makes a ParamRef.
+/// Parse's parameters of oids no type has (`missing`: index, oid). One the statement reads
+/// fails as PostgreSQL's analysis or planning does when it looks the type up: a bare result
+/// column builds its tuple descriptor (TupleDescInitEntry), one the statement gives a type
+/// to coerces it (getBaseTypeAndTypmod). One it doesn't read keeps the oid (its
+/// ParameterDescription's) and fails at Bind (getTypeInputInfo).
+fn missing_param_types(p: &mut Prepared, sql: &str, missing: &[(usize, u32)]) -> Result<()> {
+    // (A utility statement's text isn't analyzed: PREPARE ... AS's $n aren't the Parse's.)
+    let used = match p.stmt.as_ref() {
+        Some(s) if p.is_query() => param_numbers(s, sql),
+        _ => Default::default(),
+    };
+    for &(i, oid) in missing {
+        if used.contains(&(i as i32 + 1)) {
+            let routine = match p.param_types.get(i) {
+                Some(DataType::Unknown | DataType::Text) | None => "TupleDescInitEntry",
+                Some(_) => "getBaseTypeAndTypmod",
+            };
+            return Err(missing_type(oid, routine));
+        }
+        if let Some(t) = p.param_types.get_mut(i) {
+            *t = DataType::missing(oid);
+        }
+    }
+    Ok(())
+}
+
+/// The syscache's miss for type `oid`, in `routine`.
+fn missing_type(oid: u32, routine: &'static str) -> Error {
+    Error::new(code::INTERNAL_ERROR, format!("cache lookup failed for type {oid}")).routine(routine)
+}
+
 fn param_numbers(n: &Node, sql: &str) -> std::collections::HashSet<i32> {
     if !sql.contains('$') {
         return Default::default();

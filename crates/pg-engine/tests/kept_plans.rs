@@ -51,7 +51,7 @@ fn ext(s: &mut pg_engine::session::Session, name: &str, sql: &str, params: &[Opt
             s.parse_message(name, sql, &[])?;
         }
         let vals = params.iter().map(|p| p.map(|v| v.as_bytes().to_vec())).collect();
-        s.bind_message("", name, vals, &[], Vec::new())?;
+        s.bind_message("", name, vals, &[], Vec::new(), false)?;
         match s.execute_portal("", 0)?.0 {
             Outcome::Done(q) => Ok(match q.rows.first() {
                 Some(row) => format!("{:?}", row[0]),
@@ -198,11 +198,11 @@ fn bind_plans_before_checking_result_formats() {
     let q = "SELECT $1::int8 + 1, $2::int2, $3::int8 * 2";
     let vals = |v: &str| vec![Some(b"1".to_vec()), Some(b"2".to_vec()), Some(v.as_bytes().to_vec())];
     s.parse_message("", q, &[]).unwrap();
-    let e = s.bind_message("", "", vals("-9223372036854775808"), &[], vec![0, 0]).unwrap_err();
+    let e = s.bind_message("", "", vals("-9223372036854775808"), &[], vec![0, 0], false).unwrap_err();
     assert_eq!(e.code, "22003", "{e:?}");
     s.sync().unwrap();
     s.parse_message("", q, &[]).unwrap();
-    let e = s.bind_message("", "", vals("5"), &[], vec![0, 0]).unwrap_err();
+    let e = s.bind_message("", "", vals("5"), &[], vec![0, 0], false).unwrap_err();
     assert_eq!(e.code, "08P01", "{e:?}");
     s.sync().unwrap();
 }
@@ -354,7 +354,7 @@ fn custom_plans_choose_the_scan_again() {
     s.sync().unwrap();
     let run = |s: &mut Session, data: &BTreeMap<i32, i32>, lo: Option<i32>, hi: Option<i32>| {
         let params = [lo, hi].into_iter().map(|v| v.map(|v| v.to_string().into_bytes())).collect();
-        s.bind_message("", "rr", params, &[], Vec::new()).unwrap();
+        s.bind_message("", "rr", params, &[], Vec::new(), false).unwrap();
         let Outcome::Done(q) = s.execute_portal("", 0).unwrap().0 else { panic!("expected SELECT") };
         s.sync().unwrap();
         check(q, data, lo, hi);

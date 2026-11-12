@@ -43,7 +43,7 @@ fn backend_snapshot_lifecycle() {
             data_dir: dir.path().into(), cache_bytes: 4 << 20, memtable_bytes: 1 << 20,
             sync: false, ..Default::default()
         }).unwrap();
-        let (pid, _, _) = engine.register_backend(None, None);
+        let (pid, _, _) = engine.register_backend(None, None, 0);
         let mut s = engine.connect(pid, "postgres", "postgres", "snapshot").unwrap();
         rows(&mut s, "CREATE TABLE sx (i int)");
         let bid = rows(&mut s, "SELECT bid FROM pg_stat_get_backend_idset() bid WHERE pg_stat_get_backend_pid(bid) = pg_backend_pid()")[0][0].clone().unwrap();
@@ -125,7 +125,7 @@ fn backend_snapshot_lifecycle() {
 
         // A library writer publishes at allocation/abort, without the wire server's
         // statement_done_activity report. Its transaction remains active throughout.
-        let (writer_pid, _, _) = engine.register_backend(None, None);
+        let (writer_pid, _, _) = engine.register_backend(None, None, 0);
         let mut writer = engine.connect(writer_pid, "postgres", "postgres", "writer").unwrap();
         let writer_bid = rows(&mut writer, "SELECT bid FROM pg_stat_get_backend_idset() bid WHERE pg_stat_get_backend_pid(bid) = pg_backend_pid()")[0][0].clone().unwrap();
         let other = format!("SELECT * FROM pg_stat_get_backend_subxact({writer_bid})");

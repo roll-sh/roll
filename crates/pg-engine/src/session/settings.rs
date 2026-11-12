@@ -341,22 +341,24 @@ pub fn is_builtin(name: &str) -> bool {
 }
 
 /// Parameters reported to the client in ParameterStatus when they change.
+/// (In the order PostgreSQL 18.6 reports them as a session starts: BeginReportingGUCOptions
+/// walks its GUC hash table.)
 pub const REPORTED: &[&str] = &[
-    "application_name",
-    "client_encoding",
-    "DateStyle",
-    "default_transaction_read_only",
     "in_hot_standby",
     "integer_datetimes",
-    "IntervalStyle",
-    "is_superuser",
-    "scram_iterations",
-    "search_path",
-    "server_encoding",
-    "server_version",
-    "session_authorization",
-    "standard_conforming_strings",
     "TimeZone",
+    "IntervalStyle",
+    "search_path",
+    "is_superuser",
+    "application_name",
+    "default_transaction_read_only",
+    "scram_iterations",
+    "DateStyle",
+    "standard_conforming_strings",
+    "session_authorization",
+    "client_encoding",
+    "server_version",
+    "server_encoding",
 ];
 
 /// What a SET at some nest level did (`GucStackState`).
@@ -418,6 +420,8 @@ pub struct Settings {
     reserved: Vec<&'static str>,
     /// Names whose value changed since the last report (for ParameterStatus).
     pub changed: Vec<String>,
+    /// The values last reported to the client (ReportGUCOption's last_reported).
+    pub(crate) reported: std::collections::HashMap<String, String>,
     /// What every statement derives from the settings, built on first use and dropped when
     /// a value changes (see `touched`).
     derived: DerivedCache,
@@ -465,6 +469,7 @@ impl Default for Settings {
             level: 1,
             reserved: Vec::new(),
             changed: Vec::new(),
+            reported: Default::default(),
             derived: DerivedCache::default(),
             stats_fetch: (1, 0),
             txn_start: None,

@@ -395,7 +395,7 @@ fn open_worker<'a>(
         .find(|d| d.0 == sub.dbid)
         .map(|d| d.1)
         .ok_or_else(|| format!("database {} of subscription \"{}\" does not exist", sub.dbid, sub.name))?;
-    let (pid, _, _) = e.register_backend(None, None);
+    let (pid, _, _) = e.register_backend(None, None, 0);
     e.assign_proc(pid, crate::txn::procs::ProcKind::BgWorker);
     let backend = Backend { e, workers, pid, relid };
     let msg = |err: Error| err.message;

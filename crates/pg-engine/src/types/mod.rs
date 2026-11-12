@@ -394,6 +394,38 @@ impl std::hash::Hash for BaseType {
     }
 }
 
+impl DataType {
+    /// The type of a parameter a Parse message gave an oid no type has: exec_parse_message
+    /// takes the oid as given, and what looks the type up fails (`missing_oid`).
+    pub fn missing(oid: u32) -> DataType {
+        DataType::Base(Arc::new(BaseType {
+            oid,
+            name: Arc::from(""),
+            schema: 0,
+            array_oid: 0,
+            repr: None,
+            len: -1,
+            byval: false,
+            align: 'i',
+            storage: 'p',
+            category: 'X',
+            preferred: false,
+            collatable: false,
+            pseudo: true,
+            ext: 0,
+            typmod: -1,
+        }))
+    }
+
+    /// The oid of a `missing` type.
+    pub fn missing_oid(&self) -> Option<u32> {
+        match self {
+            DataType::Base(b) if b.pseudo && b.schema == 0 && b.name.is_empty() => Some(b.oid),
+            _ => None,
+        }
+    }
+}
+
 impl BaseType {
     pub fn is_shell(&self) -> bool {
         self.repr.is_none() && !self.pseudo

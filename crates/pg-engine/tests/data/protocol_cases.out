@@ -1,0 +1,115 @@
+rf7_exec	1 2 E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZI
+rf7_norows	1 2 C:SELECT 0 ZI
+rf7_describe	1 2 T:7 E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZI
+rf7_dml	1 2 C:INSERT 0 1 ZI
+rf7_returning_txn	1 2 E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZE / C:ROLLBACK T:0 D:["0"] C:SELECT 1 ZI
+rf_mixed	1 2 E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZI
+rf_neg	1 2 E{S=ERROR|C=22023|M=unsupported format code: -1|F=printtup.c|L=290|R=printtup_prepare_info} ZI
+rf7_maxrows	1 2 E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZI
+rf7_show	1 2 E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZI
+rf7_named_again	1 2 T:7 ZT / E{S=ERROR|C=22023|M=unsupported format code: 7|F=printtup.c|L=290|R=printtup_prepare_info} ZE
+rf7_fetch_none	1 2 C:FETCH 0 ZT
+rf7_copyout	1 2 H d c C:COPY 1 ZI
+copy_bad_parse	G / E{S=ERROR|C=08P01|M=unexpected message type 0x50 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_bad_unknown	G / E{S=ERROR|C=08P01|M=unexpected message type 0x79 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_bad_terminate	G / E{S=ERROR|C=08P01|M=unexpected message type 0x58 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_badlen	G / E{S=ERROR|C=08006|M=unexpected EOF on client connection with an open transaction|F=copyfromparse.c|L=301|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_done_long	G / E{S=ERROR|C=08006|M=unexpected EOF on client connection with an open transaction|F=copyfromparse.c|L=301|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+copy_done_trailing	G / C:COPY 0 ZI
+copy_fail_nostr	G / E{S=ERROR|C=08P01|M=invalid string in message|F=pqformat.c|L=593|R=pq_getmsgstring} ZI
+copy_flush_sync	G / C:COPY 1 ZI
+copy_ext_bad	1 2 G / E{S=ERROR|C=08P01|M=unexpected message type 0x50 during COPY from stdin|F=copyfromparse.c|L=292|R=CopyGetData} E{S=FATAL|C=08P01|M=terminating connection because protocol synchronization was lost|F=postgres.c|L=4502|R=PostgresMain} closed
+bind_dup_portal	1 2 E{S=ERROR|C=42P03|M=cursor "p" already exists|F=portalmem.c|L=185|R=CreatePortal} ZE
+bind_dup_implicit	1 2 E{S=ERROR|C=42P03|M=cursor "p" already exists|F=portalmem.c|L=185|R=CreatePortal} ZI
+bind_dup_cursor	1 E{S=ERROR|C=42P03|M=cursor "c" already exists|F=portalmem.c|L=185|R=CreatePortal} ZE
+bind_dup_badvalue	1 2 E{S=ERROR|C=42P03|M=cursor "p" already exists|F=portalmem.c|L=185|R=CreatePortal} ZE
+bind_dup_unnamed	1 2 2 D:["1"] C:SELECT 1 ZI
+bind_dup_after_close	1 2 3 2 D:["1"] C:SELECT 1 ZT
+declare_after_bind	1 2 ZT / E{S=ERROR|C=42P03|M=cursor "c" already exists|F=portalmem.c|L=185|R=CreatePortal} ZE
+bind_aborted_badcount	1 E{S=ERROR|C=08P01|M=bind message supplies 1 parameters, but prepared statement "" requires 0|F=postgres.c|L=1728|R=exec_bind_message} ZE
+sync_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI / ZI
+sync_trailing_txn	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZE / ZE
+sync_trailing_implicit	1 2 C:INSERT 0 1 E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI / ZI / T:0 D:["0"] C:SELECT 1 ZI
+flush_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+parse_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+bind_trailing	1 E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+bind_trailing_badval	1 E{S=ERROR|C=22P02|M=invalid input syntax for type integer: "x"|F=numutils.c|L=615|R=pg_strtoint32_safe} ZI
+execute_trailing	1 2 E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+describe_trailing	1 E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+describe_bad_kind_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+close_trailing	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+query_trailing_txn	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZE / E{S=ERROR|C=25P02|M=current transaction is aborted, commands ignored until end of transaction block|F=postgres.c|L=1136|R=exec_simple_query} ZE
+terminate_trailing	closed
+startup_noterm	E{S=FATAL|C=08P01|M=invalid startup packet layout: expected terminator as last byte|F=backend_startup.c|L=835|R=ProcessStartupPacket} closed
+startup_novalue	E{S=FATAL|C=08P01|M=invalid startup packet layout: expected terminator as last byte|F=backend_startup.c|L=835|R=ProcessStartupPacket} closed
+startup_only_version	E{S=FATAL|C=08P01|M=invalid startup packet layout: expected terminator as last byte|F=backend_startup.c|L=835|R=ProcessStartupPacket} closed
+startup_extra_after_term	E{S=FATAL|C=08P01|M=invalid startup packet layout: expected terminator as last byte|F=backend_startup.c|L=835|R=ProcessStartupPacket} closed
+startup_two_terms	E{S=FATAL|C=08P01|M=invalid startup packet layout: expected terminator as last byte|F=backend_startup.c|L=835|R=ProcessStartupPacket} closed
+startup_len_10004	E{S=FATAL|C=08P01|M=invalid startup packet layout: expected terminator as last byte|F=backend_startup.c|L=835|R=ProcessStartupPacket} closed
+startup_len_10005	closed
+startup_short	closed
+parse_badtype	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+parse_badtype_unused	1 t:1 T:0 ZI
+parse_badtype_cast	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+parse_badtype_insert	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+parse_badtype_where	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+parse_badtype_second	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+parse_badtype_sub	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+parse_badtype_relation	E{S=ERROR|C=XX000|M=cache lookup failed for type 1259|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+parse_badtype_utility	1 ZI
+parse_badtype_bind_text	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+parse_badtype_bind_null	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+parse_badtype_bind_binary	1 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3249|R=getTypeBinaryInputInfo} ZI
+proto_30	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+proto_31	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+proto_32	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:32 ZI
+proto_33	v:3.2: R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:32 ZI
+proto_3ffff	v:3.2: R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:32 ZI
+proto_30_pq	v:3.0:_pq_.foo,_pq_.bar R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+proto_32_pq	v:3.2:_pq_.foo R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:32 ZI
+proto_35_pq	v:3.2:_pq_.foo R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:32 ZI
+proto_20	EFATAL:  unsupported frontend protocol 2.0: server supports 3.0 to 3.2\n\u{0}
+proto_40	E{S=FATAL|C=0A000|M=unsupported frontend protocol 4.0: server supports 3.0 to 3.2|F=backend_startup.c|L=731|R=ProcessStartupPacket} closed
+proto_32_query	T:0 D:["1"] C:SELECT 1 ZI
+cancel_30	K:4 closed / T:0 E{S=ERROR|C=57014|M=canceling statement due to user request|F=postgres.c|L=3464|R=ProcessInterrupts} ZI
+cancel_32	K:32 closed / T:0 E{S=ERROR|C=57014|M=canceling statement due to user request|F=postgres.c|L=3464|R=ProcessInterrupts} ZI
+cancel_32_short_key	K:32 closed / T:0 D:[""] C:SELECT 1 ZI
+cancel_30_long_key	K:4 closed / T:0 D:[""] C:SELECT 1 ZI
+cancel_key_257	K:4 closed / T:0 D:[""] C:SELECT 1 ZI
+len_sync_10000	E{S=ERROR|C=08P01|M=invalid message format|F=pqformat.c|L=638|R=pq_getmsgend} ZI
+len_sync_10001	closed
+len_execute_10001	closed
+len_query_3	closed
+len_parse_huge	closed
+len_unknown_huge	E{S=FATAL|C=08P01|M=invalid frontend message type 121|F=postgres.c|L=454|R=SocketBackend} closed
+unknown_in_skip	E{S=ERROR|C=42601|M=syntax error at or near "selec"|F=scan.l|L=1236|R=scanner_yyerror} E{S=FATAL|C=08P01|M=invalid frontend message type 121|F=postgres.c|L=454|R=SocketBackend} closed
+unknown_in_failed	E{S=FATAL|C=08P01|M=invalid frontend message type 121|F=postgres.c|L=454|R=SocketBackend} closed
+copydata_outside	T:0 D:["1"] C:SELECT 1 ZI
+copydata_in_skip	E{S=ERROR|C=42601|M=syntax error at or near "selec"|F=scan.l|L=1236|R=scanner_yyerror} ZI
+failed_flush	E{S=ERROR|C=42601|M=syntax error at or near "selec"|F=scan.l|L=1236|R=scanner_yyerror} quiet / quiet / ZI
+close_missing	3 3 3 3 ZI
+close_in_failed	3 ZE / C:ROLLBACK ZI / E{S=ERROR|C=26000|M=prepared statement "q" does not exist|F=prepare.c|L=451|R=FetchPreparedStatement} ZI
+maxrows_suspend_sync	1 2 D:["1"] s ZI / E{S=ERROR|C=34000|M=portal "p" does not exist|F=postgres.c|L=2136|R=exec_execute_message} ZI
+maxrows_dml_txn	1 2 D:["1"] s D:["2"] s ZT / D:["3"] C:INSERT 0 1 ZT / T:0 D:["3"] C:SELECT 1 ZT
+maxrows_exact	1 2 D:["1"] D:["2"] D:["3"] s C:SELECT 0 ZI
+ssl_n	N R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+ssl_ssl	N E{S=FATAL|C=0A000|M=unsupported frontend protocol 1234.5679: server supports 3.0 to 3.2|F=backend_startup.c|L=731|R=ProcessStartupPacket} closed
+ssl_extra	N R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+ssl_pipelined	N E{S=FATAL|C=08P01|M=received unencrypted data after SSL request|D=This could be either a client-software bug or evidence of an attempted man-in-the-middle attack.|F=backend_startup.c|L=626|R=ProcessStartupPacket} closed
+startup_unknown_guc	R0 E{S=FATAL|C=42704|M=unrecognized configuration parameter "nosuch"|F=guc.c|L=1166|R=assignable_custom_variable_name} closed
+startup_ext_guc	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+startup_pgc_postmaster	R0 E{S=FATAL|C=55P02|M=parameter "shared_buffers" cannot be changed without restarting the server|F=guc.c|L=3499|R=set_config_with_handle} closed
+startup_internal	R0 E{S=FATAL|C=55P02|M=parameter "server_version" cannot be changed|F=guc.c|L=3476|R=set_config_with_handle} closed
+startup_options_and_param	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=on S:application_name=fromparam S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+startup_datestyle	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=iso_8601 S:search_path="$user", public S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=German, DMY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=LATIN1 S:server_version S:server_encoding=UTF8 K:4 ZI
+startup_search_path	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path=foo S:is_superuser=on S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
+ps_set_same	C:SET ZI
+ps_set_local	C:SET S:application_name=loc ZT / C:COMMIT S:application_name= ZI
+ps_set_rollback	C:SET S:application_name=rb ZT / C:ROLLBACK S:application_name= ZI
+ps_set_and_back	C:BEGIN C:SET C:SET C:COMMIT ZI
+ps_reset_all	C:RESET S:application_name= S:DateStyle=ISO, MDY ZI
+ps_ext_set_flush	1 2 C:SET quiet / S:application_name=ext ZI
+ps_set_failed_stmt	C:SET E{S=ERROR|C=42P01|M=relation "nope_t" does not exist|F=parse_relation.c|L=1498|R=parserOpenTable} ZI / T:0 D:[""] C:SHOW ZI
+ps_set_config	T:0 D:["cfg"] C:SELECT 1 S:application_name=cfg ZI
+ps_set_role	C:SET S:is_superuser=off ZI / C:RESET S:is_superuser=on ZI / C:DROP ROLE ZI
+ps_discard_all	C:DISCARD ALL S:application_name= ZI
