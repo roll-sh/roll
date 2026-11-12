@@ -348,12 +348,22 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     let (s, e) = api.call(Method::PUT, "/environments/production/secrets/KEY", Some(json!({ "value": "new" }))).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("approval_required")));
 
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1, "notify_url": "https://hooks.example/T0/B0/secret-path" }))).await;
     let r = api.ok(Method::POST, "/environments/production/requests", Some(json!({ "message": "rotate", "ops": [{ "op": "set", "key": "KEY", "value": "new" }] }))).await;
     let id = r["id"].as_str().unwrap();
     assert_eq!((r["state"].as_str(), r["items"][0]["what"].clone()), (Some("open"), json!(["changed"])));
     assert!(!r.to_string().contains("\"new\""), "a request never shows its values");
     let (s, _) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+    // Its approvers hear about it, by key name only, from the sweeper; the environment shows the
+    // URL's host, never the URL.
+    let sec = api.secrets.clone();
+    tokio::task::spawn_blocking(move || sec.sweep().unwrap()).await.unwrap();
+    let notice = api.sent.0.lock().unwrap().iter().find(|b| b["request"]["id"] == id).cloned().unwrap();
+    assert_eq!(notice["request"]["keys"], json!(["KEY"]));
+    assert!(notice["text"].as_str().unwrap().contains("opened change request") && !notice.to_string().contains("\"new\""));
+    let env = api.ok(Method::GET, "/environments/production", None).await;
+    assert_eq!(env["notify"], "hooks.example");
     // An approver who may reveal sees what changes, the value now beside the one proposed.
     let v = api.ok(Method::GET, &format!("/environments/production/requests/{id}/values"), None).await;
     assert_eq!((v[0]["key"].as_str(), v[0]["now"].as_str(), v[0]["proposed"].as_str()), (Some("KEY"), Some("old"), Some("new")));

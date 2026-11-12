@@ -672,7 +672,12 @@ and the routes stay the same.
 
 ### Protected environments and approvals
 
-An environment can be **protected** with a policy: `{"approvals": 1, "approvers": [principal…]}`.
+An environment can be **protected** with a policy: `{"approvals": 1, "approvers": [principal…],
+"notify_url"?}`. With `notify_url` (a Slack or Discord incoming webhook, or any HTTPS URL; kept
+sealed, the environment shows only its host as `notify`), each request opened on it is announced:
+the notice is written in the request's own transaction and delivered by the sweeper with retries,
+as `{text, content, project, environment, request: {id, by, message, keys}, link}` (key names,
+never values).
 A write to a protected environment doesn't apply. It answers 409 `approval_required`, and the
 client opens a **change request** with the same operations (`POST …/requests`). A request:
 
@@ -728,7 +733,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}` | | `Environment` |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
-| `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?}` | `Environment` |
+| `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
 | `GET /environments/{env}/folders?path=` | | `{path, folders: Folder[]}` |
 | `POST /environments/{env}/folders` | `{path}` | 201 `Folder` |
 | `DELETE /environments/{env}/folders?path=` | | `{change: Change \| null}` |
@@ -900,7 +905,3 @@ Ranked:
    #21 merges second; the adapter is in the apps thread).
 2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
-3. **A TypeScript client** (`packages/secrets`): `resolve` for services (with the sealed box opened
-   in process), `values`, `digest`-based watching; documented in the getting-started guide.
-4. **Approval notifications**: when a change request opens on a protected environment, its
-   approvers hear about it (a `notify` sync on the environment, or roll's chat ops).

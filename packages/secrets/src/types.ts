@@ -24,6 +24,8 @@ export type Environment = {
   secrets: number;
   /** Keys unchanged for longer are flagged stale (insights); null: never. */
   max_age_days: number | null;
+  /** The host opened change requests are announced to (the URL itself stays sealed). */
+  notify: string | null;
 };
 export type NewEnvironment = {
   slug: string;
@@ -73,7 +75,7 @@ export type Written = { change: Change | null; secret: Secret | null; warnings: 
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
 export type StateRow = { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number };
 export type ChangeDetail = Change & { items: Item[]; state?: StateRow[] };
-export type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
+export type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 export type Problem = { key: string; problem: string };
 /** `leases`: ids of dynamic credentials issued. */
 /** `dynamic`: the keys holding a dynamic link's short-lived credential. */

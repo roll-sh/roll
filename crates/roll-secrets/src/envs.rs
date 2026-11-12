@@ -42,11 +42,13 @@ pub(crate) struct EnvRow {
     pub created_at: i64,
     /// Keys unchanged for longer are flagged stale (insights).
     pub max_age_days: Option<i64>,
+    /// The host change requests are announced to (the URL itself is sealed).
+    pub notify: Option<String>,
 }
 
 const ENV_COLUMNS: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at";
 /// What reads select: the columns above, and the ones added since.
-const ENV_SELECT: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at, max_age_days";
+const ENV_SELECT: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at, max_age_days, notify_host";
 
 fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
     let kind: String = r.get(5)?;
@@ -65,6 +67,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         approvers: from_json(&r.get::<_, String>(11)?),
         created_at: r.get(12)?,
         max_age_days: r.get(13)?,
+        notify: r.get(14)?,
     })
 }
 
@@ -85,6 +88,8 @@ pub struct Environment {
     pub approvers: Vec<String>,
     pub created_at: i64,
     pub max_age_days: Option<i64>,
+    /// The host opened change requests are announced to (`notify_url`'s; the URL stays sealed).
+    pub notify: Option<String>,
     /// Shared secrets in every folder.
     pub secrets: i64,
 }
@@ -132,6 +137,10 @@ pub struct Policy {
     pub approvals: Option<i64>,
     #[serde(default)]
     pub approvers: Option<Vec<String>>,
+    /// Where opened change requests are announced (a Slack or Discord incoming webhook, any
+    /// HTTPS URL); `null` stops it, absent keeps it. Kept sealed: the URL is a credential.
+    #[serde(default, deserialize_with = "some")]
+    pub notify_url: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -183,6 +192,7 @@ pub(crate) fn insert(
         approvers: vec![],
         created_at: now,
         max_age_days: None,
+        notify: None,
     })
 }
 
@@ -226,6 +236,7 @@ fn view(c: &Conn<'_>, rows: Vec<EnvRow>) -> Result<Vec<Environment>> {
             approvers: e.approvers,
             created_at: e.created_at,
             max_age_days: e.max_age_days,
+            notify: e.notify,
         })
         .collect())
 }
@@ -391,10 +402,24 @@ impl Secrets {
         if approvers.len() > 50 || approvers.iter().any(|a| a.is_empty() || a.len() > 200) {
             return Err(Error::BadRequest("at most 50 approvers, each a principal".into()));
         }
-        self.project(project)?;
+        if let Some(Some(u)) = &p.notify_url {
+            self.deliver.as_ref().ok_or_else(|| Error::BadRequest("notifications aren't on this server".into()))?.check(u)?;
+        }
+        let dek = self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
+            match &p.notify_url {
+                Some(Some(u)) => {
+                    let sealed = dek.seal(&crate::notices::notify_aad(project, &env.id), &crate::Value::new(u.trim()));
+                    let host = u.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or_default().rsplit('@').next().unwrap_or_default().to_string();
+                    c.execute("UPDATE environments SET notify_url = ?, notify_host = ? WHERE id = ?", params![sealed, host, env.id])?;
+                }
+                Some(None) => {
+                    c.execute("UPDATE environments SET notify_url = NULL, notify_host = NULL WHERE id = ?", [&env.id])?;
+                }
+                None => {}
+            }
             if env.kind == Kind::Ephemeral && p.protected {
                 return Err(Error::BadRequest("an ephemeral environment can't be protected".into()));
             }

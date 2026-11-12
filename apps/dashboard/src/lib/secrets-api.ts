@@ -97,7 +97,12 @@ export function secretsApi(project: string) {
     environment: (env: string) => req<Environment>("GET", E(env)),
     updateEnvironment: (env: string, patch: { slug?: string; name?: string; expires_at?: number | null; max_age_days?: number | null }) => req<Environment>("PATCH", E(env), patch),
     deleteEnvironment: (env: string, confirm?: string) => req<null>("DELETE", `${E(env)}${qs({ confirm })}`),
-    policy: (env: string, p: { protected: boolean; approvals?: number; approvers?: string[] }) => req<Environment>("PUT", `${E(env)}/policy`, p),
+    /** `notify_url`: where opened change requests are announced (null stops it, absent keeps it). */
+    policy: (env: string, p: { protected: boolean; approvals?: number; approvers?: string[]; notify_url?: string | null }) => req<Environment>("PUT", `${E(env)}/policy`, p),
+    /** Destroys older versions' values of a key (all but the current one by default). */
+    purge: (env: string, key: string, path = "/", before_version?: number) => req<{ purged: number }>("POST", `${K(env, key)}/purge${qs({ path })}`, before_version ? { before_version } : {}),
+    /** How long old values are kept (null: for good). */
+    setHistoryDays: (history_days: number | null) => req<{ history_days: number | null }>("PATCH", P, { history_days }),
 
     folders: (env: string, path = "/") => req<{ path: string; folders: Folder[] }>("GET", `${E(env)}/folders${qs({ path })}`),
     createFolder: (env: string, path: string) => req<Folder>("POST", `${E(env)}/folders`, { path }),
