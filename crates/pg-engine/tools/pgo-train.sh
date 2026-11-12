@@ -3,7 +3,16 @@
 # build"): every workload class we benchmark, against an instrumented roll-engine, so that the
 # profile it writes favours none of them over another.
 #
-#   tools/pgo-train.sh <instrumented roll-engine> <bench client> <raw profile dir>
+#   tools/pgo-train.sh <instrumented roll-engine> <bench client> <raw profile dir> [<breadth raw dir>]
+#
+# With a breadth raw dir, a second phase writes its own raw profiles there (dist-pgo.sh merges the
+# two weighted, so that the benchmark classes keep most of the counts): every golden SQL file
+# (tests/sql, four at a time, each in a new database) and PostgreSQL's regression suite
+# (src/test/regress of REL_18_6, its parallel_schedule's groups four at a time; PGO_REGRESS_SRC
+# names an existing copy of that directory, else a sparse clone is made next to the raw dirs).
+# Code no training run reaches is compiled as cold, and was measured up to 13% slower than the
+# plain dist build (HANDOFF "Profile-guided build"): the breadth phase is what keeps general SQL
+# outside the benchmarks from that.
 #
 # The engine runs on the host with LLVM_PROFILE_FILE=<raw dir>/engine-%p-%m.profraw and stops
 # with SIGTERM (a smart shutdown runs the exit handlers that write the profile). The clients are
@@ -13,7 +22,8 @@
 #   PGO_WORK         scratch directory on disk for the data directory (default <raw dir>/../work)
 #   PGO_SERVER_CPUS  taskset CPUs of the engine, PGO_CLIENT_CPUS of the clients (default: none)
 #   PGO_TRAIN_SKIP   classes left out, space-separated (startup point range short bulk tpch
-#                    catalog regress): only for a hold-out measurement, never for a shipped build
+#                    catalog regress breadth): only for a hold-out measurement, never for a shipped
+#                    build
 # Time: about 8 minutes on 2 cores for the engine. Classes and their shares are set below; a
 # class's OLTP parts run for fixed seconds, the others for fixed work.
 set -eu
@@ -25,6 +35,7 @@ fi
 ENGINE=$(realpath "${1:?usage: pgo-train.sh <instrumented roll-engine> <bench client> <raw dir>}")
 BENCH=$(realpath "${2:?bench client}")
 RAW=$(mkdir -p "${3:?raw dir}" && realpath "$3")
+BRAW=${4:-}; [ -z "$BRAW" ] || BRAW=$(mkdir -p "$BRAW" && realpath "$BRAW")
 HERE=$(cd "$(dirname "$0")" && pwd)
 SQL=$HERE/../tests/sql
 PORT=${PGO_PORT:-55440}
@@ -41,10 +52,12 @@ log() { echo "   $*"; }
 if ss -ltn | grep -q ":$PORT "; then echo "pgo-train: port $PORT busy" >&2; exit 1; fi
 rm -rf "$WORK"; mkdir -p "$WORK/out" "$DATA"
 rm -f "$RAW"/*.profraw
+[ -z "$BRAW" ] || rm -f "$BRAW"/*.profraw
 EPID=
+PROFDIR=$RAW
 start() {
-  LLVM_PROFILE_FILE="$RAW/engine-%p-%m.profraw" TMPDIR="$WORK" $(ts) "$ENGINE" --data "$DATA" \
-    --listen 127.0.0.1:"$PORT" --password pw --max-prepared-transactions 5 \
+  LLVM_PROFILE_FILE="$PROFDIR/engine-%p-%m.profraw" TMPDIR="$WORK" $(ts) "$ENGINE" --data "$DATA" \
+    --listen 127.0.0.1:"$PORT" --password pw --max-prepared-transactions 5 --allow-server-files "$WORK" \
     >>"$WORK/engine.log" 2>&1 &
   EPID=$!
   i=0; until ss -ltn | grep -q ":$PORT "; do
@@ -72,7 +85,7 @@ pgbench() { docker exec -e PGPASSWORD=pw -w /w "$CLI" pgbench -h 127.0.0.1 -p "$
 mkdir -p "$WORK/w"
 printf '\\set a random(1, 100000)\nDELETE FROM events WHERE account = :a;\n' >"$WORK/w/delete.sql"
 docker run -d --name "$CLI" --network host --user "$(id -u):$(id -g)" ${PGO_CLIENT_CPUS:+--cpuset-cpus $PGO_CLIENT_CPUS} \
-  -v "$WORK/w:/w" -v "$(realpath "$SQL"):/sql:ro" --entrypoint sleep "$PGIMG" infinity >/dev/null
+  -v "$WORK/w:/w" -v "$WORK:$WORK" -v "$(realpath "$SQL"):/sql:ro" --entrypoint sleep "$PGIMG" infinity >/dev/null
 
 T0=$(date +%s)
 # Startup: a new data directory (bootstrap), first sessions, a restart that recovers it.
@@ -151,6 +164,37 @@ if want regress; then
   done
 fi
 stop
+# Breadth: general SQL, into its own raw profiles.
+if [ -n "$BRAW" ] && want breadth; then
+  PROFDIR=$BRAW; start
+  # Every golden file, four at a time, each in a new database.
+  ls "$SQL" | sed -n 's/\.sql$//p' | xargs -P 4 -I{} sh -c '
+    d=g_$(echo "{}" | tr -c "a-zA-Z0-9_\n" _)
+    x() { timeout 300 docker exec -e PGPASSWORD=pw '"$CLI"' psql -X -q -h 127.0.0.1 -p '"$PORT"' -U postgres "$@"; }
+    x -d postgres -c "CREATE DATABASE $d" >/dev/null 2>&1
+    x -d "$d" -f "/sql/{}.sql" >/dev/null 2>&1
+    x -d postgres -c "DROP DATABASE $d" >/dev/null 2>&1; true'
+  log "golden: $(ls "$SQL"/*.sql | wc -l) files $(date +%T)"
+  # PostgreSQL's regression suite in its schedule's order, a group four at a time.
+  RS=${PGO_REGRESS_SRC:-$(dirname "$RAW")/pgsrc/src/test/regress}
+  if [ ! -f "$RS/parallel_schedule" ] && [ -z "${PGO_REGRESS_SRC:-}" ]; then
+    rm -rf "$(dirname "$RAW")/pgsrc"
+    git clone -q --depth 1 --branch REL_18_6 --filter=blob:none --sparse \
+      https://github.com/postgres/postgres.git "$(dirname "$RAW")/pgsrc"
+    git -C "$(dirname "$RAW")/pgsrc" sparse-checkout set src/test/regress
+  fi
+  cp -a "$RS" "$WORK/regress"; mkdir -p "$WORK/regress/results"
+  psql -d postgres -c "CREATE DATABASE regression" >/dev/null
+  rx() { xargs -P 4 -I{} sh -c 'timeout 300 docker exec -e PGPASSWORD=pw -e PG_ABS_SRCDIR='"$WORK/regress"' \
+    -e PG_ABS_BUILDDIR='"$WORK/regress"' -e PG_LIBDIR='"$WORK/regress"' -e PG_DLSUFFIX=.so '"$CLI"' \
+    psql -X -q -h 127.0.0.1 -p '"$PORT"' -U postgres -d regression -f '"$WORK/regress"'/sql/{}.sql >/dev/null 2>&1; true'; }
+  sed -n 's/^test: *//p' "$WORK/regress/parallel_schedule" | while read -r group; do
+    printf '%s\n' $group | rx
+  done
+  log "regress: $(sed -n 's/^test: *//p' "$WORK/regress/parallel_schedule" | wc -w) files $(date +%T)"
+  stop
+  echo "pgo-train: breadth $(ls "$BRAW"/*.profraw | wc -l) raw profiles"
+fi
 T1=$(date +%s)
 n=$(ls "$RAW"/*.profraw 2>/dev/null | wc -l)
 [ "$n" -gt 0 ] || { echo "pgo-train: no profile written (an uninstrumented engine?)" >&2; exit 1; }

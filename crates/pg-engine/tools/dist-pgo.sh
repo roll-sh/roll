@@ -16,7 +16,8 @@
 # Environment: PGO_DIR (scratch: target dirs and raw profiles, default <root>/target/pgo; each
 # target dir is deleted once its binary is copied out, PGO_KEEP=1 keeps them), PGO_CLIENT,
 # PGO_BUILD_CPUS (taskset of the builds), and pgo-train.sh's PGO_PORT, PGO_SERVER_CPUS,
-# PGO_CLIENT_CPUS; PGO_LLVM_ARGS (space-separated LLVM options for the optimised build). Plain `cargo build --profile dist` is unchanged: the flags go through
+# PGO_CLIENT_CPUS, PGO_REGRESS_SRC; PGO_NO_BREADTH=1 (the benchmark classes only: for measuring
+# what the breadth phase does, not for a shipped build); PGO_LLVM_ARGS (space-separated LLVM options for the optimised build). Plain `cargo build --profile dist` is unchanged: the flags go through
 # RUSTFLAGS of these builds only.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -63,10 +64,30 @@ if [ -z "$PROF" ]; then
   cp "$W/t-gen/dist/roll-engine" "$W/roll-engine-instrumented"
   [ -n "${PGO_KEEP:-}" ] || rm -rf "$W/t-gen"
   T2=$(t)
-  "$HERE/pgo-train.sh" "$W/roll-engine-instrumented" "$CLIENT" "$W/raw"
+  rm -rf "$W/braw"; BRAW=
+  [ -n "${PGO_NO_BREADTH:-}" ] || { BRAW=$W/braw; mkdir -p "$BRAW"; }
+  "$HERE/pgo-train.sh" "$W/roll-engine-instrumented" "$CLIENT" "$W/raw" ${BRAW:+"$BRAW"}
   T3=$(t)
-  "$PROFDATA" merge -o "$OUT/roll-engine.profdata" "$W/raw"/*.profraw
-  rm -rf "$W/raw"
+  "$PROFDATA" merge -o "$W/bench.profdata" "$W/raw"/*.profraw
+  if [ -d "$W/braw" ]; then
+    # The benchmark classes keep nearly all the counts: their profile weighted so that its total
+    # is PGO_BENCH_SHARE (default 50) times the breadth phase's, about 98% of the merged counts.
+    # The breadth phase's counts still lift the general SQL it runs out of the cold class; at 4x
+    # (81%) the benchmarks lost up to 2.2% instructions (TPC-H) and sort queries came out slower
+    # than the plain dist build (HANDOFF "Profile-guided build").
+    "$PROFDATA" merge -o "$W/breadth.profdata" "$W/braw"/*.profraw
+    tot() { "$PROFDATA" show "$1" | awk '/^Total count:/ {print $3}'; }
+    TB=$(tot "$W/bench.profdata"); TR=$(tot "$W/breadth.profdata")
+    WB=$(awk -v b="$TB" -v r="$TR" -v k="${PGO_BENCH_SHARE:-50}" 'BEGIN {w = int(k * r / b) + 1; print (w < 1 ? 1 : w)}')
+    "$PROFDATA" merge -o "$OUT/roll-engine.profdata" -weighted-input="$WB,$W/bench.profdata" "$W/breadth.profdata"
+    note "profile counts: benchmarks $TB x$WB, breadth $TR"
+  else
+    cp "$W/bench.profdata" "$OUT/roll-engine.profdata"
+  fi
+  # (Each phase's profile kept next to the merged one: another weighting needs no new training.)
+  mv "$W/bench.profdata" "$OUT/bench.profdata"
+  [ ! -f "$W/breadth.profdata" ] || mv "$W/breadth.profdata" "$OUT/breadth.profdata"
+  rm -rf "$W/raw" "$W/braw"
   PROF=$OUT/roll-engine.profdata
   note "client $((T1 - T0)) s, instrumented build $((T2 - T1)) s, training $((T3 - T2)) s"
 elif [ "$PROF" != "$OUT/roll-engine.profdata" ]; then
