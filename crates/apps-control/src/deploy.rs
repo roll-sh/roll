@@ -230,10 +230,12 @@ impl Apps {
 
     pub async fn deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
         let id = dep.to_string();
-        let d = self.db(move |s| s.deployment(&id)).await?;
+        let mut d = self.db(move |s| s.deployment(&id)).await?;
         if d.service != service || d.environment != env {
             return Err(Error::NotFound(format!("no deployment {dep} of {service} in {env}")));
         }
+        let id = dep.to_string();
+        d.steps = self.db(move |s| s.steps(&id)).await?;
         Ok(d)
     }
 
@@ -267,6 +269,12 @@ impl Apps {
         }
     }
 
+    /// A deployment's step began (for its summary; a failed write only loses the summary).
+    async fn step(self: &Arc<Self>, deployment: &str, step: &'static str) {
+        let id = deployment.to_string();
+        let _ = self.db(move |s| s.mark_step(&id, step)).await;
+    }
+
     async fn run(self: &Arc<Self>, d: Deployment) {
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(d.id.clone(), cancel.clone());
@@ -277,6 +285,7 @@ impl Apps {
         let id = d.id.clone();
         match result {
             Ok(()) => {
+                self.step(&d.id, "live").await;
                 log.stream(Stream::System).line(format!("deployed in {:.1} s", began.elapsed().as_secs_f64()));
                 info!(service = %d.service, env = %d.environment, deployment = %d.id, "apps: deployed");
             }
@@ -284,6 +293,7 @@ impl Apps {
                 let _ = e;
             }
             Err(e) => {
+                self.step(&d.id, "failed").await;
                 let msg = e.to_string();
                 log.stream(Stream::System).line(format!("failed: {msg}"));
                 let _ = self.db(move |s| s.set_status(&id, &[DeployStatus::Queued, DeployStatus::Building, DeployStatus::Deploying], DeployStatus::Failed, Some(&msg))).await;
@@ -298,6 +308,7 @@ impl Apps {
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let (svc, env) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
         let id = d.id.clone();
+        self.step(&d.id, "build").await;
         let (image, run) = match &d.image {
             // A rollback or a redeploy: an image roll already has, nothing to build or pull.
             Some(img) if matches!(d.trigger, Trigger::Rollback | Trigger::Settings) => {
@@ -330,8 +341,10 @@ impl Apps {
         dep.run = run;
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         if let Some(cmd) = tpl.run.pre_deploy.clone() {
+            self.step(&d.id, "pre_deploy").await;
             self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
         }
+        self.step(&d.id, "rollout").await;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)

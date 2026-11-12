@@ -216,6 +216,8 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(d1["status"], "active", "{d1}");
     assert_eq!(d1["revision"], "a1a1a1a1a1a1");
     assert_eq!(d1["plan"]["provider"], "node", "{d1}");
+    let steps: Vec<&str> = d1["steps"].as_array().unwrap().iter().map(|s| s["step"].as_str().unwrap()).collect();
+    assert_eq!(steps, ["build", "rollout", "live"], "{d1}");
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{first}/logs"), None).await;
     assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("generated Dockerfile")), "the build log shows the Dockerfile");
     // A root reached through a symlink in the pushed tree would build from the host: refused.

@@ -212,6 +212,8 @@ export interface Deployment {
   started_at: number | null;
   finished_at: number | null;
   ready_ms: number | null;
+  /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
+  steps?: { step: string; at: number }[];
 }
 
 export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql";
@@ -439,6 +441,20 @@ const DEPLOY: Record<DeployStatus, { label: string; tone: Tone }> = {
 };
 
 export const deployStatus = (s: DeployStatus) => DEPLOY[s];
+
+const STEP_LABEL: Record<string, string> = { build: "Build", pre_deploy: "Pre-deploy", rollout: "Rollout", live: "Live", failed: "Failed" };
+
+/** A deployment's steps as label and duration: queued until the first, each until the next; the last (live, failed) has none. `now` closes a step still running. */
+export function stepDurations(d: Pick<Deployment, "created_at" | "steps">, now = Date.now()): { label: string; ms: number | null }[] {
+  const steps = d.steps ?? [];
+  if (!steps.length) return [];
+  const out: { label: string; ms: number | null }[] = [{ label: "Queued", ms: steps[0].at - d.created_at }];
+  steps.forEach((s, i) => {
+    const end = steps[i + 1]?.at ?? (s.step === "live" || s.step === "failed" ? null : now);
+    out.push({ label: STEP_LABEL[s.step] ?? s.step, ms: end === null ? null : end - s.at });
+  });
+  return out;
+}
 
 const RUN: Record<RunStatus, { label: string; tone: Tone }> = {
   running: { label: "Running", tone: "busy" },

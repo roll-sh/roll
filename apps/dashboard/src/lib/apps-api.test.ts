@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, parseEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, parseEnv, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -56,5 +56,18 @@ describe("pasted .env text", () => {
     const { vars, errors } = parseEnv('# db\nexport DATABASE_URL=postgres://x?a=b\n\nNAME="a \\"b\\"\\nc"\nRAW=\'$HOME\'\n1BAD=x\nno equals\n');
     expect(vars).toEqual({ DATABASE_URL: "postgres://x?a=b", NAME: 'a "b"\nc', RAW: "$HOME" });
     expect(errors).toEqual([6, 7]);
+  });
+});
+
+describe("a deployment's steps", () => {
+  it("time each step until the next, the queue until the first, and nothing after it's live", () => {
+    const d = { created_at: 1000, steps: [{ step: "build", at: 1500 }, { step: "rollout", at: 35_500 }, { step: "live", at: 38_000 }] };
+    expect(stepDurations(d)).toEqual([
+      { label: "Queued", ms: 500 },
+      { label: "Build", ms: 34_000 },
+      { label: "Rollout", ms: 2500 },
+      { label: "Live", ms: null },
+    ]);
+    expect(stepDurations({ created_at: 0, steps: [{ step: "build", at: 10 }] }, 110).at(-1)).toEqual({ label: "Build", ms: 100 });
   });
 });

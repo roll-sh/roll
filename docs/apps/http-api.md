@@ -208,6 +208,7 @@ type Deployment = {
   image: string | null;      // the built or pinned image, by digest once known
   plan: Plan | null;         // what the build detected
   rollback_of: string | null;
+  steps?: { step: "build" | "pre_deploy" | "rollout" | "live" | "failed"; at: number }[]; // when each began: on GET …/deploys/{dep} only
   error: string | null;
   created_at: number;
   started_at: number | null;

@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_steps (
+    deployment TEXT NOT NULL,
+    step TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (deployment, step)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_keys (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -340,6 +346,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         ready_ms: r.get(14)?,
         run: json(&r.get::<_, String>(15)?)?,
         vars_hash: r.get(16)?,
+        steps: Vec::new(),
     })
 }
 
@@ -423,6 +430,7 @@ impl Store {
     /// Remove a service and everything that belongs to it (deployments' history included).
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
+            c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
@@ -613,6 +621,17 @@ impl Store {
             .query_row(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE id = ?"), [id], deploy_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no deployment {id}")))
+    }
+
+    /// That a deployment's step began (the first time counts).
+    pub fn mark_step(&self, deployment: &str, step: &str) -> Result<()> {
+        let now = self.now()?;
+        self.db.execute("INSERT INTO deploy_steps (deployment, step, at) VALUES (?, ?, ?) ON CONFLICT (deployment, step) DO NOTHING", params![deployment, step, now])?;
+        Ok(())
+    }
+
+    pub fn steps(&self, deployment: &str) -> Result<Vec<Step>> {
+        Ok(self.db.query("SELECT step, at FROM deploy_steps WHERE deployment = ? ORDER BY at, step", [deployment], |r| Ok(Step { step: r.get(0)?, at: r.get(1)? }))?)
     }
 
     pub fn deployment_upload(&self, id: &str) -> Result<Option<String>> {

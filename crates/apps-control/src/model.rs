@@ -495,6 +495,16 @@ pub struct Deployment {
     /// A hash of the variables it was made with (names and values), to tell when they changed.
     #[serde(skip)]
     pub vars_hash: String,
+    /// When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`), on a
+    /// single deployment's GET; the list leaves them out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Step>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Step {
+    pub step: String,
+    pub at: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

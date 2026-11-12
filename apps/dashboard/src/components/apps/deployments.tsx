@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, followLog, formatMs, isPending, shortSha, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
+import { appsApi, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { clock, DeployBadge, LogView, since, type Runner } from "./shared";
@@ -129,8 +129,26 @@ export function Deployments({
   );
 }
 
+/** The open deployment's steps with their times (its own GET has them); polled while it's on its way. */
+function useSteps(service: string, env: string, d: Deployment) {
+  const [full, setFull] = useState<Deployment | null>(null);
+  const pending = isPending(d.status);
+  useEffect(() => {
+    let live = true;
+    const load = () => appsApi.deployment(service, env, d.id).then((x) => live && setFull(x), () => {});
+    void load();
+    const t = pending ? setInterval(load, 1500) : undefined;
+    return () => {
+      live = false;
+      if (t) clearInterval(t);
+    };
+  }, [service, env, d.id, pending]);
+  return full ? stepDurations(full) : [];
+}
+
 function BuildLog({ service, env, d }: { service: string; env: string; d: Deployment }) {
   const { lines, error } = useBuildLog(service, env, d);
+  const steps = useSteps(service, env, d);
   return (
     <section className="min-w-0">
       <div className="mb-2 flex items-center gap-2">
@@ -140,6 +158,17 @@ function BuildLog({ service, env, d }: { service: string; env: string; d: Deploy
           {d.image ?? ""}
         </span>
       </div>
+      {steps.length > 0 && (
+        <ol className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px]" aria-label="Steps">
+          {steps.map((s, i) => (
+            <li key={s.label} className="inline-flex items-center gap-1.5">
+              {i > 0 && <span className="text-subtle">→</span>}
+              <span className={s.label === "Failed" ? "text-danger" : "text-muted"}>{s.label}</span>
+              {s.ms !== null && <span className="font-mono text-subtle tabular-nums">{formatMs(s.ms)}</span>}
+            </li>
+          ))}
+        </ol>
+      )}
       <LogView
         lines={lines}
         className="h-[460px]"
