@@ -206,6 +206,40 @@ pub enum Secrets {
     },
     /// Open a share's link (or `<id>#<key>`) and print its value; it counts as one of its opens.
     Open { link: String },
+    /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, AWS
+    /// Parameter Store, webhooks): list, add, run now, remove.
+    #[command(subcommand)]
+    Syncs(Syncs),
+    /// Streams of the audit log to a SIEM: list, add, remove.
+    #[command(subcommand)]
+    Sinks(Sinks),
+    /// Destroy the older values of a key for good (after a leak and a rotation).
+    Purge {
+        key: String,
+        /// Only versions before this one (default: every version but the current one).
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// How long old values are kept: a number of days, or `forever`.
+    Retention { days: String },
+    /// When each key was last read and changed, and which are stale or unused.
+    Insights {
+        /// Only keys not read in the last 90 days.
+        #[arg(long)]
+        unused: bool,
+    },
+    /// The project's one-time shares (`--revoke ID` to revoke one).
+    Shares {
+        #[arg(long)]
+        revoke: Option<String>,
+    },
+    /// The leases of dynamic credentials (`--renew ID`, `--revoke ID`).
+    Leases {
+        #[arg(long, conflicts_with = "revoke")]
+        renew: Option<String>,
+        #[arg(long)]
+        revoke: Option<String>,
+    },
     /// Who read and changed what (never values).
     Audit {
         #[arg(long)]
@@ -214,7 +248,49 @@ pub enum Secrets {
         actor: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: i64,
+        /// Export instead: `csv` or `jsonl` (up to 10,000 rows).
+        #[arg(long)]
+        format: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum Syncs {
+    #[command(alias = "list")]
+    Ls,
+    /// Add a sync of this environment and folder: `add github --target repo=acme/web`.
+    Add {
+        /// The kind: github, webhook, notify, vercel, cloudflare, aws-ssm (`syncs ls` lists them).
+        kind: String,
+        /// The target's fields as `name=value` (repeat), as `syncs ls` describes them.
+        #[arg(long = "target", value_name = "NAME=VALUE")]
+        target: Vec<String>,
+        /// Only these keys (default: all of the folder's).
+        #[arg(long, value_delimiter = ',')]
+        keys: Vec<String>,
+        /// Prepend this to every name at the target.
+        #[arg(long)]
+        prefix: Option<String>,
+    },
+    /// Push it now, every key.
+    Run { id: String },
+    #[command(alias = "remove")]
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum Sinks {
+    #[command(alias = "list")]
+    Ls,
+    /// Stream the audit log to an HTTPS URL (its signing secret is printed once).
+    Add {
+        url: String,
+        /// Send the rows the project already has first.
+        #[arg(long)]
+        from_start: bool,
+    },
+    #[command(alias = "remove")]
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -702,7 +778,87 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             eprintln!("Opens {views} time{}, until {}. The key is only in this link: send it, don't store it.", if views == 1 { "" } else { "s" }, chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
         }
         Secrets::Open { .. } => unreachable!("handled above"),
-        Secrets::Audit { key, actor, limit } => {
+        Secrets::Syncs(cmd) => syncs(&c, cmd, json_out).await?,
+        Secrets::Sinks(cmd) => sinks(&c, cmd, json_out).await?,
+        Secrets::Purge { key, before } => {
+            let body = before.map(|b| json!({ "before_version": b })).unwrap_or_else(|| json!({}));
+            let v = c.call(Method::POST, &format!("{env}/secrets/{}/purge?{}", enc(&key), c.q()), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Destroyed {} older value{} of {key}", v["purged"], if v["purged"] == 1 { "" } else { "s" });
+        }
+        Secrets::Retention { days } => {
+            let d = match days.as_str() {
+                "forever" | "off" | "none" => Value::Null,
+                n => json!(n.trim_end_matches('d').parse::<i64>().with_context(|| format!("{n}: a number of days, or forever"))?),
+            };
+            let v = c.call(Method::PATCH, &c.base(), Some(json!({ "history_days": d }))).await?;
+            match v["history_days"].as_i64() {
+                Some(n) => println!("Old values are destroyed after {n} days"),
+                None => println!("Old values are kept"),
+            }
+        }
+        Secrets::Insights { unused } => {
+            let v = c.call(Method::GET, &format!("{env}/insights?{}", c.q()), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            for k in v["keys"].as_array().into_iter().flatten() {
+                if unused && k["last_read_at"].is_number() {
+                    continue;
+                }
+                let read = k["last_read_at"].as_i64().map(|at| format!("read {} by {}", ago(at), s(&k["last_read_by"]))).unwrap_or_else(|| "not read in 90 days".into());
+                let stale = if k["stale"] == true { "  STALE" } else { "" };
+                println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
+            }
+        }
+        Secrets::Shares { revoke } => {
+            if let Some(id) = revoke {
+                c.call(Method::DELETE, &format!("{}/shares/{}", c.base(), enc(&id)), None).await?;
+                println!("Revoked {id}");
+                return Ok(());
+            }
+            let v = c.call(Method::GET, &format!("{}/shares", c.base()), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            for sh in v.as_array().into_iter().flatten() {
+                let state = if sh["open"] == true { format!("{} open{} left", sh["views_left"], if sh["views_left"] == 1 { "" } else { "s" }) } else { "closed".into() };
+                println!("{}  {:<16} {:<22} by {}  {}", s(&sh["id"]), state, s(&sh["note"]), s(&sh["created_by"]), ago(sh["created_at"].as_i64().unwrap_or(0)));
+            }
+        }
+        Secrets::Leases { renew, revoke } => {
+            if let Some(id) = renew {
+                let v = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(&id)), None).await?;
+                println!("{id} now ends {}", chrono::DateTime::from_timestamp_millis(v["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
+                return Ok(());
+            }
+            if let Some(id) = revoke {
+                c.call(Method::DELETE, &format!("{}/leases/{}", c.base(), enc(&id)), None).await?;
+                println!("Revoked {id}");
+                return Ok(());
+            }
+            let v = c.call(Method::GET, &format!("{}/leases", c.base()), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            for l in v.as_array().into_iter().flatten() {
+                let state = if l["revoked_at"].is_number() { "revoked".to_string() } else { format!("ends {}", chrono::DateTime::from_timestamp_millis(l["expires_at"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default()) };
+                println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
+            }
+        }
+        Secrets::Audit { key, actor, limit, format: Some(f) } => {
+            let mut q = format!("limit={limit}&format={}", enc(&f));
+            if let Some(k) = &key {
+                q.push_str(&format!("&key={}", enc(k)));
+            }
+            if let Some(a) = &actor {
+                q.push_str(&format!("&actor={}", enc(a)));
+            }
+            print!("{}", text_of(c.api, &format!("{}/audit?{q}", c.base())).await?);
+        }
+        Secrets::Audit { key, actor, limit, format: None } => {
             let mut q = format!("limit={limit}");
             if let Some(k) = &key {
                 q.push_str(&format!("&key={}", enc(k)));
@@ -849,6 +1005,102 @@ fn import_body(text: &str, path: &str, overwrite: bool, request: bool) -> anyhow
         return Ok(json!({ "json": j, "path": path, "overwrite": overwrite, "request": request }));
     }
     Ok(json!({ "dotenv": text, "path": path, "overwrite": overwrite, "request": request }))
+}
+
+/// A route's answer as text (exports), with the API's error on failure.
+async fn text_of(api: &Api, path: &str) -> anyhow::Result<String> {
+    let mut req = api.http.get(format!("{}{path}", api.base));
+    if let Some(k) = &api.key {
+        req = req.bearer_auth(k);
+    }
+    let res = req.send().await?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        let e: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        bail!("{}", e["error"].as_str().unwrap_or(status.as_str()));
+    }
+    Ok(text)
+}
+
+async fn syncs(c: &Client<'_>, cmd: Syncs, json_out: bool) -> anyhow::Result<()> {
+    let base = format!("{}/syncs", c.base());
+    match cmd {
+        Syncs::Ls => {
+            let v = c.call(Method::GET, &base, None).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            for x in v["syncs"].as_array().into_iter().flatten() {
+                let when = x["last_synced_at"].as_i64().map(ago).unwrap_or_else(|| "never".into());
+                let err = x["error"].as_str().map(|e| format!("  ({e})")).unwrap_or_default();
+                println!("{}  {:<10} {}:{:<10} {:<8} {} keys, {when}{err}", s(&x["id"]), s(&x["kind"]), s(&x["environment"]), s(&x["path"]), s(&x["status"]), x["synced"]);
+            }
+            let kinds: Vec<String> = v["kinds"].as_array().into_iter().flatten().map(|k| s(&k["kind"])).collect();
+            eprintln!("Kinds: {}", kinds.join(", "));
+        }
+        Syncs::Add { kind, target, keys, prefix } => {
+            let mut t = serde_json::Map::new();
+            for kv in target {
+                let (k, v) = kv.split_once('=').with_context(|| format!("{kv}: --target is name=value"))?;
+                t.insert(k.into(), json!(v));
+            }
+            let mut body = json!({ "environment": c.at.env, "path": c.at.path, "kind": kind, "target": t });
+            if !keys.is_empty() {
+                body["keys"] = json!(keys);
+            }
+            if let Some(p) = prefix {
+                body["prefix"] = json!(p);
+            }
+            let v = c.call(Method::POST, &base, Some(body)).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            println!("Added {} ({} of {}:{}); it pushes at the next sweep", s(&v["id"]), s(&v["kind"]), c.at.env, c.at.path);
+            if let Some(secret) = v["secret"].as_str() {
+                println!("{secret}");
+                eprintln!("That's its signing secret (X-Roll-Signature), shown this once.");
+            }
+        }
+        Syncs::Run { id } => {
+            let v = c.call(Method::POST, &format!("{base}/{}/run", enc(&id)), None).await?;
+            println!("{} is {}{}", id, s(&v["status"]), v["error"].as_str().map(|e| format!(": {e}")).unwrap_or_default());
+        }
+        Syncs::Rm { id } => {
+            c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
+            println!("Removed {id} (what it pushed stays at the target)");
+        }
+    }
+    Ok(())
+}
+
+async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()> {
+    let base = format!("{}/audit/sinks", c.base());
+    match cmd {
+        Sinks::Ls => {
+            let v = c.call(Method::GET, &base, None).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            for x in v.as_array().into_iter().flatten() {
+                let when = x["delivered_at"].as_i64().map(ago).unwrap_or_else(|| "never".into());
+                println!("{}  {:<6} {}  delivered {when}{}", s(&x["id"]), s(&x["status"]), s(&x["url"]), x["error"].as_str().map(|e| format!("  ({e})")).unwrap_or_default());
+            }
+        }
+        Sinks::Add { url, from_start } => {
+            let v = c.call(Method::POST, &base, Some(json!({ "url": url, "from_start": from_start }))).await?;
+            println!("{}", s(&v["secret"]));
+            eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+        }
+        Sinks::Rm { id } => {
+            c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
+            println!("Removed {id}");
+        }
+    }
+    Ok(())
 }
 
 /// A random value of `n` letters and digits (62 symbols, rejection-sampled: no bias).

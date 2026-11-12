@@ -357,7 +357,12 @@ roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | r
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging
 roll secrets promote --from development --to staging [KEY…]
-roll secrets audit   [--key KEY]
+roll secrets audit   [--key KEY] [--format csv|jsonl]
+roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
+roll secrets sinks   ls | add URL [--from-start] | rm ID
+roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
+roll secrets insights [--unused]             roll secrets shares [--revoke ID]
+roll secrets leases  [--renew ID | --revoke ID]
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -908,11 +913,9 @@ Ranked:
 3. **A second security audit** of what came after the first: syncs, audit sinks, notices, one-time
    shares, purge and retention, insights, request values, lease renewal, the TypeScript client. In
    progress.
-4. **CLI parity**: `roll secrets syncs|sinks ls|add|run|rm`, `purge`, `retention`, `insights`,
-   `shares`, `leases renew`, so nothing needs the dashboard. In progress.
-5. **The dashboard's controls** for purge (a secret's history), retention (the project's settings)
+4. **The dashboard's controls** for purge (a secret's history), retention (the project's settings)
    and `notify_url` (an environment's protection).
-6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.
-7. **Performance on Postgres**: the 2k/9k-key measurements (import, grid, values, digest) against
+6. **Performance on Postgres**: the 2k/9k-key measurements (import, grid, values, digest) against
    the system database, and indexes where they're slow.
