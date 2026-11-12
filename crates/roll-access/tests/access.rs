@@ -489,6 +489,7 @@ async fn oauth_connects_an_mcp_client() {
     let redirect = "http://127.0.0.1:43111/callback";
     let (s, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "Claude Code", "redirect_uris": [redirect] }))).await;
     assert_eq!(s, StatusCode::CREATED, "{client}");
+    assert!(client.as_object().unwrap().values().all(|v| !v.is_null()), "RFC 7591: unset fields are left out: {client}");
     let client_id = client["client_id"].as_str().unwrap();
     let bad = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": ["http://evil.example/cb"] }))).await;
     assert_eq!(bad.1["error"], "invalid_redirect_uri");
