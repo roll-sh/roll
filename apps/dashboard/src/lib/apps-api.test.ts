@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, parseEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -48,5 +48,13 @@ describe("deployChange", () => {
     // One of two services failing makes it an error.
     const two = deployChange(new Map(), [svc(latest("deploying")), svc(latest("deploying", "dep_9"), "svc_b")]).seen;
     expect(deployChange(two, [svc(latest("active")), svc(latest("failed", "dep_9"), "svc_b")]).finished).toBe("error");
+  });
+});
+
+describe("pasted .env text", () => {
+  it("reads KEY=value lines as a shell would, and names the lines it can't", () => {
+    const { vars, errors } = parseEnv('# db\nexport DATABASE_URL=postgres://x?a=b\n\nNAME="a \\"b\\"\\nc"\nRAW=\'$HOME\'\n1BAD=x\nno equals\n');
+    expect(vars).toEqual({ DATABASE_URL: "postgres://x?a=b", NAME: 'a "b"\nc', RAW: "$HOME" });
+    expect(errors).toEqual([6, 7]);
   });
 });

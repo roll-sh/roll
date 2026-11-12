@@ -718,7 +718,42 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             json!({ "removed": hostname })
         }
     };
-    println!("{}", serde_json::to_string_pretty(&out)?);
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        human(&out)?;
+    }
+    Ok(())
+}
+
+/// What a command answered, for a person: by its shape (an environment, a service, a domain, a
+/// link, something removed), else as JSON.
+fn human(v: &Value) -> anyhow::Result<()> {
+    if v.get("needs_deploy").is_some() && v.get("instances").is_some() {
+        let n = v["instances"].as_array().map_or(0, Vec::len);
+        let private = if v["private"] == true { "  private" } else { "" };
+        println!("{:<12} {:<10} {}  ({n} {}){private}", s(&v["name"]), s(&v["state"]), s(&v["url"]), if n == 1 { "instance" } else { "instances" });
+        if v["needs_deploy"] == true {
+            println!("variables or settings changed since the live deployment: `roll apps redeploy` applies them");
+        }
+    } else if v.get("source").is_some() && v.get("run").is_some() {
+        print_service(v);
+    } else if v.get("hostname").is_some() && v.get("status").is_some() {
+        match v["error"].as_str() {
+            Some(e) if v["status"] != "active" => println!("{}  {}: {e}", s(&v["hostname"]), s(&v["status"])),
+            _ => println!("{}  {}", s(&v["hostname"]), s(&v["status"])),
+        }
+    } else if v.get("vars").is_some() && v.get("kind").is_some() {
+        let vars: Vec<&str> = v["vars"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        println!("linked {} {}: {}", s(&v["kind"]), s(&v["ref"]), vars.join(", "));
+        println!("its services get them on their next deploy (`roll apps redeploy`)");
+    } else if let Some(h) = v["removed"].as_str() {
+        println!("removed {h}");
+    } else if let Some(e) = v["deleted"].as_str() {
+        println!("deleted {e}");
+    } else {
+        println!("{}", serde_json::to_string_pretty(v)?);
+    }
     Ok(())
 }
 
@@ -947,7 +982,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             json!({ "deleted": target.env })
         }
     };
-    println!("{}", serde_json::to_string_pretty(&out)?);
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        human(&out)?;
+    }
     Ok(())
 }
 

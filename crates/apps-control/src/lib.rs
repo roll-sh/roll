@@ -226,7 +226,7 @@ impl Apps {
     pub async fn create_service(self: &Arc<Self>, body: Value) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -238,6 +238,21 @@ impl Apps {
         let build: Build = merge(&Build::default(), o.get("build"), "build")?;
         build.check()?;
         let run = Run::default().merged(o.get("run"))?;
+        // Production's variables, set before its first deploy (an app that needs DATABASE_URL
+        // shouldn't crash-loop first): checked now, before anything is made.
+        let variables = match o.get("variables") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(m)) => {
+                for (k, v) in m {
+                    check_var_name(k)?;
+                    if !v.is_string() {
+                        return Err(Error::BadRequest(format!("variables.{k} is a string")));
+                    }
+                }
+                Some(Value::Object(m.clone()))
+            }
+            Some(_) => return Err(Error::BadRequest("variables is an object of names to values".into())),
+        };
         let (x, y) = (o.get("x").and_then(Value::as_f64), o.get("y").and_then(Value::as_f64));
         let this = self.clone();
         let pname = {
@@ -269,6 +284,9 @@ impl Apps {
             }
         }
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
+        if let Some(set) = variables {
+            self.change_variables(&row.id, PRODUCTION, json!({ "set": set })).await?;
+        }
         // A repo or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {
             self.deploy(&row.id, PRODUCTION, json!({}), Trigger::Api, None, None).await?;

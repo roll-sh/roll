@@ -319,6 +319,14 @@ async fn variables_are_sealed_masked_and_revealed_only_on_their_route() {
     // Never in the database in the clear.
     let raw = std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap();
     assert!(!raw.windows(14).any(|x| x == b"sk-very-secret"));
+    // Given at creation, they're in production before its first deploy.
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "early", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"DATABASE_URL": "postgres://x"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let sid = svc["id"].as_str().unwrap();
+    settled(&w, sid, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{sid}/environments/production"), None).await;
+    assert_eq!(env["needs_deploy"], false, "the first deploy had them: {env}");
+    assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "bad", "source": {"kind": "upload"}, "variables": {"1X": "y"} }))).await.0, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,6 +1,6 @@
 import { ChevronRight, GitBranch, Image, LoaderCircle, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, SERVICE_NAME, type Plan, type Service, type Source } from "@/lib/apps-api";
+import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type Source } from "@/lib/apps-api";
 import { codeApi, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
@@ -49,6 +49,7 @@ export function NewServiceSheet({
   const [name, setName] = useState("");
   const [named, setNamed] = useState(false);
   const [port, setPort] = useState("");
+  const [env, setEnv] = useState("");
   const [plan, setPlan] = useState<{ key: string; plan?: Plan; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,14 +96,16 @@ export function NewServiceSheet({
     from === "repo" ? (repo ? { kind: "repo", repo, ...(root.trim() ? { root: root.trim() } : {}) } : null) : from === "image" ? (image.trim() ? { kind: "image", image: image.trim() } : null) : null;
   const portN = port.trim() ? Number(port) : undefined;
   const portOk = portN === undefined || (Number.isInteger(portN) && portN > 0 && portN < 65536);
-  const ready = !!source && SERVICE_NAME.test(name) && portOk && !busy;
+  const parsed = useMemo(() => parseEnv(env), [env]);
+  const ready = !!source && SERVICE_NAME.test(name) && portOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
     if (!source) return;
     setBusy(true);
     setError(null);
     try {
-      const s = await appsApi.create({ project: project.id, name, source, ...(portN ? { run: { port: portN } } : {}), ...spot });
+      const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
+      const s = await appsApi.create({ project: project.id, name, source, ...(portN ? { run: { port: portN } } : {}), ...variables, ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -189,6 +192,19 @@ export function NewServiceSheet({
               Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
             </Label>
             <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+            <Label>
+              Variables <span className="font-normal">optional: KEY=value lines, a .env pasted as is</span>
+            </Label>
+            <textarea
+              value={env}
+              onChange={(e) => setEnv(e.target.value)}
+              placeholder={"DATABASE_URL=postgres://…\nNODE_ENV=production"}
+              rows={3}
+              spellCheck={false}
+              aria-invalid={parsed.errors.length > 0}
+              className={`${field} h-auto resize-y py-1.5 font-mono ${parsed.errors.length ? "border-danger/60" : ""}`}
+            />
+            {parsed.errors.length > 0 && <p className="mt-1 text-[11px] text-danger">Line {parsed.errors.join(", ")} isn't KEY=value.</p>}
             {from === "repo" && <PlanView state={!repo ? null : plan?.key === planKey ? plan : {}} />}
           </>
         )}

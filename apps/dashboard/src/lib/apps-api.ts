@@ -90,8 +90,38 @@ export interface NewService {
   source: Source;
   build?: Partial<Build>;
   run?: Partial<Run>;
+  /** Production's variables, set before its first deploy. */
+  variables?: Record<string, string>;
   x?: number;
   y?: number;
+}
+
+/**
+ * `.env` text as variables: `KEY=value` lines (`export` allowed, `#` comments and blank lines
+ * skipped, a value in single quotes as is, in double quotes with `\n` for a line break). Lines it
+ * can't read are named in `errors` (1-based).
+ */
+export function parseEnv(text: string): { vars: Record<string, string>; errors: number[] } {
+  const vars: Record<string, string> = {};
+  const errors: number[] = [];
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim().replace(/^export\s+/, "");
+    if (!line || line.startsWith("#")) return;
+    const eq = line.indexOf("=");
+    const key = eq > 0 ? line.slice(0, eq).trim() : "";
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      errors.push(i + 1);
+      return;
+    }
+    let value = line.slice(eq + 1).trim();
+    const q = value[0];
+    if ((q === '"' || q === "'") && value.length >= 2 && value.endsWith(q)) {
+      value = value.slice(1, -1);
+      if (q === '"') value = value.replace(/\\n/g, "\n").replace(/\\"/g, '"');
+    }
+    vars[key] = value;
+  });
+  return { vars, errors };
 }
 
 /** A field set to `null` goes back to its default (apps-control's `merge`). */
