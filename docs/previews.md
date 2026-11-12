@@ -323,7 +323,18 @@ sessions, debug build).
 | **Cost running** | **$0.012 an hour**: the container's 128 MiB, $0.002; Postgres at 0.25 CU, $0.010; Redis memory |
 | After landing | every branch gone, every parent intact |
 
-So a hundred sleeping previews of this project cost about 7 cents a month. An hour of someone
+So a hundred sleeping previews of this project cost about 7 cents a month.
+
+**With roll apps** (a scratch merge of `feature/roll-apps`, 2026-11-12): a repo with a
+Dockerfile as a roll apps service, plus a Redis database.
+
+| What | Measured |
+| --- | --- |
+| Change opened → preview ready (Redis branched, the `pv-…` environment made, its deploy queued) | 678 ms |
+| … → the deploy active (a Docker build of the change's commit) | 4.0 s |
+| First request through roll apps' waking proxy | 444 ms |
+| The Redis the service reached | the preview's branch, not the parent |
+| After landing | the environment gone (404), nothing left: no containers, images, volumes or networks | An hour of someone
 clicking through one costs about a cent.
 
 What dominates, from most to least:
@@ -471,15 +482,17 @@ Ranked by what a person notices first. Done so far:
 - the end-to-end run and its cost;
 - an adversarial review and its fixes;
 - the private page's way in through roll;
-- per-repo build caches.
+- per-repo build caches;
+- a running parent's Postgres copied by reflinks;
+- roll apps end to end.
 
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
 2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages (no full copy on ext4). Also `schema` mode for Postgres.
-3. **roll apps end to end**: run `scripts/preview-cost.sh` against a rolld with roll apps (once
-   `feature/roll-apps` lands), and measure a built service's cold start and cost. Also link
-   access for its `pv-…` environments.
+3. **Link access for roll apps' `pv-…` environments**: they answer on roll apps' own hostnames
+   without previews' token today. Hand roll apps the token, or add a check hook. Also put the
+   roll apps run in `scripts/preview-cost.sh` once `feature/roll-apps` lands.
 4. **Spread preview services across nodes**, with a lease per preview rather than one leader.
 5. **NoSQL masking in the settings** (policies are inherited from the parent today), and an
    `own_bytes` from roll search so a search branch's cost counts only what it wrote.
