@@ -1,5 +1,5 @@
 //! roll's access approvals in chat (docs/permissions.md, "Approvals in chat"): a request a scoped
-//! token may only `ask` for is posted to the Slack channel the operator chose, as a card with
+//! token may only `ask` for is posted to the Slack or Discord channel the operator chose, as a card with
 //! Approve and Deny, and edited when it's decided. A press arrives like every Slack action
 //! (verified, recorded once, handled by a worker): only the install's members decide, and the
 //! decision goes to roll's access service through the hook rolld sets ([`Code::on_access_decision`]),
@@ -82,27 +82,63 @@ impl Code {
         let _ = self.access_decider.set(f);
     }
 
-    fn slack_install(&self, install: &str) -> Result<(&Client, String), String> {
+    fn install(&self, install: &str) -> Result<Install, String> {
+        install_by_id(self, install).map_err(|e| e.to_string())?.ok_or_else(|| format!("no chat install {install}"))
+    }
+
+    fn slack_token(&self, i: &Install) -> Result<(&Client, String), String> {
         let Some((_, client)) = self.slack() else { return Err("Slack isn't configured on this node".into()) };
-        let i = install_by_id(self, install).map_err(|e| e.to_string())?.ok_or_else(|| format!("no chat install {install}"))?;
-        if i.platform != super::Platform::Slack {
-            return Err("approvals go to Slack installs for now".into());
-        }
         let token = i.token(self).ok_or("the install's token can't be opened (ROLL_SECRET_KEY)")?;
         Ok((client, token))
     }
 
-    /// Post an approval card; its message id (`ts`).
+    fn discord_client(&self) -> Result<&code_chat::discord::Client, String> {
+        self.discord().map(|(_, c)| c).ok_or_else(|| "Discord isn't configured on this node".into())
+    }
+
+    /// Post an approval card to a Slack channel or Discord channel; its message id.
     pub async fn post_access_card(&self, install: &str, channel: &str, c: &AccessCard) -> Result<String, String> {
-        let (client, token) = self.slack_install(install)?;
-        client.post_message(&token, &message(channel, c)).await.map(|p| p.ts).map_err(|e| e.to_string())
+        let i = self.install(install)?;
+        match i.platform {
+            super::Platform::Slack => {
+                let (client, token) = self.slack_token(&i)?;
+                client.post_message(&token, &message(channel, c)).await.map(|p| p.ts).map_err(|e| e.to_string())
+            }
+            super::Platform::Discord => {
+                let payload = code_chat::discord::request(&card(c));
+                self.discord_client()?.create_message(channel, &payload).await.map(|p| p.id).map_err(|e| e.to_string())
+            }
+        }
     }
 
     /// Edit a posted approval card (decided, used or expired).
     pub async fn update_access_card(&self, install: &str, channel: &str, ts: &str, c: &AccessCard) -> Result<(), String> {
-        let (client, token) = self.slack_install(install)?;
-        client.update_message(&token, channel, ts, &message(channel, c)).await.map(|_| ()).map_err(|e| e.to_string())
+        let i = self.install(install)?;
+        match i.platform {
+            super::Platform::Slack => {
+                let (client, token) = self.slack_token(&i)?;
+                client.update_message(&token, channel, ts, &message(channel, c)).await.map(|_| ()).map_err(|e| e.to_string())
+            }
+            super::Platform::Discord => {
+                let payload = code_chat::discord::request(&card(c));
+                self.discord_client()?.edit_message(channel, ts, &payload).await.map(|_| ()).map_err(|e| e.to_string())
+            }
+        }
     }
+}
+
+/// A press on an approval card in Discord (the interaction is acknowledged already; the card is
+/// edited once the decision is recorded).
+pub(super) async fn pressed_in_discord(code: &Arc<Code>, install: &Install, approval: &str, approve: bool, user: &str) -> super::Handled {
+    if !install.allows(user) {
+        return super::Handled::Done;
+    }
+    let Some(decide) = code.access_decider.get() else { return super::Handled::Retry("approvals aren't wired on this node".into()) };
+    let d = AccessDecision { approval: approval.to_string(), approve, by: format!("discord:{user}"), install: install.id.clone() };
+    if let Err(e) = decide(d).await {
+        tracing::info!(approval, error = %e, "a Discord press decided nothing");
+    }
+    super::Handled::Done
 }
 
 /// A press on an approval card: which approval, which button, who, where.

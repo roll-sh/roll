@@ -265,19 +265,19 @@ type Approval = {
 
 ### Approvals in chat
 
-Approvals can also go to a Slack channel, through roll code's chat ops (docs/code/chatops.md) and
-its install's bot, rather than a second Slack integration:
+Approvals can also go to a Slack or Discord channel, through roll code's chat ops
+(docs/code/chatops.md) and its install's bot, rather than a second integration:
 
 - The operator picks an install and a channel (`PUT /v1/access/notify {"chat": {"install":
   "chi_…", "channel": "C…"}}`, or the approvals page). Each new approval is posted there as a card:
   who asks to do what, what would run (route, tool, arguments redacted), and the link. When it's
   decided, anywhere, the card is edited to say who decided what, and loses its buttons.
-- A press arrives like every Slack action (verified, recorded once by its id, handled by a worker;
+- A press arrives like every chat action (verified, recorded once by its id, handled by a worker;
   `code-control/src/chatops/access.rs`). Only the install's members may decide (others are told so),
   and roll-access checks the press came from the install approvals go to. `decided_by` is the
-  person (`slack:U123`).
+  person (`slack:U123`, `discord:123…`).
 - Posting is best effort: an approval lives in roll (the dashboard, the API, `roll mcp approvals`);
-  chat is one more place to decide it. Discord is next.
+  chat is one more place to decide it.
 - Nothing about an approval's binding changes: it still runs exactly the request it was asked
   for, once, within ten minutes of the decision.
 
