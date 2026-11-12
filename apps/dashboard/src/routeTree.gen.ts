@@ -16,12 +16,17 @@ import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
 import { Route as DashboardDatabasesRouteImport } from './routes/dashboard/databases'
 import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams'
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
+import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
 import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
 import { Route as OwnerRepoGitReceivePackRouteImport } from './routes/$owner/$repo/git-receive-pack'
 import { Route as OwnerRepoGitUploadPackRouteImport } from './routes/$owner/$repo/git-upload-pack'
 import { Route as OwnerRepoSearchRouteImport } from './routes/$owner/$repo/search'
 import { Route as OwnerRepoWorkRouteImport } from './routes/$owner/$repo/work'
+import { Route as DashboardAccessIndexRouteImport } from './routes/dashboard/access/index'
+import { Route as DashboardAccessApprovalsRouteImport } from './routes/dashboard/access/approvals'
+import { Route as DashboardAccessAuditRouteImport } from './routes/dashboard/access/audit'
+import { Route as DashboardAccessNewRouteImport } from './routes/dashboard/access/new'
 import { Route as DashboardAgentsIndexRouteImport } from './routes/dashboard/agents/index'
 import { Route as DashboardAgentsConnectRouteImport } from './routes/dashboard/agents/connect'
 import { Route as DashboardAgentsSharesRouteImport } from './routes/dashboard/agents/shares'
@@ -97,6 +102,11 @@ const DashboardTasksRoute = DashboardTasksRouteImport.update({
   path: '/dashboard/tasks',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
+  id: '/oauth/authorize',
+  path: '/oauth/authorize',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ShareIdRoute = ShareIdRouteImport.update({
   id: '/share/$id',
   path: '/share/$id',
@@ -126,6 +136,27 @@ const OwnerRepoWorkRoute = OwnerRepoWorkRouteImport.update({
   id: '/work',
   path: '/work',
   getParentRoute: () => OwnerRepoRouteRoute,
+} as any)
+const DashboardAccessIndexRoute = DashboardAccessIndexRouteImport.update({
+  id: '/dashboard/access/',
+  path: '/dashboard/access/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardAccessApprovalsRoute =
+  DashboardAccessApprovalsRouteImport.update({
+    id: '/dashboard/access/approvals',
+    path: '/dashboard/access/approvals',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DashboardAccessAuditRoute = DashboardAccessAuditRouteImport.update({
+  id: '/dashboard/access/audit',
+  path: '/dashboard/access/audit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardAccessNewRoute = DashboardAccessNewRouteImport.update({
+  id: '/dashboard/access/new',
+  path: '/dashboard/access/new',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardAgentsIndexRoute = DashboardAgentsIndexRouteImport.update({
   id: '/dashboard/agents/',
@@ -342,6 +373,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
+  '/oauth/authorize': typeof OauthAuthorizeRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -349,6 +381,9 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/work': typeof OwnerRepoWorkRoute
+  '/dashboard/access/approvals': typeof DashboardAccessApprovalsRoute
+  '/dashboard/access/audit': typeof DashboardAccessAuditRoute
+  '/dashboard/access/new': typeof DashboardAccessNewRoute
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
@@ -362,6 +397,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/redis/$id': typeof DashboardRedisIdRoute
   '/dashboard/storage/$bucket': typeof DashboardStorageBucketRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
+  '/dashboard/access/': typeof DashboardAccessIndexRoute
   '/dashboard/agents/': typeof DashboardAgentsIndexRoute
   '/dashboard/code/': typeof DashboardCodeIndexRoute
   '/dashboard/nosql/': typeof DashboardNosqlIndexRoute
@@ -395,6 +431,7 @@ export interface FileRoutesByTo {
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
+  '/oauth/authorize': typeof OauthAuthorizeRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
@@ -402,6 +439,9 @@ export interface FileRoutesByTo {
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/work': typeof OwnerRepoWorkRoute
+  '/dashboard/access/approvals': typeof DashboardAccessApprovalsRoute
+  '/dashboard/access/audit': typeof DashboardAccessAuditRoute
+  '/dashboard/access/new': typeof DashboardAccessNewRoute
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
@@ -415,6 +455,7 @@ export interface FileRoutesByTo {
   '/dashboard/redis/$id': typeof DashboardRedisIdRoute
   '/dashboard/storage/$bucket': typeof DashboardStorageBucketRoute
   '/$owner/$repo': typeof OwnerRepoIndexRoute
+  '/dashboard/access': typeof DashboardAccessIndexRoute
   '/dashboard/agents': typeof DashboardAgentsIndexRoute
   '/dashboard/code': typeof DashboardCodeIndexRoute
   '/dashboard/nosql': typeof DashboardNosqlIndexRoute
@@ -450,6 +491,7 @@ export interface FileRoutesById {
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
+  '/oauth/authorize': typeof OauthAuthorizeRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -457,6 +499,9 @@ export interface FileRoutesById {
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/work': typeof OwnerRepoWorkRoute
+  '/dashboard/access/approvals': typeof DashboardAccessApprovalsRoute
+  '/dashboard/access/audit': typeof DashboardAccessAuditRoute
+  '/dashboard/access/new': typeof DashboardAccessNewRoute
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
@@ -470,6 +515,7 @@ export interface FileRoutesById {
   '/dashboard/redis/$id': typeof DashboardRedisIdRoute
   '/dashboard/storage/$bucket': typeof DashboardStorageBucketRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
+  '/dashboard/access/': typeof DashboardAccessIndexRoute
   '/dashboard/agents/': typeof DashboardAgentsIndexRoute
   '/dashboard/code/': typeof DashboardCodeIndexRoute
   '/dashboard/nosql/': typeof DashboardNosqlIndexRoute
@@ -506,6 +552,7 @@ export interface FileRouteTypes {
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
+    | '/oauth/authorize'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -513,6 +560,9 @@ export interface FileRouteTypes {
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
     | '/$owner/$repo/work'
+    | '/dashboard/access/approvals'
+    | '/dashboard/access/audit'
+    | '/dashboard/access/new'
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/nosql/$id'
@@ -526,6 +576,7 @@ export interface FileRouteTypes {
     | '/dashboard/redis/$id'
     | '/dashboard/storage/$bucket'
     | '/$owner/$repo/'
+    | '/dashboard/access/'
     | '/dashboard/agents/'
     | '/dashboard/code/'
     | '/dashboard/nosql/'
@@ -559,6 +610,7 @@ export interface FileRouteTypes {
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
+    | '/oauth/authorize'
     | '/share/$id'
     | '/$owner'
     | '/dashboard'
@@ -566,6 +618,9 @@ export interface FileRouteTypes {
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
     | '/$owner/$repo/work'
+    | '/dashboard/access/approvals'
+    | '/dashboard/access/audit'
+    | '/dashboard/access/new'
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/nosql/$id'
@@ -579,6 +634,7 @@ export interface FileRouteTypes {
     | '/dashboard/redis/$id'
     | '/dashboard/storage/$bucket'
     | '/$owner/$repo'
+    | '/dashboard/access'
     | '/dashboard/agents'
     | '/dashboard/code'
     | '/dashboard/nosql'
@@ -613,6 +669,7 @@ export interface FileRouteTypes {
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
+    | '/oauth/authorize'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
@@ -620,6 +677,9 @@ export interface FileRouteTypes {
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
     | '/$owner/$repo/work'
+    | '/dashboard/access/approvals'
+    | '/dashboard/access/audit'
+    | '/dashboard/access/new'
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/nosql/$id'
@@ -633,6 +693,7 @@ export interface FileRouteTypes {
     | '/dashboard/redis/$id'
     | '/dashboard/storage/$bucket'
     | '/$owner/$repo/'
+    | '/dashboard/access/'
     | '/dashboard/agents/'
     | '/dashboard/code/'
     | '/dashboard/nosql/'
@@ -668,9 +729,13 @@ export interface RootRouteChildren {
   DashboardDatabasesRoute: typeof DashboardDatabasesRoute
   DashboardStreamsRoute: typeof DashboardStreamsRoute
   DashboardTasksRoute: typeof DashboardTasksRoute
+  OauthAuthorizeRoute: typeof OauthAuthorizeRoute
   ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
+  DashboardAccessApprovalsRoute: typeof DashboardAccessApprovalsRoute
+  DashboardAccessAuditRoute: typeof DashboardAccessAuditRoute
+  DashboardAccessNewRoute: typeof DashboardAccessNewRoute
   DashboardAgentsConnectRoute: typeof DashboardAgentsConnectRoute
   DashboardAgentsSharesRoute: typeof DashboardAgentsSharesRoute
   DashboardNosqlIdRoute: typeof DashboardNosqlIdRoute
@@ -683,6 +748,7 @@ export interface RootRouteChildren {
   DashboardQueuesVhostsRoute: typeof DashboardQueuesVhostsRoute
   DashboardRedisIdRoute: typeof DashboardRedisIdRoute
   DashboardStorageBucketRoute: typeof DashboardStorageBucketRoute
+  DashboardAccessIndexRoute: typeof DashboardAccessIndexRoute
   DashboardAgentsIndexRoute: typeof DashboardAgentsIndexRoute
   DashboardCodeIndexRoute: typeof DashboardCodeIndexRoute
   DashboardNosqlIndexRoute: typeof DashboardNosqlIndexRoute
@@ -756,6 +822,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardTasksRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/oauth/authorize': {
+      id: '/oauth/authorize'
+      path: '/oauth/authorize'
+      fullPath: '/oauth/authorize'
+      preLoaderRoute: typeof OauthAuthorizeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/share/$id': {
       id: '/share/$id'
       path: '/share/$id'
@@ -797,6 +870,34 @@ declare module '@tanstack/react-router' {
       fullPath: '/$owner/$repo/work'
       preLoaderRoute: typeof OwnerRepoWorkRouteImport
       parentRoute: typeof OwnerRepoRouteRoute
+    }
+    '/dashboard/access/': {
+      id: '/dashboard/access/'
+      path: '/dashboard/access'
+      fullPath: '/dashboard/access/'
+      preLoaderRoute: typeof DashboardAccessIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/access/approvals': {
+      id: '/dashboard/access/approvals'
+      path: '/dashboard/access/approvals'
+      fullPath: '/dashboard/access/approvals'
+      preLoaderRoute: typeof DashboardAccessApprovalsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/access/audit': {
+      id: '/dashboard/access/audit'
+      path: '/dashboard/access/audit'
+      fullPath: '/dashboard/access/audit'
+      preLoaderRoute: typeof DashboardAccessAuditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/access/new': {
+      id: '/dashboard/access/new'
+      path: '/dashboard/access/new'
+      fullPath: '/dashboard/access/new'
+      preLoaderRoute: typeof DashboardAccessNewRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/dashboard/agents/': {
       id: '/dashboard/agents/'
@@ -1114,9 +1215,13 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardDatabasesRoute: DashboardDatabasesRoute,
   DashboardStreamsRoute: DashboardStreamsRoute,
   DashboardTasksRoute: DashboardTasksRoute,
+  OauthAuthorizeRoute: OauthAuthorizeRoute,
   ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,
+  DashboardAccessApprovalsRoute: DashboardAccessApprovalsRoute,
+  DashboardAccessAuditRoute: DashboardAccessAuditRoute,
+  DashboardAccessNewRoute: DashboardAccessNewRoute,
   DashboardAgentsConnectRoute: DashboardAgentsConnectRoute,
   DashboardAgentsSharesRoute: DashboardAgentsSharesRoute,
   DashboardNosqlIdRoute: DashboardNosqlIdRoute,
@@ -1129,6 +1234,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardQueuesVhostsRoute: DashboardQueuesVhostsRoute,
   DashboardRedisIdRoute: DashboardRedisIdRoute,
   DashboardStorageBucketRoute: DashboardStorageBucketRoute,
+  DashboardAccessIndexRoute: DashboardAccessIndexRoute,
   DashboardAgentsIndexRoute: DashboardAgentsIndexRoute,
   DashboardCodeIndexRoute: DashboardCodeIndexRoute,
   DashboardNosqlIndexRoute: DashboardNosqlIndexRoute,

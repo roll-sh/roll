@@ -13,6 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod access;
 mod auth;
 mod cluster;
 mod code;
@@ -443,16 +444,59 @@ async fn run() -> anyhow::Result<()> {
     }
     // Workspace projects and roll secrets: always on, behind the same operator token (secrets
     // also take their scoped tokens). Secrets' links call the products' routes in process.
-    let ws = workspace::open(&args, &home)?;
+    let workspace = workspace::open(&args, &home)?;
+    router = router.merge(roll_workspace::router(workspace.clone()));
+    // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
+    let access = access::open(
+        &args,
+        &home,
+        &auth,
+        access::Products {
+            postgres: postgres.as_ref().map(|p| p.control.clone()),
+            redis: redis.as_ref().map(|r| r.control.clone()),
+            nosql: nosql.as_ref().map(|n| n.control.clone()),
+            streams: streams.as_ref().map(|s| s.broker.clone()),
+            code: code.as_ref().map(|c| &c.code),
+        },
+        workspace.clone(),
+    )?;
+    router = router.merge(roll_access::api::router(access.clone()));
+    // roll secrets: grants from roll-access are looked up when a sync made by one pushes.
     let products_api = secrets::Api::default();
-    let secrets = secrets::open(&args, &home, ws.clone(), !auth.enforcing(), products_api.clone())?;
-    code_secrets.set(secrets.clone(), ws.clone());
-    router = router.merge(roll_workspace::router(ws)).merge(roll_secrets::router(secrets));
+    let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants))?;
+    code_secrets.set(secrets.clone(), workspace.clone());
+    router = router.merge(roll_secrets::router(secrets));
     products_api.set(router.clone());
-    // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
-    // products that are off answer before it. The gated router merges last so its fallback (401
-    // without the token) stays the fallback.
-    let router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes()).merge(auth.gate("api", router));
+    // Approvals can be posted to a Slack channel through roll code's chat ops.
+    if let Some(c) = &code {
+        access::chat(&access, &c.code);
+    }
+    // roll's MCP server: each tool call is a request through the gated API.
+    let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
+    if on.on(Product::Code) {
+        mcp_products.push("agents".into());
+    }
+    let tool_sets: Vec<std::sync::Arc<dyn roll_mcp::ToolSet>> = match &code {
+        Some(_) => vec![std::sync::Arc::new(access::CodeTools)],
+        None => Vec::new(),
+    };
+    let mcp_config = roll_mcp::Config { api_url: access::api_url(&args), web_url: args.web_url.clone(), locked: auth.enforcing(), products: mcp_products, access: Some(access.clone()) };
+    let gated = auth.layer(router.clone());
+    // roll code's agents relay acts on a caller's behalf through the gate too.
+    if let Some(c) = &code {
+        c.code.relay_through(gated.clone());
+    }
+    let mcp = roll_mcp::routes(gated, mcp_config, tool_sets);
+    router = router.merge(mcp);
+    // The operator token in front of every product's routes (auth.rs); `/v1/info`, OAuth's public
+    // endpoints and the 404s of products that are off answer before it. The gated router merges
+    // last so its fallback (401 without the token) stays the fallback.
+    let router = on
+        .info_route(cluster.node_id().to_string())
+        .merge(on.off_routes())
+        .merge(roll_access::oauth::public_router(access))
+        .merge(auth.gate("api", router));
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {
         router = c.router(router);

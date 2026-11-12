@@ -66,6 +66,11 @@ impl Secrets {
     /// the gate let it through as the operator (or rolld has no operator token).
     pub fn caller(&self, parts: &axum::http::request::Parts) -> Result<Caller> {
         let ip = self.client_ip(parts);
+        // A roll-access grant first: its requests carry the operator marker too, narrowed by the
+        // gate, so the marker alone would read as everything.
+        if let Some(g) = roll_auth::Grant::on(&parts.extensions) {
+            return Ok(Caller { principal: format!("token:{}", g.id), grants: std::sync::Arc::new(crate::access::GrantGrants(g.clone())), ip });
+        }
         if let Some(t) = roll_auth::bearer(&parts.headers).filter(|t| t.starts_with(PREFIX)) {
             let mut caller = self.token_caller(t)?;
             caller.ip = ip;

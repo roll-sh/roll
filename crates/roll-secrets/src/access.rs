@@ -126,6 +126,44 @@ impl Grants for TokenScope {
     }
 }
 
+/// A roll-access grant (`rlt_…` tokens and OAuth connections, docs/permissions.md): rolld's gate
+/// classified the request already; this answers the second resources the product checks itself.
+#[derive(Debug)]
+pub struct GrantGrants(pub roll_auth::Grant);
+
+impl Grants for GrantGrants {
+    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
+        use roll_auth::scope;
+        let action = match action {
+            Action::Read => scope::Action::Read,
+            Action::Reveal => scope::Action::Reveal,
+            Action::Write => scope::Action::Write,
+            Action::Delete => scope::Action::Delete,
+            Action::Admin => scope::Action::Admin,
+        };
+        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), ..Default::default() };
+        // `ask` pauses a whole request at the gate; inside the product it's a no.
+        self.0.allows(&r, action) == scope::Outcome::Allow
+    }
+
+    /// The one project its secrets rules name, if they name exactly one.
+    fn project(&self) -> Option<&str> {
+        use roll_auth::scope::{Resources, Selector};
+        let mut found: Option<&str> = None;
+        for rule in self.0.scope.0.iter().filter(|r| r.product == "secrets" || r.product == "*") {
+            let Resources::Some(sel) = &rule.resources else { return None };
+            for s in sel {
+                let Selector::Project { project } = s else { return None };
+                match found {
+                    Some(p) if p != project => return None,
+                    _ => found = Some(project),
+                }
+            }
+        }
+        found
+    }
+}
+
 /// The caller of a request, or of an in-process call.
 #[derive(Clone, Debug)]
 pub struct Caller {

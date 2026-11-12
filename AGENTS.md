@@ -272,6 +272,22 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the cluster (several nodes in one process: routing, takeover, joining, draining):
       `code-control/tests/cluster.rs`
     - two nodes racing on one control database: `code-control/tests/concurrency.rs`
+- **Access and MCP (scoped tokens, docs/permissions.md, docs/mcp.md):**
+  - `roll_auth::scope` is the model (rules of product × resources × actions, `allow` or `ask`);
+    `crates/roll-access` is the store, the catalogue and the one evaluator, which rolld's gate hands
+    every request bearing a scoped (`rlt_`) or OAuth (`rlo_`) token. Products never check scopes
+    themselves: they see `roll_auth::Operator` plus a `roll_auth::Grant` (ask `Grant::allows` for a
+    second resource inside one request). Don't build a second permission system.
+  - Every route rolld serves needs a row in `roll-access/src/catalog.rs` (one action on one
+    product, how to find its resource, which answer fields are credentials) or a reason to stay the
+    operator's; `rolld/tests/auth.rs` fails otherwise. A new product adds its name to
+    `scope::PRODUCTS`, its rows, and a resolver in `rolld/src/access.rs` when its ids aren't in the
+    path (or take names).
+  - Grants are looked up on every request; never cache them. Read-only must be enforced by the
+    product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
+  - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
+    through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
+    Never call a service directly from a tool.
 - **Projects (the dashboard's workspace):** `crates/roll-workspace` stores projects and where each
   product resource sits on its canvas (docs/workspace.md); the resources themselves stay in their
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it

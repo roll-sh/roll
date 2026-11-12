@@ -52,6 +52,9 @@ export function Sidebar({ onSearch, header }: { onSearch: () => void; header?: R
       <SideLink href="/dashboard/code" icon={<GitBranch className="size-3.5" />} active={pathname.startsWith("/dashboard/code")}>
         Code
       </SideLink>
+      <SideLink href="/dashboard/access" icon={<KeyRound className="size-3.5" />} active={pathname.startsWith("/dashboard/access")}>
+        MCP &amp; access
+      </SideLink>
 
       <Projects pathname={pathname} />
       <SidebarAgents />

@@ -6309,10 +6309,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-access"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "ipnet",
+ "percent-encoding",
+ "roll-auth",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "roll-auth"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "serde",
  "serde_json",
  "tower-http 0.7.1",
 ]
@@ -6347,6 +6376,8 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "roll-access",
+ "roll-auth",
  "roll-secrets",
  "roll-workspace",
  "rustls-pemfile",
@@ -6435,6 +6466,26 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "roll-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "code-sql",
+ "futures",
+ "http-body-util",
+ "percent-encoding",
+ "roll-access",
+ "roll-auth",
+ "roll-workspace",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "url",
 ]
 
 [[package]]
@@ -6540,9 +6591,11 @@ dependencies = [
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-access",
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-mcp",
  "roll-secrets",
  "roll-workspace",
  "s3-api",

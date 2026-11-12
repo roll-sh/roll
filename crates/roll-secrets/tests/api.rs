@@ -123,7 +123,7 @@ impl Api {
         let mut syncs = Syncs::default();
         syncs.register(sync.clone());
         let sent = Arc::new(Sent::default());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None };
         let secrets = Arc::new(Secrets::new(db, ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
         let mut api = Api { sent, router, secrets, fake, sync, project: String::new(), _dir: dir };
@@ -610,4 +610,38 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
     let csv = csv.as_str().unwrap();
     assert!(csv.starts_with("id,at,actor,action,") && csv.contains("\"secrets.export\"") && !csv.contains("sk_live"));
+}
+
+#[tokio::test]
+async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
+    use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+    let api = Api::new().await;
+    api.set("production", "DB_PASSWORD", "prod-pw").await;
+    api.set("development", "REF", "${production.DB_PASSWORD}").await;
+    let rule = Rule {
+        product: "secrets".into(),
+        resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
+        environments: Some(vec!["development".into()]),
+        paths: None,
+        actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
+    // As rolld's gate passes a grant's request on: the operator marker and the grant.
+    let call = |path: String| {
+        let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}{path}", api.project)).body(Body::empty()).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(grant.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (s, v) = call("/environments/development/values".into()).await;
+    assert_eq!((s, v["values"]["REF"].as_str()), (StatusCode::OK, Some("${production.DB_PASSWORD}")), "the reference into production stays unresolved");
+    assert_eq!(call("/environments/production/values".into()).await.0, StatusCode::FORBIDDEN);
+    let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
+    assert_eq!(audit[0]["action"], "secrets.export");
 }
