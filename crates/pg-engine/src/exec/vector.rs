@@ -598,6 +598,233 @@ impl VN {
     }
 }
 
+/// A batch's exact numbers at one scale (`Lanes`): each live row's unscaled value, by its
+/// position in the selection, none of them past `bound` in magnitude, so the loops over
+/// them need no overflow checks.
+#[derive(Default)]
+pub struct Lane {
+    pub v: Vec<i128>,
+    /// By position; empty: no NULL (a NULL's value is 0).
+    pub nulls: Vec<bool>,
+    pub scale: u32,
+    pub bound: u128,
+    /// One number for every row (Some(None): NULL), `v` and `nulls` not filled.
+    konst: Option<Option<(i128, u32)>>,
+}
+
+/// The bound a lane's numbers keep under (`Lane::bound`): sums of a batch of them, and
+/// their sum with another, stay well inside an i128.
+pub const LANE_LIMIT: u128 = 1 << 100;
+
+/// A node of `Lanes`: a column, a constant, or + − × of two nodes before it.
+#[derive(Clone, Copy, PartialEq)]
+enum LNode {
+    Col(usize),
+    Const(Option<(i128, u32)>),
+    Op(NumOp, usize, usize),
+}
+
+/// The aggregates' numeric arguments (`AggArg::Num`) as one graph of their distinct
+/// subexpressions, each computed once a batch as a lane (an operator after its operands),
+/// into buffers kept from batch to batch.
+pub struct Lanes {
+    nodes: Vec<LNode>,
+    /// By aggregate argument: its node.
+    roots: Vec<Option<usize>>,
+    out: Vec<Lane>,
+}
+
+impl Lanes {
+    pub fn new(args: &[AggArg]) -> Lanes {
+        fn add(nodes: &mut Vec<LNode>, k: &VN) -> usize {
+            let n = match k {
+                VN::Col(c) => LNode::Col(*c),
+                VN::Const(x) => LNode::Const(*x),
+                VN::Op(op, a) => {
+                    let x = add(nodes, &a[0]);
+                    let y = add(nodes, &a[1]);
+                    LNode::Op(*op, x, y)
+                }
+            };
+            nodes.iter().position(|m| *m == n).unwrap_or_else(|| {
+                nodes.push(n);
+                nodes.len() - 1
+            })
+        }
+        let mut nodes = Vec::new();
+        let roots = args
+            .iter()
+            .map(|a| match a {
+                AggArg::Num(k) => Some(add(&mut nodes, k)),
+                _ => None,
+            })
+            .collect();
+        Lanes { nodes, roots, out: Vec::new() }
+    }
+
+    /// Aggregate argument `i`'s lane (`eval`'s).
+    pub fn arg(&self, i: usize) -> &Lane {
+        &self.out[self.roots[i].expect("a numeric argument")]
+    }
+
+    /// Every node's numbers over the rows `live` of `b`, exactly as `VN::eval` gives them;
+    /// false where some row's isn't one a lane holds (not a number, past `LANE_LIMIT`, a
+    /// scale past numeric's): the batch goes the row way then.
+    pub fn eval(&mut self, b: &ColBatch, live: &[u32]) -> bool {
+        self.out.resize_with(self.nodes.len(), Default::default);
+        for (i, node) in self.nodes.iter().enumerate() {
+            let (done, rest) = self.out.split_at_mut(i);
+            if !node_lane(*node, done, &mut rest[0], b, live) {
+                return false;
+            }
+        }
+        // (An argument that is a constant: its numbers made.)
+        for r in self.roots.iter().flatten() {
+            let l = &mut self.out[*r];
+            if let Some(k) = l.konst.take() {
+                let (x, s) = k.unwrap_or((0, 0));
+                l.v.clear();
+                l.v.resize(live.len(), x);
+                l.nulls.clear();
+                if k.is_none() {
+                    l.nulls.resize(live.len(), true);
+                }
+                (l.scale, l.bound) = (s, x.unsigned_abs());
+            }
+            if l.bound >= LANE_LIMIT {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Node `node`'s lane into `o` (its operands' in `done`); false: none.
+fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32]) -> bool {
+    o.konst = None;
+    o.v.clear();
+    o.nulls.clear();
+    match node {
+        LNode::Const(k) => {
+            o.konst = Some(k);
+            let (x, s) = k.unwrap_or((0, 0));
+            (o.scale, o.bound) = (s, x.unsigned_abs());
+            true
+        }
+        LNode::Col(i) => {
+            let Some(c) = col_at(b, i) else { return false };
+            if live.iter().any(|&r| c.nulls[r as usize]) {
+                o.nulls.extend(live.iter().map(|&r| c.nulls[r as usize]));
+            }
+            let nulls = &o.nulls;
+            let null = |p: usize| !nulls.is_empty() && nulls[p];
+            o.scale = 0;
+            match &c.data {
+                ColData::I32(x) => o.v.extend(live.iter().map(|&r| x[r as usize] as i128)),
+                ColData::I64(x) => o.v.extend(live.iter().map(|&r| x[r as usize] as i128)),
+                ColData::Num(x) => {
+                    // (One scale, every row's: a product's scale is its operands' sum, so
+                    // rows of other scales would give it another.)
+                    let mut s = None;
+                    for (p, &r) in live.iter().enumerate() {
+                        let (n, ns) = x[r as usize];
+                        if null(p) {
+                            o.v.push(0);
+                            continue;
+                        }
+                        if *s.get_or_insert(ns) != ns {
+                            return false;
+                        }
+                        o.v.push(n);
+                    }
+                    o.scale = s.unwrap_or(0);
+                }
+                _ => return false,
+            }
+            o.bound = o.v.iter().fold(0, |m, x| m.max(x.unsigned_abs()));
+            true
+        }
+        LNode::Op(op, x, y) => {
+            let (x, y) = (&done[x], &done[y]);
+            match (x.konst, y.konst) {
+                (Some(Some((a, sa))), Some(Some((c, sc)))) => {
+                    let Some((k, s)) = num_op(op, a, sa, c, sc) else { return false };
+                    (o.konst, o.scale, o.bound) = (Some(Some((k, s))), s, k.unsigned_abs());
+                    return true;
+                }
+                (Some(None), _) | (_, Some(None)) => {
+                    (o.konst, o.scale, o.bound) = (Some(None), 0, 0);
+                    return true;
+                }
+                _ => {}
+            }
+            let (sx, bx, sy, by) = (x.scale, x.bound, y.scale, y.bound);
+            let Some((scale, fx, fy, bound)) = (|| match op {
+                NumOp::Add | NumOp::Sub => {
+                    let s = sx.max(sy);
+                    let (fx, fy) = (10i128.checked_pow(s - sx)?, 10i128.checked_pow(s - sy)?);
+                    Some((s, fx, fy, bx.checked_mul(fx as u128)?.checked_add(by.checked_mul(fy as u128)?)?))
+                }
+                NumOp::Mul => {
+                    let s = sx + sy;
+                    (s as i64 <= crate::types::numeric::DSCALE_MAX).then_some(())?;
+                    Some((s, 1, 1, bx.checked_mul(by)?))
+                }
+            })() else {
+                return false;
+            };
+            if bound >= LANE_LIMIT {
+                return false;
+            }
+            (o.scale, o.bound) = (scale, bound);
+            let n = live.len();
+            // (In range by the bounds: no check per row.)
+            match (x.konst, y.konst) {
+                (None, None) => {
+                    let (a, c) = (&x.v, &y.v);
+                    match op {
+                        NumOp::Mul => o.v.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul(*c))),
+                        NumOp::Add => o.v.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul(fx).wrapping_add(c.wrapping_mul(fy)))),
+                        NumOp::Sub => o.v.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul(fx).wrapping_sub(c.wrapping_mul(fy)))),
+                    }
+                }
+                (Some(Some((k, _))), None) => {
+                    let k = k.wrapping_mul(fx);
+                    match op {
+                        NumOp::Mul => o.v.extend(y.v.iter().map(|c| k.wrapping_mul(*c))),
+                        NumOp::Add => o.v.extend(y.v.iter().map(|c| k.wrapping_add(c.wrapping_mul(fy)))),
+                        NumOp::Sub => o.v.extend(y.v.iter().map(|c| k.wrapping_sub(c.wrapping_mul(fy)))),
+                    }
+                }
+                (None, Some(Some((k, _)))) => {
+                    let k = k.wrapping_mul(fy);
+                    match op {
+                        NumOp::Mul => o.v.extend(x.v.iter().map(|a| a.wrapping_mul(k))),
+                        NumOp::Add => o.v.extend(x.v.iter().map(|a| a.wrapping_mul(fx).wrapping_add(k))),
+                        NumOp::Sub => o.v.extend(x.v.iter().map(|a| a.wrapping_mul(fx).wrapping_sub(k))),
+                    }
+                }
+                _ => unreachable!("constants handled above"),
+            }
+            debug_assert_eq!(o.v.len(), n);
+            let (xn, yn) = (x.konst.is_none() && !x.nulls.is_empty(), y.konst.is_none() && !y.nulls.is_empty());
+            match (xn, yn) {
+                (true, true) => o.nulls.extend(x.nulls.iter().zip(&y.nulls).map(|(a, c)| *a || *c)),
+                (true, false) => o.nulls.extend_from_slice(&x.nulls),
+                (false, true) => o.nulls.extend_from_slice(&y.nulls),
+                (false, false) => {}
+            }
+            // (A NULL row's value: 0, as a column's.)
+            for (v, null) in o.v.iter_mut().zip(&o.nulls) {
+                if *null {
+                    *v = 0;
+                }
+            }
+            true
+        }
+    }
+}
+
 /// An aggregate's argument as a batch reads it.
 pub enum AggArg {
     /// count(*).

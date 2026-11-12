@@ -139,6 +139,16 @@ impl SumNum {
         self.n += 1;
     }
 
+    /// `n` values whose sum is `v` at scale `vs` added (as `n` `add_wide`s would: an exact
+    /// sum, the largest scale seen).
+    pub fn add_sum(&mut self, v: i128, vs: u32, n: i64) {
+        if n == 0 {
+            return;
+        }
+        self.add_wide(v, vs);
+        self.n += n - 1;
+    }
+
     /// Another part's rows added (an exact sum: the same in any order).
     pub fn merge(&mut self, o: SumNum) {
         if let Some((v, s)) = o.small {
@@ -498,6 +508,39 @@ pub struct Partials<'a> {
     /// row's key as such bytes.
     bidx: hashbrown::HashMap<Box<[u8]>, u32, super::fasthash::FastState>,
     bkey: Vec<u8>,
+    /// `batch_run`'s: groups by their key packed in a word (`packed`), and its scratch.
+    pidx: hashbrown::HashMap<u64, u32, super::fasthash::FastState>,
+    run: RunScratch,
+}
+
+/// A group `batch_run` makes when it commits (numbered after the part's, in order).
+enum NewGroup {
+    /// The one group of an aggregation without keys.
+    Only,
+    /// Its key as groups compare it and its own (`batch_values`), its key's bytes
+    /// (`batch_key`) and packed word (`packed`).
+    Values(Vec<Value>, Vec<Value>, Box<[u8]>, Option<u64>),
+    /// Its NULLs and key words (`Layout`).
+    Words(Vec<u64>),
+}
+
+/// `Partials::batch_run`'s buffers, kept from batch to batch.
+#[derive(Default)]
+struct RunScratch {
+    /// Each live row's group, and its slot (groups in the order the batch touches them).
+    gids: Vec<u32>,
+    slots: Vec<u32>,
+    /// By group number: its slot this batch (u32::MAX: none).
+    slot_of: Vec<u32>,
+    touched: Vec<u32>,
+    /// By slot and aggregate: the batch's sum and count.
+    acc: Vec<i128>,
+    cnt: Vec<i64>,
+    /// New groups by their key's bytes (`batch_key`, or a words key's), and the groups.
+    newk: hashbrown::HashMap<Box<[u8]>, u32, super::fasthash::FastState>,
+    newg: Vec<NewGroup>,
+    /// A words spec's states after the batch, by slot.
+    wnew: Vec<u64>,
 }
 
 /// A kernel's value over `row`: a column's or constant's in place, else the next of the
@@ -600,6 +643,8 @@ impl<'a> Partials<'a> {
             vals: Vec::with_capacity(spec.aggs.len()),
             bidx: Default::default(),
             bkey: Vec::new(),
+            pidx: Default::default(),
+            run: Default::default(),
         }
     }
 
@@ -1079,6 +1124,386 @@ impl<'a> Partials<'a> {
         true
     }
 
+    /// Row `r`'s group key packed in a word, when it fits in 8 bytes (each key a kind
+    /// byte and its bytes, a string's length first, bpchar's trimmed: equal words, equal
+    /// keys); None otherwise.
+    #[inline]
+    fn packed(&self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> Option<u64> {
+        use crate::storage::cols::ColData as D;
+        let mut w = [0u8; 8];
+        let mut n = 0;
+        let mut put = |x: &[u8]| -> Option<()> {
+            w.get_mut(n..n + x.len())?.copy_from_slice(x);
+            n += x.len();
+            Some(())
+        };
+        for (c, trim) in plan.keys.iter().zip(&self.spec.trim) {
+            let col = b.cols[*c].as_ref()?;
+            if col.nulls[r] {
+                put(&[0])?;
+                continue;
+            }
+            match &col.data {
+                D::I32(v) => {
+                    put(&[2])?;
+                    put(&v[r].to_le_bytes())?
+                }
+                D::Date(v) => {
+                    put(&[4])?;
+                    put(&v[r].to_le_bytes())?
+                }
+                D::Bool(v) => put(&[7, v[r] as u8])?,
+                D::Bytes(_) => {
+                    let mut t = col.bytes(b, r);
+                    if *trim {
+                        while let [rest @ .., b' '] = t {
+                            t = rest;
+                        }
+                    }
+                    put(&[8, u8::try_from(t.len()).ok()?])?;
+                    put(t)?
+                }
+                _ => return None,
+            }
+        }
+        Some(u64::from_le_bytes(w))
+    }
+
+    /// The rows `live` of the column batch `b` (each one passed the filter, none odd),
+    /// with each numeric argument's numbers in `lanes` (by aggregate, `AggArg::Num`'s:
+    /// `VN::lane`), aggregated by `plan` as `batch_row` would aggregate them one by one,
+    /// in order (true); or nothing changed (false: the caller hands them to `batch_row`).
+    /// The aggregates' numbers are summed a batch at a time by group, then added to each
+    /// group's states once.
+    pub fn batch_run(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, live: &[u32], lanes: &super::vector::Lanes) -> bool {
+        use super::vector::AggArg;
+        // (Within this, a batch's sums and their sum with a state stay inside an i128.)
+        const SUM_LIMIT: u128 = 1 << 120;
+        // (1. Every aggregate takes its rows' numbers.)
+        for (i, (arg, (_, skip, p))) in plan.args.iter().zip(&self.spec.aggs).enumerate() {
+            match (arg, p) {
+                (AggArg::Star, Partial::Count(_)) => {}
+                (AggArg::Count(c), Partial::Count(_)) => {
+                    if !*skip && b.cols[*c].as_ref().is_none_or(|c| live.iter().any(|&r| c.nulls[r as usize])) {
+                        return false;
+                    }
+                }
+                (AggArg::Num(_), Partial::SumNum(_) | Partial::AvgInt(..)) => {
+                    let l = lanes.arg(i);
+                    if (!*skip && l.nulls.iter().any(|n| *n))
+                        || l.bound.checked_mul(live.len() as u128).is_none_or(|t| t >= SUM_LIMIT)
+                        || (matches!(p, Partial::AvgInt(..)) && (l.scale != 0 || l.bound >= 1 << 63))
+                    {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        // (2. Each row's group: an existing one's number, or a new one's, numbered after
+        // the part's in the order their first rows come.)
+        let base = self.groups() as u32;
+        let mut run = std::mem::take(&mut self.run);
+        run.gids.clear();
+        run.newk.clear();
+        run.newg.clear();
+        let ok = self.run_groups(plan, b, live, base, &mut run);
+        let ok = ok && self.run_sums(plan, b, live, lanes, base, &mut run);
+        if ok {
+            self.run_commit(plan, lanes, &mut run);
+        }
+        for &g in &run.touched {
+            run.slot_of[g as usize] = u32::MAX;
+        }
+        run.touched.clear();
+        self.run = run;
+        ok
+    }
+
+    /// `batch_run`'s groups into `run.gids` (false: a key it doesn't take; nothing
+    /// changed but what the lookups remember of existing groups).
+    fn run_groups(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, live: &[u32], base: u32, run: &mut RunScratch) -> bool {
+        if plan.keys.is_empty() {
+            if base == 0 {
+                run.newg.push(NewGroup::Only);
+            }
+            run.gids.resize(live.len(), 0);
+            return true;
+        }
+        if let Some(l) = self.spec.words.clone() {
+            use std::hash::BuildHasher;
+            let nk = 1 + l.keys.len();
+            for &r in live {
+                let r = r as usize;
+                self.wkey.clear();
+                self.wkey.push(0);
+                for (i, ((c, ty), k)) in plan.keys.iter().zip(&plan.key_types).zip(&l.keys).enumerate() {
+                    let Some(col) = &b.cols[*c] else { return false };
+                    if col.nulls[r] {
+                        self.wkey[0] |= 1 << i;
+                        self.wkey.push(0);
+                        continue;
+                    }
+                    let Some(w) = col.value(b, r, ty).ok().and_then(|v| k.word(&v)) else { return false };
+                    self.wkey.push(w);
+                }
+                let h = self.hasher.hash_one(&self.wkey[..]);
+                let (words, key) = (&self.words, &self.wkey[..]);
+                let g = match self.wtable.find(h, |&g| words[g as usize * l.stride..][..nk] == *key) {
+                    Some(g) => *g,
+                    None => {
+                        let bytes: Box<[u8]> = key.iter().flat_map(|w| w.to_le_bytes()).collect();
+                        *run.newk.entry(bytes).or_insert_with(|| {
+                            run.newg.push(NewGroup::Words(key.to_vec()));
+                            base + run.newg.len() as u32 - 1
+                        })
+                    }
+                };
+                run.gids.push(g);
+            }
+            return true;
+        }
+        // (The batch's packed keys seen, direct-mapped: a few groups never reach the map.
+        // No packed key is all ones: its first byte is a kind, at most 8.)
+        let mut seen = [(u64::MAX, 0u32); 32];
+        let slot = |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 59) as usize;
+        for &r in live {
+            let r = r as usize;
+            let pk = self.packed(plan, b, r);
+            if let Some(k) = pk {
+                let (sk, sg) = seen[slot(k)];
+                if sk == k {
+                    run.gids.push(sg);
+                    continue;
+                }
+                if let Some(&g) = self.pidx.get(&k) {
+                    seen[slot(k)] = (k, g);
+                    run.gids.push(g);
+                    continue;
+                }
+            }
+            if !self.batch_key(plan, b, r) {
+                return false;
+            }
+            let g = if let Some(&g) = self.bidx.get(&self.bkey[..]) {
+                if let Some(k) = pk {
+                    self.pidx.insert(k, g);
+                }
+                g
+            } else if let Some(&g) = run.newk.get(&self.bkey[..]) {
+                g
+            } else {
+                let Some((key, own)) = self.batch_values(plan, b, r) else { return false };
+                match self.index.get(&key[..]) {
+                    // (Remembered for the rows after: an existing group's.)
+                    Some(&g) => {
+                        self.bidx.insert(self.bkey.as_slice().into(), g);
+                        if let Some(k) = pk {
+                            self.pidx.insert(k, g);
+                        }
+                        g
+                    }
+                    None => {
+                        let g = base + run.newg.len() as u32;
+                        run.newk.insert(self.bkey.as_slice().into(), g);
+                        run.newg.push(NewGroup::Values(key, own, self.bkey.as_slice().into(), pk));
+                        g
+                    }
+                }
+            };
+            if let Some(k) = pk {
+                seen[slot(k)] = (k, g);
+            }
+            run.gids.push(g);
+        }
+        true
+    }
+
+    /// `batch_run`'s sums and counts by slot and aggregate, and (a words spec) each
+    /// touched group's states after them, every one checked (false: one doesn't fit).
+    fn run_sums(
+        &mut self,
+        plan: &super::vector::AggPlan,
+        b: &crate::storage::cols::ColBatch,
+        live: &[u32],
+        lanes: &super::vector::Lanes,
+        base: u32,
+        run: &mut RunScratch,
+    ) -> bool {
+        use super::vector::AggArg;
+        let na = plan.args.len();
+        let ngroups = base as usize + run.newg.len();
+        if run.slot_of.len() < ngroups {
+            run.slot_of.resize(ngroups, u32::MAX);
+        }
+        run.slots.clear();
+        for &g in &run.gids {
+            let s = &mut run.slot_of[g as usize];
+            if *s == u32::MAX {
+                *s = run.touched.len() as u32;
+                run.touched.push(g);
+            }
+            run.slots.push(*s);
+        }
+        let nslots = run.touched.len();
+        run.acc.clear();
+        run.acc.resize(nslots * na, 0);
+        run.cnt.clear();
+        run.cnt.resize(nslots * na, 0);
+        for (i, arg) in plan.args.iter().enumerate() {
+            let (acc, cnt) = (&mut run.acc, &mut run.cnt);
+            match arg {
+                AggArg::Star => run.slots.iter().for_each(|&s| cnt[s as usize * na + i] += 1),
+                AggArg::Count(c) => {
+                    if let Some(col) = &b.cols[*c] {
+                        for (&s, &r) in run.slots.iter().zip(live) {
+                            cnt[s as usize * na + i] += !col.nulls[r as usize] as i64;
+                        }
+                    }
+                }
+                AggArg::Num(_) => {
+                    let l = lanes.arg(i);
+                    if l.nulls.is_empty() {
+                        for (&s, &v) in run.slots.iter().zip(&l.v) {
+                            let j = s as usize * na + i;
+                            acc[j] += v;
+                            cnt[j] += 1;
+                        }
+                    } else {
+                        for ((&s, &v), &null) in run.slots.iter().zip(&l.v).zip(&l.nulls) {
+                            let j = s as usize * na + i;
+                            acc[j] += v;
+                            cnt[j] += !null as i64;
+                        }
+                    }
+                }
+            }
+        }
+        let Some(l) = self.spec.words.clone() else {
+            // (Values states: an exact sum takes any; an integer average's sum is checked.)
+            for (s, &g) in run.touched.iter().enumerate() {
+                if (g as usize) < self.groups.len() {
+                    for (i, st) in self.groups[g as usize].1.iter().enumerate() {
+                        if let Partial::AvgInt(sum, _) = st
+                            && sum.checked_add(run.acc[s * na + i]).is_none()
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        };
+        let nk = 1 + l.keys.len();
+        let width = l.stride - nk;
+        run.wnew.clear();
+        for (s, &g) in run.touched.iter().enumerate() {
+            let at = run.wnew.len();
+            match (g as usize) < (self.words.len() / l.stride) {
+                true => run.wnew.extend_from_slice(&self.words[g as usize * l.stride + nk..(g as usize + 1) * l.stride]),
+                false => run.wnew.resize(at + width, 0),
+            }
+            let mut o = at;
+            for (i, st) in l.states.iter().enumerate() {
+                let (x, n) = (run.acc[s * na + i], run.cnt[s * na + i]);
+                let w = &mut run.wnew[o..o + st.width()];
+                o += st.width();
+                match st {
+                    WordState::Count => w[0] += n as u64,
+                    WordState::AvgInt => {
+                        let Some(t) = wide(w[0], w[1]).checked_add(x) else { return false };
+                        (w[0], w[1], w[2]) = (t as u64, (t >> 64) as u64, w[2] + n as u64);
+                    }
+                    WordState::SumNum if n == 0 => {}
+                    WordState::SumNum => {
+                        let sc = lanes.arg(i).scale;
+                        let (t, ns) = if w[3] == 0 {
+                            (x, sc)
+                        } else {
+                            let (acc, s) = (wide(w[0], w[1]), w[2] as u32);
+                            let ns = s.max(sc);
+                            let r = (|| {
+                                let a = acc.checked_mul(10i128.checked_pow(ns - s)?)?;
+                                let b = x.checked_mul(10i128.checked_pow(ns - sc)?)?;
+                                a.checked_add(b)
+                            })();
+                            match r {
+                                Some(t) => (t, ns),
+                                None => return false,
+                            }
+                        };
+                        (w[0], w[1], w[2], w[3]) = (t as u64, (t >> 64) as u64, ns as u64, w[3] + n as u64);
+                    }
+                    WordState::SumInt => return false,
+                }
+            }
+        }
+        true
+    }
+
+    /// `batch_run`'s groups made and sums added (`run_sums` checked them).
+    fn run_commit(&mut self, plan: &super::vector::AggPlan, lanes: &super::vector::Lanes, run: &mut RunScratch) {
+        use std::hash::BuildHasher;
+        let na = plan.args.len();
+        for ng in run.newg.drain(..) {
+            match ng {
+                NewGroup::Only => {
+                    let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
+                    self.groups.push((Vec::new(), states));
+                }
+                NewGroup::Values(key, own, bytes, pk) => {
+                    let g = self.groups.len() as u32;
+                    let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
+                    self.groups.push((own, states));
+                    self.index.insert(key.into_boxed_slice(), g);
+                    self.bidx.insert(bytes, g);
+                    if let Some(k) = pk {
+                        self.pidx.insert(k, g);
+                    }
+                }
+                NewGroup::Words(key) => {
+                    let l = self.spec.words.clone().expect("a words spec");
+                    let g = self.words.len() / l.stride;
+                    let h = self.hasher.hash_one(&key[..]);
+                    self.words.extend_from_slice(&key);
+                    self.words.resize((g + 1) * l.stride, 0);
+                    let (words, hasher, nk) = (&self.words, &self.hasher, key.len());
+                    self.wtable.insert_unique(h, g as u32, |&g| hasher.hash_one(&words[g as usize * l.stride..][..nk]));
+                }
+            }
+        }
+        match self.spec.words.clone() {
+            Some(l) => {
+                let nk = 1 + l.keys.len();
+                let width = l.stride - nk;
+                for (s, &g) in run.touched.iter().enumerate() {
+                    let at = g as usize * l.stride + nk;
+                    self.words[at..at + width].copy_from_slice(&run.wnew[s * width..(s + 1) * width]);
+                }
+            }
+            None => {
+                for (s, &g) in run.touched.iter().enumerate() {
+                    for (i, st) in self.groups[g as usize].1.iter_mut().enumerate() {
+                        let (x, n) = (run.acc[s * na + i], run.cnt[s * na + i]);
+                        match st {
+                            Partial::Count(c) => *c += n,
+                            Partial::SumNum(sn) => sn.add_sum(x, lanes.arg(i).scale, n),
+                            Partial::AvgInt(sum, c) => {
+                                *sum += x;
+                                *c += n;
+                            }
+                            _ => unreachable!("batch_run takes no other state"),
+                        }
+                    }
+                }
+            }
+        }
+        if self.spec.seq {
+            self.seq.extend_from_slice(&run.gids);
+        }
+        self.rows += run.gids.len();
+    }
+
     /// Row `r`'s group key as bytes into `bkey` (bpchar keys trimmed): each value's kind
     /// and its bytes, so equal bytes are equal keys (false: a key of a kind it doesn't
     /// take).
@@ -1134,6 +1559,7 @@ impl<'a> Partials<'a> {
         }
         self.index.clear();
         self.bidx.clear();
+        self.pidx.clear();
         self.wtable.clear();
         let groups = match &self.spec.words {
             Some(l) => Groups::Words(l.clone(), std::mem::take(&mut self.words)),

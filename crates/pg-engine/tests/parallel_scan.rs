@@ -1013,6 +1013,59 @@ fn vector_batches_body() {
     for ((q, a), b) in VECTOR_QUERIES.iter().zip(&serial).zip(&batched) {
         assert_eq!(a, b, "{q}: serial");
     }
+    // Random aggregations, a whole batch at a time where they can (`batch_run`), give what
+    // the row path gives.
+    let queries = random_aggregates(0x5eed_a220, 80);
+    let rows: Vec<_> = without_vectors(|| queries.iter().map(|q| out(&mut s, q)).collect());
+    let before = pg_engine::exec::parscan::RUN_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let batched: Vec<_> = queries.iter().map(|q| out(&mut s, q)).collect();
+    assert!(pg_engine::exec::parscan::RUN_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "whole batches aggregated");
+    for ((q, a), b) in queries.iter().zip(&rows).zip(&batched) {
+        assert_eq!(a, b, "{q}");
+    }
+}
+
+/// `n` aggregations of table `v` drawn from `seed`: up to two group keys, up to four
+/// counts, sums and averages of numeric expressions (columns of one scale, of mixed scales,
+/// past an i128, NaN; integers; constants; NULLs), a filter or none.
+fn random_aggregates(seed: u64, n: usize) -> Vec<String> {
+    let mut st = seed;
+    let mut next = move |m: usize| {
+        st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((st >> 33) % m as u64) as usize
+    };
+    const KEYS: &[&str] = &["a", "c", "d", "ok", "t", "z"];
+    const LEAVES: &[&str] = &["x", "x", "a", "b", "id", "big", "z", "2.5", "1", "0.01", "-3", "NULL::numeric", "99999999999999999999.9999"];
+    const FILTERS: &[&str] = &[
+        "", "WHERE x > 50", "WHERE ok", "WHERE a IS NULL", "WHERE d < date '2024-06-01'", "WHERE c = 'ab'",
+        "WHERE t LIKE 'k1%'", "WHERE x * 3 > 200", "WHERE id > 39990", "WHERE id < 0", "WHERE 1 / (a - 3) > 0",
+    ];
+    let expr = |next: &mut dyn FnMut(usize) -> usize, depth: usize| -> String {
+        fn go(next: &mut dyn FnMut(usize) -> usize, depth: usize) -> String {
+            if depth == 0 || next(3) == 0 {
+                return LEAVES[next(LEAVES.len())].to_string();
+            }
+            let op = ["+", "-", "*"][next(3)];
+            format!("({} {op} {})", go(next, depth - 1), go(next, depth - 1))
+        }
+        go(next, depth)
+    };
+    (0..n)
+        .map(|_| {
+            let keys: Vec<&str> = (0..next(3)).map(|_| KEYS[next(KEYS.len())]).collect();
+            let mut cols: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            for _ in 0..1 + next(4) {
+                cols.push(match next(5) {
+                    0 => "count(*)".into(),
+                    1 => format!("count({})", LEAVES[next(7)]),
+                    2 => format!("avg({})", expr(&mut next, 2)),
+                    _ => format!("sum({})", expr(&mut next, 3)),
+                });
+            }
+            let group = if keys.is_empty() { String::new() } else { format!(" GROUP BY {}", keys.join(", ")) };
+            format!("SELECT {} FROM v {}{group}", cols.join(", "), FILTERS[next(FILTERS.len())])
+        })
+        .collect()
 }
 
 

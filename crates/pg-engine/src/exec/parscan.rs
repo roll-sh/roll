@@ -271,6 +271,10 @@ struct Pre<'a> {
     /// Per aggregate argument (`AggPlan::args`), each row's exact number (by row; the
     /// rows the filter passes), computed a column at a time.
     nums: Vec<Vec<super::vector::Num>>,
+    /// The rows the filter passes (`tri` T, not odd), and per aggregate argument their
+    /// numbers as a lane (`aggregate`).
+    live: Vec<u32>,
+    lanes: Option<super::vector::Lanes>,
     /// Rows decoded, and of them the ones the batch did (dropped or aggregated): the rest
     /// are decoded again by the row path, so a chunk where the batch does too few stops
     /// using it (`worth`).
@@ -312,6 +316,8 @@ impl<'a> Pre<'a> {
             sel: Vec::new(),
             tri: Vec::new(),
             nums: Vec::new(),
+            live: Vec::new(),
+            lanes: None,
             seen: 0,
             done: 0,
             off: false,
@@ -363,15 +369,32 @@ impl<'a> Pre<'a> {
         if let Some(f) = &self.plan.filter {
             f.eval(&self.cols, &self.sel, &mut self.tri);
         }
-        // (The aggregates' arguments over the rows the filter passes.)
+        self.live.clear();
+        self.live.extend(self.sel.iter().copied().filter(|r| self.tri[*r as usize] == Tri::T));
+    }
+
+    /// The run `decode` decoded aggregated into `pa` a batch at a time (`batch_run`):
+    /// when every row is one the batch decides (none odd, none the filter leaves to the
+    /// row path, no probe) and every argument's numbers make a lane. False: nothing done.
+    fn aggregate(&mut self, pa: &mut super::partial::Partials<'_>) -> bool {
+        use super::vector::Tri;
+        if self.plan.probe.is_some() || self.sel.len() != self.odd.len() || self.tri.contains(&Tri::Out) {
+            return false;
+        }
+        let lanes = self.lanes.get_or_insert_with(|| super::vector::Lanes::new(&self.plan.args));
+        lanes.eval(&self.cols, &self.live) && pa.batch_run(&self.plan, &self.cols, &self.live, lanes)
+    }
+
+    /// The aggregates' arguments over the rows the filter passes, by row (`batch_row`'s).
+    fn eval_nums(&mut self) {
+        let n = self.odd.len();
         if self.plan.args.iter().any(|a| matches!(a, super::vector::AggArg::Num(_))) {
-            let live: Vec<u32> = self.sel.iter().copied().filter(|r| self.tri[*r as usize] == Tri::T).collect();
             self.nums.resize_with(self.plan.args.len(), Vec::new);
             for (a, v) in self.plan.args.iter().zip(&mut self.nums) {
                 if let super::vector::AggArg::Num(k) = a {
                     v.clear();
                     v.resize(n, None);
-                    k.eval(&self.cols, &live, v);
+                    k.eval(&self.cols, &self.live, v);
                 }
             }
         }
@@ -1334,6 +1357,17 @@ fn partial_chunk<'d>(
             }
             pre.decode(scan.batch, run.clone());
             let pa_run = run.len();
+            // (The whole run at once where the batch decides every row; else row by row.)
+            if pre.aggregate(&mut pa) {
+                read += pa_run as u64;
+                pre.worth(pa_run, pa_run as u64);
+                RUN_ROWS.fetch_add(pa_run as u64, std::sync::atomic::Ordering::Relaxed);
+                if full(&pa) && !send_part(&mut pa, &mut read) {
+                    return (false, pa);
+                }
+                continue;
+            }
+            pre.eval_nums();
             let mut taken = 0;
             for (r, i) in run.enumerate() {
                 use super::vector::Tri;
@@ -1452,6 +1486,9 @@ impl IosRow {
 
 /// Rows aggregated through column batches (`vector`; tests: which path ran).
 pub static VECTOR_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Of them, rows aggregated a whole batch at a time (`Partials::batch_run`; tests).
+pub static RUN_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One stored row of an aggregating scan through the row path: read in place, filtered,
 /// aggregated or queued in `serial` (with the joins' rows it makes), in order.
