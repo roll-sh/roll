@@ -501,7 +501,9 @@ Ranked by what a person notices first. Done so far:
 1. **Stream data branches**: merge `feature/roll-previews-streams` (chunks shared and
    refcounted in the broker's retention, compaction and deletes), once its suite is green.
 2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
-   backup plus WAL with lazy pages (no full copy on ext4). Also `schema` mode for Postgres.
+   backup plus WAL with lazy pages, for ext4 hosts like this one. The fleet's XFS volumes already
+   share blocks through reflinks. Also `schema` mode for Postgres (a `pg_dump --schema-only`
+   restore into a fresh branch).
 3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
 4. **roll search's `own_bytes`** (asked for), so a search branch's cost counts only what it
