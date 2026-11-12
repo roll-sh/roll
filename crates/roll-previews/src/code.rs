@@ -105,8 +105,10 @@ impl CodeSource {
                     .map(|x| PreviewServiceLink { name: x.name.clone(), url: x.url.clone(), state: x.state.as_str().to_string() })
                     .collect(),
                 resources: p.resources.iter().map(|x| PreviewResourceLink { kind: x.kind.as_str().to_string(), parent: x.parent.clone(), r#ref: x.r#ref.clone() }).collect(),
-                sleeping_usd_month: p.cost.sleeping_usd_month,
-                active_usd_hour: p.cost.active_usd_hour,
+                // As precise as the comment shows: a usage reading that moves a cost by a hair
+                // doesn't make a new event for every webhook and the pull request.
+                sleeping_usd_month: (p.cost.sleeping_usd_month * 100.0).round() / 100.0,
+                active_usd_hour: (p.cost.active_usd_hour * 1000.0).round() / 1000.0,
                 dashboard_url: (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{}/previews?preview={}", p.project, p.id)),
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),

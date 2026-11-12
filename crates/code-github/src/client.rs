@@ -503,6 +503,11 @@ impl GitHub {
         }
     }
 
+    /// The comments on an issue or a pull request, oldest first.
+    pub async fn issue_comments(&self, installation: u64, owner: &str, repo: &str, number: u64) -> Result<Vec<Comment>> {
+        self.list(Who::Installation(installation), &repo_path(owner, repo, &format!("/issues/{number}/comments?per_page=100")), None).await
+    }
+
     /// Replace an issue or pull request comment's body.
     pub async fn update_comment(
         &self,

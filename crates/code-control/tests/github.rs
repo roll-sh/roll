@@ -119,6 +119,12 @@ async fn comment(State(m): S, Path((o, r, n)): Path<(String, String, u64)>, Json
     Json(json!({ "id": 1, "body": b["body"] }))
 }
 
+async fn list_comments(State(m): S, Path((o, r, n)): Path<(String, String, u64)>) -> Json<Value> {
+    let path = format!("/repos/{o}/{r}/issues/{n}/comments");
+    let made: Vec<Value> = m.calls.lock().iter().filter(|(meth, p, _)| meth == "POST" && *p == path).map(|(_, _, b)| json!({ "id": 1, "body": b["body"] })).collect();
+    Json(json!(made))
+}
+
 async fn edit_comment(State(m): S, Path((o, r, id)): Path<(String, String, u64)>, Json(b): Json<Value>) -> Json<Value> {
     record(&m, "PATCH", format!("/repos/{o}/{r}/issues/comments/{id}"), b.clone());
     Json(json!({ "id": id, "body": b["body"] }))
@@ -408,7 +414,7 @@ async fn github_mock() -> GitHub {
         .route("/orgs/{org}/teams", get(list_teams))
         .route("/repos/{o}/{r}/issues", get(issues))
         .route("/repos/{o}/{r}/issues/{n}", get(issue).patch(patch_issue))
-        .route("/repos/{o}/{r}/issues/{n}/comments", post(comment))
+        .route("/repos/{o}/{r}/issues/{n}/comments", get(list_comments).post(comment))
         .route("/repos/{o}/{r}/issues/comments/{id}", axum::routing::patch(edit_comment))
         .route("/repos/{o}/{r}/deployments", post(create_deployment))
         .route("/repos/{o}/{r}/deployments/{id}/statuses", post(deployment_status))

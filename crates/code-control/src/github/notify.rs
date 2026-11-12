@@ -170,8 +170,18 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
             Err(e) => return Err(gh(e)),
         },
         (None, Some(_)) if rules.comment => {
-            let made = hub.client.create_comment(l.installation_id, &l.owner, &l.repo, pr, &body).await.map_err(gh)?;
-            set_mark(code, &comment_key, &format!("{}:{digest}", made.id))?;
+            // A send that made the comment and then failed (a timeout, the mark's write) left
+            // it there: find it by its marker rather than make a second one.
+            let marker = format!("<!-- roll-preview:{} -->", c.id);
+            let existing = hub.client.issue_comments(l.installation_id, &l.owner, &l.repo, pr).await.map_err(gh)?;
+            let id = match existing.iter().find(|x| x.body.as_deref().is_some_and(|b| b.contains(&marker))) {
+                Some(found) => {
+                    hub.client.update_comment(l.installation_id, &l.owner, &l.repo, found.id, &body).await.map_err(gh)?;
+                    found.id
+                }
+                None => hub.client.create_comment(l.installation_id, &l.owner, &l.repo, pr, &body).await.map_err(gh)?.id,
+            };
+            set_mark(code, &comment_key, &format!("{id}:{digest}"))?;
         }
         _ => {}
     }
