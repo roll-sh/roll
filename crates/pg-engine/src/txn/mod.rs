@@ -3800,6 +3800,23 @@ impl Txn {
         }
         // (The undo log is done with: freed before the commit copies anything.)
         drop(std::mem::take(&mut self.journal));
+        // A transaction that wrote nothing (a read-only one): what the path below does with
+        // no writes, no catalog and no id, without its closures' references to the database.
+        if self.writes.is_empty()
+            && self.runs.is_none()
+            && self.catalog.is_none()
+            && self.xid == 0
+            && !self.sxact
+            && !self.prepared
+            && self.loads.is_empty()
+            && self.moved_out.is_empty()
+        {
+            let ts = self.db.store.visible_ts();
+            self.finish_xid(true);
+            self.release_locks();
+            self.ssi_finish(true, ts);
+            return Ok(ts);
+        }
         let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = Vec::new();
         let mut new_catalog = false;
         // A transaction that spilled streams its writes into the commit (`Store::
