@@ -1,4 +1,4 @@
-//! Scoped tokens (`rls_…`, docs/secrets.md "Access"): the stopgap until roll-access's scoped
+//! Scoped tokens (`rlst_…`, docs/secrets.md "Access"): the stopgap until roll-access's scoped
 //! tokens land. One project; environments and folder prefixes, or all; actions; an expiry.
 //! Stored as SHA-256 hashes and looked up on every request, never cached.
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-pub const PREFIX: &str = "rls_";
+pub const PREFIX: &str = "rlst_";
 
 #[derive(Debug, Serialize)]
 pub struct Token {
@@ -62,7 +62,7 @@ fn token_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Token, String)> {
 }
 
 impl Secrets {
-    /// Who a request is: a scoped token in `Authorization: Bearer rls_…`, else the operator if
+    /// Who a request is: a scoped token in `Authorization: Bearer rlst_…`, else the operator if
     /// the gate let it through as the operator (or rolld has no operator token).
     pub fn caller(&self, parts: &axum::http::request::Parts) -> Result<Caller> {
         let ip = self.client_ip(parts);
@@ -76,7 +76,7 @@ impl Secrets {
             c.ip = ip;
             return Ok(c);
         }
-        Err(Error::Unauthorized("roll secrets needs the operator token or a secrets token (rls_…)".into()))
+        Err(Error::Unauthorized("roll secrets needs the operator token or a secrets token (rlst_…)".into()))
     }
 
     /// The peer's address, or the first X-Forwarded-For one behind a proxy rolld trusts.
@@ -154,7 +154,7 @@ impl Secrets {
             (None, Some(_)) => return Err(Error::BadRequest("ttl_days is positive".into())),
             (None, None) => None,
         };
-        let secret = names::new_id("rls", 40);
+        let secret = names::new_id("rlst", 40);
         let id = names::new_id("tok", 12);
         let prefix: String = secret.chars().take(10).collect();
         let token = Token { id: id.clone(), name, environments: n.environments, paths, actions, expires_at, created_at: now, created_by: caller.principal.clone(), last_used_at: None, prefix };

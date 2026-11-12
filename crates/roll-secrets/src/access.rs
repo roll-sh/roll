@@ -4,7 +4,7 @@
 //! request in rolld's gate. Inside the product, the checks that the gate can't make from the
 //! request alone (a second environment, a path inside a batch) go through [`Grants`], the one
 //! trait to swap when roll-access lands: today it is the operator (everything) or one of the
-//! project's scoped tokens (`rls_…`, [`TokenScope`]).
+//! project's scoped tokens (`rlst_…`, [`TokenScope`]).
 
 use crate::names;
 use serde::{Deserialize, Serialize};
@@ -129,7 +129,7 @@ impl Grants for TokenScope {
 /// The caller of a request, or of an in-process call.
 #[derive(Clone, Debug)]
 pub struct Caller {
-    /// Stable and safe to log: `operator`, `token:rls_…`, `app:<service>`, `preview:<repo>`.
+    /// Stable and safe to log: `operator`, `token:tok_…`, `app:<service>`, `preview:<repo>`.
     pub principal: String,
     pub grants: std::sync::Arc<dyn Grants>,
     /// The client's address, for the audit log.

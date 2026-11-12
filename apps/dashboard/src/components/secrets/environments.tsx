@@ -151,7 +151,7 @@ function EnvRow({ env: e, first, last, onMove, onDelete, onError }: { env: Envir
           </label>
           <label className="min-w-48 flex-1">
             <span className={label}>Approvers (empty: anyone with admin)</span>
-            <input value={approvers} onChange={(ev) => setApprovers(ev.target.value)} placeholder="operator, token:rls_…" className={`${field} h-7 font-mono text-[12px]`} />
+            <input value={approvers} onChange={(ev) => setApprovers(ev.target.value)} placeholder="operator, token:tok_…" className={`${field} h-7 font-mono text-[12px]`} />
           </label>
           <button className={button} disabled={!policyChanged || !Number.isInteger(n) || n < 1} onClick={() => policy({ protected: true, approvals: n, approvers: list })}>
             Save policy

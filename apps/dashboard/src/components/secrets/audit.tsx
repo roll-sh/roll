@@ -58,7 +58,7 @@ export function AuditView() {
       <div className="flex flex-wrap items-center gap-2">
         <Select label="Environment" value={env} onChange={setEnv} options={[{ value: ALL, label: "All environments" }, ...envs.map((e) => ({ value: e.slug, label: e.name }))]} className="w-44" />
         <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="Key" aria-label="Key" className={`${sized} w-40 font-mono`} />
-        <input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="Actor (operator, token:rls_…)" aria-label="Actor" className={`${sized} w-56 font-mono`} />
+        <input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="Actor (operator, token:tok_…)" aria-label="Actor" className={`${sized} w-56 font-mono`} />
         <input value={action} onChange={(e) => setAction(e.target.value)} placeholder="Action (secrets.reveal, token.)" aria-label="Action" className={`${sized} w-56 font-mono`} />
       </div>
       <ErrorNote error={error} className="mt-3" />

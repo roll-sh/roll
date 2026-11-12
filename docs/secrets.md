@@ -423,10 +423,10 @@ pub trait Authority: Send + Sync {
 ```
 
 The built-in authority accepts the operator (`roll_auth::Operator`, or any request when rolld has no
-operator token) and **scoped tokens** (`rls_…`, created under `…/tokens`) for one project, a list of
+operator token) and **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
 environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
 Tokens are stored as SHA-256 hashes, looked up on every request and never cached. When roll-access
-lands, its evaluator replaces the built-in authority, the `rls_` tokens migrate to its scoped tokens,
+lands, its evaluator replaces the built-in authority, the `rlst_` tokens migrate to its scoped tokens,
 and the routes stay the same.
 
 ### Protected environments and approvals
@@ -448,7 +448,7 @@ don't change what the secret is, only its credential.
 
 ### Audit log
 
-Every read of values and every write is recorded: time, principal (`operator`, `token:rls_…`,
+Every read of values and every write is recorded: time, principal (`operator`, `token:tok_…`,
 `app:…`), action, environment, path, keys, a summary and the client address (the peer's, or the
 first `X-Forwarded-For` one with `ROLL_CODE_TRUST_FORWARDED_FOR`). A value never is.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
@@ -608,13 +608,12 @@ streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll ru
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, the dashboard's
 Secrets surface, and the fixes from a security review. Ranked:
 
-1. **A green `pnpm test:code` run** on the branch's head. The last runs, under a load average of
-   33–52, failed only timing-sensitive tests outside this work (`webhooks.rs`,
-   `cluster.rs::health_follows_each_node`, `roll-cluster`'s suite), each green when rerun alone.
-2. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
+1. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
-   merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto
+   merges second does it; build the resource as `Resource { product: "secrets", project, environment,
+   path, ..Default::default() }`, since it gained `also_in`), and `rlst_` tokens migrate to roll-access
+   tokens (`rls_` is accounts' session prefix). Its MCP tools map onto
    the routes above.
-3. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+2. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-4. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+3. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.

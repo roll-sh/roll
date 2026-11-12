@@ -309,7 +309,7 @@ async fn scoped_tokens_reach_only_their_environments_paths_and_actions() {
     api.set("production", "ROOT", "r").await;
     let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "deploy", "environments": ["production"], "paths": ["/api"], "actions": ["read", "reveal"], "ttl_days": 30 }))).await;
     let token = t["token"].as_str().unwrap();
-    assert!(token.starts_with("rls_"));
+    assert!(token.starts_with("rlst_"));
     let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(token)).await;
     assert_eq!((s, v["values"]["STRIPE"].as_str()), (StatusCode::OK, Some("sk_live")));
     for (method, path, body) in [
