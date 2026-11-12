@@ -148,23 +148,30 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let gh = |e: code_github::Error| crate::Error::Internal(e.into());
     let rules = c.preview.as_ref().and_then(|p| p.environment.as_ref()).map(|e| e.github).unwrap_or_default();
     let body = preview_comment(c);
-    // The comment: edited in place once it exists (a removed preview edits it too).
+    // The comment: edited in place once it exists (a removed preview edits it too), and only
+    // when its text changed (a preview waking and sleeping doesn't touch it).
     let comment_key = format!("pv-comment:{}", c.id);
-    let comment = mark(code, &comment_key)?.and_then(|v| v.parse::<u64>().ok());
+    let digest = format!("{:016x}", fnv(body.as_bytes()));
+    let stored = mark(code, &comment_key)?;
+    let (comment, sent) = match stored.as_deref().and_then(|v| v.split_once(':')) {
+        Some((id, d)) => (id.parse::<u64>().ok(), Some(d.to_string())),
+        None => (stored.as_deref().and_then(|v| v.parse::<u64>().ok()), None),
+    };
     match (comment, &c.preview) {
+        (Some(_), _) if sent.as_deref() == Some(&digest) => {}
         (Some(id), _) => match hub.client.update_comment(l.installation_id, &l.owner, &l.repo, id, &body).await {
-            Ok(_) => {}
+            Ok(_) => set_mark(code, &comment_key, &format!("{id}:{digest}"))?,
             // Someone deleted it on GitHub: start a new one if there's still a preview.
             Err(e) if e.status() == Some(404) && c.preview.is_some() && rules.comment => {
                 let made = hub.client.create_comment(l.installation_id, &l.owner, &l.repo, pr, &body).await.map_err(gh)?;
-                set_mark(code, &comment_key, &made.id.to_string())?;
+                set_mark(code, &comment_key, &format!("{}:{digest}", made.id))?;
             }
             Err(e) if e.status() == Some(404) => {}
             Err(e) => return Err(gh(e)),
         },
         (None, Some(_)) if rules.comment => {
             let made = hub.client.create_comment(l.installation_id, &l.owner, &l.repo, pr, &body).await.map_err(gh)?;
-            set_mark(code, &comment_key, &made.id.to_string())?;
+            set_mark(code, &comment_key, &format!("{}:{digest}", made.id))?;
         }
         _ => {}
     }
@@ -174,6 +181,12 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let url = c.preview.as_ref().and_then(|p| p.url.clone());
     let log_url = env.and_then(|e| e.dashboard_url.clone());
     let (status, deploy, description) = preview_states(c.preview.as_ref());
+    // Statuses go out when they change for this head, not on every wake and sleep.
+    let state_key = format!("pv-state:{}", c.id);
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}");
+    if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
+        return Ok(());
+    }
     // The commit status, on the head it's about.
     if rules.status
         && let Some(status) = status
@@ -219,7 +232,12 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         }
         _ => {}
     }
-    Ok(())
+    set_mark(code, &state_key, &state_now)
+}
+
+/// FNV-1a: a stable digest of what was last sent (not a security boundary).
+fn fnv(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ *x as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// The commit status, the deployment status and their description for a preview.
@@ -232,8 +250,9 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
         PreviewState::Failed => "failed",
     });
     match state {
-        "ready" => (Some("success"), Some("success"), "Preview ready".into()),
-        "sleeping" => (Some("success"), Some("success"), "Preview asleep: the first request wakes it".into()),
+        // Asleep or awake it's ready (the first request wakes it): one status for both, so
+        // waking and sleeping send nothing.
+        "ready" | "sleeping" => (Some("success"), Some("success"), "Preview ready: it sleeps when idle and wakes on the first request".into()),
         "failed" => (Some("failure"), Some("failure"), p.error.as_deref().and_then(|e| e.lines().next()).unwrap_or("Preview failed").chars().take(130).collect()),
         "awaiting_approval" => (Some("pending"), None, "Waiting for a writer to approve running this fork (approve-run)".into()),
         "queued" => (Some("pending"), None, "Waiting for a preview slot".into()),
@@ -250,11 +269,13 @@ fn preview_comment(c: &Change) -> String {
     match &p.environment {
         Some(e) => {
             let link = e.dashboard_url.as_ref().map(|u| format!(" · [open in roll]({u})")).unwrap_or_default();
-            out.push_str(&format!("**roll preview** · {}{link}\n\n", word(&e.state)));
+            // Asleep or awake, it's ready: the comment only changes when something real does.
+            let state = if e.state == "sleeping" { "ready" } else { e.state.as_str() };
+            out.push_str(&format!("**roll preview** · {}{link}\n\n", word(state)));
             if !e.services.is_empty() {
-                out.push_str("| Service | URL | Status |\n| --- | --- | --- |\n");
+                out.push_str("| Service | URL |\n| --- | --- |\n");
                 for s in &e.services {
-                    out.push_str(&format!("| {} | {} | {} |\n", s.name, s.url, word(&s.state)));
+                    out.push_str(&format!("| {} | {} |\n", s.name, s.url));
                 }
                 out.push('\n');
             }
