@@ -73,7 +73,7 @@ every deployment is immutable with instant rollback.
   build is never magic, and the service settings or `roll.toml` `[app]` can override any
   command.
 - **Config as code** (`roll.toml` `[app]` in the service's root, like `railway.json`): `builder`,
-  `dockerfile`, `install`, `build`, `start`, `pre_deploy`, `health_path`. Read at each build;
+  `dockerfile`, `install`, `build`, `start`, `pre_deploy`, `health_path`, `watch`. Read at each build;
   what it sets wins over the service's settings and is named in the build log and the plan's
   notes (`POST /v1/apps/plan` shows it too). It's checked as the API checks settings, an unknown
   key is an error (a typo never silently does nothing), and it must be a regular file. The
@@ -129,6 +129,11 @@ every deployment is immutable with instant rollback.
   serving. A service scaled to zero rolls out without starting anything: the pointer moves, and
   the next request wakes the new deployment (a health check runs at the first wake instead, and
   failing it there rolls the pointer back automatically).
+- **Watch paths** (monorepos; `build.watch`, `[app] watch`, the settings page): a push deploys a
+  repo service only when a path that differs between what the environment runs and the pushed
+  commit matches one of its patterns (gitignore-style from the repo's root, roll code's
+  CODEOWNERS matcher; roll.toml's are read at the pushed commit). The environment's log says
+  which pushes it skipped. Nothing set: every push deploys, as before.
 - **Pre-deploy command** (`run.pre_deploy`, `roll apps set --pre-deploy`, the settings page):
   once per deploy, after the image is ready and before anything starts, in a container of the
   new image with the deployment's variables on the project network (not the volume: the old
@@ -446,24 +451,22 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-2. **Watch paths for monorepos**: a push deploys a service only when it changes a path the
-   service watches (`[app] watch`, the settings), with the changed paths from roll code.
-3. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
+2. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
    `roll ssh` / exec into an instance, with the API routes under the service.
-4. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
+3. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics
    tiles that total the window; CLI output for people, not JSON; a project slug that isn't
    repeated in the URL.
-5. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
+4. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
    output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
    `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
-6. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
+5. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
-7. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
-8. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+6. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+7. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.
-9. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+8. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
     node; pending claims expire.
-10. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+9. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+10. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

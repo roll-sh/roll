@@ -21,6 +21,8 @@ interface Form {
   install: string;
   build: string;
   buildStart: string;
+  /** Watch paths, comma-separated. */
+  watch: string;
   type: Run["type"];
   port: string;
   start: string;
@@ -54,6 +56,7 @@ export function formOf(s: Service): Form {
     install: str(s.build.install),
     build: str(s.build.build),
     buildStart: str(s.build.start),
+    watch: (s.build.watch ?? []).join(", "),
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -94,6 +97,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.install !== before.install) build.install = text(f.install);
   if (f.build !== before.build) build.build = text(f.build);
   if (f.buildStart !== before.buildStart) build.start = text(f.buildStart);
+  if (f.watch !== before.watch) {
+    const list = f.watch.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
+    build.watch = list.length ? list : null;
+  }
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
   if (f.type !== before.type) run.type = f.type;
@@ -192,6 +199,11 @@ export function SettingsTab({ service, runner, onDeleted }: { service: Service; 
             <Field label="Start command" hint="baked into the image">
               {t("buildStart", "detected")}
             </Field>
+            {form.sourceKind === "repo" && (
+              <Field label="Watch paths" hint="a push deploys only when it changes one">
+                {t("watch", "apps/web/**, packages/ui/**")}
+              </Field>
+            )}
           </Grid>
         </Panel>
       )}

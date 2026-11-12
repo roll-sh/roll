@@ -103,6 +103,9 @@ type Build = {
   install?: string;    // overrides the detected commands
   build?: string;
   start?: string;
+  /** A repo source deploys a push only when it changes a path these match (gitignore-style, from
+   *  the repo's root, as CODEOWNERS; at most 50). roll.toml `[app] watch` wins over it. */
+  watch?: string[];
 };
 
 type Run = {

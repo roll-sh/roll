@@ -35,6 +35,8 @@ export interface Build {
   install?: string;
   build?: string;
   start?: string;
+  /** A push deploys only when it changes a path these match (gitignore-style, from the repo's root). */
+  watch?: string[];
 }
 
 export type ServiceType = "web" | "worker" | "cron";

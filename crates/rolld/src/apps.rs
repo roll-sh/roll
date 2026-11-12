@@ -134,6 +134,31 @@ impl Sources for CodeSources {
         let this = self.clone();
         blocking(move || this.0.store.land_log_head()).await
     }
+
+    async fn read_file(&self, repo: &str, revision: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let (this, repo_s, rev) = (self.clone(), repo.to_string(), revision.to_string());
+        let (r, cs) = blocking(move || {
+            let r = this.repo(&repo_s)?;
+            let cs = this.0.store.resolve(&r.id, &rev)?.ok_or_else(|| anyhow::anyhow!("no revision {rev}"))?;
+            Ok((r, cs))
+        })
+        .await?;
+        let f = self.0.store.read_file(&r.id, &cs, path).await?;
+        // A symlink or a submodule isn't a file here, and a big one isn't config.
+        Ok(f.filter(|f| f.mode.is_file() && f.data.len() <= 64 << 10).map(|f| f.data.to_vec()))
+    }
+
+    async fn touches(&self, repo: &str, from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
+        let (this, repo, from, to) = (self.clone(), repo.to_string(), from.to_string(), to.to_string());
+        let patterns: Vec<code_control::review::pattern::Pattern> = patterns.iter().filter_map(|p| code_control::review::pattern::Pattern::new(p)).collect();
+        blocking(move || {
+            let r = this.repo(&repo)?;
+            let at = |rev: &str| this.0.store.resolve(&r.id, rev)?.ok_or_else(|| anyhow::anyhow!("no revision {rev}"));
+            let (a, b) = (at(&from)?, at(&to)?);
+            Ok(this.0.store.compare(&r.id, &a, &b)?.iter().any(|d| code_control::review::pattern::any_match(&patterns, d.path.as_str())))
+        })
+        .await
+    }
 }
 
 /// The data products' connection variables for links.

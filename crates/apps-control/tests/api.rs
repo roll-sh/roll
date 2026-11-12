@@ -22,12 +22,15 @@ use tower::ServiceExt;
 #[derive(Default)]
 struct FakeCode {
     files: Mutex<BTreeMap<String, String>>,
+    /// The paths each push changed.
+    pushed: Mutex<BTreeMap<String, Vec<String>>>,
     head: Mutex<(String, String)>,
     landings: Mutex<Vec<Landing>>,
 }
 
 impl FakeCode {
     fn push(&self, sha: &str, message: &str, files: &[(&str, &str)]) {
+        self.pushed.lock().insert(sha.to_string(), files.iter().map(|(k, _)| k.to_string()).collect());
         for (k, v) in files {
             self.files.lock().insert(k.to_string(), v.to_string());
         }
@@ -70,6 +73,12 @@ impl Sources for FakeCode {
     }
     async fn head(&self) -> anyhow::Result<i64> {
         Ok(self.landings.lock().len() as i64)
+    }
+    /// The paths `to`'s push changed, matched as `dir/**` prefixes (roll code's real matcher is
+    /// CODEOWNERS', tested there).
+    async fn touches(&self, _repo: &str, _from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
+        let changed = self.pushed.lock().get(to).cloned().unwrap_or_default();
+        Ok(changed.iter().any(|f| patterns.iter().any(|p| f.starts_with(p.trim_end_matches("**")))))
     }
 }
 
@@ -238,6 +247,24 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     let rb = settled(&w, &id, "production", rb["id"].as_str().unwrap()).await;
     assert_eq!((rb["status"].as_str(), rb["rollback_of"].as_str(), rb["image"].clone()), (Some("active"), Some(first.as_str()), d1["image"].clone()));
     assert_eq!(Fake::count(&w.fake.counts.builds), builds);
+    // Watching web/: a push elsewhere in the monorepo isn't deployed, one into web/ is.
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"watch": ["web/**"]}}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let count = || async { call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await.1.as_array().unwrap().len() };
+    let before = count().await;
+    w.code.push("c3c3c3c3c3c3", "api only", &[("api/main.go", "package main")]);
+    w.code.push("d4d4d4d4d4d4", "the site", &[("web/index.js", "v4")]);
+    let mut seen = Vec::new();
+    for _ in 0..500 {
+        let (_, all) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await;
+        seen = all.as_array().unwrap().iter().map(|d| d["revision"].as_str().unwrap_or("").to_string()).collect();
+        if seen.iter().any(|r| r == "d4d4d4d4d4d4") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(seen.iter().any(|r| r == "d4d4d4d4d4d4") && !seen.iter().any(|r| r == "c3c3c3c3c3c3"), "{seen:?}");
+    assert_eq!(count().await, before + 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

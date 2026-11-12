@@ -12,6 +12,7 @@
 //! start = "node dist/server.js"
 //! pre_deploy = "pnpm prisma migrate deploy"
 //! health_path = "/healthz"
+//! watch = ["apps/web/**", "packages/ui/**"]
 //! ```
 
 use crate::model::{Build, Builder, Run};
@@ -32,6 +33,8 @@ pub struct AppConfig {
     pub start: Option<String>,
     pub pre_deploy: Option<String>,
     pub health_path: Option<String>,
+    /// Path patterns a push must touch to deploy ([`Build::watch`]).
+    pub watch: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +95,10 @@ impl AppConfig {
                 set(what, v);
                 *to = Some(v.clone());
             }
+        }
+        if let Some(w) = &self.watch {
+            set("watch", &w.join(", "));
+            b.watch = Some(w.clone());
         }
         b.check()?;
         let r = r.normalized()?;

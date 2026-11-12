@@ -805,11 +805,43 @@ impl Apps {
         }
     }
 
+    /// The paths a push must touch to deploy `svc`: roll.toml `[app] watch` at the pushed
+    /// revision, else the service's setting; `None` when everything counts.
+    async fn watch_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<Vec<String>> {
+        let (Source::Repo { repo, root }, Some(sources)) = (&svc.source, &self.deps.sources) else { return None };
+        let path = match root {
+            Some(r) => format!("{r}/roll.toml"),
+            None => "roll.toml".into(),
+        };
+        let from_file = match sources.read_file(repo, revision, &path).await {
+            Ok(Some(bytes)) => crate::config::parse(&String::from_utf8_lossy(&bytes)).ok().flatten().and_then(|a| a.watch),
+            _ => None,
+        };
+        from_file.or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty())
+    }
+
+    /// Whether `revision` changes a watched path since what `env` runs (no active deployment, or
+    /// a source that can't tell: yes).
+    async fn push_touches(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, revision: &str, patterns: &[String]) -> bool {
+        let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, &self.deps.sources) else { return true };
+        let Some(active) = env.active.clone() else { return true };
+        let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
+        sources.touches(repo, &from, revision, patterns).await.unwrap_or(true)
+    }
+
     async fn on_landing(self: &Arc<Self>, l: &crate::integrations::Landing) -> Result<()> {
         let all = self.db(|s| Ok((s.services(None)?, s.all_environments()?))).await?;
         let (services, envs) = all;
         for svc in services.iter().filter(|s| matches!(&s.source, Source::Repo { repo, .. } if *repo == l.repo)) {
+            let watch = self.watch_at(svc, &l.revision.sha).await;
             for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral && e.branch.as_deref() == Some(l.branch.as_str())) {
+                if let Some(patterns) = &watch
+                    && !self.push_touches(svc, e, &l.revision.sha, patterns).await
+                {
+                    let sha = &l.revision.sha[..l.revision.sha.len().min(12)];
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {sha} changes nothing this service watches ({}): not deployed", patterns.join(", ")));
+                    continue;
+                }
                 let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
                 // The owner queues it (it may be another node: the queue is in the store).
                 self.deploy(&svc.id, &e.name, body, Trigger::Push, None, None).await?;

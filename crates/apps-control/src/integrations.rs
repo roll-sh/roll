@@ -38,6 +38,15 @@ pub trait Sources: Send + Sync {
     async fn landings(&self, after: i64, limit: usize) -> anyhow::Result<Vec<Landing>>;
     /// The newest landing's sequence number.
     async fn head(&self) -> anyhow::Result<i64>;
+    /// A file at `revision` (at most 64 KiB; a larger one or a symlink is `None`).
+    async fn read_file(&self, _repo: &str, _revision: &str, _path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    /// Whether a path that differs between `from` and `to` matches one of `patterns`
+    /// (gitignore-style, from the repo's root). A source that can't tell says yes.
+    async fn touches(&self, _repo: &str, _from: &str, _to: &str, _patterns: &[String]) -> anyhow::Result<bool> {
+        Ok(true)
+    }
 }
 
 /// Project secrets per environment: roll secrets (feature/roll-secrets, docs/secrets.md).

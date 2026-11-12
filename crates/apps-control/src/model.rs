@@ -104,6 +104,10 @@ pub struct Build {
     pub build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
+    /// A repo source deploys a push only when it changes a path these match (gitignore-style,
+    /// from the repo's root, as CODEOWNERS): a monorepo's other apps don't redeploy this one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +127,11 @@ impl Build {
             if v.as_ref().is_some_and(|c| c.len() > 2000 || c.contains('\0')) {
                 return Err(Error::BadRequest(format!("build.{k} is a command of at most 2000 characters")));
             }
+        }
+        if let Some(w) = &self.watch
+            && (w.len() > 50 || w.iter().any(|p| p.trim().is_empty() || p.len() > 200 || p.contains('\0')))
+        {
+            return Err(Error::BadRequest("build.watch is at most 50 path patterns of at most 200 characters".into()));
         }
         Ok(())
     }
