@@ -10971,4 +10971,14 @@ Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.
   was lost"; a duplicate named portal at Bind, a Sync with trailing bytes, a startup packet
   without its terminator are accepted; Parse with an unknown type oid gives 42704 (PostgreSQL
   XX000 cache lookup failed); the protocol-version message says 3.0 to 3.0 (PostgreSQL 18:
-  3.2).
+  3.2). Wire test `protocol_error_locations`.
+
+Verification (agent 214): release golden (in-process, wire, shuffled), wire (71), lib (214),
+kept_plans (10), no Clippy warning in the changed files; the regress subset vacuum,
+vacuum_parallel, cluster, portals, portals_p2, limit, prepare, btree_index, join,
+partition_prune: the same differing units as the unchanged base run in that order (join's
+EXPLAIN units come from running join without the files before it in the schedule), none new.
+The cursor change runs only in scroll cursors' FETCH (no index scan path changed), so no
+benchmark pairs. Verification train on `481c345ef`: every step 0 (clippy 19 warnings, all
+outside these files; regress newly differing 0; isolation 1647/1648, intra-grant-inplace as
+before; pg_dump 14609 passed).
