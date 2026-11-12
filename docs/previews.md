@@ -232,6 +232,17 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   products' refcounts and garbage collection guarantee it, and the adapter checks parentage
   before it deletes).
 - **Production secrets** are covered above.
+- **Private by default.** A preview runs on branches of real data, so with `access: "link"`
+  (the default) its URLs answer only to a request that carries the preview's access token.
+  - The links roll hands out (`share_url`: the change, the pull request comment, the dashboard,
+    `roll preview show`) carry the token as `?roll_access=…`. A request with it gets an
+    `HttpOnly`, `SameSite=Lax` cookie for that preview and is redirected to the same URL without
+    the token, so the token doesn't stay in the address bar or in `Referer`.
+  - Anything else gets a 401 page. `access: "public"` opens a project's previews to anyone who
+    can reach the domain.
+  - The token is 120 random bits per preview, compared in constant time.
+  - Services on roll apps are reached through roll apps' own hostnames and are protected by its
+    rules, not this one (see `## Next`).
 - **Who.** `/v1/previews` sits behind the operator token like every product's API. Scoped tokens
   (`feature/roll-mcp`) classify these routes: `GET` is `read`; create, refresh, sleep and wake are
   `write`; reset and `DELETE` are `delete`. `Store::environment_of(kind, ref)` tells the
@@ -355,12 +366,13 @@ type Preview = {
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   error: string | null;
   url: string | null;                 // the first service's URL
+  share_url: string | null;           // url with its access token (link access): the one to hand out
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
 };
-type Service = { name: string; repo: string; url: string; revision: string | null; deployed: string | null;
+type Service = { name: string; repo: string; url: string; share_url: string | null; revision: string | null; deployed: string | null;
                  state: "pending" | "deploying" | "running" | "sleeping" | "failed"; error: string | null };
 type Resource = { kind: Kind; parent: string; ref: string | null; mode: "branch" | "schema";
                   state: "pending" | "ready" | "resetting" | "failed" | "deleting"; error: string | null; bytes: number };
@@ -380,6 +392,7 @@ type Settings = {
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
   github: { comment: boolean; status: boolean; deployment: boolean };   // all true
+  access: "link" | "public";          // "link": a preview's URLs need its link ("link")
 };
 ```
 

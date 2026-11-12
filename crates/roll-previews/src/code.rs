@@ -88,7 +88,7 @@ impl CodeSource {
         let web = self.code.config.web_url.trim_end_matches('/');
         code_control::model::Preview {
             state,
-            url: p.url.clone(),
+            url: p.share_url.clone().or_else(|| p.url.clone()),
             postgres: pg,
             redis,
             error: p.error.clone(),
@@ -97,7 +97,11 @@ impl CodeSource {
                 id: p.id.clone(),
                 slug: p.slug.clone(),
                 state: p.state.as_str().to_string(),
-                services: p.services.iter().map(|x| PreviewServiceLink { name: x.name.clone(), url: x.url.clone(), state: x.state.as_str().to_string() }).collect(),
+                services: p
+                    .services
+                    .iter()
+                    .map(|x| PreviewServiceLink { name: x.name.clone(), url: x.share_url.clone().unwrap_or_else(|| x.url.clone()), state: x.state.as_str().to_string() })
+                    .collect(),
                 resources: p.resources.iter().map(|x| PreviewResourceLink { kind: x.kind.as_str().to_string(), parent: x.parent.clone(), r#ref: x.r#ref.clone() }).collect(),
                 sleeping_usd_month: p.cost.sleeping_usd_month,
                 active_usd_hour: p.cost.active_usd_hour,

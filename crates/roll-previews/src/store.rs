@@ -238,6 +238,7 @@ fn service_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Service, i64)> {
             state: ServiceState::parse(&state),
             error: r.get(7)?,
             memory_mb: r.get(8)?,
+            share_url: None,
         },
         r.get(9)?,
     ))
@@ -260,6 +261,9 @@ impl Store {
 
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
+        if !db.has_column("previews", "token")? {
+            db.add_column("previews", "token", "TEXT")?;
+        }
         Ok(Store { db, rates: Rates::default() })
     }
 
@@ -348,6 +352,7 @@ impl Store {
                     now
                 ],
             )?;
+            c.execute("UPDATE previews SET token = ? WHERE id = ?", params![new_token(), id])?;
             append(c, &id, now, "preview created")?;
             let r = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [&id], row)?;
             Ok((r, true))
@@ -608,6 +613,15 @@ impl Store {
         })
     }
 
+    /// A preview's access token, and whether its project requires it.
+    pub fn access(&self, id: &str) -> Result<Option<(String, bool)>> {
+        let row: Option<(Option<String>, String)> =
+            self.db.read(|c| c.query_row("SELECT token, project_id FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        let Some((token, project)) = row else { return Ok(None) };
+        let required = self.settings(&project)?.access == crate::settings::Access::Link;
+        Ok(Some((token.unwrap_or_default(), required)))
+    }
+
     /// The preview and service a host label serves.
     pub fn service_for_host(&self, host: &str) -> Result<Option<(String, String)>> {
         Ok(self.db.read(|c| c.query_row("SELECT preview_id, name FROM services WHERE host = ?", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional())?)
@@ -641,7 +655,17 @@ impl Store {
             cost.active_usd_hour += gib * self.rates.usd_per_container_gib_hour;
             cost.month_to_date_usd += gib * self.rates.usd_per_container_gib_hour * (*active_ms as f64 / HOUR_MS);
         }
+        // With link access, the links roll hands out carry the token (once; then a cookie).
+        let token = match self.access(&r.id)? {
+            Some((t, true)) if !t.is_empty() => Some(t),
+            _ => None,
+        };
+        let share = |u: &str| match &token {
+            Some(t) => format!("{}/?roll_access={t}", u.trim_end_matches('/')),
+            None => u.to_string(),
+        };
         let url = services.first().map(|(s, _)| s.url.clone());
+        let share_url = url.as_deref().map(share);
         Ok(Preview {
             id: r.id,
             project: r.project_id,
@@ -658,7 +682,14 @@ impl Store {
             state: r.state,
             error: r.error,
             url,
-            services: services.into_iter().map(|(s, _)| s).collect(),
+            share_url,
+            services: services
+                .into_iter()
+                .map(|(mut s, _)| {
+                    s.share_url = Some(share(&s.url));
+                    s
+                })
+                .collect(),
             resources: resources
                 .into_iter()
                 .map(|x| Resource { kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes })
@@ -672,6 +703,14 @@ impl Store {
             updated_at: r.updated_at,
         })
     }
+}
+
+/// A preview's access token: 24 random characters of lowercase base32 (120 bits).
+fn new_token() -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut b = [0u8; 24];
+    getrandom::fill(&mut b).expect("system randomness");
+    b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect()
 }
 
 fn slug_taken(c: &Conn<'_>, slug: &str) -> code_sql::Result<bool> {

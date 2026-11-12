@@ -120,6 +120,10 @@ T1=$(now_ms)
 P=$(api GET "/v1/previews/$PV")
 echo "$P" | python3 -m json.tool > "$HOME_DIR/preview.json"
 HOST=$(echo "$P" | jq_ "d['services'][0]['url'].split('//')[1].split(':')[0]")
+QUERY=$(echo "$P" | jq_ "d['services'][0]['share_url'].split('/?')[1]")
+JAR="$HOME_DIR/cookies"
+# A private preview (link access, the default) answers 401 without its link.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a preview without its link should be 401"; exit 1; }
 say "preview $PV ready in $((T1 - T0)) ms: $(echo "$P" | jq_ "[(r['kind'], r['ref']) for r in d['resources']]")"
 
 say "write into the preview's branches: 1 MiB of objects, 1,000 keys"
@@ -133,10 +137,10 @@ BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
 
 say "visit it: cold start"
 T2=$(now_ms)
-BODY=$(curl -sS -H "Host: $HOST" "http://$API/" --max-time 120)
+BODY=$(curl -sS -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120)
 T3=$(now_ms)
 echo "$BODY" | grep -q "preview of change 1" || { echo "unexpected body: $BODY"; tail -30 "$HOME_DIR/rolld.log"; exit 1; }
-T4=$(now_ms); curl -sS -o /dev/null -H "Host: $HOST" "http://$API/"; T5=$(now_ms)
+T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T5=$(now_ms)
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"
 STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAINER")
 RSS1=$(ps -o rss= -p "$PID")

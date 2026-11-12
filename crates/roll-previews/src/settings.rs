@@ -30,6 +30,17 @@ pub struct Settings {
     pub secrets: SecretsRule,
     pub env: BTreeMap<String, String>,
     pub github: GithubRule,
+    /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
+    /// its access token once and then a cookie; `public` is anyone who can reach the domain.
+    pub access: Access,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Access {
+    #[default]
+    Link,
+    Public,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +82,7 @@ impl Default for Settings {
             secrets: SecretsRule::default(),
             env: BTreeMap::new(),
             github: GithubRule::default(),
+            access: Access::Link,
         }
     }
 }

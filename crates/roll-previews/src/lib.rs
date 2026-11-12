@@ -175,6 +175,9 @@ pub struct Preview {
     pub state: State,
     pub error: Option<String>,
     pub url: Option<String>,
+    /// `url` as roll hands it out: with the access token when the project's previews need a
+    /// link (`access: "link"`).
+    pub share_url: Option<String>,
     pub services: Vec<Service>,
     pub resources: Vec<Resource>,
     pub cost: cost::Cost,
@@ -207,6 +210,8 @@ pub struct Service {
     pub state: ServiceState,
     pub error: Option<String>,
     pub memory_mb: i64,
+    /// `url` with the access token, when one is needed.
+    pub share_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

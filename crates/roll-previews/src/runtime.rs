@@ -287,6 +287,48 @@ impl Runtime {
         self.store.service_for_host(label).ok().flatten()
     }
 
+    /// Link access: a request carries the preview's token in its query (it gets a cookie and is
+    /// sent to the same URL without it) or in that cookie; anything else is refused. `None`:
+    /// let it through.
+    fn gate(&self, preview: &str, req: &Request) -> Option<Response> {
+        let (token, required) = match self.store.access(preview) {
+            Ok(Some(a)) => a,
+            Ok(None) => return None,
+            Err(_) => return Some((StatusCode::SERVICE_UNAVAILABLE, "try again").into_response()),
+        };
+        if !required || token.is_empty() {
+            return None;
+        }
+        let cookie = format!("roll_access_{preview}");
+        let has_cookie = req
+            .headers()
+            .get_all(header::COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(';'))
+            .filter_map(|kv| kv.trim().split_once('='))
+            .any(|(k, v)| k == cookie && same(v, &token));
+        if has_cookie {
+            return None;
+        }
+        let query = req.uri().query().unwrap_or("");
+        let given = query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "roll_access").map(|(_, v)| v);
+        if given.is_some_and(|v| same(v, &token)) {
+            let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_access=") && !kv.is_empty()).collect();
+            let location = if rest.is_empty() { req.uri().path().to_string() } else { format!("{}?{}", req.uri().path(), rest.join("&")) };
+            let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
+            let set = format!("{cookie}={token}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax{secure}");
+            let mut r = (StatusCode::FOUND, "").into_response();
+            if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) {
+                r.headers_mut().insert(header::LOCATION, l);
+                r.headers_mut().insert(header::SET_COOKIE, c);
+                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            }
+            return Some(r);
+        }
+        Some(page(StatusCode::UNAUTHORIZED, "This preview is private", "Open it from its link in roll, the change or the pull request.", false))
+    }
+
     async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request) -> Response {
         let mut retried = false;
         let addr = loop {
@@ -341,6 +383,11 @@ impl Runtime {
         *live.started.lock() = Some(Instant::now());
         live.phase.send_replace(Phase::Running { addr });
     }
+}
+
+/// Equal, in time that doesn't depend on where they differ.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// On Docker, a container reaches the host as `host.docker.internal`: rewrite loopback hosts
@@ -454,6 +501,9 @@ impl Apps for Runtime {
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
     let Some((preview, service)) = host.and_then(|h| rt.service_for_host(&h)) else { return next.run(req).await };
+    if let Some(r) = rt.gate(&preview, &req) {
+        return r;
+    }
     match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();
@@ -535,7 +585,21 @@ mod tests {
             s.read_to_string(&mut out).await.unwrap();
             out
         };
-        assert!(get("web-pr1-shop.preview.test:7070").await.ends_with("service saw /hello"));
+        // Link access (the default): no token, no preview; the link's token turns into a cookie.
+        assert!(get("web-pr1-shop.preview.test:7070").await.starts_with("HTTP/1.1 401"));
+        let token = rt.store.access(&row.id).unwrap().unwrap().0;
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("GET /hello?roll_access={token}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.starts_with("HTTP/1.1 302") && out.contains("location: /hello?x=1"), "{out}");
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: a=b; roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id).as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.ends_with("service saw /hello"), "{out}");
+        rt.store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
+        assert!(get("web-pr1-shop.preview.test:7070").await.ends_with("service saw /hello"), "public previews need no link");
         assert!(get("localhost").await.ends_with("api"));
         assert!(get("nope-pr1-shop.preview.test").await.ends_with("api"), "an unknown label isn't a preview");
     }
