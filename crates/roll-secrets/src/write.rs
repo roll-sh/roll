@@ -136,10 +136,13 @@ impl Prepared {
     }
 }
 
+/// The most operations one change holds (a large `.env` imports as one change).
+pub const OPS_MAX: usize = 10_000;
+
 /// The batch's operations as items, checked (keys, values, comments, tags).
 pub(crate) fn items(path: &str, ops: &[Op], caller: &Caller) -> Result<Vec<Item>> {
-    if ops.len() > 1000 {
-        return Err(Error::BadRequest("at most 1000 operations per change".into()));
+    if ops.len() > OPS_MAX {
+        return Err(Error::BadRequest(format!("at most {OPS_MAX} operations per change")));
     }
     let owner = |t: &Option<SecretType>| -> Result<String> {
         match t.unwrap_or_default() {
@@ -722,13 +725,13 @@ impl Secrets {
             return Err(Error::BadRequest("an ephemeral environment isn't a promotion target".into()));
         }
         let mut items = vec![];
+        let shared: std::collections::HashMap<&str, &crate::read::Entry> = target.iter().filter(|t| t.row.owner.is_empty()).map(|t| (t.row.key.as_str(), t)).collect();
+        let wanted: Option<BTreeSet<&str>> = keys.map(|k| k.iter().map(String::as_str).collect());
         for e in source.iter().filter(|e| e.row.owner.is_empty()) {
-            if let Some(keys) = keys
-                && !keys.contains(&e.row.key)
-            {
+            if wanted.as_ref().is_some_and(|w| !w.contains(e.row.key.as_str())) {
                 continue;
             }
-            let t = target.iter().find(|t| t.row.key == e.row.key && t.row.owner.is_empty());
+            let t = shared.get(e.row.key.as_str()).copied();
             if keys.is_none() && t.is_some_and(|t| t.row.fp == e.row.fp && t.row.comment == e.row.comment && t.row.tags == e.row.tags) {
                 continue;
             }

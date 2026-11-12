@@ -472,6 +472,8 @@ impl Secrets {
             keys.extend(v.iter().map(|e| e.row.key.clone()));
         }
         let required: BTreeSet<String> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).map(|r| r.key).collect();
+        // Each environment's entries by key: a row looks each environment up once, not by scanning.
+        let by_key: Vec<HashMap<&str, &Entry>> = views.iter().map(|v| v.iter().map(|e| (e.row.key.as_str(), e)).collect()).collect();
         keys.extend(required.iter().cloned());
         let rows = keys
             .into_iter()
@@ -480,9 +482,10 @@ impl Secrets {
                 // The status compares real fingerprints; the cells show them only where the caller
                 // may reveal.
                 let mut fps: Vec<Option<&str>> = vec![];
-                for (env, view) in envs.iter().zip(&views) {
-                    fps.push(view.iter().find(|e| e.row.key == key).map(|e| e.row.fp.as_str()));
-                    let cell = view.iter().find(|e| e.row.key == key).map(|e| Cell {
+                for (env, view) in envs.iter().zip(&by_key) {
+                    let found = view.get(key.as_str()).copied();
+                    fps.push(found.map(|e| e.row.fp.as_str()));
+                    let cell = found.map(|e| Cell {
                         fp: if caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path)) { e.row.fp.clone() } else { String::new() },
                         version: e.row.version,
                         updated_at: e.row.updated_at,
@@ -521,10 +524,11 @@ impl Secrets {
         let a = self.view(project, from, &path, caller, true, Action::Read)?;
         let b = self.view(project, to, &path, caller, true, Action::Read)?;
         let keys: BTreeSet<&str> = a.iter().chain(&b).map(|e| e.row.key.as_str()).collect();
+        let (ia, ib): (HashMap<&str, &Entry>, HashMap<&str, &Entry>) = (a.iter().map(|e| (e.row.key.as_str(), e)).collect(), b.iter().map(|e| (e.row.key.as_str(), e)).collect());
         let rows: Vec<Json> = keys
             .into_iter()
             .map(|k| {
-                let (x, y) = (a.iter().find(|e| e.row.key == k), b.iter().find(|e| e.row.key == k));
+                let (x, y) = (ia.get(k).copied(), ib.get(k).copied());
                 let status = match (x, y) {
                     (Some(x), Some(y)) if x.row.fp == y.row.fp => "same",
                     (Some(_), Some(_)) => "different",
@@ -593,7 +597,7 @@ pub(crate) struct Resolver<'a> {
     resolve: bool,
     consumer: String,
     envs: HashMap<String, Option<EnvRow>>,
-    views: HashMap<(String, String), Vec<Entry>>,
+    views: HashMap<(String, String), HashMap<String, Entry>>,
     done: HashMap<String, (Value, Option<String>)>,
     stack: Vec<String>,
     /// The project's resources, loaded at the first link.
@@ -621,10 +625,10 @@ impl<'a> Resolver<'a> {
     fn lookup(&mut self, env: &str, path: &str, key: &str) -> std::result::Result<Entry, String> {
         let k = (env.to_string(), path.to_string());
         if !self.views.contains_key(&k) {
-            let v = self.s.view(self.project, env, path, self.caller, false, Action::Reveal).map_err(|e| e.to_string())?;
+            let v = self.s.view(self.project, env, path, self.caller, false, Action::Reveal).map_err(|e| e.to_string())?.into_iter().map(|e| (e.row.key.clone(), e)).collect();
             self.views.insert(k.clone(), v);
         }
-        self.views[&k].iter().find(|e| e.row.key == key).cloned().ok_or_else(|| "doesn't exist".to_string())
+        self.views[&k].get(key).cloned().ok_or_else(|| "doesn't exist".to_string())
     }
 
     /// An entry's value and the first problem resolving it (the value then keeps the
