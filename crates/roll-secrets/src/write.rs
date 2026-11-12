@@ -451,14 +451,7 @@ impl Secrets {
         if !wants_link {
             return Ok(out);
         }
-        let resources: BTreeSet<(String, String)> = self
-            .workspace
-            .get(project)
-            .map_err(|e| Error::Internal(e.to_string()))?
-            .resources
-            .into_iter()
-            .map(|r| (r.kind.as_str().to_string(), r.r#ref))
-            .collect();
+        let resources = self.members(project)?;
         let dek = self.project(project)?;
         // Existing credentials of the environment, by (kind, ref, credential): a new secret that
         // links to one shares it.
@@ -499,9 +492,10 @@ impl Secrets {
                 continue;
             }
             let cred = self.links.credential(&link).unwrap_or("default").to_string();
-            let group = (link.kind.clone(), link.r#ref.clone(), cred.clone());
+            // Options (a branch, a permission) are part of what's issued: only equal links share.
+            let group = (link.kind.clone(), link.r#ref.clone(), format!("{cred}:{}", json(&link.options)));
             if !issued.contains_key(&group) {
-                let shared = existing.iter().find(|(l, _)| l.kind == link.kind && l.r#ref == link.r#ref && l.mode == Mode::Managed && self.links.credential(l) == Some(cred.as_str()));
+                let shared = existing.iter().find(|(l, _)| l.kind == link.kind && l.r#ref == link.r#ref && l.mode == Mode::Managed && l.options == link.options && self.links.credential(l) == Some(cred.as_str()));
                 let entry = match shared {
                     Some((_, state)) => (open_parts(&dek, project, state)?, state.clone()),
                     None => {
@@ -536,6 +530,12 @@ impl Secrets {
             return Err(e);
         }
         Ok(out)
+    }
+
+    /// The project's resources on its canvas, as (kind, ref): what its links may reach, checked
+    /// on every write, read, issue and rotation (a resource can move to another project).
+    pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
+        Ok(self.workspace.get(project).map_err(|e| Error::Internal(e.to_string()))?.resources.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect())
     }
 
     /// Revoke what [`Secrets::prepare`] issued, after the write failed.
@@ -578,13 +578,21 @@ impl Secrets {
         }
     }
 
-    fn check_items(&self, project: &str, env: &str, items: &[Item], caller: &Caller) -> Result<()> {
+    /// Each item's own check: write or delete in its folder, and `admin` to set a link
+    /// (a link reaches a resource's credentials as the operator, so who links what into which
+    /// environment is an admin's choice).
+    pub(crate) fn check_items(&self, project: &str, env: &str, items: &[Item], caller: &Caller) -> Result<()> {
         for i in items {
-            let action = match i.action {
-                ItemAction::Delete => Action::Delete,
-                ItemAction::Set { .. } => Action::Write,
-            };
-            caller.need(action, &Scope::at(project, env, &i.path))?;
+            let at = Scope::at(project, env, &i.path);
+            match &i.action {
+                ItemAction::Delete => caller.need(Action::Delete, &at)?,
+                ItemAction::Set { link, .. } => {
+                    caller.need(Action::Write, &at)?;
+                    if matches!(link, Some(Some(_))) {
+                        caller.need(Action::Admin, &at)?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -647,9 +655,13 @@ impl Secrets {
                     continue;
                 }
                 let link: Option<Link> = v.link.as_deref().and_then(|l| serde_json::from_str(l).ok());
-                let value = match &v.value {
-                    Some(ct) => Some(dek.open(&value_aad(project, &v.secret_id, v.version), ct)?),
-                    None => None,
+                // A managed credential isn't rolled back: the old one was retired (and revoked)
+                // when it rotated. The link comes back; the current credential stays, or a new one
+                // is issued.
+                let value = match (&v.value, &link) {
+                    (_, Some(l)) if l.mode == Mode::Managed => None,
+                    (Some(ct), _) => Some(dek.open(&value_aad(project, &v.secret_id, v.version), ct)?),
+                    (None, _) => None,
                 };
                 items.push(Item {
                     path: v.path.clone(),
@@ -683,7 +695,8 @@ impl Secrets {
         if from == to {
             return Err(Error::BadRequest("promote copies between two environments".into()));
         }
-        let items = self.promotion(project, from, to, &path, p.keys.as_deref())?;
+        let items = self.promotion(project, from, to, &path, p.keys.as_deref(), caller)?;
+        self.check_items(project, to, &items, caller)?;
         let message = p.message.unwrap_or_else(|| format!("promoted {} from {from}", plural(items.len(), "key")));
         names::message(&message)?;
         // Into a protected environment, a promotion is a change request with the values in it.
@@ -698,11 +711,11 @@ impl Secrets {
     }
 
     /// The items that make `to` match `from` for `keys` (default: every key that differs).
-    pub(crate) fn promotion(&self, project: &str, from: &str, to: &str, path: &str, keys: Option<&[String]>) -> Result<Vec<Item>> {
+    pub(crate) fn promotion(&self, project: &str, from: &str, to: &str, path: &str, keys: Option<&[String]>, caller: &Caller) -> Result<Vec<Item>> {
         let dek = self.project(project)?;
-        let operator = Caller::operator();
-        let source = self.view(project, from, path, &operator, true)?;
-        let target = self.view(project, to, path, &operator, true)?;
+        // As the caller: what shows through the source's imports and base is only what it may read.
+        let source = self.view(project, from, path, caller, true, Action::Reveal)?;
+        let target = self.view(project, to, path, caller, true, Action::Read)?;
         let to_env = self.db.read(|c| envs::by_slug(c, project, to))?;
         if to_env.kind == envs::Kind::Ephemeral {
             return Err(Error::BadRequest("an ephemeral environment isn't a promotion target".into()));
@@ -745,11 +758,13 @@ impl Secrets {
         let limit = limit.unwrap_or(50).clamp(1, 500);
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            Ok(c.query(
+            let rows = c.query(
                 &format!("SELECT {CHANGE_COLUMNS} FROM changes c JOIN environments e ON e.id = c.env_id WHERE c.env_id = ? AND c.seq < ? ORDER BY c.seq DESC LIMIT ?"),
                 params![env.id, before.unwrap_or(i64::MAX), limit],
                 change_row,
-            )?)
+            )?;
+            // A caller limited to some folders sees only the changes in them.
+            Ok(rows.into_iter().filter(|ch| caller.allows(Action::Read, &Scope::at(project, slug, &ch.path))).collect())
         })
     }
 
@@ -781,11 +796,12 @@ impl Secrets {
                 },
             )?;
             let mut out = serde_json::to_value(&change).expect("JSON");
+            let items: Vec<ItemDiff> = items.into_iter().filter(|i| caller.allows(Action::Read, &Scope::at(project, slug, &i.path))).collect();
             out["items"] = serde_json::to_value(&items).expect("JSON");
             if with_state {
                 let state: Vec<Json> = state_at(c, &env.id, seq)?
                     .into_iter()
-                    .filter(|v| v.owner.is_empty())
+                    .filter(|v| v.owner.is_empty() && caller.allows(Action::Read, &Scope::at(project, slug, &v.path)))
                     .map(|v| serde_json::json!({ "key": v.key, "path": v.path, "version": v.version, "fp": v.fp, "comment": v.comment, "tags": from_json::<Vec<String>>(&v.tags), "link": v.link.as_deref().and_then(|l| serde_json::from_str::<Json>(l).ok()), "at": v.at }))
                     .collect();
                 out["state"] = Json::Array(state);

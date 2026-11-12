@@ -370,6 +370,13 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     assert_ne!(a["values"]["TEMP_KEY"], b["values"]["TEMP_KEY"]);
     assert_eq!(a["leases"].as_array().unwrap().len(), 1);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+
+    // An environment that goes takes its managed credentials with it.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "tmp" }))).await;
+    api.ok(Method::PUT, "/environments/tmp/secrets/KEY_ID", Some(json!({ "link": link("access_key_id", "managed") }))).await;
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 4);
+    api.ok(Method::DELETE, "/environments/tmp", None).await;
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -394,4 +401,43 @@ async fn values_are_sealed_for_services_and_never_appear_in_the_audit_log() {
     assert_eq!(&actions[..3], ["secrets.resolve", "secrets.export", "secrets.write"]);
     assert_eq!(audit[0]["summary"], "resolved 2 values for app:web");
     assert!(!audit.to_string().contains("sk_live_123"));
+}
+
+#[tokio::test]
+async fn nothing_reaches_an_environment_its_caller_cannot_read() {
+    let api = Api::new().await;
+    api.set("production", "DB_PASSWORD", "prod-pw").await;
+    api.set("development", "REF", "${production.DB_PASSWORD}").await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(json!([{ "environment": "production", "path": "/" }]))).await;
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-1", "base": "production" }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
+
+    // Checks and sandboxes resolve as a consumer that may not touch protected environments: not
+    // through a reference, an import or an ephemeral environment's base either.
+    let check = roll_secrets::Caller::consumer_except("check:acme/web#test", vec!["production".into()]);
+    let s = api.secrets.clone();
+    let p = api.project.clone();
+    let (dev, staging, preview) = tokio::task::spawn_blocking(move || {
+        (s.values(&p, "development", "/", true, Some("check"), &check).unwrap(), s.values(&p, "staging", "/", true, Some("check"), &check).unwrap(), s.values(&p, "pr-1", "/", true, Some("check"), &check).unwrap())
+    })
+    .await
+    .unwrap();
+    assert_eq!(dev.values["REF"].expose(), "${production.DB_PASSWORD}");
+    assert_eq!(dev.problems[0].problem, "production.DB_PASSWORD: no access to production");
+    assert!(!staging.values.contains_key("DB_PASSWORD") && !preview.values.contains_key("DB_PASSWORD"));
+
+    // A token for development can't make development an overlay of production, nor link a
+    // resource (that's an admin's), nor see the fingerprint of what it can't reveal.
+    let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "dev", "environments": ["development"], "actions": ["read", "reveal", "write", "delete"] }))).await;
+    let token = t["token"].as_str();
+    let (s, _) = api.req(Method::DELETE, "/environments/development", None, token).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = api.req(Method::POST, "/environments", Some(json!({ "slug": "development", "base": "production" })), token).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let link = json!({ "link": { "kind": "bucket", "ref": "assets", "field": "url", "mode": "live" } });
+    let (s, _) = api.req(Method::PUT, "/environments/development/secrets/URL", Some(link), token).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let reader = api.ok(Method::POST, "/tokens", Some(json!({ "name": "read", "actions": ["read"] }))).await;
+    let (_, list) = api.req(Method::GET, "/environments/staging/secrets", None, reader["token"].as_str()).await;
+    assert_eq!(list[0]["fp"], "");
 }

@@ -92,6 +92,9 @@ impl Secrets {
             })
         })?;
         // A token limited to some environments sees only their rows.
-        Ok(rows.into_iter().filter(|r| r.environment.as_deref().is_none_or(|e| caller.allows(Action::Read, &Scope::env(project, e)))).collect())
+        Ok(rows
+            .into_iter()
+            .filter(|r| r.environment.as_deref().is_none_or(|e| caller.allows(Action::Read, &Scope::at(project, e, r.path.as_deref().unwrap_or("/")))))
+            .collect())
     }
 }

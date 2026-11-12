@@ -172,17 +172,19 @@ impl Secrets {
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let rows = c.query(&format!("SELECT {COLUMNS} FROM requests WHERE env_id = ? ORDER BY at DESC LIMIT 200"), [&env.id], request_row)?;
-            Ok(rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s)).map(|r| view(&env, r)).collect())
+            Ok(rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(&env, r)).collect())
         })
     }
 
     pub fn request(&self, project: &str, slug: &str, id: &str, caller: &Caller) -> Result<Request> {
         caller.need(Action::Read, &Scope::env(project, slug))?;
         self.project(project)?;
-        self.db.read(|c| {
+        let r = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            Ok(view(&env, load(c, &env, id)?))
-        })
+            Ok::<_, Error>(view(&env, load(c, &env, id)?))
+        })?;
+        caller.need(Action::Read, &Scope::at(project, slug, &r.path))?;
+        Ok(r)
     }
 
     pub fn open_request(&self, project: &str, slug: &str, b: Batch, caller: &Caller) -> Result<Request> {
@@ -191,6 +193,7 @@ impl Secrets {
         let message = b.message.unwrap_or_default();
         names::message(&message)?;
         let items = items(&path, &b.ops, caller)?;
+        self.check_items(project, slug, &items, caller)?;
         self.open_request_items(project, slug, &path, message, items, caller)
     }
 
@@ -311,35 +314,42 @@ impl Secrets {
             };
             items.push(Item { path: o.path.clone(), key: o.key.clone(), owner: o.owner.clone(), action });
         }
-        // Stale: a key it touches changed after it was opened.
-        let stale = self.db.read(|c| {
-            for i in &items {
+        let message = if r.message.is_empty() { format!("applied {id}") } else { format!("{} ({id})", r.message) };
+        let prepared = self.prepare(project, slug, &items, caller)?;
+        let now = self.db.now_ms()?;
+        // One transaction: the request is still in the state it was read in, no key it touches
+        // changed since it was opened, the change, and the request marked applied.
+        let res = self.db.write(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let current = load(c, &env, id)?;
+            if current.state != r.state {
+                return Err(Error::Conflict("conflict", format!("{id} is {} now", current.state)));
+            }
+            for i in &prepared.items {
                 let newer: i64 = c.query_row(
                     "SELECT COUNT(*) FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? AND seq > ?",
                     params![env.id, i.path, i.key, i.owner, r.base_seq],
                     |x| x.get(0),
                 )?;
                 if newer > 0 {
-                    return Ok::<_, Error>(Some(i.key.clone()));
+                    return Err(Error::Conflict("stale", format!("{} changed after {id} was opened: open a new request", i.key)));
                 }
             }
-            Ok(None)
-        })?;
-        if let Some(k) = stale {
-            self.db.write(|c| c.execute("UPDATE requests SET state = 'stale' WHERE id = ? AND state = ?", [id, r.state.as_str()]))?;
-            return Err(Error::Conflict("stale", format!("{k} changed after {id} was opened: open a new request")));
-        }
-        let message = if r.message.is_empty() { format!("applied {id}") } else { format!("{} ({id})", r.message) };
-        let applied = self.commit(project, slug, items, "request", &message, None, true, caller)?;
-        let seq = applied.change.as_ref().map(|c| c.seq);
-        let now = self.db.now_ms()?;
-        self.db.write(|c| {
-            c.execute("UPDATE requests SET state = 'applied', applied_seq = ? WHERE id = ?", params![seq, id])?;
+            let (change, diffs) = crate::write::apply(c, &dek, &env, &prepared.items, "request", &message, caller, now)?;
+            let seq = (!diffs.is_empty()).then_some(change.seq);
+            c.execute("UPDATE requests SET state = 'applied', applied_seq = ? WHERE id = ? AND state = ?", params![seq, id, r.state])?;
             if bypass && r.state != "approved" {
                 audit::record(c, project, caller, "approval.bypass", Some(slug), Some(&r.path), &[], &format!("applied {id} without approval"), now)?;
             }
-            Ok::<_, Error>(())
-        })?;
+            Ok(())
+        });
+        if let Err(e) = res {
+            self.discard(&prepared);
+            if matches!(e, Error::Conflict("stale", _)) {
+                self.db.write(|c| c.execute("UPDATE requests SET state = 'stale' WHERE id = ? AND state = ?", [id, r.state.as_str()]))?;
+            }
+            return Err(e);
+        }
         self.request(project, slug, id, caller)
     }
 

@@ -332,7 +332,27 @@ action:
 
 Values are returned only by the `reveal` routes, so the gate can classify a request without reading
 its body. A route that touches a second resource (the source of a promote, a reference into another
-environment, a path inside a batch) checks it in process through the same evaluator.
+environment, a path inside a batch) checks it in process through the same evaluator. The rules
+that follow from it:
+
+- **Nothing reaches an environment its caller can't read.** A reference, an import and an ephemeral
+  environment's base each show through only where the caller may read (for a listing) or reveal
+  (for values) the other environment. Making an ephemeral environment needs `reveal` on its base.
+- **Links are an admin's choice.** A link reaches a resource's credentials as the operator, so
+  setting one (or promoting one) needs `admin` in that environment, and so does rotating a
+  resource's own credential (`live` links: it affects every environment that links it). A link
+  works only while its resource is on the project's canvas, checked on every read, issue and
+  rotation.
+- **Protected environments.** Changing their imports needs `admin` (it changes what they resolve to
+  without a change). Checks and sandboxes resolve as a consumer that may not touch any protected
+  environment, so none reaches them through a reference, an import or a base either.
+- **Folders.** A caller limited to some folders sees only their changes, change items, requests and
+  audit rows; leases name no folder, so it sees none.
+- **Fingerprints** are shown only to a caller who may reveal the value: a writer could otherwise
+  test guesses against values it can't read. The grid's and compare's statuses still say whether
+  two environments match, to a caller who can read both.
+- Token scopes name environments by slug: a token for `pr-117` reaches a new `pr-117` made after the
+  old one was deleted (it needs `reveal` on the new one's base to make it).
 
 Until roll-access lands, the checks are one trait in `crates/roll-secrets/src/access.rs`:
 
@@ -521,7 +541,8 @@ Done and in PR #20: the store and crypto, rolld's mount and link providers (a Po
 against a real compute), `roll secrets`, `roll secrets setup` and `roll run`, checks and sandboxes,
 the dashboard's Secrets surface. Ranked:
 
-1. **Act on the security review** of PR #20 (running now): fix what it confirms.
+1. **Postgres role passwords off the compute's log**: issue roles with a SCRAM verifier instead of
+   a plaintext `PASSWORD`, so a failing statement can't log it (`log_min_error_statement`).
 2. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
    merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto

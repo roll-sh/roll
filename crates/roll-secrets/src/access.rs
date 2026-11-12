@@ -77,6 +77,17 @@ impl Grants for Everything {
     }
 }
 
+/// Everything except the environments it names: what checks and sandboxes get, so a protected
+/// environment never reaches them, through a reference, an import or a base either.
+#[derive(Debug)]
+pub struct Except(pub Vec<String>);
+
+impl Grants for Except {
+    fn allows(&self, _: Action, at: &Scope<'_>) -> bool {
+        at.env.is_none_or(|e| !self.0.iter().any(|x| x == e))
+    }
+}
+
 /// A scoped token's grants: one project; environments and folders (prefixes) or all; actions.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TokenScope {
@@ -134,6 +145,11 @@ impl Caller {
     /// handing out the call may do, named for the audit log.
     pub fn consumer(name: &str) -> Caller {
         Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None }
+    }
+
+    /// An in-process consumer that may not touch `except` (a project's protected environments).
+    pub fn consumer_except(name: &str, except: Vec<String>) -> Caller {
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Except(except)), ip: None }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {

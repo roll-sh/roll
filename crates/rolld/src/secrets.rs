@@ -439,11 +439,14 @@ impl ForCode {
         let (slug, path) = environment.split_once(':').unwrap_or((environment, "/"));
         let (slug, path, consumer) = (slug.to_string(), path.to_string(), consumer.to_string());
         tokio::task::spawn_blocking(move || {
-            let caller = roll_secrets::Caller::consumer(&consumer);
-            let env = secrets.environment(&project, &slug, &caller)?;
-            if env.protected {
+            // Never a protected environment: not asked for, nor through a reference, an import or
+            // an ephemeral environment's base.
+            let all = secrets.environments(&project, &roll_secrets::Caller::operator())?;
+            let protected: Vec<String> = all.iter().filter(|e| e.protected).map(|e| e.slug.clone()).collect();
+            if protected.contains(&slug) {
                 anyhow::bail!("{slug} is protected: protected environments never go to checks or sandboxes");
             }
+            let caller = roll_secrets::Caller::consumer_except(&consumer, protected);
             let v = secrets.values(&project, &slug, &path, true, Some(&consumer), &caller)?;
             if let Some(p) = v.problems.first() {
                 anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);

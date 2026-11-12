@@ -151,8 +151,13 @@ pub struct Version {
     pub by: String,
 }
 
-/// The effective entries of `env`/`path` for `principal` (`None`: shared values only).
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+/// Whether entries of another environment's folder may show through an import or a base.
+type Through<'a> = &'a dyn Fn(&str, &str) -> bool;
+
+/// The effective entries of `env`/`path` for `principal` (`None`: shared values only). Imports
+/// and the base count only where `through(environment, path)` allows: a caller never reads an
+/// environment through another that it couldn't read itself.
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
@@ -173,7 +178,10 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, dept
     let mut have: HashSet<String> = out.iter().map(|e| e.row.key.clone()).collect();
     for imp in envs::imports_of(c, &env.id, path)? {
         let Ok(from) = envs::by_slug(c, &env.project_id, &imp.environment) else { continue };
-        for mut e in view_in(c, &from, &imp.path, principal, depth + 1, seen)? {
+        if !through(&from.slug, &imp.path) {
+            continue;
+        }
+        for mut e in view_in(c, &from, &imp.path, principal, through, depth + 1, seen)? {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
                     e.source = Source::Import { environment: imp.environment.clone(), path: imp.path.clone() };
@@ -184,7 +192,8 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, dept
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        for mut e in view_in(c, &base, path, principal, depth + 1, seen)? {
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, depth + 1, seen)? } else { vec![] };
+        for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
                     e.source = Source::Base { environment: base.slug.clone() };
@@ -199,15 +208,20 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, dept
 
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
-    pub(crate) fn view(&self, project: &str, slug: &str, path: &str, caller: &Caller, shared: bool) -> Result<Vec<Entry>> {
+    /// Imports and the base show through only where the caller may `action` them.
+    pub(crate) fn view(&self, project: &str, slug: &str, path: &str, caller: &Caller, shared: bool, action: Action) -> Result<Vec<Entry>> {
         let principal = (!shared && caller.personal()).then_some(caller.principal.as_str());
+        let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, 0, &mut HashSet::new())
         })
     }
 
-    fn secret_of(&self, dek: &Dek, project: &str, e: Entry) -> Secret {
+    /// `e` as the API shows it. Its fingerprint only to a caller who may reveal it: a writer
+    /// could otherwise test guesses against values it can't read.
+    fn secret_of(&self, dek: &Dek, project: &str, e: Entry, caller: &Caller) -> Secret {
+        let fp = if caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path)) { e.row.fp.clone() } else { String::new() };
         let references = match &e.row.value {
             Some(ct) => dek.open(&value_aad(project, &e.row.id, e.row.version), ct).map(|v| refs::refs(v.expose()).iter().map(refs::Ref::display).collect()).unwrap_or_default(),
             None => vec![],
@@ -221,7 +235,7 @@ impl Secrets {
             comment: e.row.comment,
             tags: e.row.tags,
             link: e.row.link,
-            fp: e.row.fp,
+            fp,
             references,
             updated_at: e.row.updated_at,
             updated_by: e.row.updated_by,
@@ -235,8 +249,8 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, false)?;
-        Ok(entries.into_iter().map(|e| self.secret_of(&dek, project, e)).collect())
+        let entries = self.view(project, slug, &path, caller, false, Action::Read)?;
+        Ok(entries.into_iter().map(|e| self.secret_of(&dek, project, e, caller)).collect())
     }
 
     /// One effective secret, without its value. `kind`: the shared one or the caller's personal
@@ -245,12 +259,12 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, kind == Some(SecretType::Shared))?;
+        let entries = self.view(project, slug, &path, caller, kind == Some(SecretType::Shared), Action::Read)?;
         let e = entries.into_iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
         if kind == Some(SecretType::Personal) && e.row.owner.is_empty() {
             return Err(Error::NotFound(format!("no personal value of {key} in {slug}:{path}")));
         }
-        Ok(self.secret_of(&dek, project, e))
+        Ok(self.secret_of(&dek, project, e, caller))
     }
 
     /// One secret's value, resolved unless `resolve` is false. Audited.
@@ -258,7 +272,7 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, false)?;
+        let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &caller.principal);
         let (v, problem) = r.entry(e);
@@ -273,7 +287,7 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, false)?;
+        let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
         let mut r = Resolver::new(self, project, &dek, caller, resolve, &who);
         let mut values = BTreeMap::new();
@@ -380,7 +394,8 @@ impl Secrets {
             let mut views = vec![];
             let mut folders = BTreeSet::new();
             for e in &envs {
-                views.push(view_in(c, e, &path, principal, 0, &mut HashSet::new())?);
+                let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
+                views.push(view_in(c, e, &path, principal, &through, 0, &mut HashSet::new())?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
@@ -399,9 +414,13 @@ impl Secrets {
             .into_iter()
             .map(|key| {
                 let mut cells = BTreeMap::new();
+                // The status compares real fingerprints; the cells show them only where the caller
+                // may reveal.
+                let mut fps: Vec<Option<&str>> = vec![];
                 for (env, view) in envs.iter().zip(&views) {
+                    fps.push(view.iter().find(|e| e.row.key == key).map(|e| e.row.fp.as_str()));
                     let cell = view.iter().find(|e| e.row.key == key).map(|e| Cell {
-                        fp: e.row.fp.clone(),
+                        fp: if caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path)) { e.row.fp.clone() } else { String::new() },
                         version: e.row.version,
                         updated_at: e.row.updated_at,
                         link: e.row.link.clone(),
@@ -436,8 +455,8 @@ impl Secrets {
         caller.need(Action::Read, &Scope::at(project, from, &path))?;
         caller.need(Action::Read, &Scope::at(project, to, &path))?;
         self.project(project)?;
-        let a = self.view(project, from, &path, caller, true)?;
-        let b = self.view(project, to, &path, caller, true)?;
+        let a = self.view(project, from, &path, caller, true, Action::Read)?;
+        let b = self.view(project, to, &path, caller, true, Action::Read)?;
         let keys: BTreeSet<&str> = a.iter().chain(&b).map(|e| e.row.key.as_str()).collect();
         let rows: Vec<Json> = keys
             .into_iter()
@@ -470,8 +489,13 @@ impl Secrets {
                     out.push(format!("{} references itself", item.key));
                     continue;
                 }
+                // Only where the caller may look: a warning must not tell whether a key exists in an
+                // environment it can't read.
+                if !caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
+                    continue;
+                }
                 let keys = views.entry((env.clone(), path.clone())).or_insert_with(|| {
-                    let mut k: Vec<String> = self.view(project, &env, &path, caller, true).map(|v| v.into_iter().map(|e| e.row.key).collect()).unwrap_or_default();
+                    let mut k: Vec<String> = self.view(project, &env, &path, caller, true, Action::Read).map(|v| v.into_iter().map(|e| e.row.key).collect()).unwrap_or_default();
                     if env == slug && path == item.path {
                         k.extend(items.iter().filter(|i| matches!(i.action, ItemAction::Set { .. })).map(|i| i.key.clone()));
                     }
@@ -509,13 +533,15 @@ pub(crate) struct Resolver<'a> {
     views: HashMap<(String, String), Vec<Entry>>,
     done: HashMap<String, (Value, Option<String>)>,
     stack: Vec<String>,
+    /// The project's resources, loaded at the first link.
+    members: Option<std::collections::BTreeSet<(String, String)>>,
     /// Dynamic credentials issued during this resolve, by (environment, kind, ref, credential).
     issued: BTreeMap<(String, String, String, String), std::result::Result<IssuedDynamic, String>>,
 }
 
 impl<'a> Resolver<'a> {
     pub fn new(s: &'a Secrets, project: &'a str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Self {
-        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], issued: BTreeMap::new() }
+        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new() }
     }
 
     fn env(&mut self, slug: &str) -> Option<EnvRow> {
@@ -529,7 +555,7 @@ impl<'a> Resolver<'a> {
     fn lookup(&mut self, env: &str, path: &str, key: &str) -> std::result::Result<Entry, String> {
         let k = (env.to_string(), path.to_string());
         if !self.views.contains_key(&k) {
-            let v = self.s.view(self.project, env, path, self.caller, false).map_err(|e| e.to_string())?;
+            let v = self.s.view(self.project, env, path, self.caller, false, Action::Reveal).map_err(|e| e.to_string())?;
             self.views.insert(k.clone(), v);
         }
         self.views[&k].iter().find(|e| e.row.key == key).cloned().ok_or_else(|| "doesn't exist".to_string())
@@ -567,6 +593,14 @@ impl<'a> Resolver<'a> {
     }
 
     fn raw(&mut self, e: &Entry) -> std::result::Result<Value, String> {
+        if let Some(l) = e.row.link.as_ref().filter(|l| l.mode != Mode::Managed) {
+            if self.members.is_none() {
+                self.members = Some(self.s.members(self.project).map_err(|e| e.to_string())?);
+            }
+            if !self.members.as_ref().is_some_and(|m| m.contains(&(l.kind.clone(), l.r#ref.clone()))) {
+                return Err(format!("{} {} isn't in this project any more", l.kind, l.r#ref));
+            }
+        }
         match &e.row.link {
             Some(l) if l.mode == Mode::Live => {
                 let p = self.s.links.get(&l.kind).map_err(|e| e.to_string())?;
@@ -574,7 +608,7 @@ impl<'a> Resolver<'a> {
             }
             Some(l) if l.mode == Mode::Dynamic => {
                 let cred = self.s.links.credential(l).unwrap_or("default").to_string();
-                let group = (e.row.env_id.clone(), l.kind.clone(), l.r#ref.clone(), cred.clone());
+                let group = (e.row.env_id.clone(), l.kind.clone(), l.r#ref.clone(), format!("{cred}:{}", json(&l.options)));
                 if !self.issued.contains_key(&group) {
                     let label = format!("roll secrets {} {} for {}", e.env, e.row.key, self.consumer);
                     let r = self

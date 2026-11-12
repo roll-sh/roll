@@ -59,12 +59,14 @@ impl Secrets {
                     })
                 },
             )?;
-            Ok(rows.into_iter().filter(|l| caller.allows(Action::Read, &Scope::env(project, &l.environment))).collect())
+            // Leases name no folder: a caller limited to some folders sees none.
+            Ok(rows.into_iter().filter(|l| caller.allows(Action::Read, &Scope::at(project, &l.environment, "/"))).collect())
         })
     }
 
     /// Revoke a lease now.
     pub fn revoke_lease(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
+        caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let env: Option<String> = self.db.read(|c| {
             c.query_row("SELECT e.slug FROM leases l JOIN environments e ON e.id = l.env_id WHERE l.id = ? AND l.project_id = ?", [id, project], |r| r.get(0)).optional()
@@ -111,6 +113,29 @@ impl Secrets {
         }
     }
 
+    /// The managed credentials of the secrets matching `cond` (`env_id = ?`, `project_id = ?`),
+    /// one per credential: collected before what holds them is deleted.
+    pub(crate) fn managed_where(&self, cond: &str, arg: &str) -> Vec<(Link, Json)> {
+        let rows = self.db.read(|c| c.query(&format!("SELECT link, link_state FROM secrets WHERE link_state IS NOT NULL AND {cond}"), [arg], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))));
+        let mut seen = std::collections::BTreeSet::new();
+        rows.unwrap_or_default()
+            .into_iter()
+            .filter_map(|(l, s)| Some((serde_json::from_str::<Link>(&l).ok()?, serde_json::from_str::<Json>(&s).ok()?)))
+            .filter(|(_, s)| s.get("credential").and_then(Json::as_str).is_some_and(|c| seen.insert(c.to_string())))
+            .collect()
+    }
+
+    /// Revoke credentials whose secrets are gone (an environment or a project deleted), best
+    /// effort: a failure is logged, and the product still holds the credential.
+    pub(crate) fn revoke_managed(&self, creds: Vec<(Link, Json)>) {
+        for (link, state) in creds {
+            let Some(handle) = state.get("handle") else { continue };
+            if let Err(e) = self.links.get(&link.kind).and_then(|p| p.revoke(&link.r#ref, handle)) {
+                tracing::warn!(kind = %link.kind, "revoking a deleted secret's credential failed: {e}");
+            }
+        }
+    }
+
     /// Rotate a managed link's credential (with every secret that shares it), or a live link's
     /// resource credential. A rotation doesn't need approval on a protected environment.
     pub fn rotate(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
@@ -125,9 +150,14 @@ impl Secrets {
             let link: Link = link.and_then(|l| serde_json::from_str(&l).ok()).ok_or_else(|| Error::BadRequest(format!("{key} isn't linked: nothing to rotate")))?;
             Ok::<_, Error>((env, link, state.and_then(|s| serde_json::from_str::<Json>(&s).ok())))
         })?;
+        if !self.members(project)?.contains(&(link.kind.clone(), link.r#ref.clone())) {
+            return Err(Error::BadRequest(format!("{} {} isn't in this project any more", link.kind, link.r#ref)));
+        }
         let provider = self.links.get(&link.kind)?;
         match link.mode {
             Mode::Live => {
+                // Resetting the resource's own credential affects every environment that links it.
+                caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
                 if !provider.rotate_source(&link.r#ref)? {
                     return Err(Error::BadRequest(format!("{} {} has no credential to rotate", link.kind, link.r#ref)));
                 }
@@ -144,6 +174,14 @@ impl Secrets {
                 let new_state = seal_parts(&dek, project, &issued.parts, issued.handle, now);
                 let res = self.db.write(|c| {
                     let env = envs::by_slug(c, project, slug)?;
+                    // The claim: the credential is still the one this rotation replaces. If another
+                    // rotation (a user, another node's sweeper) won, this one's credential is revoked.
+                    let now_state: Option<String> =
+                        c.query_row("SELECT link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |r| r.get(0)).optional()?.flatten();
+                    let now_cred = now_state.and_then(|s| serde_json::from_str::<Json>(&s).ok()).and_then(|s| s.get("credential").and_then(Json::as_str).map(String::from));
+                    if now_cred != old {
+                        return Err(Error::Conflict("stale", format!("{key} was rotated meanwhile")));
+                    }
                     // Every secret of the environment that shares the credential.
                     let sharing: Vec<(String, String, String, String)> = match &old {
                         Some(old) => c.query(

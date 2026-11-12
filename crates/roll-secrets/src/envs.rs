@@ -265,7 +265,13 @@ impl Secrets {
             (None, None) => None,
         };
         let path = names::path(new.path.as_deref().unwrap_or("/"))?;
+        // An ephemeral environment shows its base's values: whoever makes one must be able to
+        // read them.
+        if let Some(b) = &new.base {
+            caller.need(Action::Reveal, &Scope::at(project, b, &path))?;
+        }
         let items = crate::write::items(&path, &new.secrets, caller)?;
+        self.check_items(project, &new.slug, &items, caller)?;
         let items = self.prepare(project, &new.slug, &items, caller)?;
         let env = self.db.write(|c| {
             if by_slug(c, project, &new.slug).is_ok() {
@@ -391,8 +397,9 @@ impl Secrets {
             return Err(Error::BadRequest(format!("{slug} is protected: pass ?confirm={slug} to delete it")));
         }
         self.revoke_leases_where("env_id = ?", &env.id);
+        let managed = self.managed_where("env_id = ?", &env.id);
         let now = self.db.now_ms()?;
-        self.db.write(|c| {
+        let done = self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
             if env.kind == Kind::Standard {
                 let standard: i64 = c.query_row("SELECT COUNT(*) FROM environments WHERE project_id = ? AND kind = 'standard'", [project], |r| r.get(0))?;
@@ -407,12 +414,17 @@ impl Secrets {
             drop_env(c, &env)?;
             audit::record(c, project, caller, "environment.delete", Some(slug), None, &[], &format!("deleted environment {slug}"), now)?;
             Ok(())
-        })
+        });
+        if done.is_ok() {
+            self.revoke_managed(managed);
+        }
+        done
     }
 
     /// Delete every ephemeral environment with label `k=v`. Returns their slugs.
     pub fn delete_by_label(&self, project: &str, label: &str, caller: &Caller) -> Result<Vec<String>> {
         let (k, v) = label.split_once('=').ok_or_else(|| Error::BadRequest("label is key=value".into()))?;
+        caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let doomed: Vec<EnvRow> = self.db.read(|c| Ok::<_, Error>(all(c, project)?.into_iter().filter(|e| e.kind == Kind::Ephemeral && e.labels.get(k).is_some_and(|x| x == v)).collect()))?;
         for e in &doomed {
@@ -421,11 +433,13 @@ impl Secrets {
         let mut deleted = vec![];
         for e in doomed {
             self.revoke_leases_where("env_id = ?", &e.id);
+            let managed = self.managed_where("env_id = ?", &e.id);
             let now = self.db.now_ms()?;
             self.db.write(|c| {
                 drop_env(c, &e)?;
                 audit::record(c, project, caller, "environment.delete", Some(&e.slug), None, &[], &format!("deleted ephemeral environment {} ({k}={v})", e.slug), now)
             })?;
+            self.revoke_managed(managed);
             deleted.push(e.slug);
         }
         Ok(deleted)
@@ -533,6 +547,11 @@ impl Secrets {
         }
         self.project(project)?;
         let now = self.db.now_ms()?;
+        // On a protected environment, imports change what it resolves to without a change: an
+        // admin's decision, like its policy.
+        if self.db.read(|c| by_slug(c, project, slug))?.protected {
+            caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
+        }
         self.db.write(|c| {
             let env = by_slug(c, project, slug)?;
             c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, &path])?;

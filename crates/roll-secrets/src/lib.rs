@@ -358,7 +358,8 @@ impl Secrets {
     /// revoked first.
     pub fn forget_project(&self, project: &str) -> Result<()> {
         self.revoke_leases_where("project_id = ?", project);
-        self.db.write(|c| {
+        let managed = self.managed_where("project_id = ?", project);
+        let done = self.db.write(|c| {
             for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
@@ -370,7 +371,11 @@ impl Secrets {
             c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM projects WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
-        })
+        });
+        if done.is_ok() {
+            self.revoke_managed(managed);
+        }
+        done
     }
 }
 
