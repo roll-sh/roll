@@ -6,6 +6,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use roll_secrets::links::{Field, Issued, Link, LinkProvider, Links, Mode};
+use roll_secrets::syncs::{Push, Resources, SyncField, SyncTarget, Syncs};
 use roll_secrets::{Keyring, Options, Secrets, Value as Secret};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -53,10 +54,43 @@ impl LinkProvider for Fake {
     }
 }
 
+/// A push a fake platform got: its values (exposed), changed and removed names.
+type Pushed = (BTreeMap<String, String>, Vec<String>, Vec<String>);
+
+/// A fake outside platform: the pushes it got.
+#[derive(Default)]
+struct FakeSync {
+    pushes: Mutex<Vec<Pushed>>,
+}
+
+impl SyncTarget for FakeSync {
+    fn kind(&self) -> &str {
+        "fake"
+    }
+    fn label(&self) -> &str {
+        "Fake"
+    }
+    fn fields(&self) -> &[SyncField] {
+        &[]
+    }
+    fn signed(&self) -> bool {
+        true
+    }
+    fn check(&self, _: &str, _: &Resources, target: &Value) -> roll_secrets::Result<()> {
+        target.get("name").map(|_| ()).ok_or_else(|| roll_secrets::Error::BadRequest("target needs a name".into()))
+    }
+    fn push(&self, _: &Value, p: &Push<'_>) -> roll_secrets::Result<()> {
+        let values = p.values.iter().map(|(k, v)| (k.clone(), v.expose().to_string())).collect();
+        self.pushes.lock().unwrap().push((values, p.changed.to_vec(), p.removed.to_vec()));
+        Ok(())
+    }
+}
+
 struct Api {
     router: Router,
     secrets: Arc<Secrets>,
     fake: Arc<Fake>,
+    sync: Arc<FakeSync>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -70,10 +104,13 @@ impl Api {
         let fake = Arc::new(Fake::default());
         let mut links = Links::default();
         links.register(fake.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, open: true, trust_forwarded_for: false, web_url: None };
+        let sync = Arc::new(FakeSync::default());
+        let mut syncs = Syncs::default();
+        syncs.register(sync.clone());
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None };
         let secrets = Arc::new(Secrets::new(db, ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { router, secrets, fake, project: String::new(), _dir: dir };
+        let mut api = Api { router, secrets, fake, sync, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -482,4 +519,37 @@ async fn a_shared_value_opens_as_many_times_as_allowed_and_the_server_never_hold
     assert_eq!((list[0]["open"].as_bool(), list[0]["views_left"].as_i64()), (Some(false), Some(0)));
     let audit = api.ok(Method::GET, "/audit?action=share", None).await;
     assert_eq!(audit.as_array().unwrap().len(), 3, "created and opened twice");
+}
+
+#[tokio::test]
+async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
+    let api = Api::new().await;
+    api.set("staging", "DB_URL", "postgres://db").await;
+    api.set("staging", "STRIPE_KEY", "sk_live_123").await;
+    let s = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x" } }))).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    assert!(s["signing_secret"].as_str().unwrap().starts_with("whsec_"), "shown once: {s}");
+    let pushes = |n: usize| api.sync.pushes.lock().unwrap()[n].clone();
+
+    api.secrets.sweep().unwrap();
+    let (values, changed, removed) = pushes(0);
+    assert_eq!(values["STRIPE_KEY"], "sk_live_123");
+    assert_eq!((changed, removed.len()), (vec!["DB_URL".to_string(), "STRIPE_KEY".into()], 0));
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "an unchanged environment isn't pushed again");
+
+    api.set("staging", "DB_URL", "postgres://db2").await;
+    api.ok(Method::DELETE, "/environments/staging/secrets/STRIPE_KEY", None).await;
+    api.secrets.sweep().unwrap();
+    let (values, changed, removed) = pushes(1);
+    assert_eq!((values.len(), changed, removed), (1, vec!["DB_URL".to_string()], vec!["STRIPE_KEY".to_string()]));
+
+    let listed = api.ok(Method::GET, "/syncs", None).await;
+    assert_eq!((listed["syncs"][0]["status"].as_str(), listed["syncs"][0]["synced"].as_u64()), (Some("ok"), Some(1)));
+    assert!(listed["syncs"][0].get("signing_secret").is_none());
+    let audit = api.ok(Method::GET, &format!("/audit?actor=sync:{id}"), None).await;
+    assert_eq!(audit[0]["action"], "sync.push");
+    assert_eq!(audit[0]["keys"], json!(["DB_URL", "STRIPE_KEY"]));
+    assert_eq!(audit.as_array().unwrap().len(), 2);
+    assert!(!audit.to_string().contains("sk_live_123") && !audit.to_string().contains("postgres://"));
 }

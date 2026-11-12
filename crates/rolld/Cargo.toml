@@ -20,6 +20,7 @@ chrono.workspace = true
 clap.workspace = true
 roll-cluster.workspace = true
 code-control.workspace = true
+code-github.workspace = true
 code-preview.workspace = true
 futures.workspace = true
 http-body.workspace = true

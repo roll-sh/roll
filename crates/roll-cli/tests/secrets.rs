@@ -57,6 +57,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
         keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
         key_source: roll_secrets::KeySource::Env,
         links: Default::default(),
+        syncs: Default::default(),
         open: true,
         trust_forwarded_for: false,
         web_url: None,

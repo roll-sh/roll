@@ -148,7 +148,7 @@ pub fn private_ip(ip: IpAddr) -> bool {
 }
 
 /// Resolves names, refusing private addresses.
-pub(crate) struct PublicOnly;
+pub struct PublicOnly;
 
 impl reqwest::dns::Resolve for PublicOnly {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
@@ -166,7 +166,7 @@ impl reqwest::dns::Resolve for PublicOnly {
 
 /// Is `url`'s host a private address written out (an IP literal, or `localhost`)? Names that
 /// resolve to one are refused when connecting ([`PublicOnly`]).
-pub(crate) fn literal_private_host(url: &url::Url) -> bool {
+pub fn literal_private_host(url: &url::Url) -> bool {
     let literal = match url.host() {
         Some(url::Host::Ipv4(v)) => Some(IpAddr::V4(v)),
         Some(url::Host::Ipv6(v)) => Some(IpAddr::V6(v)),

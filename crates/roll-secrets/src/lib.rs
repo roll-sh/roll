@@ -25,6 +25,7 @@ mod requests;
 mod required;
 mod shares;
 mod sweep;
+pub mod syncs;
 mod tokens;
 mod write;
 
@@ -40,6 +41,7 @@ pub use requests::{Request, Review, Verdict};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};
+pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
 pub use tokens::{NewToken, Token};
 pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
 
@@ -262,6 +264,8 @@ pub struct Options {
     pub keyring: std::result::Result<Keyring, String>,
     pub key_source: KeySource,
     pub links: Links,
+    /// The kinds of outside platforms syncs push to (docs/secrets.md, "Syncs").
+    pub syncs: Syncs,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -279,6 +283,7 @@ pub struct Secrets {
     key_source: KeySource,
     workspace: Arc<roll_workspace::Workspace>,
     links: Links,
+    syncs: Syncs,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -302,10 +307,11 @@ impl Secrets {
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(shares::SCHEMA)?;
+        db.ensure_schema(syncs::SCHEMA)?;
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
     }
 
     pub fn links(&self) -> &Links {
@@ -362,7 +368,7 @@ impl Secrets {
             }
             Err(_) => serde_json::Value::Null,
         };
-        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>() }))
+        Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
 
     /// Forget everything about a project (its workspace project was deleted). Active leases are
@@ -371,7 +377,7 @@ impl Secrets {
         self.revoke_leases_where("project_id = ?", project);
         let managed = self.managed_where("project_id = ?", project);
         let done = self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares"] {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;

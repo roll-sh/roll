@@ -569,11 +569,14 @@ pub(crate) struct Resolver<'a> {
     members: Option<std::collections::BTreeSet<(String, String)>>,
     /// Dynamic credentials issued during this resolve, by (environment, kind, ref, credential).
     issued: BTreeMap<(String, String, String, String), std::result::Result<IssuedDynamic, String>>,
+    /// Refuse dynamic links instead of issuing (syncs: a short-lived credential would expire at
+    /// the target).
+    pub no_dynamic: bool,
 }
 
 impl<'a> Resolver<'a> {
     pub fn new(s: &'a Secrets, project: &'a str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Self {
-        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new() }
+        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new(), no_dynamic: false }
     }
 
     fn env(&mut self, slug: &str) -> Option<EnvRow> {
@@ -638,6 +641,7 @@ impl<'a> Resolver<'a> {
                 let p = self.s.links.get(&l.kind).map_err(|e| e.to_string())?;
                 p.read(&l.r#ref, &l.field, l).map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref))
             }
+            Some(l) if l.mode == Mode::Dynamic && self.no_dynamic => Err(format!("{} {} is dynamic: short-lived credentials aren't synced", l.kind, l.r#ref)),
             Some(l) if l.mode == Mode::Dynamic => {
                 let cred = self.s.links.credential(l).unwrap_or("default").to_string();
                 let group = (e.row.env_id.clone(), l.kind.clone(), l.r#ref.clone(), format!("{cred}:{}", json(&l.options)));

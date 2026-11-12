@@ -33,6 +33,7 @@ pub struct Swept {
     pub revoked: usize,
     pub rotated: usize,
     pub expired: usize,
+    pub synced: usize,
     pub failed: usize,
 }
 
@@ -272,6 +273,9 @@ impl Secrets {
             }
         }
         self.expire_shares()?;
+        let (synced, failed) = self.sweep_syncs()?;
+        out.synced += synced;
+        out.failed += failed;
         let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
         self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
         Ok(out)

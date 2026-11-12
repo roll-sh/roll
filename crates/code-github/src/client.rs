@@ -1018,6 +1018,61 @@ impl GitHub {
             .ok_or_else(|| Error::Decode(format!("{field}: no thread in the response")))
     }
 
+    // ── Actions secrets (roll secrets' syncs, docs/secrets.md "Syncs") ──
+
+    /// The key a repo's Actions secrets (or one of its environments' secrets) are sealed to.
+    pub async fn actions_public_key(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        environment: Option<&str>,
+    ) -> Result<ActionsKey> {
+        self.get(
+            Who::Installation(installation),
+            &actions_path(owner, repo, environment, "/public-key"),
+        )
+        .await
+    }
+
+    /// Create or update an Actions secret, sealed to `key` ([`seal_secret`]).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_actions_secret(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        environment: Option<&str>,
+        key: &ActionsKey,
+        name: &str,
+        value: &str,
+    ) -> Result<()> {
+        let body = json!({"encrypted_value": seal_secret(&key.key, value)?, "key_id": key.key_id});
+        let path = actions_path(owner, repo, environment, &format!("/{}", percent_encode(name)));
+        self.execute(Who::Installation(installation), Method::PUT, &path, Some(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// Delete an Actions secret; one that doesn't exist is already deleted.
+    pub async fn delete_actions_secret(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        environment: Option<&str>,
+        name: &str,
+    ) -> Result<()> {
+        let path = actions_path(owner, repo, environment, &format!("/{}", percent_encode(name)));
+        match self
+            .execute(Who::Installation(installation), Method::DELETE, &path, None)
+            .await
+        {
+            Err(e) if e.is_not_found() => Ok(()),
+            r => r.map(|_| ()),
+        }
+    }
+
     // ── transport ──
 
     async fn get<T: DeserializeOwned>(&self, who: Who, path: &str) -> Result<T> {
@@ -1242,6 +1297,41 @@ fn error_message(body: &[u8]) -> String {
 
 fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
     headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+/// A repo's (or an environment's) Actions secrets key: `key` is a base64 X25519 public key.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ActionsKey {
+    pub key_id: String,
+    pub key: String,
+}
+
+/// `value` as GitHub takes an Actions secret: a libsodium sealed box (`crypto_box_seal`: a fresh
+/// X25519 key pair, XSalsa20-Poly1305, nonce BLAKE2b-24(epk ‖ pk)) to the base64 public `key`,
+/// in base64.
+pub fn seal_secret(key: &str, value: &str) -> Result<String> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    let raw: [u8; 32] = STANDARD
+        .decode(key.trim())
+        .ok()
+        .and_then(|k| k.try_into().ok())
+        .ok_or_else(|| Error::Decode("the Actions secrets key isn't a base64 X25519 key".into()))?;
+    let sealed = crypto_box::PublicKey::from(raw)
+        .seal(&mut crypto_box::aead::OsRng, value.as_bytes())
+        .map_err(|_| Error::Decode("sealing an Actions secret failed".into()))?;
+    Ok(STANDARD.encode(sealed))
+}
+
+fn actions_path(owner: &str, repo: &str, environment: Option<&str>, rest: &str) -> String {
+    match environment {
+        None => repo_path(owner, repo, &format!("/actions/secrets{rest}")),
+        Some(env) => repo_path(
+            owner,
+            repo,
+            &format!("/environments/{}/secrets{rest}", percent_encode(env)),
+        ),
+    }
 }
 
 fn repo_path(owner: &str, repo: &str, rest: &str) -> String {

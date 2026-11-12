@@ -167,6 +167,9 @@ aes-gcm = "0.10"
 # Endpoint keys sealed to a daemon (agent-host `endpoints.rs`): X25519 and HKDF.
 curve25519-dalek = "4"
 hkdf = "0.12"
+# GitHub Actions secrets are libsodium sealed boxes (code-github `seal_secret`).
+crypto_box = { version = "0.9", features = ["seal"] }
+blake2 = "0.10"
 toml = "1"
 http-body-util = "0.1"
 http-body = "1"

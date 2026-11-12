@@ -7,6 +7,7 @@
 //!
 //! Links (docs/secrets.md, "Links") are providers that call each product's own API in process,
 //! as the operator, on the router of every product's routes: roll-secrets knows no product.
+//! Syncs' kinds (docs/secrets.md, "Syncs") are in [`syncs`].
 
 use axum::body::Body;
 use axum::http::{Method, Request};
@@ -18,6 +19,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
+
+mod syncs;
 
 /// The router of every product's routes (no gate), set once rolld has built it.
 #[derive(Clone, Default)]
@@ -96,7 +99,9 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     }
     let pg = code_sql::PgOptions { max_connections: args.db_budget()?.secrets, ca: args.code.code_db_ca.clone(), ..Default::default() };
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url };
+    // Syncs' webhooks go to private addresses only where roll code's may (local development).
+    let allow_private = args.code_webhook_allow_private.unwrap_or(open);
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api, allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // A deleted project's secrets go with it.
@@ -110,7 +115,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
             }
         });
     }));
-    // Expired leases and environments, due rotations, old audit rows.
+    // Expired leases and environments, due rotations, syncs whose environment changed, old
+    // audit rows.
     let s = secrets.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));

@@ -14,7 +14,8 @@ connection strings, rotation and short-lived credentials issued by the product, 
 environments that inherit from a base environment instead of copying it.
 
 - Code: `crates/roll-secrets` (store, crypto, references, router), mounted by
-  `crates/rolld/src/secrets.rs`, which also implements the link providers.
+  `crates/rolld/src/secrets.rs`, which also implements the link providers; the sync kinds are
+  `crates/rolld/src/secrets/syncs.rs`.
 - Client: `apps/dashboard/src/lib/secrets-api.ts`. Change it and this contract together.
 - CLI: `roll secrets …` and `roll run` in `crates/roll-cli/src/secrets.rs`.
 - Tests: `crates/roll-secrets/tests/api.rs` (the router in process, on SQLite or Postgres),
@@ -372,6 +373,107 @@ open it.
   `GET …/shares` lists a project's shares (never their ciphertext); `DELETE …/shares/{id}` revokes
   one. A project has at most 200 open at once.
 
+## Syncs
+
+A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
+they change: GitHub Actions secrets, an endpoint of the team's own, or a deploy hook that only hears
+that something changed. Infisical's "secret syncs" are the reference. roll secrets stays the source
+of truth: a sync never reads from its target, and a value edited there is overwritten at the next
+change of that key.
+
+roll-secrets knows no platform. Each kind is a `SyncTarget` (`crates/roll-secrets/src/syncs.rs`)
+that rolld registers (`crates/rolld/src/secrets/syncs.rs`), as link providers are:
+
+```rust
+pub trait SyncTarget: Send + Sync {
+    fn kind(&self) -> &str;                                   // "github", "webhook", "notify"
+    fn label(&self) -> &str;
+    fn fields(&self) -> &[SyncField];                         // what the dashboard asks for
+    fn values(&self) -> bool { true }                         // false: pushes carry key names only
+    fn signed(&self) -> bool { false }                        // a signing secret, shown once
+    // On create and before every push; `resources`: the project's canvas, as (kind, ref).
+    fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
+    // `push`: the values by target name, which names changed, which were removed, the digest,
+    // the signing secret.
+    fn push(&self, target: &Json, push: &Push) -> Result<()>;
+}
+```
+
+A sync is `{id: "syn_…", environment, path, kind, target, keys, prefix, status, last_digest,
+last_synced_at, error}`:
+
+- **What it pushes.** The folder's effective values (own, imported, inherited from a base),
+  resolved, as `roll run` gets them. `keys` limits it to some keys (default: all); `prefix` is put
+  in front of every name at the target (`prefix: "APP_"` pushes `DB_URL` as `APP_DB_URL`). Personal
+  values never sync, and neither do dynamic links (a short-lived credential would expire at the
+  target): a dynamic key, or a reference that can't resolve, is left out and named in `error`.
+- **When.** The sweeper (every node, every 30 s) compares each sync's environment `digest` (the
+  hash `roll run --watch` polls) with the sync's `last_digest`. A sync whose digest moved is
+  claimed with a compare-and-swap on its `running_until` (5 minutes), so two nodes never push one
+  sync at once. A new sync first pushes at the next sweep. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says (also after
+  a live link's resource rotated, which moves no digest).
+- **Only what changed.** A sync remembers a stamp per name it pushed (the secret's id, version,
+  fingerprint and link: no value). A push carries the values of every synced key and says which
+  names `changed` since the last push, and which were `removed`: synced before, gone now (deleted,
+  or left out by `keys`). Targets that set one value per call (GitHub) send only the changed ones
+  and delete the removed ones at the target.
+- **As whom.** A sync resolves with the access of whoever created it, looked up at every push: the
+  operator, or the scoped token that made it (a revoked or expired token stops the sync with an
+  error). So a reference to an environment its creator can't reveal stays unresolved. Every push is
+  audited as `sync.push` by `sync:<id>`, with the keys it pushed or removed (roll's names, without
+  the prefix) and never a value; a push that fails is audited too.
+- **Errors** name keys and the target, never a value: `github owner/app: 404 Not Found`,
+  `DB_URL: ${staging.X} doesn't exist`. A failed push keeps the previous `last_digest` and is tried
+  again after 5 minutes. Deleting a sync leaves what it pushed at the target. Deleting its
+  environment or project deletes the sync.
+- **Who.** Creating, deleting and running a sync need `admin` on its environment: it sends values
+  out of roll. Listing needs `read` and shows the syncs of environments the caller can read.
+
+| Kind | Target | Pushes |
+| --- | --- | --- |
+| `github` | `{repo: "owner/name", environment?: "production"}` | Repository Actions secrets, or a GitHub environment's secrets, through roll's GitHub App |
+| `webhook` | `{url, recipient}` (a base64url X25519 public key) | Every synced value, sealed to `recipient`, POSTed to `url` |
+| `notify` | `{url}` | No values: that the environment changed, and which keys, POSTed to `url` (deploy hooks) |
+
+### `github`
+
+- The repo must be the GitHub repo of a roll repo on the project's canvas (connected through the
+  App), checked when the sync is made and before every push, so a project can't write into a repo
+  of another tenant that the App happens to reach. Without the App (`ROLL_GITHUB_APP_ID`…),
+  creating one answers 400 and says the App isn't configured.
+- Each value is encrypted for GitHub with the repo's (or the environment's) public key as a
+  libsodium sealed box (`crypto_box_seal`: X25519, XSalsa20-Poly1305, nonce BLAKE2b-24(epk ‖ pk);
+  `code_github::seal_secret`), then `PUT …/actions/secrets/{name}` or
+  `PUT …/environments/{environment}/secrets/{name}`. Removed names are deleted (a 404 counts as
+  done).
+- GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
+  an error naming it (rename it or use `keys`/`prefix`).
+
+### `webhook` and `notify`
+
+Both POST JSON to a public HTTPS `url` the creator chose: fetched through the `PublicOnly` resolver,
+a literal private host refused, no redirects, 15 s timeout, at most 64 KiB of the answer read (and
+ignored). Any 2xx is success. `ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` (local development only) allows
+`http` and private addresses.
+
+Each sync of these kinds has a **signing secret** (`whsec_…`), made when the sync is created, shown
+once in the answer, and stored sealed with the project's data key. Every request carries:
+
+```
+X-Roll-Sync: syn_…
+X-Roll-Timestamp: <unix seconds>
+X-Roll-Signature: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>
+```
+
+- `webhook` body: `{sync, project, environment, path, digest, at, changed, removed, context,
+  sealed}`. `sealed` is a `roll-seal-v1` box (see "Runtime resolve") to `recipient` of the JSON
+  object of every synced name and value; `context` is `roll-secrets-sync:<sync id>`. Only the
+  holder of the recipient's secret key reads the values, so a team can write a sync for any
+  platform without roll knowing it.
+- `notify` body: `{sync, project, environment, path, digest, changed_keys, removed_keys, at}`. No
+  value, sealed or not, and nothing is resolved or revealed for it: a deploy hook ("redeploy when
+  production's secrets change").
+
 ## Governance
 
 ### Access
@@ -383,11 +485,11 @@ action:
 
 | Action | Routes |
 | --- | --- |
-| `read` | names, metadata, versions, history, compare, folders, imports, requests, links, leases, audit, required keys |
+| `read` | names, metadata, versions, history, compare, folders, imports, requests, links, leases, audit, required keys, listing syncs |
 | `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/resolve` |
 | `write` | set, batch changes, rotate, rollback, promote, folders, imports, create an environment, open or apply a request |
 | `delete` | a secret, an environment, ephemeral environments by label, a lease |
-| `admin` | rename or reorder environments, protection and approval policy, reviewing a request |
+| `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run) |
 
 Values are returned only by the `reveal` routes, so the gate can classify a request without reading
 its body. A route that touches a second resource (the source of a promote, a reference into another
@@ -464,7 +566,7 @@ isn't in the workspace is 404.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[]}` (`links`: the kinds with a link provider) |
+| `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
 | `GET` | | `{project, environments: Environment[], previews: number}` |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
@@ -516,6 +618,10 @@ isn't in the workspace is 404.
 | `GET /shares` | | `Share[]` newest first |
 | `POST /shares` | `{ciphertext, note?, views?, ttl_minutes?}` | 201 `Share` |
 | `DELETE /shares/{id}` | | 204 |
+| `GET /syncs` | | `{syncs: Sync[], kinds: SyncKind[]}` |
+| `POST /syncs` | `NewSync` | 201 `Sync & {signing_secret?}` (shown once; `admin`) |
+| `DELETE /syncs/{id}` | | 204 (`admin`) |
+| `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
@@ -574,6 +680,14 @@ type Lease = { id: string; environment: string; key: string; kind: "dynamic" | "
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
+type Sync = {
+  id: string; environment: string; path: string; kind: string; target: Record<string, unknown>;
+  keys: string[] | null; prefix: string; status: "pending" | "ok" | "error"; error: string | null;
+  last_digest: string | null; last_synced_at: number | null; synced: number; // names at the target
+  signed: boolean; created_at: number; created_by: string;
+};
+type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
+type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] };
 type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
 ```
 
@@ -595,6 +709,9 @@ leases(id PK, project_id, env_id, secret_id, key, consumer, handle, issued_at, e
 tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, actions, expires_at,
        created_at, created_by, last_used_at, revoked_at)
 audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip)
+syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
+      last_digest, state, last_synced_at, running_until, created_at, created_by)
+      -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)
 ```
 
 `owner` is `''` for a shared secret and the principal for a personal one. A deleted secret keeps its
@@ -605,8 +722,8 @@ free again and its history stays readable by key.
 
 Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
 streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
-checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, the dashboard's
-Secrets surface, and the fixes from a security review. Ranked:
+checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
+webhook, notify), the dashboard's Secrets surface, and the fixes from a security review. Ranked:
 
 1. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
@@ -614,6 +731,5 @@ Secrets surface, and the fixes from a security review. Ranked:
    path, ..Default::default() }`, since it gained `also_in`), and `rlst_` tokens migrate to roll-access
    tokens (`rls_` is accounts' session prefix). Its MCP tools map onto
    the routes above.
-2. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
-   Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-3. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+2. **More sync kinds**: Vercel (its API token a reference to a secret of the same project, resolved
+   at push time), AWS Parameter Store, Cloudflare Workers, as `SyncTarget`s in rolld.
