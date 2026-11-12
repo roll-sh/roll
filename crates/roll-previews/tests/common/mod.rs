@@ -119,7 +119,7 @@ impl Brancher for FakeData {
         Ok(self.branches.lock().contains(&id).then_some(id))
     }
     async fn usage(&self, _parent: &str, _branch: &str) -> anyhow::Result<Usage> {
-        Ok(Usage { bytes: 1 << 20, storage_usd_month: 0.001, active_usd_hour: 0.04, month_to_date_usd: 0.0 })
+        Ok(Usage { bytes: 1 << 20, storage_usd_month: 0.001, active_usd_hour: 0.04, month_to_date_usd: 0.01 })
     }
 }
 

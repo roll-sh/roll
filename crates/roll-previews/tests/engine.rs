@@ -169,3 +169,17 @@ async fn a_delete_during_a_converge_and_an_unrecorded_branch_leave_nothing_behin
     e.engine.pass().await.unwrap();
     assert!(e.pg.branches.lock().is_empty(), "{:?}", e.pg.branches.lock());
 }
+
+#[tokio::test]
+async fn previews_wait_once_the_month_s_budget_is_spent() {
+    let e = env(json!({ "enabled": true, "max_usd_month": 0.015 }));
+    e.code.open(change("chg_1", 1));
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().unwrap().state, State::Ready);
+    // Its branches have cost $0.02 this month (two at $0.01): over the cap.
+    e.code.open(change("chg_2", 2));
+    e.engine.pass().await.unwrap();
+    let second = e.engine.store.row_by_change("chg_2").unwrap().unwrap();
+    assert_eq!(second.state, State::Queued, "a new preview waits once the budget is spent");
+    assert!(e.engine.store.activity(&second.id).unwrap().iter().any(|a| a.message.contains("max_usd_month")));
+}
