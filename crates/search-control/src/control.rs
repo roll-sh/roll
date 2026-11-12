@@ -544,6 +544,7 @@ impl Control {
             indices: 0,
             docs: 0,
             stored_bytes: 0,
+            own_bytes: 0,
             loaded_on: None,
         }
     }
@@ -1255,6 +1256,9 @@ impl Control {
         };
         drop(loaded);
         self.store.set_stats(&c.id, at_ms / 1000, indices, docs, u.segment_bytes as i64).await?;
+        if c.own_bytes != u.own_bytes as i64 {
+            self.store.set_own_bytes(&c.id, u.own_bytes as i64).await?;
+        }
         let mut refreshed = self.refreshed.lock();
         if self.node.get_loaded(name).is_some() {
             refreshed.insert(name.to_string(), at_ms);
@@ -1363,6 +1367,7 @@ mod tests {
             indices: 0,
             docs: 0,
             stored_bytes: 0,
+            own_bytes: 0,
             loaded_on: None,
         };
         let s = spec_for(&c);

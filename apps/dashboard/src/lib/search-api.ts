@@ -83,6 +83,8 @@ export interface SearchCluster extends SearchSettings {
   indices: number;
   docs: number;
   stored_bytes: number;
+  /** Of `stored_bytes`, what a branch references that its parent's latest commit points don't. */
+  own_bytes: number;
   url: string;
   host: string;
   port: number;

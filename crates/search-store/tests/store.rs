@@ -619,6 +619,7 @@ async fn branches_share_segments_and_delete_independently() {
     let usage = store.cluster_usage("preview").await.unwrap();
     assert_eq!((usage.segments, usage.segment_bytes, usage.docs, usage.deleted_docs), (2, 12_000, 19, 1));
     assert_eq!(usage.cached_bytes, 12_002, "segments plus the 2-byte live docs");
+    assert_eq!((usage.own_bytes, store.cluster_usage("prod").await.unwrap().own_bytes), (0, 12_000), "a fresh branch adds nothing");
 
     // The child opens (on another node), deletes a document in segment b and adds a segment.
     let other = open(&objects, &temp_dir("branch-b"), fast_config("n2")).await;
@@ -632,6 +633,7 @@ async fn branches_share_segments_and_delete_independently() {
     segs.push(seg_ref(c.0, 3000));
     other.write_manifest("preview", &s, &ShardManifest { segments: segs, ..cm }).await.unwrap();
     drop(cwal);
+    assert_eq!(other.cluster_usage("preview").await.unwrap().own_bytes, 3000, "the branch's own segment");
 
     // The parent is untouched.
     let pm = store.read_manifest("prod", &s).await.unwrap().unwrap();

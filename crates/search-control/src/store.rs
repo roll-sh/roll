@@ -54,6 +54,9 @@ pub struct SearchCluster {
     pub indices: i64,
     pub docs: i64,
     pub stored_bytes: i64,
+    /// Of `stored_bytes`, what a branch's commit points reference that its parent's latest
+    /// don't: what the branch adds (all of it for a cluster that isn't a branch).
+    pub own_bytes: i64,
     /// On a fleet, the node it's loaded on (set as it loads, cleared as it unloads there): what
     /// lists show without asking the cluster's lease.
     #[serde(skip)]
@@ -111,7 +114,7 @@ const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_f
                     parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, loaded_on";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, loaded_on, own_bytes";
 
 fn row(r: &Row) -> code_sql::Result<SearchCluster> {
     Ok(SearchCluster {
@@ -132,6 +135,7 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         docs: r.get(14)?,
         stored_bytes: r.get(15)?,
         loaded_on: r.get(16)?,
+        own_bytes: r.get(17)?,
     })
 }
 
@@ -164,6 +168,7 @@ impl Store {
     fn with_db(db: Db) -> anyhow::Result<Self> {
         db.ensure_schema(SCHEMA)?;
         db.add_column("search_clusters", "loaded_on", "TEXT")?;
+        db.add_column("search_clusters", "own_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db })
@@ -292,6 +297,12 @@ impl Store {
         Ok(())
     }
 
+    /// [`SearchCluster::own_bytes`], as metering last saw it.
+    pub async fn set_own_bytes(&self, id: &str, own_bytes: i64) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("UPDATE search_clusters SET own_bytes = ?2 WHERE id = ?1", params![id, own_bytes]).map(drop))?;
+        Ok(())
+    }
+
     pub async fn record_usage(&self, id: &str, u: &UsageSample) -> anyhow::Result<()> {
         self.db.write(|x| {
             x.execute(
@@ -373,6 +384,7 @@ mod tests {
             indices: 0,
             docs: 0,
             stored_bytes: 0,
+            own_bytes: 0,
             loaded_on: None,
         }
     }

@@ -226,7 +226,11 @@ function OverviewTab({ cluster, info }: { cluster: SearchCluster; info: SearchIn
               : "wakes on the next request",
           },
           { label: "Indices", value: formatCount(st.indices ?? cluster.indices), hint: `${formatCount(cluster.docs)} documents` },
-          { label: "Stored", value: formatBytes(cluster.stored_bytes), hint: "segments in object storage" },
+          {
+            label: "Stored",
+            value: formatBytes(cluster.stored_bytes),
+            hint: cluster.parent_id ? `${formatBytes(cluster.own_bytes ?? 0)} its own, the rest shared with its parent` : "segments in object storage",
+          },
           { label: "In flight", value: on ? formatCount(st.in_flight ?? 0) : "0", hint: `limit ${cluster.max_in_flight} · bodies to ${cluster.max_body_mb} MB` },
         ]}
       />

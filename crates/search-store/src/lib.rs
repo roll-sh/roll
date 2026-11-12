@@ -273,6 +273,9 @@ pub struct ClusterUsage {
     pub segments: u64,
     /// Bytes of referenced segments (segments shared with a parent or branch count in full).
     pub segment_bytes: u64,
+    /// Of those, the segments its parent's latest commit points don't reference: what a branch
+    /// adds (`segment_bytes` for a cluster that isn't a branch, or whose parent is gone).
+    pub own_bytes: u64,
     /// Of those, plus live docs, the bytes in this node's local cache now.
     pub cached_bytes: u64,
     pub docs: u64,
@@ -1166,11 +1169,20 @@ impl Store {
     /// [`Wal::cluster_stats`].)
     pub async fn cluster_usage(&self, cluster: &str) -> anyhow::Result<ClusterUsage> {
         let mut u = ClusterUsage::default();
-        for (_, m) in self.read_latest_manifests(cluster).await? {
+        let latest = self.read_latest_manifests(cluster).await?;
+        let parent = latest.iter().find_map(|(_, m)| m.base.as_ref().map(|b| b.cluster.clone()));
+        let shared: std::collections::HashSet<SegmentId> = match parent {
+            Some(p) => self.read_latest_manifests(&p).await?.into_iter().flat_map(|(_, m)| m.segments.into_iter().map(|s| s.id)).collect(),
+            None => Default::default(),
+        };
+        for (_, m) in latest {
             u.shards += 1;
             u.segments += m.segments.len() as u64;
             u.segment_bytes += m.segment_bytes();
             for s in &m.segments {
+                if !shared.contains(&s.id) {
+                    u.own_bytes += s.bytes;
+                }
                 u.docs += u64::from(s.max_doc.saturating_sub(s.del_count));
                 u.deleted_docs += u64::from(s.del_count);
                 u.cached_bytes += self.inner.cache.size_of(&s.id.file_name()).unwrap_or(0);
