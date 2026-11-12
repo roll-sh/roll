@@ -106,6 +106,8 @@ export interface PreviewSettings {
   access: "link" | "public";
   /** Run once on fresh data (after branching or a reset) before the services deploy. */
   seed: { image: string; run: string; timeout_s?: number; memory_mb?: number } | null;
+  /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */
+  masking: Record<string, Record<string, string>>;
 }
 
 /** A partial update: objects merge (except `resources` and `env`, which are replaced whole). */
