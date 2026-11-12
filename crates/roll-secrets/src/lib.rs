@@ -330,6 +330,8 @@ impl Secrets {
         // Approval notifications (notices.rs): the sealed URL, its host to show, and the outbox.
         db.add_column("environments", "notify_url", "BLOB")?;
         db.add_column("environments", "notify_host", "TEXT")?;
+        db.add_column("syncs", "checked_at", "INTEGER")?;
+        db.add_column("leases", "path", "TEXT")?;
         db.ensure_schema(notices::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
     }

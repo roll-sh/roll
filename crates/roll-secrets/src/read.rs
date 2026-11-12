@@ -343,7 +343,8 @@ impl Secrets {
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let dek = self.project(project)?;
         let mut h = Sha256::new();
-        let stamp = |h: &mut Sha256, e: &Entry| h.update(format!("{}\0{}\0{}\0{}\0{}\0{}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.fp, e.row.link.as_ref().map(json).unwrap_or_default()));
+        // No fingerprint: a digest is readable without reveal, and a version moves with every value.
+        let stamp = |h: &mut Sha256, e: &Entry| h.update(format!("{}\0{}\0{}\0{}\0{}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
         for e in &entries {
             stamp(&mut h, e);
         }
@@ -588,7 +589,7 @@ fn lease_note(leases: &[String]) -> String {
 }
 
 /// A dynamic credential issued during one resolve: its parts, its handle, its link.
-type IssuedDynamic = (BTreeMap<String, Value>, Json, Link, String);
+type IssuedDynamic = (BTreeMap<String, Value>, Json, Link, (String, String));
 
 /// Resolves values: decrypts, reads live links, issues dynamic ones (once per credential), and
 /// follows references with cycle detection.
@@ -690,7 +691,7 @@ impl<'a> Resolver<'a> {
                         .links
                         .get(&l.kind)
                         .and_then(|p| p.issue(&l.r#ref, &cred, l, &label, Some(l.ttl_minutes())))
-                        .map(|i| (i.parts, i.handle, l.clone(), e.row.key.clone()))
+                        .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone())))
                         .map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref));
                     self.issued.insert(group.clone(), r);
                 }
@@ -749,7 +750,7 @@ impl<'a> Resolver<'a> {
     /// Record the leases of the dynamic credentials this resolve issued; revoke them if that
     /// fails. Returns their ids.
     pub fn finish(self, _slug: &str) -> Result<Vec<String>> {
-        let issued: Vec<_> = self.issued.into_iter().filter_map(|((env_id, _, _, _), r)| r.ok().map(|(_, handle, link, key)| (env_id, handle, link, key))).collect();
+        let issued: Vec<_> = self.issued.into_iter().filter_map(|((env_id, _, _, _), r)| r.ok().map(|(_, handle, link, at)| (env_id, handle, link, at))).collect();
         if issued.is_empty() {
             return Ok(vec![]);
         }
@@ -758,10 +759,10 @@ impl<'a> Resolver<'a> {
         let project = self.project.to_string();
         let ids: Vec<String> = issued.iter().map(|_| names::new_id("lse", 16)).collect();
         let res = self.s.db.write(|c| {
-            for ((env_id, handle, link, key), id) in issued.iter().zip(&ids) {
+            for ((env_id, handle, link, (key, path)), id) in issued.iter().zip(&ids) {
                 c.execute(
-                    "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL)",
-                    params![id, project, env_id, key, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000],
+                    "INSERT INTO leases (id, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL)",
+                    params![id, project, env_id, key, path, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000],
                 )?;
             }
             Ok::<_, Error>(())

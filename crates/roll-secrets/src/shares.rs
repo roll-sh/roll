@@ -136,11 +136,15 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
+        // Its creator's, or an admin's: another reader of the project can't take a link away.
+        let admin = caller.allows(Action::Admin, &Scope::project(project));
         self.db.write(|c| {
-            let n = c.execute("UPDATE shares SET ciphertext = NULL, views_left = 0 WHERE id = ? AND project_id = ?", [id, project])?;
-            if n == 0 {
-                return Err(Error::NotFound(format!("no share {id}")));
+            let by: Option<String> = c.query_row("SELECT created_by FROM shares WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
+            let by = by.ok_or_else(|| Error::NotFound(format!("no share {id}")))?;
+            if by != caller.principal && !admin {
+                return Err(Error::Forbidden("only whoever made a share, or an admin, revokes it".into()));
             }
+            c.execute("UPDATE shares SET ciphertext = NULL, views_left = 0 WHERE id = ? AND project_id = ?", [id, project])?;
             audit::record(c, project, caller, "share.revoke", None, None, &[], &format!("revoked share {}", &id[..12.min(id.len())]), now)
         })
     }

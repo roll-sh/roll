@@ -1,10 +1,10 @@
-import { ArrowLeft, Columns2, History as HistoryIcon, RotateCcw, X } from "lucide-react";
+import { ArrowLeft, Columns2, Flame, History as HistoryIcon, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { needsApproval, type Change, type Environment, type SecretType, type Version } from "@/lib/secrets-api";
 import { Dialog } from "../agents/ui/dialog";
 import { ItemWhat } from "./requests";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, ErrorNote, errorText, field, ghost, LinkChip, primary, Reveal, stamp, useLoad, useMaskAgain } from "./ui";
+import { ActorMark, ago, button, dangerButton, ErrorNote, errorText, field, ghost, LinkChip, primary, Reveal, stamp, useLoad, useMaskAgain } from "./ui";
 import { ValueCompare, type Shown } from "./value-compare";
 
 export type Drawer = { kind: "changes" } | { kind: "change"; seq: number } | { kind: "versions"; key: string; type: SecretType };
@@ -247,11 +247,27 @@ function Versions({ env, secretKey, type, onClose, onChanges }: { env: Environme
     }
   };
   const list = versions.data ?? [];
+  const [purging, setPurging] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  // Purging is for shared values (a personal override's history is its owner's), and only when an older value is still readable.
+  const purgeable = type !== "personal" && list.slice(1).some((v) => v.op === "set" && !v.purged && !(v.link && v.link.mode !== "managed"));
   return (
     <>
       <Head title={<span className="font-mono">{secretKey}</span>} sub={`Versions in ${env.name}${type === "personal" ? " (your override)" : ""}`} onClose={onClose} onBack={onChanges} />
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         <ErrorNote error={error ?? versions.error} onDismiss={error ? () => setError(null) : undefined} className="m-1.5" />
+        {note && (
+          <p className="fade-in m-1.5 text-[11.5px] text-muted" role="status">
+            {note}
+          </p>
+        )}
+        {purgeable && (
+          <div className="flex justify-end px-1.5 pb-1">
+            <button className={`${ghost} h-6 text-[11.5px] hover:text-danger`} onClick={() => setPurging(true)} title="Admin: makes older values unreadable for good">
+              <Flame className="size-3.5" /> Destroy older values…
+            </button>
+          </div>
+        )}
         {list.map((v, i) => (
           <div key={v.version} className="rounded-lg px-2 py-2 hover:bg-fg/[0.03]">
             <div className="flex items-center gap-2 text-[11.5px]">
@@ -273,8 +289,14 @@ function Versions({ env, secretKey, type, onClose, onChanges }: { env: Environme
               </div>
             )}
             {v.comment && <p className="mt-1 text-[11.5px] text-muted">{v.comment}</p>}
-            {v.op === "set" && !(v.link && v.link.mode !== "managed") && <Reveal className="mt-1" load={() => api.versionValue(env.slug, secretKey, v.version, path, owner)} />}
-            {list[i + 1] && (
+            {v.purged ? (
+              <p className="mt-1 text-[11px] text-subtle italic" title="Its stored value was destroyed: it can't be revealed, compared or rolled back to">
+                value destroyed
+              </p>
+            ) : (
+              v.op === "set" && !(v.link && v.link.mode !== "managed") && <Reveal className="mt-1" load={() => api.versionValue(env.slug, secretKey, v.version, path, owner)} />
+            )}
+            {list[i + 1] && !v.purged && !list[i + 1].purged && (
               <button className={`${ghost} mt-0.5 -ml-1 h-6 text-[11.5px]`} onClick={() => compare(v, list[i + 1])} aria-expanded={cmp?.version === v.version} title="Reveals both values (audited)">
                 <Columns2 className="size-3.5" /> {cmp?.version === v.version ? "Hide the comparison" : loading === v.version ? "Revealing…" : `Compare with the previous version`}
               </button>
@@ -283,6 +305,66 @@ function Versions({ env, secretKey, type, onClose, onChanges }: { env: Environme
           </div>
         ))}
       </div>
+      <PurgeDialog
+        open={purging}
+        env={env}
+        secretKey={secretKey}
+        current={list[0]?.version ?? null}
+        onClose={() => setPurging(false)}
+        onPurged={(n) => {
+          setPurging(false);
+          setCmp(null);
+          setNote(n ? `Destroyed ${n} older ${n === 1 ? "value" : "values"} of ${secretKey}.` : `${secretKey} had no older values left to destroy.`);
+          versions.reload();
+        }}
+      />
     </>
+  );
+}
+
+/** Destroys a key's older values for good (admin, audited): its name typed to confirm. */
+function PurgeDialog({ open, env, secretKey, current, onClose, onPurged }: { open: boolean; env: Environment; secretKey: string; current: number | null; onClose: () => void; onPurged: (n: number) => void }) {
+  const { api, search } = useSecrets();
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onPurged((await api.purge(env.slug, secretKey, search.path || "/")).purged);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      onExited={() => (setTyped(""), setError(null))}
+      busy={busy}
+      title={`Destroy ${secretKey}'s older values?`}
+      lead={`Every version before the current one${current ? ` (v${current})` : ""} in ${env.name} loses its stored value for good: nobody can reveal it, compare it or roll back to it again. History still shows what changed and when, and this is in the audit log. Use it after rotating a value that leaked.`}
+      footer={
+        <>
+          <button className={ghost} onClick={onClose}>
+            Cancel
+          </button>
+          <button className={dangerButton} disabled={busy || typed !== secretKey} onClick={run}>
+            {busy ? "Destroying…" : "Destroy older values"}
+          </button>
+        </>
+      }
+    >
+      <label className="block">
+        <span className="mb-1 block text-[11px] font-medium text-subtle">
+          Type <span className="font-mono text-fg">{secretKey}</span> to confirm
+        </span>
+        <input autoFocus value={typed} onChange={(e) => setTyped(e.target.value)} spellCheck={false} className={`${field} font-mono`} />
+      </label>
+      <ErrorNote error={error} className="mt-2" />
+    </Dialog>
   );
 }

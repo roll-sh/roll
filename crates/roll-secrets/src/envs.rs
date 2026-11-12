@@ -412,7 +412,7 @@ impl Secrets {
             match &p.notify_url {
                 Some(Some(u)) => {
                     let sealed = dek.seal(&crate::notices::notify_aad(project, &env.id), &crate::Value::new(u.trim()));
-                    let host = u.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or_default().rsplit('@').next().unwrap_or_default().to_string();
+                    let host = crate::names::url_host(u);
                     c.execute("UPDATE environments SET notify_url = ?, notify_host = ? WHERE id = ?", params![sealed, host, env.id])?;
                 }
                 Some(None) => {

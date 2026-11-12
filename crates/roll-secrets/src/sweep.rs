@@ -18,6 +18,8 @@ use serde_json::Value as Json;
 pub struct Lease {
     pub id: String,
     pub environment: String,
+    /// The folder of the secret it was issued for (`/` for a retired credential's).
+    pub path: String,
     pub key: String,
     pub kind: String,
     pub link: Option<Link>,
@@ -25,6 +27,23 @@ pub struct Lease {
     pub issued_at: i64,
     pub expires_at: i64,
     pub revoked_at: Option<i64>,
+}
+
+const LEASE_SELECT: &str = "SELECT l.id, e.slug, COALESCE(l.path, '/'), l.key, l.kind, l.link, l.consumer, l.issued_at, l.expires_at, l.revoked_at FROM leases l JOIN environments e ON e.id = l.env_id";
+
+fn lease_row(r: &code_sql::Row<'_>) -> code_sql::Result<Lease> {
+    Ok(Lease {
+        id: r.get(0)?,
+        environment: r.get(1)?,
+        path: r.get(2)?,
+        key: r.get(3)?,
+        kind: r.get(4)?,
+        link: serde_json::from_str(&r.get::<_, String>(5)?).ok(),
+        consumer: r.get(6)?,
+        issued_at: r.get(7)?,
+        expires_at: r.get(8)?,
+        revoked_at: r.get(9)?,
+    })
 }
 
 /// The longest a dynamic credential lives, renewals included (from when it was issued).
@@ -46,26 +65,18 @@ impl Secrets {
         self.project(project)?;
         self.db.read(|c| {
             let rows = c.query(
-                "SELECT l.id, e.slug, l.key, l.kind, l.link, l.consumer, l.issued_at, l.expires_at, l.revoked_at FROM leases l JOIN environments e ON e.id = l.env_id
-                 WHERE l.project_id = ? ORDER BY l.issued_at DESC LIMIT 500",
+                &format!("{LEASE_SELECT} WHERE l.project_id = ? ORDER BY l.issued_at DESC LIMIT 500"),
                 [project],
-                |r| {
-                    Ok(Lease {
-                        id: r.get(0)?,
-                        environment: r.get(1)?,
-                        key: r.get(2)?,
-                        kind: r.get(3)?,
-                        link: serde_json::from_str(&r.get::<_, String>(4)?).ok(),
-                        consumer: r.get(5)?,
-                        issued_at: r.get(6)?,
-                        expires_at: r.get(7)?,
-                        revoked_at: r.get(8)?,
-                    })
-                },
+                lease_row,
             )?;
-            // Leases name no folder: a caller limited to some folders sees none.
-            Ok(rows.into_iter().filter(|l| caller.allows(Action::Read, &Scope::at(project, &l.environment, "/"))).collect())
+            Ok(rows.into_iter().filter(|l| caller.allows(Action::Read, &Scope::at(project, &l.environment, &l.path))).collect())
         })
+    }
+
+    fn lease(&self, project: &str, id: &str) -> Result<Lease> {
+        self.db
+            .read(|c| c.query_row(&format!("{LEASE_SELECT} WHERE l.id = ? AND l.project_id = ?"), [id, project], lease_row).optional())?
+            .ok_or_else(|| Error::NotFound(format!("no lease {id}")))
     }
 
     /// Push a live dynamic lease's expiry out by `ttl_minutes` (default: its link's TTL), at most 30
@@ -75,31 +86,23 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        // (environment, kind, link, handle, issued_at, expires_at, revoked_at)
-        type LeaseRow = (String, String, String, String, i64, i64, Option<i64>);
-        let found: Option<LeaseRow> = self.db.read(|c| {
-            c.query_row(
-                "SELECT e.slug, l.kind, l.link, l.handle, l.issued_at, l.expires_at, l.revoked_at FROM leases l JOIN environments e ON e.id = l.env_id WHERE l.id = ? AND l.project_id = ?",
-                [id, project],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-            )
-            .optional()
-        })?;
-        let (env, kind, link, handle, issued_at, expires_at, revoked_at) = found.ok_or_else(|| Error::NotFound(format!("no lease {id}")))?;
-        caller.need(Action::Reveal, &Scope::at(project, &env, "/"))?;
+        let l = self.lease(project, id)?;
+        let handle: Option<String> = self.db.read(|c| c.query_row("SELECT handle FROM leases WHERE id = ?", [id], |r| r.get(0)).optional())?;
+        let (env, kind, issued_at, expires_at, revoked_at) = (l.environment.clone(), l.kind.clone(), l.issued_at, l.expires_at, l.revoked_at);
+        caller.need(Action::Reveal, &Scope::at(project, &env, &l.path))?;
         if kind != "dynamic" {
             return Err(Error::BadRequest(format!("{id} is a retired credential's: only dynamic leases renew")));
         }
         if revoked_at.is_some() || expires_at <= now {
             return Err(Error::Conflict("conflict", format!("{id} has ended: resolve again for a new credential")));
         }
-        let link: Link = serde_json::from_str(&link).map_err(|_| Error::Internal("a lease's link isn't JSON".into()))?;
-        let ttl = ttl_minutes.unwrap_or_else(|| link.ttl_minutes()).clamp(1, 7 * 24 * 60) as i64;
+        let link: Link = l.link.ok_or_else(|| Error::Internal("a lease's link isn't JSON".into()))?;
+        let ttl = ttl_minutes.unwrap_or_else(|| link.ttl_minutes()).clamp(crate::links::TTL_MIN, 7 * 24 * 60) as i64;
         let until = (now + ttl * 60_000).min(issued_at + LEASE_LIFE_MAX);
         if until <= expires_at {
             return Err(Error::Conflict("conflict", format!("{id} can't live past 30 days from when it was issued: resolve again for a new credential")));
         }
-        let handle: Json = serde_json::from_str(&handle).unwrap_or_default();
+        let handle: Json = handle.and_then(|h| serde_json::from_str(&h).ok()).unwrap_or_default();
         // The product first: if recording fails, the old expiry stands and the sweeper revokes then.
         self.links.get(&link.kind)?.renew(&link.r#ref, &handle, until)?;
         let n = self.db.write(|c| c.execute("UPDATE leases SET expires_at = ? WHERE id = ? AND revoked_at IS NULL AND expires_at = ?", params![until, id, expires_at]))?;
@@ -107,18 +110,16 @@ impl Secrets {
             return Err(Error::Conflict("conflict", format!("{id} changed meanwhile: try again")));
         }
         self.audit_now(project, caller, "lease.renew", Some(&env), None, &[], &format!("renewed {id} for {ttl} min"));
-        self.leases(project, caller)?.into_iter().find(|l| l.id == id).ok_or_else(|| Error::NotFound(format!("no lease {id}")))
+        self.lease(project, id)
     }
 
     /// Revoke a lease now.
     pub fn revoke_lease(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
-        let env: Option<String> = self.db.read(|c| {
-            c.query_row("SELECT e.slug FROM leases l JOIN environments e ON e.id = l.env_id WHERE l.id = ? AND l.project_id = ?", [id, project], |r| r.get(0)).optional()
-        })?;
-        let env = env.ok_or_else(|| Error::NotFound(format!("no lease {id}")))?;
-        caller.need(Action::Delete, &Scope::env(project, &env))?;
+        let l = self.lease(project, id)?;
+        let env = l.environment;
+        caller.need(Action::Delete, &Scope::at(project, &env, &l.path))?;
         match self.revoke_one(id)? {
             true => {
                 self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}"));
@@ -263,8 +264,18 @@ impl Secrets {
         }
     }
 
-    /// One pass of background work, as of `now`.
+    /// One pass of all background work: [`Secrets::sweep_local`], then [`Secrets::sweep_outbound`].
     pub fn sweep(&self) -> Result<Swept> {
+        let mut out = self.sweep_local()?;
+        let o = self.sweep_outbound()?;
+        out.synced += o.synced;
+        out.failed += o.failed;
+        Ok(out)
+    }
+
+    /// Background work in roll: expired leases and environments, due rotations, expired shares,
+    /// retention and old audit rows.
+    pub fn sweep_local(&self) -> Result<Swept> {
         let mut out = Swept::default();
         let now = self.db.now_ms()?;
         // Expired leases: dynamic credentials and retired managed ones.
@@ -319,6 +330,15 @@ impl Secrets {
         }
         self.expire_shares()?;
         self.sweep_retention()?;
+        let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
+        self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
+        Ok(out)
+    }
+
+    /// Background work that waits on the network outside roll: approval notices, syncs and audit
+    /// sinks. A separate task in rolld, so a slow platform never holds up leases or rotation.
+    pub fn sweep_outbound(&self) -> Result<Swept> {
+        let mut out = Swept::default();
         let (_, failed) = self.sweep_notices()?;
         out.failed += failed;
         let (synced, failed) = self.sweep_syncs()?;
@@ -326,8 +346,6 @@ impl Secrets {
         out.failed += failed;
         let (_, failed) = self.sweep_sinks()?;
         out.failed += failed;
-        let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
-        self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
         Ok(out)
     }
 }

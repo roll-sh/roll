@@ -9,6 +9,10 @@ use serde_json::{Map, Value as Json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// The shortest a dynamic credential lives: one that ends before a process has started serving
+/// isn't worth issuing, and renewals stay calm.
+pub const TTL_MIN: u64 = 15;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -54,7 +58,7 @@ impl Link {
 
     /// Minutes a dynamic credential lives (default 60, at most 7 days).
     pub fn ttl_minutes(&self) -> u64 {
-        self.option_u64("ttl_minutes").unwrap_or(60).clamp(1, 7 * 24 * 60)
+        self.option_u64("ttl_minutes").unwrap_or(60).clamp(TTL_MIN, 7 * 24 * 60)
     }
 
     /// Minutes the previous managed credential keeps working after a rotation (default 60).

@@ -115,24 +115,28 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
             }
         });
     }));
-    // Expired leases and environments, due rotations, syncs whose environment changed, old
-    // audit rows.
-    let s = secrets.clone();
+    // Two sweepers: work in roll (expired leases and environments, due rotations, old audit
+    // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
+    sweeper(secrets.clone(), "local", Secrets::sweep_local);
+    sweeper(secrets.clone(), "outbound", Secrets::sweep_outbound);
+    Ok(secrets)
+}
+
+fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secrets::Result<roll_secrets::Swept>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
             let s = s.clone();
-            match tokio::task::spawn_blocking(move || s.sweep()).await {
-                Ok(Ok(w)) if w.failed > 0 => tracing::warn!(?w, "roll secrets: some background work failed"),
+            match tokio::task::spawn_blocking(move || pass(&s)).await {
+                Ok(Ok(w)) if w.failed > 0 => tracing::warn!(?w, what, "roll secrets: some background work failed"),
                 Ok(Err(Error::Unavailable(_))) | Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::warn!("roll secrets: sweeping failed: {e}"),
-                Err(e) => tracing::warn!("roll secrets: sweeping panicked: {e}"),
+                Ok(Err(e)) => tracing::warn!(what, "roll secrets: sweeping failed: {e}"),
+                Err(e) => tracing::warn!(what, "roll secrets: sweeping panicked: {e}"),
             }
         }
     });
-    Ok(secrets)
 }
 
 /// The link providers of every product rolld serves.
@@ -503,6 +507,11 @@ impl LinkProvider for Search {
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
         Ok(Issued { parts: BTreeMap::from([("api_key".to_string(), text(&k, "/api_key")?)]), handle: json!({ "id": id.expose() }) })
+    }
+    /// A key's expiry is set when it's made (roll search has no way to move it), so a renewal
+    /// would leave a lease that outlives its key.
+    fn renew(&self, _: &str, _: &Json, _: i64) -> roll_secrets::Result<()> {
+        Err(Error::BadRequest("search keys can't be renewed: resolve again for a new key".into()))
     }
     fn revoke(&self, r#ref: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(id) = h["id"].as_str() else { return Ok(()) };

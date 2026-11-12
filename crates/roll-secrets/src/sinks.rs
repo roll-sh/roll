@@ -37,6 +37,8 @@ const BATCH: i64 = 200;
 /// How long a claim holds, and how long a failed delivery waits.
 const HOLD_MS: i64 = 2 * 60_000;
 const RETRY_MS: i64 = 5 * 60_000;
+/// How old an audit row is before a sink gets it (longer than any write transaction).
+const SETTLE_MS: i64 = 30_000;
 /// Sinks per project.
 const SINKS_MAX: i64 = 10;
 
@@ -133,11 +135,14 @@ impl Secrets {
     pub(crate) fn sweep_sinks(&self) -> Result<(usize, usize)> {
         let Some(deliver) = self.deliver.clone() else { return Ok((0, 0)) };
         let now = self.db.now_ms()?;
+        // Only rows older than SETTLE_MS: ids are given out when a row is written, so on Postgres a
+        // row can commit after a higher one is already visible, and a cursor past it would skip it.
+        let settled = now - SETTLE_MS;
         let due: Vec<(String, String, String, Vec<u8>, i64)> = self.db.read(|c| {
             c.query(
                 "SELECT s.id, s.project_id, s.url, s.secret, s.cursor FROM audit_sinks s WHERE s.running_until <= ? AND s.retry_at <= ?
-                 AND EXISTS (SELECT 1 FROM audit a WHERE a.project_id = s.project_id AND a.id > s.cursor) LIMIT 100",
-                params![now, now],
+                 AND EXISTS (SELECT 1 FROM audit a WHERE a.project_id = s.project_id AND a.id > s.cursor AND a.at <= ?) LIMIT 100",
+                params![now, now, settled],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
         })?;
@@ -147,7 +152,7 @@ impl Secrets {
             if self.db.write(|c| c.execute("UPDATE audit_sinks SET running_until = ? WHERE id = ? AND running_until <= ? AND cursor = ?", params![hold, id, now, cursor]))? != 1 {
                 continue;
             }
-            let rows = self.db.read(|c| {
+            let mut rows = self.db.read(|c| {
                 c.query(
                     "SELECT id, at, actor, action, env, path, keys, summary, ip FROM audit WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
                     params![project, cursor, BATCH],
@@ -166,6 +171,14 @@ impl Secrets {
                     },
                 )
             })?;
+            // Up to the first row that hasn't settled (by id, so nothing before it is skipped).
+            if let Some(at) = rows.iter().position(|r| r.at > settled) {
+                rows.truncate(at);
+            }
+            if rows.is_empty() {
+                self.db.write(|c| c.execute("UPDATE audit_sinks SET running_until = 0 WHERE id = ? AND running_until = ?", params![id, hold]))?;
+                continue;
+            }
             let last = rows.last().map(|r| r.id).unwrap_or(cursor);
             let sent = self.project(&project).and_then(|dek| dek.open(&sink_aad(&project, &id), &sealed).map_err(Error::from)).and_then(|secret| {
                 let body = json!({ "sink": id, "project": project, "events": rows });

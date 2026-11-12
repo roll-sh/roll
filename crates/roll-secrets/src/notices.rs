@@ -39,7 +39,10 @@ pub(crate) fn queue(c: &Conn<'_>, project: &str, env_id: &str, env: &str, reques
     if let Some(l) = &link {
         text.push_str(&format!(" Review: {l}"));
     }
-    let body = json!({ "text": text, "content": text, "project": project, "environment": env, "request": { "id": request, "by": by, "message": message, "keys": keys }, "link": link });
+    // A request's message and key names are the requester's words: no Slack markup (`<!channel>`,
+    // links) and no Discord mentions.
+    let slack = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let body = json!({ "text": slack, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": env, "request": { "id": request, "by": by, "message": message, "keys": keys }, "link": link });
     c.execute(
         "INSERT INTO notices (id, project_id, env_id, body, attempts, next_at, sent_at, created_at) VALUES (?, ?, ?, ?, 0, ?, NULL, ?)",
         params![names::new_id("ntc", 16), project, env_id, body.to_string(), now, now],
