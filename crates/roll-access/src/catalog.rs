@@ -185,16 +185,19 @@ fn method_rank(r: &Row, method: &str) -> Option<u8> {
 /// longest prefix. A route that is a catch-all (`/v1/tasks/{*rest}`, storage's nest) is the
 /// product's own router in disguise: its rows are matched against the request's path.
 pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
-    if OPERATOR_ONLY.iter().any(|(r, _)| *r == route) {
+    if OPERATOR_ONLY.iter().any(|(r, _)| shape(r) == shape(route)) {
         return None;
     }
-    let exact = ROWS.iter().filter(|r| r.route == route).filter_map(|r| method_rank(r, method).map(|m| (m, r))).max_by_key(|(m, _)| *m);
+    // Patterns are compared by shape: a product naming a parameter `{key}` where its row says
+    // `{name}` still matches its row (a rename must never change an action).
+    let shape = shape(route);
+    let exact = ROWS.iter().filter(|r| self::shape(r.route) == shape).filter_map(|r| method_rank(r, method).map(|m| (m, r))).max_by_key(|(m, _)| *m);
     if let Some((_, row)) = exact {
         return Some(Found { row, params: None });
     }
     let prefix = ROWS
         .iter()
-        .filter(|r| r.route.ends_with('/') && route.starts_with(r.route))
+        .filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
         .filter_map(|r| method_rank(r, method).map(|m| ((r.route.len(), m), r)))
         .max_by_key(|(k, _)| *k);
     if let Some((_, row)) = prefix {
@@ -239,6 +242,19 @@ pub fn placement(row: &Row, params: &[(String, String)]) -> Option<(&'static str
 /// the gate here decides the original request again, on this node.
 pub const FORWARDS: &[(&str, &str)] = &[("/internal/storage/control", "x-roll-storage-uri"), ("/internal/tasks", "x-roll-tasks-uri")];
 
+/// A route pattern with its parameters' names dropped (`/a/{id}/{*rest}` → `/a/{}/{*}`).
+pub fn shape(route: &str) -> String {
+    route
+        .split('/')
+        .map(|seg| match seg.strip_prefix('{') {
+            Some(rest) if rest.starts_with('*') => "{*}",
+            Some(_) => "{}",
+            None => seg,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Products mounted with `nest_service`: axum gives their requests no matched route.
 pub const NESTS: &[&str] = &["/v1/storage"];
 
@@ -273,13 +289,14 @@ pub fn by_path(method: &str, path: &str) -> Option<Found> {
 /// catch-all whose real routes have rows), `operator only` (on purpose), or `None`: no row, so no
 /// grant can call it. rolld logs it for every route at startup; `rolld/tests/auth.rs` reads it.
 pub fn classified(route: &str) -> Option<&'static str> {
-    if OPERATOR_ONLY.iter().any(|(r, _)| *r == route) {
+    if OPERATOR_ONLY.iter().any(|(r, _)| shape(r) == shape(route)) {
         return Some("operator only");
     }
-    if let Some(r) = ROWS.iter().find(|r| r.route == route) {
+    let shape = shape(route);
+    if let Some(r) = ROWS.iter().find(|r| self::shape(r.route) == shape) {
         return Some(r.product);
     }
-    if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && route.starts_with(r.route)).max_by_key(|r| r.route.len()) {
+    if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route))).max_by_key(|r| r.route.len()) {
         return Some(r.product);
     }
     if FORWARDS.iter().any(|(r, _)| *r == route) {
@@ -773,6 +790,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/branches", "search", W, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
+    // An API key: its secret is in the answer.
+    row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")),
@@ -792,6 +812,21 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // What hands out more than the request itself: secrets' own tokens, syncs (they push values
+    // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
+    row("*", "/v1/secrets/projects/{project}/tokens", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/tokens", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/tokens/", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/audit/sinks", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
+    // Purging a secret's history can't be undone.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -810,6 +845,15 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/domains/{host}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A shell (a WebSocket's GET) and its screen run commands where the service runs: deploy* too.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // Waking a sleeping environment and checking a domain change nothing a person sees.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps", "apps", R, Tgt::Product),
+    row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
+    row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
     row("GET", "/v1/previews", "previews", R, list("id")),
@@ -942,6 +986,10 @@ mod tests {
         // Static segments beat parameters; production decides deploy.
         let env = find("PUT", "/v1/secrets/projects/{project}/environments/order", "x").unwrap();
         assert_eq!(env.row.action("PUT", &[], None), Action::Admin);
+        // A product naming a parameter differently from its row still gets its row (secrets'
+        // router says `{key}`, the row `{name}`): a value read is never the prefix's read.
+        let f = find("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "x").unwrap();
+        assert_eq!(f.row.action("GET", &[], None), Action::Reveal);
         // Every route that answers secret values is reveal.
         for r in ["values", "secrets/{name}/value", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
             let route = format!("/v1/secrets/projects/{{project}}/environments/{{env}}/{r}");

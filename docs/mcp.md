@@ -247,7 +247,13 @@ previews are listed once those products are on.
 | `secrets_delete` | Delete a secret. | `DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `apps_list_services` | App services. | `GET /v1/apps/services` |
 | `apps_get_service` | A service with its environments and deploys. | `GET /v1/apps/services/{service}` |
-| `apps_deploy` | Deploy a service to an environment (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
+| `apps_restart` | Restart an environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/restart` |
+| `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
+| `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
+| `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_rollback` | Roll an environment back to an earlier deploy. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
 | `apps_logs` | Recent logs of a service's environment. | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
@@ -255,7 +261,9 @@ previews are listed once those products are on.
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |
 | `previews_list` | Preview environments. | `GET /v1/previews` |
 | `previews_get` | A preview with its branched resources. | `GET /v1/previews/{id}` |
-| `previews_create` | A preview environment: every resource of a project branched. | `POST /v1/previews` |
+| `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
+| `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
+| `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
 | `previews_delete` | Tear a preview down with its branches. | `DELETE /v1/previews/{id}` |
 | `code_…`, `agents_…` | roll code's tools (docs/code/mcp.md), under product names | as there |
 

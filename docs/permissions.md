@@ -411,4 +411,11 @@ this list:
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
 | `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify` | the operator decides |
 
+Rows match a route by its shape, not its parameters' names (`…/secrets/{key}/value` finds the row
+written `…/secrets/{name}/value`), so renaming a parameter can never change an action. To check a
+branch's routes before it merges, list them as `METHOD<TAB>PATTERN` lines and run
+`cargo run -p roll-access --example classify < routes.txt`: each line comes back with its product,
+action and row, `NONE` for a route no grant could call, and `MISSING PARAMS` when a row's resource
+or environment parameter isn't in the route.
+
 The rest of the work list is in [mcp.md](mcp.md#next).
