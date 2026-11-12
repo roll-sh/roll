@@ -133,7 +133,7 @@ export function LinkChip({ link, name, compact = false }: { link: Link; name?: s
           <span className="truncate font-mono text-[10.5px]">{link.field}</span>
         </>
       )}
-      <span className={`font-mono text-[10px] ${link.mode === "live" ? "text-subtle" : "text-muted"}`}>{link.mode}</span>
+      <span className={`shrink-0 font-mono text-[10px] ${link.mode === "live" ? "text-subtle" : "text-muted"}`}>{link.mode}</span>
     </span>
   );
 }
@@ -251,10 +251,10 @@ export function Reveal({ load, className = "" }: { load: () => Promise<{ value: 
           </span>
         )}
       </button>
-      <button onClick={toggle} className={iconButton} aria-hidden tabIndex={-1} title={shown ? "Hide" : "Reveal (audited)"}>
+      <button onClick={toggle} className={`${iconButton} shrink-0`} aria-hidden tabIndex={-1} title={shown ? "Hide" : "Reveal (audited)"}>
         {shown ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
       </button>
-      <button onClick={copy} className={iconButton} aria-label="Copy the value" title="Copy (audited)">
+      <button onClick={copy} className={`${iconButton} shrink-0`} aria-label="Copy the value" title="Copy (audited)">
         {copied ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />}
       </button>
       {error && <span className="shrink-0 text-[11px] text-danger">{error}</span>}
