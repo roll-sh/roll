@@ -897,6 +897,7 @@ impl Code {
             // Review rules still apply, unless an admin bypasses them (audited).
             let settings = self.settings(r).await;
             self.prepare_review(r, c).await;
+            self.prepare_leaks(r, c).await;
             let blockers: Vec<Blocker> =
                 self.blockers(r, c, &settings).into_iter().filter(|b| b.kind != "untrusted" && b.kind != "checks").collect();
             let (review, other): (Vec<Blocker>, Vec<Blocker>) = blockers.into_iter().partition(|b| crate::review::REVIEW_BLOCKERS.contains(&b.kind.as_str()));

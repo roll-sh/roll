@@ -337,7 +337,7 @@ the change`. The blocker names keys and environments, never the value or the lin
   store none). Nothing is decrypted. Candidates shorter than 8 characters never match, so values
   like `true` or `8080` don't block. Every project that has the repo on its canvas is checked.
 - **When.** The answer is computed before a change is queued or landed and when a single change is
-  read, and cached per (repo, merge base, head), as review facts are. A secret set after a head was
+  read, and cached per head with the merge base it was found from. A secret set after a head was
   checked is caught when the head or its merge base moves. A repo on no project's canvas, or a
   server without roll secrets, gets no blocker; if roll secrets can't answer, the change isn't
   blocked and the check runs again next time.

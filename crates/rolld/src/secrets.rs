@@ -511,4 +511,17 @@ impl code_control::SecretEnv for ForCode {
         }
         self.resolve(p.id, environment, consumer).await
     }
+
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let r = repo.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for p in ws.list()?.into_iter().filter(|p| p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref == r)) {
+                out.extend(secrets.leaks(&p.id, &candidates)?.into_iter().map(|l| (l.key, l.environment)));
+            }
+            Ok(out)
+        })
+        .await?
+    }
 }

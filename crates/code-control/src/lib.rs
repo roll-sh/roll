@@ -13,6 +13,7 @@ pub mod db;
 pub mod ext;
 pub mod git;
 pub mod github;
+mod leaks;
 pub mod mcp;
 pub mod model;
 pub mod names;
@@ -420,6 +421,9 @@ pub struct Code {
     pub(crate) review_configs: Mutex<HashMap<String, Arc<review::ReviewConfig>>>,
     /// What review rules need to know about a change's diff, per (repo, merge base, head).
     pub(crate) review_facts: Cache<(String, Option<ChangesetId>, ChangesetId), Arc<review::rules::Facts>>,
+    /// The secrets a change's added lines hold, per (repo, head), with the merge base they were
+    /// found from (`leaks.rs`).
+    pub(crate) leak_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, leaks::Leaks)>,
     /// Review-app webhook deliveries.
     pub(crate) deliveries: review::Deliveries,
     /// roll's own reviewer: its job queue, the codebase index, sealed keys.
@@ -543,6 +547,7 @@ impl Code {
             baselines: Cache::new(1024),
             review_configs: Mutex::new(HashMap::new()),
             review_facts: Cache::new(16_384),
+            leak_facts: Cache::new(16_384),
             deliveries: review::Deliveries::default(),
             ai,
             worktrees: checkout::Worktrees::default(),

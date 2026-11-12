@@ -264,8 +264,9 @@ pub struct Preview {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Blocker {
     /// `state`, `draft`, `untrusted`, `checks`, `needs_approval`, `needs_codeowner`,
-    /// `changes_requested`, `unresolved_threads`, `review_pending` or `review_required` (more
-    /// kinds may be added; show unknown ones by their message).
+    /// `changes_requested`, `unresolved_threads`, `review_pending`, `review_required` or
+    /// `secret_leak` (the change adds a roll secrets value; docs/secrets.md) (more kinds may be
+    /// added; show unknown ones by their message).
     pub kind: String,
     pub message: String,
 }

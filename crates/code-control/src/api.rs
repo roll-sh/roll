@@ -613,6 +613,7 @@ async fn change_by_number(
     let c = c.ok_or_else(|| Error::NotFound(format!("change {number}")))?;
     code.settings(&r).await;
     code.prepare_review(&r, &c).await;
+    code.prepare_leaks(&r, &c).await;
     Ok(Json(code.change_view(c)?))
 }
 
@@ -620,6 +621,7 @@ async fn get_change(State(code): S, caller: Caller, Path(id): Path<String>) -> R
     let (r, c) = code.readable_change(&caller, &id)?;
     code.settings(&r).await;
     code.prepare_review(&r, &c).await;
+    code.prepare_leaks(&r, &c).await;
     Ok(Json(code.change_or_404(&id)?))
 }
 

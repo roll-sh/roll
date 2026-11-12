@@ -546,6 +546,39 @@ async fn blockers_keep_changes_out_of_the_queue() {
     assert_eq!(s, StatusCode::CONFLICT);
 }
 
+/// roll secrets for acme/api: STRIPE_KEY in production holds `sk_live_51Hx9Q2`.
+struct FakeSecrets;
+
+#[async_trait]
+impl code_control::SecretEnv for FakeSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {
+        let hit = repo == "acme/api" && candidates.iter().any(|c| c == "sk_live_51Hx9Q2");
+        Ok(if hit { vec![("STRIPE_KEY".into(), "production".into())] } else { vec![] })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_that_adds_a_secrets_value_is_blocked_until_it_is_removed() {
+    let a = queue_app("", Arc::new(QueueRunner::default())).await;
+    a.code.set_secret_env(Arc::new(FakeSecrets));
+    let c = change(&a, "config", json!({ "config.js": { "content": "export const port = 8080;\nconst stripe = \"sk_live_51Hx9Q2\";\n" } })).await;
+    let leak = |v: &Value| v["blockers"].as_array().unwrap().iter().find(|b| b["kind"] == "secret_leak").cloned();
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(leak(&c).unwrap()["message"], "adds the value of STRIPE_KEY (production): rotate it and remove it from the change");
+    let (s, v) = a.req("POST", &format!("/v1/code/changes/{}/enqueue", id(&c)), None, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(leak(&v).is_some() && !v.to_string().contains("sk_live_51Hx9Q2"), "{v}");
+    let c = a.ok("POST", &format!("/v1/code/changes/{}/revise", id(&c)), Some(json!({ "message": "config", "files": { "config.js": { "content": "const stripe = process.env.STRIPE_KEY;\n" } } }))).await;
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(leak(&c), None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revert_restores_the_parent_and_keeps_later_work() {
     let a = app(None);

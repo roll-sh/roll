@@ -157,7 +157,9 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            review: ReviewSummary /* see Reviews */,
            created_at, updated_at}
 Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval" | "needs_codeowner" | "changes_requested"
-                   | "unresolved_threads" | "review_pending" | "review_required" /* more may come: show unknown kinds by message */,
+                   | "unresolved_threads" | "review_pending" | "review_required"
+                   | "secret_leak" /* it adds a roll secrets value; names keys, never values (docs/secrets.md) */
+                   /* more may come: show unknown kinds by message */,
              message}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,

@@ -441,3 +441,45 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     let (_, list) = api.req(Method::GET, "/environments/staging/secrets", None, reader["token"].as_str()).await;
     assert_eq!(list[0]["fp"], "");
 }
+
+#[tokio::test]
+async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_51Hx9").await;
+    api.set("development", "PORT", "8080").await;
+    let candidates = ["sk_live_51Hx9", "8080", "something-else"].map(String::from);
+    let leaks = api.secrets.leaks(&api.project, &candidates).unwrap();
+    assert_eq!(leaks, [roll_secrets::Leak { key: "STRIPE_KEY".into(), environment: "production".into(), path: "/".into() }]);
+}
+
+#[tokio::test]
+async fn a_shared_value_opens_as_many_times_as_allowed_and_the_server_never_holds_it() {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    let api = Api::new().await;
+    // The client encrypts; the key would be in the link's #fragment.
+    let (key, nonce) = ([3u8; 32], [5u8; 12]);
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).unwrap();
+    let ct = cipher.encrypt(&nonce.into(), Payload { msg: b"hunter2-staging-db", aad: b"roll-share-v1" }).unwrap();
+    let blob = B64.encode([&nonce[..], &ct].concat());
+    let share = api.ok(Method::POST, "/shares", Some(json!({ "ciphertext": blob, "note": "the staging db", "views": 2, "ttl_minutes": 60 }))).await;
+    let id = share["id"].as_str().unwrap();
+
+    // Looking at the link uses nothing up; each open does, and the last one drops it.
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/shares/{id}"), None).await;
+    assert_eq!((peek["note"].as_str(), peek["views_left"].as_i64()), (Some("the staging db"), Some(2)));
+    for _ in 0..2 {
+        let (s, opened) = api.call(Method::POST, &format!("/v1/secrets/shares/{id}/open"), None).await;
+        assert_eq!(s, StatusCode::OK);
+        let raw = B64.decode(opened["ciphertext"].as_str().unwrap()).unwrap();
+        let plain = cipher.decrypt(raw[..12].into(), Payload { msg: &raw[12..], aad: b"roll-share-v1" }).unwrap();
+        assert_eq!(plain, b"hunter2-staging-db");
+    }
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/shares/{id}/open"), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let list = api.ok(Method::GET, "/shares", None).await;
+    assert_eq!((list[0]["open"].as_bool(), list[0]["views_left"].as_i64()), (Some(false), Some(0)));
+    let audit = api.ok(Method::GET, "/audit?action=share", None).await;
+    assert_eq!(audit.as_array().unwrap().len(), 3, "created and opened twice");
+}

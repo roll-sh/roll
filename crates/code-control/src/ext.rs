@@ -1,7 +1,8 @@
 //! Extension points that run code: previews (branched Postgres and Redis plus a container) and
 //! the checks runner. rolld plugs implementations in with [`crate::Code::set_preview_backend`]
 //! and [`crate::Code::set_runner`]; without them previews and runner checks are unavailable.
-//! [`SecretEnv`] is roll secrets, for checks and sandboxes ([`crate::Code::set_secret_env`]).
+//! [`SecretEnv`] is roll secrets, for checks, sandboxes and the `secret_leak` blocker
+//! ([`crate::Code::set_secret_env`]).
 
 use crate::model::{Change, Check, Preview, RepoRow};
 use async_trait::async_trait;
@@ -43,4 +44,8 @@ pub trait SecretEnv: Send + Sync {
     /// The same for workspace project `project` (an id or a name), which must have one of
     /// `owner`'s repos on its canvas (sandboxes).
     async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// The (key, environment) of every secret, in any environment of the projects that have repo
+    /// `owner/name` on their canvas, whose value is one of `candidates` (matched by fingerprint;
+    /// values never come back). Empty for a repo on no project's canvas.
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(String, String)>>;
 }
