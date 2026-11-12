@@ -239,7 +239,9 @@ and in the table below.
 Secrets of one environment linked to the same resource and credential share one issue: linking
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` gives one access key, and rotating either rotates
 both, in one change. A Postgres role made for a branch also exists in branches made from it later
-(roles live in the branch's data); it expires with `VALID UNTIL` either way. Revoking a role ends
+(roles live in the branch's data); it expires with `VALID UNTIL` either way. The role gets a SCRAM-SHA-256
+verifier, never the password itself, so a failing statement can't put it in the compute's log.
+Revoking a role ends
 its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
 a credential never drops data.
 
@@ -541,13 +543,11 @@ Done and in PR #20: the store and crypto, rolld's mount and link providers (a Po
 against a real compute), `roll secrets`, `roll secrets setup` and `roll run`, checks and sandboxes,
 the dashboard's Secrets surface. Ranked:
 
-1. **Postgres role passwords off the compute's log**: issue roles with a SCRAM verifier instead of
-   a plaintext `PASSWORD`, so a failing statement can't log it (`log_min_error_statement`).
-2. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
+1. **Swap the stopgap authority for roll-access** when `origin/feature/roll-mcp` (PR #19) lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever
    merges second does it), and `rls_` tokens migrate to roll-access tokens. Its MCP tools map onto
    the routes above.
-3. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
+2. **Syncs to outside**: push an environment to GitHub Actions secrets (through `code-github`),
    Vercel, AWS Parameter Store, Cloudflare Workers; one-way, versioned, audited.
-4. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
-5. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.
+3. **Change webhooks** through roll code's delivery queue: `secrets.changed` for deploy hooks.
+4. **Grid without decrypting**: store whether a value has references, so the grid decrypts nothing.

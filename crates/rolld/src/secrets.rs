@@ -235,7 +235,8 @@ impl LinkProvider for Postgres {
             _ => "GRANT pg_read_all_data, pg_write_all_data TO {r}; GRANT ALL ON SCHEMA public TO {r};",
         }
         .replace("{r}", &role);
-        let sql = format!("CREATE ROLE {role} LOGIN PASSWORD '{password}' {until}; {grants}");
+        // The SCRAM verifier, not the password: a statement that fails is logged by the compute.
+        let sql = format!("CREATE ROLE {role} LOGIN PASSWORD '{}' {until}; {grants}", scram_verifier(&password));
         self.0.call(Method::POST, &format!("/v1/endpoints/{}/query", enc(&endpoint)), Some(json!({ "sql": sql })))?;
         let mut url = url::Url::parse(&uri).map_err(|_| Error::Link("the branch's URL doesn't parse".into()))?;
         let _ = url.set_username(&role);
@@ -260,6 +261,29 @@ impl LinkProvider for Postgres {
         );
         self.0.call(Method::POST, &format!("/v1/endpoints/{}/query", enc(endpoint)), Some(json!({ "sql": sql }))).map(|_| ())
     }
+}
+
+/// A SCRAM-SHA-256 verifier (RFC 5802/7677, as Postgres stores it): Postgres takes it as a
+/// role's password, so the password itself never reaches the database.
+fn scram_verifier(password: &str) -> String {
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+    const ITERATIONS: u32 = 4096;
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).expect("system randomness");
+    let mut salted = [0u8; 32];
+    pbkdf2::pbkdf2::<Hmac<Sha256>>(password.as_bytes(), &salt, ITERATIONS, &mut salted).expect("a valid output length");
+    let mac = |key: &[u8], msg: &[u8]| {
+        let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("any key length");
+        m.update(msg);
+        m.finalize().into_bytes()
+    };
+    let client = mac(&salted, b"Client Key");
+    let stored = Sha256::digest(client);
+    let server = mac(&salted, b"Server Key");
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    format!("SCRAM-SHA-256${ITERATIONS}:{}${}:{}", b64(&salt), b64(&stored), b64(&server))
 }
 
 /// Redis: the database's URLs and token (live); rotating resets its password.
