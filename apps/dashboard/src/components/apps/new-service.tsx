@@ -1,7 +1,7 @@
 import { ChevronRight, GitBranch, Image, LoaderCircle, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
-import { codeApi, type Repo } from "@/lib/code-api";
+import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
@@ -58,6 +58,7 @@ export function NewServiceSheet({
 
   // The project's own repositories first.
   const inProject = useMemo(() => new Set(project.resources.filter((r) => r.kind === "repo").map((r) => r.ref)), [project.resources]);
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     codeApi.repos().then(
       (l) => {
@@ -67,7 +68,7 @@ export function NewServiceSheet({
       },
       (e) => setReposError(message(e)),
     );
-  }, [inProject]);
+  }, [inProject, reload]);
 
   // The name follows the source until it's typed.
   useEffect(() => {
@@ -148,7 +149,7 @@ export function NewServiceSheet({
                 <span className="shimmer">Loading repositories…</span>
               </p>
             ) : repos.length === 0 ? (
-              <p className="text-[11.5px] leading-relaxed text-muted">There are no repositories in roll code yet. Push one, or mirror one from GitHub, then come back.</p>
+              <p className="text-[11.5px] leading-relaxed text-muted">There are no repositories in roll code yet: push one, or bring one from GitHub below.</p>
             ) : (
               <select value={repo} onChange={(e) => setRepo(e.target.value)} className={field}>
                 {repos.map((r) => (
@@ -159,6 +160,12 @@ export function NewServiceSheet({
                 ))}
               </select>
             )}
+            <FromGithub
+              onPicked={(full) => {
+                setReload((n) => n + 1);
+                setRepo(full);
+              }}
+            />
             <Label>
               Root directory <span className="font-normal">optional</span>
             </Label>
@@ -333,5 +340,97 @@ export function Dockerfile({ text, generated }: { text: string; generated: boole
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * A GitHub repository as the source in one step: one roll code already mirrors is picked as it
+ * is; another is imported first (roll code mirrors it from then on). Only when this rolld has a
+ * GitHub App that can see repositories.
+ */
+function FromGithub({ onPicked }: { onPicked: (fullName: string) => void }) {
+  const [installs, setInstalls] = useState<GithubInstallation[] | null>(null);
+  const [owners, setOwners] = useState<Owner[]>([]);
+  const [owner, setOwner] = useState("");
+  const [pick, setPick] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const app = await codeApi.github();
+        if (!app.configured || !alive) return;
+        const [i, o] = await Promise.all([codeApi.installations(), codeApi.owners()]);
+        if (!alive) return;
+        setInstalls(i);
+        setOwners(o);
+        setOwner(o[0]?.name ?? "");
+      } catch {
+        // No GitHub here (or not for this caller): the picker just doesn't show.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const repos = (installs ?? []).flatMap((i) => i.repos.map((r) => ({ install: i, repo: r })));
+  if (!repos.length) return null;
+  const chosen = repos.find((r) => r.repo.full_name === pick);
+
+  const go = async () => {
+    if (!chosen) return;
+    if (chosen.repo.connected_repo) return onPicked(chosen.repo.connected_repo);
+    setBusy(true);
+    setError(null);
+    try {
+      const made = await codeApi.createRepo({
+        owner,
+        name: chosen.repo.name,
+        default_branch: chosen.repo.default_branch,
+        visibility: chosen.repo.private ? "private" : "public",
+        source: { github: { installation_id: chosen.install.id, owner: chosen.repo.owner, repo: chosen.repo.name } },
+      });
+      onPicked(made.full_name);
+      setPick("");
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Label>
+        Or from GitHub <span className="font-normal">roll code mirrors it</span>
+      </Label>
+      <div className="flex gap-1.5">
+        <select value={pick} onChange={(e) => setPick(e.target.value)} className={`${field} min-w-0 flex-1`} aria-label="GitHub repository">
+          <option value="">Pick a repository…</option>
+          {repos.map(({ repo }) => (
+            <option key={repo.full_name} value={repo.full_name}>
+              {repo.full_name}
+              {repo.connected_repo ? ` · in roll as ${repo.connected_repo}` : ""}
+            </option>
+          ))}
+        </select>
+        {chosen && !chosen.repo.connected_repo && owners.length > 1 && (
+          <select value={owner} onChange={(e) => setOwner(e.target.value)} className={`${field} w-28`} aria-label="Into the owner">
+            {owners.map((o) => (
+              <option key={o.name} value={o.name}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <button type="button" onClick={() => void go()} disabled={!chosen || busy || (!chosen.repo.connected_repo && !owner)} className="shrink-0 rounded-md border border-line px-2 text-[11.5px] text-fg hover:bg-fg/[0.05] disabled:opacity-50">
+          {busy ? "Importing…" : chosen?.repo.connected_repo ? "Use" : "Import"}
+        </button>
+      </div>
+      {error && <p className="mt-1 text-[11px] text-danger">{error}</p>}
+    </>
   );
 }

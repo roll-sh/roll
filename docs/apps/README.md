@@ -481,21 +481,15 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **First run and the dashboard.** GitHub repos inline in New service (mirror and pick in one
-   step); a build/deploy step summary with durations on each deployment. (Done: the service
-   type and a cron schedule in New service, variables before the first deploy, a new environment
-   and its branch from the switcher, metric headlines that total or peak the window, `roll up`'s
-   commit message and sha, people-readable CLI output, slugs that don't repeat the project, a
-   cron service's next run and its scheduled runs.)
-3. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
+2. **Lean images and real builds in tests.** Prune devDependencies and use Next's standalone
    output; build the generated Node, Python and Go Dockerfiles in `tests/docker.rs`; a
    `roll-cli/tests/apps.rs` for `roll up`; measure the Node cold start again.
-4. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
+3. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
-5. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
-6. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+4. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.
+5. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
     `code-preview/tests/fargate.rs`.
-7. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+6. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
     node; pending claims expire.
-8. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-9. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+7. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+8. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
