@@ -393,6 +393,11 @@ struct ResolveBody {
     consumer: String,
     #[serde(default)]
     seal_to: Option<String>,
+    /// The consumer runs code nobody vetted (a preview or a check of a change): nothing from a
+    /// protected environment resolves, asked for or reached through a reference, an import or
+    /// an ephemeral environment's base.
+    #[serde(default)]
+    untrusted: bool,
 }
 
 /// Runtime resolve for services (roll apps, previews, sandboxes, tasks).
@@ -405,7 +410,12 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let v = blocking(s, move |s| s.values(&p, &e, &path, true, Some(&cons), &c)).await?;
+    let untrusted = r.untrusted;
+    let v = blocking(s, move |s| {
+        let c = if untrusted { s.untrusted(&p, &c)? } else { c };
+        s.values(&p, &e, &path, true, Some(&cons), &c)
+    })
+    .await?;
     let out = match r.seal_to {
         None => ok(&v),
         Some(to) => {
