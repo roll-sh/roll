@@ -172,6 +172,13 @@ operator token. A user who isn't an admin lists, reads and changes only their ow
 operator see all. Names are unique per owner, and a resource's place is per owner, so two users can
 each put the same repository on their canvas (docs/workspace.md).
 
+Tokens an admin minted for other owners while an admin stay those owners' tokens when the admin
+flag is taken away: revoke them on those owners if needed.
+
+With `ROLL_ADMIN_TOKEN` set and no `ROLL_DASHBOARD_ORIGIN`, CORS (with credentials) answers only
+the dashboard's own origin, from `ROLL_WEB_URL`: never every local port, since a page there could
+read the session's CSRF token.
+
 ## Rate limits
 
 Counted durably in `throttle` (they hold across restarts and nodes) and only for things that
@@ -187,6 +194,9 @@ parallel (to any node) can't get past a limit.
 - Wrong TOTP or recovery codes: 10 per user per 5 minutes.
 - A TOTP code is accepted once: its time step must be newer than the last one accepted.
 - Request-rate limits per client address are Cloudflare's (a rule on `/v1/accounts/*`).
+- Known limit: anyone can start challenges for an address and spend that user's 10 wrong codes
+  per 15 minutes, holding off their email sign-in for the window (GitHub, Google and recovery
+  codes still work). Cloudflare's per-address rule bounds how fast.
 
 ## Sign-in flows
 
@@ -319,7 +329,7 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
 | `GET /v1/accounts/users` | | `User[]`, oldest first |
-| `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions |
+| `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
 
 A non-admin session on these is 403 `{code: "admin_only"}`; no credentials at all is 401.

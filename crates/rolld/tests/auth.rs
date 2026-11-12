@@ -249,6 +249,34 @@ async fn every_control_plane_route_needs_the_operator_token() {
     assert!(wrong.is_empty(), "{} routes misbehave:\n{}", wrong.len(), wrong.join("\n"));
     let code: serde_json::Value = http.get(format!("{api}/v1/code")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
     assert_eq!((code["auth"]["caller"]["kind"].as_str(), code["auth"]["caller"]["owner"].as_str()), (Some("owner"), Some("ada")), "{code}");
+    // Disabling the account cuts off what the person made in roll code too, not just the session:
+    // a token minted with the session stops working at once.
+    let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+    let minted: serde_json::Value = http
+        .post(format!("{api}/v1/code/owners/ada/tokens"))
+        .header("cookie", &cookie)
+        .header("origin", DASHBOARD)
+        .header("x-roll-csrf", session["csrf"].as_str().unwrap())
+        .json(&serde_json::json!({ "name": "ci" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let as_token = |t: String| {
+        let http = http.clone();
+        let api = api.clone();
+        async move { http.get(format!("{api}/v1/code")).bearer_auth(t).send().await.unwrap().json::<serde_json::Value>().await.unwrap()["auth"]["caller"]["kind"].clone() }
+    };
+    let token = minted["token"].as_str().expect("a token").to_string();
+    assert_eq!(as_token(token.clone()).await, "owner");
+    let users: serde_json::Value = http.get(format!("{api}/v1/accounts/users")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
+    let ada = users.as_array().unwrap().iter().find(|u| u["handle"] == "ada").unwrap()["id"].as_str().unwrap().to_string();
+    let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
+    assert_eq!(off.status(), 200);
+    assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");
+
     // `/v1/info` answers before the gate: the dashboard's sidebar reads it before sign-in.
     assert_eq!(send("internal", "api".into(), "/v1/info".into(), None).await, 200);
     let code: serde_json::Value = http.get(format!("{api}/v1/code")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();

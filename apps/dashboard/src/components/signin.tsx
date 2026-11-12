@@ -20,7 +20,8 @@ const ERRORS: Record<string, string> = {
   disabled: "This account is disabled.",
 };
 
-const safeReturn = (r: string | undefined) => (r && r.startsWith("/") && !r.startsWith("//") ? r : "/dashboard");
+/** Where to go after: a path on this site only (not `//host` or `/\\host`, which browsers take as another host). */
+const safeReturn = (r: string | undefined) => (r && r.startsWith("/") && !/^\/[/\\]/.test(r) ? r : "/dashboard");
 
 type Step = { kind: "start" } | { kind: "code"; email: string; challenge: string } | { kind: "mfa"; recovery: boolean };
 

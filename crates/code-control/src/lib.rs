@@ -692,6 +692,23 @@ impl Code {
         }
     }
 
+    /// Cut an owner off at once (its person's account was disabled, docs/accounts.md): every
+    /// token it holds stops working and every machine's link closes. Re-enabling the account
+    /// gives none of them back.
+    pub async fn suspend_owner(&self, owner_id: &str) -> Result<()> {
+        for t in self.db.tokens(owner_id)? {
+            if let Some(id) = t["id"].as_str() {
+                self.db.delete_token(owner_id, id)?;
+            }
+        }
+        for m in agents::store::machines(self.db.sql(), owner_id)? {
+            if !m.revoked {
+                agents::api::revoke(self, owner_id, &m.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Whether `name` could be a new owner's name: valid, not reserved, not taken.
     pub fn owner_name_free(&self, name: &str) -> Result<bool> {
         Ok(match names::owner(name) {

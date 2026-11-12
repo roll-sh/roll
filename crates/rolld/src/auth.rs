@@ -99,6 +99,14 @@ impl Auth {
                 warn!("ROLL_DASHBOARD_ORIGIN isn't set: no browser origin may call the control-plane API");
                 Origins::List(Vec::new())
             }
+            // With a token, sessions are on and CORS carries credentials: any page on any local
+            // port reading the session (and its CSRF token) would act as whoever is signed in.
+            // Only the dashboard's own origin (`ROLL_WEB_URL`) then.
+            None if token.is_some() => {
+                let web = args.web_url.trim();
+                let origin = web.find("://").map_or(web, |i| web[i + 3..].find('/').map_or(web, |j| &web[..i + 3 + j]));
+                Origins::parse(origin).map_err(|e| anyhow::anyhow!("ROLL_WEB_URL as the dashboard's origin: {e}"))?
+            }
             None => Origins::Local,
         };
         match &token {

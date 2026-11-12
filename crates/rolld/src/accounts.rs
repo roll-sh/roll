@@ -19,6 +19,11 @@ impl roll_accounts::Owners for CodeOwners {
     fn create(&self, handle: &str, name: &str) -> Result<Option<String>, String> {
         self.0.create_user_owner(handle, name).map_err(|e| e.to_string())
     }
+
+    fn suspend(&self, owner_id: &str) -> Result<(), String> {
+        // Called off the async threads (the accounts API runs its store in `spawn_blocking`).
+        tokio::runtime::Handle::current().block_on(self.0.suspend_owner(owner_id)).map_err(|e| e.to_string())
+    }
 }
 
 pub async fn open(args: &crate::Args, home: &Path, code: Option<Arc<code_control::Code>>, open: bool) -> anyhow::Result<Arc<roll_accounts::Accounts>> {
