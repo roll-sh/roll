@@ -54,6 +54,10 @@ code-sql.workspace = true
 pg-storage.workspace = true
 tempfile.workspace = true
 aws-sdk-s3.workspace = true
+# `tests/preview.rs`: roll previews on a real roll code.
+roll-previews.workspace = true
+roll-workspace.workspace = true
+code-preview.workspace = true
 # `tests/nosql_api.rs`: the real control API in process.
 nosql-control.workspace = true
 nosql-server.workspace = true

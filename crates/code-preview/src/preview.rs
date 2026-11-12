@@ -324,6 +324,11 @@ impl Previews {
     async fn start_inner(&self, change_id: &str, live: &Live) -> anyhow::Result<SocketAddr> {
         let code = self.code()?;
         let c = code.change_or_404(change_id)?;
+        // A fork's code runs only at a head a writer approved (approve-run): a preview made for
+        // an approved head never starts the next, unapproved push.
+        if !c.trusted && !c.run_approved {
+            anyhow::bail!("this change comes from a fork and its head isn't approved to run: a writer can approve it (approve-run)");
+        }
         let repo = code.repo_by_id(&c.repo_id)?;
         // The change's tree comes from the repo's pool of work trees, leased only while it's read
         // (here, for roll.toml) and copied into the container below: nothing is bind-mounted,

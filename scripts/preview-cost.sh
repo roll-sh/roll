@@ -74,8 +74,30 @@ api POST /v1/queues/vhosts '{"name":"jobs"}' >/dev/null
 STREAM=$(api POST /v1/streams '{"name":"clicks"}' | jq_ "d['id']")
 api POST "/v1/streams/$STREAM/topics" '{"name":"clicks","partitions":3}' >/dev/null
 api POST /_roll/tenants '{"id":"work"}' >/dev/null
-# Some data in the parents, so a branch has something to share.
-redis-cli -p 27380 --no-auth-warning ping >/dev/null 2>&1 || true
+# Data in the parents, so the branches have something to share: 20 MiB of objects, 20,000 keys.
+KEY=$(api POST /v1/storage/keys '{"name":"e2e","permission":"admin"}')
+export AWS_ACCESS_KEY_ID=$(echo "$KEY" | jq_ "d['id']") AWS_SECRET_ACCESS_KEY=$(echo "$KEY" | jq_ "d['secret_access_key']") AWS_DEFAULT_REGION=us-east-1
+S3="aws --endpoint-url http://127.0.0.1:27900 s3"
+mkdir -p "$HOME_DIR/blobs" && for i in $(seq 1 20); do head -c 1048576 /dev/urandom >"$HOME_DIR/blobs/$i.bin"; done
+$S3 cp --quiet --recursive "$HOME_DIR/blobs" s3://assets/blobs/
+REDIS_URL=$(api GET "/v1/redis/databases/$REDIS" | jq_ "d['redis_url']")
+resp() { # resp <redis url> <n keys> <prefix>: SET n keys of 1 KiB over RESP
+  python3 - "$@" <<'PY'
+import socket, sys, urllib.parse
+u = urllib.parse.urlparse(sys.argv[1]); n = int(sys.argv[2]); prefix = sys.argv[3]
+s = socket.create_connection((u.hostname, u.port))
+def cmd(*a):
+    return b"*%d\r\n" % len(a) + b"".join(b"$%d\r\n%s\r\n" % (len(x), x) for x in a)
+buf = cmd(b"AUTH", u.username.encode(), urllib.parse.unquote(u.password).encode())
+buf += b"".join(cmd(b"SET", f"{prefix}:{i}".encode(), b"x" * 1024) for i in range(n))
+s.sendall(buf)
+want, got = n + 1, b""
+while got.count(b"\r\n") < want:
+    got += s.recv(65536)
+assert b"-" not in got[:1], got[:200]
+PY
+}
+resp "$REDIS_URL" 20000 parent
 
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work"; do
@@ -100,6 +122,15 @@ echo "$P" | python3 -m json.tool > "$HOME_DIR/preview.json"
 HOST=$(echo "$P" | jq_ "d['services'][0]['url'].split('//')[1].split(':')[0]")
 say "preview $PV ready in $((T1 - T0)) ms: $(echo "$P" | jq_ "[(r['kind'], r['ref']) for r in d['resources']]")"
 
+say "write into the preview's branches: 1 MiB of objects, 1,000 keys"
+BRANCH_BUCKET=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='bucket'][0]")
+BRANCH_REDIS=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='redis'][0]")
+$S3 cp --quiet "$HOME_DIR/blobs/1.bin" "s3://$BRANCH_BUCKET/new/1.bin"
+resp "$(api GET "/v1/redis/databases/$BRANCH_REDIS" | jq_ "d['redis_url']")" 1000 preview
+PARENT_OBJECTS=$(api GET /v1/storage/buckets/assets | jq_ "d['bytes']")
+BRANCH_OBJECTS=$(api GET "/v1/storage/buckets/$BRANCH_BUCKET" | jq_ "d['bytes']")
+BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
+
 say "visit it: cold start"
 T2=$(now_ms)
 BODY=$(curl -sS -H "Host: $HOST" "http://$API/" --max-time 120)
@@ -109,7 +140,7 @@ T4=$(now_ms); curl -sS -o /dev/null -H "Host: $HOST" "http://$API/"; T5=$(now_ms
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"
 STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAINER")
 RSS1=$(ps -o rss= -p "$PID")
-api POST "/v1/previews/$PV/refresh" >/dev/null; sleep 2
+api POST "/v1/previews/$PV/refresh" >/dev/null; sleep 3
 ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "sleep it"
@@ -134,7 +165,8 @@ BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'
 cat <<EOF
 | What | Measured |
 | --- | --- |
-| Change opened → preview ready (8 branches made, services deployed) | $((T1 - T0)) ms |
+| Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
+| Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |
 | Service container while running | $STATS |

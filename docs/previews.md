@@ -109,7 +109,7 @@ state. A pass of the reconciler:
       checks that it is a child of that parent. A crash between "branched" and "recorded" finds
       the branch the next time.
    4. A due reset runs.
-   5. The secrets environment `preview-<slug>` is ensured (base, overrides, resource URLs).
+   5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
       for its repo, the default head for the others).
    7. The preview becomes `ready` (or `sleeping`), and the change and the PR hear about it.
@@ -124,8 +124,11 @@ services. The API writes only the desired state (and asks the reconciler to run)
 
 ## Branches per product
 
-Branch names are `pv-<preview id>` (Postgres: `preview/<preview id>`). Branch adapters live in
-`crates/rolld/src/previews.rs` and implement `roll_previews::Brancher`.
+Branch names are `pv-<preview id>` (a bucket's is `<parent>-pv-<preview id>`, since bucket names
+are global). Branch adapters live in `crates/rolld/src/previews.rs` and implement
+`roll_previews::ports::Brancher`. They call this node's own API over loopback with the operator
+token, like `roll` does, so each request runs where the product keeps the resource (a Redis
+database's or a stream's lease, storage's metadata owner) wherever the reconciler runs.
 
 | Kind | Branch | Reset | Sleeping cost | Notes |
 | --- | --- | --- | --- | --- |
@@ -145,9 +148,11 @@ Safety rules every adapter follows:
   name. Anything else is refused and reported.
 - **It branches only resources in the preview's project.** A preview can't name a resource
   outside its project.
-- **No connection string is stored.** The preview records ids only. URLs and passwords are read
-  from the product each time a service is deployed, so a rotated password reaches the next
-  deploy.
+- **No connection string is stored where the product can give it again.** Postgres, Redis and
+  NoSQL URLs and passwords are read from the product each time a service starts, so a rotated
+  password reaches the next start. Streams, queues, tasks and bucket keys show their secret only
+  once: the adapter keeps it with the branch (`resources.kept`), never returns it from the API,
+  and mints a new one if a crash lost it.
 
 ## Services
 
@@ -169,7 +174,7 @@ A service is something the preview runs and serves over HTTP.
     roll code's own previews.
 - A service gets this environment, later entries winning:
   1. its `roll.toml` `[preview] env`;
-  2. the resolved secrets environment (`preview-<slug>`, inheriting its base);
+  2. the resolved secrets environment (`pv-<preview id>`, inheriting its base);
   3. the project's preview `env` overrides;
   4. the branched resources' URLs:
 
@@ -195,14 +200,15 @@ A service is something the preview runs and serves over HTTP.
 ## Secrets
 
 A preview's secrets are an environment of the project's secrets (`feature/roll-secrets`,
-docs/secrets.md) called `preview-<slug>`, inheriting from `secrets.base` (`development` by
+docs/secrets.md) called `pv-<preview id>` (an ephemeral environment, labelled `preview`), inheriting from `secrets.base` (`development` by
 default) with the project's `env` overrides and the branched resources' URLs on top.
 
 - **Production secrets are never inherited unless the project allows it.** A base named
   `production` or `prod` is refused unless `secrets.allow_production` is true, and a fork's
   preview never gets them, whatever the setting says.
-- Until roll secrets lands, the `Secrets` trait has a stand-in that knows no secrets: a
-  service gets the overrides and resource URLs only.
+- rolld's adapter talks to roll secrets' API (`feature/roll-secrets`). A project with no secrets,
+  or a node without roll secrets, gives its previews no environment: a service then gets the
+  overrides and resource URLs only.
 - The environment is deleted with the preview.
 
 ## Safety
@@ -235,12 +241,42 @@ own rates (the same ones its usage page shows).
 
 ### Measured on this machine
 
-The `measurements` section below is filled by `scripts/preview-cost.sh`. That script creates a
-project with one of each resource, opens a change, visits it, lets it sleep, and reads what each
-product and the container used. Numbers are from 2026-11-12, on ai-server (36 threads, ext4,
-load 25–30 from other sessions).
+`scripts/preview-cost.sh` runs a rolld of its own (ports 27xxx, home in `~/.cache`). It:
 
-_Pending: see `## Next`._
+1. makes a project with a repo (`roll.toml` `[preview]`: `python -m http.server`, 128 MiB,
+   0.25 CPU) and a Redis database, a bucket, a NoSQL database, a queues vhost, a stream with a
+   topic and a tasks tenant;
+2. puts 20 MiB of objects and 20,000 1 KiB keys into the parents;
+3. opens a change, writes 1 MiB and 1,000 keys into the preview's branches, and visits it;
+4. sleeps it and lands the change.
+
+These are the numbers from 2026-11-12 on ai-server (36 threads, ext4, load 25–30 from other
+sessions, debug build). Postgres wasn't in the run (see `## Next`).
+
+| What | Measured |
+| --- | --- |
+| Change opened → preview ready (6 branches, 1 service deployed) | 1.2–1.7 s |
+| The bucket branch: parent's bytes / its own after writing 1 MiB / objects it sees | 20 MiB / 1 MiB / 21 |
+| First request (cold start of the service's container, image cached) | 3.8–6.4 s |
+| Next request (warm) | 18–25 ms |
+| The service's container while running | 26 MiB of 128 MiB, 0.01% CPU |
+| rolld while the preview runs (its Redis branch and NoSQL database loaded) | +94 MiB RSS |
+| Containers left once it sleeps | 0 |
+| Bytes the preview's branches own | 24.7 MB (Redis: 23.6 MB of loaded memory, bucket: 1 MiB, the rest: 0) |
+| **Cost asleep** | **$0.00057 a month** |
+| **Cost running** | **$0.0022 an hour** (the container's 128 MiB, plus Redis memory) |
+| After landing | every branch gone, every parent intact |
+
+So with these sizes, a hundred sleeping previews cost about 6 cents a month, and an hour of
+someone clicking through one costs a fifth of a cent.
+
+What dominates, from most to least:
+
+- **The service container while it runs**, priced as Fargate memory and CPU.
+- **A Redis branch.** It reports its loaded dataset, which includes the parent's keys.
+- **Bytes the preview writes.** Every other product branches copy-on-write and pays only for those.
+
+A Postgres branch on this ext4 disk is a full data directory (see `## Next`).
 
 ## Data model
 

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 mod nosql;
 mod queues;
+mod preview;
 mod storage;
 mod redis;
 
@@ -74,6 +75,10 @@ enum Cmd {
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
+    /// Preview environments: every service and a branch of every data resource of a project,
+    /// per change or pull request.
+    #[command(subcommand, alias = "previews")]
+    Preview(preview::Preview),
 }
 
 #[derive(Subcommand)]
@@ -379,6 +384,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

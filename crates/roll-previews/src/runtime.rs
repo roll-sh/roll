@@ -70,6 +70,9 @@ pub struct Runtime {
     trees: Arc<dyn Trees>,
     store: Arc<Store>,
     engine: OnceLock<Weak<Engine>>,
+    /// In a cluster, services run on the node that runs the reconciler (the holder of
+    /// `singleton:previews`): requests for their hosts are forwarded there.
+    cluster: OnceLock<Arc<roll_cluster::Cluster>>,
     me: Weak<Runtime>,
     live: Mutex<HashMap<(String, String), Arc<Live>>>,
     client: Client<HttpConnector, Body>,
@@ -88,6 +91,7 @@ impl Runtime {
             trees,
             store,
             engine: OnceLock::new(),
+            cluster: OnceLock::new(),
             me: me.clone(),
             live: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
@@ -107,6 +111,11 @@ impl Runtime {
                 rt.reap().await;
             }
         });
+    }
+
+    /// Serve preview hosts on the cluster's reconciler node.
+    pub fn set_cluster(&self, cluster: Arc<roll_cluster::Cluster>) {
+        let _ = self.cluster.set(cluster);
     }
 
     fn engine(&self) -> anyhow::Result<Arc<Engine>> {
@@ -444,7 +453,19 @@ impl Apps for Runtime {
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
     let Some((preview, service)) = host.and_then(|h| rt.service_for_host(&h)) else { return next.run(req).await };
-    rt.proxy(&preview, &service, req).await
+    match rt.cluster.get().cloned() {
+        Some(cluster) => {
+            let rt2 = rt.clone();
+            cluster
+                .dispatch(crate::engine::LEADER_KEY, req, move |req, guard| async move {
+                    let resp = rt2.proxy(&preview, &service, req).await;
+                    drop(guard);
+                    resp
+                })
+                .await
+        }
+        None => rt.proxy(&preview, &service, req).await,
+    }
 }
 
 #[cfg(test)]

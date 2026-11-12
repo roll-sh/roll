@@ -16,6 +16,10 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
+/// The lease of the node that runs the reconciler and serves preview hosts in a cluster
+/// (`Cluster::singleton("previews")`).
+pub const LEADER_KEY: &str = "singleton:previews";
+
 /// Settled previews aren't converged again until something changes.
 const SETTLED: i64 = i64::MAX;
 /// The first retry after a failed step, doubling up to [`MAX_BACKOFF_MS`].
@@ -547,7 +551,7 @@ impl Engine {
         for (k, v) in urls {
             set(&mut vars, &k, v);
         }
-        self.secrets.ensure(&r.project_id, &env_name(&r.slug), &s.secrets.base, &vars).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
 
         // 4. Services: the change's repo at its head, every other repo at its default head.
         let repos: Vec<String> = project.resources.iter().filter(|x| x.kind == roll_workspace::Kind::Repo).map(|x| x.r#ref.clone()).collect();
@@ -649,7 +653,7 @@ impl Engine {
             self.apps.remove(&r.id, &svc.name).await;
             self.store.drop_service(&r.id, &svc.name)?;
         }
-        self.secrets.delete(&r.project_id, &env_name(&r.slug)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        self.secrets.delete(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let name = branch_name(&r.id);
         for res in self.store.resources(&r.id)? {
             self.delete_branch(&r.id, &res, &name).await?;
@@ -841,9 +845,10 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     c.open && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*"))
 }
 
-/// The secrets environment of a preview.
-pub fn env_name(slug: &str) -> String {
-    format!("preview-{slug}")
+/// The secrets environment of a preview: its branch name (`pv-<id>`, within roll secrets'
+/// 32-character slugs).
+pub fn env_name(preview_id: &str) -> String {
+    branch_name(preview_id)
 }
 
 fn short(rev: &str) -> &str {
@@ -881,7 +886,7 @@ impl EnvSource for Engine {
         // Later entries win: roll.toml, the secrets environment, the project's overrides, the
         // branches, then roll's own.
         let mut env = spec.env.clone();
-        for (k, v) in self.secrets.resolve(&r.project_id, &env_name(&r.slug)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))? {
+        for (k, v) in self.secrets.resolve(&r.project_id, &env_name(&r.id)).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))? {
             set(&mut env, &k, v);
         }
         for (k, v) in &s.env {
