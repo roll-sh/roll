@@ -285,6 +285,106 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Profile-guided build (2026-11-12, agent 225)
+
+`crates/pg-engine/tools/dist-pgo.sh` builds roll-engine profile-guided: the `dist` profile plus
+LLVM's profile of a training run (`tools/pgo-train.sh`), generated in the build. HANDOFF.md
+"Profile-guided build" has the recipe and how to gate on it. **Every table from here on says
+which roll build it shows: "plain dist" (`cargo build --profile dist`) or "PGO"
+(`tools/dist-pgo.sh`, its default training).**
+
+How the three servers' binaries are built (for every same-day comparison):
+
+| server | build |
+|---|---|
+| roll, plain dist | `cargo build --profile dist`: release + fat LTO, `codegen-units = 1`, no `target-cpu` (x86-64 baseline), mimalloc; rustc 1.99.1 |
+| roll, PGO | the same profile and flags, plus `-Cprofile-use` of a profile made by an instrumented build of the same commit running `tools/pgo-train.sh`; nothing else differs (same target CPU) |
+| PostgreSQL 18.6 | the pinned official image (`postgres@sha256:77f58511…`, Alpine, musl): `pg_config --configure` shows gcc, `CFLAGS=-O2`, `--with-llvm` (JIT), no `-flto`, no `-fprofile-use`: neither LTO nor PGO |
+| pgrust | the pinned image (`malisper/pgrust@sha256:9ec8cbd6…`): a stripped Rust binary from an unpublished builder stage; `.comment` says rustc 1.96.0 and LLD 22; whether it used LTO or PGO can't be read from the binary |
+
+### PGO against plain dist, same commit (236568f2a)
+
+Each workload on its own lane (HANDOFF machine rules), 3 alternating pairs, fresh server and data
+each run; user cycles and instructions of the server's connection threads (OLTP) or of the whole
+process over the run (bulk, TPC-H); medians, every pair in the same direction unless noted. No
+pair had more than 1.0 foreign core except where marked.
+
+| workload | plain dist | PGO | throughput / wall | user cycles / op | user instr / op |
+|---|---:|---:|---:|---:|---:|
+| point reads, 8 clients, extended protocol, binary results | 73,121 tps | 94,992 tps | +29.9% | -37.4% | -21.1% |
+| point reads, 8 clients, simple protocol | 66,613 tps | 85,841 tps | +28.1% | -34.4% | -14.9% |
+| pgbench -S -M prepared, 8 clients (text) | 72,529 tps | 103,840 tps | +44.2% | -40.3% | -20.7% |
+| range reads (100 rows), 8 clients | 26,670 tps | 33,782 tps | +26.5% | -29.0% | -20.6% |
+| short write transactions, 1 client | 2,573 tps | 3,228 tps | +21.8% | -30.6% | -16.8% |
+| short write transactions, 8 clients | 10,779 tps | 13,412 tps | +24.4% | -28.5% | -14.8% |
+| short write transactions, 32 clients | 10,066 tps | 12,086 tps | +20.6% | -25.4% | -18.3% |
+| bulk (1M rows: COPY in/out, 2 index builds, INSERT SELECT, UPDATE, DELETE, VACUUM, ANALYZE) | 7.46 s | 6.16 s | -17.4% wall | -21.6% | -18.9% |
+| TPC-H SF1, 22 queries, parallel | 15.8 s | 13.6 s | -13.7% wall | -15.7% | -16.7% |
+
+- Bulk: every step faster (count -36%, VACUUM -32%, ANALYZE -28%, COPY out -27%, INSERT SELECT
+  -21%, DELETE -19%, UPDATE -18%, unique index -16%, COPY in -11%, index -2%).
+- TPC-H: result hashes equal in every run. With one run a query, q01 (+2.7%) and q12 (+5.6%)
+  read slower at the median; run alone 5 times a run (3 pairs) they are -9.8% and -8.9%.
+- Memory after a short-transaction run, a CHECKPOINT and 3 s (3 pairs): plain 72.8 MB, PGO 67.6 MB
+  (median). Right after a fixed-time run PGO holds more (+13%): it committed 22-24% more.
+- Idle footprint (100 idle sessions, cgroup anon + shmem, 3 runs each): plain 36.7-36.9 MB, **PGO
+  42.9-43.1 MB** (+6.1 MB, 62 KB a session). Not landed, see below. One idle process: PGO 2.7 MB
+  less RSS (29.9 against 32.6 MB). Fresh data directory: 3.03 MB both.
+- Startup (40 alternating rounds, exec to the first TCP connect): new data directory 33.4 ms
+  plain, 34.4 ms PGO; restart 13.1 and 12.1 ms (the same within the polling's 1 ms).
+- Binary: plain 70.7 MB, PGO 66.0 MB.
+
+**The idle footprint.** The +62 KB a session is the session thread's stack (stack page faults by
+function, `perf record -e page-faults -d`): PGO inlines the wire message handlers (Parse, Bind,
+Execute, Describe, Close, simple query, with the session methods they call) into
+`server::message_loop`, whose frame grows from 11 KB to 70 KB, and that frame is under every
+session for its whole life. Tried: the handlers `#[inline(never)]` (footprint 37.0 MB, but point
+reads +1.8% instructions and +3.5% cycles at 1 client, PGO; in plain dist -0.8 MB for +0.3%);
+all but Bind and Execute (37.5 MB, +2.6% instructions); `-Cllvm-args=-inline-max-stacksize=4096`
+(36.9 MB, but range reads +9.3% instructions, +10.1% cycles). None kept: the PGO build ships with
+the 6 MB at 100 sessions; HANDOFF says what to try next.
+
+### Code PGO's training never ran
+
+Code no training run reaches is cold to LLVM: placed and inlined as such. Measured:
+
+- **A class left out** (profile trained without TPC-H, TPC-H measured against plain dist, 3 pairs):
+  all 22 queries -3.3% user cycles, -6.3% instructions at the median, but one pair +1.3% cycles;
+  q01, q06 and q16 alone (5 runs each, 3 pairs) **+5.6% user cycles** (q01 +13.4%, q06 +7.5%
+  wall). With TPC-H trained, the same queries are 9-10% faster than plain dist.
+- **Fresh hold-outs no profile trains** (the bench client's `analytic` set, 2M rows, and `nl`,
+  nested loops over a parameterised index scan), the default (benchmark-class) profile against
+  plain dist, each query alone, 5 runs, 3 pairs: numeric_sum -12.4% user cycles, sort_float -4.1%,
+  sort_text -1.4%, seq_filter -9.2%; nested loops -24.0% (inner -34.5%, semi -26.7%, left
+  -16.1% wall). Not slower in any pair. (Read from one multi-query run, numeric_sum and sort_text
+  looked 8-10% slower: that was the attribution, not the code.)
+- **Wider training** (`PGO_BREADTH=1`: every golden SQL file and PostgreSQL's regression suite,
+  merged with the benchmark classes' profile at weights that leave the benchmarks 81%, 95% and
+  98% of the counts), against the default profile: TPC-H +2.2%, +1.4%, +1.4% instructions; bulk
+  +1.4%, +0.2%, +2.2%; point reads +1.0%, +0.1%, -0.2% instructions with +1.1-2.4% cycles; short
+  transactions +2% cycles. And on the hold-outs it is worse, not better: against plain dist at 98%,
+  seq_filter **+1.9%** user cycles (every pair), sort_text +0.9% (two pairs of three slower),
+  sort_float one pair +4.2%; at 81%, sort_float **+8.6%** and sort_text **+3.9%** in every pair.
+- **A guard** (`-pgso=false -inline-cold-callsite-threshold=225`: no size optimisation of cold
+  code, cold call sites inlined as others; `-pgo-cold-func-opt` already defaults to no attribute
+  in LLVM 23) on the no-TPC-H profile: TPC-H -6.5% cycles instead of -3.3%, q01+q06+q16 +2.0%
+  instead of +5.6%, but q01 +10.4% and q12 +14.0% wall at the median; binary 74 MB. Halves the
+  loss, does not remove it; not used.
+
+**A workload class missing from the training can run slower than plain dist (TPC-H q01 +13%
+with TPC-H left out); new benchmark classes must be added to `tools/pgo-train.sh`.** So the
+default trains the benchmark classes only (and a slice of the golden files), and the rule is: **every workload class we benchmark is in `tools/pgo-train.sh`**; a workload outside them gets
+what its code paths share with the trained ones (nested loops: all of it; numeric aggregates,
+sorts, filters: 1-12% cycles here), and a whole class left out can come out slower than plain dist
+(TPC-H's q01: +13%).
+
+### Builds and disk
+
+`dist-pgo.sh` on 2 jobs (heavy.sh): bench client (release) 1,123 s if not given (`PGO_CLIENT`),
+instrumented build 1,162-1,225 s, training 310 s (611 s with `PGO_BREADTH=1`), optimised build
+1,015-1,115 s; 41 minutes with a client given, 63 without. Disk: each dist target dir ~3 GB
+(instrumented a little more), deleted after its binary is copied; raw profiles 35 MB; the merged
+profile 19 MB. A plain dist build of the same commit: 17-19 minutes.
 ## Range reads, round 8 (2026-11-12, agent 223)
 
 HANDOFF.md, "Range reads round 8", has what changed: a rechosen custom plan restarts the executor

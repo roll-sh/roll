@@ -7949,6 +7949,10 @@ container name: pick your own).
   (BENCH.md "Build profile: dist"), so a `release` engine understates the engine against
   PostgreSQL. It takes about twice as long to build, so tests and before/after comparisons of
   two engine revisions stay on `release` (both sides on the same profile).
+- **A profile-guided build is 20-44% faster than plain dist** (HANDOFF "Profile-guided build",
+  `tools/dist-pgo.sh`). Every benchmark table says which roll build it shows ("plain dist" or
+  "PGO"), and a new benchmark class goes into `tools/pgo-train.sh` in the same change: a class the
+  training never runs can come out slower than plain dist.
 - Follow `AGENTS.md`: Rust edition 2024, dependencies in the root `[workspace.dependencies]`,
   match the surrounding style and comment density, don't run `cargo fmt` on others' files.
 - Stored data must stay loadable. Format changes need a migration: see
@@ -9696,6 +9700,84 @@ when it loses; an index none of whose key columns a clause reads still runs
 `match_quals`; `lit_env` is read twice per Bind (`param_custom`, `values_custom`), 0.5%;
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
+
+## Profile-guided build (agent 225)
+
+BENCH.md "Profile-guided build" has the tables. A profile-guided (PGO) build of roll-engine is
+20-44% more throughput than the plain `--profile dist` build of the same commit on every
+benchmarked workload class (user cycles per operation -16% to -40%), with the same results.
+
+**Recipe** (`crates/pg-engine/tools/dist-pgo.sh`; it runs itself under `heavy.sh`, one slot for
+the whole pipeline):
+
+1. an instrumented dist build: `RUSTFLAGS=-Cprofile-generate=<dir>`, its own target dir;
+2. the training run, `tools/pgo-train.sh`: the engine on the host with
+   `LLVM_PROFILE_FILE=<dir>/engine-%p-%m.profraw`, stopped with SIGTERM (the exit handlers write
+   the profile); point reads (extended binary, simple, pgbench extended / prepared / simple),
+   range reads, short write transactions (8 / 32 / 1 clients, pgbench tpcb-like, single-row
+   INSERT / UPDATE / upsert / DELETE), bulk (1M rows), TPC-H SF0.2 (22 queries, parallel),
+   startup and restarts, catalog DDL and psql's / ORMs' introspection, every 25th golden file;
+   about 5 minutes; all data generated in the script;
+3. `llvm-profdata merge` (the toolchain's, `rustup component add llvm-tools`; Debian's LLVM can't
+   read rustc's profiles);
+4. the optimised dist build: `RUSTFLAGS="-Cprofile-use=<profdata> -Cllvm-args=-no-pgo-warn-mismatch"`,
+   another target dir;
+5. it prints the profile's and the binary's SHA-256 and writes them to `<out>/BUILD.txt`.
+
+```sh
+crates/pg-engine/tools/dist-pgo.sh --out ~/.cache/aNNN/bin/pgo     # ~41 min, or 63 building the client
+#   PGO_CLIENT=<bench example binary>  (skip building it)  PGO_PORT=<free port>
+#   PGO_BUILD_CPUS=0-5,18-23 PGO_SERVER_CPUS=2,3,20,21 PGO_CLIENT_CPUS=4,5,22,23 (build cores)
+crates/pg-engine/tools/dist-pgo.sh --profdata <file> --out <dir>   # reuse a profile: ~18 min
+```
+
+Plain `cargo build --profile dist` is unchanged (no `.cargo/config`, no profile rustflags: the
+flags exist only in these builds' RUSTFLAGS). `target-cpu` is not set (the x86-64 baseline, as
+plain dist); `codegen-units = 1` and fat LTO were already the dist profile's. BOLT not tried:
+`llvm-bolt` is not in the toolchain's `llvm-tools` nor on the host, and it needs `--emit-relocs`
+and LBR profiles of the running server: not simple or reproducible here.
+
+**Generated at build time, not checked in**: the profile is 19 MB per commit and goes stale as code
+moves (a function whose code changed gets no counts), and a checked-in one would need a second
+review path for a binary. A build regenerates it from source; `--profdata` reuses one for repeat
+builds of the same or a nearby commit. The function names in a profile are the symbols plus the
+codegen unit's name, and those do not depend on the checkout's path (a plain dist build in one
+worktree and an instrumented one in another had the same `pg_engine` crate hash), so a profile from
+another checkout of the same commit applies (agent 218 found otherwise; not reproduced).
+
+**What the gains apply to: trained workloads only. A workload class missing from the training
+can run slower than the plain dist build** (with TPC-H left out of training, TPC-H's q01 ran 13%
+slower than plain dist). So: **every new benchmark class must be added to `tools/pgo-train.sh`, in
+proportion, in the same change that adds the benchmark.** Code no training run reaches is cold to
+LLVM. Measured (BENCH.md): with TPC-H left
+out of training, TPC-H's q01 +13.4% and q06 +7.5% wall against plain dist (q01+q06+q16 +5.6% user
+cycles), while trained they are 9-10% faster. Workloads outside the classes get what their code
+paths share with the trained ones: two fresh hold-outs no profile trained came out faster than
+plain dist in every pair (analytic queries -1.4% to -12.4% user cycles, nested loops -24%), but
+with less gain than the trained classes' 16-40%. Expect an untrained workload to be between a few
+percent slower and as fast as a trained one; benchmark it before relying on PGO for it.
+
+Not the default, measured and why: a breadth phase (`PGO_BREADTH=1`: every golden file and
+PostgreSQL's regression suite, its own profile, merged `PGO_BENCH_SHARE`:1 with the benchmark
+classes') cost the benchmark classes 1.4-2.2% instructions on TPC-H and ~2% cycles on the OLTP
+classes at every weighting tried, and made the hold-outs slower, not faster (seq_filter +1.9%,
+sort_float +8.6% at the heaviest breadth weighting, against plain dist). The guard
+`-pgso=false -inline-cold-callsite-threshold=225` (`PGO_LLVM_ARGS`) halved the untrained class's
+loss but q01 and q12 stayed 10-14% slower than plain dist.
+
+**Known cost: idle footprint.** 100 idle sessions take 43 MB instead of 37 MB (+62 KB a session):
+PGO inlines the wire message handlers into `server::message_loop`, whose frame (11 KB plain, 70 KB
+PGO) sits under every session. Keeping the handlers out of line costs point reads ~2% instructions
+under PGO; an inliner stack cap (`-inline-max-stacksize=4096`) costs range reads 9%. Next to try:
+release the session thread's stack below its idle depth when a session has been idle a while
+(madvise), or move the handlers' large locals behind a box; either helps the plain build too.
+
+**Correctness.** `tools/verification-train.sh` takes `TRAIN_ENGINE_BIN=<pgo roll-engine>`
+(regress, isolation and pg_dump_tap run against that binary) and `TRAIN_PGO_PROFDATA=<profdata>`
+(crash_random and the power stage build `--profile dist` with that profile: the engine runs in the
+test process). The release and debug crate tests don't use a built binary (and a fat-LTO build
+of every test binary would take hours): they stay as they are. `TRAIN_NO_CHECKOUT=1` tests the
+checkout as it is. The train on the PGO build: see "Agent 218's stack under PGO" below.
 
 ## Analytic path against pgrust (agent 220)
 
