@@ -14,6 +14,45 @@ pub const FIRST_NORMAL_XID: u64 = 3;
 pub const INITDB_XID: u64 = 745;
 /// How many aborted transactions to remember (older ones read as committed).
 const ABORTED_KEPT: usize = 65536;
+/// How many of the newest ids' states `status` reads without the state's mutex (`Recent`).
+const RECENT: usize = 4096;
+const _: () = assert!(RECENT < ABORTED_KEPT);
+
+/// The newest ids' states, read without the state's mutex: a slot per id modulo its size,
+/// holding (id << 2) | state, written under the mutex as an id is assigned (running), ends
+/// (committed or aborted) or runs again (`recover_running`). A slot holding another id says
+/// nothing of this one: `status` takes the mutex. The size models look up the state of
+/// every writer of the rows they reach that their thread hasn't seen end: about 20 times a
+/// short write transaction, each a lock of the mutex every session shares.
+struct Recent(Box<[std::sync::atomic::AtomicU64]>);
+
+impl Recent {
+    const RUNNING: u64 = 1;
+    const COMMITTED: u64 = 2;
+    const ABORTED: u64 = 3;
+
+    fn new() -> Recent {
+        Recent((0..RECENT).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())
+    }
+
+    /// (Under the state's mutex.)
+    fn set(&self, xid: u64, state: u64) {
+        self.0[xid as usize % RECENT].store((xid << 2) | state, std::sync::atomic::Ordering::Release);
+    }
+
+    fn get(&self, xid: u64) -> Option<&'static str> {
+        let v = self.0[xid as usize % RECENT].load(std::sync::atomic::Ordering::Acquire);
+        if v >> 2 != xid {
+            return None;
+        }
+        match v & 3 {
+            Self::RUNNING => Some("in progress"),
+            Self::COMMITTED => Some("committed"),
+            Self::ABORTED => Some("aborted"),
+            _ => None,
+        }
+    }
+}
 
 /// An exported snapshot (ExportSnapshot's file): what SET TRANSACTION SNAPSHOT installs and
 /// checks.
@@ -51,6 +90,9 @@ struct State {
 
 pub struct Xids {
     state: crate::counter::Padded<Mutex<State>>,
+    /// The newest ids' states, for `status` without the mutex (an engine's table only: a
+    /// database outside one has none).
+    recent: Option<Recent>,
     /// The snapshots pg_export_snapshot() exported, by identifier, until the exporting
     /// transaction ends (cluster-wide, like Postgres's pg_snapshots directory).
     exported: Mutex<std::collections::HashMap<String, Exported>>,
@@ -210,6 +252,10 @@ impl std::fmt::Debug for Xids {
 impl Xids {
     /// Ids from `next` on; `persist` durably records how far they may have gone.
     pub fn new(next: u64, persist: impl Fn(u64) + Send + Sync + 'static) -> Xids {
+        Self::with_recent(next, persist, true)
+    }
+
+    fn with_recent(next: u64, persist: impl Fn(u64) + Send + Sync + 'static, recent: bool) -> Xids {
         let next = next.max(FIRST_NORMAL_XID);
         Xids {
             state: crate::counter::Padded(Mutex::new(State {
@@ -223,6 +269,7 @@ impl Xids {
                 owners: Default::default(),
                 safe_ic: BTreeSet::new(),
             })),
+            recent: recent.then(Recent::new),
             exported: Mutex::new(std::collections::HashMap::new()),
             oldest: FIRST_NORMAL_XID,
             persist: Box::new(persist),
@@ -284,7 +331,7 @@ impl Xids {
 
     /// A counter kept only in memory (a database outside an engine).
     pub fn local() -> Xids {
-        Xids::new(FIRST_NORMAL_XID, |_| {})
+        Xids::with_recent(FIRST_NORMAL_XID, |_| {}, false)
     }
 
     /// A new transaction id, now running.
@@ -294,6 +341,9 @@ impl Xids {
             let x = s.next;
             s.next += 1;
             s.running.insert(x);
+            if let Some(r) = &self.recent {
+                r.set(x, Recent::RUNNING);
+            }
             // (No new horizon: the new id is past the last completed one, so `xmin_now`
             // stays.)
             debug_assert_eq!(Self::xmin_now(&s), self.run_now.load(std::sync::atomic::Ordering::Relaxed));
@@ -321,6 +371,9 @@ impl Xids {
         let mut s = self.state.lock();
         s.running.remove(&xid);
         s.subs.remove(&xid);
+        if let Some(r) = &self.recent {
+            r.set(xid, if committed { Recent::COMMITTED } else { Recent::ABORTED });
+        }
         if !committed {
             s.aborted.insert(xid);
             if s.aborted.len() > ABORTED_KEPT {
@@ -340,6 +393,9 @@ impl Xids {
         for &x in std::iter::once(&xid).chain(subs) {
             s.running.insert(x);
             s.aborted.remove(&x);
+            if let Some(r) = &self.recent {
+                r.set(x, Recent::RUNNING);
+            }
             if x >= s.next {
                 s.next = x + 1;
             }
@@ -591,6 +647,9 @@ impl Xids {
 
     /// pg_xact_status(): in progress, committed or aborted.
     pub fn status(&self, xid: u64) -> Result<&'static str> {
+        if let Some(st) = self.recent.as_ref().and_then(|r| r.get(xid)) {
+            return Ok(st);
+        }
         let s = self.state.lock();
         if xid >= s.next {
             return Err(Error::new(

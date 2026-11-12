@@ -136,8 +136,11 @@ pub struct Database {
     lo_oid: Mutex<u32>,
     /// The catalog version the last commit other than a shared-catalog update left.
     last_local: AtomicU64,
-    /// Transaction ids (the engine's, shared by every database).
-    xids: crate::published::Published<xids::Xids>,
+    /// Transaction ids: the engine's, shared by every database (`set_xids`, once, as the
+    /// database opens), else this database's own (`xids_local`). Read by every statement
+    /// as a plain reference: a reference count of its own was a line every session wrote.
+    xids: std::sync::OnceLock<Arc<xids::Xids>>,
+    xids_local: Arc<xids::Xids>,
     /// Prepared transactions (the engine's registry, shared by every database).
     twophase: RwLock<Arc<twophase::TwoPhase>>,
     /// The modelled on-disk layout of tables and indexes (`exec::sizing`), locked per
@@ -266,7 +269,8 @@ impl Database {
             notify: Default::default(),
             lo_oid: Mutex::new(0),
             last_local: AtomicU64::new(version),
-            xids: crate::published::Published::new(Arc::new(xids::Xids::local())),
+            xids: std::sync::OnceLock::new(),
+            xids_local: Arc::new(xids::Xids::local()),
             twophase: RwLock::new(Arc::new(twophase::TwoPhase::local())),
             relfiles: Default::default(),
             pgstat: Mutex::new(Default::default()),
@@ -366,17 +370,19 @@ impl Database {
     }
 
     /// Hand out transaction ids from the cluster's counter.
+    /// (Once, before the database is shared.)
     pub fn set_xids(&self, x: Arc<xids::Xids>) {
-        *self.xids.write() = x;
+        let set = self.xids.set(x);
+        debug_assert!(set.is_ok(), "a database's transaction ids are set once");
     }
 
-    pub fn xids(&self) -> Arc<xids::Xids> {
-        self.xids.load()
+    pub fn xids(&self) -> &Arc<xids::Xids> {
+        self.xids.get().unwrap_or(&self.xids_local)
     }
 
-    /// `f` of `xids()`, without a reference of its own.
+    /// `f` of `xids()`.
     pub fn with_xids<R>(&self, f: impl FnOnce(&Arc<xids::Xids>) -> R) -> R {
-        self.xids.with(f)
+        f(self.xids())
     }
 
     /// Take part in the cluster's prepared transactions.
@@ -3145,7 +3151,7 @@ impl Txn {
     /// let go of every such snapshot meanwhile. While it waits, this transaction holds no
     /// snapshot others would wait for (Postgres's waiting backend has xmin 0).
     pub fn wait_for_older_snapshots(&mut self) -> Result<()> {
-        let xids = self.db.xids();
+        let xids = self.db.xids().clone();
         let limit = xids.current_xmin();
         let had = self.xmin.take().is_some();
         let mut r = Ok(());
@@ -3669,7 +3675,7 @@ impl Txn {
             self.pgstat.end_subxact(nest, false);
         }
         // The subtransaction and those under it abort; the savepoint starts a new one.
-        let xids = self.db.xids();
+        let xids = self.db.xids().clone();
         let aborted: Vec<u64> = self.savepoints[i..]
             .iter_mut()
             .flat_map(|sp| std::mem::take(&mut sp.committed).into_iter().chain([sp.xid]))

@@ -112,7 +112,7 @@ fn xact_status(a: &[Value], c: &FnCtx) -> Result<Value> {
             text("committed")
         });
     }
-    let xids = c.exec.txn.borrow().db.xids();
+    let xids = c.exec.txn.borrow().db.xids().clone();
     // TransactionIdInRecentPast: older than the oldest status kept is unknown.
     if x < xids.oldest() {
         return Ok(Value::Null);

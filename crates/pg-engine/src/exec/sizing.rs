@@ -2535,7 +2535,6 @@ pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
 pub struct Fetcher {
     table: u32,
     db: Arc<Database>,
-    xids: Arc<Xids>,
     /// A temporary relation's: its transaction's id (`vis_for`).
     temp: Option<Option<u64>>,
     visible: Option<heapsim::VisWatch>,
@@ -2554,13 +2553,13 @@ impl Fetcher {
         let temp = rel
             .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
             .then(|| ctx.txn.borrow().xid_if_assigned());
-        Some(Fetcher { table, xids: db.xids(), db, temp, visible, hints, last: None })
+        Some(Fetcher { table, db, temp, visible, hints, last: None })
     }
 
     fn vis(&self) -> Vis<'_> {
         match self.temp {
-            Some(own) => Vis::temp(&self.xids, own),
-            None => Vis::new(&self.xids),
+            Some(own) => Vis::temp(self.db.xids(), own),
+            None => Vis::new(self.db.xids()),
         }
     }
 
@@ -2588,8 +2587,8 @@ impl Fetcher {
             return;
         }
         let horizon = match self.temp {
-            Some(own) => self.xids.temp_horizon(own),
-            None => self.xids.horizon(),
+            Some(own) => self.db.xids().temp_horizon(own),
+            None => self.db.xids().horizon(),
         };
         match self.hints.0.may_prune(blk, horizon) {
             Some(false) => self.last = Some(blk),
