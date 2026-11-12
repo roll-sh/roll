@@ -169,4 +169,45 @@ async fn a_cluster_moves_between_rolld_nodes_with_every_write() {
     up(&http, &nodes[stop]).await;
     let (s, v) = es(&http, &nodes[stop], auth, reqwest::Method::GET, "/items/_count", None).await;
     assert_eq!((s, v["count"].as_i64()), (200, Some(20)), "{v}");
+
+    // SIGKILL the owner while a writer keeps going through the other node: the new owner replays
+    // the dead one's WAL from S3, and every write that was acknowledged is there.
+    let shown: Value = http.get(format!("{}/v1/search/clusters/shop", nodes[0].api)).send().await.unwrap().json().await.unwrap();
+    let owner = shown["status"]["node"].as_str().unwrap_or_else(|| panic!("no owner in {shown}")).to_string();
+    let (kill, keep) = if owner == "n1" { (0, 1) } else { (1, 0) };
+    let writer = {
+        let (http, rest, pw) = (http.clone(), nodes[keep].rest.clone(), pw.clone());
+        tokio::spawn(async move {
+            let mut acked = Vec::new();
+            for i in 100..300 {
+                let r = http.put(format!("{rest}/items/_doc/{i}")).basic_auth("shop", Some(&pw)).json(&json!({"n": i})).send().await;
+                if r.is_ok_and(|r| r.status().as_u16() == 201) {
+                    acked.push(i);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            acked
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let _ = nodes[kill].child.kill();
+    let _ = nodes[kill].child.wait();
+    let acked = writer.await.unwrap();
+    assert!(acked.len() > 100, "the writer kept going through the takeover: {} acknowledged", acked.len());
+    let t = Instant::now();
+    loop {
+        let (s, _) = es(&http, &nodes[keep], auth, reqwest::Method::POST, "/items/_refresh", None).await;
+        if s == 200 {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(60), "the survivor never served it: {s}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let (_, v) = es(&http, &nodes[keep], auth, reqwest::Method::GET, "/items/_count", None).await;
+    let count = v["count"].as_u64().unwrap_or(0) as usize;
+    assert!(count >= 20 + acked.len(), "{count} documents, {} acknowledged after the first 20", acked.len());
+    for i in &acked {
+        let (s, v) = es(&http, &nodes[keep], auth, reqwest::Method::GET, &format!("/items/_doc/{i}"), None).await;
+        assert_eq!((s, v["found"].as_bool()), (200, Some(true)), "acknowledged document {i} is gone: {v}");
+    }
 }

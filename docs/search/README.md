@@ -206,9 +206,10 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    only on a measured win. Settle one allocator policy: rolld's (purge delay 0, collect on park)
    against search-dev's purge governor, by a matched benchmark.
 2. **Fleet under load**: `rolld/tests/search_cluster_e2e.rs` (two real `rolld` processes,
-   Postgres leases, MinIO; `ROLL_E2E=1`) passes: writes through both nodes, a SIGTERM handover
-   and a restart keep every document. Next: a writer running through the drain, a SIGKILL
-   (lease expiry, WAL replay on the new owner), and the edge's hostnames in the same run.
+   Postgres leases, MinIO; `ROLL_E2E=1`) passes: writes through both nodes, a SIGTERM handover,
+   a restart, and a SIGKILL of the owner under a running writer (every acknowledged write
+   replayed from S3 on the new owner). Next: the edge's hostnames in the same run, and search in
+   `deploy/cloud`'s fleet test (`rolld/tests/fleet_e2e.rs`).
 3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`, `logsdb`,
    runtime fields, `otel-data`, transforms, ES|QL, watcher, downsampling, KQL.
 4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
