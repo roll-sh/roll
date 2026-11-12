@@ -91,6 +91,9 @@ export type CompareRow = { key: string; status: CompareStatus; from: number | nu
 export type Compare = { from: string; to: string; path: string; rows: CompareRow[] };
 export type RequestState = "open" | "approved" | "rejected" | "applied" | "closed" | "stale";
 export type Review = { by: string; verdict: "approve" | "reject"; comment: string; at: number };
+/** One item of a change request with its values: `now` is null for a new key or a live/dynamic link. */
+export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null };
+
 export type ChangeRequest = {
   id: string;
   environment: string;
@@ -284,6 +287,8 @@ export function secretsApi(project: string) {
     requests: (env: string, state?: RequestState) => req<ChangeRequest[]>("GET", `${E(env)}/requests${qs({ state })}`),
     openRequest: (env: string, b: Batch) => req<ChangeRequest>("POST", `${E(env)}/requests`, b),
     request: (env: string, id: string) => req<ChangeRequest>("GET", `${E(env)}/requests/${enc(id)}`),
+    /** A request's values now and proposed, for an approver who may reveal them (audited). */
+    requestValues: (env: string, id: string) => req<RequestValue[]>("GET", `${E(env)}/requests/${enc(id)}/values`),
     review: (env: string, id: string, verdict: "approve" | "reject", comment?: string) =>
       req<ChangeRequest>("POST", `${E(env)}/requests/${enc(id)}/review`, { verdict, comment }),
     apply: (env: string, id: string, bypass = false) => req<ChangeRequest>("POST", `${E(env)}/requests/${enc(id)}/apply`, bypass ? { bypass } : {}),

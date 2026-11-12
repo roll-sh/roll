@@ -37,7 +37,7 @@ pub use envs::{EnvChange, Environment, Folder, Import, Kind as EnvironmentKind, 
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
 pub use read::{Grid, Problem, Secret, Source, Values, Version};
-pub use requests::{Request, Review, Verdict};
+pub use requests::{Request, RequestValue, Review, Verdict};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};

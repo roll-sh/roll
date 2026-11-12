@@ -54,6 +54,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/import"), post(import_dotenv))
         .route(&format!("{E}/requests"), get(requests).post(open_request))
         .route(&format!("{E}/requests/{{id}}"), get(request))
+        .route(&format!("{E}/requests/{{id}}/values"), get(request_values))
         .route(&format!("{E}/requests/{{id}}/review"), post(review))
         .route(&format!("{E}/requests/{{id}}/apply"), post(apply_request))
         .route(&format!("{E}/requests/{{id}}/close"), post(close_request))
@@ -474,6 +475,10 @@ async fn open_request(State(s): S, Who(c): Who, Path((project, env)): Path<(Stri
 
 async fn request(State(s): S, Who(c): Who, Path((project, env, id)): Path<(String, String, String)>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.request(&project, &env, &id, &c)).await?))
+}
+
+async fn request_values(State(s): S, Who(c): Who, Path((project, env, id)): Path<(String, String, String)>) -> crate::Result<Response> {
+    Ok(secret_response(ok(blocking(s, move |s| s.request_values(&project, &env, &id, &c)).await?)))
 }
 
 async fn review(State(s): S, Who(c): Who, Path((project, env, id)): Path<(String, String, String)>, b: Bytes) -> crate::Result<Response> {

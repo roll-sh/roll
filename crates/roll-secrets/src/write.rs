@@ -200,7 +200,7 @@ pub(crate) struct Current {
     pub link_state: Option<Json>,
 }
 
-fn current(c: &Conn<'_>, env_id: &str, path: &str, key: &str, owner: &str) -> Result<Option<Current>> {
+pub(crate) fn current(c: &Conn<'_>, env_id: &str, path: &str, key: &str, owner: &str) -> Result<Option<Current>> {
     Ok(c.query_row(
         "SELECT id, version, value, fp, comment, tags, link, link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?",
         [env_id, path, key, owner],

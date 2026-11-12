@@ -49,6 +49,22 @@ pub struct Request {
     pub applied_seq: Option<i64>,
 }
 
+/// One item of a request with its values (`…/requests/{id}/values`).
+#[derive(Debug, Serialize)]
+pub struct RequestValue {
+    pub key: String,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub kind: SecretType,
+    pub delete: bool,
+    /// The stored value now (`None`: no such key, or a live or dynamic link).
+    pub now: Option<Value>,
+    pub now_link: Option<Link>,
+    /// What it proposes (`None`: a deletion, a link, or the value kept).
+    pub proposed: Option<Value>,
+    pub proposed_link: Option<Link>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Verdict {
@@ -174,6 +190,47 @@ impl Secrets {
             let rows = c.query(&format!("SELECT {COLUMNS} FROM requests WHERE env_id = ? ORDER BY at DESC LIMIT 200"), [&env.id], request_row)?;
             Ok(rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(&env, r)).collect())
         })
+    }
+
+    /// A request's values, for an approver who may reveal them: each item's stored value now and
+    /// the one it proposes (unresolved; a link shows as `None` with its link). Audited.
+    pub fn request_values(&self, project: &str, slug: &str, id: &str, caller: &Caller) -> Result<Vec<RequestValue>> {
+        caller.need(Action::Read, &Scope::env(project, slug))?;
+        let dek = self.project(project)?;
+        let (env, r) = self.db.read(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let r = load(c, &env, id)?;
+            Ok::<_, Error>((env, r))
+        })?;
+        let ops: Vec<StoredOp> = serde_json::from_slice(&r.ops).map_err(|_| Error::Internal("a request's operations aren't JSON".into()))?;
+        for o in &ops {
+            caller.need(Action::Reveal, &Scope::at(project, slug, &o.path))?;
+        }
+        let mut out = Vec::with_capacity(ops.len());
+        for (n, o) in ops.iter().enumerate() {
+            let cur = self.db.read(|c| crate::write::current(c, &env.id, &o.path, &o.key, &o.owner))?;
+            let now = match &cur {
+                Some(cur) if cur.link.as_ref().is_none_or(|l| l.mode == crate::Mode::Managed) => cur.value.as_ref().map(|ct| dek.open(&crate::crypto::value_aad(project, &cur.id, cur.version), ct)).transpose()?,
+                _ => None,
+            };
+            let proposed = match &o.value {
+                Some(b) => Some(dek.open(&request_aad(id, n), &STANDARD.decode(b).map_err(|_| Error::Internal("a pending value isn't base64".into()))?)?),
+                None => None,
+            };
+            out.push(RequestValue {
+                key: o.key.clone(),
+                path: o.path.clone(),
+                kind: if o.owner.is_empty() { SecretType::Shared } else { SecretType::Personal },
+                delete: o.delete,
+                now,
+                now_link: cur.and_then(|c| c.link),
+                proposed,
+                proposed_link: o.link.clone().flatten(),
+            });
+        }
+        let keys: Vec<String> = out.iter().map(|v| v.key.clone()).collect();
+        self.audit_now(project, caller, "request.reveal", Some(slug), Some(&r.path), &keys, &format!("revealed {id}'s values"));
+        Ok(out)
     }
 
     pub fn request(&self, project: &str, slug: &str, id: &str, caller: &Caller) -> Result<Request> {

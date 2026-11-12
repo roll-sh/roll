@@ -492,7 +492,7 @@ action:
 | Action | Routes |
 | --- | --- |
 | `read` | names, metadata, versions, history, compare, folders, imports, requests, links, leases, audit, required keys, listing syncs |
-| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/resolve` |
+| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/requests/{id}/values`, `…/resolve` |
 | `write` | set, batch changes, rotate, rollback, promote, folders, imports, create an environment, open or apply a request |
 | `delete` | a secret, an environment, ephemeral environments by label, a lease |
 | `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run) |
@@ -543,7 +543,8 @@ An environment can be **protected** with a policy: `{"approvals": 1, "approvers"
 A write to a protected environment doesn't apply. It answers 409 `approval_required`, and the
 client opens a **change request** with the same operations (`POST …/requests`). A request:
 
-- holds its operations with values encrypted, and shows a diff without values;
+- holds its operations with values encrypted, and shows a diff without values; an approver who may
+  reveal them sees each value now beside the one proposed (`…/requests/{id}/values`, audited);
 - needs `approvals` approvals from approvers other than its author (an empty approver list means any
   principal with `admin`);
 - applies as one change when approved (`…/apply`), and only if no key it touches changed since it
@@ -609,6 +610,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/requests?state=` | | `Request[]` |
 | `POST /environments/{env}/requests` | `Batch` | 201 `Request` |
 | `GET /environments/{env}/requests/{id}` | | `Request` |
+| `GET /environments/{env}/requests/{id}/values` | | `RequestValue[]` (`reveal`; audited: the value now and the one proposed) |
 | `POST /environments/{env}/requests/{id}/review` | `{verdict: "approve"\|"reject", comment?}` | `Request` |
 | `POST /environments/{env}/requests/{id}/apply` | `{bypass?}` | `Request` |
 | `POST /environments/{env}/requests/{id}/close` | | `Request` |
@@ -735,23 +737,21 @@ security review. `pnpm test:code` is green on the head. Reviewed on 2026-11-12 a
 Doppler, Vercel and 1Password Developer, and against the apps, previews, MCP and search branches.
 Ranked:
 
-1. **Approvers see what they approve**: `GET …/requests/{id}/values` (`reveal`) returns a request's
-   pending values to a caller who may reveal them, and the dashboard shows old and new side by
-   side; today approvals see fingerprints only.
-2. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands
+1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever PR
    merges second does it), the resource is `Resource { product: "secrets", project, environment,
    path, ..Default::default() }`, `rlst_` tokens migrate to roll-access tokens, and a sync made by a
-   grant re-checks it through roll-access. Also: roll apps' `Secrets` port wired to `Secrets::values`
+   grant stores the grant's id and re-checks it at each push through `roll_auth::Grants::grant(id)`
+   (rolld hands roll-access's `Access` as `Arc<dyn roll_auth::Grants>`). Also: roll apps' `Secrets` port wired to `Secrets::values`
    (whichever of #20 and #21 merges second; the adapter is in the apps thread).
-3. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
+2. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
    a version's history shows the old and new value side by side on reveal.
-4. **Audit streaming and export**: a CSV/JSON export of the audit log, and a sync-like sink that
+3. **Audit streaming and export**: a CSV/JSON export of the audit log, and a sync-like sink that
    streams audit rows (no values) to a SIEM URL.
-5. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
+4. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
    links, previews), for users rather than implementers.
-6. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
+5. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
-7. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
+6. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
    Cloudflare Workers; the platform's token is a reference to a secret of the same project,
    resolved at push time, never stored in the sync.

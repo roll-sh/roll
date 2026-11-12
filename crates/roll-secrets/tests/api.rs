@@ -320,6 +320,9 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     assert!(!r.to_string().contains("\"new\""), "a request never shows its values");
     let (s, _) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+    // An approver who may reveal sees what changes, the value now beside the one proposed.
+    let v = api.ok(Method::GET, &format!("/environments/production/requests/{id}/values"), None).await;
+    assert_eq!((v[0]["key"].as_str(), v[0]["now"].as_str(), v[0]["proposed"].as_str()), (Some("KEY"), Some("old"), Some("new")));
     let (s, _) = api.call(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" }))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "the author doesn't approve their own request");
 

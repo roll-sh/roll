@@ -1,6 +1,6 @@
-import { Check, GitPullRequestArrow, Lock, X } from "lucide-react";
-import { useState } from "react";
-import type { Batch, ChangeRequest, Environment, Item, RequestState } from "@/lib/secrets-api";
+import { Check, Eye, EyeOff, GitPullRequestArrow, Lock, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import type { Batch, ChangeRequest, Environment, Item, Link, RequestState, RequestValue } from "@/lib/secrets-api";
 import { Segmented } from "../agents/ui/toggle-group";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Teach, useLoad } from "./ui";
@@ -123,6 +123,12 @@ export function ItemWhat({ item }: { item: Item }) {
   );
 }
 
+function ShownValue({ value, link, empty }: { value: string | null; link: Link | null; empty: string }) {
+  if (value !== null) return <span className="break-all whitespace-pre-wrap text-fg">{value === "" ? <span className="text-subtle italic">empty</span> : value}</span>;
+  if (link) return <span className="text-muted">→ {link.kind} {link.ref} {link.field} ({link.mode})</span>;
+  return <span className="text-subtle italic">{empty}</span>;
+}
+
 function RequestCard({ env, request: r, onChanged }: { env: Environment; request: ChangeRequest; onChanged: (r: ChangeRequest) => void }) {
   const { api } = useSecrets();
   const [comment, setComment] = useState("");
@@ -141,6 +147,27 @@ function RequestCard({ env, request: r, onChanged }: { env: Environment; request
     }
   };
   const live = r.state === "open" || r.state === "approved";
+  // What it changes, for an approver who may reveal it: masked again after 20 s or on blur.
+  const [values, setValues] = useState<RequestValue[] | null>(null);
+  useEffect(() => {
+    if (!values) return;
+    const hide = () => setValues(null);
+    const t = setTimeout(hide, 20_000);
+    window.addEventListener("blur", hide);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("blur", hide);
+    };
+  }, [values]);
+  const reveal = async () => {
+    if (values) return setValues(null);
+    setError(null);
+    try {
+      setValues(await api.requestValues(env.slug, r.id));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
   return (
     <article className={`${card} p-3`}>
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -157,12 +184,26 @@ function RequestCard({ env, request: r, onChanged }: { env: Environment; request
         {r.applied_seq !== null && <span>· applied as change #{r.applied_seq}</span>}
       </p>
       <ul className="mt-2 divide-y divide-line rounded-lg border border-line-2 bg-panel-2/60 px-2.5">
-        {r.items.map((i) => (
-          <li key={`${i.path}:${i.key}:${i.type}`} className="py-1.5">
-            <ItemWhat item={i} />
-          </li>
-        ))}
+        {r.items.map((i) => {
+          const v = values?.find((x) => x.key === i.key && x.path === i.path && x.type === i.type);
+          return (
+            <li key={`${i.path}:${i.key}:${i.type}`} className="py-1.5">
+              <ItemWhat item={i} />
+              {v && (
+                <div className="fade-in mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 font-mono text-[11.5px]">
+                  <span className="text-subtle">now</span>
+                  <ShownValue value={v.now} link={v.now_link} empty={i.what.includes("added") ? "not set" : "unchanged"} />
+                  <span className="text-subtle">after</span>
+                  <ShownValue value={v.delete ? null : v.proposed} link={v.proposed_link} empty={v.delete ? "deleted" : "unchanged"} />
+                </div>
+              )}
+            </li>
+          );
+        })}
       </ul>
+      <button className={`${ghost} mt-1.5`} onClick={reveal} title={values ? "Hide the values" : "Show the values it changes (audited)"}>
+        {values ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} {values ? "Hide values" : "Show values"}
+      </button>
       {r.reviews.length > 0 && (
         <ul className="mt-2 space-y-1 text-[11.5px]">
           {r.reviews.map((v) => (
