@@ -19,6 +19,11 @@
 # <prefix>-dclient (pg_dump client, host network, $TRAIN_DIR/pgdump mounted). The idle timer
 # stops containers quiet for 3 hours: the job starts them itself.
 # $TRAIN_DIR/pgr/src-repo must have src/bin/pg_dump (a sparse copy without it fails pg_dump_tap).
+# A profile-guided build (tools/dist-pgo.sh; HANDOFF "Profile-guided build"): TRAIN_ENGINE_BIN=
+# <its roll-engine> runs regress, isolation and pg_dump_tap against that binary, and
+# TRAIN_PGO_PROFDATA=<its .profdata> builds crash_random and the power stage with `--profile
+# dist` and -Cprofile-use of it (the engine in-process, as the shipped binary is optimised).
+# TRAIN_NO_CHECKOUT=1 tests the checkout as it is (the commit the binary was built from).
 set -u
 D=${TRAIN_DIR:?TRAIN_DIR: a scratch directory on disk}
 P=${TRAIN_PREFIX:?TRAIN_PREFIX: the prefix of your containers}
@@ -30,7 +35,15 @@ cd "$ROOT" || exit 1
 mkdir -p "$D/bin" "$D/pgr" "$D/iso" "$D/pgdump"; : >"$D/status"
 st() { echo "$1 $2 $(date +%T)" >>"$D/status"; }
 up() { sg docker -c "docker start $P-rref $P-iref $P-psql $P-dclient" >/dev/null 2>&1; sleep 10; }
-if [ -z "$(git status --porcelain --untracked-files=no)" ]; then
+if [ -n "${TRAIN_ENGINE_BIN:-}" ]; then
+  export PGREGRESS_ENGINE_BIN=$TRAIN_ENGINE_BIN PGISOLATION_ENGINE_BIN=$TRAIN_ENGINE_BIN PGDUMP_ENGINE_BIN=$TRAIN_ENGINE_BIN
+  echo "engine-bin $(sha256sum "$TRAIN_ENGINE_BIN" | cut -c1-16) $(date +%T)" >>"$D/status"
+fi
+CRASH="--release"
+if [ -n "${TRAIN_PGO_PROFDATA:-}" ]; then
+  CRASH="--profile dist --config build.rustflags=['-Cprofile-use=$TRAIN_PGO_PROFDATA','-Cllvm-args=-no-pgo-warn-mismatch']"
+fi
+if [ -z "${TRAIN_NO_CHECKOUT:-}" ] && [ -z "$(git status --porcelain --untracked-files=no)" ]; then
   git fetch -q origin && git checkout -q --detach origin/docs/postgres-architecture-strategy
 fi
 H=$(git rev-parse --short=9 HEAD); st head "$H"
@@ -39,10 +52,10 @@ cargo test --release --no-fail-fast -p pg-engine >"$D/release.log" 2>&1; st rele
 cp "$(ls -t "$T"/release/deps/difftest-* | grep -v '\.d$' | head -1)" "$D/bin/dt-$(git rev-parse --short=8 HEAD)"
 cargo clippy -p pg-engine --all-targets >"$D/clippy.log" 2>&1; st clippy "$? $(grep -c '^warning' "$D/clippy.log")w"
 SEEDS=$(seq -s, 1 30)
-CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 cargo test --release -p pg-engine --test crash_random >"$D/crash.log" 2>&1; st crash $?
+CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 cargo test $CRASH -p pg-engine --test crash_random >"$D/crash.log" 2>&1; st crash $?
 # (The power stage builds the engine with the powerloss feature; the regress step after it
 # builds it again without.)
-PW="cargo test --release -p pg-engine --features powerloss --test crash_random"
+PW="cargo test $CRASH -p pg-engine --features powerloss --test crash_random"
 if grep -q 'feature = "powerloss"' crates/pg-engine/tests/crash_random.rs; then
   $PW -- power_cut >"$D/power-cut.log" 2>&1
   st power-cut "$? $(grep -o '[0-9]* passed' "$D/power-cut.log" | tail -1)"
