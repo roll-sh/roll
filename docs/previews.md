@@ -294,12 +294,11 @@ sessions, debug build).
 | The service's container while running | 12–30 MiB of 128 MiB, 0.01% CPU |
 | rolld while the preview runs (its Redis branch and NoSQL database loaded) | +86 to +96 MiB RSS |
 | Containers left once it sleeps | 0 |
-| **Cost asleep** | **$0.006 a month**: the Postgres directory, $0.005 until it's evicted after 24 h (then about $0.0001); Redis, $0.0006 |
+| **Cost asleep** | **$0.0007 a month** once idle for an hour (the Postgres branch evicted to a ~4 MB base backup; Redis $0.0006); $0.006 a month in its first idle hour (the 62 MiB directory) |
 | **Cost running** | **$0.012 an hour**: the container's 128 MiB, $0.002; Postgres at 0.25 CU, $0.010; Redis memory |
 | After landing | every branch gone, every parent intact |
 
-So a hundred sleeping previews of this project cost about 60 cents a month in their first day,
-and about 7 cents a month once their Postgres directories are evicted. An hour of someone
+So a hundred sleeping previews of this project cost about 7 cents a month. An hour of someone
 clicking through one costs about a cent.
 
 What dominates, from most to least:
@@ -309,8 +308,8 @@ What dominates, from most to least:
 An hour after a preview's last request, with nothing running, its branches are told it's idle:
 a Postgres branch is evicted (its directory goes to object storage as a base backup, and the
 next connection restores it). That's what keeps a sleeping preview's Postgres cheap on ext4.
-- **The Postgres branch's local directory on ext4.** Until eviction it's a full copy (see
-  `## Next`).
+- **The Postgres branch's local directory on ext4** in the hour before it's evicted: a full copy
+  (see `## Next`).
 - **The service's container while it runs.**
 - **A Redis branch.** It reports its loaded dataset, which includes the parent's keys.
 - **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those.
