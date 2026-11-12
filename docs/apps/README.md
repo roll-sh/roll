@@ -1,0 +1,328 @@
+# roll apps: run your own code
+
+roll apps hosts the user's own code next to their roll databases: a **service** in a workspace
+project, built from a roll code repo (deploys on push), a GitHub repo mirrored into roll code, a
+Dockerfile, a public image, or an auto-detected build. HTTP services **scale to zero, wake on the
+first request, and cost nothing while idle**. Workers stay up, cron jobs run on a schedule, and
+every deployment is immutable with instant rollback.
+
+- Code: `crates/apps-build` (source detection and build plans; no I/O but reading the tree),
+  `crates/apps-control` (the store, deploy queue, runtimes, the waking proxy, logs, metrics,
+  metering, `/v1/apps`), mounted by `crates/rolld/src/apps.rs`.
+- Contract: [http-api.md](http-api.md), with `apps/dashboard/src/lib/apps-api.ts`. Change both
+  together.
+- CLI: `roll up`, `roll deploy`, `roll logs`, `roll domains`, `roll apps …` (`crates/roll-cli/src/apps.rs`).
+- Dashboard: services on the project canvas (`/dashboard/projects/$id`) and a service page at
+  `/dashboard/apps/$id` (deployments, logs, metrics, variables, domains, settings).
+
+```
+  browser / curl ──▶ <slug>.up.roll.site, custom domains  (Cloudflare, proxied)
+                          │
+                    rolld (any node) ─ edge: Host → service ─┐
+                          │                                   │ dispatch to the owner of
+                          ▼                                   │ apps:service:<id>
+               the service's owner node ◀────────────────────┘
+               ├─ the waking proxy: queue the request, wake an instance, forward
+               ├─ the deploy queue: build → image → roll out → health check → switch
+               ├─ the autoscaler: concurrency per instance → instance count (min..max)
+               └─ the meter: CPU-seconds, GB-seconds, requests, egress, cold starts
+                          │
+               Runtime: Docker on this host (one node, development)
+                        Fargate tasks (the roll cloud fleet; no customer code on a node)
+```
+
+## What we learned from the others
+
+| platform | what it gets right | what we take |
+| --- | --- | --- |
+| Railway | the project canvas; services, variables and private networking per project; environments (production, staging, PR envs) that copy a project; Railpack auto-detection; a deploy per push, rollback to any deployment; usage billing per second of real CPU and memory | the whole model: a service is a card on the project canvas, deploys per environment, variables per service and environment, `${{ postgres.DATABASE_URL }}`-style links, `railway up` as `roll up` |
+| Render | blueprints, preview environments per PR, health-checked zero-downtime deploys, cron jobs as a service type | service types `web`, `worker`, `cron`; a health check gates every switch |
+| Fly.io | Firecracker machines that **suspend** (memory snapshot) and resume in a few hundred ms; the proxy starts machines on request (`auto_start_machines`) and stops them when idle | the waking proxy and the tiered idle states: running → suspended → stopped |
+| Cloud Run | request-based autoscaling on concurrency per instance, scale to zero, per-100 ms billing, startup CPU boost, min instances to avoid cold starts | concurrency target as the scaling signal; min/max instances; billing only while serving |
+| Knative | the activator: requests for a scaled-to-zero revision are held in a buffer while the autoscaler brings a pod up; revisions are immutable | the owner's proxy is the activator; deployments are immutable revisions |
+| Vercel | immutable deployments with their own URLs, instant rollback by moving the alias | every deployment keeps its image; rollback moves the environment's pointer, nothing rebuilds |
+| Koyeb, Northflank | scale-to-zero on microVMs, BYO cloud, build + deploy pipelines with logs streamed live | build logs streamed as they happen; a deploy queue per service and environment |
+
+## Decisions
+
+### A service, an environment, a deployment
+
+- **Service** (`svc_…`): what to run and how. It belongs to one workspace project and is a
+  resource kind on its canvas (`service`, docs/workspace.md). Source, build settings, run
+  settings (type, port, start command, scaling, resources, health check, volume) live on the
+  service and apply to every environment.
+- **Environment**: a name (`production`, `staging`, `development`, a custom one, a preview's
+  `pr-42`). A service runs in an environment once it has been deployed there. Per environment:
+  the branch that deploys on push, the variables, the active deployment, the domains, and the
+  instances. This is Railway's model and roll secrets' (feature/roll-secrets): a service deploys
+  into one of the project's environments and that environment's secrets are injected.
+- **Deployment** (`dep_…`): an immutable record of one rollout: the source revision, the image
+  it built (by digest), and a frozen copy of the service's settings and the variable names. A
+  rollback deploys an older deployment's image and settings again, without building: it is a
+  new deployment whose `rollback_of` names the old one, so history only grows.
+
+### Builds
+
+- **Auto-detect** (`crates/apps-build`): Railpack/Nixpacks-style providers read the tree and
+  produce a **plan**: a base image, install, build and start commands, the port, and the
+  Dockerfile they make. Providers, in order: Dockerfile (when one exists, it wins), Node (npm,
+  pnpm, yarn, bun; Next, Remix, Astro, Vite, Nuxt, SvelteKit), Python (uv, poetry, pip; Django,
+  FastAPI, Flask), Go, Rust, Ruby (Rails, Rack), PHP (Laravel, plain), Java (Maven, Gradle;
+  Spring Boot), static sites (an `index.html`, or a framework build's output dir served by a
+  tiny static server). The generated Dockerfile is shown in the UI and in the build log, so a
+  build is never magic, and `roll.toml` `[app]` (or the service settings) can override any
+  command.
+- **Why a generated Dockerfile instead of Nix or buildpacks' lifecycle**: BuildKit's layer cache
+  makes dependency installs incremental, multi-stage builds give slim runtime images (cold
+  starts scale with image size), and one build path (Dockerfile → BuildKit) serves detected and
+  user Dockerfiles alike.
+- **Where builds run**: locally, `docker build` (BuildKit) on this host, under a
+  `roll-apps-build-*` builder name, CPU and memory limited, with the build's own network. On the
+  fleet, a build is customer code and never runs on a node: it is an AWS CodeBuild build
+  (serverless, per-minute, privileged BuildKit inside CodeBuild's own VM) that pushes to the
+  stack's ECR repository (`apps/<service>`), behind the same `Builder` trait. CodeBuild was
+  chosen over Kaniko in Fargate (Kaniko is unmaintained since 2025 and slow on big layers) and
+  over BuildKit in Fargate (needs privileges Fargate doesn't grant).
+- **Public images** skip the build: the deployment pins the image's digest at deploy time, so a
+  moving tag never changes a running deployment.
+- Build logs stream line by line to the dashboard and `roll deploy` as they're written
+  (server-sent events), and are kept with the deployment.
+
+### Deploys
+
+- **One queue per service and environment.** A new deploy waits for the one in flight; a newer
+  push supersedes queued ones that haven't started (`superseded`), as on Railway. Different
+  environments deploy in parallel.
+- **States**: `queued → building → deploying → active`, or `failed`, `canceled`, `superseded`;
+  an active deployment becomes `inactive` when another replaces it. The dashboard maps them onto
+  the shared mark states through `MarkStateProvider` (`deploying` while building or rolling out,
+  then `success` or `error`).
+- **Zero-downtime rollout**: new instances start next to the old ones, each must pass the
+  health check (`GET <health_path>` answering 2xx–3xx, or the port accepting a connection when
+  no path is set) within `health_timeout`; then the environment's pointer moves in one write,
+  new requests go to the new instances, and the old ones drain (requests in flight finish, up
+  to 30 s) and stop. A failed health check fails the deploy and leaves the old deployment
+  serving. A service scaled to zero rolls out without starting anything: the pointer moves, and
+  the next request wakes the new deployment (a health check runs at the first wake instead, and
+  failing it there rolls the pointer back automatically).
+- **Instant rollback**: the old image is still in the registry (deployments keep their
+  images until the deployment is deleted from history), so a rollback is a rollout with no
+  build: seconds, not minutes.
+
+### The runtime: scale to zero, wake on request
+
+- **The waking proxy** (Knative's activator, Fly's proxy) runs on the service's owner node. A
+  request for a service with no running instance is held (up to `wake_timeout`, 60 s, then a
+  503 with `Retry-After`), one wake starts, and every held request goes through as soon as the
+  instance answers its port. Requests arriving while it wakes join the same wait; nothing
+  starts twice.
+- **Idle states**, cheapest last:
+  1. **running**: serving, billed per second of CPU and memory it actually uses.
+  2. **suspended**: after `suspend_after` (default 30 s) without a request, the instance is
+     frozen (Docker `pause`, the cgroup freezer: memory kept, no CPU). Resuming takes
+     milliseconds. Not billed to the user; roll pays for the memory, so it lasts only until
+     `sleep_after`.
+  3. **stopped**: after `sleep_after` (default 10 min) the instance stops. Its container stays
+     created, so waking is a start of the app, not a pull or a create. This is the cold start.
+  An HTTP service with `min_instances: 0` reaches stopped; `min_instances ≥ 1` keeps that many
+  running (no cold starts, billed while up).
+- **Why tiered** and not one idle timeout: most wakes come soon after the last request
+  (a user clicking around, a webhook burst), and a frozen process answers them in
+  milliseconds; the long tail of idle time costs nothing because it ends stopped. This is Fly's
+  suspend/stop split, done with the freezer locally.
+- **On the fleet**, instances are Fargate tasks (the sandbox pattern from docs/cloud/README.md,
+  "Isolated work": a template task definition per image, `fetch`/`guard` from roll's own image,
+  the service's image as `run`, no AWS permissions, isolated subnets, a public IP for egress).
+  Fargate can't freeze a task, so there the states are running → stopped, and a cold start is a
+  task launch (tens of seconds for a large image; SOCI indexes cut the pull). Two things keep
+  that rare: `suspend_after` becomes a **warm window** (the task keeps running, unbilled to the
+  user, for 5 minutes), and services that must answer instantly set `min_instances: 1`. The fast
+  path on the fleet is in `## Next`: Firecracker microVM hosts with snapshot restore (what Fly
+  and Lambda SnapStart do), behind the same `Runtime` trait.
+- **Autoscaling**: the owner counts requests in flight per instance every second; the target is
+  `concurrency` (default 50) in flight per instance. Instances needed = ceil(in flight /
+  concurrency), between `min_instances` and `max_instances`, scaling up at once and down only
+  after 60 s below target (no flapping). Workers run exactly `min_instances` (at least 1).
+- **Workers** have no port and no proxy: they run `min_instances` (default 1) and restart on
+  exit with backoff (1 s doubling to 60 s).
+- **Cron jobs** are a service type with a schedule (five-field cron, UTC). Each run is a fresh
+  instance of the active deployment that runs to its exit, with a timeout (default 1 h) and its
+  output as a log; a run that is still going when the next is due is skipped (Railway's rule).
+  The schedule lives with the service and fires on the owner node; roll tasks wasn't used for
+  this because a cron run must start an instance on the owner (a runtime action, not a webhook
+  delivery), and keeping the schedule next to the deployment keeps a rollback's schedule right.
+- **Resources**: `cpu` (0.25–8 vCPU) and `memory_mb` (256–16384) per instance, as Docker
+  `--cpus`/`--memory` (no swap) and a pids limit, or the Fargate size rounded up.
+- **Volumes**: a service may have one volume (a mount path and a size). Locally it's a named
+  Docker volume `roll-apps-vol-<service>-<env>`; a service with a volume runs at most one
+  instance (`max_instances` is forced to 1, as on Railway). On the fleet it's an EFS access
+  point per service and environment (in `## Next`).
+
+### Isolation
+
+- Customer code never runs on a fleet node: instances, cron runs and builds are Fargate tasks
+  and CodeBuild builds. Locally they're Docker containers with no host mounts (sources are
+  copied into the build context, never bind-mounted), resource limits, no privileges, and the
+  default seccomp/AppArmor profiles.
+- Every container, network, volume and image roll apps makes is named `roll-apps-…` and carries
+  the label `sh.roll.apps=<service id>`, so leftovers are found and removed by exact name.
+- A service's variables reach only its own instances. They're stored sealed
+  (`ROLL_SECRET_KEY`, AES-256-GCM; locally a key file under `<home>/apps/key` made 0600 on first
+  start), never logged, never in a `RunTask` request (they go in the bundle, as sandboxes' env
+  does), and returned in the clear only by the `reveal` route.
+
+### Networking
+
+- **Public URLs**: every service in an environment gets
+  `https://<service>-<project>[-<env>].up.roll.site` (production omits the env; a taken name
+  gets a 4-character suffix). `up.roll.site` keeps apps off the bucket namespace
+  (`<bucket>.roll.site`) and on roll.site, which only serves user content. Cloudflare proxies it
+  (`*.up.roll.site` needs Advanced Certificate Manager on the zone, a fixed $10 a month; the
+  origin has the wildcard from ACME DNS-01 like the other site names). Locally the domain is
+  `apps.localhost` on the apps listener (`ROLL_APPS_LISTEN`, `127.0.0.1:7080`), and each service
+  can also get a port of its own (`ROLL_APPS_PORTS=58100-58199`) so it opens on a machine without
+  wildcard DNS (a Tailscale name).
+- **Custom domains**: the user adds `www.example.com`, points a CNAME at the service's
+  `up.roll.site` name, and roll verifies it (the CNAME, or a `_roll-challenge.<host>` TXT with the
+  domain's token for apex domains behind an ALIAS/flattening provider). On the fleet, TLS is
+  **Cloudflare for SaaS** custom hostnames (`POST /zones/{zone}/custom_hostnames`): Cloudflare
+  issues and renews the certificate at its edge, the origin needs nothing per domain, and the
+  WAF and cache apply. Self-hosted rolld issues its own over ACME HTTP-01 through `roll-edge`'s
+  ACME client and serves it by SNI. Domain states: `pending` (waiting for DNS) → `issuing` →
+  `active`, or `failed` with the reason.
+- **Private networking**: a project's services reach each other at
+  `<service>.<env>.internal:<port>` and by bare `<service>`. Locally every project and
+  environment has a Docker network `roll-apps-net-<project>-<env>` and each instance joins it
+  with its service name as an alias. On the fleet, tasks of one project and environment share a
+  security group that admits only itself, and names resolve through Cloud Map (in `## Next`).
+- **roll databases**: a service links to the project's Postgres, Redis, buckets, streams,
+  queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`,
+  `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`), named with the resource's prefix
+  when a service links two of a kind (`ORDERS_DATABASE_URL`). Locally the URLs are rewritten for
+  the container (`host.docker.internal`); on the fleet they're the public edge names over TLS,
+  as previews use, so there's no path from a task into the fleet's network.
+
+### Secrets and environments
+
+- **roll secrets** (feature/roll-secrets, docs/secrets.md) owns per-project secrets per
+  environment. roll apps reads a deploy's secrets through one trait,
+  `apps_control::secrets::SecretSource` (`environments(project)`, `resolve(project, env)`), and
+  never stores a second copy of a project secret.
+- Until that branch lands, `LocalSecrets` implements the trait from roll apps' own variables:
+  service variables per environment (Railway's service variables), sealed at rest. They stay
+  after roll secrets lands, because a service's own config (`PORT`, `NODE_ENV`) belongs to the
+  service; project secrets come from roll secrets and service variables win on a clash.
+- What a deploy injects, lowest to highest precedence: roll's own (`PORT`,
+  `ROLL_SERVICE`, `ROLL_ENVIRONMENT`, `ROLL_DEPLOYMENT`, `ROLL_PUBLIC_URL`,
+  `ROLL_PRIVATE_HOST`), links, the environment's project secrets, the service's variables.
+- A deployment records the variables' names and a hash of their values, never the values:
+  changing a variable marks the environment "needs deploy" (like Railway's staged changes), and
+  a rollback uses the current values.
+
+### Preview environments
+
+The previews thread (feature/roll-previews) drives roll apps through two calls, both on the
+public contract so they need no private hook:
+
+- `PUT /v1/apps/services/{id}/environments/{env}` with `{ "branch": null, "ephemeral": true }`
+  makes the environment (an ephemeral one is never the target of deploy-on-push and is
+  listed apart), then `POST /v1/apps/services/{id}/environments/{env}/deploys` with
+  `{ "revision": "<sha>" }` deploys that revision into it.
+- `DELETE /v1/apps/services/{id}/environments/{env}` tears it down: instances stopped and
+  removed, domains released, variables deleted, deployments kept in history as `removed`.
+- Preview environments scale to zero like any other, so an open pull request costs nothing
+  until someone opens its URL.
+
+### Permissions and MCP
+
+roll apps adds no token or scope checks of its own. Its routes sit behind rolld's gate
+(`crates/roll-auth`; scoped tokens and the catalogue in `crates/roll-access` on
+feature/roll-mcp), and every route is classifiable from its pattern alone:
+
+- the service id is in the path, and the environment too wherever an action targets one;
+- production is the environment name in the path, so `deploy` (deploy, rollback, promote to
+  production) is separable from `write` (deploy to a non-production environment) by the route;
+- revealing variables is its own route (`…/variables/values`), so `reveal` is separable from
+  `read`;
+- deleting a service, an environment or a domain is a `DELETE` on its own path.
+
+The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`, `reveal` and
+`admin`. The route table with each route's action is in http-api.md, "Routes and actions".
+
+### On the fleet
+
+- Ownership: lease `apps:service:<id>`. The owner runs the service's deploy queue, waking proxy,
+  autoscaler, cron schedule and meter. Any node accepts a request for a service's hostname and
+  hands it to the owner with `Cluster::dispatch` (WebSockets included). A node that takes a
+  service over starts from the store: it marks instances the previous owner had as unknown,
+  adopts Fargate tasks still running under the service's group (`roll-apps-<service>`) after
+  checking their deployment, and stops any it doesn't recognise. Deploys in flight on a lost
+  node fail and are retried once by the new owner (builds are idempotent: same revision, same
+  image tag).
+- Every catalog write that belongs to a service is a `code_sql` write closure; the switch of an
+  environment's active deployment is a compare-and-swap on the previous pointer, so two nodes
+  that briefly both think they own a service can't both switch it.
+- The store is `code_sql`: SQLite at `<home>/apps.db` on one node, the system database's `apps`
+  schema in a cluster.
+
+## Observability and cost
+
+- **Runtime logs**: each instance's stdout and stderr, line by line with the time, stream and
+  instance, kept in memory per environment (the last 5,000 lines) and appended to log chunks in
+  object storage (`apps/logs/<service>/<env>/<day>/<seq>.ndjson`, kept 7 days). `roll logs -f`
+  and the dashboard follow them over server-sent events.
+- **Metrics** per service and environment, per minute: requests, 2xx/4xx/5xx, latency p50/p95/p99
+  (a fixed-bucket histogram at the proxy), CPU (cores used), memory (bytes resident), instances,
+  cold starts and their duration (from wake to the first byte the instance answers). Kept 7 days
+  at minute resolution in the store.
+- **Metering**: usage per service and environment per hour: CPU-seconds used, GB-seconds of
+  memory resident while running, requests, egress bytes, build minutes. Suspended and stopped
+  instances meter nothing.
+- **Prices** (roll cloud, per second of real use; the dashboard shows them and the month so
+  far):
+
+  | what | price |
+  | --- | --- |
+  | CPU | $0.000012 per vCPU-second used ($31 per vCPU-month flat out) |
+  | memory | $0.000004 per GB-second resident ($10.4 per GB-month) |
+  | egress | $0.05 per GB |
+  | builds | $0.005 per build minute |
+  | requests | free |
+
+  An idle service costs $0.00: it is stopped, and a stopped instance meters nothing. A
+  low-traffic site (a request a minute, 50 ms of CPU each at 100 MB) is about 1,440 s of
+  running a day if each request keeps it awake 1 s, a few cents a month.
+- **What roll pays for idle**: locally nothing but disk (images, stopped containers). On the
+  fleet, the image in ECR ($0.10/GB-month) and the warm window's Fargate seconds.
+
+## Measured
+
+Cold starts and idle cost are measured by `crates/apps-control/tests/docker.rs` (real Docker,
+`pnpm test:apps --docker`) and recorded here; the numbers are from ai-server (36 cores, Docker
+29, overlayfs, load around 25 from other work).
+
+| path | what it measures | result |
+| --- | --- | --- |
+| resume from suspended | first byte after `docker unpause` | see "Measured results" below |
+| cold start from stopped | first byte after `docker start` of a created container | see below |
+| first deploy | image build → first byte | see below |
+
+### Measured results
+
+Filled in from the test runs as they happen (`tests/docker.rs` prints them).
+
+## Not done yet
+
+See `## Next` at the end.
+
+## Next
+
+Ranked; the top item is what's being worked on.
+
+1. Build the core: `apps-build` detection, `apps-control` store, deploy queue, Docker runtime,
+   waking proxy, `/v1/apps`; rolld wiring.
+2. CLI: `roll up`, `roll deploy`, `roll logs`, `roll domains`.
+3. Dashboard: service cards on the project canvas, the service page.
+4. Fargate runtime and CodeBuild builder against fakes, like `code-preview/tests/fargate.rs`.
+5. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+6. EFS volumes and Cloud Map private DNS on the fleet.

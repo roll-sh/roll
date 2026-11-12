@@ -1,0 +1,229 @@
+# roll apps HTTP API
+
+The contract between `crates/apps-control` (`/v1/apps`) and its clients:
+`apps/dashboard/src/lib/apps-api.ts`, `roll` (`crates/roll-cli/src/apps.rs`) and the MCP tools on
+feature/roll-mcp. Change them together.
+
+- Bodies are JSON unless a route says otherwise. Every error is `{"error": string}` with the
+  status below. Times are unix milliseconds. Ids: `svc_…`, `dep_…`, `run_…` (12 lowercase base32
+  characters after the prefix).
+- The routes sit behind rolld's gate (the operator token today; scoped tokens from
+  feature/roll-mcp). roll apps checks nothing itself.
+- `{env}` is an environment name: 1–32 characters of `[a-z0-9-]`, not starting or ending with
+  `-`. `production` is the one environment that `deploy` (not `write`) guards.
+- Live streams are server-sent events (`text/event-stream`): each event is `data: <json>`; the
+  stream starts with what is already there (`?tail=N` lines) and follows until the client goes.
+
+## Routes and actions
+
+`action` is what the permissions catalogue (feature/roll-mcp, product `apps`) classifies the
+route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
+
+| Route | Body | Answer | action |
+| --- | --- | --- | --- |
+| `GET /v1/apps` | | `Overview` | read |
+| `POST /v1/apps/plan` | `PlanRequest` | `Plan` | read |
+| `GET /v1/apps/services?project=` | | `Service[]` | read |
+| `POST /v1/apps/services` | `NewService` | 201 `Service` | write |
+| `GET /v1/apps/services/{id}` | | `Service` | read |
+| `PATCH /v1/apps/services/{id}` | `ServicePatch` | `Service` | write |
+| `DELETE /v1/apps/services/{id}` | | 204 | delete |
+| `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
+| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` | write |
+| `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 | write |
+| `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
+| `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
+| `DELETE /v1/apps/services/{id}/environments/{env}` | | 204 | delete |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, or a gzipped tar (`application/gzip`) | 202 `Deployment` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys` | | `Deployment[]`, newest first | read |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | | 202 `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | read |
+| `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
+| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}` | reveal |
+| `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[]}` | `Variables` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=` | | `LogLine[]` or SSE | read |
+| `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=` | | `Metrics` | read |
+| `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
+| `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
+| `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
+| `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
+| `DELETE /v1/apps/services/{id}/environments/{env}/domains/{host}` | | 204 | delete |
+
+Statuses: 400 a bad body, name, env or query; 404 no such service, environment, deployment or
+domain; 409 a name or hostname that's taken, a rollback to a deployment with no image, a cancel
+of a finished deployment, a second volume instance; 413 an upload over 512 MiB; 503 with
+`Retry-After` while the service's owner moves.
+
+## Shapes
+
+```ts
+type Overview = {
+  services: Service[];
+  runtime: "docker" | "fargate";
+  /** Where generated URLs live: `up.roll.site`, `apps.localhost`. */
+  domain: string;
+  prices: Prices;
+};
+
+type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_minute: number };
+
+type Source =
+  | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }
+  | { kind: "image"; image: string /* docker.io/library/nginx:1.27 */ }
+  | { kind: "upload" } /* `roll up`: each deploy carries its tree */;
+
+type Build = {
+  /** auto: detect (a Dockerfile wins); dockerfile: use `dockerfile`. */
+  builder: "auto" | "dockerfile";
+  dockerfile?: string; // path in the tree, default "Dockerfile"
+  install?: string;    // overrides the detected commands
+  build?: string;
+  start?: string;
+};
+
+type Run = {
+  type: "web" | "worker" | "cron";
+  port?: number;            // web: the port the app listens on (default from the plan, else 8080; PORT is set to it)
+  start?: string;           // overrides the image's command
+  schedule?: string;        // cron: five fields, UTC
+  timeout_s?: number;       // cron: a run's limit (default 3600)
+  min_instances: number;    // web: 0 scales to zero (default 0); worker: at least 1
+  max_instances: number;    // default 3
+  concurrency: number;      // requests in flight per instance before scaling out (default 50)
+  cpu: number;              // vCPU per instance, 0.25–8 (default 0.5)
+  memory_mb: number;        // 256–16384 (default 512)
+  health_path?: string;     // web: GET it for a 2xx/3xx; none: the port accepting a connection
+  health_timeout_s: number; // default 60
+  suspend_after_s: number;  // default 30; 0 never suspends
+  sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
+  volume?: { mount: string; size_gb: number };
+};
+
+type Service = {
+  id: string;
+  project: string;          // workspace project id
+  name: string;             // 1–32 of [a-z0-9-], unique in the project
+  source: Source;
+  build: Build;
+  run: Run;
+  created_at: number;
+  environments: EnvironmentSummary[];
+};
+
+type EnvironmentSummary = {
+  name: string;
+  state: InstanceState;
+  url: string | null;
+  active: { id: string; revision: string | null; created_at: number } | null;
+  latest: { id: string; status: DeployStatus } | null;
+};
+
+type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
+
+type NewService = { project: string; name: string; source: Source; build?: Partial<Build>; run?: Partial<Run>; x?: number; y?: number };
+type ServicePatch = { name?: string; source?: Source; build?: Partial<Build>; run?: Partial<Run> };
+
+type EnvironmentPut = { branch?: string | null; ephemeral?: boolean };
+
+type Environment = EnvironmentSummary & {
+  service: string;
+  branch: string | null;     // deploys on every landing on this branch (repo sources)
+  ephemeral: boolean;        // a preview environment
+  instances: Instance[];
+  domains: Domain[];
+  port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
+  needs_deploy: boolean;     // variables or settings changed since the active deployment
+  created_at: number;
+};
+
+type Instance = { id: string; deployment: string; state: InstanceState; started_at: number | null; in_flight: number };
+
+type DeployStatus = "queued" | "building" | "deploying" | "active" | "inactive" | "failed" | "canceled" | "superseded" | "removed";
+
+type NewDeploy = { revision?: string; image?: string; message?: string };
+
+type Deployment = {
+  id: string;
+  service: string;
+  environment: string;
+  status: DeployStatus;
+  trigger: "push" | "manual" | "rollback" | "upload" | "api" | "settings";
+  revision: string | null;   // git commit of a repo source
+  message: string;
+  image: string | null;      // the built or pinned image, by digest once known
+  plan: Plan | null;         // what the build detected
+  rollback_of: string | null;
+  error: string | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  /** Milliseconds from the deploy's start to its first healthy answer. */
+  ready_ms: number | null;
+};
+
+type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
+
+type Plan = {
+  provider: "dockerfile" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "static";
+  framework: string | null;  // next, django, rails, spring…
+  language_version: string | null;
+  install: string | null;
+  build: string | null;
+  start: string | null;
+  port: number;
+  dockerfile: string;        // what builds the image (the tree's own, or generated)
+  notes: string[];           // why: "found pnpm-lock.yaml", "next build → .next"
+};
+
+type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql"; ref: string; prefix: string; vars: string[] };
+
+type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" }[] };
+
+type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string };
+
+type Metrics = {
+  minutes: number[];         // unix minute of each point, oldest first
+  requests: number[]; errors: number[]; // 5xx
+  p50_ms: number[]; p95_ms: number[]; p99_ms: number[];
+  cpu: number[];             // cores used, average over the minute
+  memory_bytes: number[];    // resident, max over the minute
+  instances: number[];
+  cold_starts: number[];
+  cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
+};
+
+type Usage = {
+  days: { day: number; cpu_seconds: number; gb_seconds: number; requests: number; egress_bytes: number; build_seconds: number; usd: number }[];
+  total_usd: number;
+};
+
+type CronRun = { id: string; deployment: string; status: "running" | "succeeded" | "failed" | "skipped" | "timed_out"; exit_code: number | null; started_at: number; finished_at: number | null };
+
+type Domain = {
+  hostname: string;
+  kind: "roll" | "custom";
+  status: "pending" | "issuing" | "active" | "failed";
+  /** What the user puts in DNS: a CNAME to `target`, or (apex) a TXT `_roll-challenge.<host>` with `token`. */
+  target: string;
+  token: string;
+  error: string | null;
+  created_at: number;
+};
+```
+
+## Public traffic
+
+Requests to a service's hostname (`<slug>.<domain>`, a custom domain, or locally the service's
+own port) are the service's, not the API's: they reach the waking proxy, never the gate. The
+proxy adds `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Request-Id`, and
+strips `X-Roll-*` request headers. A service that can't wake in `wake_timeout` answers 503 with
+`Retry-After: 5` and a small page; a service with no deployment answers 404 with a page that
+says so.
