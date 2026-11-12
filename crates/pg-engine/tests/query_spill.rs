@@ -212,6 +212,54 @@ fn hash_join_batches_clean_up_after_completion_limit_and_error() {
     eng.shutdown();
 }
 
+/// A hash join past work_mem whose batches have few outer rows: a reloaded batch keeps the
+/// inner rows no outer row can match as stored, never decoded (`hashjoin::KEPT_STORED`).
+/// Inner, semi, anti, left and right joins give the rows (and, in each, the row order) they
+/// give with the inner side in memory, sorted alike.
+#[test]
+fn hash_join_batches_of_few_outer_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    // (The inner side a function's rows, estimated at 1,000; the outer side a table whose
+    // statistics count the 30,000 rows it had: the planner hashes the function's rows.)
+    for sql in [
+        "CREATE TABLE few (k int, w text) WITH (autovacuum_enabled = false)",
+        "INSERT INTO few SELECT g * 37, 'w' || g FROM generate_series(1, 30000) g",
+        "ANALYZE few",
+        "DELETE FROM few WHERE k > 300 * 37",
+        "INSERT INTO few VALUES (NULL, 'null'), (-5, 'none')",
+        "SET max_parallel_workers_per_gather = 0",
+        "SET enable_mergejoin = off",
+        "SET enable_nestloop = off",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let big = "(SELECT g AS k, g % 97 AS g, md5(g::text) || repeat('x', g % 40) AS t FROM generate_series(1, (SELECT 30000)) g)";
+    let queries = [
+        format!("SELECT f.k, f.w, b.g, b.t FROM few f JOIN {big} b ON b.k = f.k ORDER BY 1, 2"),
+        format!("SELECT f.k, f.w FROM few f WHERE EXISTS (SELECT 1 FROM {big} b WHERE b.k = f.k + 1 AND b.g <> 3) ORDER BY 1"),
+        format!("SELECT f.k, f.w FROM few f WHERE NOT EXISTS (SELECT 1 FROM {big} b WHERE b.k = f.k) ORDER BY 1"),
+        format!("SELECT f.k, f.w, b.t FROM few f LEFT JOIN {big} b ON b.k = f.k AND b.g > 10 ORDER BY 1, 2"),
+        format!("SELECT b.k, f.w FROM few f RIGHT JOIN {big} b ON b.k = f.k WHERE b.k < 2000 ORDER BY 1"),
+        format!("SELECT count(*), sum(length(b.t)) FROM few f JOIN {big} b ON b.g = f.k % 97"),
+    ];
+    let run = |s: &mut Session| queries.iter().map(|sql| q(s, sql).unwrap()).collect::<Vec<_>>();
+    q(&mut s, "SET work_mem = '64MB'").unwrap();
+    let memory = run(&mut s);
+    q(&mut s, "SET work_mem = '64kB'").unwrap();
+    let kept = pg_engine::exec::hashjoin::KEPT_STORED.load(std::sync::atomic::Ordering::Relaxed);
+    let spilled = run(&mut s);
+    assert!(pg_engine::exec::hashjoin::KEPT_STORED.load(std::sync::atomic::Ordering::Relaxed) > kept, "rows kept as stored");
+    for ((sql, a), b) in queries.iter().zip(&memory).zip(&spilled) {
+        assert_eq!(a, b, "{sql}");
+    }
+    assert!(memory[0].len() > 100 && memory[2].len() > 1, "{} {}", memory[0].len(), memory[2].len());
+    assert_no_spill_files(dir.path());
+    drop(s);
+    eng.shutdown();
+}
+
 // Reference transcript: a150-resume-t3-864cc5fb/temp-reference.{sql,out} in ~/.cache.
 #[test]
 fn hash_join_limit_temp_accounting_matches_postgres() {

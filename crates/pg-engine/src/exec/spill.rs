@@ -365,6 +365,14 @@ pub fn put_tagged_row(buf: &mut Vec<u8>, tag: [u32; 2], row: &[Value]) {
     put_row(buf, row);
 }
 
+/// A row `put_tagged_row` would write, from its encoding (`RowReader::read_tagged_raw`).
+pub fn put_tagged_raw(buf: &mut Vec<u8>, tag: [u32; 2], enc: &[u8]) {
+    buf.extend_from_slice(&tag[0].to_le_bytes());
+    buf.extend_from_slice(&tag[1].to_le_bytes());
+    buf.extend_from_slice(&(enc.len() as u32).to_le_bytes());
+    buf.extend_from_slice(enc);
+}
+
 /// Rows of a temporary file, read in order.
 pub struct RowReader {
     file: Rc<File>,
@@ -387,6 +395,16 @@ impl RowReader {
         let row = self.read_row()?.ok_or_else(|| Error::new(code::INTERNAL_ERROR, "temporary file ended early"))?;
         Ok(Some((tag, row)))
     }
+    /// A row `put_tagged_row` wrote, as stored: its tag and its encoding (`decode_row`
+    /// reads it).
+    pub fn read_tagged_raw(&mut self) -> Result<Option<([u32; 2], &[u8])>> {
+        let Some(t) = self.take(12)? else { return Ok(None) };
+        let w = |i: usize| u32::from_le_bytes(t[i..i + 4].try_into().unwrap());
+        let (tag, len) = ([w(0), w(4)], w(8) as usize);
+        let b = self.take(len)?.ok_or_else(|| Error::new(code::INTERNAL_ERROR, "temporary file ended early"))?;
+        Ok(Some((tag, b)))
+    }
+
     pub fn read_row(&mut self) -> Result<Option<Vec<Value>>> {
         let Some(len) = self.take(4)?.map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize) else {
             return Ok(None);

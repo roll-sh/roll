@@ -5975,7 +5975,7 @@ impl HashJoinNode {
     /// The batch's table, of the rows PostgreSQL's table holds now.
     fn load_batch(&mut self, ctx: &ExecCtx) -> Result<()> {
         let b = self.batching.as_mut().unwrap();
-        let (rows, table) = b.hj.take_batch();
+        let (rows, table, decoded) = b.hj.take_batch();
         let mut by_key = Vec::with_capacity(rows.len());
         match b.prekeys.take().filter(|p| p.len() == rows.len()) {
             Some(pre) => {
@@ -5987,6 +5987,10 @@ impl HashJoinNode {
             }
             None => {
                 for (i, r) in rows.iter().enumerate() {
+                    // (A row no outer row of the batch can match: not in the table's map.)
+                    if decoded.as_ref().is_some_and(|d| !d[i]) {
+                        continue;
+                    }
                     let k = eval_all(&b.rkeys, r, ctx)?;
                     if !k.iter().any(Value::is_null) {
                         by_key.push((normed(k, &self.rnorm), i));
@@ -6463,9 +6467,12 @@ impl RightSemiNode {
         let mut rtypes = Vec::new();
         let mut probe: Option<super::hashjoin::BatchReader> = None;
         loop {
-            let (rows, table) = hj.take_batch();
+            let (rows, table, decoded) = hj.take_batch();
             let mut by_key = Vec::with_capacity(rows.len());
             for (i, r) in rows.iter().enumerate() {
+                if decoded.as_ref().is_some_and(|d| !d[i]) {
+                    continue;
+                }
                 let k = eval_all(&self.lkeys, r, ctx)?;
                 if !k.iter().any(Value::is_null) {
                     by_key.push((normed(k, &lnorm), i));

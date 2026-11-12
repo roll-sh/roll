@@ -10,7 +10,7 @@
 //! inner rows in batch 0 until its buckets exceed their share of memory.
 
 use super::pghash::JoinTable;
-use super::spill::{RowReader, TempAcct, TempFile, put_tagged_row};
+use super::spill::{RowReader, TempAcct, TempFile, put_tagged_raw, put_tagged_row};
 use super::workmem::BLCKSZ;
 use super::{ExecCtx, Row};
 use crate::error::Result;
@@ -35,6 +35,8 @@ struct BatchFile {
     acct: Option<TempAcct>,
     cleanup: std::rc::Rc<super::spill::TempCleanup>,
     bytes: u64,
+    /// Tuples written.
+    rows: u64,
 }
 
 impl Drop for BatchFile {
@@ -59,6 +61,15 @@ impl Files {
 
     /// ExecHashJoinSaveTuple: the file made at its first tuple.
     fn save(&mut self, batch: usize, side: usize, hash: u32, row: &[Value], tlen: i64, ctx: &ExecCtx) -> Result<()> {
+        self.save_with(batch, side, tlen, ctx, |buf| put_tagged_row(buf, [hash, tlen as u32], row))
+    }
+
+    /// `save` of a row as its file had it (`RowReader::read_tagged_raw`).
+    fn save_raw(&mut self, batch: usize, side: usize, hash: u32, enc: &[u8], tlen: i64, ctx: &ExecCtx) -> Result<()> {
+        self.save_with(batch, side, tlen, ctx, |buf| put_tagged_raw(buf, [hash, tlen as u32], enc))
+    }
+
+    fn save_with(&mut self, batch: usize, side: usize, tlen: i64, ctx: &ExecCtx, put: impl FnOnce(&mut Vec<u8>)) -> Result<()> {
         if self.batches.len() <= batch {
             self.batches.resize_with(batch + 1, Default::default);
         }
@@ -68,8 +79,10 @@ impl Files {
             acct: Some(TempAcct::new(ctx)),
             cleanup: ctx.temp_cleanup.clone(),
             bytes: 0,
+            rows: 0,
         });
-        put_tagged_row(&mut f.buf, [hash, tlen as u32], row);
+        put(&mut f.buf);
+        f.rows += 1;
         f.bytes += 4 + tlen as u64;
         // (BufFile writes its buffer out a block at a time.)
         f.acct.as_ref().unwrap().pg_size(f.bytes / BLCKSZ as u64 * BLCKSZ as u64)?;
@@ -103,6 +116,34 @@ impl Files {
         Ok(Some(BatchReader { f, cur: None }))
     }
 
+    /// The tuples written to batch `batch`'s file of `side`.
+    fn rows(&self, batch: usize, side: usize) -> u64 {
+        self.batches.get(batch).and_then(|b| b[side].as_ref()).map_or(0, |f| f.rows)
+    }
+
+    /// The hash values of batch `batch`'s file of `side`, its rows passed over unread.
+    fn hashes(&mut self, batch: usize, side: usize, ctx: &ExecCtx) -> Result<Vec<u32>> {
+        let Some(f) = self.batches.get_mut(batch).and_then(|b| b[side].as_mut()) else {
+            return Ok(Vec::new());
+        };
+        let file = match &mut self.file {
+            Some(file) => file,
+            None => self.file.insert(TempFile::create_raw(ctx)?),
+        };
+        if !f.buf.is_empty() {
+            push_chunk(&mut f.chunks, file.append(&f.buf)?);
+            f.buf.clear();
+        }
+        let mut out = Vec::with_capacity(f.rows as usize);
+        for &(s, e) in &f.chunks {
+            let mut r = file.reader(s, e)?;
+            while let Some((t, _)) = r.read_tagged_raw()? {
+                out.push(t[0]);
+            }
+        }
+        Ok(out)
+    }
+
     fn close(&mut self, batch: usize, side: usize) -> Result<()> {
         if let Some(f) = self.batches.get_mut(batch).and_then(|b| b[side].take()) {
             // BufFileClose flushes even a skipped batch's buffered tail.
@@ -128,6 +169,20 @@ pub struct BatchReader {
 }
 
 impl BatchReader {
+    /// The next row as stored, to `f`: its (hash value, t_len) and its encoding.
+    fn next_with<T>(&mut self, files: &mut Files, mut f: impl FnMut([u32; 2], &[u8]) -> Result<T>) -> Result<Option<T>> {
+        loop {
+            if let Some(r) = &mut self.cur
+                && let Some((tag, b)) = r.read_tagged_raw()?
+            {
+                return f(tag, b).map(Some);
+            }
+            let Some((s, e)) = self.f.chunks.pop() else { return Ok(None) };
+            let file = files.file.as_mut().ok_or_else(|| crate::error::internal("hash join batch file missing"))?;
+            self.cur = Some(file.reader(s, e)?);
+        }
+    }
+
     fn next(&mut self, files: &mut Files) -> Result<Option<(u32, u32, Row)>> {
         loop {
             if let Some(r) = &mut self.cur
@@ -141,6 +196,9 @@ impl BatchReader {
         }
     }
 }
+
+/// Reloaded batches' inner rows kept as stored, no outer row able to match them (tests).
+pub static KEPT_STORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A Hash node's table (HashJoinTableData) and its batch files. `rows` are the batch's
 /// inner rows in the order dense_alloc placed them since the table was last copied, which
@@ -161,6 +219,10 @@ pub struct HashTable {
     pub rows: Vec<Row>,
     hashes: Vec<u32>,
     lens: Vec<u32>,
+    /// A reloaded batch's rows no outer row of the batch can match, as their file had them
+    /// (their `rows` empty): written as they are when they move to a later batch, never
+    /// decoded (`new_batch`).
+    stored: Vec<Option<Box<[u8]>>>,
     /// The build's end made the buckets anew (ExecHashIncreaseNumBuckets).
     rebucketed: bool,
     files: Files,
@@ -223,6 +285,7 @@ impl HashTable {
             rows: Vec::new(),
             hashes: Vec::new(),
             lens: Vec::new(),
+            stored: Vec::new(),
             rebucketed: false,
             files: Files::default(),
             skew_mcvs,
@@ -313,6 +376,7 @@ impl HashTable {
                 self.rows.push(row);
                 self.hashes.push(b.hash);
                 self.lens.push(len);
+                self.stored.push(None);
                 self.space_used_skew -= size;
             } else {
                 self.files.save(batch as usize, INNER, b.hash, &row, len as i64, ctx)?;
@@ -347,9 +411,17 @@ impl HashTable {
 
     /// ExecHashTableInsert.
     fn insert(&mut self, row: Row, hash: u32, tlen: i64, ctx: &ExecCtx) -> Result<()> {
+        self.insert_entry(row, None, hash, tlen, ctx)
+    }
+
+    /// `insert` of a row, or of one as stored (`stored`, its `row` empty).
+    fn insert_entry(&mut self, row: Row, stored: Option<Box<[u8]>>, hash: u32, tlen: i64, ctx: &ExecCtx) -> Result<()> {
         let b = self.batch_of(hash);
         if b != self.curbatch {
-            return self.files.save(b as usize, INNER, hash, &row, tlen, ctx);
+            return match &stored {
+                Some(enc) => self.files.save_raw(b as usize, INNER, hash, enc, tlen, ctx),
+                None => self.files.save(b as usize, INNER, hash, &row, tlen, ctx),
+            };
         }
         // (NTUP_PER_BUCKET exceeded by the tuples before this one, while there is one batch.)
         if self.nbatch == 1
@@ -362,6 +434,7 @@ impl HashTable {
         self.rows.push(row);
         self.hashes.push(hash);
         self.lens.push(tlen as u32);
+        self.stored.push(stored);
         self.space_used += HJTUPLE_OVERHEAD + tlen;
         self.space_peak = self.space_peak.max(self.space_used);
         if self.space_used + self.nbuckets_optimal as i64 * 8 > self.space_allowed {
@@ -386,17 +459,23 @@ impl HashTable {
         let mut rows = std::mem::take(&mut self.rows);
         let hashes = std::mem::take(&mut self.hashes);
         let lens = std::mem::take(&mut self.lens);
+        let mut stored = std::mem::take(&mut self.stored);
         let mut freed = 0;
         for &i in &order {
             let (h, len) = (hashes[i], lens[i]);
             let row = std::mem::take(&mut rows[i]);
+            let enc = stored.get_mut(i).and_then(Option::take);
             let b = self.batch_of(h);
             if b == self.curbatch {
                 self.rows.push(row);
                 self.hashes.push(h);
                 self.lens.push(len);
+                self.stored.push(enc);
             } else {
-                self.files.save(b as usize, INNER, h, &row, len as i64, ctx)?;
+                match &enc {
+                    Some(enc) => self.files.save_raw(b as usize, INNER, h, enc, len as i64, ctx)?,
+                    None => self.files.save(b as usize, INNER, h, &row, len as i64, ctx)?,
+                }
                 self.space_used -= HJTUPLE_OVERHEAD + len as i64;
                 freed += 1;
             }
@@ -426,8 +505,11 @@ impl HashTable {
     }
 
     /// The batch's rows (the main table's, then the skew buckets') and their bucket chains
-    /// (the order of matches and of unmatched inner rows), taken out of the table.
-    pub fn take_batch(&mut self) -> (Vec<Row>, JoinTable) {
+    /// (the order of matches and of unmatched inner rows), taken out of the table, and which
+    /// rows were decoded (None: all; the others match no outer row of the batch).
+    pub fn take_batch(&mut self) -> (Vec<Row>, JoinTable, Option<Vec<bool>>) {
+        let stored = std::mem::take(&mut self.stored);
+        let mut decoded = stored.iter().any(Option::is_some).then(|| stored.iter().map(Option::is_none).collect::<Vec<bool>>());
         let seq: Vec<usize> = if self.rebucketed { chunk_walk(&self.lens) } else { (0..self.rows.len()).collect() };
         let mut table = JoinTable::flat(self.nbuckets, seq.into_iter().map(|i| (i, self.hashes[i])));
         let mut rows = std::mem::take(&mut self.rows);
@@ -440,7 +522,10 @@ impl HashTable {
             }
             table = table.with_skew(chains);
         }
-        (rows, table)
+        if let Some(d) = &mut decoded {
+            d.resize(rows.len(), true);
+        }
+        (rows, table, decoded)
     }
 
     /// An outer row of a later batch, to that batch's outer file.
@@ -487,12 +572,28 @@ impl HashTable {
         self.rows.clear();
         self.hashes.clear();
         self.lens.clear();
+        self.stored.clear();
         self.space_used = 0;
         self.rebucketed = false;
+        // A batch of a few outer rows: only the inner rows of their hash values can match,
+        // the others are kept as stored, never decoded (none is returned unmatched). The
+        // outer file's hash values are read first, its rows passed over.
+        let few = !fill_inner && self.files.rows(cur, OUTER) * 4 < self.files.rows(cur, INNER);
+        let matchable: Option<std::collections::HashSet<u32>> =
+            if few { Some(self.files.hashes(cur, OUTER, ctx)?.into_iter().collect()) } else { None };
         if let Some(mut r) = self.files.take(cur, INNER, ctx)? {
-            while let Some((h, len, row)) = r.next(&mut self.files)? {
+            let entry = |[h, len]: [u32; 2], b: &[u8]| -> Result<(u32, u32, Row, Option<Box<[u8]>>)> {
+                Ok(match &matchable {
+                    Some(m) if !m.contains(&h) => {
+                        KEPT_STORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        (h, len, Vec::new(), Some(b.into()))
+                    }
+                    _ => (h, len, crate::storage::row::decode_row(b)?, None),
+                })
+            };
+            while let Some((h, len, row, stored)) = r.next_with(&mut self.files, entry)? {
                 ctx.check()?;
-                self.insert(row, h, len as i64, ctx)?;
+                self.insert_entry(row, stored, h, len as i64, ctx)?;
             }
         }
         Ok(Some(self.files.take(cur, OUTER, ctx)?))
