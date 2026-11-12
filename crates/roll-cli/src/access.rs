@@ -119,6 +119,16 @@ pub enum Mcp {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Where approvals are also posted: a Slack or Discord channel through roll code's chat ops
+    /// (`--install chi_… --channel C…`), `--off`, or nothing to show it.
+    Notify {
+        #[arg(long, requires = "channel")]
+        install: Option<String>,
+        #[arg(long, requires = "install")]
+        channel: Option<String>,
+        #[arg(long, conflicts_with_all = ["install", "channel"])]
+        off: bool,
+    },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
         /// Only this token (tok_…).
@@ -437,6 +447,20 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
         Mcp::Deny { id, reason } => {
             let a = api.post(&format!("/v1/access/approvals/{id}/deny"), json!({ "reason": reason })).await?;
             if json_out { println!("{}", serde_json::to_string_pretty(&a)?) } else { println!("denied: {}", s(&a["summary"])) }
+        }
+        Mcp::Notify { install, channel, off } => {
+            let v = match (install, channel, off) {
+                (Some(i), Some(c), _) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": i, "channel": c.trim_start_matches('#') } }))).await?,
+                (_, _, true) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await?,
+                _ => api.get("/v1/access/notify").await?,
+            };
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else if v["chat"].is_null() {
+                println!("approvals go only to the dashboard and `roll mcp approvals`");
+            } else {
+                println!("approvals are also posted to {} in {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]));
+            }
         }
         Mcp::Audit { token, product, decision, limit } => {
             let mut q = url::form_urlencoded::Serializer::new(String::new());
