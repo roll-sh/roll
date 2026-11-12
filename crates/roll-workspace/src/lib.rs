@@ -214,9 +214,9 @@ impl Workspace {
         })
     }
 
-    /// The project a resource is in, if any (`kind` as stored: `postgres`, `repo`, …).
-    pub fn project_of(&self, kind: &str, r#ref: &str) -> Result<Option<String>> {
-        Ok(self.db.read(|c| c.query_row("SELECT project_id FROM resources WHERE kind = ? AND ref = ?", [kind, r#ref], |r| r.get(0)).optional())?)
+    /// The projects a resource is in (`kind` as stored: `postgres`, `repo`, …).
+    pub fn projects_of(&self, kind: &str, r#ref: &str) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT project_id FROM resources WHERE kind = ? AND ref = ? ORDER BY project_id", [kind, r#ref], |r| r.get(0)))?)
     }
 
     /// Remove a project and its membership rows (never the resources themselves).

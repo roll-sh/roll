@@ -197,7 +197,7 @@ async fn escalation_paths_are_shut() {
     let (scoped, _) = d.token(json!([{ "product": "*", "resources": [{ "project": a.id }], "actions": { "read": "allow", "write": "allow" } }]), json!({})).await;
     let pull = format!("/v1/workspace/projects/{}/resources/postgres/pb", a.id);
     assert_eq!(d.call(&scoped, Method::PUT, &pull, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::FORBIDDEN, "pulled pb into its project");
-    assert_eq!(d.workspace.project_of("postgres", "pb").unwrap(), None);
+    assert!(d.workspace.projects_of("postgres", "pb").unwrap().is_empty());
     // With admin on Postgres everywhere it may move it.
     let (admin, _) = d
         .token(json!([{ "product": "*", "resources": [{ "project": a.id }], "actions": { "write": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "admin": "allow" } }]), json!({}))
@@ -307,7 +307,7 @@ async fn a_token_never_makes_a_stronger_one() {
     assert_eq!(d.call(&scoped, Method::POST, "/v1/projects", Some(json!({ "name": "x" }))).await.0, StatusCode::FORBIDDEN);
     let (s, made) = d.send(&scoped, Method::POST, "/v1/projects", Some(json!({ "name": "x" })), &[("x-roll-project", &project.id)]).await;
     assert_eq!((s, made["password"].as_str()), (StatusCode::CREATED, Some("[redacted]")));
-    assert_eq!(d.workspace.project_of("postgres", "pnew").unwrap().as_deref(), Some(project.id.as_str()));
+    assert_eq!(d.workspace.projects_of("postgres", "pnew").unwrap(), vec![project.id.clone()]);
 }
 
 /// An MCP client connects with OAuth: it registers, the operator consents (narrowing what it

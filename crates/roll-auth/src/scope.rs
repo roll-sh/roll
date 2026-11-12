@@ -146,6 +146,9 @@ pub struct Resource {
     pub id: Option<String>,
     /// The workspace project it's in, at the time of the request.
     pub project: Option<String>,
+    /// Other workspace projects it's in too (each user places resources in their own projects).
+    /// Build a `Resource` with `..Default::default()` so fields like this one can be added.
+    pub also_in: Vec<String>,
     pub environment: Option<String>,
     pub path: Option<String>,
 }
@@ -213,7 +216,7 @@ impl Rule {
                     Resources::All => true,
                     Resources::Some(sel) => sel.iter().any(|s| match s {
                         Selector::Id { id } => r.id.as_deref() == Some(id),
-                        Selector::Project { project } => r.project.as_deref() == Some(project),
+                        Selector::Project { project } => r.project.as_deref() == Some(project) || r.also_in.contains(project),
                     }),
                 };
                 resource && self.environment_matches(r.environment.as_deref()) && self.path_matches(r.path.as_deref())

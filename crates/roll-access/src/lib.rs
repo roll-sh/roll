@@ -136,10 +136,10 @@ pub trait Resolver: Send + Sync + 'static {
         let _ = (kind, id);
         None
     }
-    /// The workspace project a resource of this workspace kind is in.
-    fn project_of(&self, workspace_kind: &str, r#ref: &str) -> Option<String> {
+    /// The workspace projects a resource of this workspace kind is in.
+    fn projects_of(&self, workspace_kind: &str, r#ref: &str) -> Vec<String> {
         let _ = (workspace_kind, r#ref);
-        None
+        Vec::new()
     }
     /// Put a newly created resource in a workspace project.
     fn place(&self, project: &str, workspace_kind: &str, r#ref: &str) -> Result<()> {
@@ -159,8 +159,8 @@ pub struct Resolved {
 pub struct WorkspaceResolver(pub Arc<roll_workspace::Workspace>);
 
 impl Resolver for WorkspaceResolver {
-    fn project_of(&self, workspace_kind: &str, r#ref: &str) -> Option<String> {
-        self.0.project_of(workspace_kind, r#ref).ok().flatten()
+    fn projects_of(&self, workspace_kind: &str, r#ref: &str) -> Vec<String> {
+        self.0.projects_of(workspace_kind, r#ref).unwrap_or_default()
     }
 
     fn place(&self, project: &str, workspace_kind: &str, r#ref: &str) -> Result<()> {
@@ -181,8 +181,8 @@ impl Resolvers {
         self.by_kind.get(kind)?.resolve(kind, id)
     }
 
-    pub fn project_of(&self, workspace_kind: &str, r#ref: &str) -> Option<String> {
-        self.workspace.as_ref()?.project_of(workspace_kind, r#ref)
+    pub fn projects_of(&self, workspace_kind: &str, r#ref: &str) -> Vec<String> {
+        self.workspace.as_ref().map(|w| w.projects_of(workspace_kind, r#ref)).unwrap_or_default()
     }
 }
 
@@ -208,8 +208,9 @@ impl Access {
         let id = resolved.as_ref().map_or_else(|| id.to_string(), |r| r.id.clone());
         // A workspace project (kind `project`) is in itself, and so is what a product keeps per
         // workspace project (secrets' environments, previews' settings): their routes name it.
-        let project = if kind == "project" { Some(id.clone()) } else { catalog::workspace_kind(product).and_then(|wk| self.resolvers.project_of(wk, &id)) };
-        Resource { product: product.into(), id: Some(id), project, environment: resolved.and_then(|r| r.environment), path: None }
+        let mut projects = if kind == "project" { vec![id.clone()] } else { catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default() };
+        let project = (!projects.is_empty()).then(|| projects.remove(0));
+        Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), path: None }
     }
 }
 
