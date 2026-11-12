@@ -6485,7 +6485,6 @@ dependencies = [
  "s3-server",
  "s3-store",
  "search-control",
- "search-proxy",
  "search-server",
  "search-store",
  "serde_json",
@@ -7154,27 +7153,27 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "code-sql",
+ "futures",
  "futures-util",
  "getrandom 0.4.3",
  "http-body-util",
- "hyper 1.12.0",
- "hyper-util",
  "parking_lot",
  "reqwest",
+ "roll-cluster",
  "rusqlite",
  "search-es",
  "search-index",
- "search-proxy",
  "search-server",
  "search-store",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
- "tokio-postgres",
- "tokio-rustls 0.26.6",
  "tower-http 0.7.1",
  "tracing",
+ "urlencoding",
 ]
 
 [[package]]
@@ -7247,38 +7246,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "search-proxy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "clap",
- "futures-util",
- "hex",
- "hmac 0.12.1",
- "http-body-util",
- "hyper 1.12.0",
- "hyper-util",
- "mimalloc",
- "parking_lot",
- "rcgen",
- "reqwest",
- "rusqlite",
- "rustls-native-certs",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
- "tokio-rustls 0.26.6",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "search-server"
 version = "0.1.0"
 dependencies = [
@@ -7298,8 +7265,6 @@ dependencies = [
  "parking_lot",
  "rcgen",
  "reqwest",
- "rusqlite",
- "rustls-native-certs",
  "search-codec",
  "search-es",
  "search-index",
@@ -7308,8 +7273,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
  "tokio-rustls 0.26.6",
  "tracing",
  "tracing-subscriber",

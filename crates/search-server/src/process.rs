@@ -83,10 +83,11 @@ static GOVERNOR_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// parked after a long idle stretch; costs one atomic load when it is running.
 pub fn note_activity() {
     use std::sync::atomic::Ordering;
-    if GOVERNOR_PARKED.load(Ordering::Relaxed) && GOVERNOR_PARKED.swap(false, Ordering::AcqRel) {
-        if let Some(t) = PARKED_GOVERNOR.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            t.unpark();
-        }
+    if GOVERNOR_PARKED.load(Ordering::Relaxed)
+        && GOVERNOR_PARKED.swap(false, Ordering::AcqRel)
+        && let Some(t) = PARKED_GOVERNOR.lock().unwrap_or_else(|e| e.into_inner()).take()
+    {
+        t.unpark();
     }
 }
 
@@ -190,8 +191,8 @@ mod tests {
         while !super::GOVERNOR_PARKED.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        assert!(!woke.load(Ordering::Acquire), "parked until activity");
+        // (Other tests in this process serve requests, which note activity too: whether it
+        // stays parked meanwhile isn't something this test can see.)
         super::note_activity();
         t.join().unwrap();
         assert!(woke.load(Ordering::Acquire));

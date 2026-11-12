@@ -184,7 +184,9 @@ async fn head_is_never_gzipped() {
     assert_eq!(zipped.header("content-encoding"), Some("gzip"));
     let mut text = Vec::new();
     flate2::read::GzDecoder::new(&zipped.body[..]).read_to_end(&mut text).unwrap();
-    assert_eq!(text.len(), plain.body.len());
+    // The same answer (`took` may differ by a digit).
+    let hits = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap()["hits"].clone();
+    assert_eq!(hits(&text), hits(&plain.body));
 }
 
 /// A node whose one cluster `dev` has a 1000-byte in-flight body budget.

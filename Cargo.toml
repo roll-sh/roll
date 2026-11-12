@@ -253,7 +253,6 @@ search-store = { path = "crates/search-store" }
 search-es = { path = "crates/search-es" }
 search-server = { path = "crates/search-server" }
 search-control = { path = "crates/search-control" }
-search-proxy = { path = "crates/search-proxy" }
 search-yaml = { path = "crates/search-yaml" }
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.

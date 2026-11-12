@@ -58,6 +58,7 @@ fn start(home: &std::path::Path, env: &[(&str, &str)]) -> (Rolld, u16) {
         "ROLL_QUEUES_WEB_MQTT",
         "ROLL_QUEUES_STREAM",
         "ROLL_QUEUES_HTTP",
+        "ROLL_SEARCH_HTTP",
     ] {
         cmd.env(var, local(free_port()));
     }
@@ -99,11 +100,11 @@ impl Rolld {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_product_but_postgres_runs_without_docker() {
     let home = tempfile::tempdir().unwrap();
-    let (mut rolld, proxy) = start(home.path(), &[("ROLL_PRODUCTS", "redis,streams,tasks,storage,nosql,queues,code")]);
+    let (mut rolld, proxy) = start(home.path(), &[("ROLL_PRODUCTS", "redis,streams,tasks,storage,nosql,queues,code,search")]);
     let http = reqwest::Client::new();
     let info = rolld.info(&http).await;
-    assert_eq!(info["products"], serde_json::json!(["redis", "streams", "tasks", "storage", "nosql", "queues", "code"]));
-    for path in ["/v1/redis", "/v1/kafka", "/v1/tasks/queues", "/v1/storage", "/v1/nosql", "/v1/queues/overview", "/v1/code"] {
+    assert_eq!(info["products"], serde_json::json!(["redis", "streams", "tasks", "storage", "nosql", "queues", "code", "search"]));
+    for path in ["/v1/redis", "/v1/kafka", "/v1/tasks/queues", "/v1/storage", "/v1/nosql", "/v1/queues/overview", "/v1/code", "/v1/search"] {
         let (status, body) = rolld.get(&http, path).await;
         assert_eq!(status, 200, "{path}: {body}");
     }

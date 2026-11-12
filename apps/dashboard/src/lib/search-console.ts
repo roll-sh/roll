@@ -2,8 +2,7 @@
  * Completion for the search console (Kibana Dev Tools syntax: `METHOD /path` on the first line,
  * the JSON body below).
  *
- * Everything here is pure and dependency-free (no `@/` imports), so `node --test` runs its tests
- * straight from the TypeScript source (`search-console.test.mjs`).
+ * Everything here is pure (tests: `search-console.test.ts`).
  *
  * - On the first line it completes the method, then the path one segment at a time: index names
  *   and top-level APIs first, then the APIs under an index or under `_cat`, `_cluster`, ….

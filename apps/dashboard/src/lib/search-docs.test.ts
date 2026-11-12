@@ -1,7 +1,7 @@
-// Tests of the index browser's document helpers (`node --test`).
+// Tests of the index browser's document helpers (vitest).
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs.ts";
+import { test } from "vitest";
+import { cellText, columnsOf, deleteRequest, flatten, formatJson, hitSources, jsonSpans, parseDocument, sourceCells, tableColumns, writeRequest } from "./search-docs";
 
 test("flatten", () => {
   assert.deepEqual([...flatten({ a: 1, u: { name: "x", geo: { lat: 1 } }, tags: ["a", "b"], e: {}, n: null })], [

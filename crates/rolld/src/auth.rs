@@ -145,6 +145,7 @@ fn listeners(a: &Args) -> Vec<SocketAddr> {
     l.extend([q.amqp, q.management, q.stomp, q.web_stomp, q.mqtt, q.web_mqtt, q.stream, q.http]);
     l.extend([n.nosql_cql, n.nosql_cql_shard_aware, n.nosql_alternator, n.nosql_rest]);
     l.extend([n.nosql_alternator_https, n.nosql_cql_tls, n.nosql_cql_shard_aware_tls, n.nosql_metrics].into_iter().flatten());
+    l.push(a.search.search_http);
     l
 }
 

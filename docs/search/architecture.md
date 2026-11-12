@@ -58,7 +58,6 @@ branch instantly and keep their data on object storage.
 | `search-es`       | Elasticsearch semantics: mappings, settings, index templates, aliases, the Query DSL, the document and search APIs, `_cat`, cluster and node APIs, errors with Elasticsearch's types and texts |
 | `search-server`   | the node: HTTP listener, tenants (clusters), authentication, wake-on-request, idle unload, request limits, TLS |
 | `search-control`  | the roll API (`/v1/search/...`) for the dashboard and CLI: clusters, credentials, branches, usage, metering and pricing |
-| `search-proxy`    | the front proxy on AWS: routes requests to the node owning a cluster, wakes the fleet |
 | `search-yaml`     | a runner for Elasticsearch's YAML REST test format, usable against any URL (roll or a real Elasticsearch) |
 | `rolld`           | runs everything on one node (`crates/rolld/src/search.rs`) |
 
@@ -155,44 +154,41 @@ cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
 request-rate and in-flight byte budgets so one tenant can't starve the node.
 
-## On AWS
+## On the fleet (roll cloud)
 
-Same shape as roll tasks and roll queues (`deploy/aws`, `deploy/queues/aws`): one image,
-a CloudFormation stack (`deploy/search/aws/roll-search.yaml`), arm64 Graviton, Spot where it is
-safe, no NAT (S3 gateway endpoint). How to deploy it: [deploy-aws.md](deploy-aws.md).
+Search runs on the same rolld fleet as every other product (docs/cloud/README.md): no image,
+stack, proxy or metadata database of its own. On one node (the memory backend) nothing below
+applies: every cluster is this node's.
 
-```
- clients ──► NLB (TLS) or Lambda function URL
-               │
-               ▼
- search-proxy (Fargate arm64, ¼ vCPU, per AZ) ── routes each request to the node that owns its
-               │                                cluster; holds it and wakes the fleet if none run
-               ▼
- search nodes: rolld --search-only (ECS on Graviton, on-demand base + Spot) ×N
-   │ ownership leases, cluster catalog                │ WAL group commits, segments, manifests
-   ▼                                                  ▼
- Postgres (roll postgres / RDS) or S3 leases     S3 Standard (+ S3 Express One Zone for the WAL)
-```
-
-- **Nodes are stateless.** Local disk is only a cache. A cluster is owned by one node at a time
-  through a lease with an epoch (compare-and-set in the metadata store); the epoch is written into
-  every WAL batch and manifest, so a deposed owner can't commit. Owners are picked by rendezvous
-  hashing over live nodes, preferring the client's AZ.
-- **Acks on ephemeral disks.** On AWS, writes are acknowledged once the WAL batch is in object
-  storage (`--search-sync-objects`): S3 Express One Zone when configured (single-digit ms), S3
-  Standard otherwise. Batches are shared by every cluster on the node, so request costs follow
-  nodes and traffic, not tenants.
-- **Failover and deploys.** A node that stops heartbeating loses its leases; the next owner opens
-  the cluster from its manifests and replays the WAL after them. SIGTERM (deploy, Spot reclaim)
-  flushes and hands clusters over before exit, and the proxy retries in-flight requests.
-- **TLS on every hop** without a CA: nodes make a certificate at boot and publish its SHA-256 in
-  their fleet record, and proxies (and nodes calling each other's control API) accept only that
-  one; the function URL pins the proxies' certificate, which both derive from a stack secret.
-- **Zero idle.** Clusters unload after `IdleClusterSeconds`. The node fleet scales on CPU down to
-  `MinNodes`, which may be 0: with no node running, the proxy holds the first request, starts a
-  node (ECS `UpdateService`) and forwards once it heartbeats, as `mq-proxy` does.
-- **Metering** per cluster: requests, stored GB-months, loaded GB-hours; the dashboard compares
-  the cost with Elastic Cloud and Amazon OpenSearch Service for the same workload.
+- **Ownership**: a cluster is served by the holder of the lease `search:cluster:<id>`, taken from
+  rolld's roll-cluster handle. A cluster is loaded only under a guard of that lease and unloaded
+  when the guard's tenure ends (a handoff, a drain, the lease lost). An owner gives an idle
+  cluster's lease up (`Cluster::release_if_idle`) once it has unloaded, so a sleeping cluster
+  belongs to nobody and costs no node anything.
+- **Requests**: the Elasticsearch REST listener and the edge's `<cluster>.search.<region>.<domain>`
+  read only which cluster a request names (`Host`, the Basic or ApiKey user, the Bearer token's
+  prefix), never its credentials, and run it on the owner: here, or forwarded with
+  `Cluster::dispatch` to the owner's `/internal/search/rest/…`, signed, bodies streamed. The owner
+  authenticates. `/v1/search/clusters/{id}/…` routes that touch a cluster's data run on its owner
+  the same way.
+- **Fencing is in object storage, not in the lease.** Leases are about where a cluster runs. When a
+  node loads a cluster it writes an ownership marker `search/c/<cluster>/owner/<epoch>` with
+  `epoch = 1 + the highest marker present` (only the lease holder does this, so two nodes never
+  pick the same epoch); every manifest, cluster state and WAL batch carries the epoch, and a node
+  whose epoch is below the newest marker gets `Fenced` and stops acknowledging. roll-cluster's own
+  epochs aren't used: they restart at 1 after `release_if_idle` deletes the lease row.
+- **Acknowledgements** wait for the WAL batch in object storage (`--search-sync-objects`, on by
+  default on a fleet) and for a valid guard (`Guard::is_valid`) at the moment of the ack.
+- **Catalog**: the shared system database (`ROLL_SYSTEM_DATABASE`, schema `search`), through
+  `code-sql` like the other products' catalogs; `search.db` (SQLite) on one node.
+- **Background work** on owners: metering of loaded clusters; garbage collection of unreferenced
+  objects on one node (`singleton:search-gc`); always-on clusters taken by the node they're placed
+  on.
+- **Drains** (SIGTERM, deploys, Spot): roll-cluster hands every lease off; each cluster flushes and
+  unloads as its guard ends, and the next request loads it on its new owner from its manifests and
+  the WAL after them.
+- **Metering** per cluster: loaded GB-hours, requests, stored GB-months; the dashboard compares the
+  cost with Elastic Cloud and Amazon OpenSearch Service for the same workload.
 
 ## Testing
 

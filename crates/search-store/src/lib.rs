@@ -579,6 +579,20 @@ impl Store {
         Ok(())
     }
 
+    /// Claim `cluster` under an epoch one past the newest ownership marker (1 for a cluster
+    /// never claimed), and write from now on under it: for owners chosen by a lease whose own
+    /// epochs can start over (roll-cluster's). Only the lease's holder may call it, so two
+    /// nodes never pick the same epoch; an older owner then finds this marker and is fenced, as
+    /// with [`Store::claim_cluster`]. Returns the epoch.
+    pub async fn claim_next(&self, cluster: &str) -> anyhow::Result<u64> {
+        keys::validate_cluster(cluster)?;
+        let top = self.owner_markers(cluster).await?.last().copied().unwrap_or(0);
+        let epoch = top.max(self.epoch(cluster)) + 1;
+        self.set_epoch(cluster, epoch);
+        self.claim_cluster(cluster).await?;
+        Ok(epoch)
+    }
+
     /// Whether this node still owns `cluster`: fails with [`Fenced`] (and fences the cluster's
     /// WAL appends) once a newer owner has claimed it ([`Store::claim_cluster`]). One listing of
     /// the cluster's ownership markers; a no-op without an epoch.

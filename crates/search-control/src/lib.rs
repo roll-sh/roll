@@ -15,11 +15,12 @@
 //! ```
 
 pub mod api;
+pub mod cluster;
 pub mod control;
 pub mod meter;
 pub mod pricing;
 pub mod store;
 mod wake;
 
-pub use control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, Fleet, FleetConfig, SearchConfig, SqlCatalog};
+pub use control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Defaults, SearchConfig, SqlCatalog};
 pub use pricing::{Cost, Pricing};

@@ -6,16 +6,9 @@
 //! responses that create it (create, branch) or change it (rotate). Creating a cluster answers
 //! in the shape `search-yaml run --cluster-hook` expects (`url`, `username`, `password`, `id`).
 //!
-//! With [`crate::SearchConfig::api_token`] every route wants `Authorization: Bearer <token>`
-//! (compared in constant time); without one the API is open, like rolld's local API. In a fleet,
-//! calls about a cluster another node holds (console requests, indices, unload, branching it)
-//! are forwarded to that node's API, once (`x-roll-search-forwarded`), over TLS pinned by the
-//! node's record when it serves its API with TLS.
-//!
-//! [`TlsListener`] serves the API over TLS (fleet nodes behind search-proxy, whose own API
-//! port carries nothing else): handshakes run on their own tasks, so a slow or silent client
-//! never holds up accepting the next connection. During a rolling upgrade from a fleet before
-//! `api_tls` it also answers the old nodes' plain HTTP calls, until none of them is left.
+//! rolld puts the API behind its operator gate (roll-auth), like every product's. On a fleet,
+//! calls about one cluster run on its owner (`crate::cluster::on_owner`), and so does creating a
+//! branch (on its parent's owner).
 
 use crate::control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Usage};
 use crate::store::SearchCluster;
@@ -51,7 +44,6 @@ impl IntoResponse for ControlError {
 }
 
 pub fn router(control: Arc<Control>) -> Router {
-    let authed = control.clone();
     Router::new()
         .route("/v1/search", get(info))
         .route("/v1/search/clusters", get(list).post(create))
@@ -62,243 +54,37 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
-        .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
-            let c = authed.clone();
-            async move { authorize(&c, req, next).await }
+        .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
+        .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping))
+        .route("/v1/search/clusters/{id}/indices/{index}/search", post(index_search))
+        .route("/v1/search/clusters/{id}/indices/{index}/docs", post(doc_create))
+        .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
+        .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
+        .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
+        // On a fleet, calls about one cluster run on its owner.
+        .layer(axum::middleware::from_fn({
+            let c = control.clone();
+            move |req: Request, next: Next| crate::cluster::on_owner(c.clone(), req, next)
         }))
         // The dashboard calls it from the browser, like the other control planes.
         .layer(CorsLayer::permissive())
         .with_state(control)
 }
 
-/// Constant-time byte comparison (the length is not secret).
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-async fn authorize(c: &Control, req: Request, next: Next) -> Response {
-    let Some(token) = c.cfg.api_token.as_deref().filter(|t| !t.is_empty()) else { return next.run(req).await };
-    // Browsers send CORS preflights without credentials.
-    if req.method() == Method::OPTIONS {
-        return next.run(req).await;
-    }
-    let presented = req.headers().get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::trim);
-    match presented {
-        Some(p) if ct_eq(p.as_bytes(), token.as_bytes()) => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, [(axum::http::header::WWW_AUTHENTICATE, "Bearer")], Json(json!({ "error": "missing or wrong API token" }))).into_response(),
-    }
-}
-
-/// How long a forwarded call may take, answer included (a console request runs a search).
-const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// Forwards an API call to the node holding `name`, when that is another node of the fleet.
+/// Forwards an API call to the owner of cluster `name` when that is another node of the fleet
+/// (`None`: run it here).
 async fn forward(c: &Control, name: &str, method: Method, path: &str, headers: &HeaderMap, body: bytes::Bytes) -> Option<Response> {
-    if headers.contains_key(crate::control::FORWARDED_HEADER) {
-        return None;
-    }
-    let base = c.owner_api(name).await?;
-    let http = c.forwarder()?;
-    let mut r = axum::http::Request::builder().method(method).uri(format!("{base}{path}")).header(crate::control::FORWARDED_HEADER, "1");
+    let cluster = c.cluster_leases()?.cluster().clone();
+    let node = match cluster.route_async(&crate::cluster::key(name)).await {
+        Ok(roll_cluster::Route::Forward(n)) => n,
+        _ => return None,
+    };
+    let mut r = axum::http::Request::builder().method(method).uri(path);
     for (k, v) in headers {
-        if matches!(k.as_str(), "authorization" | "content-type" | "accept") {
-            r = r.header(k, v);
-        }
+        r = r.header(k, v);
     }
-    let failed = |e: String| ControlError::Internal(anyhow::anyhow!("forwarding to the cluster's node failed: {e}")).into_response();
-    let req = match r.body(http_body_util::Full::new(body)) {
-        Ok(r) => r,
-        Err(e) => return Some(failed(e.to_string())),
-    };
-    let call = async {
-        use http_body_util::BodyExt;
-        let resp = http.request(req).await.map_err(|e| format!("{e:?}"))?;
-        let (parts, body) = resp.into_parts();
-        let bytes = body.collect().await.map_err(|e| e.to_string())?.to_bytes();
-        Ok::<_, String>((parts, bytes))
-    };
-    Some(match tokio::time::timeout(FORWARD_TIMEOUT, call).await {
-        Ok(Ok((parts, bytes))) => {
-            let ct = parts.headers.get("content-type").cloned().unwrap_or_else(|| axum::http::HeaderValue::from_static("application/json"));
-            (parts.status, [(axum::http::header::CONTENT_TYPE, ct)], bytes).into_response()
-        }
-        Ok(Err(e)) => failed(e),
-        Err(_) => failed("timed out".into()),
-    })
-}
-
-/// A TLS listener for [`axum::serve`]: accepts TCP connections and completes each handshake
-/// on its own task (10 s at most), handing out only connections that finished it.
-///
-/// [`TlsListener::for_fleet`] also serves plain HTTP while the node's fleet still has a node
-/// that calls other nodes' APIs without TLS (one from before `api_tls`, during the deploy that
-/// replaces it), told apart by the first byte (a TLS record starts with 0x16, an HTTP request
-/// with a letter). That window is no weaker than the fleet it upgrades: those nodes already
-/// send their calls, and the API token, in plain HTTP. Once none is left, plain connections
-/// are closed unanswered again.
-pub struct TlsListener {
-    rx: tokio::sync::mpsc::Receiver<(ApiStream, std::net::SocketAddr)>,
-    local: std::net::SocketAddr,
-    accepting: tokio::task::JoinHandle<()>,
-}
-
-/// Handshakes finished but not yet served; past it new handshakes wait.
-const TLS_BACKLOG: usize = 256;
-
-/// The first byte of a TLS record carrying a handshake (a ClientHello).
-const TLS_HANDSHAKE: u8 = 0x16;
-
-impl TlsListener {
-    pub fn new(listener: tokio::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor) -> std::io::Result<TlsListener> {
-        Self::start(listener, acceptor, None)
-    }
-
-    /// [`TlsListener::new`], plus plain HTTP while `control`'s fleet has a node that calls APIs
-    /// in plain HTTP ([`Control::plain_api_callers`]).
-    pub fn for_fleet(listener: tokio::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor, control: Arc<Control>) -> std::io::Result<TlsListener> {
-        Self::start(listener, acceptor, Some(control))
-    }
-
-    fn start(listener: tokio::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor, plain: Option<Arc<Control>>) -> std::io::Result<TlsListener> {
-        let local = listener.local_addr()?;
-        let (tx, rx) = tokio::sync::mpsc::channel(TLS_BACKLOG);
-        // The control is held weakly: the listener must not keep a stopped node alive.
-        let plain = plain.map(|c| Arc::downgrade(&c));
-        let accepting = tokio::spawn(async move {
-            loop {
-                let (tcp, peer) = match listener.accept().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        // Out of file descriptors and the like: back off rather than spin.
-                        tracing::warn!(error = %e, "accepting a search API connection failed");
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        continue;
-                    }
-                };
-                if tx.is_closed() {
-                    return;
-                }
-                let _ = tcp.set_nodelay(true);
-                let (acceptor, tx, plain) = (acceptor.clone(), tx.clone(), plain.clone());
-                tokio::spawn(async move {
-                    let opened = async {
-                        if let Some(plain) = plain {
-                            let mut first = [0u8; 1];
-                            if tcp.peek(&mut first).await? == 0 {
-                                return Ok(None);
-                            }
-                            if first[0] != TLS_HANDSHAKE {
-                                let allowed = match plain.upgrade() {
-                                    Some(c) => c.plain_api_callers().await,
-                                    None => false,
-                                };
-                                if !allowed {
-                                    tracing::debug!(%peer, "plain HTTP on the TLS search API refused");
-                                    return Ok(None);
-                                }
-                                return Ok(Some(ApiStream::Plain(tcp)));
-                            }
-                        }
-                        acceptor.accept(tcp).await.map(|tls| Some(ApiStream::Tls(Box::new(tls))))
-                    };
-                    match tokio::time::timeout(std::time::Duration::from_secs(10), opened).await {
-                        Ok(Ok(Some(io))) => {
-                            let _ = tx.send((io, peer)).await;
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(e)) => tracing::debug!(%peer, error = %e, "search API TLS handshake failed"),
-                        Err(_) => tracing::debug!(%peer, "search API TLS handshake timed out"),
-                    }
-                });
-            }
-        });
-        Ok(TlsListener { rx, local, accepting })
-    }
-}
-
-/// A connection [`TlsListener`] hands out: TLS, or plain HTTP from a node of an older release.
-pub enum ApiStream {
-    Tls(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
-    Plain(tokio::net::TcpStream),
-}
-
-impl ApiStream {
-    pub fn is_tls(&self) -> bool {
-        matches!(self, ApiStream::Tls(_))
-    }
-}
-
-impl tokio::io::AsyncRead for ApiStream {
-    fn poll_read(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
-            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl tokio::io::AsyncWrite for ApiStream {
-    fn poll_write(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
-            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_write_vectored(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write_vectored(cx, bufs),
-            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_write_vectored(cx, bufs),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        match self {
-            ApiStream::Tls(s) => s.is_write_vectored(),
-            ApiStream::Plain(s) => s.is_write_vectored(),
-        }
-    }
-
-    fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
-            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
-            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
-
-impl Drop for TlsListener {
-    fn drop(&mut self) {
-        self.accepting.abort();
-    }
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = ApiStream;
-    type Addr = std::net::SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        match self.rx.recv().await {
-            Some(c) => c,
-            // The accept loop only ends when this listener is dropped.
-            None => std::future::pending().await,
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        Ok(self.local)
-    }
+    let req = r.body(Body::from(body)).ok()?;
+    Some(cluster.forward(&node, req, 0).await)
 }
 
 async fn info(State(c): State<AppState>) -> Json<Value> {
@@ -544,6 +330,91 @@ pub fn console_limit(max_body_mb: i64) -> usize {
     ((max_body_mb.max(1) as usize) << 21).saturating_add(1 << 20)
 }
 
+// --- per index: one route per Elasticsearch operation, so the cluster and index are in the
+// path (roll's permission catalogue classifies requests by route and method). Each answers
+// with Elasticsearch's own status and body; query strings (`refresh`, `routing`, `size`, …)
+// pass through.
+
+/// What a per-index route sends: Elasticsearch's method and path under the index, and the
+/// kind of body it takes.
+#[derive(Clone, Copy, PartialEq)]
+enum EsBody {
+    None,
+    Json,
+    Ndjson,
+}
+
+/// An index (or, for reads, an index expression: `logs-*`, `a,b`) as a path segment.
+fn index_segment(index: &str, read: bool) -> Result<String, ControlError> {
+    let bad = index.is_empty() || index.starts_with('_') || index.contains('/') || (!read && (index.contains(',') || index.contains('*')));
+    if bad {
+        return Err(ControlError::Invalid(format!("invalid index name [{index}]")));
+    }
+    Ok(urlencoding::encode(index).into_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_method: &str, es_path: String, query: Option<&str>, headers: &HeaderMap, body: Body, kind: EsBody) -> Result<Response, ControlError> {
+    let cluster = c.get(id).await?;
+    let bytes = match kind {
+        EsBody::None => bytes::Bytes::new(),
+        _ => read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20).await.map_err(|e| match e {
+            Some(e) => ControlError::Invalid(format!("reading the request failed: {e}")),
+            None => ControlError::TooLarge(format!("the request is larger than cluster {}'s body limit allows ({} MiB, max_body_mb)", cluster.name, cluster.max_body_mb)),
+        })?,
+    };
+    if kind == EsBody::Json && !bytes.is_empty() && serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_err() {
+        return Err(ControlError::Invalid("the body isn't JSON".into()));
+    }
+    let q = query.map(|q| format!("?{q}")).unwrap_or_default();
+    if let Some(resp) = forward(c, &cluster.name, method, &format!("{api_path}{q}"), headers, bytes.clone()).await {
+        return Ok(resp);
+    }
+    let ct = match kind {
+        EsBody::Ndjson => Some("application/x-ndjson"),
+        _ => Some("application/json"),
+    };
+    let (status, ct, body) = c.es(&cluster.id, es_method, &format!("{es_path}{q}"), ct, bytes).await?;
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    Ok((status, [(axum::http::header::CONTENT_TYPE, ct)], body).into_response())
+}
+
+fn api_index_path(id: &str, index: &str, rest: &str) -> String {
+    format!("/v1/search/clusters/{}/indices/{}{rest}", urlencoding::encode(id), urlencoding::encode(index))
+}
+
+macro_rules! index_route {
+    ($name:ident, $es_method:literal, $rest:literal, $es_rest:literal, $read:expr, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let seg = index_segment(&index, $read)?;
+            es_route(&c, &id, method, api_index_path(&id, &index, $rest), $es_method, format!("/{seg}{}", $es_rest), uri.query(), &headers, body, $kind).await
+        }
+    };
+}
+
+index_route!(index_get, "GET", "", "", true, EsBody::None);
+index_route!(index_create, "PUT", "", "", false, EsBody::Json);
+index_route!(index_delete, "DELETE", "", "", false, EsBody::None);
+index_route!(index_mapping, "PUT", "/mapping", "/_mapping", false, EsBody::Json);
+index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
+index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
+index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
+index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_query", true, EsBody::Json);
+
+macro_rules! doc_route {
+    ($name:ident, $es_method:literal, $kind:expr) => {
+        async fn $name(State(c): State<AppState>, Path((id, index, doc)): Path<(String, String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+            let seg = index_segment(&index, false)?;
+            let d = urlencoding::encode(&doc).into_owned();
+            es_route(&c, &id, method, api_index_path(&id, &index, &format!("/docs/{d}")), $es_method, format!("/{seg}/_doc/{d}"), uri.query(), &headers, body, $kind).await
+        }
+    };
+}
+
+doc_route!(doc_get, "GET", EsBody::None);
+doc_route!(doc_put, "PUT", EsBody::Json);
+doc_route!(doc_delete, "DELETE", EsBody::None);
+
 #[derive(Deserialize)]
 struct UsageQuery {
     days: Option<i64>,
@@ -587,31 +458,4 @@ mod tests {
         assert!(sent.load(Ordering::SeqCst) < n);
     }
 
-    /// The API over [`TlsListener`]: a client that connects and never says anything doesn't
-    /// stop the next one, which is served over TLS pinned to the listener's certificate.
-    #[tokio::test]
-    async fn tls_listener_serves_while_a_handshake_stalls() {
-        use http_body_util::BodyExt;
-        let cert = search_proxy::upstream::self_signed(&[]).unwrap();
-        let acceptor = search_server::net::tls_acceptor(cert.cert_pem.as_bytes(), cert.key_pem.as_bytes()).unwrap();
-        let l = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let addr = l.local_addr().unwrap();
-        let tls = TlsListener::new(l, acceptor).unwrap();
-        assert_eq!(axum::serve::Listener::local_addr(&tls).unwrap(), addr);
-        let app = Router::new().route("/v1/search", get(|| async { "ok" }));
-        tokio::spawn(async move { axum::serve(tls, app).await });
-        let _silent = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let pins = Arc::new(search_proxy::upstream::Pins::default());
-        pins.replace(std::collections::HashMap::from([(addr, search_proxy::upstream::parse_pin(&cert.fingerprint).unwrap())]));
-        let conn = search_proxy::upstream::Connector::new(hyper_util::client::legacy::connect::HttpConnector::new(), pins, std::time::Duration::from_secs(5));
-        let client: crate::control::Forwarder = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build(conn);
-        let req = axum::http::Request::get(format!("https://{addr}/v1/search")).body(http_body_util::Full::new(bytes::Bytes::new())).unwrap();
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), client.request(req)).await.unwrap().unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(resp.into_body().collect().await.unwrap().to_bytes(), "ok");
-        // Plain HTTP gets no answer from it.
-        let plain = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<http_body_util::Full<bytes::Bytes>>();
-        let req = axum::http::Request::get(format!("http://{addr}/v1/search")).body(http_body_util::Full::new(bytes::Bytes::new())).unwrap();
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), plain.request(req)).await.unwrap().is_err());
-    }
 }

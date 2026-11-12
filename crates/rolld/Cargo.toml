@@ -53,7 +53,6 @@ s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
 search-control.workspace = true
-search-proxy.workspace = true
 search-server.workspace = true
 search-store.workspace = true
 serde_json.workspace = true

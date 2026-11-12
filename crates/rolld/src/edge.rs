@@ -207,6 +207,14 @@ impl Public {
         cfg.advertised_port = self.kafka_port;
     }
 
+    /// search: `https://<cluster>.search.<region>.<domain>` (the `Host` label names the
+    /// cluster; any user's credentials work at the cluster's own host).
+    pub fn search(&self, cfg: &mut search_control::SearchConfig) {
+        let domain = self.hosts.product_domain("search");
+        cfg.public_url = Some(format!("https://{domain}"));
+        cfg.domain = Some(domain);
+    }
+
     /// Postgres: `<endpoint>.pg.<region>.<domain>:5432`, `sslmode=require`.
     pub fn postgres(&self, cfg: &mut pg_control::Config) {
         cfg.public_domain = Some(self.hosts.product_domain("pg"));
@@ -228,6 +236,8 @@ pub struct Products<'a> {
     pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
     pub queues: Option<&'a crate::queues::Queues>,
+    /// The Elasticsearch REST API (each request runs on its cluster's owner).
+    pub search: Option<axum::Router>,
     /// The operator-token gate: the Kafka HTTP and tasks hosts carry control-plane routes too.
     pub auth: &'a crate::auth::Auth,
 }
@@ -548,6 +558,7 @@ struct HttpRoutes {
     tasks: Option<axum::Router>,
     s3: Option<axum::Router>,
     alternator: Option<axum::Router>,
+    search: Option<axum::Router>,
     /// Queues: web-STOMP, web-MQTT and the HTTP messaging API, on their own listeners.
     mq: Option<(Upstream, Upstream, Upstream)>,
 }
@@ -572,6 +583,7 @@ impl HttpRoutes {
             tasks: p.tasks.clone().map(|t| logged(p.auth.gate("tasks", t))),
             s3: p.storage.clone().map(logged),
             alternator: p.nosql.map(|n| logged(n.alternator_router())),
+            search: p.search.clone().map(logged),
             mq,
         })
     }
@@ -595,6 +607,7 @@ impl Routes for HttpRoutes {
             Host::Tasks => router(&self.tasks),
             Host::S3 { .. } => router(&self.s3),
             Host::Nosql(_) => router(&self.alternator),
+            Host::Search(_) => router(&self.search),
             Host::Mq(_) => match &self.mq {
                 Some((stomp, mqtt, http)) => match websocket_protocol(headers) {
                     Some(p) if p.contains("mqtt") => Target::Proxy(mqtt.clone()),
@@ -621,7 +634,7 @@ mod tests {
     async fn every_cluster_node_takes_spliced_connections() {
         let args = crate::Args::parse_from(["rolld"]);
         let auth = crate::auth::Auth::new(&args).unwrap();
-        let products = Products { api: axum::Router::new(), pg: None, redis: None, streams: None, tasks: None, storage: None, nosql: None, queues: None, auth: &auth };
+        let products = Products { api: axum::Router::new(), pg: None, redis: None, streams: None, tasks: None, storage: None, nosql: None, queues: None, search: None, auth: &auth };
         let cfg = |id: &str| roll_cluster::ClusterConfig::for_tests(id, "http://127.0.0.1:9", b"splice test cluster secret".to_vec());
         let alone = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), cfg("alone")).unwrap();
         assert!(splice_routes(&alone, &products).unwrap().is_none());

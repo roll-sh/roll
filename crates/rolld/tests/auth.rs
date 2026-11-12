@@ -52,7 +52,7 @@ fn loopback_args(api: u16) -> Vec<String> {
     for flag in [
         "--proxy", "--redis", "--redis-http", "--kafka", "--s3", "--storage-api",
         "--queues-amqp", "--queues-management", "--queues-stomp", "--queues-web-stomp", "--queues-mqtt", "--queues-web-mqtt", "--queues-stream", "--queues-http",
-        "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator",
+        "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator", "--search-http",
     ] {
         args.extend([flag.to_string(), format!("127.0.0.1:{}", free_port())]);
     }
@@ -64,7 +64,7 @@ fn concrete(pattern: &str) -> String {
     // is probed at a real route behind it, so the check is the product's, not a 404 for a path
     // that doesn't exist.
     match pattern {
-        "/v1/storage/{*rest}" => return "/v1/storage/buckets".into(),
+        "/v1/storage/{*rest}" | "/v1/storage/" => return "/v1/storage/buckets".into(),
         // Tasks forwards to the cell's leader: a tenant that doesn't exist answers like a bad key.
         "/v1/tasks/{*rest}" => return "/v1/tasks/queues".into(),
         "/t/{tenant}/v1/tasks/{*rest}" => return "/t/0/v1/tasks/queues".into(),

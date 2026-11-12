@@ -14,7 +14,7 @@ update this file in the same change when a signature other crates use moves.
 Other `rolld` flags (`crates/rolld/src/search.rs`, `#[derive(clap::Args)] SearchArgs`):
 `--search-tls-cert/-key`, `--search-tls-self-signed` (a boot-time certificate; in a fleet the
 heartbeat publishes its pin), `--search-domain`, `--search-idle-unload` (300 s),
-`--search-cache-bytes`, `--search-sync-objects`, `--search-proxy-protocol`,
+`--search-cache-bytes`, `--search-sync-objects`, `--search-proxy-protocol` (PROXY protocol headers),
 `--search-history` (point-in-time window, 86400 s), `--search-gc-interval` (3600 s),
 `--search-test-features`, `--no-search`;
 `rolld --search-only` runs only search and its API (over TLS with the REST certificate when the
@@ -1700,17 +1700,23 @@ impl Control { async fn new(SearchConfig, pg_storage::Objects) -> Result<Arc<Con
 // reconciles the new instance). Credentials, limits and max_in_flight (permits resized) apply in
 // place; dialect and destructive_requires_name are fixed at load: changing them schedules a
 // reload, done once no request runs.
-// SearchConfig.public_url: the front (NLB / Lambda function URL) cluster URLs name; fleet: FleetConfig
-// { meta, meta_ca, meta_password, node_id, az, advertise_http, advertise_api, tls_pin /* published in Beat.tls */,
-//   api_tls /* the API listener serves TLS with the same certificate: Beat.api_tls */, heartbeat, lease_ttl, follow }.
-// API calls forwarded to the owner go through Control::forwarder() -> Option<&Forwarder> (hyper client over
-// search_proxy::upstream::Connector, pinned by the owner's record when it serves TLS).
+// SearchConfig.public_url: the front (a load balancer) cluster URLs name; SearchConfig.catalog: the system
+// database's Postgres URL (schema `search`, through code-sql) every node of a fleet shares.
+// Control::with_catalog(cfg, objects, Arc<Store>): nodes of one process sharing a catalog (tests).
+// Control::join(Arc<roll_cluster::Cluster>): serve clusters as the holders of their leases (see `cluster` below).
 pub enum ControlError { NotFound, Invalid, Conflict, TooLarge /* 413 */, Internal }
 pub fn api::router(Arc<Control>) -> axum::Router;   // /v1/search
-pub struct api::TlsListener;   // TlsListener::new(TcpListener, TlsAcceptor) -> io::Result: an axum::serve::Listener (Io = api::ApiStream),
-                               // handshakes on their own tasks; TlsListener::for_fleet(listener, acceptor, Arc<Control>) also serves
-                               // plain HTTP (told apart by the first byte) while Control::plain_api_callers() (a live record without
-                               // api_tls: a node from before api_tls) is true, so rolling upgrades keep old -> new forwarding working
+// cluster: roll search on a roll-cluster fleet (docs/search/architecture.md, "On the fleet").
+pub fn cluster::key(name) -> String;   // "search:cluster:<name>"
+pub struct cluster::ClusterLeases;     // search_server::Leases over roll-cluster: a guard per loaded cluster; Leases::validity
+                                       // (acks check Guard::is_valid), store_epochs() = true (store epochs from ownership markers:
+                                       // search_store::Store::claim_next); an ending guard unloads the cluster; release gives the
+                                       // idle lease up (Cluster::release_if_idle)
+pub fn cluster::rest_router(Arc<Control>) -> axum::Router;   // the ES REST API on a fleet node: names the cluster without
+                                       // checking credentials (search_server::auth::cluster_named), Cluster::dispatch to its owner,
+                                       // bodies up to 4 MiB re-sent while the cluster moves (508 / unavailable)
+pub fn cluster::internal_router(Arc<Control>, Arc<Cluster>) -> axum::Router;   // /internal/search/rest/…, signed hops only
+// /v1/search/clusters/{id}/… runs on the cluster's owner (cluster::on_owner); idle leases of unloaded clusters are given up.
 pub struct SqlCatalog;   // search_server::Catalog over SQLite: ClusterSpec { name, dialect from flavor, credentials: [password],
                          // idle_unload (0 = always loaded: such clusters load at create/update, node start and after a reload,
                          // and in a fleet every 3 lease periods wherever nobody holds them: Store::always_on(), a partial
@@ -1725,62 +1731,6 @@ pub fn meter::index_figures(&Cluster, uuid) -> Option<EngineFigures>;   pub fn m
 A cluster's name is its key on the node and in object storage (Basic user, SNI label,
 `cluster_name`); names are DNS labels. Metered requests are every request the node admitted
 (`Node::take_request_counts`, read by `Control::sample`), console requests included.
-
-## `search-proxy` (owned by the product crate)
-
-The AWS front proxy and the fleet protocol the nodes share with it. It depends on nothing else in
-roll search: ownership is the nodes' (`search_server::lease`); the proxy follows
-`X-Roll-Search-Owner` on a 503 refusal.
-
-```rust
-// fleet: one heartbeated record per node (ages by the store's clock), table search_nodes
-pub struct Beat { pub id, pub http /* host:port */, pub api: Option<String>, pub az: Option<String>, pub draining: bool, pub loaded: u32,
-                  pub tls: Option<String> /* SHA-256 hex of the REST certificate: proxies connect with TLS pinned to it; None: plain */,
-                  pub api_tls: bool /* the API address serves TLS with the same certificate */ }   // derives Default
-// Beat::pins() -> Result<Vec<(SocketAddr, CertPin)>, String>: the pin per address (REST, and API with api_tls); Err for a malformed pin
-pub struct NodeRecord { pub beat: Beat, pub age_ms: u64 }
-#[async_trait] pub trait Members { async fn beat(&Beat); async fn leave(id); async fn list() -> Vec<NodeRecord>; }
-// MemoryMembers::new(), SqliteMembers::open(path), PgMembers::new(Arc<pg::Pg>); fleet::open(url, ca, password) -> Arc<dyn Members>
-impl Heartbeat { async fn start(members, Beat, every) -> Arc<Heartbeat> /* first beat must succeed */; fn set_loaded(n);
-                 async fn drain() /* draining at once: SIGTERM */; async fn stop() /* leaves */ }
-// pg::{Pg::connect(url, ca, password) /* TLS per sslmode, system roots + ca */, MetaUrl::parse(s) -> Postgres(url) | Sqlite(path),
-//   libpq_url(url) /* sslmode=verify-ca|verify-full -> require (tokio-postgres can't parse them; we always verify) */}
-// route::{cluster_of(authorization, host_cluster) /* the node's rules: Basic user[@cluster], ApiKey id, Bearer <cluster>_ */,
-//   host_label(host, domain), weight(cluster, node), pick(cluster, &[Candidate { id, az }], az) /* rendezvous, own AZ first */}
-pub struct ProxyConfig { az, domain, node_ttl /* 5 s */, refresh /* 1 s */, hold_timeout /* 60 s */, wake_every /* 10 s */,
-                         connect_timeout /* 2 s */, retry_body_bytes /* 100 MiB per request */, retry_buffer_bytes /* 128 MiB per proxy */ }
-impl Directory { fn new(Arc<dyn Members>, ProxyConfig) -> Arc<Directory>; async fn refresh(); fn spawn_refresh(); fn live() -> Vec<String>; fn tls(&addr) -> bool;
-                 fn remember_owner(cluster, node); fn forget_owner(cluster); fn owner_of(cluster) -> Option<String> }
-impl Proxy { fn new(Arc<Directory>, Option<Arc<dyn Waker>>) -> Arc<Proxy>; async fn forward(Request<B: Body + Unpin>, &ClientInfo, Port) -> Response<Body>;
-             pub budget: Arc<replay::Budget> /* used(): request bytes kept for resends */;
-             async fn serve(self: Arc<Self>, TcpListener, ListenOptions { port: Port::{Rest, Api}, tls, proxy_protocol, drain }, watch::Receiver<bool>);
-             pub stats: Stats { requests, retries, redirects, held, wakes } }
-pub trait Waker { fn wake(&self) -> BoxFuture<Result<()>> }   // EcsWaker::new(cluster, service, desired, region).with_endpoint(..) (SigV4,
-                                                               // DescribeServices then UpdateService, never lowers desiredCount); CommandWaker(sh)
-// proxy::{serve_health(listener) /* never touches nodes */, tls_acceptor(cert, key), read_only(method, path) /* safe to resend */};
-// proxy_protocol::read_header (v1 + v2); lambda::{run(runtime_api, upstream, api_upstream, tls_seed: Option<&[u8]>), request_of, response_of}
-//   (function URL 2.0; https:// upstreams pinned to upstream::seeded(tls_seed));
-// aws::{ecs_availability_zone, ecs_task_id, advertise_for(bind)}
-// upstream::{fingerprint(der), pem_fingerprint(pem), parse_pin(hex) -> Option<CertPin = [u8; 32]>, self_signed(names) -> SelfSigned { cert_pem, key_pem, fingerprint },
-//   seeded(secret >= 16 bytes) -> SelfSigned /* deterministic Ed25519: the same certificate for the same secret */,
-//   Pins { get, contains, replace(map), Pins::any(pin) /* for every address and host names */ },
-//   Connector /* plain for http://, TLS for https:// accepting only the address's pinned certificate, never SNI */}
-```
-
-Retries: a request is resent only when the node provably didn't run it (connect failure, owner
-refusal, `node_closed_exception`), or, once, when it is read-only and the node broke the
-connection (to another node when there is one). Only a failed connect marks a node bad (3 s); a
-connection broken by the client's own upload failing (`Replay::client_failed`) is never resent; the owner cache learns only from REST answers past the
-node's credential check (not 401/403) and from refusals. A 503 over 64 KiB is passed on whole
-without parsing. Bodies stream through and are kept as
-they pass (`replay::Replay`, reference-counted chunks, no copy), so a refusal mid-upload resends
-the whole body; a body over `retry_body_bytes` or the shared budget streams on but can't be
-resent (the refusal reaches the client, and the owner it names is remembered for the retry). Binary: `search-proxy --meta <url>
-[--listen 0.0.0.0:9200] [--api-listen] [--health] [--tls-cert/--tls-key | *_PEM env | --tls-self-signed | --tls-seed <secret>] [--proxy-protocol]
-[--wake-ecs-service cluster/service --wake-count N | --wake-command sh] [--hold-timeout 120]`, or
-`[--lambda] --lambda-upstream http(s)://nlb:9200 [--lambda-api-upstream http(s)://nlb:7070] [--lambda-tls-seed <secret>]` inside Lambda (the function's image command is `--lambda`, so the image's
-`CMD ["rolld"]` never reaches this binary). Deployment:
-[deploy-aws.md](deploy-aws.md).
 
 ## `search-yaml`
 

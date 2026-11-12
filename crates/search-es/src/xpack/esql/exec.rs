@@ -645,8 +645,9 @@ impl Compiler<'_> {
                 (CE::In(Box::new(c), l, *neg, at_of(self.src, e)), DataType::Boolean)
             }
             ExprKind::Cast(x, ty) => {
-                // `::text` is no conversion Elasticsearch has (`TO_STRING` gives keywords).
-                let Some(t) = DataType::parse_name(ty).filter(|t| *t != DataType::Text) else {
+                // ES|QL has no conversion to text (`TO_STRING` gives keywords); SQL casts to
+                // `VARCHAR`/`TEXT` do.
+                let Some(t) = DataType::parse_name(ty).filter(|t| *t != DataType::Text || self.src.sql) else {
                     return Err(verification(self.src, e.start, &format!("Unsupported conversion to type [{}]", ty.to_ascii_uppercase())));
                 };
                 // A cast resolves a union type when every one of its types converts.
@@ -2179,6 +2180,9 @@ struct Source {
     unsupported: HashMap<String, String>,
     /// Fields that are `flattened` in some target index.
     flattened: Vec<String>,
+    /// The same, with the indices mapping each as `flattened` (`None`: every index). Below such
+    /// a field, in those indices, there is no column: its keys read as null.
+    flattened_in: Vec<(String, Option<Vec<String>>)>,
 }
 
 async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metadata: &[String], at: usize) -> EsResult<Source> {
@@ -2208,7 +2212,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         // Patterns that match nothing are an empty result with no columns.
         if sources.iter().all(|s| s.contains('*')) {
-            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new() });
+            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new() });
         }
         return Err(verification_plain(&format!("Unknown index [{index}]")));
     }
@@ -2335,11 +2339,20 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
         };
         cols.push(Col { name: m.clone(), ty });
     }
-    let flattened = match caps.get("fields") {
-        Some(Value::Obj(f)) => f.iter().filter(|(_, c)| c.get("flattened").is_some()).map(|(k, _)| k.clone()).collect(),
+    let flattened_in: Vec<(String, Option<Vec<String>>)> = match caps.get("fields") {
+        Some(Value::Obj(f)) => f
+            .iter()
+            .filter_map(|(k, c)| {
+                let m = c.as_object()?;
+                let caps = m.get("flattened")?;
+                let only = (m.len() > 1).then(|| caps.get("indices").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default());
+                Some((k.clone(), only))
+            })
+            .collect(),
         _ => Vec::new(),
     };
-    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened })
+    let flattened = flattened_in.iter().map(|(k, _)| k.clone()).collect();
+    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in })
 }
 
 fn verification_plain(msg: &str) -> EsError {
@@ -2697,7 +2710,12 @@ async fn scan(cluster: &Cluster, s: &Source, query: Option<Value>, limit: Option
                     Some(u) => u.iter().find(|(_, idx)| idx.iter().any(|x| x == index)).map_or(DataType::Unsupported, |(t, _)| DataType::of_mapping(t)),
                     None => s.cols[i].ty,
                 };
-                let mut v = h.pointer(&["fields", f.as_str()]).map(|x| value::from_field_in(x, ty, array_order || s.source_order.contains(f))).unwrap_or(V::Null);
+                let under_flattened = !s.load.contains(f)
+                    && s.flattened_in.iter().any(|(r, only)| f.len() > r.len() && f.starts_with(r.as_str()) && f.as_bytes()[r.len()] == b'.' && only.as_ref().is_none_or(|ix| ix.iter().any(|x| x == index)));
+                let mut v = match under_flattened {
+                    true => V::Null,
+                    false => h.pointer(&["fields", f.as_str()]).map(|x| value::from_field_in(x, ty, array_order || s.source_order.contains(f))).unwrap_or(V::Null),
+                };
                 if s.floats.contains(f) {
                     v = widen_float(v);
                 } else if v.is_null() && s.cols[i].ty == DataType::Keyword {
