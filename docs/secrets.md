@@ -889,6 +889,26 @@ syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, 
 row with `op = 'delete'` in `versions` and is removed from `secrets`, so `(env, path, key, owner)` is
 free again and its history stays readable by key.
 
+## Performance
+
+`cargo run -p roll-secrets --release --example bench -- 9000` times the hot paths on one
+environment of 9,000 keys plus 900 references, on SQLite or, with `ROLL_CODE_TEST_DATABASE`, on
+Postgres. Measured 2026-11-13 on ai-server under a load average of about 27 (second run, warm):
+
+| | SQLite | Postgres |
+| --- | --- | --- |
+| one change of 9,900 keys | 313 ms | |
+| one key's change | 5 ms | 6 ms |
+| grid (every standard environment) | 38 ms | 48 ms |
+| list | 26 ms | 46 ms |
+| values, resolved | 74 ms | 149 ms |
+| digest | 90 ms | 143 ms |
+| insights | 27 ms | 40 ms |
+| compare | 38 ms | 62 ms |
+
+Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
+3.07 s before that, 0.43 s after, on a debug build).
+
 ## Next
 
 Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
@@ -913,9 +933,5 @@ Ranked:
 3. **A second security audit** of what came after the first: syncs, audit sinks, notices, one-time
    shares, purge and retention, insights, request values, lease renewal, the TypeScript client. In
    progress.
-4. **The dashboard's controls** for purge (a secret's history), retention (the project's settings)
-   and `notify_url` (an environment's protection).
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
+4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.
-6. **Performance on Postgres**: the 2k/9k-key measurements (import, grid, values, digest) against
-   the system database, and indexes where they're slow.
