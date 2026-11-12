@@ -1,0 +1,85 @@
+//! `roll secrets` and `roll run` end to end: the workspace and secrets routers in process, and
+//! the real `roll` binary talking to them through `ROLL_API_URL`.
+
+use std::process::Stdio;
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+
+struct Out {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+async fn roll(api: &str, env: &[(&str, &str)], args: &[&str], stdin: Option<&str>) -> Out {
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"));
+    cmd.args(args)
+        .env("ROLL_API_URL", api)
+        .env_remove("ROLL_TOKEN")
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    if let Some(input) = stdin {
+        let mut pipe = child.stdin.take().unwrap();
+        pipe.write_all(input.as_bytes()).await.unwrap();
+        pipe.shutdown().await.unwrap();
+    }
+    let out = child.wait_with_output().await.unwrap();
+    Out { code: out.status.code(), stdout: String::from_utf8_lossy(&out.stdout).into(), stderr: String::from_utf8_lossy(&out.stderr).into() }
+}
+
+async fn ok(api: &str, env: &[(&str, &str)], args: &[&str], stdin: Option<&str>) -> String {
+    let o = roll(api, env, args, stdin).await;
+    assert_eq!(o.code, Some(0), "roll {args:?}: {}\n{}", o.stderr, o.stdout);
+    o.stdout
+}
+
+#[tokio::test]
+async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+    let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+    ws.create("shop", "", None).unwrap();
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+    let opts = roll_secrets::Options {
+        keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+        key_source: roll_secrets::KeySource::Env,
+        links: Default::default(),
+        open: true,
+    };
+    let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets));
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
+    ok(&api, &[], &[&at[..], &["set", "PASSWORD"]].concat(), Some("s3cret\n")).await;
+    ok(&api, &[], &[&at[..], &["import", "-"]].concat(), Some("DATABASE_URL=postgres://app:${PASSWORD}@${HOST}:${PORT}/shop\n")).await;
+    let ls = ok(&api, &[], &[&at[..], &["ls"]].concat(), None).await;
+    assert!(ls.contains("DATABASE_URL") && !ls.contains("s3cret"), "values are masked: {ls}");
+
+    // The child sees resolved values; the shell's own variables win unless --override.
+    let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
+    assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop 6000");
+
+    // A scoped token implies its project and reaches only its environments.
+    let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
+    let t = [("ROLL_TOKEN", token.trim())];
+    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
+    let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
+    assert_ne!(denied.code, Some(0));
+
+    ok(&api, &[], &[&at[..], &["set", "BROKEN=${NOPE}"]].concat(), None).await;
+    let refused = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--", "true"], None).await;
+    assert_ne!(refused.code, Some(0));
+    assert!(refused.stderr.contains("BROKEN: NOPE doesn't exist"), "{}", refused.stderr);
+}

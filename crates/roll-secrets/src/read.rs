@@ -524,7 +524,7 @@ impl<'a> Resolver<'a> {
             let v = self.s.view(self.project, env, path, self.caller, false).map_err(|e| e.to_string())?;
             self.views.insert(k.clone(), v);
         }
-        self.views[&k].iter().find(|e| e.row.key == key).cloned().ok_or_else(|| format!("{} doesn't exist", if path == "/" { format!("{env}.{key}") } else { format!("{env}:{path} {key}") }))
+        self.views[&k].iter().find(|e| e.row.key == key).cloned().ok_or_else(|| "doesn't exist".to_string())
     }
 
     /// An entry's value and the first problem resolving it (the value then keeps the
@@ -611,7 +611,7 @@ impl<'a> Resolver<'a> {
                     } else if self.env(&env).is_none() {
                         Err(format!("{}: no environment {env}", r.display()))
                     } else {
-                        self.lookup(&env, &path, &r.key).and_then(|e| match self.entry(&e) {
+                        self.lookup(&env, &path, &r.key).map_err(|p| format!("{} {p}", r.display())).and_then(|e| match self.entry(&e) {
                             (v, None) => Ok(v),
                             (_, Some(p)) if p.starts_with("cycle") => Err(p),
                             (_, Some(p)) => Err(format!("{}: {p}", r.display())),

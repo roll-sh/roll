@@ -6301,6 +6301,8 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "roll-secrets",
+ "roll-workspace",
  "rustls-pemfile",
  "rustyline",
  "s3-control",
@@ -6452,6 +6454,7 @@ dependencies = [
  "futures",
  "futures-util",
  "http-body 1.1.0",
+ "http-body-util",
  "kafka-protocol",
  "lapin",
  "libc",
@@ -6488,6 +6491,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-secrets",
  "roll-workspace",
  "s3-api",
  "s3-control",
@@ -6502,6 +6506,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
 ]
 

@@ -13,6 +13,7 @@ mod nosql;
 mod queues;
 mod storage;
 mod redis;
+mod secrets;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -74,6 +75,18 @@ enum Cmd {
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
+    /// Secrets and environment variables of a project's environments (`ROLL_TOKEN`: a scoped
+    /// secrets token).
+    #[command(alias = "env")]
+    Secrets {
+        #[command(flatten)]
+        at: secrets::At,
+        #[command(subcommand)]
+        cmd: secrets::Secrets,
+    },
+    /// Run a command with an environment's secrets in its environment, without writing files:
+    /// `roll run -p shop -e production -- npm start`.
+    Run(secrets::Run),
 }
 
 #[derive(Subcommand)]
@@ -234,6 +247,13 @@ impl Api {
     }
 }
 
+/// The API as roll secrets is called: with `ROLL_TOKEN` (a scoped secrets token) if it's set,
+/// else the operator token.
+fn secrets_api(api: &Api) -> Api {
+    let token = std::env::var("ROLL_TOKEN").ok().filter(|t| !t.trim().is_empty());
+    Api { base: api.base.clone(), http: api.http.clone(), key: token.or(api.key.clone()), headers: api.headers.clone() }
+}
+
 fn s(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -379,6 +399,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api), cli.json, at, cmd).await,
+        Cmd::Run(r) => return secrets::run_command(&secrets_api(&api), r).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

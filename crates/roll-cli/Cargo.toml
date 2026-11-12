@@ -62,6 +62,9 @@ regex.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
+# `tests/secrets.rs`: roll secrets in process.
+roll-secrets.workspace = true
+roll-workspace.workspace = true
 
 [[test]]
 name = "cqlsh_roll"
