@@ -393,7 +393,7 @@ const NOSQL_SECRETS: &[&str] = &["password", "http_token", "secret_access_key"];
 const STREAM_SECRETS: &[&str] = &["connect", "secret", "password"];
 const STORAGE_SECRETS: &[&str] = &["webhook_secret", "secret_access_key", "session_token", "anon_key", "service_key"];
 const QUEUE_SECRETS: &[&str] = &["password", "urls", "password_hash"];
-const SEARCH_SECRETS: &[&str] = &["password", "url", "connection_uri"];
+const SEARCH_SECRETS: &[&str] = &["password"];
 
 const PG: &[&str] = &["id"];
 const REPO: &[&str] = &["owner", "repo"];
