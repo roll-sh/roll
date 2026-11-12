@@ -264,6 +264,9 @@ impl Store {
         if !db.has_column("previews", "token")? {
             db.add_column("previews", "token", "TEXT")?;
         }
+        if !db.has_column("previews", "seed_needed")? {
+            db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
+        }
         Ok(Store { db, rates: Rates::default() })
     }
 
@@ -609,6 +612,18 @@ impl Store {
     pub fn drop_service(&self, id: &str, name: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM services WHERE preview_id = ? AND name = ?", [id, name])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Whether the preview's data is fresh (branched or reset) and its seed hasn't run on it.
+    pub fn seed_needed(&self, id: &str) -> Result<bool> {
+        Ok(self.db.read(|c| c.query_row("SELECT seed_needed FROM previews WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional())?.unwrap_or(0) != 0)
+    }
+
+    pub fn set_seed_needed(&self, id: &str, needed: bool) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET seed_needed = ? WHERE id = ?", params![needed as i64, id])?;
             Ok::<_, Error>(())
         })
     }

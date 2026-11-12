@@ -151,6 +151,17 @@ pub struct Target {
 /// A branched resource's kind and parent, and its own variables (unprefixed).
 pub type BranchVars = (Kind, String, Vec<(String, String)>);
 
+/// A seed run: the project's command, on the preview's tree, with its variables. (No `Debug`:
+/// `env` holds passwords.)
+#[derive(Clone)]
+pub struct SeedJob {
+    pub preview: String,
+    pub repo: String,
+    pub revision: String,
+    pub seed: crate::settings::Seed,
+    pub env: Vec<(String, String)>,
+}
+
 /// A service in a project's catalog (roll apps): a repo's (built at a revision) or an image's.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CatalogService {
@@ -189,6 +200,10 @@ pub trait Apps: Send + Sync {
     /// service until it succeeds, so nothing is left running).
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()>;
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String>;
+    /// Run a project's seed command to its end: `Ok((exit code, the output's tail))`.
+    async fn seed(&self, _job: &SeedJob) -> anyhow::Result<(i32, String)> {
+        anyhow::bail!("this server can't run seed commands")
+    }
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;
 }

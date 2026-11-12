@@ -111,6 +111,11 @@ state. A pass of the reconciler:
       checks that it is a child of that parent. A crash between "branched" and "recorded" finds
       the branch the next time.
    4. A due reset runs.
+   4b. On fresh data (anything just branched or reset), the project's `seed` runs once:
+       `sh -c <run>` in `<image>`, in the change's tree, with the branches' variables, like a
+       check. Use it to anonymise production rows, run migrations or load fixtures. It runs
+       before services deploy; a failure fails the preview with the output's tail, and is
+       retried.
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
       for its repo, the default head for the others).
@@ -393,6 +398,7 @@ type Settings = {
   env: Record<string, string>;        // overrides every service gets
   github: { comment: boolean; status: boolean; deployment: boolean };   // all true
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
+  seed: { image: string; run: string; timeout_s?: number /* 600 */; memory_mb?: number /* 1024 */ } | null;
 };
 ```
 
@@ -446,5 +452,4 @@ Ranked by what a person notices first. Done so far:
 7. **Search branches** (roll search, `search_control::Control::branch`) when it lands.
 8. **Link access for roll apps services**: hand roll apps the preview's token (or a check hook)
    so `pv-…` environments are private like `roll.toml` services.
-9. **Seeds and anonymised data**: a per-resource `seed` command run once after branching, and
-   NoSQL masking surfaced in the settings.
+9. **NoSQL masking in the settings** (masking policies are inherited from the parent today).

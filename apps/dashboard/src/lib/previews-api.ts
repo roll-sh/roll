@@ -104,6 +104,8 @@ export interface PreviewSettings {
   github: { comment: boolean; status: boolean; deployment: boolean };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
+  /** Run once on fresh data (after branching or a reset) before the services deploy. */
+  seed: { image: string; run: string; timeout_s?: number; memory_mb?: number } | null;
 }
 
 /** A partial update: objects merge (except `resources` and `env`, which are replaced whole). */

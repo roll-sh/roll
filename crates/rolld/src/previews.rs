@@ -943,6 +943,10 @@ impl roll_previews::ports::Apps for Services {
         if self.apps.find(preview, service).await.is_some() { self.apps.logs(preview, service, lines).await } else { self.runtime.logs(preview, service, lines).await }
     }
 
+    async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
+        self.runtime.seed(job).await
+    }
+
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {
         self.runtime.status(preview, service)
     }

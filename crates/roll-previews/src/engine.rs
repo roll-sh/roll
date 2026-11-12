@@ -483,6 +483,7 @@ impl Engine {
                         x.error = None;
                     })?;
                     self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
+                    self.store.set_seed_needed(&r.id, true)?;
                 }
                 Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
                     self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
@@ -495,6 +496,7 @@ impl Engine {
                         x.bytes = 0;
                     })?;
                     self.store.log(&r.id, &format!("reset {key} from its parent"))?;
+                    self.store.set_seed_needed(&r.id, true)?;
                     reset_any = true;
                 }
                 Some(_) if res.state != ResourceState::Ready => {
@@ -558,6 +560,24 @@ impl Engine {
             set(&mut vars, &k, v);
         }
         self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+
+        // 3b. The project's seed, once on fresh data, before anything serves it.
+        if let Some(seed) = &s.seed
+            && self.store.seed_needed(&r.id)?
+        {
+            let mut env = vars.clone();
+            set(&mut env, "ROLL_PREVIEW", r.id.clone());
+            set(&mut env, "ROLL_REPO", r.repo.clone());
+            set(&mut env, "ROLL_CHANGESET", r.head.clone());
+            let job = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.head.clone(), seed: seed.clone(), env };
+            self.store.log(&r.id, &format!("seeding: {}", seed.run.lines().next().unwrap_or("")))?;
+            let (code, tail) = self.apps.seed(&job).await.map_err(|e| anyhow::anyhow!("seed: {e:#}"))?;
+            if code != 0 {
+                anyhow::bail!("the seed command failed with exit code {code}\n\n{}", tail.trim_end());
+            }
+            self.store.set_seed_needed(&r.id, false)?;
+            self.store.log(&r.id, "seeded")?;
+        }
 
         // 4. Services: the change's repo at its head, every other repo at its default head.
         // From roll apps' catalog when the project has services there, else the repos'

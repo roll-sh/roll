@@ -33,6 +33,30 @@ pub struct Settings {
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
     /// its access token once and then a cookie; `public` is anyone who can reach the domain.
     pub access: Access,
+    /// A command run once on the preview's fresh data (after branching, and after each reset)
+    /// before its services deploy: anonymise, migrate, load fixtures.
+    pub seed: Option<Seed>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Seed {
+    /// The container image it runs in (`postgres:18-alpine`, `node:22`).
+    pub image: String,
+    /// Run as `sh -c <run>` in the change's tree, with the branches' variables.
+    pub run: String,
+    #[serde(default = "seed_timeout")]
+    pub timeout_s: u32,
+    #[serde(default = "seed_memory")]
+    pub memory_mb: u32,
+}
+
+fn seed_timeout() -> u32 {
+    600
+}
+
+fn seed_memory() -> u32 {
+    1024
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +107,7 @@ impl Default for Settings {
             env: BTreeMap::new(),
             github: GithubRule::default(),
             access: Access::Link,
+            seed: None,
         }
     }
 }
@@ -151,6 +176,20 @@ impl Settings {
         }
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));
+        }
+        if let Some(seed) = &self.seed {
+            if seed.image.trim().is_empty() || seed.image.len() > 255 || seed.image.contains(char::is_whitespace) {
+                return bad("seed.image: an image reference".into());
+            }
+            if seed.run.trim().is_empty() || seed.run.len() > 8192 {
+                return bad("seed.run: a command, at most 8 KiB".into());
+            }
+            if !(10..=3600).contains(&seed.timeout_s) {
+                return bad("seed.timeout_s: 10 to 3600".into());
+            }
+            if !(64..=16384).contains(&seed.memory_mb) {
+                return bad("seed.memory_mb: 64 to 16384".into());
+            }
         }
         if self.env.len() > MAX_ENV {
             return bad(format!("env: at most {MAX_ENV} variables"));

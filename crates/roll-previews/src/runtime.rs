@@ -29,6 +29,9 @@ use tracing::{info, warn};
 #[async_trait]
 pub trait Trees: Send + Sync {
     async fn prepare(&self, iso: &dyn Isolation, job: &Job, repo: &str, revision: &str) -> anyhow::Result<()>;
+    /// Run a check-like job on a revision's tree (seeds): a pooled work tree, leased while the
+    /// job's container is made.
+    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -485,6 +488,26 @@ impl Apps for Runtime {
         self.iso.logs_tail(&container_name(&host), lines.clamp(1, 2000)).await.lines().map(str::to_string).collect()
     }
 
+    async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
+        use code_preview::runner::Outcome;
+        let docker = self.iso.name() == "docker";
+        let env: Vec<(String, String)> = job.env.iter().map(|(k, v)| (k.clone(), reach_local(&self.iso.reach(v), docker))).collect();
+        let spec = code_preview::config::CheckSpec {
+            image: job.seed.image.clone(),
+            run: job.seed.run.clone(),
+            timeout: Duration::from_secs(job.seed.timeout_s as u64),
+            memory_mb: job.seed.memory_mb,
+            cpus: 1.0,
+            env: Default::default(),
+        };
+        let out = self.trees.run(&self.iso, &spec, &job.repo, &job.revision, &env).await?;
+        match out.result {
+            Outcome::Exited(code) => Ok((code, out.log)),
+            Outcome::TimedOut => Ok((124, format!("timed out after {}s\n{}", job.seed.timeout_s, out.log))),
+            Outcome::Error(e) => Err(anyhow::anyhow!(e)),
+        }
+    }
+
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
         let live = self.live.lock().get(&(preview.to_string(), service.to_string())).cloned()?;
         let phase = live.phase.borrow().clone();
@@ -530,6 +553,9 @@ mod tests {
     #[async_trait]
     impl Trees for NoTrees {
         async fn prepare(&self, _: &dyn Isolation, _: &Job, _: &str, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not in this test")
+        }
+        async fn run(&self, _: &Arc<dyn Isolation>, _: &code_preview::config::CheckSpec, _: &str, _: &str, _: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput> {
             anyhow::bail!("not in this test")
         }
     }

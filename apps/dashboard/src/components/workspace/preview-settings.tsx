@@ -231,6 +231,27 @@ function Form({
         </Field>
       </Section>
 
+      <Section title="Seed">
+        <Field label="Image" note="Runs once on a preview's fresh data, before its services start: anonymise rows, migrate, load fixtures. Leave empty for none.">
+          <input
+            value={s.seed?.image ?? ""}
+            placeholder="postgres:18-alpine"
+            onChange={(e) => set("seed", e.target.value || s.seed?.run ? { ...(s.seed ?? { run: "" }), image: e.target.value } : null)}
+            className={`${field} h-8 w-full font-mono text-[12px]`}
+            spellCheck={false}
+          />
+        </Field>
+        <Field label="Command" note="Runs as sh -c in the change's tree, with the branches' DATABASE_URL, REDIS_URL and the rest.">
+          <input
+            value={s.seed?.run ?? ""}
+            placeholder='psql "$DATABASE_URL" -f seed/anonymise.sql'
+            onChange={(e) => set("seed", e.target.value || s.seed?.image ? { ...(s.seed ?? { image: "" }), run: e.target.value } : null)}
+            className={`${field} h-8 w-full font-mono text-[12px]`}
+            spellCheck={false}
+          />
+        </Field>
+      </Section>
+
       <Section title="Who can open them">
         <Field group label="Access" note="Previews run on branches of real data. Private ones answer only to their link (from roll, the change or the pull request).">
           <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />

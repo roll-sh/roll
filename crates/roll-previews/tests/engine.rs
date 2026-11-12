@@ -122,6 +122,9 @@ impl Brancher for FakeData {
 struct FakeApps {
     deployed: Mutex<HashMap<(String, String), String>>,
     removed: Mutex<Vec<(String, String)>>,
+    /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
+    seeds: Mutex<Vec<String>>,
+    seed_exit: std::sync::atomic::AtomicI32,
 }
 
 #[async_trait]
@@ -141,6 +144,11 @@ impl Apps for FakeApps {
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         Vec::new()
+    }
+    async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
+        let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
+        self.seeds.lock().push(db);
+        Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {
         None
@@ -307,4 +315,28 @@ async fn previews_beyond_the_limit_wait_and_start_as_others_go() {
     e.code.heads.lock().insert("acme/web@feat/x".into(), "cs_x".into());
     let err = e.engine.create(&e.project, "acme/web", Some("feat/x"), None, "me").await.unwrap_err();
     assert!(err.to_string().contains("max_previews"), "{err}");
+}
+
+#[tokio::test]
+async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "postgres:18-alpine", "run": "psql \"$DATABASE_URL\" -f seed/anonymise.sql" } }));
+    e.apps.seed_exit.store(3, Ordering::SeqCst);
+    e.code.open(change("chg_s", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_s").unwrap().unwrap();
+    assert_eq!(p.state, State::Failed, "a failing seed fails the preview");
+    assert!(p.error.as_deref().unwrap().contains("seed output"), "{:?}", p.error);
+    assert!(e.apps.deployed.lock().is_empty(), "nothing serves unseeded data");
+    // It works on the retry: the branch's URL reached it; a push doesn't seed again; a reset does.
+    e.apps.seed_exit.store(0, Ordering::SeqCst);
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    assert!(e.apps.seeds.lock().last().unwrap().starts_with("fake://prj_db~pv-"), "{:?}", e.apps.seeds.lock());
+    e.code.edit("chg_s", |c| c.head = "cs_9b".into());
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), 2);
+    e.engine.reset(&p.id, Vec::new()).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), 3, "reset data is seeded again");
 }

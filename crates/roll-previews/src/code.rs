@@ -217,6 +217,13 @@ impl Trees for CodeSource {
         let tree = self.code.checkout(&r.id, &cs).await?;
         iso.prepare(job, tree.path()).await
     }
+
+    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput> {
+        let r = self.repo(repo)?;
+        let cs = self.code.store.resolve_or_404(&r.id, revision)?;
+        let tree = self.code.checkout(&r.id, &cs).await?;
+        Ok(code_preview::runner::run_check(iso, spec, tree.path(), env).await)
+    }
 }
 
 /// roll code's preview backend, in front of its single-container previews: a change whose repo
