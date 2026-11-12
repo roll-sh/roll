@@ -274,10 +274,8 @@ Ranked; the top item is in progress. A watchdog reads this list.
    metadata owner, as tasks now does.
 5. **Client ID metadata documents** (MCP 2025-11-25) next to dynamic registration, fetched through
    the public-only client.
-6. **`POST /v1/access/check`:** the decision for a method and path without running it (the builder's
-   "test this token").
-7. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
+6. **git with scoped tokens:** fetch as `code` read, push as `write`, push to the default branch as
    `deploy`.
-8. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
-9. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
+7. **Finer resources:** tasks queues and topics, Redis replicas, storage buckets in other accounts.
+8. **Audit export and activity:** download the log (JSON lines), and each token's calls over the
     last day in the list.
