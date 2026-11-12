@@ -220,10 +220,11 @@ One function, `roll_access::evaluate`, in front of every route rolld serves. On 
 The decision is the same wherever the request comes from: the HTTP API, the CLI, or an MCP tool
 (whose call is one request through the same router, with the same token).
 
-A request forwarded to another node through the API (roll code's repo owners) is evaluated
-again there, which is cheap (one indexed read). One forwarded over a signed internal hop after the
-gate (the tasks leader) was decided by the node that forwarded it, and the leader takes it as the
-operator's.
+A request forwarded to another node is evaluated again there, which is cheap (one indexed
+read): roll code's repo owners get the request as it was, and the signed hops to storage's metadata
+owner and the tasks cell's leader (`/internal/storage/control`, `/internal/tasks`) are decided as
+the original request their header carries (`x-roll-storage-uri`, `x-roll-tasks-uri`). Those routes
+take only signed requests, so nobody outside the cluster can put a path there.
 
 On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token still pass, and a
 request **with** a scoped token is still evaluated. That keeps a well-behaved client to its rules,
