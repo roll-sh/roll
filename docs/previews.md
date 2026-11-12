@@ -134,7 +134,275 @@ database's or a stream's lease, storage's metadata owner) wherever the reconcile
 
 | Kind | Branch | Reset | Sleeping cost | Notes |
 | --- | --- | --- | --- | --- |
-| `postgres` | `pg_control::Control::create_branch` from the project's `main` | Delete and branch again, on the same branch name. The URL changes, and the services are redeployed with it | Its local data directory until eviction (24 h), then its own base backup in object storage | The weakest copy-on-write here: a branch is a full data directory on ext4 (reflinks on btrfs/XFS). See `## Next
+| `postgres` | `pg_control::Control::create_branch` from the project's `main` | Delete and branch again, on the same branch name. The URL changes, and the services are redeployed with it | Its local data directory until eviction (24 h), then its own base backup in object storage | The weakest copy-on-write here: a branch is a full data directory on ext4 (reflinks on btrfs/XFS). See `## Next`. |
+| `redis` | `redis_control::Control::branch` | Delete and branch again | Nothing in memory; its manifest and the segments it pins | Copy-on-write in storage. Loading replays the parent into memory. |
+| `bucket` | `s3_store::Store::branch_bucket` | Delete and branch again | The objects it wrote, plus the parent's writes pushed down to it | One row to create. Credentials are a write key scoped to the branch. |
+| `nosql` | `nosql_control::Control::branch` (`schema_only` for `schema`) | `nosql_control::Control::reset`: same id, endpoint and credentials | The SSTables it wrote | Zero copy. Masking policies are inherited. |
+| `stream` | A new stream with the parent's topics and their configs (`schema`). `branch` also copies each topic's committed offsets so consumers resume where the parent was | Delete and branch again | Its own chunks | A data fork that shares the parent's chunks needs reference counting in the broker's retention and compaction first. See `## Next`. |
+| `queue` | A vhost with the parent vhost's definitions (exchanges, queues, bindings, policies), no messages | Delete and branch again | Nothing (a vhost suspends after 5 minutes) | A branch never holds production messages. |
+| `tasks` | A new tenant with no messages and no schedules | Delete and create again | Its own SQLite file | Copied schedules would call production endpoints, so they never are. |
+| `search` | `search_control::Control::branch` (zero copy) | Delete and branch again | Segments it wrote | Joins when roll search lands (`feature/serverless-search`). Its adapter is behind the same trait. |
+
+Safety rules every adapter follows:
+
+- **It never deletes the parent.** `delete` deletes only an id the preview recorded. Before
+  deleting, it checks that the id is a child of the recorded parent and has the preview's branch
+  name. Anything else is refused and reported.
+- **It branches only resources in the preview's project.** A preview can't name a resource
+  outside its project.
+- **No connection string is stored where the product can give it again.** Postgres, Redis and
+  NoSQL URLs and passwords are read from the product each time a service starts, so a rotated
+  password reaches the next start. Streams, queues, tasks and bucket keys show their secret only
+  once: the adapter keeps it with the branch (`resources.kept`), never returns it from the API,
+  and mints a new one if a crash lost it.
+
+## Services
+
+A service is something the preview runs and serves over HTTP. There are two backends, both
+behind the `Apps` trait:
+
+- **roll apps** (`feature/roll-apps`, docs/apps/). When the project has roll apps services, they
+  are the preview's services.
+  - Each gets an ephemeral environment `pv-<preview id>`: `PUT …/environments/pv-…`
+    `{branch: null, ephemeral: true}`.
+  - The branches' URLs and the project's overrides are set as its variables.
+  - It is deployed at the change's git commit (or its image, for an image service).
+  - roll apps injects the roll secrets environment of the same name, builds once, scales to
+    zero, and answers on its own hostnames (`<slug>.up.<site>`). A preview's service URLs are
+    those.
+  - Deleting the preview deletes the environments.
+- **`roll.toml` containers**, when the project has no roll apps services. The services are the
+  project's repos whose `roll.toml` has a `[preview]` section, named after the repo
+  (`[preview] name = "api"` overrides that). Each runs in the container `roll.toml` describes,
+  through code-preview's `Isolation`: Docker here, a Fargate task on the fleet.
+- The tree is copied into the container, never bind-mounted.
+- Each service answers at `<service>-<slug>.<domain>`.
+  - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
+    name for a branch preview, then `-<project name>`.
+  - Example: `web-pr482-shop.preview.roll.site`.
+  - Labels are cut to 63 characters, and a clash gets the preview id's last 4 characters.
+  - The domain is rolld's preview domain (`--code-preview-domain`), served on the API port like
+    roll code's own previews.
+- A service gets this environment, later entries winning:
+  1. its `roll.toml` `[preview] env`;
+  2. the resolved secrets environment (`pv-<preview id>`, inheriting its base);
+  3. the project's preview `env` overrides;
+  4. the branched resources' URLs:
+
+     | Resource | Variables |
+     | --- | --- |
+     | Postgres | `DATABASE_URL` |
+     | Redis | `REDIS_URL` |
+     | Bucket | `S3_BUCKET`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+     | NoSQL | `CASSANDRA_CONTACT_POINTS`, `CASSANDRA_USERNAME`, `CASSANDRA_PASSWORD` |
+     | Stream | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` |
+     | Queue | `AMQP_URL` |
+     | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
+     | Search | `ELASTICSEARCH_URL` |
+
+     With two resources of a kind, the first one takes the plain name and the others add
+     `_<NAME>` (`DATABASE_URL_ANALYTICS`).
+  5. `ROLL_PREVIEW`, `ROLL_PREVIEW_URL`, and `ROLL_PREVIEW_URL_<SERVICE>` for each service, so
+     services find each other; `PORT`, `ROLL_REPO`, `ROLL_CHANGE` and `ROLL_CHANGESET`.
+- Containers and images are shared: one image per `roll.toml` image reference, pulled once per
+  node. Build caches are the image's (`pnpm`, `cargo` caches under `/root/.cache` aren't kept
+  between starts; see `## Next`).
+
+## Secrets
+
+A preview's secrets are an environment of the project's secrets (`feature/roll-secrets`,
+docs/secrets.md) called `pv-<preview id>` (an ephemeral environment, labelled `preview`), inheriting from `secrets.base` (`development` by
+default) with the project's `env` overrides and the branched resources' URLs on top.
+
+- **Production secrets are never inherited unless the project allows it.** A base named
+  `production` or `prod` is refused unless `secrets.allow_production` is true, and a fork's
+  preview never gets them, whatever the setting says.
+- rolld's adapter talks to roll secrets' API (`feature/roll-secrets`). A project with no secrets,
+  or a node without roll secrets, gives its previews no environment: a service then gets the
+  overrides and resource URLs only.
+- The environment is deleted with the preview.
+
+## Safety
+
+- **Forks.** A change with `trusted: false` (a PR from a fork) gets a preview only for a head a
+  writer approved (`approve-run`, roll code's rule). A new push un-approves it. Its services
+  stop, and it waits as `awaiting_approval` with its data branches kept. This also fixes roll
+  code's own previews: the container started for a visit now refuses an unapproved head.
+- **Data.** A branch is a child of the parent. Deleting the branch never touches the parent (the
+  products' refcounts and garbage collection guarantee it, and the adapter checks parentage
+  before it deletes).
+- **Production secrets** are covered above.
+- **Who.** `/v1/previews` sits behind the operator token like every product's API. Scoped tokens
+  (`feature/roll-mcp`) classify these routes: `GET` is `read`; create, refresh, sleep and wake are
+  `write`; reset and `DELETE` are `delete`. `Store::environment_of(kind, ref)` tells the
+  evaluator which preview and project a branched resource belongs to, so a "previews only" token
+  reaches the branches and never the originals.
+
+## Cost
+
+A preview's cost is the sum of what its branches and services use, priced with each product's
+own rates (the same ones its usage page shows).
+
+- **Sleeping**, per month: the bytes each branch owns, at its product's storage rate. Compute
+  costs nothing.
+- **Active**, per hour: the services' containers (memory GiB-hours), Postgres compute units
+  while connected, and Redis memory while loaded.
+- Every preview shows `cost: {sleeping_usd_month, active_usd_hour, month_to_date_usd}`, and the
+  project shows the total.
+
+### Measured on this machine
+
+`scripts/preview-cost.sh` runs a rolld of its own (ports 27xxx, home in `~/.cache`). It:
+
+1. makes a project with a repo (`roll.toml` `[preview]`: `python -m http.server`, 128 MiB,
+   0.25 CPU) and a Redis database, a bucket, a NoSQL database, a queues vhost, a stream with a
+   topic and a tasks tenant;
+2. puts 20 MiB of objects and 20,000 1 KiB keys into the parents;
+3. opens a change, writes 1 MiB and 1,000 keys into the preview's branches, and visits it;
+4. sleeps it and lands the change.
+
+These are the numbers from 2026-11-12 on ai-server (36 threads, ext4, load 25–30 from other
+sessions, debug build). Postgres wasn't in the run (see `## Next`).
+
+| What | Measured |
+| --- | --- |
+| Change opened → preview ready (6 branches, 1 service deployed) | 1.2–1.7 s |
+| The bucket branch: parent's bytes / its own after writing 1 MiB / objects it sees | 20 MiB / 1 MiB / 21 |
+| First request (cold start of the service's container, image cached) | 3.8–6.4 s |
+| Next request (warm) | 18–25 ms |
+| The service's container while running | 26 MiB of 128 MiB, 0.01% CPU |
+| rolld while the preview runs (its Redis branch and NoSQL database loaded) | +94 MiB RSS |
+| Containers left once it sleeps | 0 |
+| Bytes the preview's branches own | 24.7 MB (Redis: 23.6 MB of loaded memory, bucket: 1 MiB, the rest: 0) |
+| **Cost asleep** | **$0.00057 a month** |
+| **Cost running** | **$0.0022 an hour** (the container's 128 MiB, plus Redis memory) |
+| After landing | every branch gone, every parent intact |
+
+So with these sizes, a hundred sleeping previews cost about 6 cents a month, and an hour of
+someone clicking through one costs a fifth of a cent.
+
+What dominates, from most to least:
+
+- **The service container while it runs**, priced as Fargate memory and CPU.
+- **A Redis branch.** It reports its loaded dataset, which includes the parent's keys.
+- **Bytes the preview writes.** Every other product branches copy-on-write and pays only for those.
+
+A Postgres branch on this ext4 disk is a full data directory (see `## Next`).
+
+## Data model
+
+`code_sql` like the workspace: SQLite at `<home>/previews.db` on one node, or the system
+database's `previews` schema shared by every node. Every read-then-write is one `Db::write`
+closure.
+
+```sql
+settings(project_id TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL)
+previews(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
+         repo TEXT NOT NULL, change_id TEXT UNIQUE, branch TEXT, number INTEGER, title TEXT NOT NULL,
+         github_pr INTEGER, head TEXT NOT NULL, trusted INTEGER NOT NULL,
+         desired TEXT NOT NULL,            -- active | deleted
+         state TEXT NOT NULL,              -- see Preview.state
+         error TEXT, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL,
+         asleep INTEGER NOT NULL, reset_requested TEXT, last_reset_at INTEGER,
+         last_active_at INTEGER NOT NULL, expires_at INTEGER,
+         created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
+resources(preview_id TEXT NOT NULL, kind TEXT NOT NULL, parent TEXT NOT NULL, mode TEXT NOT NULL,
+          ref TEXT, state TEXT NOT NULL, error TEXT, bytes INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          PRIMARY KEY (preview_id, kind, parent))
+services(preview_id TEXT NOT NULL, name TEXT NOT NULL, repo TEXT NOT NULL, host TEXT NOT NULL UNIQUE,
+         revision TEXT, deployed TEXT, state TEXT NOT NULL, error TEXT, memory_mb INTEGER NOT NULL,
+         active_ms INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (preview_id, name))
+dismissed(change_id TEXT PRIMARY KEY, head TEXT NOT NULL, at INTEGER NOT NULL)
+activity(preview_id TEXT NOT NULL, at INTEGER NOT NULL, seq INTEGER NOT NULL, message TEXT NOT NULL,
+         PRIMARY KEY (preview_id, seq))   -- newest 200 per preview
+```
+
+- A preview id is `pv_` followed by 12 random characters of lowercase base32. Times are unix
+  milliseconds.
+- `resources.ref` is null until the branch exists. `bytes` is refreshed every 5 minutes.
+
+## HTTP contract
+
+Bodies are JSON. Every error is `{"error": string}`.
+
+| Route | Body | Answer |
+| --- | --- | --- |
+| `GET /v1/previews?project=&state=` | | `Preview[]`, newest first |
+| `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the existing one) |
+| `GET /v1/previews/{id}` | | `Preview` |
+| `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
+| `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
+| `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
+| `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
+| `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
+| `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
+| `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
+| `GET /v1/previews/projects/{project}/settings` | | `Settings` |
+| `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
+| `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd}` |
+
+- 400: a bad body or setting. 404: no such preview, project or repo. 409: the change already has
+  a preview in another project, or `max_previews` is reached (manual creation only; automatic
+  ones queue).
+- `POST /v1/previews` with `change` (`chg_…`) or `branch`. The repo must be in the project.
+
+```ts
+type Preview = {
+  id: string; project: string; slug: string; repo: string;
+  change: string | null; number: number | null; github_pr: number | null; branch: string | null;
+  title: string; head: string; trusted: boolean;
+  desired: "active" | "deleted";
+  state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
+  error: string | null;
+  url: string | null;                 // the first service's URL
+  services: Service[]; resources: Resource[];
+  cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
+  last_reset_at: number | null; last_active_at: number; expires_at: number | null;
+  created_by: string; created_at: number; updated_at: number;
+};
+type Service = { name: string; repo: string; url: string; revision: string | null; deployed: string | null;
+                 state: "pending" | "deploying" | "running" | "sleeping" | "failed"; error: string | null };
+type Resource = { kind: Kind; parent: string; ref: string | null; mode: "branch" | "schema";
+                  state: "pending" | "ready" | "resetting" | "failed" | "deleting"; error: string | null; bytes: number };
+type Kind = "postgres" | "redis" | "bucket" | "nosql" | "stream" | "queue" | "tasks" | "search";
+type Activity = { at: number; message: string };
+type Settings = {
+  enabled: boolean;
+  branches: string[];                 // globs on the change's branch; ["*"]
+  drafts: boolean;                    // previews for draft changes (false)
+  resources: Record<string, "branch" | "schema" | "skip">;   // "<kind>:<ref>" → mode; unlisted: `data`
+  data: "branch" | "schema";          // the default mode ("branch")
+  reset_every_hours: number;          // 0: never
+  sleep_after_s: number;              // 600
+  ttl_hours: number;                  // 168
+  max_previews: number;               // 10
+  max_bytes: number;                  // 10 GiB
+  secrets: { base: string; allow_production: boolean };      // "development", false
+  env: Record<string, string>;        // overrides every service gets
+  github: { comment: boolean; status: boolean; deployment: boolean };   // all true
+};
+```
+
+## Surfaces
+
+- **roll code change**: `Change.preview` carries the environment: its state, the first URL,
+  `environment: {id, services: [{name, url, state}], cost_usd_month}`. A change whose repo is in
+  a project with previews on gets its preview from here instead of code-preview's single
+  container.
+- **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
+  - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
+  - a commit status `roll/preview` on the head;
+  - a GitHub deployment to the environment `preview/<slug>` with the URL, marked `inactive` when
+    the preview is deleted.
+- **Dashboard**: a Previews tab on each project, with the list, status, cost, logs, and open,
+  sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
+  preview's branches next to their parents.
+- **CLI**: `roll preview ls|show|create|rm|sleep|wake|reset|logs|settings`.
+
+Every one of them plays the mark states: `deploying` while creating or updating, `success` when
+ready, `error` on failure, and `sleep` for a sleeping preview.
+
+## Next
 
 Ranked by what a person notices first. Done so far: the crate, rolld's adapters for every
 product, the secrets adapter, roll code and GitHub reporting, `roll preview`, the end-to-end run
@@ -149,13 +417,13 @@ and its cost.
 3. **Stream data branches** that share the parent's uploaded chunks (refcounted chunks in the
    broker's retention, compaction and `delete_stream`). Today a stream branch gets the topics,
    not the records.
-4. **Several services per repo**: `[services.<name>]` in `roll.toml`, each with its own image,
-   command, port and `root`, so a monorepo's web and API both run.
+4. **roll apps end to end**: run `scripts/preview-cost.sh` against a rolld with roll apps (once
+   `feature/roll-apps` lands) and measure a built service's cold start and cost. Several
+   services per repo come from roll apps' catalog (a service per `root`).
 5. **Build caches.** Keep a service's package caches between starts, in a per-repo volume shared
    by every preview of the repo. This cuts the cold start of real apps.
 6. **Spread preview services across nodes** (a lease per preview rather than one leader). Today
    one node serves every preview host in a cluster.
-7. **Search branches** (roll search, `search_control::Control::branch`) when it lands, and the
-   roll apps adapter (`Apps`) when `feature/roll-apps` lands.
+7. **Search branches** (roll search, `search_control::Control::branch`) when it lands.
 8. **Seeds and anonymised data**: a per-resource `seed` command run once after branching, and
    NoSQL masking surfaced in the settings.
