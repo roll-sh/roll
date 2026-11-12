@@ -291,7 +291,7 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
-| `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd}` |
+| `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes}` |
 
 - 400: a bad body or setting. 404: no such preview, project or repo. 409: the change already has
   a preview in another project, or `max_previews` is reached (manual creation only; automatic
@@ -338,7 +338,8 @@ type Settings = {
 ## Surfaces
 
 - **roll code change**: `Change.preview` carries the environment: its state, the first URL,
-  `environment: {id, services: [{name, url, state}], cost_usd_month}`. A change whose repo is in
+  `environment: {id, slug, state, services: [{name, url, state}], resources: [{kind, parent, ref}],
+  sleeping_usd_month, active_usd_hour, dashboard_url, github}` (docs/code/http-api.md). A change whose repo is in
   a project with previews on gets its preview from here instead of code-preview's single
   container.
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):

@@ -142,7 +142,11 @@ Check   = {name, status: "queued" | "running" | "success" | "failure" | "cancell
            source: "runner" | "external" | "github", url: string | null, summary: string | null,
            started_at: number | null, finished_at: number | null}
 Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | null,
-           postgres: {project_id, branch_id} | null, redis: {db_id} | null, error: string | null, created_at}
+           postgres: {project_id, branch_id} | null, redis: {db_id} | null, error: string | null, created_at,
+           environment?: {id /* pv_… */, slug, state /* roll previews' Preview.state */,
+                          services: [{name, url, state}], resources: [{kind, parent, ref: string | null}],
+                          sleeping_usd_month, active_usd_hour, dashboard_url: string | null,
+                          github: {comment, status, deployment}} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
            base, head, revision, work_item: string | null, branch: string | null /* git branch it was pushed as */,

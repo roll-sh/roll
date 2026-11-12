@@ -1,0 +1,159 @@
+/**
+ * Client for roll previews (`crates/roll-previews`, docs/previews.md "HTTP contract"): a full copy
+ * of a workspace project per change, with a branch of every data resource. Change both together.
+ */
+
+import { call } from "./roll-api";
+
+export const PREVIEW_STATES = ["queued", "awaiting_approval", "creating", "ready", "sleeping", "updating", "failed", "deleting"] as const;
+export type PreviewState = (typeof PREVIEW_STATES)[number];
+
+export type PreviewKind = "postgres" | "redis" | "bucket" | "nosql" | "stream" | "queue" | "tasks" | "search";
+
+export interface PreviewService {
+  name: string;
+  repo: string;
+  url: string;
+  /** The changeset it should run. */
+  revision: string | null;
+  /** The changeset it was last deployed at. */
+  deployed: string | null;
+  state: "pending" | "deploying" | "running" | "sleeping" | "failed";
+  error: string | null;
+}
+
+export interface PreviewResource {
+  kind: PreviewKind;
+  /** The resource in the project it branches. */
+  parent: string;
+  /** The branch, once it exists. */
+  ref: string | null;
+  mode: "branch" | "schema";
+  state: "pending" | "ready" | "resetting" | "failed" | "deleting";
+  error: string | null;
+  /** Bytes the branch owns (not its parent's). */
+  bytes: number;
+}
+
+export interface PreviewCost {
+  sleeping_usd_month: number;
+  active_usd_hour: number;
+  month_to_date_usd: number;
+  bytes: number;
+}
+
+/** Times are unix milliseconds. */
+export interface Preview {
+  id: string;
+  project: string;
+  slug: string;
+  /** `owner/name`. */
+  repo: string;
+  /** `chg_…`, for a change's preview. */
+  change: string | null;
+  number: number | null;
+  github_pr: number | null;
+  branch: string | null;
+  title: string;
+  head: string;
+  trusted: boolean;
+  desired: "active" | "deleted";
+  state: PreviewState;
+  error: string | null;
+  /** The first service's URL. */
+  url: string | null;
+  services: PreviewService[];
+  resources: PreviewResource[];
+  cost: PreviewCost;
+  last_reset_at: number | null;
+  last_active_at: number;
+  expires_at: number | null;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface PreviewActivity {
+  at: number;
+  message: string;
+}
+
+export type ResourceRule = "branch" | "schema" | "skip";
+
+export interface PreviewSettings {
+  enabled: boolean;
+  /** Globs on the change's branch. */
+  branches: string[];
+  drafts: boolean;
+  /** `"<kind>:<ref>"` → mode; resources not listed get `data`. A patch replaces the whole map. */
+  resources: Record<string, ResourceRule>;
+  data: "branch" | "schema";
+  /** 0: never. */
+  reset_every_hours: number;
+  sleep_after_s: number;
+  ttl_hours: number;
+  max_previews: number;
+  max_bytes: number;
+  secrets: { base: string; allow_production: boolean };
+  /** A patch replaces the whole map. */
+  env: Record<string, string>;
+  github: { comment: boolean; status: boolean; deployment: boolean };
+}
+
+/** A partial update: objects merge (except `resources` and `env`, which are replaced whole). */
+export type SettingsPatch = Partial<Omit<PreviewSettings, "secrets" | "github">> & {
+  secrets?: Partial<PreviewSettings["secrets"]>;
+  github?: Partial<PreviewSettings["github"]>;
+};
+
+export interface PreviewUsage {
+  previews: number;
+  sleeping_usd_month: number;
+  active_usd_hour: number;
+  month_to_date_usd: number;
+  bytes: number;
+}
+
+export type PreviewSource = { branch: string; change?: never } | { change: string; branch?: never };
+
+const one = (id: string) => `/v1/previews/${encodeURIComponent(id)}`;
+const project = (id: string) => `/v1/previews/projects/${encodeURIComponent(id)}`;
+
+function query(params: Record<string, string | number | undefined>) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+export const previewsApi = {
+  /** Newest first. */
+  list: (filter: { project?: string; state?: PreviewState } = {}) => call<Preview[]>("GET", `/v1/previews${query(filter)}`),
+  get: (id: string) => call<Preview>("GET", one(id)),
+  /** A preview of a branch (no change) or of a change; the existing one if there is one. */
+  create: (projectId: string, repo: string, source: PreviewSource) =>
+    call<Preview>("POST", "/v1/previews", { project: projectId, repo, ...source }),
+  /** Marks it for deletion (`desired: "deleted"`); the reconciler removes it. */
+  remove: (id: string) => call<Preview>("DELETE", one(id)),
+  refresh: (id: string) => call<Preview>("POST", `${one(id)}/refresh`),
+  sleep: (id: string) => call<Preview>("POST", `${one(id)}/sleep`),
+  wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
+  /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
+  reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
+    call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
+  /** Newest first. */
+  activity: (id: string) => call<PreviewActivity[]>("GET", `${one(id)}/activity`),
+  settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
+  putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
+  usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),
+};
+
+/** A resource as the reset body and the settings name it. */
+export const resourceId = (r: Pick<PreviewResource, "kind" | "parent">) => `${r.kind}:${r.parent}`;
+
+/** Work in progress: the list polls quickly while any preview is in one of these. */
+export const BUSY: ReadonlySet<PreviewState> = new Set(["creating", "updating", "deleting"]);
+
+/** Production's environment names (crates/roll-previews `is_production`). */
+export const isProduction = (env: string) => ["production", "prod", "live"].includes(env.toLowerCase());
