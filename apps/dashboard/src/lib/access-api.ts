@@ -157,6 +157,13 @@ function query(q: object): string {
   return s ? `?${s}` : "";
 }
 
+/** Where approvals are posted, and the chat user ids (Slack `U…`) the operator lets decide there. */
+export interface ChatTarget {
+  install: string;
+  channel: string;
+  approvers: string[];
+}
+
 export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
@@ -189,8 +196,8 @@ export const accessApi = {
   policy: () => call<Policy>("GET", "/v1/access/policy"),
   setPolicy: (p: Policy) => call<Policy>("PUT", "/v1/access/policy", p),
   /** Where approvals are posted (Slack through roll code's chat ops), or `{chat: null}`. */
-  notify: () => call<{ chat: { install: string; channel: string } | null }>("GET", "/v1/access/notify"),
-  setNotify: (chat: { install: string; channel: string } | null) => call<{ chat: unknown }>("PUT", "/v1/access/notify", { chat }),
+  notify: () => call<{ chat: ChatTarget | null }>("GET", "/v1/access/notify"),
+  setNotify: (chat: ChatTarget | null) => call<{ chat: unknown }>("PUT", "/v1/access/notify", { chat }),
   client: (id: string) => call<OAuthClient>("GET", `/v1/access/oauth/clients/${encodeURIComponent(id)}`),
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),

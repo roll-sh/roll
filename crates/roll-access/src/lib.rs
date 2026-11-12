@@ -272,13 +272,19 @@ impl Access {
         });
     }
 
-    /// A press in chat: decide, when it came from the install approvals go to. `Err` is what the
-    /// person who pressed is told.
+    /// A press in chat: decide, when it came from the install approvals go to and from one of the
+    /// approvers the operator named. `Err` is what the person who pressed is told.
     pub async fn decide_from_chat(self: &Arc<Self>, approval: String, approve: bool, by: String, install: String) -> std::result::Result<(), String> {
         let me = self.clone();
         let result = tokio::task::spawn_blocking(move || {
             if me.chat_target().is_none_or(|(i, _)| i != install) {
                 return Err(Error::Forbidden("approvals aren't decided from this workspace".into()));
+            }
+            // Only the people the operator named: not everyone who can see the channel.
+            let user = by.split_once(':').map_or(by.as_str(), |(_, u)| u);
+            let named = me.store.setting("notify").ok().flatten().is_some_and(|n| n["chat"]["approvers"].as_array().is_some_and(|a| a.iter().any(|v| v == user)));
+            if !named {
+                return Err(Error::Forbidden("you aren't one of the people roll's operator lets approve these".into()));
             }
             let r = me.store.decide(&approval, approve, &by, None);
             // Already decided or expired: bring the card up to date as well.

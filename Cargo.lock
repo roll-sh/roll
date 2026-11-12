@@ -6326,6 +6326,7 @@ dependencies = [
  "percent-encoding",
  "reqwest",
  "roll-auth",
+ "roll-cluster",
  "roll-net",
  "roll-workspace",
  "serde",

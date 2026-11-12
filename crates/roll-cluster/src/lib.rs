@@ -144,7 +144,7 @@ pub mod sign;
 pub use backend::{Backend, DynamoDb, DynamoDbConfig, Memory, MemoryStore, Postgres};
 pub use cluster::{Cluster, Guard, Node, Ownership, Route, Stats};
 pub use config::ClusterConfig;
-pub use forward::{ClientAddr, FORWARD_FAILED, Forwarded, MAX_HOPS, accept_forwarded, client_addr, hops, is_upgrade, require_signed, unavailable};
+pub use forward::{ClientAddr, Decided, FORWARD_FAILED, Forwarded, MAX_HOPS, accept_forwarded, client_addr, hops, is_upgrade, require_signed, unavailable};
 pub use sign::VerifyError;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

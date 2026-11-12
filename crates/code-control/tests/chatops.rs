@@ -618,8 +618,8 @@ async fn slack_status_buttons_answer_requests_and_replies_steer() {
 }
 
 /// An access approval (docs/permissions.md, "Approvals in chat") is posted to a Slack channel as
-/// a card, and an allowed person's press goes to roll's access service to decide; a stranger's
-/// decides nothing. The decided card loses its buttons.
+/// a card, and a press goes to roll's access service to decide; one it refuses (not an approver)
+/// is told why. The decided card loses its buttons.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn access_approvals_are_decided_from_slack() {
     use code_control::chatops::access::{AccessCard, AccessDecision};
@@ -629,6 +629,9 @@ async fn access_approvals_are_decided_from_slack() {
     w.a.code.on_access_decision(Arc::new(move |d| {
         let tx = tx.clone();
         Box::pin(async move {
+            if d.by != "slack:UADA" {
+                return Err("you aren't one of the approvers".to_string());
+            }
             let _ = tx.send(d);
             Ok(())
         })
