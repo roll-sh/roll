@@ -442,7 +442,8 @@ async fn run() -> anyhow::Result<()> {
         router = router.merge(n.router());
     }
     // Workspace projects and roll secrets: always on, behind the same operator token (secrets
-    // also take their scoped tokens). Secrets' links call the products' routes in process.
+    // also take their scoped tokens). Secrets' links call the products' routes in process, through
+    // the copy taken below: every product's router merges above this line, or its links 404.
     let ws = workspace::open(&args, &home)?;
     let products_api = secrets::Api::default();
     let secrets = secrets::open(&args, &home, ws.clone(), !auth.enforcing(), products_api.clone())?;
