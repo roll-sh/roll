@@ -1,7 +1,6 @@
 import { Lock, Moon, MoreHorizontal, Plus, Search } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { formatUsd } from "@/lib/roll-api";
 import { PROJECT_NAME, type ResourceKind, type WorkspaceProject } from "@/lib/workspace-api";
 import {
   CREATABLE,
@@ -13,6 +12,7 @@ import {
   projectMonth,
   resourceKey,
   suggestName,
+  usd,
   type ResourceView,
 } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/workspace-store";
@@ -124,7 +124,7 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
             else workspace.place(project.id, c.view.kind, c.view.ref, x, y).catch(fail);
           }}
         />
-        {cards.length === 0 && ws.status === "ready" && <Empty name={project.name} onPick={stage} />}
+        {cards.length === 0 && ws.status === "ready" && <Empty name={project.name} kinds={CREATABLE.filter((k) => ws.kinds.has(k))} onPick={stage} />}
         <AddMenu open={adding} ws={ws} onClose={() => setAdding(false)} onNew={stage} onAttach={attach} />
         {error && (
           <button
@@ -176,7 +176,7 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
           only you
         </span>
         <span className="ml-auto">
-          {formatUsd(spend.usd)} this month · ≈ {formatUsd(projectMonth(spend.usd, month))} by {month.end}
+          {usd(spend.usd)} this month · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}
         </span>
       </footer>
     </AppShell>
@@ -267,14 +267,14 @@ function ProjectMenu({ project }: { project: WorkspaceProject }) {
   );
 }
 
-function Empty({ name, onPick }: { name: string; onPick: (k: ResourceKind) => void }) {
+function Empty({ name, kinds, onPick }: { name: string; kinds: ResourceKind[]; onPick: (k: ResourceKind) => void }) {
   return (
     <div className="pointer-events-none absolute inset-0 grid place-items-center p-4">
       <div className="rise pointer-events-auto w-full max-w-[460px] text-center">
         <h2 className="text-[18px] font-semibold tracking-[-0.045em]">What should {name} run?</h2>
         <p className="mt-1 text-[12.5px] text-muted">Add a database or storage. Everything in a project scales to zero when it's idle.</p>
         <div className="mt-5 grid grid-cols-2 gap-2 text-left sm:grid-cols-3">
-          {CREATABLE.map((k) => (
+          {kinds.map((k) => (
             <button
               key={k}
               onClick={() => onPick(k)}
@@ -315,7 +315,7 @@ function AddMenu({
   }, [open]);
   const placed = new Set(ws.projects.flatMap((p) => p.resources.map(resourceKey)));
   const match = (s: string) => s.toLowerCase().includes(q.trim().toLowerCase());
-  const fresh = CREATABLE.filter((k) => match(KIND_LABEL[k] + KIND_BLURB[k]));
+  const fresh = CREATABLE.filter((k) => ws.kinds.has(k) && match(KIND_LABEL[k] + KIND_BLURB[k]));
   const loose = [...ws.inventory.values()].filter((v) => !placed.has(resourceKey(v)) && match(v.name + KIND_LABEL[v.kind]));
 
   return (

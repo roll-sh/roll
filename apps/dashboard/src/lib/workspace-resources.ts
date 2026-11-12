@@ -10,7 +10,7 @@ import { DIALECT_LABEL, nosqlApi, type NosqlDb } from "./nosql-api";
 import { redisApi, type RedisDb } from "./redis-api";
 import { api, formatBytes, maskUri, streams, type Product, type Project as PgProject, type StreamInfo } from "./roll-api";
 import { storageApi, type Bucket } from "./storage-api";
-import type { PlacedResource, ResourceKind } from "./workspace-api";
+import { RESOURCE_KINDS, type PlacedResource, type ResourceKind } from "./workspace-api";
 
 export type ResourceState = "online" | "idle" | "starting" | "missing";
 
@@ -205,13 +205,21 @@ export function missing(p: { kind: ResourceKind; ref: string }): ResourceView {
   };
 }
 
-/** Every resource of every product this rolld runs, keyed by `kind:ref`. Off products are skipped. */
-export async function loadInventory(): Promise<Map<string, ResourceView>> {
+export interface Inventory {
+  /** Every resource, keyed by `kind:ref`. */
+  views: Map<string, ResourceView>;
+  /** The kinds whose product this rolld runs. */
+  kinds: Set<ResourceKind>;
+}
+
+/** Every resource of every product this rolld runs. Off products are skipped. */
+export async function loadInventory(): Promise<Inventory> {
   const products = await api.info().then(
     (i) => new Set(i.products),
     () => null,
   );
   const on = (k: ResourceKind) => !products || products.has(KIND_PRODUCT[k]);
+  const kinds = new Set(RESOURCE_KINDS.filter(on));
   const lists = await Promise.all([
     on("postgres") ? api.projects().then((l) => l.map(pg), () => []) : [],
     on("redis") ? redisApi.list().then((l) => l.map(redis), () => []) : [],
@@ -220,7 +228,7 @@ export async function loadInventory(): Promise<Map<string, ResourceView>> {
     on("nosql") ? nosqlApi.list().then((l) => l.map(nosql), () => []) : [],
     on("repo") ? codeApi.repos().then((l) => l.map(repo), () => []) : [],
   ]);
-  return new Map(lists.flat().map((v) => [resourceKey(v), v]));
+  return { views: new Map(lists.flat().map((v) => [resourceKey(v), v])), kinds };
 }
 
 /** What can be made from the canvas (repos are connected, not made, here). */
@@ -262,6 +270,9 @@ export async function createResource(kind: ResourceKind, name: string): Promise<
 }
 
 // ── this month's spend ──
+
+/** Dollars as a bill shows them: cents, and whole dollars from $1,000. */
+export const usd = (n: number) => (n >= 1000 ? `$${Math.round(n).toLocaleString("en-US")}` : `$${n.toFixed(2)}`);
 
 export interface Month {
   /** Days of the month so far, today included. */

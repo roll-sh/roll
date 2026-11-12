@@ -4,9 +4,8 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { requestSignIn } from "@/lib/code-token";
-import { formatUsd } from "@/lib/roll-api";
 import { PROJECT_NAME } from "@/lib/workspace-api";
-import { monthOf, projectMonth } from "@/lib/workspace-resources";
+import { monthOf, projectMonth, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace, workspace } from "@/lib/workspace-store";
 import { useMarkState } from "../mark-state";
 import { MiniMap } from "./kind";
@@ -67,13 +66,13 @@ export function Sidebar({ onSearch, header }: { onSearch: () => void; header?: R
           </span>
         </div>
         <div className="mt-1 flex items-baseline gap-1.5 font-mono text-[17px] font-semibold tracking-[-0.04em]">
-          {ws.status === "ready" ? formatUsd(total.usd) : "—"}
+          {ws.status === "ready" ? usd(total.usd) : "—"}
           <span className="text-[11px] font-normal tracking-normal text-subtle">so far</span>
         </div>
         <MonthMeter elapsed={month.elapsed} days={month.days} />
         <div className="mt-1.5 flex justify-between text-[11px] text-subtle">
           <span>
-            On track for <b className="font-mono font-medium text-fg">≈ {formatUsd(projectMonth(total.usd, month))}</b>
+            On track for <b className="font-mono font-medium text-fg">≈ {usd(projectMonth(total.usd, month))}</b>
           </span>
           <span>by {month.end}</span>
         </div>
@@ -157,7 +156,7 @@ function Projects({ pathname }: { pathname: string }) {
                   {staged.length ? <span className="text-accent"> · {staged.length} staged</span> : null}
                 </span>
               </span>
-              <span className="font-mono text-[11px] text-muted">{p.resources.length ? formatUsd(spend.usd) : ""}</span>
+              <span className="font-mono text-[11px] text-muted">{p.resources.length ? usd(spend.usd) : ""}</span>
             </Link>
           );
         })}

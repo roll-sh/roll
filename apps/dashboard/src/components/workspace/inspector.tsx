@@ -1,8 +1,7 @@
 import { Check, Copy, ExternalLink, X } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
-import { formatUsd } from "@/lib/roll-api";
-import { KIND_BLURB, KIND_LABEL, monthOf, projectMonth, type ResourceView } from "@/lib/workspace-resources";
+import { KIND_BLURB, KIND_LABEL, monthOf, projectMonth, usd, type ResourceView } from "@/lib/workspace-resources";
 import type { Staged } from "@/lib/workspace-store";
 import { KindTile } from "./kind";
 
@@ -156,8 +155,8 @@ export function ResourceSheet({
           <>
             <Label>{month.label}</Label>
             <div className="grid grid-cols-2 gap-2">
-              <Stat label="So far" value={spent == null ? "—" : formatUsd(spent)} note={`day ${month.elapsed} of ${month.days}`} />
-              <Stat label="Projected" value={spent == null ? "—" : `≈ ${formatUsd(projectMonth(spent, month))}`} note={`by ${month.end}`} />
+              <Stat label="So far" value={spent == null ? "—" : usd(spent)} note={`day ${month.elapsed} of ${month.days}`} />
+              <Stat label="Projected" value={spent == null ? "—" : `≈ ${usd(projectMonth(spent, month))}`} note={`by ${month.end}`} />
             </div>
             <p className="mt-3 text-[11.5px] leading-relaxed text-subtle">
               {spent === null
@@ -168,8 +167,8 @@ export function ResourceSheet({
         )}
       </div>
       <div className="flex items-center justify-between border-t border-line px-3 py-2">
-        <span className="text-[11px] text-subtle">The resource stays if you remove it here.</span>
-        <button onClick={onRemove} className="rounded-md px-2 py-1 text-[11.5px] text-muted hover:bg-white/[0.05] hover:text-fg">
+        <span className="text-[11px] text-subtle">Removing keeps the resource.</span>
+        <button onClick={onRemove} className="rounded-md px-2 py-1 whitespace-nowrap text-[11.5px] text-muted hover:bg-white/[0.05] hover:text-fg">
           Remove from project
         </button>
       </div>

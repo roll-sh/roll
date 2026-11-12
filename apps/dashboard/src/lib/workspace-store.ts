@@ -32,12 +32,14 @@ export interface WorkspaceState {
   error?: string;
   projects: WorkspaceProject[];
   inventory: Map<string, ResourceView>;
+  /** The kinds whose product this rolld runs (what Add offers). */
+  kinds: Set<ResourceKind>;
   /** USD this month per `kind:ref`; absent while loading, null when the product couldn't say. */
   spend: Map<string, number | null>;
   staged: Record<string, Staged[]>;
 }
 
-let state: WorkspaceState = { status: "loading", projects: [], inventory: new Map(), spend: new Map(), staged: {} };
+let state: WorkspaceState = { status: "loading", projects: [], inventory: new Map(), kinds: new Set(), spend: new Map(), staged: {} };
 const listeners = new Set<() => void>();
 let loading: Promise<void> | null = null;
 
@@ -66,8 +68,8 @@ async function loadSpend() {
 export function loadWorkspace(): Promise<void> {
   loading ??= (async () => {
     try {
-      const [projects, inventory] = await Promise.all([workspaceApi.projects(), loadInventory()]);
-      set({ status: "ready", error: undefined, projects, inventory });
+      const [projects, inv] = await Promise.all([workspaceApi.projects(), loadInventory()]);
+      set({ status: "ready", error: undefined, projects, inventory: inv.views, kinds: inv.kinds });
       void loadSpend();
     } catch (e) {
       set({ status: "error", error: errorText(e) });
@@ -79,7 +81,8 @@ export function loadWorkspace(): Promise<void> {
 }
 
 export async function refreshInventory() {
-  set({ inventory: await loadInventory() });
+  const inv = await loadInventory();
+  set({ inventory: inv.views, kinds: inv.kinds });
 }
 
 export const workspace = {
@@ -178,7 +181,7 @@ const subscribe = (l: () => void) => {
   return () => listeners.delete(l);
 };
 
-const serverState: WorkspaceState = { status: "loading", projects: [], inventory: new Map(), spend: new Map(), staged: {} };
+const serverState: WorkspaceState = { status: "loading", projects: [], inventory: new Map(), kinds: new Set(), spend: new Map(), staged: {} };
 
 /** The workspace, loading it the first time anything asks. */
 export function useWorkspace(): WorkspaceState {

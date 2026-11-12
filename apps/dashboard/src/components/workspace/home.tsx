@@ -1,7 +1,6 @@
 import { ArrowUpRight } from "lucide-react";
 import { Link } from "@/components/link";
-import { formatUsd } from "@/lib/roll-api";
-import { KIND_LABEL, monthOf, projectMonth, resourceKey } from "@/lib/workspace-resources";
+import { KIND_LABEL, monthOf, projectMonth, resourceKey, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
 import { KindTile, MiniMap } from "./kind";
@@ -46,8 +45,8 @@ export function Home() {
                   ))}
                 </div>
                 <div className="mt-3 flex justify-between border-t border-line pt-2 font-mono text-[11px] text-subtle">
-                  <span>{formatUsd(s.usd)} so far</span>
-                  <span>≈ {formatUsd(projectMonth(s.usd, month))}</span>
+                  <span>{usd(s.usd)} so far</span>
+                  <span>≈ {usd(projectMonth(s.usd, month))}</span>
                 </div>
               </Link>
             );
@@ -63,8 +62,8 @@ export function Home() {
       <section id="usage" className="rise mt-10 scroll-mt-16">
         <h2 className="text-[15px] font-semibold tracking-[-0.03em]">{month.label}</h2>
         <div className="mt-3 grid grid-cols-3 gap-2.5">
-          <Stat label="So far" value={formatUsd(total.usd)} note={`day ${month.elapsed} of ${month.days}`} />
-          <Stat label="Projected" value={`≈ ${formatUsd(projectMonth(total.usd, month))}`} note={`by ${month.end}, at this rate`} />
+          <Stat label="So far" value={usd(total.usd)} note={`day ${month.elapsed} of ${month.days}`} />
+          <Stat label="Projected" value={`≈ ${usd(projectMonth(total.usd, month))}`} note={`by ${month.end}, at this rate`} />
           <Stat label="Projects" value={String(ws.projects.length)} note={`${placed.size} resources`} />
         </div>
         {ws.projects.length > 0 && (
@@ -79,8 +78,8 @@ export function Home() {
               return (
                 <div key={p.id} className="flex items-center border-t border-line px-3 py-2 text-[12.5px]">
                   <span className="flex-1 truncate">{p.name}</span>
-                  <span className="w-24 text-right font-mono text-[12px]">{s.pending && !s.usd ? "…" : formatUsd(s.usd)}</span>
-                  <span className="w-24 text-right font-mono text-[12px] text-subtle">{formatUsd(projectMonth(s.usd, month))}</span>
+                  <span className="w-24 text-right font-mono text-[12px]">{s.pending && !s.usd ? "…" : usd(s.usd)}</span>
+                  <span className="w-24 text-right font-mono text-[12px] text-subtle">{usd(projectMonth(s.usd, month))}</span>
                 </div>
               );
             })}
