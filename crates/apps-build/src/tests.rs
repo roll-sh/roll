@@ -35,6 +35,29 @@ fn s(v: &str) -> Option<String> {
 }
 
 #[test]
+fn next_standalone_ships_only_the_traced_server() {
+    let p = detect(&[
+        ("package.json", r#"{"scripts": {"build": "next build", "start": "next start"}, "dependencies": {"next": "15.0.0", "react": "19.0.0"}}"#),
+        ("package-lock.json", "{}"),
+        ("next.config.mjs", "const config = {\n  output: 'standalone',\n};\nexport default config;\n"),
+        ("public/logo.svg", "<svg/>"),
+        ("app/page.tsx", ""),
+    ]);
+    assert_eq!(p.start, s("node server.js"));
+    has(
+        &p,
+        &[
+            "COPY --from=build --chown=node:node /app/.next/standalone /app",
+            "COPY --from=build --chown=node:node /app/.next/static /app/.next/static",
+            "COPY --from=build --chown=node:node /app/public /app/public",
+            "ENV HOSTNAME=0.0.0.0",
+            r#"CMD ["sh", "-c", "exec node server.js"]"#,
+        ],
+    );
+    assert!(!p.dockerfile.contains("COPY --from=build --chown=node:node /app /app") && !p.dockerfile.contains("prune"), "{}", p.dockerfile);
+}
+
+#[test]
 fn next_on_pnpm() {
     let p = detect(&[
         (

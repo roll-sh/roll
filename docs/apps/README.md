@@ -102,7 +102,9 @@ every deployment is immutable with instant rollback.
   `pnpm prune --prod`), as Heroku's Node builds do, unless the start command uses one (`ts-node`,
   `nodemon`: the plan says so) or only a framework's output directory is copied. An express app
   with TypeScript and ESLint as devDependencies: `node_modules` 45 MB → 4.4 MB, the image 381 →
-  332 MB (the rest is `node:22-slim`).
+  332 MB (the rest is `node:22-slim`). A Next.js app whose `next.config` sets
+  `output: "standalone"` ships only `.next/standalone`, `.next/static` and `public`, started with
+  `node server.js` (a real Next 15 app: `/app` is 53 MB, its page and `public/` answer).
 - **Variables in builds**: every install and build step sees the environment's variables
   (`NEXT_PUBLIC_*`, `VITE_*`, a Prisma `DATABASE_URL`, an `NPM_TOKEN`), as Railway's builds do.
   They're BuildKit secrets mounted as environment variables (`RUN --mount=type=secret,id=K,env=K`),
@@ -489,10 +491,9 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **Next.js standalone output** when `next.config` sets `output: "standalone"` (copy
-   `.next/standalone` and `.next/static`, start `node server.js`): a far smaller image; and
-   what dockerd's own ~250 ms of a cold start is made of (network attach, `--init`, the log
-   driver).
+2. **What dockerd's own ~250 ms of a cold start is made of** (network attach, `--init`, the log
+   driver, the cgroup setup): measured one by one in matched pairs, kept only where it's a clear
+   win.
 3. **Signals.** Webhooks and notifications on a failed deploy or a crash loop; search over the
     stored 7 days of logs.
 4. Links for buckets, streams, queues and NoSQL; private registries with credentials sealed.

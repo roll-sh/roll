@@ -202,6 +202,17 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
             (None, start, None)
         }
     };
+    // Next's standalone output (`output: "standalone"` in next.config): the image is the traced
+    // server, its static files and `public`, started with `node server.js` (`next start`
+    // doesn't serve a standalone build).
+    let standalone = framework == Some("next") && o.start.is_none() && next_standalone(tree);
+    let start = if standalone {
+        notes.push("next.config sets output: \"standalone\": the image is .next/standalone, started with node server.js".into());
+        Some("node server.js".to_string())
+    } else {
+        start
+    };
+    let public = standalone && tree.exists("public");
     match (&start, start_script) {
         (Some(s), Some(script)) if s == script => {
             notes.push(format!("a start script that runs node directly: {s}"))
@@ -220,6 +231,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
     let starts_with: String = [start.as_deref(), start_script, o.start.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" ");
     let dev_used = pkg["devDependencies"].as_object().into_iter().flat_map(|m| m.keys()).find(|d| starts_with.split(|c: char| !(c.is_alphanumeric() || "@/-_.".contains(c))).any(|w| w == d.as_str()));
     let prune = match (node.pm, &output, dev_used) {
+        _ if standalone => None,
         (_, Some(_), _) => None,
         (_, None, Some(d)) => {
             notes.push(format!("the start command uses {d}, a devDependency: devDependencies stay in the image"));
@@ -249,6 +261,14 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         df.env(&[("NODE_ENV", "production")]);
         node.runtime_extras(&mut df);
         match output {
+            _ if standalone => {
+                df.line("COPY --from=build --chown=node:node /app/.next/standalone /app");
+                df.line("COPY --from=build --chown=node:node /app/.next/static /app/.next/static");
+                if public {
+                    df.line("COPY --from=build --chown=node:node /app/public /app/public");
+                }
+                df.env(&[("HOSTNAME", "0.0.0.0")]);
+            }
             Some(dir) => df.line(&format!(
                 "COPY --from=build --chown=node:node /app/{dir} /app/{dir}"
             )),
@@ -270,6 +290,17 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         notes,
         render,
     }))
+}
+
+/// Whether next.config asks for the standalone output.
+fn next_standalone(tree: &dyn Tree) -> bool {
+    ["next.config.js", "next.config.mjs", "next.config.cjs", "next.config.ts"]
+        .iter()
+        .filter_map(|f| text(tree, f))
+        .any(|t| {
+            let t: String = t.split_whitespace().collect();
+            t.contains("output:\"standalone\"") || t.contains("output:'standalone'") || t.contains("output:`standalone`")
+        })
 }
 
 /// `package.json`, when there is one.
