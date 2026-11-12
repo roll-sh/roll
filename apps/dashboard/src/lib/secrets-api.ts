@@ -134,7 +134,8 @@ export type AuditFilter = { env?: string; key?: string; actor?: string; action?:
 export type Imported = Applied & { skipped: string[] };
 export type ImportedAsRequest = { request: ChangeRequest; skipped: string[] };
 export type ExportFormat = "dotenv" | "json" | "shell" | "yaml";
-export type Health = { ok: boolean; key: "env" | "file" | "missing"; resealed: string };
+/** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`: the kinds with a link provider. */
+export type Health = { ok: boolean; key: "env" | "file" | "missing"; resealed: "all" | number | null; links: string[] };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** An answer that isn't 2xx: the API's `error`, its `code` (`approval_required`, `stale`, `conflict`…) and the status. */

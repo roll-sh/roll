@@ -369,7 +369,7 @@ isn't in the workspace is 404.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed}` |
+| `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[]}` (`links`: the kinds with a link provider) |
 | `GET` | | `{project, environments: Environment[], previews: number}` |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
