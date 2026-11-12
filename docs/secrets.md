@@ -69,7 +69,20 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
    notification). roll's own checks (`secrets = "development"` in `roll.toml`), previews, apps and
    sandboxes read their environment directly.
-7. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
+7. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
+   same token. `resolve` with `sealTo` returns the values sealed to a key only that process holds,
+   and `watch` follows the digest and renews dynamic credentials' leases, as `roll run --watch` does:
+
+   ```ts
+   import { createClient, generateKeyPair } from "@roll/secrets";
+
+   const secrets = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN! });
+   const { values } = await secrets.values("staging");
+   const keys = generateKeyPair();
+   const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
+   const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
+   ```
+8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
