@@ -27,9 +27,9 @@ memchr.workspace = true
 p256.workspace = true
 pkcs1.workspace = true
 pkcs8.workspace = true
-qrcode.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 ring.workspace = true
+roll-auth.workspace = true
 s3-proto.workspace = true
 s3-image.workspace = true
 s3-select.workspace = true

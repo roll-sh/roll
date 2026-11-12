@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates/s3-proto crates/s3-select crates/s3-image crates/s3-store crates/s3-server crates/s3-control crates/s3-api crates/pg-storage crates/roll-cluster crates/rolld crates/roll-cli
+PATHS=(crates/roll-auth crates/s3-proto crates/s3-select crates/s3-image crates/s3-store crates/s3-server crates/s3-control crates/s3-api crates/pg-storage crates/roll-cluster crates/rolld crates/roll-cli
        Cargo.toml Cargo.lock scripts/test-storage.sh .github/workflows/storage.yml)
 STAMP=target/.test-storage.hash
 # Images are pinned by digest (tag@multi-arch index digest): a rebuilt upstream tag can't change them.

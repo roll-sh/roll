@@ -765,6 +765,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-sesv2"
+version = "1.140.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf26866eb72be4a43eb1366424e4098567ca621486feec75083b34d1d2b17fee"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sso"
 version = "1.114.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6210,6 +6235,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.6",
@@ -6264,12 +6290,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-accounts"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "aws-config",
+ "aws-sdk-sesv2",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "reqwest",
+ "roll-auth",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "roll-auth"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "flate2",
+ "getrandom 0.4.3",
+ "qrcode",
+ "ring",
  "serde_json",
+ "sha2 0.10.9",
  "tower-http 0.7.1",
+ "tracing",
 ]
 
 [[package]]
@@ -6398,6 +6461,7 @@ dependencies = [
  "code-sql",
  "getrandom 0.4.3",
  "http-body-util",
+ "roll-auth",
  "serde",
  "serde_json",
  "tempfile",
@@ -6458,6 +6522,7 @@ dependencies = [
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-accounts",
  "roll-auth",
  "roll-cluster",
  "roll-edge",
@@ -6892,11 +6957,11 @@ dependencies = [
  "p256",
  "pkcs1",
  "pkcs8",
- "qrcode",
  "rand 0.8.8",
  "rcgen",
  "reqwest",
  "ring",
+ "roll-auth",
  "roll-cluster",
  "rsa",
  "s3-image",

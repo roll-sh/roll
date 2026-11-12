@@ -13,6 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod accounts;
 mod auth;
 mod cluster;
 mod code;
@@ -344,7 +345,7 @@ async fn run() -> anyhow::Result<()> {
     let mut args = Args::parse();
     logs::init(args.log_format);
     edge::configure(&mut args);
-    let auth = auth::Auth::new(&args)?;
+    let mut auth = auth::Auth::new(&args)?;
     let on = args.products()?;
     info!(products = %on, "starting");
     let home = std::path::absolute(&args.home)?;
@@ -438,8 +439,12 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
-    // Workspace projects: always on, behind the same operator token.
+    // Workspace projects: always on; the operator's, and each signed-in user's own.
     router = router.merge(roll_workspace::router(workspace::open(&args, &home)?));
+    // Accounts and sign-in: always on; the gate resolves their session cookies.
+    let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
+    auth.sessions(accounts.sessions(), &accounts.config().api_url);
+    router = router.merge(roll_accounts::router(accounts));
     // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
     // products that are off answer before it. The gated router merges last so its fallback (401
     // without the token) stays the fallback.

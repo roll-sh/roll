@@ -2,8 +2,9 @@
 //! and through the edge (`ROLL_EDGE=1`: the API host, and the Kafka HTTP and tasks hosts that
 //! carry control-plane routes too): each route rolld lists at startup (from its routers, with the
 //! access `src/auth.rs` gives it) answers 401 without the token and something else with it,
-//! except the public ones; CORS answers only the dashboard's origin; and rolld refuses to listen
-//! off loopback without a token.
+//! except the public ones; a signed-in user who isn't an admin (docs/accounts.md) gets 403 on
+//! every route that isn't theirs; CORS answers only the dashboard's origin; and rolld refuses to
+//! listen off loopback without a token.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -64,7 +65,7 @@ fn concrete(pattern: &str) -> String {
     // is probed at a real route behind it, so the check is the product's, not a 404 for a path
     // that doesn't exist.
     match pattern {
-        "/v1/storage/{*rest}" => return "/v1/storage/buckets".into(),
+        "/v1/storage/{*rest}" | "/v1/storage/" => return "/v1/storage/buckets".into(),
         // Tasks forwards to the cell's leader: a tenant that doesn't exist answers like a bad key.
         "/v1/tasks/{*rest}" => return "/v1/tasks/queues".into(),
         "/t/{tenant}/v1/tasks/{*rest}" => return "/t/0/v1/tasks/queues".into(),
@@ -115,6 +116,8 @@ async fn every_control_plane_route_needs_the_operator_token() {
         // The edge's queues listeners need a real login (guest/guest is refused behind it).
         ("ROLL_QUEUES_USER", "auth-test".to_string()),
         ("ROLL_QUEUES_PASSWORD", "auth-test-password".to_string()),
+        // Sign-in codes land here (docs/accounts.md).
+        ("ROLL_ACCOUNTS_OUTBOX", home.path().join("outbox").display().to_string()),
     ];
     for var in ["ROLL_EDGE_REDIS", "ROLL_EDGE_PG", "ROLL_EDGE_KAFKA", "ROLL_EDGE_NOSQL", "ROLL_EDGE_AMQPS", "ROLL_EDGE_MQTTS", "ROLL_EDGE_STOMPS", "ROLL_EDGE_MQ_STREAM"] {
         env.push((var, local(free_port())));
@@ -223,6 +226,29 @@ async fn every_control_plane_route_needs_the_operator_token() {
     }
     assert!(wrong.is_empty(), "{} routes misbehave:\n{}", wrong.len(), wrong.join("\n"));
     assert!(protected > 200 && public > 0, "protected {protected}, public {public}");
+
+    // A signed-in user who isn't an admin: 403 on every operator route (and on a credential
+    // route without its credential), their own projects, and roll code as their own owner.
+    let cookie = sign_in(&http, &api, &home.path().join("outbox")).await;
+    let mut wrong = Vec::new();
+    for (host, route, access) in routes.iter().filter(|(h, ..)| h == "api") {
+        if access.starts_with("product:") || access.starts_with("public:") {
+            continue;
+        }
+        let path = concrete(route);
+        let status = match http.get(format!("{api}{path}")).header("cookie", &cookie).send().await {
+            Ok(r) => r.status().as_u16(),
+            Err(e) if e.is_timeout() => 0,
+            Err(e) => panic!("GET {path}: {e}"),
+        };
+        let fine = if access.starts_with("user:") { status != 401 && status != 403 } else { status == 403 };
+        if !fine {
+            wrong.push(format!("{host} {route} ({access}): {status} with a user's session"));
+        }
+    }
+    assert!(wrong.is_empty(), "{} routes misbehave:\n{}", wrong.len(), wrong.join("\n"));
+    let code: serde_json::Value = http.get(format!("{api}/v1/code")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+    assert_eq!((code["auth"]["caller"]["kind"].as_str(), code["auth"]["caller"]["owner"].as_str()), (Some("owner"), Some("ada")), "{code}");
     // `/v1/info` answers before the gate: the dashboard's sidebar reads it before sign-in.
     assert_eq!(send("internal", "api".into(), "/v1/info".into(), None).await, 200);
     let code: serde_json::Value = http.get(format!("{api}/v1/code")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
@@ -245,6 +271,50 @@ async fn every_control_plane_route_needs_the_operator_token() {
     assert!(ok.headers()["access-control-allow-headers"].to_str().unwrap().contains("authorization"));
     let foreign = preflight("https://evil.example").await.unwrap();
     assert!(foreign.headers().get("access-control-allow-origin").is_none(), "a foreign origin gets no CORS grant");
+}
+
+/// Invite `ada@example.com` with the operator's token and sign in by email code (from the
+/// outbox): the session cookie, as `name=value`.
+async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) -> String {
+    let invite: serde_json::Value = http
+        .post(format!("{api}/v1/accounts/invites"))
+        .bearer_auth(TOKEN)
+        .json(&serde_json::json!({ "email": "ada@example.com" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let start: serde_json::Value = http
+        .post(format!("{api}/v1/accounts/email/start"))
+        .json(&serde_json::json!({ "email": "ada@example.com", "invite": invite["token"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut code = None;
+    for _ in 0..200 {
+        let mails = std::fs::read_dir(outbox).into_iter().flatten().flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.'));
+        code = mails
+            .filter_map(|e| serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path()).ok()?).ok())
+            .find_map(|m| m["subject"].as_str().filter(|s| s.contains("sign-in code")).map(|s| s[..6].to_string()));
+        if code.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let verify = http
+        .post(format!("{api}/v1/accounts/email/verify"))
+        .json(&serde_json::json!({ "challenge": start["challenge"], "code": code.expect("a sign-in mail") }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), 200);
+    let set = verify.headers()["set-cookie"].to_str().unwrap();
+    set.split(';').next().unwrap().to_string()
 }
 
 #[test]

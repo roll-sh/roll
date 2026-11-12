@@ -6,7 +6,10 @@
 //! - On loopback the token is optional: without one, nothing is checked (local development).
 //! - Off loopback, or with `ROLL_EDGE=1`, rolld refuses to start without one.
 //! - CORS answers only the dashboard's origins (`ROLL_DASHBOARD_ORIGIN`; on loopback, by default,
-//!   any localhost port).
+//!   any localhost port), with credentials: people sign in with a session cookie
+//!   (docs/accounts.md), which the gate resolves on every request. An admin's session opens what
+//!   the token does; anyone else's opens roll code, the agents and their own projects, and gets
+//!   403 on the rest.
 
 use crate::Args;
 use roll_auth::{Access, AdminToken, Gate, Origins, Rule};
@@ -32,6 +35,11 @@ pub const RULES: &[Rule] = &[
     // operator's token as its admin.
     Rule { route: "/v1/code", access: Access::Product("roll code: owners, tokens, public repos, signed webhooks, device login") },
     Rule { route: "/git", access: Access::Product("roll code's git smart HTTP: its tokens, public repos") },
+    // Accounts: sign-in is public; the rest checks the session, an admin's, or the operator's
+    // token (docs/accounts.md).
+    Rule { route: "/v1/accounts", access: Access::Product("accounts: sign-in, then the session decides") },
+    // Workspace projects: the operator and every signed-in user, each seeing their own.
+    Rule { route: "/v1/workspace", access: Access::User("workspace projects: a user's own") },
     // Node-to-node hops are signed with the cluster secret; computes fetch WAL with their token.
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.
@@ -60,6 +68,14 @@ pub struct Auth {
     token: Option<AdminToken>,
     gate: Arc<Gate>,
     origins: Origins,
+}
+
+impl Auth {
+    /// Sign people in with session cookies too (docs/accounts.md). `api_url`: where browsers
+    /// reach this API, whose origin may send writes besides the dashboard's.
+    pub fn sessions(&mut self, sessions: Arc<dyn roll_auth::Sessions>, api_url: &str) {
+        self.gate = Gate::with_sessions(self.token.clone(), RULES.to_vec(), sessions, self.origins.clone(), api_url);
+    }
 }
 
 impl Auth {
@@ -111,18 +127,19 @@ impl Auth {
     /// route with its access at debug (`RUST_LOG=rolld::auth=debug`).
     pub fn gate(&self, host: &str, router: axum::Router) -> axum::Router {
         let routes = route_patterns(&router);
-        let (mut public, mut product, mut credential, mut operator) = (0, 0, 0, 0);
+        let (mut public, mut product, mut credential, mut user, mut operator) = (0, 0, 0, 0, 0);
         for r in &routes {
             let access = self.gate.access(r);
             match access {
                 Access::Public(_) => public += 1,
                 Access::Product(_) => product += 1,
                 Access::Credential(_) => credential += 1,
+                Access::User(_) => user += 1,
                 Access::Operator => operator += 1,
             }
             debug!(target: "rolld::auth", host = %host, route = %r, access = %access, "route");
         }
-        info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, product, public, "control-plane routes");
+        info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, user, product, public, "control-plane routes");
         router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
     }
 

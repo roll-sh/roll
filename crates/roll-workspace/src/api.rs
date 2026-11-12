@@ -1,6 +1,10 @@
 //! `/v1/workspace`: JSON in and out, errors as `{"error": "..."}` (docs/workspace.md).
+//!
+//! rolld's gate lets the operator and signed-in users in (`Access::User`); a user who isn't an
+//! admin sees only their own projects.
 
-use crate::{Error, Kind, Workspace};
+use crate::{Error, Kind, Scope, Workspace};
+use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -12,6 +16,27 @@ use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
 type S = State<Arc<Workspace>>;
+type Who = Option<Extension<roll_auth::SignedIn>>;
+
+/// Who is asking: the owner new projects get, and the projects they see. Without a signed-in
+/// user the gate let the operator through (or the daemon is open).
+struct Caller {
+    owner: String,
+    all: bool,
+}
+
+impl Caller {
+    fn of(who: Who) -> Caller {
+        match who {
+            Some(Extension(u)) => Caller { all: u.admin, owner: u.user },
+            None => Caller { owner: String::new(), all: true },
+        }
+    }
+
+    fn scope(&self) -> Scope<'_> {
+        if self.all { Scope::All } else { Scope::Owner(&self.owner) }
+    }
+}
 
 pub fn router(ws: Arc<Workspace>) -> Router {
     Router::new()
@@ -57,22 +82,26 @@ struct PlaceBody {
     y: f64,
 }
 
-async fn list(State(ws): S) -> crate::Result<Response> {
-    Ok(Json(blocking(ws, |ws| ws.list()).await?).into_response())
+async fn list(State(ws): S, who: Who) -> crate::Result<Response> {
+    let me = Caller::of(who);
+    Ok(Json(blocking(ws, move |ws| ws.list(me.scope())).await?).into_response())
 }
 
-async fn create(State(ws): S, b: Bytes) -> crate::Result<Response> {
+async fn create(State(ws): S, who: Who, b: Bytes) -> crate::Result<Response> {
+    let me = Caller::of(who);
     let CreateBody { name, description, icon } = body(&b)?;
-    let project = blocking(ws, move |ws| ws.create(&name, &description, icon.as_ref())).await?;
+    let project = blocking(ws, move |ws| ws.create(&me.owner, &name, &description, icon.as_ref())).await?;
     Ok((StatusCode::CREATED, Json(project)).into_response())
 }
 
-async fn get_one(State(ws): S, Path(id): Path<String>) -> crate::Result<Response> {
-    Ok(Json(blocking(ws, move |ws| ws.get(&id)).await?).into_response())
+async fn get_one(State(ws): S, who: Who, Path(id): Path<String>) -> crate::Result<Response> {
+    let me = Caller::of(who);
+    Ok(Json(blocking(ws, move |ws| ws.get(me.scope(), &id)).await?).into_response())
 }
 
 /// `{name?, description?, icon?}`: what's there changes; `"icon": null` goes back to the default.
-async fn update(State(ws): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
+async fn update(State(ws): S, who: Who, Path(id): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let me = Caller::of(who);
     let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
     let text = |o: &mut serde_json::Map<String, serde_json::Value>, k: &str| -> crate::Result<Option<String>> {
         match o.remove(k) {
@@ -89,22 +118,25 @@ async fn update(State(ws): S, Path(id): Path<String>, b: Bytes) -> crate::Result
     if let Some(k) = o.keys().next() {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
-    Ok(Json(blocking(ws, move |ws| ws.update(&id, &change)).await?).into_response())
+    Ok(Json(blocking(ws, move |ws| ws.update(me.scope(), &id, &change)).await?).into_response())
 }
 
-async fn delete(State(ws): S, Path(id): Path<String>) -> crate::Result<StatusCode> {
-    blocking(ws, move |ws| ws.delete(&id)).await?;
+async fn delete(State(ws): S, who: Who, Path(id): Path<String>) -> crate::Result<StatusCode> {
+    let me = Caller::of(who);
+    blocking(ws, move |ws| ws.delete(me.scope(), &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn place(State(ws): S, Path((id, kind, r#ref)): Path<(String, String, String)>, b: Bytes) -> crate::Result<Response> {
+async fn place(State(ws): S, who: Who, Path((id, kind, r#ref)): Path<(String, String, String)>, b: Bytes) -> crate::Result<Response> {
+    let me = Caller::of(who);
     let kind = Kind::parse(&kind)?;
     let PlaceBody { x, y } = body(&b)?;
-    Ok(Json(blocking(ws, move |ws| ws.place(&id, kind, &r#ref, x, y)).await?).into_response())
+    Ok(Json(blocking(ws, move |ws| ws.place(me.scope(), &id, kind, &r#ref, x, y)).await?).into_response())
 }
 
-async fn remove(State(ws): S, Path((id, kind, r#ref)): Path<(String, String, String)>) -> crate::Result<StatusCode> {
+async fn remove(State(ws): S, who: Who, Path((id, kind, r#ref)): Path<(String, String, String)>) -> crate::Result<StatusCode> {
+    let me = Caller::of(who);
     let kind = Kind::parse(&kind)?;
-    blocking(ws, move |ws| ws.remove(&id, kind, &r#ref)).await?;
+    blocking(ws, move |ws| ws.remove(me.scope(), &id, kind, &r#ref)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
