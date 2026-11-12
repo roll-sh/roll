@@ -23,6 +23,16 @@ export const label = "mb-1 block text-[11px] font-medium text-subtle";
 
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** Saves `text` as a file the browser downloads (an export). */
+export function saveText(name: string, text: string, type = "text/plain") {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 /** What a load is: its data, its error, and a way to load it again. */
 export function useLoad<T>(load: () => Promise<T>, deps: unknown[]) {
   const [state, setState] = useState<{ data: T | null; error: string | null; loading: boolean }>({ data: null, error: null, loading: true });
