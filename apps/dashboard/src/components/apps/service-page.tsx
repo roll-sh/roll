@@ -311,6 +311,17 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
       )}
 
       <ErrorNote error={runner.error} />
+      {env?.crash_loop && (
+        <div role="alert" className="rise mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3 text-[13px]">
+          <span className="font-medium text-danger">Crashing</span>
+          <span className="min-w-0 flex-1 text-muted">
+            {env.crash_loop.crashes} times in the last 10 minutes; the last at {clock(env.crash_loop.last_at)}, because {env.crash_loop.last_error}.
+          </span>
+          <button type="button" className={btn} onClick={() => go({ tab: "logs" })}>
+            See the logs
+          </button>
+        </div>
+      )}
 
       <nav className="mt-6 flex gap-1 overflow-x-auto border-b border-line [scrollbar-width:none]" aria-label="Service">
         {SERVICE_TABS.map((t) => (

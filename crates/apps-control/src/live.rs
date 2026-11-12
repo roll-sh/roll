@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// How far back crashes count toward a crash loop.
+const CRASH_WINDOW: Duration = Duration::from_secs(600);
+
 /// What instances of the active deployment are made from.
 #[derive(Clone, Debug)]
 pub struct Template {
@@ -171,6 +174,8 @@ pub struct EnvLive {
     /// The last failed wake and how many failed in a row: the requests behind it get its error
     /// instead of each trying again, for a backoff that grows from 1 s to 30 s.
     failed: Mutex<Option<(Instant, String, u32)>>,
+    /// Crashes of the last ten minutes: when, when in unix ms, why.
+    crashes: Mutex<std::collections::VecDeque<(Instant, i64, String)>>,
     seq: AtomicU64,
     pub log: LogSink,
     pub meter: Mutex<Meter>,
@@ -198,6 +203,7 @@ impl EnvLive {
             closed: AtomicBool::new(false),
             waiters: AtomicU32::new(0),
             failed: Mutex::new(None),
+            crashes: Mutex::new(std::collections::VecDeque::new()),
             seq: AtomicU64::new(0),
             log,
             meter: Mutex::new(Meter::default()),
@@ -263,7 +269,7 @@ impl EnvLive {
         let addr = match self.runtime.start(&inst.name, log).await {
             Ok(a) => a,
             Err(e) => {
-                *inst.phase.lock() = Phase::Crashed;
+                self.crashed(inst, &format!("it didn't start: {e}"));
                 return Err(WakeError::Failed(e.to_string()));
             }
         };
@@ -275,11 +281,11 @@ impl EnvLive {
                     break;
                 }
                 if Instant::now() >= deadline {
-                    *inst.phase.lock() = Phase::Crashed;
+                    self.crashed(inst, "it didn't answer in time");
                     return Err(WakeError::Timeout(self.cfg.wake_timeout));
                 }
                 if !self.runtime.running(&inst.name).await {
-                    *inst.phase.lock() = Phase::Crashed;
+                    self.crashed(inst, "the process exited before it answered");
                     return Err(WakeError::Failed("the process exited before it answered".into()));
                 }
                 tokio::time::sleep(self.cfg.probe_every).await;
@@ -287,7 +293,7 @@ impl EnvLive {
             _ => {
                 tokio::time::sleep(self.cfg.worker_grace).await;
                 if !self.runtime.running(&inst.name).await {
-                    *inst.phase.lock() = Phase::Crashed;
+                    self.crashed(inst, "the process exited right after it started");
                     return Err(WakeError::Failed("the process exited right after it started".into()));
                 }
             }
@@ -392,7 +398,7 @@ impl EnvLive {
                     return Ok(l);
                 }
             } else {
-                *i.phase.lock() = Phase::Crashed;
+                self.crashed(&i, "it couldn't be resumed");
             }
         }
         // Then a start: a created instance of the active deployment, or a new one.
@@ -425,10 +431,42 @@ impl EnvLive {
     /// The proxy couldn't connect to a running instance: it's gone (killed, out of memory), and
     /// the next request starts a fresh one instead of trying it again.
     pub fn connect_failed(&self, inst: &Inst) {
-        let mut p = inst.phase.lock();
-        if matches!(*p, Phase::Running(_)) {
-            *p = Phase::Crashed;
+        if matches!(inst.phase(), Phase::Running(_)) {
+            self.crashed(inst, "its port stopped answering");
         }
+    }
+
+    /// An instance crashed: it's marked so (the next start makes a fresh one) and the crash is
+    /// counted. Three in ten minutes is a crash loop, said once in the environment's log.
+    fn crashed(&self, inst: &Inst, why: &str) {
+        *inst.phase.lock() = Phase::Crashed;
+        let entered = {
+            let mut c = self.crashes.lock();
+            let was = Self::looping(&c);
+            c.push_back((Instant::now(), now_ms(), why.to_string()));
+            while c.len() > 20 || c.front().is_some_and(|(at, _, _)| at.elapsed() > CRASH_WINDOW) {
+                c.pop_front();
+            }
+            !was && Self::looping(&c)
+        };
+        if entered {
+            self.log.stream(Stream::System).line(format!("crash loop: {} crashes in 10 minutes, the last because {why}", self.crashes.lock().len()));
+        }
+    }
+
+    fn looping(c: &std::collections::VecDeque<(Instant, i64, String)>) -> bool {
+        c.iter().filter(|(at, _, _)| at.elapsed() <= CRASH_WINDOW).count() >= 3
+    }
+
+    /// The environment's crashes of the last ten minutes when they're a loop (three or more).
+    pub fn crash_loop(&self) -> Option<crate::model::CrashLoop> {
+        let c = self.crashes.lock();
+        if !Self::looping(&c) {
+            return None;
+        }
+        let recent: Vec<_> = c.iter().filter(|(at, _, _)| at.elapsed() <= CRASH_WINDOW).collect();
+        let (_, at, why) = recent.last()?;
+        Some(crate::model::CrashLoop { crashes: recent.len() as u32, last_at: *at, last_error: why.clone() })
     }
 
     /// A created (not running) instance of the active deployment, made if there's none.
@@ -697,7 +735,7 @@ impl EnvLive {
         for i in &insts {
             if matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)) && !self.runtime.running(&i.name).await {
                 // Exited on its own: the next request starts it again.
-                *i.phase.lock() = Phase::Crashed;
+                self.crashed(i, "the process exited on its own");
                 awake = awake.saturating_sub(1);
                 self.log.stream(Stream::System).line(format!("{} exited", i.name));
                 continue;
@@ -743,7 +781,7 @@ impl EnvLive {
             match i.phase() {
                 Phase::Running(_) if self.runtime.running(&i.name).await => up += 1,
                 Phase::Running(_) => {
-                    *i.phase.lock() = Phase::Crashed;
+                    self.crashed(i, "the process exited");
                     i.crashes.fetch_add(1, Ordering::SeqCst);
                     self.log.stream(Stream::System).line(format!("{} exited; restarting", i.name));
                 }
@@ -926,6 +964,17 @@ mod tests {
         assert_eq!(live.state(), InstanceState::Crashed);
         let l = live.acquire().await.unwrap();
         assert!(l.cold && l.inst.name != dead);
+        assert!(live.crash_loop().is_none(), "one crash isn't a loop");
+        // Two more: a crash loop, with the last reason.
+        drop(l);
+        for _ in 0..2 {
+            let name = live.instances().iter().find(|i| i.state() == InstanceState::Running).unwrap().name.clone();
+            fake.crash(&name);
+            live.tick().await;
+            drop(live.acquire().await.unwrap());
+        }
+        let c = live.crash_loop().expect("three crashes in ten minutes");
+        assert_eq!((c.crashes, c.last_error.as_str()), (3, "the process exited on its own"));
     }
 
     #[tokio::test]

@@ -268,6 +268,10 @@ every deployment is immutable with instant rollback.
   `apps.localhost` on the apps listener (`ROLL_APPS_LISTEN`, `127.0.0.1:7080`), and each service
   can also get a port of its own (`ROLL_APPS_PORTS=58100-58199`) so it opens on a machine without
   wildcard DNS (a Tailscale name).
+- **Crash loops**: every crash (an exit, a start that fails or never answers, a port that stops
+  answering) is counted per environment; three in ten minutes is a crash loop, said once in the
+  environment's log and on `Environment.crash_loop` (the count, when, and why), which the
+  service page shows as a banner with its logs a click away.
 - **Private environments** (previews): an environment with an access token answers only
   visitors who bring it: `?roll_access=<token>` once sets a host-only `HttpOnly; SameSite=Lax`
   cookie and redirects to the URL without the token; a request without it is a 401 that wakes

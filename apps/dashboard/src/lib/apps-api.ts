@@ -171,6 +171,8 @@ export interface Environment extends EnvironmentSummary {
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
   next_run_at: number | null;
+  /** Its instances keep crashing: three or more in the last ten minutes. */
+  crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   created_at: number;
 }
 

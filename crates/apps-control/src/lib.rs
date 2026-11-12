@@ -462,9 +462,9 @@ impl Apps {
 
     async fn environment_view(self: &Arc<Self>, r: EnvRow) -> Result<Environment> {
         let summary = self.summary(&r).await?;
-        let instances = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
-            Some(l) => l.instances().iter().map(|i| Instance { id: i.name.clone(), deployment: i.deployment.clone(), state: i.state(), started_at: i.started_at(), in_flight: i.in_flight() }).collect(),
-            None => Vec::new(),
+        let (instances, crash_loop) = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
+            Some(l) => (l.instances().iter().map(|i| Instance { id: i.name.clone(), deployment: i.deployment.clone(), state: i.state(), started_at: i.started_at(), in_flight: i.in_flight() }).collect(), l.crash_loop()),
+            None => (Vec::new(), None),
         };
         let domains = self.domains(&r.service, &r.name).await?;
         let sid = r.service.clone();
@@ -485,7 +485,7 @@ impl Apps {
             None => false,
         };
         let private = self.access_hash(&r.service, &r.name).await?.is_some();
-        Ok(Environment { summary, service: r.service.clone(), branch: r.branch.clone(), ephemeral: r.ephemeral, instances, domains, port: r.port, needs_deploy, private, next_run_at, created_at: r.created_at })
+        Ok(Environment { summary, service: r.service.clone(), branch: r.branch.clone(), ephemeral: r.ephemeral, instances, domains, port: r.port, needs_deploy, private, next_run_at, crash_loop, created_at: r.created_at })
     }
 
     /// `PUT …/environments/{env}`: make it (a preview environment, a staging one) or change its

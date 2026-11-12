@@ -374,7 +374,17 @@ pub struct Environment {
     pub private: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
+    /// Its instances keep crashing: three or more in the last ten minutes.
+    pub crash_loop: Option<CrashLoop>,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CrashLoop {
+    /// In the last ten minutes.
+    pub crashes: u32,
+    pub last_at: i64,
+    pub last_error: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
