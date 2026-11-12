@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, productName, type Approval } from "@/lib/access-api";
+import { accessApi, productName, type Approval, type ChatTarget } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -156,10 +156,11 @@ const integrations = createIntegrationsApi(call);
  */
 function ChatSetting() {
   const shown = useShownOwner();
-  const [current, setCurrent] = useState<{ install: string; channel: string } | null | undefined>(undefined);
+  const [current, setCurrent] = useState<ChatTarget | null | undefined>(undefined);
   const [installs, setInstalls] = useState<ChatInstall[]>([]);
   const [install, setInstall] = useState("");
   const [channel, setChannel] = useState("");
+  const [approvers, setApprovers] = useState("");
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -169,6 +170,7 @@ function ChatSetting() {
         setCurrent(n.chat);
         setInstall(n.chat?.install ?? "");
         setChannel(n.chat?.channel ?? "");
+        setApprovers(n.chat?.approvers?.join(", ") ?? "");
       })
       .catch(() => setCurrent(null));
   }, []);
@@ -179,7 +181,7 @@ function ChatSetting() {
       .then((i) => setInstalls(i.slack.installs))
       .catch(() => setInstalls([]));
   }, [shown?.owner]);
-  const save = async (chat: { install: string; channel: string } | null) => {
+  const save = async (chat: ChatTarget | null) => {
     setError(null);
     try {
       await accessApi.setNotify(chat);
@@ -196,10 +198,11 @@ function ChatSetting() {
       <p className="flex flex-wrap items-center gap-2">
         {current ? (
           <>
-            Approvals are also posted to <b className="font-medium text-fg">#{current.channel}</b> in {name(current.install)}.
+            Approvals are also posted to <b className="font-medium text-fg">#{current.channel}</b> in {name(current.install)}, where{" "}
+            {current.approvers.length === 1 ? "one person" : `${current.approvers.length} people`} you named can decide them.
           </>
         ) : (
-          "Approvals can be posted to a Slack channel, where the people you allow approve or deny them."
+          "Approvals can be posted to a Slack channel, where the people you name approve or deny them."
         )}
         <button onClick={() => setOpen((o) => !o)} className={btn}>
           {current ? "Change" : "Post to Slack"}
@@ -215,7 +218,8 @@ function ChatSetting() {
           className="rise flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            if (install && channel.trim()) void save({ install, channel: channel.trim().replace(/^#/, "") });
+            const ids = approverIds(approvers);
+            if (install && channel.trim() && ids.length) void save({ install, channel: channel.trim().replace(/^#/, ""), approvers: ids });
           }}
         >
           <select value={install} onChange={(e) => setInstall(e.target.value)} className={input} aria-label="Slack workspace">
@@ -227,7 +231,14 @@ function ChatSetting() {
             ))}
           </select>
           <input value={channel} onChange={(e) => setChannel(e.target.value)} placeholder="Channel id (C0123…)" className={`${input} font-mono text-[12px]`} aria-label="Channel id" />
-          <button type="submit" disabled={!install || !channel.trim()} className={primary}>
+          <input
+            value={approvers}
+            onChange={(e) => setApprovers(e.target.value)}
+            placeholder="Who may decide: Slack member ids (U0123…, U0456…)"
+            className={`${input} min-w-64 flex-1 font-mono text-[12px]`}
+            aria-label="Approvers' Slack member ids"
+          />
+          <button type="submit" disabled={!install || !channel.trim() || approverIds(approvers).length === 0} className={primary}>
             Save
           </button>
         </form>
@@ -235,4 +246,9 @@ function ChatSetting() {
       <ErrorNote error={error} />
     </div>
   );
+}
+
+/** Slack member ids typed as a list (commas, spaces or new lines). */
+function approverIds(text: string): string[] {
+  return [...new Set(text.split(/[\s,]+/).map((s) => s.trim().replace(/^@/, "")).filter(Boolean))];
 }

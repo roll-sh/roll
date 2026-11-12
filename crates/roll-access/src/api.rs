@@ -159,11 +159,14 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .map_err(|e| Error::Internal(e.to_string()))?;
     let action = row.action(&method, &params, c.body.as_ref());
     let outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    // What a path resolves to (an endpoint's project, a replica's database) only for what the
+    // token reaches.
+    let resource = if outcome == Outcome::Deny { None } else { crate::evaluate::describe(&target) };
     Ok(Json(json!({
         "decision": outcome,
         "product": row.product,
         "action": action,
-        "resource": crate::evaluate::describe(&target),
+        "resource": resource,
         "route": format!("{} {}", row.method, row.route),
     })))
 }
@@ -235,9 +238,9 @@ async fn may_touch(a: &Arc<Access>, g: &roll_auth::Grant, target: &crate::store:
 
 async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     let change: GrantChange = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
+    let (target_id, a2) = (id.clone(), a.clone());
+    let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
     if let Who::Grant(g) = who(&a, &ext)? {
-        let (target_id, a2) = (id.clone(), a.clone());
-        let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
         // What the token is now, and what it would become, must both be within the caller's; a
         // token never widens its own addresses.
         may_touch(&a, &g, &target).await?;
@@ -249,8 +252,9 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         let ips = change.ip_allow.clone().unwrap_or(target.ip_allow.clone());
         check_within(&a, &g, &rules, expires, &ips).await?;
     }
-    if let Some(e) = change.expires_at {
-        a.check_policy(e)?;
+    // A token whose rules, lifetime or addresses change meets the policy as it is now.
+    if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {
+        a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
     }
     Ok(Json(json!(blocking(a, move |a| a.store.update(&id, &change)).await?)))
 }
@@ -267,11 +271,13 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
 
 /// A new secret, the same rules: shown once. A grant may rotate itself, or tokens it covers.
 async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    let (target_id, a2) = (id.clone(), a.clone());
+    let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
     if let Who::Grant(g) = who(&a, &ext)? {
-        let (target_id, a2) = (id.clone(), a.clone());
-        let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
         may_touch(&a, &g, &target).await?;
     }
+    // A new secret is a new token: it meets the policy (set an expiry first if it must expire).
+    a.check_policy(target.expires_at)?;
     let (grant, token) = blocking(a, move |a| a.store.rotate(&id)).await?;
     Ok(Json(json!({ "grant": grant, "token": token })))
 }
@@ -331,8 +337,9 @@ async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::
     Ok(Json(json!(decided)))
 }
 
-/// Where approvals are posted: `{chat: {install, channel} | null}` (docs/permissions.md,
-/// "Approvals in chat").
+/// Where approvals are posted: `{chat: {install, channel, approvers} | null}` (docs/permissions.md,
+/// "Approvals in chat"). `approvers` are the chat user ids (Slack `U…`, Discord snowflakes) who
+/// may decide there: the operator names them, whoever else sees the channel.
 async fn notify(State(a): S) -> crate::Result<Json<Value>> {
     let v = blocking(a, |a| a.store.setting("notify")).await?;
     Ok(Json(v.unwrap_or_else(|| json!({ "chat": null }))))
@@ -341,10 +348,18 @@ async fn notify(State(a): S) -> crate::Result<Json<Value>> {
 async fn set_notify(State(a): S, ext: Extensions, Json(v): Json<Value>) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "choose where approvals go")?;
     let chat = &v["chat"];
+    let short = |v: &Value| v.as_str().is_some_and(|i| i.len() <= 64 && !i.is_empty());
+    let id = |v: &Value| short(v) && v.as_str().is_some_and(|i| i.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)));
+    let approvers = chat["approvers"].as_array().filter(|a| !a.is_empty() && a.len() <= 50 && a.iter().all(id));
     let ok = chat.is_null()
-        || (chat["install"].as_str().is_some_and(|i| i.len() <= 64 && !i.is_empty()) && chat["channel"].as_str().is_some_and(|c| c.len() <= 64 && !c.is_empty()));
+        || (short(&chat["install"])
+            && short(&chat["channel"])
+            && approvers.is_some()
+            && chat.as_object().is_some_and(|o| o.keys().all(|k| ["install", "channel", "approvers"].contains(&k.as_str()))));
     if !ok || v.as_object().is_none_or(|o| o.keys().any(|k| k != "chat")) {
-        return Err(Error::BadRequest("expected {\"chat\": {\"install\": \"chi_…\", \"channel\": \"C…\"}} or {\"chat\": null}".into()));
+        return Err(Error::BadRequest(
+            "expected {\"chat\": {\"install\": \"chi_…\", \"channel\": \"C…\", \"approvers\": [\"U…\"]}} (1-50 chat user ids who may decide) or {\"chat\": null}".into(),
+        ));
     }
     let v2 = json!({ "chat": chat });
     blocking(a, move |a| a.store.set_setting("notify", &v2)).await?;
@@ -394,8 +409,16 @@ async fn clients(State(a): S) -> crate::Result<Json<Value>> {
     Ok(Json(json!(seen.into_values().collect::<Vec<_>>())))
 }
 
-/// A client: registered here, or (an https URL) known by its metadata document.
-async fn client(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
-    let c = crate::oauth::known_client(&a, &id).await?.ok_or_else(|| Error::NotFound("no such client".into()))?;
+/// A client: registered here, or (an https URL) known by its metadata document. A token sees only
+/// the clients roll knows: it never makes roll fetch a document.
+async fn client(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    let c = match who(&a, &ext)? {
+        Who::Operator => crate::oauth::known_client(&a, &id).await?,
+        Who::Grant(_) => {
+            let id = id.clone();
+            blocking(a.clone(), move |a| a.store.client(&id)).await?
+        }
+    };
+    let c = c.ok_or_else(|| Error::NotFound("no such client".into()))?;
     Ok(Json(json!(c)))
 }

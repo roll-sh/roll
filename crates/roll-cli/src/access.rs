@@ -129,12 +129,15 @@ pub enum Mcp {
         reason: Option<String>,
     },
     /// Where approvals are also posted: a Slack or Discord channel through roll code's chat ops
-    /// (`--install chi_… --channel C…`), `--off`, or nothing to show it.
+    /// (`--install chi_… --channel C… --approver U…`), `--off`, or nothing to show it.
     Notify {
-        #[arg(long, requires = "channel")]
+        #[arg(long, requires_all = ["channel", "approver"])]
         install: Option<String>,
         #[arg(long, requires = "install")]
         channel: Option<String>,
+        /// A chat user id (Slack `U…`, a Discord user id) who may decide there; repeat it for more.
+        #[arg(long, requires = "install")]
+        approver: Vec<String>,
         #[arg(long, conflicts_with_all = ["install", "channel"])]
         off: bool,
     },
@@ -479,9 +482,12 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             let a = api.post(&format!("/v1/access/approvals/{id}/deny"), json!({ "reason": reason })).await?;
             if json_out { println!("{}", serde_json::to_string_pretty(&a)?) } else { println!("denied: {}", s(&a["summary"])) }
         }
-        Mcp::Notify { install, channel, off } => {
+        Mcp::Notify { install, channel, approver, off } => {
             let v = match (install, channel, off) {
-                (Some(i), Some(c), _) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": i, "channel": c.trim_start_matches('#') } }))).await?,
+                (Some(i), Some(c), _) => {
+                    let chat = json!({ "install": i, "channel": c.trim_start_matches('#'), "approvers": approver });
+                    api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": chat }))).await?
+                }
                 (_, _, true) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await?,
                 _ => api.get("/v1/access/notify").await?,
             };
@@ -490,7 +496,8 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             } else if v["chat"].is_null() {
                 println!("approvals go only to the dashboard and `roll mcp approvals`");
             } else {
-                println!("approvals are also posted to {} in {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]));
+                let who: Vec<&str> = v["chat"]["approvers"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+                println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
         Mcp::Audit { token, product, decision, limit } => {

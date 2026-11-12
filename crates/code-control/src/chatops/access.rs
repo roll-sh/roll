@@ -1,9 +1,10 @@
 //! roll's access approvals in chat (docs/permissions.md, "Approvals in chat"): a request a scoped
 //! token may only `ask` for is posted to the Slack or Discord channel the operator chose, as a card with
 //! Approve and Deny, and edited when it's decided. A press arrives like every Slack action
-//! (verified, recorded once, handled by a worker): only the install's members decide, and the
-//! decision goes to roll's access service through the hook rolld sets ([`Code::on_access_decision`]),
-//! which also checks the install is the one approvals go to.
+//! (verified, recorded once, handled by a worker), and goes to roll's access service through the
+//! hook rolld sets ([`Code::on_access_decision`]), which decides it only from the install approvals
+//! go to and only for the approvers roll's operator named (not the install's member list, which
+//! the roll code owner manages).
 
 use super::{Install, install_by_id};
 use crate::Code;
@@ -130,9 +131,6 @@ impl Code {
 /// A press on an approval card in Discord (the interaction is acknowledged already; the card is
 /// edited once the decision is recorded).
 pub(super) async fn pressed_in_discord(code: &Arc<Code>, install: &Install, approval: &str, approve: bool, user: &str) -> super::Handled {
-    if !install.allows(user) {
-        return super::Handled::Done;
-    }
     let Some(decide) = code.access_decider.get() else { return super::Handled::Retry("approvals aren't wired on this node".into()) };
     let d = AccessDecision { approval: approval.to_string(), approve, by: format!("discord:{user}"), install: install.id.clone() };
     if let Err(e) = decide(d).await {
@@ -155,10 +153,6 @@ pub(super) async fn pressed(code: &Arc<Code>, client: &Client, token: &str, inst
     let say = |text: String| async move {
         let _ = client.post_ephemeral(token, channel, user, &text).await;
     };
-    if !install.allows(user) {
-        say("Only people the roll owner allows can decide this.".into()).await;
-        return super::Handled::Done;
-    }
     let Some(decide) = code.access_decider.get() else { return super::Handled::Retry("approvals aren't wired on this node".into()) };
     let d = AccessDecision { approval: approval.to_string(), approve, by: format!("slack:{user}"), install: install.id.clone() };
     if let Err(e) = decide(d).await {

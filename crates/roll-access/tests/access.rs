@@ -22,6 +22,15 @@ impl Resolver for Endpoints {
     }
 }
 
+/// Every repo's default branch is `main`.
+struct DefaultBranch;
+
+impl Resolver for DefaultBranch {
+    fn resolve(&self, _kind: &str, _repo: &str) -> Option<Resolved> {
+        Some(Resolved { id: "main".into(), environment: None })
+    }
+}
+
 struct Daemon {
     router: Router,
     access: Arc<Access>,
@@ -52,6 +61,7 @@ fn postgres() -> Router {
         .route("/v1/unclassified", get(|| async { "{}" }))
         .route("/v1/open", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/internal/tasks", axum::routing::any(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        .route("/git/{owner}/{repo}/git-receive-pack", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
 }
@@ -63,6 +73,7 @@ impl Daemon {
         let workspace = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
         let mut resolvers = Resolvers::default();
         resolvers.by_kind.insert("endpoint", Arc::new(Endpoints));
+        resolvers.by_kind.insert("default-branch", Arc::new(DefaultBranch));
         resolvers.workspace = Some(Arc::new(WorkspaceResolver(workspace.clone())));
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
@@ -84,6 +95,12 @@ impl Daemon {
     }
 
     async fn send(&self, token: &str, method: Method, path: &str, body: Option<Value>, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+        let body = body.map_or(Body::empty(), |b| Body::from(b.to_string()));
+        self.raw(token, method, path, body, headers, None).await
+    }
+
+    /// A request with any body, and (a signed hop from another node) a `Forwarded` extension.
+    async fn raw(&self, token: &str, method: Method, path: &str, body: Body, headers: &[(&str, &str)], hop: Option<roll_cluster::Forwarded>) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json");
         if !token.is_empty() {
             req = req.header("authorization", format!("Bearer {token}"));
@@ -91,7 +108,10 @@ impl Daemon {
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
-        let req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        let mut req = req.body(body).unwrap();
+        if let Some(f) = hop {
+            req.extensions_mut().insert(f);
+        }
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -243,6 +263,38 @@ async fn escalation_paths_are_shut() {
     let other = d.send(&asker, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &id), ("x-roll-project", &a.id)]).await;
     assert_eq!(other.1["code"], "approval_mismatch");
     assert_eq!(d.send(&asker, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &id)]).await.0, StatusCode::OK);
+
+    // A push needs every action its ref updates take; refs/land/main lands on main: a deploy.
+    let pkt = |s: String| format!("{:04x}{s}", s.len() + 4);
+    let (z, c) = ("0".repeat(40), "c".repeat(40));
+    let push = |updates: &[String]| Body::from(format!("{}0000PACK", updates.iter().map(|u| pkt(u.clone())).collect::<String>()));
+    let git = "/git/acme/site/git-receive-pack";
+    let code = |actions: Value| d.token(json!([{ "product": "code", "resources": [{ "id": "acme/site" }], "actions": actions }]), json!({}));
+    let (writer, _) = code(json!({ "write": "allow" })).await;
+    let (s, e) = d.raw(&writer, Method::POST, git, push(&[format!("{z} {c} refs/land/main\0report-status\n")]), &[], None).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("deploy")), "{e}");
+    let (cleaner, _) = code(json!({ "delete": "allow" })).await;
+    let mixed = || push(&[format!("{c} {z} refs/heads/old\0report-status\n"), format!("{z} {c} refs/heads/new\n")]);
+    let (s, e) = d.raw(&cleaner, Method::POST, git, mixed(), &[], None).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("write")), "a delete doesn't carry a new branch in: {e}");
+    let (both, _) = code(json!({ "write": "allow", "delete": "ask" })).await;
+    let (s, e) = d.raw(&both, Method::POST, git, mixed(), &[], None).await;
+    assert_eq!(e["code"], "approval_pending", "{s} {e}");
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", e["approval"].as_str().unwrap()), None).await;
+    assert_eq!(asked["args"]["updates"][0]["ref"], "refs/heads/old", "the approval shows the ref updates: {asked}");
+    assert_eq!(d.raw(&cleaner, Method::POST, git, Body::from("garbage"), &[], None).await.0, StatusCode::FORBIDDEN);
+
+    // A signed hop from a node that decided it for this grant: no second approval, and the
+    // client's address is the one that node saw. A hop that names another grant is decided again.
+    let (fleet, grant) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }]), json!({ "ip_allow": ["10.1.2.0/24"] })).await;
+    let hop = |decided: &str| Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("10.1.2.3".into()), decided: Some(decided.into()) });
+    let (s, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop(&grant)).await;
+    assert_eq!((s, out["grant"].as_str()), (StatusCode::OK, Some(grant.as_str())), "{out}");
+    let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop("tok_other")).await;
+    assert_eq!(out["code"], "approval_pending", "{out}");
+    let stranger = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("192.0.2.9".into()), decided: Some(grant.clone()) });
+    let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], stranger).await;
+    assert_eq!(out["code"], "ip_not_allowed", "{out}");
 }
 
 /// An `ask` action waits for a person: approved, the request runs as sent (once); denied, it's
@@ -321,8 +373,10 @@ async fn a_token_never_makes_a_stronger_one() {
         d.call(&admin, Method::POST, "/v1/access/tokens", Some(body))
     };
     let read = json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]);
-    // The operator's policy: tokens live at most a week.
+    // The operator's policy: tokens live at most a week, a new secret for an old token too.
+    let (_, old) = d.token(read.clone(), json!({})).await;
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "max_days": 7 }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{old}/rotate"), None).await.0, StatusCode::BAD_REQUEST);
     let forever = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "forever", "rules": read }))).await;
     assert_eq!(forever.0, StatusCode::BAD_REQUEST, "{}", forever.1);
     let month = json!({ "name": "month", "rules": read, "expires_at": code_sql::now_ms() + 30 * 86_400_000 });
@@ -356,13 +410,14 @@ impl roll_access::ApprovalChat for FakeChat {
 }
 
 /// With approvals going to a chat channel, a new approval is posted there; a press from another
-/// workspace decides nothing; one from that workspace decides it, and the card follows.
+/// workspace, or from someone the operator didn't name, decides nothing; an approver's decides
+/// it, and the card follows.
 #[tokio::test(flavor = "multi_thread")]
 async fn approvals_are_posted_to_chat_and_decided_there() {
     let d = Daemon::new(50);
     let chat = Arc::new(FakeChat::default());
     let _ = d.access.chat.set(chat.clone());
-    let (s, _) = d.call(OPERATOR, Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": "chi_a", "channel": "C9" } }))).await;
+    let (s, _) = d.call(OPERATOR, Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": "chi_a", "channel": "C9", "approvers": ["U1"] } }))).await;
     assert_eq!(s, StatusCode::OK);
     let (asker, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask", "read": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&asker, Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await.0, StatusCode::FORBIDDEN, "a token never moves approvals");
@@ -383,6 +438,8 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     seen(format!("post chi_a C9 {id} pending")).await;
     let other = d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_other".into()).await;
     assert!(other.is_err());
+    let stranger = d.access.decide_from_chat(id.clone(), true, "slack:U2".into(), "chi_a".into()).await;
+    assert!(stranger.is_err(), "only the approvers the operator named decide");
     d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_a".into()).await.unwrap();
     seen(format!("update chi_a C9 1700.1 {id} approved")).await;
     let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;

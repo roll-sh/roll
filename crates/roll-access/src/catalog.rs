@@ -84,7 +84,7 @@ impl Row {
                 if params.iter().any(|(k, v)| k == p && v == "production") { Action::Deploy } else { Action::Write }
             }
             Act::Body(f) => f(body.unwrap_or(&Value::Null)),
-            // The strongest it can be, unless its commands were read (`git_push_action`).
+            // The strongest it can be; the evaluator reads its commands (`git_push`).
             Act::GitPush => Action::Deploy,
         }
     }
@@ -926,41 +926,82 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/code/agents/{owner}/automations/{id}/webhook/secret", "agents", REVEAL, one(&["owner"], "owner")),
 ];
 
-/// What a push's commands make it (`old new ref` pkt-lines before the first flush): `deploy` when
-/// one moves `default_branch` (unknown: any branch), `delete` when one deletes a ref, else
-/// `write`. `None` when the commands aren't all there (the evaluator then takes it as `deploy`).
-pub fn git_push_action(prefix: &[u8], default_branch: Option<&str>) -> Option<Action> {
+/// One ref update in a push, and the action it takes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RefUpdate {
+    #[serde(rename = "ref")]
+    pub name: String,
+    pub old: String,
+    pub new: String,
+    pub action: Action,
+}
+
+/// A push's commands (`old new ref` pkt-lines before the first flush), as far as they've arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Push {
+    /// Not all there yet.
+    More,
+    /// Not commands this parser reads: the push needs everything it could do ([`UNREAD_PUSH`]).
+    Bad,
+    Commands(Vec<RefUpdate>),
+}
+
+/// What a push whose commands weren't read might do; it needs every one of them.
+pub const UNREAD_PUSH: [Action; 3] = [Action::Write, Action::Delete, Action::Deploy];
+
+/// A push's ref updates and what each one is: `deploy` when it moves `default_branch`, directly or
+/// through `refs/land/<branch>` (which lands onto the branch; unknown default: any branch),
+/// `delete` when it deletes a ref, else `write`. A push needs every action its updates take:
+/// actions don't imply each other.
+pub fn git_push(prefix: &[u8], default_branch: Option<&str>) -> Push {
     let mut rest = prefix;
-    let mut out = Action::Write;
-    let mut any = false;
+    let mut out = Vec::new();
     loop {
-        let len = std::str::from_utf8(rest.get(..4)?).ok().and_then(|h| usize::from_str_radix(h, 16).ok())?;
+        let Some(head) = rest.get(..4) else { return Push::More };
+        let Some(len) = std::str::from_utf8(head).ok().and_then(|h| usize::from_str_radix(h, 16).ok()) else { return Push::Bad };
         if len == 0 {
-            return any.then_some(out);
+            return if out.is_empty() { Push::Bad } else { Push::Commands(out) };
         }
-        if len < 4 || rest.len() < len {
-            return None;
+        if len < 4 {
+            return Push::Bad;
+        }
+        if rest.len() < len {
+            return Push::More;
         }
         let line = &rest[4..len];
         rest = &rest[len..];
         let line = line.split(|b| *b == 0).next().unwrap_or(line);
-        let text = std::str::from_utf8(line).ok()?.trim_end();
+        let Ok(text) = std::str::from_utf8(line) else { return Push::Bad };
+        let text = text.trim_end_matches('\n');
+        // A shallow client says which commits it has the history of before its commands.
+        if out.is_empty() && text.strip_prefix("shallow ").is_some_and(is_oid) {
+            continue;
+        }
         let mut parts = text.split(' ');
-        let (_old, new, name) = (parts.next()?, parts.next()?, parts.next()?);
-        any = true;
-        let to_default = match default_branch {
-            Some(b) => name == format!("refs/heads/{b}"),
-            None => name.starts_with("refs/heads/"),
+        let (Some(old), Some(new), Some(name), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return Push::Bad };
+        if !is_oid(old) || !is_oid(new) || name.is_empty() {
+            return Push::Bad;
+        }
+        let onto = name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("refs/land/"));
+        let ships = match (onto, default_branch) {
+            (Some(b), Some(d)) => b == d,
+            (Some(_), None) => true,
+            (None, _) => false,
         };
-        let a = if to_default {
+        let action = if ships {
             Action::Deploy
         } else if new.bytes().all(|c| c == b'0') {
             Action::Delete
         } else {
             Action::Write
         };
-        out = out.max(a);
+        out.push(RefUpdate { name: name.to_string(), old: old.to_string(), new: new.to_string(), action });
     }
+}
+
+/// A git object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
+fn is_oid(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -1022,10 +1063,19 @@ mod tests {
         let pkt = |s: &str| format!("{:04x}{s}", s.len() + 4);
         let (z, a) = ("0".repeat(40), "a".repeat(40));
         let push = |cmds: &[String]| format!("{}0000PACK…", cmds.join("")).into_bytes();
-        assert_eq!(git_push_action(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0report-status\n"))]), Some("main")), Some(Action::Write));
-        assert_eq!(git_push_action(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0caps\n")), pkt(&format!("{z} {a} refs/heads/main\n"))]), Some("main")), Some(Action::Deploy));
-        assert_eq!(git_push_action(&push(&[pkt(&format!("{a} {z} refs/tags/v1\0caps\n"))]), Some("main")), Some(Action::Delete));
-        assert_eq!(git_push_action(b"00", Some("main")), None);
+        let actions = |p: Push| match p {
+            Push::Commands(c) => c.into_iter().map(|u| u.action).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0report-status\n"))]), Some("main"))), [Action::Write]);
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0caps\n")), pkt(&format!("{z} {a} refs/heads/main\n"))]), Some("main"))), [Action::Write, Action::Deploy]);
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{a} {z} refs/tags/v1\0caps\n")), pkt(&format!("{z} {a} refs/heads/x\n"))]), Some("main"))), [Action::Delete, Action::Write]);
+        // refs/land/<branch> lands onto the branch.
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/land/main\0caps\n"))]), Some("main"))), [Action::Deploy]);
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/land/feature\0caps\n"))]), None)), [Action::Deploy]);
+        assert_eq!(git_push(b"00", Some("main")), Push::More);
+        assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
+        assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         let f = find("POST", "/git/{*path}", "/git/acme/site.git/git-receive-pack").unwrap();
         assert_eq!(f.row.route, "/git/{owner}/{repo}/git-receive-pack");
         let mut routes: Vec<_> = ROWS.iter().map(|r| (r.method, r.route)).collect();
