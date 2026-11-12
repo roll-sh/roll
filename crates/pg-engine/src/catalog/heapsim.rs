@@ -1307,6 +1307,24 @@ impl Heap {
         out
     }
 
+    /// Every row's key in heap (TID) order, when each row has one version: nothing updated,
+    /// deleted or pending, only inserted. None otherwise.
+    pub fn inserted_in_heap_order(&self) -> Option<Vec<&[u8]>> {
+        let k = &self.keys;
+        if !self.pending.is_empty() || k.rows() != k.len() || self.versions != k.len() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(k.len());
+        for p in &self.pages {
+            for off in 1..=p.lps.len() as u16 {
+                if let Some(t) = p.tup(off) {
+                    out.push(self.keys.key(t.row)?);
+                }
+            }
+        }
+        (out.len() == k.len()).then_some(out)
+    }
+
     pub fn tid_of(&self, key: &[u8]) -> Option<Tid> {
         self.keys.get(key)
     }

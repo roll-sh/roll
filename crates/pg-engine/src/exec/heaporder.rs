@@ -25,14 +25,18 @@ pub(super) type Held = (u64, Vec<u8>, Bytes);
 /// Which rows (by position in storage order) are outside the longest run whose TIDs
 /// increase (`displaced`), and which of those come before a run row stored ahead of them
 /// (`early`): two bit sets.
-pub(super) fn displaced(tids: &[u64]) -> (Vec<u64>, Vec<u64>) {
+pub(super) fn displaced<T: Ord + Copy>(tids: &[T]) -> (Vec<u64>, Vec<u64>) {
     const NONE: u32 = u32::MAX;
     // (Patience sorting: `tails[k]` is the row ending the run of length k + 1 with the
     // smallest last TID; `prev` links each row to the one before it in its run.)
     let mut tails: Vec<u32> = Vec::new();
     let mut prev: Vec<u32> = Vec::with_capacity(tids.len());
     for (i, &t) in tids.iter().enumerate() {
-        let j = tails.partition_point(|&x| tids[x as usize] < t);
+        // (Mostly past the longest run's end: no search.)
+        let j = match tails.last() {
+            Some(&x) if tids[x as usize] < t => tails.len(),
+            _ => tails.partition_point(|&x| tids[x as usize] < t),
+        };
         prev.push(if j > 0 { tails[j - 1] } else { NONE });
         if j == tails.len() {
             tails.push(i as u32);
@@ -116,7 +120,7 @@ mod tests {
         let (bits, early) = displaced(&tids);
         assert_eq!(set(&bits, 8), vec![0, 1, 2]);
         assert!(set(&early, 8).is_empty());
-        assert!(displaced(&[]).0.is_empty());
+        assert!(displaced::<u64>(&[]).0.is_empty());
         assert_eq!(tid_rank((1, 2)), 65538);
     }
 }

@@ -1132,6 +1132,58 @@ const REORDERED_QUERIES: &[&str] = &[
 ];
 
 #[test]
+fn inserts_into_free_space_through_chunks() {
+    on_session_thread(inserts_into_free_space_through_chunks_inner);
+}
+
+/// A heap only inserted into whose later rows went into earlier pages' free space (the
+/// free space map's, after a VACUUM): the workers read chunks of keys with those rows put in
+/// their places (`DisplacedFill`), and every query gives the serial scan's rows in its order.
+fn inserts_into_free_space_through_chunks_inner() {
+    use pg_engine::exec::parscan::DISPLACED_ROWS;
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE f (id int, g int, x numeric(10, 2), t text, pad text); \
+         INSERT INTO f SELECT i, i % 23, (i % 4000) / 40.0, 'f' || (i % 300), repeat('p', 1500) FROM generate_series(1, 6000) i",
+    )
+    .unwrap();
+    s.query("VACUUM f").unwrap();
+    s.query(
+        "INSERT INTO f SELECT i, i % 23, (i % 4000) / 40.0, 'f' || (i % 300), '' FROM generate_series(6001, 60000) i; \
+         CREATE TABLE q (k int PRIMARY KEY, w int); INSERT INTO q SELECT k, k % 4 FROM generate_series(0, 22) k; \
+         ANALYZE f; ANALYZE q",
+    )
+    .unwrap();
+    assert_eq!(out(&mut s, "SELECT pg_relation_size('f') >= 8 * 1024 * 1024"), ["[Bool(true)]"]);
+    // (Rows of later keys on earlier pages: the heap isn't in key order.)
+    assert_eq!(
+        out(&mut s, "SELECT count(*) > 0 FROM (SELECT id, ctid, lag(ctid) OVER (ORDER BY id) p FROM f) z WHERE ctid < p"),
+        ["[Bool(true)]"]
+    );
+    let queries = [
+        "SELECT id, g, x FROM f WHERE x > 99.5",
+        "SELECT g, count(*), sum(x) FROM f WHERE t LIKE 'f1%' GROUP BY g ORDER BY g",
+        "SELECT f.id, q.w FROM f JOIN q ON f.g = q.k WHERE f.x = 12.25",
+        "SELECT q.w, count(*), sum(f.x) FROM f JOIN q ON f.g = q.k WHERE f.id % 7 <> 0 GROUP BY q.w ORDER BY 1",
+    ];
+    let run = |s: &mut Session| -> Vec<Vec<String>> { queries.iter().map(|q| out(s, q)).collect() };
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial = run(&mut s);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let (started, displaced) = (pg_engine::exec::parscan::started(), DISPLACED_ROWS.load(Relaxed));
+    let parallel = run(&mut s);
+    assert!(pg_engine::exec::parscan::started() > started, "the heap ran in workers");
+    assert!(DISPLACED_ROWS.load(Relaxed) > displaced, "displaced rows were put in their places");
+    for ((q, a), b) in queries.iter().zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+    assert!(serial[0].len() > 10, "{:?}", serial[0]);
+}
+
+#[test]
 fn reordered_heaps_through_batches() {
     on_session_thread(reordered_heaps_through_batches_inner);
 }

@@ -4864,6 +4864,31 @@ pub fn row_tids(t: &Table, rows: &[(Vec<u8>, bytes::Bytes)], ctx: &ExecCtx) -> O
     Some(out)
 }
 
+/// The rows of the table's modelled heap that inserts alone put out of key order (a COPY's
+/// rows in an earlier page's free space; `Heap::inserted_in_heap_order`): those outside the
+/// longest run whose keys rise in heap order, each with its place in heap order and the key
+/// of the run row after it there (None: after them all). None: the model can't name them
+/// (rows updated or deleted, or not modelled).
+pub fn displaced_inserts(t: &Table, ctx: &ExecCtx) -> Option<Vec<(Vec<u8>, u64, Option<Vec<u8>>)>> {
+    use super::heaporder::{displaced, is_set};
+    heap_blocks(t, ctx).ok().flatten()?;
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
+    let keys = rf.heaps.get(&t.oid)?.inserted_in_heap_order()?;
+    let (bits, _) = displaced(&keys);
+    let mut out = Vec::new();
+    // (Walked backward: the run row after each.)
+    let mut next: Option<&[u8]> = None;
+    for (i, k) in keys.iter().enumerate().rev() {
+        if is_set(&bits, i) {
+            out.push((k.to_vec(), i as u64, next.map(<[u8]>::to_vec)));
+        } else {
+            next = Some(k);
+        }
+    }
+    out.reverse();
+    Some(out)
+}
+
 /// The rows' locations as a bitmap heap scan reads them: their HOT chains' roots (what
 /// the indexes point to).
 pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Option<Tid>>> {

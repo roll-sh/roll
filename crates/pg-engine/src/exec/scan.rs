@@ -4890,11 +4890,17 @@ impl ScanNode {
             return Ok(None);
         }
         let (start, end) = self.ranges[0].clone();
+        // (A heap whose rows only inserts put out of key order, as a COPY puts some in an
+        // earlier page's free space: the model names them, and the workers read chunks of
+        // keys with those rows moved to their places in heap order (`DisplacedFill`). Else
+        // the rows are read here and sorted by TID.)
+        let displaced = if reordered { super::sizing::displaced_inserts(&p.table, ctx) } else { None };
+        let listed = reordered && displaced.is_none();
         let txn = ctx.txn.borrow();
         // (Chunks read rows as stored: the workers read the out-of-line values of the columns
         // they decode, for the rows they keep. Reordered rows come with their values.)
-        let toast = if reordered { None } else { txn.scan_snap(&start, &end, &snap).source().cloned() };
-        let scans: Vec<super::parscan::Source> = if reordered {
+        let toast = if listed { None } else { txn.scan_snap(&start, &end, &snap).source().cloned() };
+        let scans: Vec<super::parscan::Source> = if listed {
             let mut rows = Vec::new();
             for r in txn.scan_snap(&start, &end, &snap) {
                 rows.push(r?);
@@ -4930,13 +4936,39 @@ impl ScanNode {
             bounds.extend(cuts);
             bounds.push(end);
             let bulk = ctx.sess.db.store.bulk_range(&bounds[0], &bounds[bounds.len() - 1]);
-            let scans = bounds
-                .windows(2)
-                .map(|w| {
-                    let s = txn.scan_snap(&w[0], &w[1], &snap);
-                    super::parscan::fill_source(if toast.is_some() { s.raw() } else { s }, bulk)
-                })
-                .collect();
+            let scans = match displaced {
+                Some(d) => {
+                    // (Each displaced row goes to the chunk of the row it comes before in
+                    // heap order, and is passed over in the chunk its key is in.)
+                    let cuts = &bounds[1..bounds.len() - 1];
+                    let chunk = |k: &[u8]| cuts.partition_point(|c| c.as_slice() <= k);
+                    let mut fills: Vec<super::parscan::DisplacedFill<crate::txn::TxnScan>> = bounds
+                        .windows(2)
+                        .map(|w| {
+                            let s = txn.scan_snap(&w[0], &w[1], &snap);
+                            super::parscan::DisplacedFill::new(if toast.is_some() { s.raw() } else { s })
+                        })
+                        .collect();
+                    let (lo, hi) = (bounds[0].clone(), bounds[bounds.len() - 1].clone());
+                    for (key, at, anchor) in d.into_iter().filter(|(k, ..)| *k >= lo && *k < hi) {
+                        fills[chunk(&key)].skip.push(key.clone());
+                        let s = txn.scan_snap(&key, &prefix_end(&key), &snap);
+                        let row = if toast.is_some() { s.raw() } else { s }.next().transpose()?;
+                        if let Some((k, v)) = row.filter(|(k, _)| *k == key) {
+                            let c = anchor.as_deref().map_or(fills.len() - 1, chunk);
+                            fills[c].put.push((at, anchor, k, v));
+                        }
+                    }
+                    fills.into_iter().map(|f| super::parscan::fill_source(f.ready(), bulk)).collect()
+                }
+                None => bounds
+                    .windows(2)
+                    .map(|w| {
+                        let s = txn.scan_snap(&w[0], &w[1], &snap);
+                        super::parscan::fill_source(if toast.is_some() { s.raw() } else { s }, bulk)
+                    })
+                    .collect(),
+            };
             drop(txn);
             scans
         };

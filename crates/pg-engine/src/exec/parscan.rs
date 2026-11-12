@@ -247,6 +247,82 @@ impl FillRows for ListFill {
     }
 }
 
+/// Rows `DisplacedFill` put in their places (tests distinguish this source).
+pub static DISPLACED_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A chunk of keys of a modelled heap whose rows only inserts put out of key order
+/// (`sizing::displaced_inserts`), in heap order: the rows `inner` reads in key order, those
+/// rows (`skip`) passed over there, and each of them (`put`) given before the first row whose
+/// key is at least its anchor's (the row after it in heap order; none: at the chunk's end).
+pub struct DisplacedFill<F> {
+    inner: F,
+    /// Keys passed over, ascending once `ready`.
+    pub skip: Vec<Vec<u8>>,
+    /// (place in heap order, anchor key, key, value), in heap order once `ready`.
+    pub put: Vec<(u64, Option<Vec<u8>>, Vec<u8>, bytes::Bytes)>,
+    batch: RowBatch,
+    /// The next of `skip` and of `put`.
+    at: (usize, usize),
+    done: bool,
+}
+
+impl<F> DisplacedFill<F> {
+    pub fn new(inner: F) -> Self {
+        DisplacedFill { inner, skip: Vec::new(), put: Vec::new(), batch: RowBatch::default(), at: (0, 0), done: false }
+    }
+
+    /// Its lists in order.
+    pub fn ready(mut self) -> Self {
+        self.skip.sort_unstable();
+        self.put.sort_unstable_by_key(|p| p.0);
+        self
+    }
+}
+
+impl<F: FillRows> FillRows for DisplacedFill<F> {
+    fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        let target = b.len() + max;
+        while b.len() < target {
+            if self.batch.remaining() == 0 && !self.done {
+                self.batch.clear();
+                self.inner.fill(&mut self.batch, max)?;
+                self.done = self.batch.is_empty();
+            }
+            if self.done {
+                let Some((_, _, k, v)) = self.put.get(self.at.1) else { break };
+                b.push(k, v.clone());
+                self.at.1 += 1;
+                DISPLACED_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            let i = self.batch.pos();
+            let (k, _) = self.batch.get(i);
+            if let Some((_, Some(a), dk, dv)) = self.put.get(self.at.1)
+                && a.as_slice() <= k
+            {
+                b.push(dk, dv.clone());
+                self.at.1 += 1;
+                DISPLACED_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            // (A displaced row the snapshot doesn't see isn't met.)
+            while self.skip.get(self.at.0).is_some_and(|s| s.as_slice() < k) {
+                self.at.0 += 1;
+            }
+            if self.skip.get(self.at.0).is_some_and(|s| s.as_slice() == k) {
+                self.at.0 += 1;
+            } else {
+                match self.batch.value_in(i) {
+                    (v, Some((buf, off))) => b.push_in(k, buf, off, v.len()),
+                    (v, None) => b.push_copy(k, v),
+                }
+            }
+            self.batch.advance();
+        }
+        Ok(())
+    }
+}
+
 /// A table's rows in [range) through `FillRows`, as a bulk read when `bulk`.
 pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
     Source::Fill(if bulk { Box::new(crate::storage::batch::BulkFill(f)) } else { Box::new(f) })
