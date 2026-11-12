@@ -860,7 +860,9 @@ impl Brancher for Search {
 
     async fn usage(&self, _parent: &str, branch: &str) -> anyhow::Result<Usage> {
         let c = self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await?;
-        let bytes = c["stored_bytes"].as_i64().or_else(|| c["usage"]["stored_bytes"].as_i64()).unwrap_or(0);
+        // What the branch wrote, when roll search says (`own_bytes`); else everything it
+        // references, the parent's shared segments included (an overestimate).
+        let bytes = c["own_bytes"].as_i64().or_else(|| c["stored_bytes"].as_i64()).unwrap_or(0);
         Ok(Usage { bytes, storage_usd_month: gb(bytes) * 0.023, active_usd_hour: 0.0, month_to_date_usd: 0.0 })
     }
 }
