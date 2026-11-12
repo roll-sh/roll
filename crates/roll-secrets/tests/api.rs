@@ -227,6 +227,11 @@ async fn references_imports_and_personal_values_resolve_and_cycles_are_reported(
     let v = api.values("development", "/").await;
     assert_eq!(v["values"]["URL"], "postgres://u:pw@prod.db/x");
     assert_eq!(v["values"]["LITERAL"], "${HOME}");
+    // What a reference reaches moves the digest (roll run --watch, syncs), in another environment too.
+    let before = api.ok(Method::GET, "/environments/development/digest", None).await["digest"].clone();
+    api.set("production", "DB_HOST", "prod2.db").await;
+    assert_ne!(api.ok(Method::GET, "/environments/development/digest", None).await["digest"], before);
+    api.set("production", "DB_HOST", "prod.db").await;
     let problems: Vec<&str> = v["problems"].as_array().unwrap().iter().map(|p| p["problem"].as_str().unwrap()).collect();
     assert!(problems.iter().any(|p| p.starts_with("cycle: A → B → A")), "{problems:?}");
     let w = api.ok(Method::PUT, "/environments/development/secrets/X", Some(json!({ "value": "${staging.NOPE}" }))).await;
@@ -406,6 +411,11 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let b = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "app:web" }))).await;
     assert_ne!(a["values"]["TEMP_KEY"], b["values"]["TEMP_KEY"]);
     assert_eq!(a["leases"].as_array().unwrap().len(), 1);
+    // A long-running service renews its lease instead of restarting.
+    let lease = a["leases"][0].as_str().unwrap();
+    let before = api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().find(|l| l["id"] == lease).unwrap()["expires_at"].as_i64().unwrap();
+    let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
+    assert!(renewed["expires_at"].as_i64().unwrap() > before + 60 * 60_000);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
 
     // An environment that goes takes its managed credentials with it.

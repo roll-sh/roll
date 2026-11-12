@@ -27,6 +27,9 @@ pub struct Lease {
     pub revoked_at: Option<i64>,
 }
 
+/// The longest a dynamic credential lives, renewals included (from when it was issued).
+const LEASE_LIFE_MAX: i64 = 30 * 86_400_000;
+
 /// What one sweep did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Swept {
@@ -63,6 +66,48 @@ impl Secrets {
             // Leases name no folder: a caller limited to some folders sees none.
             Ok(rows.into_iter().filter(|l| caller.allows(Action::Read, &Scope::at(project, &l.environment, "/"))).collect())
         })
+    }
+
+    /// Push a live dynamic lease's expiry out by `ttl_minutes` (default: its link's TTL), at most 30
+    /// days from when it was issued: a long-running service keeps its credential without
+    /// restarting. Needs `reveal` on the lease's environment (whoever could read the credential).
+    pub fn renew_lease(&self, project: &str, id: &str, ttl_minutes: Option<u64>, caller: &Caller) -> Result<Lease> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        let now = self.db.now_ms()?;
+        // (environment, kind, link, handle, issued_at, expires_at, revoked_at)
+        type LeaseRow = (String, String, String, String, i64, i64, Option<i64>);
+        let found: Option<LeaseRow> = self.db.read(|c| {
+            c.query_row(
+                "SELECT e.slug, l.kind, l.link, l.handle, l.issued_at, l.expires_at, l.revoked_at FROM leases l JOIN environments e ON e.id = l.env_id WHERE l.id = ? AND l.project_id = ?",
+                [id, project],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+            .optional()
+        })?;
+        let (env, kind, link, handle, issued_at, expires_at, revoked_at) = found.ok_or_else(|| Error::NotFound(format!("no lease {id}")))?;
+        caller.need(Action::Reveal, &Scope::at(project, &env, "/"))?;
+        if kind != "dynamic" {
+            return Err(Error::BadRequest(format!("{id} is a retired credential's: only dynamic leases renew")));
+        }
+        if revoked_at.is_some() || expires_at <= now {
+            return Err(Error::Conflict("conflict", format!("{id} has ended: resolve again for a new credential")));
+        }
+        let link: Link = serde_json::from_str(&link).map_err(|_| Error::Internal("a lease's link isn't JSON".into()))?;
+        let ttl = ttl_minutes.unwrap_or_else(|| link.ttl_minutes()).clamp(1, 7 * 24 * 60) as i64;
+        let until = (now + ttl * 60_000).min(issued_at + LEASE_LIFE_MAX);
+        if until <= expires_at {
+            return Err(Error::Conflict("conflict", format!("{id} can't live past 30 days from when it was issued: resolve again for a new credential")));
+        }
+        let handle: Json = serde_json::from_str(&handle).unwrap_or_default();
+        // The product first: if recording fails, the old expiry stands and the sweeper revokes then.
+        self.links.get(&link.kind)?.renew(&link.r#ref, &handle, until)?;
+        let n = self.db.write(|c| c.execute("UPDATE leases SET expires_at = ? WHERE id = ? AND revoked_at IS NULL AND expires_at = ?", params![until, id, expires_at]))?;
+        if n == 0 {
+            return Err(Error::Conflict("conflict", format!("{id} changed meanwhile: try again")));
+        }
+        self.audit_now(project, caller, "lease.renew", Some(&env), None, &[], &format!("renewed {id} for {ttl} min"));
+        self.leases(project, caller)?.into_iter().find(|l| l.id == id).ok_or_else(|| Error::NotFound(format!("no lease {id}")))
     }
 
     /// Revoke a lease now.

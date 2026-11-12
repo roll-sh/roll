@@ -222,7 +222,12 @@ A link is `{kind, ref, field, mode, options}`:
   pick up the new value.
 - **`dynamic`** (short-lived credentials): each resolve that asks for it (`roll run`, an app's
   start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at most 7 days), recorded
-  as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`. Only
+  as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`. A
+  long-running consumer renews instead of restarting: `POST …/leases/{id}/renew` pushes the expiry
+  out by the link's TTL (at most 30 days from issue), and the provider follows where the product
+  enforces its own expiry (a Postgres role's `VALID UNTIL`). `roll run --watch` renews its leases
+  every 10 minutes. `Values.dynamic` names the keys that hold one, for a consumer that can't renew
+  (a service that scales to zero refuses them). Only
   the lease's metadata is stored, never the credential.
 
 Which fields and modes each kind offers is in `GET …/links` (the catalogue of the project's
@@ -279,9 +284,10 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   project.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
-  effective keys, versions, fingerprints and links that decrypts nothing, issues nothing and isn't
-  audited. A change that doesn't resolve keeps the running command. A live link's resource rotating
-  doesn't change the digest.
+  effective keys, versions, fingerprints and links, and of what their references reach (in this
+  environment or another), that decrypts nothing, issues nothing and isn't audited
+  (`Secrets::digest` in process). A change that doesn't resolve keeps the running command. A live
+  link's resource rotating doesn't change the digest.
 - `roll run` fetches the resolved values (`…/values`), adds them to the child's environment and
   execs the command. It writes no file, and it fails before running anything if a reference is
   unresolved. Variables already set in the shell keep their value unless `--override` is passed.
@@ -609,6 +615,7 @@ isn't in the workspace is 404.
 | `GET /links` | | `LinkTarget[]` |
 | `GET /leases` | | `Lease[]` |
 | `DELETE /leases/{id}` | | 204 |
+| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
 | `GET /tokens` | | `Token[]` |
 | `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
 | `DELETE /tokens/{id}` | | 204 |
@@ -668,7 +675,7 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[] }; // leases: ids of dynamic credentials issued
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Required = { key: string; path: string; comment: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
@@ -728,24 +735,23 @@ security review. `pnpm test:code` is green on the head. Reviewed on 2026-11-12 a
 Doppler, Vercel and 1Password Developer, and against the apps, previews, MCP and search branches.
 Ranked:
 
-1. **Lease renewal** for long-running consumers (roll apps' services): `POST …/leases/{id}/renew`
-   pushes a dynamic credential's expiry out (the provider extends it where the product enforces
-   one: a Postgres role's `VALID UNTIL`), so a service doesn't have to restart before its lease
-   ends. In progress.
-2. **Approvers see what they approve**: `GET …/requests/{id}/values` (`reveal`) returns a request's
+1. **Approvers see what they approve**: `GET …/requests/{id}/values` (`reveal`) returns a request's
    pending values to a caller who may reveal them, and the dashboard shows old and new side by
    side; today approvals see fingerprints only.
-3. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands
+2. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands
    `roll_auth::Grant`: `Secrets::caller` reads the Grant before the `Operator` marker (whichever PR
    merges second does it), the resource is `Resource { product: "secrets", project, environment,
    path, ..Default::default() }`, `rlst_` tokens migrate to roll-access tokens, and a sync made by a
    grant re-checks it through roll-access. Also: roll apps' `Secrets` port wired to `Secrets::values`
    (whichever of #20 and #21 merges second; the adapter is in the apps thread).
-4. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
+3. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
    a version's history shows the old and new value side by side on reveal.
-5. **Audit streaming and export**: a CSV/JSON export of the audit log, and a sync-like sink that
+4. **Audit streaming and export**: a CSV/JSON export of the audit log, and a sync-like sink that
    streams audit rows (no values) to a SIEM URL.
-6. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
+5. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
    links, previews), for users rather than implementers.
-7. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
+6. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
+7. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
+   Cloudflare Workers; the platform's token is a reference to a secret of the same project,
+   resolved at push time, never stored in the sync.

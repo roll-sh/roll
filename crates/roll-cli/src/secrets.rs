@@ -894,19 +894,21 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
-async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<Vec<(String, String)>> {
+async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
     let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
-    Ok(v["values"]
+    let env = v["values"]
         .as_object()
         .into_iter()
         .flatten()
         .filter(|(k, _)| r.override_env || std::env::var_os(k).is_none())
         .map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string()))
-        .collect())
+        .collect();
+    let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
+    Ok((env, leases))
 }
 
 /// `roll run`: resolve, then exec the command with the values in its environment; with
@@ -915,9 +917,9 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let at = r.at.resolve();
     let project = project(api, at.project.as_deref()).await?;
     let c = Client { project, api, at: at.clone() };
-    let env = run_env(&c, &at, &r).await?;
+    let (env, leases) = run_env(&c, &at, &r).await?;
     if r.watch {
-        return watch(&c, &at, &r, env).await;
+        return watch(&c, &at, &r, env, leases).await;
     }
     let mut cmd = std::process::Command::new(&r.command[0]);
     cmd.args(&r.command[1..]).envs(env);
@@ -937,10 +939,12 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
 /// `roll run --watch`: the command as a child, restarted (SIGTERM, then SIGKILL after 10 s) when
 /// the environment changes. A change that doesn't resolve keeps the running command. Exits with
 /// the command's own code when it exits by itself.
-async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>) -> anyhow::Result<()> {
+async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>) -> anyhow::Result<()> {
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
     let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
     let every = std::time::Duration::from_secs(r.interval.max(1));
+    // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
+    let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
     loop {
         let mut child = tokio::process::Command::new(&r.command[0]).args(&r.command[1..]).envs(env.iter().cloned()).spawn().with_context(|| format!("running {}", r.command[0]))?;
         loop {
@@ -949,6 +953,13 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>)
                 _ = tokio::signal::ctrl_c() => {
                     stop(&mut child).await;
                     std::process::exit(130);
+                }
+                _ = renew.tick(), if !leases.is_empty() => {
+                    for l in &leases {
+                        if let Err(e) = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(l)), None).await {
+                            eprintln!("roll run: couldn't renew lease {l} ({e})");
+                        }
+                    }
                 }
                 _ = tokio::time::sleep(every) => {
                     let now = match c.call(Method::GET, &digest_path, None).await {
@@ -963,9 +974,10 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>)
                     }
                     last = now;
                     match run_env(c, at, r).await {
-                        Ok(next) => {
+                        Ok((next, next_leases)) => {
                             eprintln!("roll run: {}:{} changed, restarting {}", at.env, at.path, r.command[0]);
                             env = next;
+                            leases = next_leases;
                             stop(&mut child).await;
                             break;
                         }
@@ -976,6 +988,9 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>)
         }
     }
 }
+
+/// How often `roll run --watch` renews its dynamic credentials' leases.
+const RENEW_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// SIGTERM, and SIGKILL if it hasn't exited after 10 seconds.
 async fn stop(child: &mut tokio::process::Child) {

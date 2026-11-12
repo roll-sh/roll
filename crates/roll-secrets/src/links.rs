@@ -112,6 +112,13 @@ pub trait LinkProvider: Send + Sync {
         let _ = (r#ref, handle);
         Ok(())
     }
+    /// Keep a dynamic credential working until `until` (unix ms): a lease was renewed. Only a
+    /// product that enforces an expiry of its own needs this (a Postgres role's `VALID UNTIL`);
+    /// for the rest, roll's lease is the expiry.
+    fn renew(&self, r#ref: &str, handle: &Json, until: i64) -> Result<()> {
+        let _ = (r#ref, handle, until);
+        Ok(())
+    }
     /// Rotate the resource's own credential (a database password), which `live` fields then
     /// read. `Ok(false)`: this kind has nothing to rotate.
     fn rotate_source(&self, r#ref: &str) -> Result<bool> {

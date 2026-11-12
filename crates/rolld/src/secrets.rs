@@ -258,6 +258,17 @@ impl LinkProvider for Postgres {
     }
     /// Ends the role's sessions and drops it. What it made (tables from a migration) is given to
     /// `roll` first, so revoking a credential never drops data.
+    /// A renewed lease: the role's `VALID UNTIL` follows (with the same 5 minutes of slack).
+    fn renew(&self, _: &str, h: &Json, until: i64) -> roll_secrets::Result<()> {
+        let (Some(role), Some(endpoint)) = (h["role"].as_str(), h["endpoint"].as_str()) else { return Ok(()) };
+        if !role.starts_with("roll_") || !role[5..].bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {
+            return Err(Error::Internal("a lease names a role roll didn't make".into()));
+        }
+        let at = chrono::DateTime::from_timestamp_millis(until + 5 * 60_000).ok_or_else(|| Error::BadRequest("a time out of range".into()))?.to_rfc3339();
+        self.0.call(Method::POST, &format!("/v1/endpoints/{}/query", enc(endpoint)), Some(json!({ "sql": format!("ALTER ROLE {role} VALID UNTIL '{at}'") }))).map(|_| ())
+    }
+    /// Ends the role's sessions and drops it. What it made (tables from a migration) is given to
+    /// `roll` first, so revoking a credential never drops data.
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
         let (Some(role), Some(endpoint)) = (h["role"].as_str(), h["endpoint"].as_str()) else { return Ok(()) };
         if !role.starts_with("roll_") || !role[5..].bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {

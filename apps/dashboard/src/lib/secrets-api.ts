@@ -79,7 +79,8 @@ export type ChangeDetail = Change & { items: Item[]; state?: StateRow[] };
 export type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 export type Problem = { key: string; problem: string };
 /** `leases`: ids of dynamic credentials issued. */
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[] };
+/** `dynamic`: the keys holding a dynamic link's short-lived credential. */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[] };
 export type CellSource = "own" | "import" | "base";
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean };
 export type RowStatus = "same" | "different" | "missing";
@@ -291,6 +292,8 @@ export function secretsApi(project: string) {
     links: () => req<LinkTarget[]>("GET", `${P}/links`),
     leases: () => req<Lease[]>("GET", `${P}/leases`),
     revokeLease: (id: string) => req<null>("DELETE", `${P}/leases/${enc(id)}`),
+    /** Pushes a dynamic lease's expiry out by its link's TTL (or `ttl_minutes`). */
+    renewLease: (id: string, ttl_minutes?: number) => req<Lease>("POST", `${P}/leases/${enc(id)}/renew`, ttl_minutes ? { ttl_minutes } : {}),
 
     tokens: () => req<Token[]>("GET", `${P}/tokens`),
     createToken: (t: NewToken) => req<Token & { token: string }>("POST", `${P}/tokens`, t),

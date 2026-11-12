@@ -119,6 +119,9 @@ pub struct Values {
     pub values: BTreeMap<String, Value>,
     pub problems: Vec<Problem>,
     pub leases: Vec<String>,
+    /// Keys whose value is a dynamic link's short-lived credential (it ends with its lease: a
+    /// consumer that can't renew it, such as a service that scales to zero, should refuse them).
+    pub dynamic: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -322,7 +325,8 @@ impl Secrets {
             None => format!("exported {}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
         };
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
-        Ok(Values { values, problems, leases })
+        let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
+        Ok(Values { values, problems, leases, dynamic })
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
@@ -335,9 +339,36 @@ impl Secrets {
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
         self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
+        let dek = self.project(project)?;
         let mut h = Sha256::new();
+        let stamp = |h: &mut Sha256, e: &Entry| h.update(format!("{}\0{}\0{}\0{}\0{}\0{}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.fp, e.row.link.as_ref().map(json).unwrap_or_default()));
         for e in &entries {
-            h.update(format!("{}\0{}\0{}\0{}\0{}\0{}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.fp, e.row.link.as_ref().map(json).unwrap_or_default()));
+            stamp(&mut h, e);
+        }
+        // What references reach, in this environment or another, moves the digest too.
+        let mut views: HashMap<(String, String), Vec<Entry>> = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut todo: Vec<(Entry, usize)> = entries.iter().map(|e| (e.clone(), 0)).collect();
+        while let Some((e, depth)) = todo.pop() {
+            if depth >= DEPTH {
+                continue;
+            }
+            for display in e.row.references(&dek, project) {
+                let Some(r) = refs::refs(&format!("${{{display}}}")).into_iter().next() else { continue };
+                let (env, at) = match &r.env {
+                    None => (e.env.clone(), e.row.path.clone()),
+                    Some(x) => (x.clone(), r.path.clone()),
+                };
+                if !seen.insert(format!("{env}:{at}:{}", r.key)) || !caller.allows(Action::Read, &Scope::at(project, &env, &at)) {
+                    continue;
+                }
+                let view = views.entry((env.clone(), at.clone())).or_insert_with(|| self.view(project, &env, &at, caller, false, Action::Read).unwrap_or_default());
+                if let Some(t) = view.iter().find(|t| t.row.key == r.key) {
+                    h.update(b"ref\0");
+                    stamp(&mut h, t);
+                    todo.push((t.clone(), depth + 1));
+                }
+            }
         }
         let have: Vec<String> = entries.iter().map(|e| e.row.key.clone()).collect();
         for m in self.missing_required(project, &path, &have)? {

@@ -60,6 +60,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/links"), get(links))
         .route(&format!("{P}/leases"), get(leases))
         .route(&format!("{P}/leases/{{id}}"), axum::routing::delete(revoke_lease))
+        .route(&format!("{P}/leases/{{id}}/renew"), post(renew_lease))
         .route(&format!("{P}/tokens"), get(tokens).post(create_token))
         .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
         .route(&format!("{P}/audit"), get(audit))
@@ -502,6 +503,18 @@ async fn links(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::
 
 async fn leases(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.leases(&project, &c)).await?))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RenewBody {
+    #[serde(default)]
+    ttl_minutes: Option<u64>,
+}
+
+async fn renew_lease(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let r: RenewBody = if b.is_empty() { RenewBody::default() } else { body(&b)? };
+    Ok(ok(blocking(s, move |s| s.renew_lease(&project, &id, r.ttl_minutes, &c)).await?))
 }
 
 async fn revoke_lease(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
