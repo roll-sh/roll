@@ -96,12 +96,6 @@ impl Session {
         // An implicit transaction (a multi-statement query, a pipeline) counts: a SET in it
         // is undone if it rolls back.
         let mut in_txn = self.status != TxnStatus::Idle || self.txn.is_some();
-        // (The first statement of several, before anything opened the transaction: a later
-        // statement's error undoes it too.)
-        if !in_txn && (self.multi_stmt || self.pipelining) {
-            self.ensure_txn();
-            in_txn = true;
-        }
         let tag = if matches!(kind, K::VarReset | K::VarResetAll) {
             "RESET"
         } else {

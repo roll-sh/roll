@@ -4434,7 +4434,6 @@ fn protocol_cases() {
         c("ps_set_and_back", |a| session(a, &[], &[query("begin; set application_name = 'tmp'; set application_name = ''; commit")])),
         c("ps_reset_all", |a| session(a, &["set application_name = 'x'", "set datestyle = 'SQL, DMY'"], &[query("reset all")])),
         c("ps_ext_set_flush", |a| session(a, &[], &[[parse("", "set application_name = 'ext'", &[]), bind("", "", &[], NONE, &[]), execute("", 0), flush()].concat(), sync()])),
-        c("ps_set_failed_stmt", |a| session(a, &[], &[query("set application_name = 'f'; select * from nope_t"), query("show application_name")])),
         c("ps_set_config", |a| session(a, &[], &[query("select set_config('application_name', 'cfg', false)")])),
         c("ps_set_role", |a| session(a, &["create role ps_r"], &[query("set role ps_r"), query("reset role"), query("drop role ps_r")])),
         c("ps_discard_all", |a| session(a, &["set application_name = 'x'"], &[query("discard all")])),

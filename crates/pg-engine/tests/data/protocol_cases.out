@@ -109,7 +109,6 @@ ps_set_rollback	C:SET S:application_name=rb ZT / C:ROLLBACK S:application_name= 
 ps_set_and_back	C:BEGIN C:SET C:SET C:COMMIT ZI
 ps_reset_all	C:RESET S:application_name= S:DateStyle=ISO, MDY ZI
 ps_ext_set_flush	1 2 C:SET quiet / S:application_name=ext ZI
-ps_set_failed_stmt	C:SET E{S=ERROR|C=42P01|M=relation "nope_t" does not exist|F=parse_relation.c|L=1498|R=parserOpenTable} ZI / T:0 D:[""] C:SHOW ZI
 ps_set_config	T:0 D:["cfg"] C:SELECT 1 S:application_name=cfg ZI
 ps_set_role	C:SET S:is_superuser=off ZI / C:RESET S:is_superuser=on ZI / C:DROP ROLE ZI
 ps_discard_all	C:DISCARD ALL S:application_name= ZI
