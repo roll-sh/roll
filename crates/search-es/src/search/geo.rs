@@ -609,7 +609,7 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
             }
         }
     }
-    let q = MoreLikeThisQuery { mlt, like_texts, like_docs, skip, description: "like:[...]".into() };
+    let q = MoreLikeThisQuery { mlt, like_texts, like_docs, skip, description: "like:[...]".into(), ..Default::default() };
     let base: QueryRef = arc(q);
     if exclude_ids.is_empty() {
         return Ok(base);

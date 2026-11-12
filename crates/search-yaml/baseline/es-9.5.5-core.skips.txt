@@ -1,0 +1,5 @@
+# Environment skips of the `core` extended suite: tests that fail on a private single-node
+# Elasticsearch 9.5.5 in Docker for a reason outside the server under test (scripts/search-yaml-suites.sh
+# es-extended-baseline). Format: `<glob over test ids>  # reason`; roll skips them too.
+
+core:license/10_feature_usage/No features should be used just by starting up with default configuration  # the Docker distribution uses licensed features at startup (the suite's integ-test cluster doesn't)

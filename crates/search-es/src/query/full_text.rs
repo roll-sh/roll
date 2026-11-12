@@ -203,6 +203,9 @@ impl Match {
     }
 
     pub fn inner(&self) -> Value {
+        if super::opensearch_print() {
+            return self.inner_opensearch();
+        }
         let mut m = Map::new();
         m.insert("query".into(), self.query.clone());
         if self.operator != Operator::Or {
@@ -232,6 +235,27 @@ impl Match {
         if !self.auto_generate_synonyms_phrase_query {
             m.insert("auto_generate_synonyms_phrase_query".into(), false.into());
         }
+        self.common.write_if_set(&mut m);
+        obj! { self.field.clone() => Value::Obj(m) }
+    }
+
+    /// OpenSearch's `MatchQueryBuilder.doXContent`: every option, defaults included.
+    fn inner_opensearch(&self) -> Value {
+        let mut m = Map::new();
+        m.insert("query".into(), self.query.clone());
+        m.insert("operator".into(), self.operator.name().into());
+        super::opt_str(&mut m, "analyzer", &self.analyzer);
+        if let Some(f) = &self.fuzzy.fuzziness {
+            m.insert("fuzziness".into(), f.as_string().into());
+        }
+        m.insert("prefix_length".into(), self.fuzzy.prefix_length.into());
+        m.insert("max_expansions".into(), self.fuzzy.max_expansions.into());
+        super::opt_str(&mut m, "minimum_should_match", &self.minimum_should_match);
+        super::opt_str(&mut m, "fuzzy_rewrite", &self.fuzzy.fuzzy_rewrite);
+        m.insert("fuzzy_transpositions".into(), self.fuzzy.fuzzy_transpositions.into());
+        m.insert("lenient".into(), self.lenient.into());
+        m.insert("zero_terms_query".into(), self.zero_terms_query.name().into());
+        m.insert("auto_generate_synonyms_phrase_query".into(), self.auto_generate_synonyms_phrase_query.into());
         self.common.write_if_set(&mut m);
         obj! { self.field.clone() => Value::Obj(m) }
     }

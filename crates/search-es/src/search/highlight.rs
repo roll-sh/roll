@@ -11,6 +11,26 @@ use search_index::highlight::{BoundaryScanner, Encoder, Fragmenter, HighlightOpt
 use search_index::QueryRef;
 use std::sync::Arc;
 
+/// The weights [`matching_part`] builds for the leaf queries of a shard's highlighted
+/// queries, shared by the hits of a page: a leaf's weight (its term statistics) doesn't depend
+/// on the hit. Entries hold their query, so a query's address identifies it while cached.
+#[derive(Default)]
+pub struct MatchWeights(parking_lot::Mutex<std::collections::HashMap<usize, (QueryRef, LeafWeight)>>);
+
+type LeafWeight = Arc<dyn search_index::Weight>;
+
+impl MatchWeights {
+    fn get(&self, searcher: &search_index::Searcher, q: &QueryRef) -> search_index::Result<LeafWeight> {
+        let key = Arc::as_ptr(q).cast::<()>() as usize;
+        if let Some((_, w)) = self.0.lock().get(&key) {
+            return Ok(w.clone());
+        }
+        let w: LeafWeight = Arc::from(searcher.create_weight(q, search_index::ScoreMode::CompleteNoScores)?);
+        self.0.lock().insert(key, (q.clone(), w.clone()));
+        Ok(w)
+    }
+}
+
 /// One field's highlight request.
 #[derive(Clone, Debug)]
 pub struct FieldSpec {
@@ -225,18 +245,28 @@ fn highlightable(f: &FieldInfo) -> bool {
 /// Highlights one hit.
 ///
 /// Values come from the field's stored values when it is `store: true` and `doc` (the global
-/// doc) is given (`HighlightUtils.loadFieldValues`), from `source` otherwise.
+/// doc) is given (`HighlightUtils.loadFieldValues`), from `source` otherwise. `stored` is the
+/// doc's stored fields when the caller has read them already; otherwise they are read only if
+/// a highlighted field is stored. `weights` keeps the leaf weights of weight matches across
+/// the hits of one searcher.
 #[allow(clippy::too_many_arguments)]
-pub fn highlight_hit(qctx: &QueryCtx, spec: &Spec, query: &QueryRef, source: Option<&Value>, doc_id: &str, searcher: &search_index::Searcher, doc: Option<u32>) -> EsResult<Map> {
+pub fn highlight_hit(
+    qctx: &QueryCtx,
+    spec: &Spec,
+    query: &QueryRef,
+    source: Option<&Value>,
+    doc_id: &str,
+    searcher: &search_index::Searcher,
+    doc: Option<u32>,
+    stored: Option<&[(u32, search_codec::stored::OwnedStoredValue)]>,
+    weights: Option<&MatchWeights>,
+) -> EsResult<Map> {
     let mut out = Map::new();
     let empty = Map::new();
-    let stored = match doc {
-        Some(d) => Some(searcher.stored(d).map_err(crate::engine::convert::index_error)?),
-        None => None,
-    };
+    let mut loaded = None;
     let src = match source {
         Some(Value::Obj(src)) => src,
-        _ if stored.is_some() => &empty,
+        _ if doc.is_some() => &empty,
         _ => return Ok(out),
     };
     for fs in &spec.fields {
@@ -268,14 +298,29 @@ pub fn highlight_hit(qctx: &QueryCtx, spec: &Spec, query: &QueryRef, source: Opt
             let q = match doc.and_then(|d| searcher.segment_of(d)) {
                 Some((seg, local)) if o.weight_matches && o.kind == search_index::highlight::HighlighterType::Unified => {
                     // A `highlight_query` that misses the hit highlights nothing in it.
-                    matching_part(searcher, &q, seg, local)
+                    let local_weights;
+                    let weights = match weights {
+                        Some(w) => w,
+                        None => {
+                            local_weights = MatchWeights::default();
+                            &local_weights
+                        }
+                    };
+                    matching_part(searcher, weights, &q, seg, local)
                         .map_err(crate::engine::convert::index_error)?
                         .unwrap_or_else(|| Arc::new(search_index::query::MatchNoneQuery::default()))
                 }
                 _ => q,
             };
-            let values: Vec<String> = match &stored {
-                Some(st) if f.store => st
+            if let Some(d) = doc
+                && f.store
+                && stored.is_none()
+                && loaded.is_none()
+            {
+                loaded = Some(searcher.stored(d).map_err(crate::engine::convert::index_error)?);
+            }
+            let values: Vec<String> = match stored.or(loaded.as_deref()) {
+                Some(st) if f.store && doc.is_some() => st
                     .iter()
                     .filter(|(n, _)| *n == f.number)
                     .filter_map(|(_, v)| match v {
@@ -327,7 +372,7 @@ pub fn highlight_hit(qctx: &QueryCtx, spec: &Spec, query: &QueryRef, source: Opt
 /// too few matching `should`s) contributes nothing, nor do `should` / `dis_max` clauses that
 /// miss it, nor `must_not` clauses; the rest keep their structure. `None` when nothing of `q`
 /// matches. Only terms of the remaining clauses are highlighted.
-fn matching_part(searcher: &search_index::Searcher, q: &QueryRef, seg: &search_index::SegmentContext, local: u32) -> search_index::Result<Option<QueryRef>> {
+fn matching_part(searcher: &search_index::Searcher, weights: &MatchWeights, q: &QueryRef, seg: &search_index::SegmentContext, local: u32) -> search_index::Result<Option<QueryRef>> {
     use search_index::query::{BooleanQuery, BoostQuery, ConstantScoreQuery, DisMaxQuery, FunctionScoreQuery, Occur};
     let any = q.as_any();
     if let Some(b) = any.downcast_ref::<BooleanQuery>() {
@@ -339,14 +384,14 @@ fn matching_part(searcher: &search_index::Searcher, q: &QueryRef, seg: &search_i
                 Occur::MustNot => {}
                 Occur::Must | Occur::Filter => {
                     required = true;
-                    match matching_part(searcher, &c.query, seg, local)? {
+                    match matching_part(searcher, weights, &c.query, seg, local)? {
                         Some(p) => kept = kept.add(c.occur, p),
                         None => return Ok(None),
                     }
                 }
                 Occur::Should => {
                     shoulds += 1;
-                    if let Some(p) = matching_part(searcher, &c.query, seg, local)? {
+                    if let Some(p) = matching_part(searcher, weights, &c.query, seg, local)? {
                         matched_shoulds += 1;
                         kept = kept.add(Occur::Should, p);
                     }
@@ -361,23 +406,23 @@ fn matching_part(searcher: &search_index::Searcher, q: &QueryRef, seg: &search_i
     if let Some(d) = any.downcast_ref::<DisMaxQuery>() {
         let mut kept = Vec::new();
         for q in &d.disjuncts {
-            if let Some(p) = matching_part(searcher, q, seg, local)? {
+            if let Some(p) = matching_part(searcher, weights, q, seg, local)? {
                 kept.push(p);
             }
         }
         return Ok((!kept.is_empty()).then(|| Arc::new(DisMaxQuery::new(kept, d.tie_breaker)) as QueryRef));
     }
     if let Some(c) = any.downcast_ref::<ConstantScoreQuery>() {
-        return Ok(matching_part(searcher, &c.query, seg, local)?.map(|p| Arc::new(ConstantScoreQuery::new(p)) as QueryRef));
+        return Ok(matching_part(searcher, weights, &c.query, seg, local)?.map(|p| Arc::new(ConstantScoreQuery::new(p)) as QueryRef));
     }
     if let Some(b) = any.downcast_ref::<BoostQuery>() {
-        return Ok(matching_part(searcher, &b.query, seg, local)?.map(|p| Arc::new(BoostQuery { query: p, boost: b.boost }) as QueryRef));
+        return Ok(matching_part(searcher, weights, &b.query, seg, local)?.map(|p| Arc::new(BoostQuery { query: p, boost: b.boost }) as QueryRef));
     }
     if let Some(f) = any.downcast_ref::<FunctionScoreQuery>() {
         // Its functions don't take part in matches; `min_score` filtering is the search's.
-        return matching_part(searcher, &f.query, seg, local);
+        return matching_part(searcher, weights, &f.query, seg, local);
     }
-    let w = searcher.create_weight(q, search_index::ScoreMode::CompleteNoScores)?;
+    let w = weights.get(searcher, q)?;
     if !search_index::query::basic::matches_doc(&*w, seg, local)? {
         return Ok(None);
     }

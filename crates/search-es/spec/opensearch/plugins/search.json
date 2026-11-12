@@ -13,6 +13,10 @@
       "cancel_after_time_interval": {
         "type": "time",
         "description": "The time after which the search request will be cancelled."
+      },
+      "verbose_pipeline": {
+        "type": "boolean",
+        "description": "Report each search pipeline processor's input, output and duration."
       }
     }
   }

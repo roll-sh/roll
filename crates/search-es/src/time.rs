@@ -1459,7 +1459,13 @@ fn resolve(p: &Parsed, zone: Option<&Zone>, round_up: bool, week_based: bool, re
     let date = if week_based || (p.week_year.is_some() && year.is_none()) {
         let wy = p.week_year.or(year).unwrap_or(1970);
         let week = p.week.unwrap_or(if round_up { 52 } else { 1 });
-        let dow = p.dow.unwrap_or(if round_up { 7 } else { 1 });
+        // A missing day is the week's first (Sunday for locale weeks), or its last rounding up.
+        let dow = p.dow.unwrap_or(match (p.loc_weeks, round_up) {
+            (true, false) => 7,
+            (true, true) => 6,
+            (false, false) => 1,
+            (false, true) => 7,
+        });
         let weekday = dow.checked_sub(1).and_then(|d| chrono::Weekday::try_from(d as u8).ok()).ok_or_else(generic)?;
         let wyi = i32::try_from(wy).map_err(|_| generic())?;
         if p.loc_weeks {

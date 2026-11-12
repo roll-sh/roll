@@ -1512,7 +1512,7 @@ impl<'r> Analyzer<'r> {
             return Err(CompileError::illegal_argument(loc, format!("invalid assignment: cannot assign a value to function call [{name}/{}]", args.len())));
         }
         if name == "$" {
-            let fam = if self.ctx.has(Family::DocBased) { Family::DocBased } else { Family::Write };
+            let fam = [Family::DocBased, Family::Write, Family::Conditional].into_iter().find(|f| self.ctx.has(*f)).unwrap_or(Family::Write);
             if !self.ctx.has(fam) {
                 return Err(CompileError::illegal_argument(loc, "invalid shortcut [$] for [field]; ensure [field] exists in this context"));
             }

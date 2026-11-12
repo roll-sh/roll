@@ -75,6 +75,8 @@ pub struct Config {
     pub more_urls: Vec<String>,
     pub suites: Vec<SuiteRoot>,
     pub api_spec: PathBuf,
+    /// More spec directories, loaded after `api_spec` (a module's own APIs).
+    pub extra_api_specs: Vec<PathBuf>,
     /// Only run tests whose id matches.
     pub filter: Option<Regex>,
     /// Only run these test ids (compared without trailing whitespace), on top of `filter`: a
@@ -104,7 +106,13 @@ pub struct Config {
     pub feature_flags: HashSet<String>,
     /// Extra headers for every request (authentication).
     pub headers: Vec<(String, String)>,
+    /// Headers that replace `headers` for the cleanup between tests (the admin client's
+    /// credentials).
+    pub admin_headers: Vec<(String, String)>,
     pub progress: bool,
+    /// Check every `esql.query` like Elasticsearch's ES|QL suite class does
+    /// ([`Suite::assert_esql_not_partial`]).
+    pub esql_not_partial: bool,
     /// Log every request of every `do` (method, target, status, time) to stderr.
     pub trace: bool,
 }
@@ -116,6 +124,7 @@ impl Default for Config {
             more_urls: Vec::new(),
             suites: Vec::new(),
             api_spec: PathBuf::new(),
+            extra_api_specs: Vec::new(),
             filter: None,
             only_ids: None,
             skip_list: Vec::new(),
@@ -135,7 +144,9 @@ impl Default for Config {
             serverless: false,
             feature_flags: HashSet::new(),
             headers: Vec::new(),
+            admin_headers: Vec::new(),
             progress: false,
+            esql_not_partial: false,
             trace: false,
         }
     }
@@ -273,14 +284,21 @@ fn full_id(label: &str, id: &str) -> String {
 pub async fn run(cfg: Config) -> anyhow::Result<Report> {
     let started_at = chrono::Utc::now().to_rfc3339();
     let started = Instant::now();
-    let spec = Arc::new(ApiSpec::load_dir(&cfg.api_spec)?);
+    let mut spec = ApiSpec::load_dir(&cfg.api_spec)?;
+    for dir in &cfg.extra_api_specs {
+        spec.add_dir(dir)?;
+    }
+    let spec = Arc::new(spec);
     let mut jobs = VecDeque::new();
     for root in &cfg.suites {
         let root = Arc::new(root.clone());
         let base = if root.path.is_file() { root.path.parent().unwrap_or(Path::new("")).to_path_buf() } else { root.path.clone() };
         for file in discover(&root.path)? {
             match Suite::load(&base, &file) {
-                Ok(suite) => {
+                Ok(mut suite) => {
+                    if cfg.esql_not_partial {
+                        suite.assert_esql_not_partial();
+                    }
                     let tests: Vec<usize> = (0..suite.tests.len())
                         .filter(|&i| cfg.selects(&full_id(&root.label, &suite.test_id(&suite.tests[i]))))
                         .collect();
@@ -322,7 +340,20 @@ pub async fn run(cfg: Config) -> anyhow::Result<Report> {
         let url = cfg.url.as_deref().context("either --url, --cluster-hook or --spawn is required")?;
         (Client::new(endpoint(url, &cfg)?, cfg.timeout), None)
     };
-    let mut info = match TargetInfo::detect(&mut probe_client, cfg.flavor).await {
+    // ESRestTestCase asks what the cluster is through its admin client.
+    let client_headers = (!cfg.admin_headers.is_empty()).then(|| {
+        let mut headers = probe_client.endpoint().headers.clone();
+        for (k, v) in &cfg.admin_headers {
+            headers.retain(|(h, _)| !h.eq_ignore_ascii_case(k));
+            headers.push((k.clone(), v.clone()));
+        }
+        probe_client.replace_headers(headers)
+    });
+    let detected = TargetInfo::detect(&mut probe_client, cfg.flavor).await;
+    if let Some(h) = client_headers {
+        probe_client.replace_headers(h);
+    }
+    let mut info = match detected {
         Ok(info) => info,
         Err(e) => {
             if let Some(fresh) = probe_cluster {
@@ -337,6 +368,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<Report> {
     info.claimed_features.extend(cfg.claimed_features.iter().cloned());
     info.serverless = cfg.serverless;
     info.feature_flags.extend(cfg.feature_flags.iter().cloned());
+    info.admin_headers = cfg.admin_headers.clone();
     let target_summary = TargetSummary {
         url: match (&cfg.cluster_hook, &cfg.spawn) {
             (Some(h), _) => h.create_url.clone(),

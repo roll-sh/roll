@@ -107,28 +107,20 @@ pub fn highlight_sources(values: &[&str], sources: &[(Option<&Analyzer>, &Highli
         ms.push((m.start, m.end, k));
     }
     let n_frag = opts.number_of_fragments;
-    let (mut bi, max_passages) = if n_frag == 0 || !opts.tokenized {
-        (BreakIter::Separator(Boundaries::separators(&content)), if n_frag == 0 { usize::MAX - 1 } else { n_frag })
-    } else {
-        let b = match opts.boundary_scanner.unwrap_or(BoundaryScanner::Sentence) {
-            BoundaryScanner::Sentence => {
-                if opts.fragment_size > 0 {
-                    BreakIter::Bounded(Bounded::new(
-                        Boundaries::sentences(&content),
-                        Boundaries::words(&content),
-                        opts.fragment_size,
-                        &content,
-                    ))
-                } else {
-                    BreakIter::Plain(Boundaries::sentences(&content))
-                }
-            }
-            BoundaryScanner::Word | BoundaryScanner::Chars => BreakIter::Plain(Boundaries::words(&content)),
-        };
-        (b, n_frag)
-    };
+    let separators = n_frag == 0 || !opts.tokenized;
+    let max_passages = if n_frag == 0 { usize::MAX - 1 } else { n_frag };
     let mut passages: Vec<Passage> = Vec::new();
     if !ms.is_empty() {
+        // Boundaries only for a value with matches.
+        let mut bi = if separators {
+            BreakIter::Separator(Boundaries::separators(&content))
+        } else {
+            match opts.boundary_scanner.unwrap_or(BoundaryScanner::Sentence) {
+                BoundaryScanner::Sentence if opts.fragment_size > 0 => BreakIter::Bounded(Bounded::new(Boundaries::sentences(&content), opts.fragment_size, &content)),
+                BoundaryScanner::Sentence => BreakIter::Plain(Boundaries::sentences(&content)),
+                BoundaryScanner::Word | BoundaryScanner::Chars => BreakIter::Plain(Boundaries::words(&content)),
+            }
+        };
         // Lucene FieldHighlighter.highlightOffsetsEnums.
         let mut queue: Vec<Passage> = Vec::new();
         let mut passage = Passage::new();

@@ -37,6 +37,14 @@ impl Template {
             Template::Mustache(t) => t.render_json(&d.template_model()).map_err(crate::scripting::script_error),
         }
     }
+
+    /// The template rendered without a document (how the stats name a `pipeline` processor).
+    pub fn render_empty(&self) -> String {
+        match self {
+            Template::Plain(s) => s.clone(),
+            Template::Mustache(t) => t.render_json(&serde_json::json!({})).unwrap_or_default(),
+        }
+    }
 }
 
 /// A templated value (strings render; lists and maps render their strings).
@@ -108,19 +116,19 @@ pub enum Kind {
     Set { field: Template, value: Option<ValueTemplate>, copy_from: Option<String>, overwrite: bool, ignore_empty: bool },
     Remove { fields: Vec<Template>, keep: Option<Vec<Template>>, ignore_missing: bool },
     Rename { field: Template, target: Template, ignore_missing: bool, overwrite: bool },
-    Append { field: Template, value: Option<ValueTemplate>, copy_from: Option<String>, allow_duplicates: bool },
+    Append { field: Template, value: Option<ValueTemplate>, copy_from: Option<String>, allow_duplicates: bool, ignore_empty: bool },
     Convert { field: String, target: String, ty: String, ignore_missing: bool },
     Case { field: String, target: String, ignore_missing: bool, op: u8 },
     Split { field: String, target: String, sep: Arc<LazyPattern>, ignore_missing: bool, preserve_trailing: bool },
     Join { field: String, target: String, sep: String },
     Gsub { field: String, target: String, pattern: Arc<JavaReplace>, ignore_missing: bool },
     Sort { field: String, target: String, desc: bool },
-    Json { field: String, target: Option<String>, add_to_root: bool, conflict_replace: bool },
-    Kv { field: String, target: Option<String>, field_split: Arc<LazyPattern>, value_split: Arc<LazyPattern>, value_split_text: String, include: Option<Vec<String>>, exclude: Option<Vec<String>>, ignore_missing: bool, prefix: Option<String>, trim_key: Option<Arc<JavaReplace>>, trim_value: Option<Arc<JavaReplace>>, strip_brackets: bool },
+    Json { field: String, target: Option<String>, add_to_root: bool, conflict_replace: bool, allow_duplicates: bool },
+    Kv { field: Template, target: Option<Template>, field_split: Arc<LazyPattern>, value_split: Arc<LazyPattern>, value_split_text: String, include: Option<Vec<String>>, exclude: Option<Vec<String>>, ignore_missing: bool, prefix: Option<String>, trim_key: Option<Arc<JavaReplace>>, trim_value: Option<Arc<JavaReplace>>, strip_brackets: bool },
     Date { field: String, target: String, formats: Vec<String>, timezone: Option<Template>, locale: Option<Template>, output_format: String },
     DateIndexName { field: String, prefix: Template, rounding: String, formats: Vec<String>, timezone: Option<String>, locale: crate::time::DateLocale, index_format: String },
     Dissect { field: String, dissect: Arc<search_painless::dissect::Dissect>, ignore_missing: bool },
-    Grok { field: String, groks: Vec<Arc<search_painless::grok::Grok>>, ignore_missing: bool, trace: bool },
+    Grok { field: String, groks: Vec<Arc<search_painless::grok::Grok>>, ignore_missing: bool, trace: bool, validate_only: bool },
     Fail { message: Template },
     Drop,
     Script { bound: crate::scripting::Bound },
@@ -135,6 +143,12 @@ pub enum Kind {
     Fingerprint { fields: Vec<String>, target: String, salt: String, method: String, ignore_missing: bool },
     Reroute { destination: Option<Template>, dataset: Vec<String>, namespace: Vec<String> },
     Terminate,
+    /// `recover_failure_document`: a failure store document back to the document it holds.
+    RecoverFailureDocument,
+    /// `user_agent`: a user agent string parsed by a uap-core regex file.
+    UserAgent(Box<super::user_agent::Processor>),
+    /// `registered_domain`: a domain name split by the public suffix list.
+    RegisteredDomain { field: String, target: String, ignore_missing: bool },
     /// `enrich`: a lookup in a loaded enrich index (`crate::xpack::enrich`).
     Enrich(Box<crate::xpack::enrich::Processor>),
     /// Accepted but needs data or licenses roll does not have (geoip, user_agent, …).
@@ -262,12 +276,19 @@ impl Kind {
                 Kind::Remove { fields: list("field")?.unwrap_or_default(), keep: list("keep")?, ignore_missing: im }
             }
             "rename" => Kind::Rename { field: Template::new(&field()?)?, target: Template::new(&req(cfg, ptype, tag, "target_field")?)?, ignore_missing: im, overwrite: b(cfg, "override", false) },
-            "append" => Kind::Append {
-                field: Template::new(&field()?)?,
-                value: cfg.get("value").map(ValueTemplate::new).transpose()?,
-                copy_from: s(cfg, "copy_from"),
-                allow_duplicates: b(cfg, "allow_duplicates", true),
-            },
+            "append" => {
+                let copy_from = s(cfg, "copy_from");
+                if copy_from.is_some() && cfg.get("value").is_some_and(|v| !v.is_null()) {
+                    return Err(config_error(ptype, tag, "copy_from", "cannot set both `copy_from` and `value` in the same processor"));
+                }
+                Kind::Append {
+                    field: Template::new(&field()?)?,
+                    value: if copy_from.is_some() { None } else { cfg.get("value").map(ValueTemplate::new).transpose()? },
+                    copy_from,
+                    allow_duplicates: b(cfg, "allow_duplicates", true),
+                    ignore_empty: b(cfg, "ignore_empty_values", false),
+                }
+            }
             "convert" => {
                 let f = field()?;
                 let ty = req(cfg, ptype, tag, "type")?;
@@ -312,7 +333,13 @@ impl Kind {
                 if add && t.is_some() {
                     return Err(config_error(ptype, tag, "target_field", "Cannot set a target field while also setting `add_to_root` to true"));
                 }
-                Kind::Json { target: if add { None } else { Some(t.unwrap_or_else(|| f.clone())) }, field: f, add_to_root: add, conflict_replace: s(cfg, "add_to_root_conflict_strategy").as_deref() != Some("merge") }
+                Kind::Json {
+                    target: if add { None } else { Some(t.unwrap_or_else(|| f.clone())) },
+                    field: f,
+                    add_to_root: add,
+                    conflict_replace: s(cfg, "add_to_root_conflict_strategy").as_deref() != Some("merge"),
+                    allow_duplicates: b(cfg, "allow_duplicate_keys", false),
+                }
             }
             "kv" => {
                 let f = field()?;
@@ -325,7 +352,7 @@ impl Kind {
                 let field_split = req(cfg, ptype, tag, "field_split")?;
                 let value_split = req(cfg, ptype, tag, "value_split")?;
                 Kind::Kv {
-                    target: s(cfg, "target_field"),
+                    target: s(cfg, "target_field").map(|t| Template::new(&t)).transpose()?,
                     field_split: kv_splitter(&field_split, ptype, tag)?,
                     value_split: kv_splitter(&value_split, ptype, tag)?,
                     value_split_text: value_split,
@@ -336,7 +363,7 @@ impl Kind {
                     trim_key: kv_trimmer(s(cfg, "trim_key"), ptype, tag)?,
                     trim_value: kv_trimmer(s(cfg, "trim_value"), ptype, tag)?,
                     strip_brackets: b(cfg, "strip_brackets", false),
-                    field: f,
+                    field: Template::new(&f)?,
                 }
             }
             "date" => {
@@ -406,14 +433,11 @@ impl Kind {
                 let watchdog = grok_watchdog(cluster, "ingest.grok.watchdog.max_execution_time");
                 let mut groks = Vec::new();
                 for p in &patterns {
-                    let g = search_painless::grok::Grok::new(&bank, p).map_err(|e| {
-                        EsError::new(400, "parse_exception", format!("[patterns] Invalid regex pattern found in: {patterns:?}. {}", e.message))
-                            .with_meta("property_name", "patterns")
-                            .with_meta("processor_type", "grok")
-                    })?;
+                    let g = search_painless::grok::Grok::new(&bank, p)
+                        .map_err(|e| config_error(ptype, tag, "patterns", &format!("Invalid regex pattern found in: [{}]. {}", patterns.join(", "), e.message)))?;
                     groks.push(Arc::new(g.with_max_execution_time(watchdog)));
                 }
-                Kind::Grok { field: f, groks, ignore_missing: im, trace: b(cfg, "trace_match", false) }
+                Kind::Grok { field: f, groks, ignore_missing: im, trace: b(cfg, "trace_match", false), validate_only: b(cfg, "validate_only", false) }
             }
             "fail" => Kind::Fail { message: Template::new(&req(cfg, ptype, tag, "message")?)? },
             "drop" => Kind::Drop,
@@ -541,6 +565,30 @@ impl Kind {
                     wkt,
                 }))
             }
+            "recover_failure_document" => Kind::RecoverFailureDocument,
+            "user_agent" => {
+                use super::user_agent::{self as ua, Property};
+                let f = field()?;
+                let file = s(cfg, "regex_file").unwrap_or_else(|| ua::DEFAULT_PARSER.into());
+                let parser = ua::parser(cluster.config.node_setting("path.conf"), &file)
+                    .ok_or_else(|| config_error(ptype, tag, "regex_file", &format!("regex file [{file}] doesn't exist (has to exist at node startup)")))?;
+                let mut properties = match cfg.get("properties") {
+                    None => Property::ALL.to_vec(),
+                    Some(Value::Arr(a)) => a.iter().map(|v| Property::parse(&v.to_es_string())).collect::<Result<Vec<_>, _>>().map_err(|e| config_error(ptype, tag, "properties", &e))?,
+                    Some(v) => return Err(config_error(ptype, tag, "properties", &format!("property isn't a list, but of type [{}]", java_type(v)))),
+                };
+                properties.sort();
+                properties.dedup();
+                Kind::UserAgent(Box::new(ua::Processor {
+                    target: s(cfg, "target_field").unwrap_or_else(|| "user_agent".into()),
+                    field: f,
+                    parser,
+                    properties,
+                    extract_device_type: b(cfg, "extract_device_type", false),
+                    ignore_missing: im,
+                }))
+            }
+            "registered_domain" => Kind::RegisteredDomain { field: field()?, target: s(cfg, "target_field").unwrap_or_default(), ignore_missing: b(cfg, "ignore_missing", true) },
             other => Kind::Unsupported(other.to_string()),
         })
     }
@@ -649,56 +697,6 @@ fn map_strings(v: &Value, field: &str, f: &dyn Fn(&str) -> EsResult<String>) -> 
     }
 }
 
-fn strip_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '<' => in_tag = true,
-            '>' if in_tag => {
-                in_tag = false;
-                out.push('\n');
-            }
-            _ if in_tag => {}
-            '&' => {
-                let mut ent = String::new();
-                while let Some(&n) = chars.peek() {
-                    if n == ';' || ent.len() > 8 {
-                        break;
-                    }
-                    ent.push(n);
-                    chars.next();
-                }
-                if chars.peek() == Some(&';') {
-                    chars.next();
-                    let rep = match ent.as_str() {
-                        "amp" => "&",
-                        "lt" => "<",
-                        "gt" => ">",
-                        "quot" => "\"",
-                        "apos" => "'",
-                        "nbsp" => "\u{a0}",
-                        _ => "",
-                    };
-                    if rep.is_empty() {
-                        out.push('&');
-                        out.push_str(&ent);
-                        out.push(';');
-                    } else {
-                        out.push_str(rep);
-                    }
-                } else {
-                    out.push('&');
-                    out.push_str(&ent);
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// `ByteSizeValue.parseBytesSizeValue` to bytes.
 fn bytes_of(s: &str) -> EsResult<i64> {
     crate::units::ByteSize::parse(s, "Ingest Field").map(|b| b.bytes())
@@ -709,17 +707,21 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
     match k {
         Kind::Set { field, value, copy_from, overwrite, ignore_empty } => {
             let path = field.render(d)?;
-            let v = match (value, copy_from) {
-                (Some(v), _) => v.render(d)?,
-                (None, Some(c)) => d.get(c)?.clone(),
-                _ => Value::Null,
-            };
-            if *ignore_empty && (v.is_null() || v.as_str() == Some("")) {
+            if !(*overwrite || !d.has(&path) || d.get_opt(&path).is_some_and(Value::is_null)) {
                 return Ok(Flow::Continue);
             }
-            if *overwrite || !d.has(&path) || d.get_opt(&path).is_some_and(Value::is_null) {
-                d.set(&path, v)?;
+            // `ignore_empty_value` applies to copied and templated values, not to literals
+            // (`IngestDocument.setFieldValue(String, ValueSource, boolean)`).
+            let (v, checked) = match (value, copy_from) {
+                (Some(v), _) => (v.render(d)?, matches!(v, ValueTemplate::Str(Template::Mustache(_)))),
+                (None, Some(c)) if *ignore_empty => (d.get_opt(c).cloned().unwrap_or(Value::Null), true),
+                (None, Some(c)) => (d.get(c)?.clone(), true),
+                _ => (Value::Null, false),
+            };
+            if *ignore_empty && checked && (v.is_null() || v.as_str() == Some("")) {
+                return Ok(Flow::Continue);
             }
+            d.set(&path, v)?;
         }
         Kind::Remove { fields, keep, ignore_missing } => {
             if let Some(keep) = keep {
@@ -762,14 +764,16 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
                 return Err(e);
             }
         }
-        Kind::Append { field, value, copy_from, allow_duplicates } => {
+        Kind::Append { field, value, copy_from, allow_duplicates, ignore_empty } => {
             let path = field.render(d)?;
             let v = match (value, copy_from) {
                 (Some(v), _) => v.render(d)?,
+                // A missing source is a null (ignored) value with `ignore_empty_values`.
+                (None, Some(c)) if *ignore_empty => d.get_opt(c).cloned().unwrap_or(Value::Null),
                 (None, Some(c)) => d.get(c)?.clone(),
                 _ => Value::Null,
             };
-            d.append(&path, v, *allow_duplicates)?;
+            d.append(&path, v, *allow_duplicates, *ignore_empty)?;
         }
         Kind::Convert { field, target, ty, ignore_missing } => {
             let Some(v) = input(d, field, *ignore_missing)?.cloned() else { return Ok(Flow::Continue) };
@@ -826,13 +830,13 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             }
             d.set(target, Value::Arr(a))?;
         }
-        Kind::Json { field, target, add_to_root, conflict_replace } => {
+        Kind::Json { field, target, add_to_root, conflict_replace, allow_duplicates } => {
             let v = d.get(field)?.clone();
             let text = match &v {
                 Value::Str(s) => s.clone(),
                 other => other.to_json(),
             };
-            let parsed = crate::json::parse(text.as_bytes()).map_err(|e| EsError::illegal_argument(e.to_string()))?.unwrap_or(Value::Null);
+            let parsed = crate::json::parse::parse_with(text.as_bytes(), *allow_duplicates).map_err(|e| EsError::illegal_argument(e.to_string()))?.unwrap_or(Value::Null);
             if *add_to_root {
                 let Value::Obj(m) = parsed else {
                     return Err(EsError::illegal_argument("cannot add non-map fields to root of document"));
@@ -854,6 +858,8 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             }
         }
         Kind::Kv { field, target, field_split, value_split, value_split_text, include, exclude, ignore_missing, prefix, trim_key, trim_value, strip_brackets } => {
+            let field = &field.render(d)?;
+            let target = target.as_ref().map(|t| t.render(d)).transpose()?.filter(|t| !t.is_empty());
             let Some(v) = input(d, field, *ignore_missing)?.cloned() else { return Ok(Flow::Continue) };
             let s = v.to_es_string();
             let (field_split, value_split) = (pattern_of(field_split)?, pattern_of(value_split)?);
@@ -876,11 +882,11 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
                 pairs.push((format!("{}{k}", prefix.as_deref().unwrap_or("")), val));
             }
             for (k, val) in pairs {
-                let path = match target {
+                let path = match &target {
                     Some(t) => format!("{t}.{k}"),
                     None => k,
                 };
-                d.append(&path, Value::Str(val), true)?;
+                d.append(&path, Value::Str(val), true, false)?;
                 // A single value stays a scalar.
                 if let Some(Value::Arr(a)) = d.get_opt(&path).cloned()
                     && a.len() == 1
@@ -962,7 +968,7 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
                 d.set(&k, Value::Str(val))?;
             }
         }
-        Kind::Grok { field, groks, ignore_missing, trace } => {
+        Kind::Grok { field, groks, ignore_missing, trace, validate_only } => {
             let Some(v) = input(d, field, *ignore_missing)?.cloned() else { return Ok(Flow::Continue) };
             let Value::Str(s) = &v else {
                 return Err(EsError::illegal_argument(format!("field [{field}] of type [{}] cannot be cast to [java.lang.String]", java_type(&v))));
@@ -970,8 +976,10 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             for (i, g) in groks.iter().enumerate() {
                 let caps = g.captures(s).map_err(grok_match_error)?;
                 if let Some(caps) = caps {
-                    for (k, val) in caps {
-                        d.set(&k, grok_value(&val))?;
+                    if !*validate_only {
+                        for (k, val) in caps {
+                            d.set(&k, grok_value(&val))?;
+                        }
                     }
                     if *trace {
                         d.ingest.insert("_grok_match_index".into(), Value::Str(i.to_string()));
@@ -985,7 +993,7 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             return Err(EsError::new(500, "fail_processor_exception", message.render(d)?));
         }
         Kind::Drop => return Ok(Flow::Drop),
-        Kind::Terminate => {}
+        Kind::Terminate => d.terminate = true,
         Kind::Script { bound } => super::pipeline::run_script(bound, d)?,
         Kind::Foreach { field, processor, ignore_missing } => {
             let v = match d.get_opt(field) {
@@ -1040,7 +1048,7 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
         }
         Kind::HtmlStrip { field, target, ignore_missing } => {
             let Some(v) = input(d, field, *ignore_missing)?.cloned() else { return Ok(Flow::Continue) };
-            let out = map_strings(&v, field, &|s| Ok(strip_html(s)))?;
+            let out = map_strings(&v, field, &|s| Ok(search_analysis::strip_html(s)))?;
             d.set(target, out)?;
         }
         Kind::UrlDecode { field, target, ignore_missing } => {
@@ -1202,11 +1210,78 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
                 d.set(p, Value::from(i64::from(cell.precision)))?;
             }
         }
+        Kind::RecoverFailureDocument => recover_failure_document(d)?,
+        Kind::UserAgent(p) => super::user_agent::run(p, d)?,
+        Kind::RegisteredDomain { field, target, ignore_missing } => {
+            // A null value is no domain (`getFieldValue` returns it as is).
+            let fqdn = match d.get_opt(field).filter(|v| !v.is_null()).map_or_else(|| if *ignore_missing || d.has(field) { Ok(None) } else { d.get(field).map(Some) }, |v| Ok(Some(v)))? {
+                None => None,
+                Some(Value::Str(s)) => Some(s.clone()),
+                Some(other) => return Err(EsError::illegal_argument(format!("field [{field}] of type [{}] cannot be cast to [java.lang.String]", java_type(other)))),
+            };
+            let Some(info) = fqdn.as_deref().and_then(super::registered_domain::parse) else {
+                if *ignore_missing {
+                    return Ok(Flow::Continue);
+                }
+                return Err(EsError::illegal_argument("unable to set domain information for document"));
+            };
+            let prefix = if target.is_empty() { String::new() } else { format!("{target}.") };
+            d.set(&format!("{prefix}domain"), Value::Str(info.domain))?;
+            if let Some(r) = info.registered_domain {
+                d.set(&format!("{prefix}registered_domain"), Value::Str(r))?;
+            }
+            d.set(&format!("{prefix}top_level_domain"), Value::Str(info.top_level_domain))?;
+            if let Some(sd) = info.subdomain {
+                d.set(&format!("{prefix}subdomain"), Value::Str(sd))?;
+            }
+        }
         Kind::Unsupported(t) => {
             return Err(EsError::illegal_argument(format!("processor [{t}] is not available in roll search")));
         }
     }
     Ok(Flow::Continue)
+}
+
+/// `RecoverFailureDocumentProcessor`: keeps the failure document (its `document` without the
+/// source) in `_ingest.pre_recovery`, then restores the original index, routing, id and source.
+fn recover_failure_document(d: &mut IngestDoc) -> EsResult<()> {
+    const PREFIX: &str = "failure store document has unexpected structure, missing required";
+    if !d.has("document") {
+        return Err(EsError::illegal_argument(format!("{PREFIX} [document] field")));
+    }
+    if !d.has("document.source") {
+        return Err(EsError::illegal_argument(format!("{PREFIX} [document.source] field")));
+    }
+    if !d.has("error") {
+        return Err(EsError::illegal_argument(format!("{PREFIX} [error] field")));
+    }
+    let mut pre = Map::new();
+    for (k, v) in d.source.iter().chain(d.meta.iter()) {
+        let v = match (k.as_str(), v) {
+            ("document", Value::Obj(doc)) => {
+                let mut copy = doc.clone();
+                copy.shift_remove("source");
+                Value::Obj(copy)
+            }
+            _ => v.clone(),
+        };
+        pre.insert(k.clone(), v);
+    }
+    super::doc::java_hash_order(&mut pre, false);
+    d.ingest.insert("pre_recovery".into(), Value::Obj(pre));
+    let Some(Value::Obj(doc)) = d.source.get("document").cloned() else {
+        return Err(EsError::illegal_argument(format!("{PREFIX} [document] field")));
+    };
+    for (from, to) in [("index", "_index"), ("routing", "_routing"), ("id", "_id")] {
+        if let Some(Value::Str(v)) = doc.get(from) {
+            d.meta.insert(to.into(), Value::Str(v.clone()));
+        }
+    }
+    d.source = match doc.get("source") {
+        Some(Value::Obj(src)) => src.clone(),
+        _ => Map::new(),
+    };
+    Ok(())
 }
 
 /// The `geo_grid` processor's configuration.

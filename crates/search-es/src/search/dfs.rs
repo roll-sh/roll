@@ -7,8 +7,10 @@
 //! back. Roll runs the same recording pass in process ([`Recorder`]): it learns which fields
 //! each shard's weights request statistics for — Lucene's `PhraseWeight`, for one, asks only
 //! when one of its terms exists on the shard, so an empty shard's documents are left out of
-//! the field's document count. Term statistics are summed lazily over every shard (a shard
-//! where a term is absent contributes zeros either way) and cached for the request.
+//! the field's document count. Term statistics are summed over the shards whose weights asked
+//! for the term (a phrase prefix with no expansion on a shard asks for none of its terms
+//! there), lazily, and cached for the request; a term no DFS weight asked for sums over every
+//! shard.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -25,6 +27,9 @@ pub struct DfsStats {
     views: Vec<Searcher>,
     /// Per view, the fields its DFS-phase weights asked statistics for.
     requested: Vec<HashSet<u32>>,
+    /// Per view, the terms its DFS-phase weights asked statistics for, with the statistics
+    /// they gave (a blended rewrite's), which that shard reports instead of its own.
+    requested_terms: Vec<HashMap<(u32, Vec<u8>), Option<TermStats>>>,
     terms: Mutex<HashMap<(u32, Vec<u8>), TermStats>>,
     fields: Mutex<HashMap<u32, Option<CollectionStats>>>,
 }
@@ -36,13 +41,30 @@ impl search_index::StatsSource for DfsStats {
             return Some(*t);
         }
         let mut t = TermStats { doc_freq: 0, total_term_freq: 0 };
-        for v in &self.views {
-            let s = v.term_stats(field, term);
+        let any = self.requested_terms.iter().any(|r| r.contains_key(&key));
+        for (v, r) in self.views.iter().zip(&self.requested_terms) {
+            if any && !r.contains_key(&key) {
+                continue;
+            }
+            let s = match r.get(&key) {
+                Some(Some(given)) => *given,
+                _ => v.term_stats(field, term),
+            };
             t.doc_freq += s.doc_freq;
             t.total_term_freq += s.total_term_freq;
         }
         self.terms.lock().insert(key, t);
         Some(t)
+    }
+
+    /// `ContextIndexSearcher.termStatistics`: the summed statistics of a term the DFS phase
+    /// saw, else the weight's own.
+    fn term_stats_given(&self, field: u32, term: &[u8], given: TermStats) -> Option<TermStats> {
+        let key = (field, term.to_vec());
+        if !self.requested_terms.iter().any(|r| r.contains_key(&key)) {
+            return Some(given);
+        }
+        self.term_stats(field, term)
     }
 
     fn collection_stats(&self, field: u32) -> Option<Option<CollectionStats>> {
@@ -73,10 +95,17 @@ impl search_index::StatsSource for DfsStats {
 #[derive(Default)]
 struct Recorder {
     fields: Mutex<HashSet<u32>>,
+    terms: Mutex<HashMap<(u32, Vec<u8>), Option<TermStats>>>,
 }
 
 impl search_index::StatsSource for Recorder {
-    fn term_stats(&self, _field: u32, _term: &[u8]) -> Option<TermStats> {
+    fn term_stats(&self, field: u32, term: &[u8]) -> Option<TermStats> {
+        self.terms.lock().entry((field, term.to_vec())).or_insert(None);
+        None
+    }
+
+    fn term_stats_given(&self, field: u32, term: &[u8], given: TermStats) -> Option<TermStats> {
+        self.terms.lock().insert((field, term.to_vec()), Some(given));
         None
     }
 
@@ -95,6 +124,7 @@ pub fn with_global_stats(cluster: &crate::cluster::Cluster, req: &super::SearchR
     let st = cluster.state();
     let mut views = Vec::with_capacity(targets.len());
     let mut requested = Vec::with_capacity(targets.len());
+    let mut requested_terms = Vec::with_capacity(targets.len());
     let mut failures = Vec::new();
     for (i, t) in targets.iter().enumerate() {
         let view = t.searcher()?.with_global_stats(None);
@@ -106,6 +136,7 @@ pub fn with_global_stats(cluster: &crate::cluster::Cluster, req: &super::SearchR
         if let Err(e) = super::check_inner_hit_names(&req.source) {
             failures.push((i, e));
             requested.push(std::mem::take(&mut *rec.fields.lock()));
+            requested_terms.push(std::mem::take(&mut *rec.terms.lock()));
             views.push(view);
             continue;
         }
@@ -129,9 +160,10 @@ pub fn with_global_stats(cluster: &crate::cluster::Cluster, req: &super::SearchR
             Err(e) => failures.push((i, super::query::shard_exception(&t.idx, e))),
         }
         requested.push(std::mem::take(&mut *rec.fields.lock()));
+        requested_terms.push(std::mem::take(&mut *rec.terms.lock()));
         views.push(view);
     }
-    let stats: Arc<dyn search_index::StatsSource> = Arc::new(DfsStats { views: views.clone(), requested, terms: Mutex::default(), fields: Mutex::default() });
+    let stats: Arc<dyn search_index::StatsSource> = Arc::new(DfsStats { views: views.clone(), requested, requested_terms, terms: Mutex::default(), fields: Mutex::default() });
     let targets = targets
         .iter()
         .zip(views)

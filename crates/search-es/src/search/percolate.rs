@@ -89,29 +89,63 @@ impl MemoryIndex {
 /// What a `percolate` query matched on a shard, kept for the fetch phase.
 pub struct Percolated {
     pub name: Option<String>,
-    /// Per matching stored-query doc: the slots of the documents it matched.
-    pub slots: HashMap<u32, Vec<u32>>,
-    /// Per matching doc: per slot, the stored query's named queries that matched it.
-    pub named: HashMap<u32, Vec<(u32, Vec<String>)>>,
-    queries: HashMap<u32, crate::query::Query>,
+    /// The segments with matches, by base.
+    segs: Vec<SegMatches>,
+    /// Every distinct stored query that matched.
+    verified: Vec<Verified>,
     mem: MemoryIndex,
     docs: Vec<Value>,
     /// Memory index doc -> slot.
     slot_of: HashMap<u32, u32>,
 }
 
+/// A segment's matches: its distinct stored queries that matched, by query index.
+struct SegMatches {
+    base: u32,
+    stored: Arc<super::percolate_candidates::StoredQueries>,
+    /// Query index (in `stored`) -> index into [`Percolated::verified`].
+    verified_of: HashMap<u32, u32>,
+}
+
+/// A distinct stored query that matched the documents.
+struct Verified {
+    query: Arc<crate::query::Query>,
+    /// The slots of the documents it matched.
+    slots: Vec<u32>,
+    /// Per slot, its named queries that matched that document.
+    named: Vec<(u32, Vec<String>)>,
+}
+
 impl std::fmt::Debug for Percolated {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Percolated").field("name", &self.name).field("matches", &self.slots.len()).finish()
+        f.debug_struct("Percolated").field("name", &self.name).field("matching_queries", &self.verified.len()).finish()
     }
 }
 
 impl Percolated {
+    /// What the stored query of matching doc `doc` (a shard doc id) matched.
+    fn verified(&self, doc: u32) -> Option<&Verified> {
+        let s = self.segs.iter().rev().find(|s| s.base <= doc)?;
+        let q = s.stored.query_of(doc - s.base)?;
+        s.verified_of.get(&q).map(|&v| &self.verified[v as usize])
+    }
+
+    /// The slots of the documents the stored query of matching doc `doc` matched.
+    pub fn slots(&self, doc: u32) -> Option<&[u32]> {
+        self.verified(doc).map(|v| &v.slots[..])
+    }
+
+    /// Per slot, the named queries of `doc`'s stored query that matched that document.
+    pub fn named(&self, doc: u32) -> &[(u32, Vec<String>)] {
+        self.verified(doc).map_or(&[], |v| &v.named[..])
+    }
+
     /// `PercolatorHighlightSubFetchPhase`: the documents the stored query of `doc` matched,
     /// highlighted with that query; with several documents, fields are prefixed by the slot.
     pub fn highlight(&self, cluster: &Cluster, st: &ClusterState, spec: &super::highlight::Spec, doc: u32, now: i64) -> EsResult<crate::json::Map> {
         let mut out = crate::json::Map::new();
-        let (Some(slots), Some(q)) = (self.slots.get(&doc), self.queries.get(&doc)) else { return Ok(out) };
+        let Some(v) = self.verified(doc) else { return Ok(out) };
+        let (slots, q) = (&v.slots, &*v.query);
         let table = self.mem.engine.table();
         let searcher = self.mem.engine.shard(0).shard.searcher();
         let qctx = QueryCtx::new(cluster, st, &self.mem.meta, &table, &searcher, now);
@@ -119,7 +153,7 @@ impl Percolated {
         for slot in slots {
             let Some((&mdoc, _)) = self.slot_of.iter().find(|(_, s)| *s == slot) else { continue };
             let Some(source) = self.docs.get(*slot as usize) else { continue };
-            let hl = super::highlight::highlight_hit(&qctx, spec, &query, Some(source), &slot.to_string(), &searcher, Some(mdoc))?;
+            let hl = super::highlight::highlight_hit(&qctx, spec, &query, Some(source), &slot.to_string(), &searcher, Some(mdoc), None, None)?;
             for (k, v) in hl {
                 let key = if self.docs.len() == 1 { k } else { format!("{slot}_{k}") };
                 out.insert(key, v);
@@ -175,9 +209,8 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
     }
     let ie = crate::engine::convert::index_error;
     let mut matches: Vec<(u32, f32)> = Vec::new();
-    let mut slots: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut queries: HashMap<u32, crate::query::Query> = HashMap::new();
-    let mut named: HashMap<u32, Vec<(u32, Vec<String>)>> = HashMap::new();
+    let mut segs: Vec<SegMatches> = Vec::new();
+    let mut verified: Vec<Verified> = Vec::new();
     // Stored queries whose extracted terms the documents lack can't match: verify only the
     // candidates (see `percolate_candidates`).
     let all = super::percolate_candidates::adds_fields(ctx.table, &mem_table);
@@ -194,13 +227,14 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
                 s
             }
         };
+        let mut verified_of = HashMap::new();
         for i in stored.candidates(&mem_searcher, all) {
-            let entry = &stored.queries[i as usize];
-            let d = entry.doc;
-            if !seg.is_live(d) {
+            // Verified once for every doc storing this query; docs deleted since don't match.
+            let docs = &stored.docs_of[i as usize];
+            if !docs.iter().any(|&d| seg.is_live(d)) {
                 continue;
             }
-            let parsed = entry.query.clone();
+            let parsed = stored.queries[i as usize].clone();
             let qctx = QueryCtx::new(ctx.cluster, ctx.st, &mem.meta, &mem_table, &mem_searcher, ctx.now_ms);
             let Ok(stored_q) = qctx.to_query(&parsed) else { continue };
             let q: QueryRef = arc(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Must, stored_q).add(search_index::query::Occur::Filter, root.clone()));
@@ -225,9 +259,9 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
             if let Some(score) = best {
                 // Named queries of the stored query, per matched document.
                 let names = qctx.named.take();
+                let mut per_slot = Vec::new();
                 if !names.is_empty() {
                     hit_docs.sort_unstable();
-                    let mut per_slot = Vec::new();
                     for (slot, mdoc) in &hit_docs {
                         let mut matched: Vec<String> = Vec::new();
                         for (n, nq) in &names {
@@ -239,16 +273,18 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
                             per_slot.push((*slot, matched));
                         }
                     }
-                    named.insert(seg.base + d, per_slot);
                 }
                 hit_slots.sort_unstable();
-                matches.push((seg.base + d, score));
-                slots.insert(seg.base + d, hit_slots);
-                queries.insert(seg.base + d, parsed);
+                matches.extend(docs.iter().filter(|&&d| seg.is_live(d)).map(|&d| (seg.base + d, score)));
+                verified_of.insert(i, verified.len() as u32);
+                verified.push(Verified { query: parsed, slots: hit_slots, named: per_slot });
             }
         }
+        if !verified_of.is_empty() {
+            segs.push(SegMatches { base: seg.base, stored: stored.clone(), verified_of });
+        }
     }
-    ctx.percolate.borrow_mut().push(Arc::new(Percolated { name: p.name.clone(), slots, named, queries, mem, docs, slot_of }));
+    ctx.percolate.borrow_mut().push(Arc::new(Percolated { name: p.name.clone(), segs, verified, mem, docs, slot_of }));
     if matches.is_empty() {
         return Ok(super::query::match_none("no stored query matches"));
     }

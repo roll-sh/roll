@@ -98,12 +98,24 @@ pub fn execute_held(job: Job, hold: Box<dyn Send + 'static>) {
 /// caller claims indices too, so the call completes even when every worker is busy with
 /// searches (it then runs everything itself). Inside a worker, everything runs inline.
 pub fn for_each_index(n: usize, helpers: usize, f: &(dyn Fn(usize) + Sync)) {
+    if in_worker() {
+        (0..n).for_each(f);
+        return;
+    }
+    help_each_index(n, helpers, f);
+}
+
+/// [`for_each_index`], also inside a pool worker (a shard's query phase that runs on a worker
+/// splits into segment slices this way). It cannot deadlock: a thread only ever waits for
+/// indices another thread has claimed and is running, never for one still queued, and a
+/// claimed index only waits on work nested inside it, so every wait ends.
+pub fn help_each_index(n: usize, helpers: usize, f: &(dyn Fn(usize) + Sync)) {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     if n == 0 {
         return;
     }
-    if n == 1 || helpers == 0 || in_worker() {
+    if n == 1 || helpers == 0 {
         (0..n).for_each(f);
         return;
     }

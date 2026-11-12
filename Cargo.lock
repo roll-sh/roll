@@ -3843,11 +3843,14 @@ name = "pg-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
+ "chrono",
  "futures",
  "object_store",
  "pg-proxy",
  "postgres-protocol",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -5007,6 +5010,7 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-tz",
+ "flate2",
  "foldhash",
  "indexmap",
  "itoa",

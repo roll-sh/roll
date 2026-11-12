@@ -98,6 +98,9 @@ pub fn create_data_stream(st: &mut ClusterState, name: &str, now_ms: i64) -> EsR
     if st.metadata.data_streams.contains_key(name) {
         return Err(EsError::resource_already_exists(format!("data_stream [{name}] already exists")));
     }
+    if crate::xpack::esql::is_view(st, name) {
+        return Err(EsError::resource_already_exists(format!("data_stream [{name}] already exists as an ESQL view")));
+    }
     data_streams::validate_name(name)?;
     let (tname, template) = match find_composable(&st.metadata, name, false) {
         Some((n, t)) => (n.clone(), t.clone()),

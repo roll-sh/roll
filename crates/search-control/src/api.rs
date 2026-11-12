@@ -14,7 +14,8 @@
 //!
 //! [`TlsListener`] serves the API over TLS (fleet nodes behind search-proxy, whose own API
 //! port carries nothing else): handshakes run on their own tasks, so a slow or silent client
-//! never holds up accepting the next connection.
+//! never holds up accepting the next connection. During a rolling upgrade from a fleet before
+//! `api_tls` it also answers the old nodes' plain HTTP calls, until none of them is left.
 
 use crate::control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Usage};
 use crate::store::SearchCluster;
@@ -128,8 +129,15 @@ async fn forward(c: &Control, name: &str, method: Method, path: &str, headers: &
 
 /// A TLS listener for [`axum::serve`]: accepts TCP connections and completes each handshake
 /// on its own task (10 s at most), handing out only connections that finished it.
+///
+/// [`TlsListener::for_fleet`] also serves plain HTTP while the node's fleet still has a node
+/// that calls other nodes' APIs without TLS (one from before `api_tls`, during the deploy that
+/// replaces it), told apart by the first byte (a TLS record starts with 0x16, an HTTP request
+/// with a letter). That window is no weaker than the fleet it upgrades: those nodes already
+/// send their calls, and the API token, in plain HTTP. Once none is left, plain connections
+/// are closed unanswered again.
 pub struct TlsListener {
-    rx: tokio::sync::mpsc::Receiver<(tokio_rustls::server::TlsStream<tokio::net::TcpStream>, std::net::SocketAddr)>,
+    rx: tokio::sync::mpsc::Receiver<(ApiStream, std::net::SocketAddr)>,
     local: std::net::SocketAddr,
     accepting: tokio::task::JoinHandle<()>,
 }
@@ -137,10 +145,25 @@ pub struct TlsListener {
 /// Handshakes finished but not yet served; past it new handshakes wait.
 const TLS_BACKLOG: usize = 256;
 
+/// The first byte of a TLS record carrying a handshake (a ClientHello).
+const TLS_HANDSHAKE: u8 = 0x16;
+
 impl TlsListener {
     pub fn new(listener: tokio::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor) -> std::io::Result<TlsListener> {
+        Self::start(listener, acceptor, None)
+    }
+
+    /// [`TlsListener::new`], plus plain HTTP while `control`'s fleet has a node that calls APIs
+    /// in plain HTTP ([`Control::plain_api_callers`]).
+    pub fn for_fleet(listener: tokio::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor, control: Arc<Control>) -> std::io::Result<TlsListener> {
+        Self::start(listener, acceptor, Some(control))
+    }
+
+    fn start(listener: tokio::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor, plain: Option<Arc<Control>>) -> std::io::Result<TlsListener> {
         let local = listener.local_addr()?;
         let (tx, rx) = tokio::sync::mpsc::channel(TLS_BACKLOG);
+        // The control is held weakly: the listener must not keep a stopped node alive.
+        let plain = plain.map(|c| Arc::downgrade(&c));
         let accepting = tokio::spawn(async move {
             loop {
                 let (tcp, peer) = match listener.accept().await {
@@ -156,12 +179,33 @@ impl TlsListener {
                     return;
                 }
                 let _ = tcp.set_nodelay(true);
-                let (acceptor, tx) = (acceptor.clone(), tx.clone());
+                let (acceptor, tx, plain) = (acceptor.clone(), tx.clone(), plain.clone());
                 tokio::spawn(async move {
-                    match tokio::time::timeout(std::time::Duration::from_secs(10), acceptor.accept(tcp)).await {
-                        Ok(Ok(tls)) => {
-                            let _ = tx.send((tls, peer)).await;
+                    let opened = async {
+                        if let Some(plain) = plain {
+                            let mut first = [0u8; 1];
+                            if tcp.peek(&mut first).await? == 0 {
+                                return Ok(None);
+                            }
+                            if first[0] != TLS_HANDSHAKE {
+                                let allowed = match plain.upgrade() {
+                                    Some(c) => c.plain_api_callers().await,
+                                    None => false,
+                                };
+                                if !allowed {
+                                    tracing::debug!(%peer, "plain HTTP on the TLS search API refused");
+                                    return Ok(None);
+                                }
+                                return Ok(Some(ApiStream::Plain(tcp)));
+                            }
                         }
+                        acceptor.accept(tcp).await.map(|tls| Some(ApiStream::Tls(Box::new(tls))))
+                    };
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), opened).await {
+                        Ok(Ok(Some(io))) => {
+                            let _ = tx.send((io, peer)).await;
+                        }
+                        Ok(Ok(None)) => {}
                         Ok(Err(e)) => tracing::debug!(%peer, error = %e, "search API TLS handshake failed"),
                         Err(_) => tracing::debug!(%peer, "search API TLS handshake timed out"),
                     }
@@ -172,6 +216,68 @@ impl TlsListener {
     }
 }
 
+/// A connection [`TlsListener`] hands out: TLS, or plain HTTP from a node of an older release.
+pub enum ApiStream {
+    Tls(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
+    Plain(tokio::net::TcpStream),
+}
+
+impl ApiStream {
+    pub fn is_tls(&self) -> bool {
+        matches!(self, ApiStream::Tls(_))
+    }
+}
+
+impl tokio::io::AsyncRead for ApiStream {
+    fn poll_read(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ApiStream {
+    fn poll_write(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write_vectored(cx, bufs),
+            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            ApiStream::Tls(s) => s.is_write_vectored(),
+            ApiStream::Plain(s) => s.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ApiStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+            ApiStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
 impl Drop for TlsListener {
     fn drop(&mut self) {
         self.accepting.abort();
@@ -179,7 +285,7 @@ impl Drop for TlsListener {
 }
 
 impl axum::serve::Listener for TlsListener {
-    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Io = ApiStream;
     type Addr = std::net::SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
@@ -237,7 +343,17 @@ struct ClusterView {
     password: Option<String>,
 }
 
-async fn view(c: &Control, d: SearchCluster, with_password: bool) -> Result<ClusterView, ControlError> {
+async fn view(c: &Control, mut d: SearchCluster, with_password: bool) -> Result<ClusterView, ControlError> {
+    // The catalog's figures are metering's (refreshed every `stats_interval` while loaded); a
+    // cluster loaded here shows its live index and document counts. Stored bytes stay the
+    // billed object-store figure.
+    if let Some(l) = c.node.get_loaded(&d.name) {
+        let f = crate::meter::engine_figures(&l.cluster);
+        d.indices = f.indices as i64;
+        if f.complete() {
+            d.docs = f.docs as i64;
+        }
+    }
     let branches = c
         .store
         .children(&d.id)

@@ -127,7 +127,8 @@ fn detailed_message(e: &EsError) -> String {
     let mut text = format!("{}: {}", java_class(&e.kind), e.reason());
     if let Some(c) = &e.caused_by {
         text.push_str("; ");
-        if c.es {
+        // `XContentParseException` is no `ElasticsearchException`: the chain stops there.
+        if c.es && c.kind != "x_content_parse_exception" {
             text.push_str(&detailed_message(c));
         } else {
             text.push_str(&format!("{}: {}", java_class(&c.kind), c.reason()));
@@ -158,6 +159,16 @@ fn java_class(kind: &str) -> String {
 
 /// Renders a search template body (`{source|id, params}`) to the search body JSON.
 pub fn render_template(ctx: &Ctx, body: &Map, id_override: Option<&str>) -> EsResult<Value> {
+    let out = render_template_text(ctx, body, id_override)?;
+    match crate::json::parse(out.as_bytes()) {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Ok(Value::Obj(Map::new())),
+        Err(e) => Err(EsError::x_content_parse_bare(e.to_string())),
+    }
+}
+
+/// The text a search template renders to, before it is parsed.
+pub fn render_template_text(ctx: &Ctx, body: &Map, id_override: Option<&str>) -> EsResult<String> {
     let params = body.get("params").cloned().unwrap_or(Value::Obj(Map::new()));
     let (source, options): (String, Vec<(String, String)>) = if let Some(id) = id_override.or_else(|| body.get("id").and_then(Value::as_str)) {
         let st = ctx.state();
@@ -177,12 +188,7 @@ pub fn render_template(ctx: &Ctx, body: &Map, id_override: Option<&str>) -> EsRe
         }
     };
     let t = ctx.cluster.scripts.engine.compile_template(&source, search_painless::Context::Template, &options).map_err(crate::scripting::script_error)?;
-    let out = t.render_json(&crate::scripting::to_serde(&params)).map_err(crate::scripting::script_error)?;
-    match crate::json::parse(out.as_bytes()) {
-        Ok(Some(v)) => Ok(v),
-        Ok(None) => Ok(Value::Obj(Map::new())),
-        Err(e) => Err(EsError::x_content_parse_bare(e.to_string())),
-    }
+    t.render_json(&crate::scripting::to_serde(&params)).map_err(crate::scripting::script_error)
 }
 
 /// `GET/POST /_render/template`, `/_render/template/{id}`.

@@ -9,7 +9,9 @@
 //!   every page it frees and reuses back in (bulk indexing: about 8% of its CPU in page faults
 //!   and page clearing), so [`start_purge_governor`] raises it to [`BUSY_PURGE_DELAY_MS`] while
 //!   the process uses CPU and, once it is idle, drops it to 0 again and has every runtime
-//!   worker collect its heap, leaving an idle process as small as before.
+//!   worker collect its heap, leaving an idle process as small as before. Once the process has
+//!   stayed idle that long, the governor parks until [`note_activity`] (every request) wakes
+//!   it, so an idle node makes no system calls at all.
 //! - **Transparent huge pages** (`/sys/kernel/mm/transparent_hugepage/enabled` = `always`, the
 //!   default on many distributions) back every touched 2 MiB stretch of mimalloc's arena with a
 //!   whole huge page. A heap that is mostly small, sparse allocations (route tables, analysis
@@ -72,6 +74,34 @@ const IDLE_TICKS: u32 = 10;
 /// A second collection, once tokio's blocking threads (10 s keep-alive) have exited.
 const LATE_IDLE_TICKS: u32 = 48;
 
+/// The governor thread, while it is parked (an idle process): [`note_activity`] wakes it.
+static PARKED_GOVERNOR: std::sync::Mutex<Option<std::thread::Thread>> = std::sync::Mutex::new(None);
+/// Whether [`PARKED_GOVERNOR`] holds a parked thread (one relaxed load per request otherwise).
+static GOVERNOR_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tells the purge governor the process has work again (a request arrived). Wakes it if it
+/// parked after a long idle stretch; costs one atomic load when it is running.
+pub fn note_activity() {
+    use std::sync::atomic::Ordering;
+    if GOVERNOR_PARKED.load(Ordering::Relaxed) && GOVERNOR_PARKED.swap(false, Ordering::AcqRel) {
+        if let Some(t) = PARKED_GOVERNOR.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            t.unpark();
+        }
+    }
+}
+
+/// Parks the calling governor until [`note_activity`].
+fn park_governor() {
+    use std::sync::atomic::Ordering;
+    *PARKED_GOVERNOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current());
+    GOVERNOR_PARKED.store(true, Ordering::Release);
+    // `park` may return spuriously, and an unpark that came first leaves a token: either way
+    // the flag tells whether activity was noted.
+    while GOVERNOR_PARKED.load(Ordering::Acquire) {
+        std::thread::park();
+    }
+}
+
 /// User plus system CPU of the whole process.
 #[cfg(unix)]
 fn process_cpu() -> std::time::Duration {
@@ -116,6 +146,10 @@ pub fn start_purge_governor(rt: tokio::runtime::Handle, workers: usize) {
                 continue;
             }
             if !busy && idle_ticks >= LATE_IDLE_TICKS {
+                // Idle and collected: nothing to do until a request comes.
+                park_governor();
+                idle_ticks = 0;
+                last = process_cpu();
                 continue;
             }
             idle_ticks += 1;
@@ -144,6 +178,28 @@ pub fn start_purge_governor(rt: tokio::runtime::Handle, workers: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_parked_governor_wakes_on_activity() {
+        use std::sync::atomic::Ordering;
+        let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let w = woke.clone();
+        let t = std::thread::spawn(move || {
+            super::park_governor();
+            w.store(true, Ordering::Release);
+        });
+        while !super::GOVERNOR_PARKED.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!woke.load(Ordering::Acquire), "parked until activity");
+        super::note_activity();
+        t.join().unwrap();
+        assert!(woke.load(Ordering::Acquire));
+        // Without a parked governor, noting activity does nothing.
+        super::note_activity();
+        assert!(!super::GOVERNOR_PARKED.load(Ordering::Acquire));
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn thp_is_disabled_for_the_process() {

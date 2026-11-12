@@ -233,17 +233,23 @@ pub fn bp_reorder(src: &dyn SegmentSource, opts: &BpOptions) -> Result<Option<Do
     Ok(Some(DocMap::from_new_to_old(new_to_old, max_doc)?))
 }
 
-/// Per-thread scratch: doc freqs of both halves and the bias array.
+/// Per-thread scratch: doc freqs of both halves, every term's gain and the bias array.
 struct Bufs {
     left: Vec<u32>,
     right: Vec<u32>,
+    /// `log2(right[t]) - log2(left[t])`, kept current for the terms of the partition being
+    /// split: a unit's bias is then one load per term instead of two logarithms, and a term's
+    /// gain changes only when a unit holding it moves (far fewer postings than a bias pass
+    /// reads). The bias sums the very same `f32` differences in the same order, so the
+    /// reordering is bit-identical to computing them in place.
+    gain: Vec<f32>,
     /// (bias, unit, position before the move)
     biases: Vec<(f32, u32, u32)>,
 }
 
 impl Bufs {
     fn new(num_terms: usize) -> Bufs {
-        Bufs { left: vec![0; num_terms], right: vec![0; num_terms], biases: Vec::new() }
+        Bufs { left: vec![0; num_terms], right: vec![0; num_terms], gain: vec![0.0; num_terms], biases: Vec::new() }
     }
 }
 
@@ -282,7 +288,8 @@ impl Ctx<'_> {
     fn partition(&self, units: &mut [u32], bufs: &mut Bufs) {
         let fwd = self.fwd;
         let mid = units.len() / 2;
-        let Bufs { left, right, biases } = bufs;
+        let Bufs { left, right, gain, biases } = bufs;
+        let log2 = &self.log2;
         for &u in &units[..mid] {
             for &t in fwd.terms(u) {
                 left[t as usize] += 1;
@@ -293,13 +300,19 @@ impl Ctx<'_> {
                 right[t as usize] += 1;
             }
         }
+        for &u in units.iter() {
+            for &t in fwd.terms(u) {
+                let t = t as usize;
+                gain[t] = log2.get(right[t]) - log2.get(left[t]);
+            }
+        }
         for iter in 0..self.opts.max_iters {
             biases.clear();
             let (mut max_left, mut min_right) = (f32::NEG_INFINITY, f32::INFINITY);
             for (i, &u) in units.iter().enumerate() {
                 let mut b = 0f32;
                 for &t in fwd.terms(u) {
-                    b += self.log2.get(right[t as usize]) - self.log2.get(left[t as usize]);
+                    b += gain[t as usize];
                 }
                 if i < mid {
                     max_left = max_left.max(b);
@@ -315,10 +328,12 @@ impl Ctx<'_> {
             for (i, &(_, u, was)) in biases.iter().enumerate() {
                 let (now_left, was_left) = (i < mid, (was as usize) < mid);
                 if now_left != was_left {
-                    let (from, to) = if was_left { (&mut *left, &mut *right) } else { (&mut *right, &mut *left) };
                     for &t in fwd.terms(u) {
-                        from[t as usize] -= 1;
-                        to[t as usize] += 1;
+                        let t = t as usize;
+                        let (l, r) = if was_left { (left[t] - 1, right[t] + 1) } else { (left[t] + 1, right[t] - 1) };
+                        left[t] = l;
+                        right[t] = r;
+                        gain[t] = log2.get(r) - log2.get(l);
                     }
                 }
                 units[i] = u;
@@ -362,5 +377,85 @@ mod tests {
         assert_eq!(unit_starts(8, Some(&bits)).unwrap(), vec![0, 3, 4, 8]);
         assert_eq!(unit_starts(3, None).unwrap(), vec![0, 1, 2, 3]);
         assert!(unit_starts(100, Some(&bits)).is_err());
+    }
+
+    /// The bisection as first written: both logarithms of every term of every unit on every
+    /// iteration, no kept gains.
+    fn reference_bisect(fwd: &Forward, opts: &BpOptions, log2: &Log2, units: &mut [u32]) {
+        if units.len() < opts.min_partition_size * 2 {
+            return;
+        }
+        let (mut left, mut right) = (vec![0u32; fwd.num_terms], vec![0u32; fwd.num_terms]);
+        let mid = units.len() / 2;
+        for (i, &u) in units.iter().enumerate() {
+            for &t in fwd.terms(u) {
+                if i < mid { left[t as usize] += 1 } else { right[t as usize] += 1 }
+            }
+        }
+        for iter in 0..opts.max_iters {
+            let mut biases = Vec::new();
+            let (mut max_left, mut min_right) = (f32::NEG_INFINITY, f32::INFINITY);
+            for (i, &u) in units.iter().enumerate() {
+                let mut b = 0f32;
+                for &t in fwd.terms(u) {
+                    b += log2.get(right[t as usize]) - log2.get(left[t as usize]);
+                }
+                if i < mid { max_left = max_left.max(b) } else { min_right = min_right.min(b) }
+                biases.push((b, u, i as u32));
+            }
+            if max_left - min_right <= iter as f32 {
+                break;
+            }
+            biases.select_nth_unstable_by(mid, |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            for (i, &(_, u, was)) in biases.iter().enumerate() {
+                if (i < mid) != ((was as usize) < mid) {
+                    for &t in fwd.terms(u) {
+                        let t = t as usize;
+                        if (was as usize) < mid { (left[t], right[t]) = (left[t] - 1, right[t] + 1) } else { (left[t], right[t]) = (left[t] + 1, right[t] - 1) }
+                    }
+                }
+                units[i] = u;
+            }
+        }
+        let (l, r) = units.split_at_mut(mid);
+        l.sort_unstable();
+        r.sort_unstable();
+        reference_bisect(fwd, opts, log2, l);
+        reference_bisect(fwd, opts, log2, r);
+    }
+
+    #[test]
+    fn kept_gains_reorder_exactly_like_recomputed_logarithms() {
+        // Splitmix64: deterministic without a dev-dependency.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        for (units, num_terms, threads) in [(70usize, 5usize, 1usize), (1000, 60, 1), (9000, 300, 4), (20_000, 1500, 8)] {
+            let mut offsets = vec![0u64];
+            let mut terms = Vec::new();
+            for _ in 0..units {
+                // Skewed term choice: low ids are frequent, so halves really trade units.
+                let n = 1 + next() % 24;
+                let mut ts: Vec<u32> = (0..n).map(|_| ((next() % num_terms as u64) * (next() % num_terms as u64) / num_terms as u64) as u32).collect();
+                ts.sort_unstable();
+                ts.dedup();
+                terms.extend(ts);
+                offsets.push(terms.len() as u64);
+            }
+            let fwd = Forward { offsets, terms, num_terms, unit_start: (0..=units as u32).collect() };
+            let opts = BpOptions { threads, ..BpOptions::default() };
+            let ctx = Ctx { fwd: &fwd, opts: &opts, min_part: opts.min_partition_size, log2: Log2::new() };
+            let mut got: Vec<u32> = (0..units as u32).collect();
+            ctx.bisect(&mut got, &mut Bufs::new(num_terms), threads.next_power_of_two().trailing_zeros() as usize);
+            let mut want: Vec<u32> = (0..units as u32).collect();
+            reference_bisect(&fwd, &opts, &ctx.log2, &mut want);
+            assert_eq!(got, want, "{units} units, {num_terms} terms");
+            assert!(got.iter().enumerate().any(|(i, &u)| i as u32 != u), "nothing moved: the case tests nothing");
+        }
     }
 }

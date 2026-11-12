@@ -626,9 +626,24 @@ async fn snapshot_contents_survive_unload_crash_gc_and_branches() {
     ok(&n, "c1", "PUT", "/_snapshot/r", r#"{"type":"fs","settings":{"location":"r"}}"#).await;
     let s1 = ok(&n, "c1", "PUT", "/_snapshot/r/s1?wait_for_completion=true", r#"{"indices":"s,empty,closed"}"#).await;
     assert_eq!(s1["snapshot"]["state"], "SUCCESS", "{s1}");
-    // A pin per non-empty shard; the empty index needs none.
+    // A pin per shard, an empty one for the empty index's shard.
     let pins = store.list_pins("c1").await.unwrap();
-    assert_eq!(pins.len(), 3, "{pins:?}");
+    assert_eq!(pins.len(), 4, "{pins:?}");
+    // `_status` reports the files each pin references (segments, live docs, the pin itself); a
+    // second snapshot of the unchanged indices adds none, as Elasticsearch reports it.
+    let status = ok(&n, "c1", "GET", "/_snapshot/r/s1/_status", "").await;
+    let stats = &status["snapshots"][0]["stats"];
+    assert!(stats["total"]["size_in_bytes"].as_u64().unwrap() > 1000 && stats["total"]["file_count"].as_u64().unwrap() >= 6, "{status}");
+    assert_eq!(stats["incremental"], stats["total"], "{status}");
+    assert_eq!(status["snapshots"][0]["indices"]["empty"]["stats"]["total"]["file_count"], 1, "an empty shard's pin");
+    ok(&n, "c1", "PUT", "/_snapshot/r/again?wait_for_completion=true", r#"{"indices":"s,empty,closed"}"#).await;
+    let again = ok(&n, "c1", "GET", "/_snapshot/r/again/_status", "").await;
+    assert_eq!(again["snapshots"][0]["stats"]["incremental"], serde_json::json!({"file_count": 0, "size_in_bytes": 0}), "{again}");
+    assert_eq!(again["snapshots"][0]["stats"]["total"], stats["total"]);
+    let details = ok(&n, "c1", "GET", "/_snapshot/r/again?index_details=true", "").await;
+    assert_eq!(details["snapshots"][0]["index_details"]["s"]["size_in_bytes"], status["snapshots"][0]["indices"]["s"]["stats"]["total"]["size_in_bytes"]);
+    ok(&n, "c1", "DELETE", "/_snapshot/r/again", "").await;
+    assert_eq!(store.list_pins("c1").await.unwrap().len(), 4);
 
     // The index goes on: more writes, a merge, then it is deleted, and the cluster unloads.
     for i in 0..5 {
@@ -640,7 +655,7 @@ async fn snapshot_contents_survive_unload_crash_gc_and_branches() {
     assert!(n.unload("c1").await);
     ok(&n, "c1", "DELETE", "/closed", "").await;
     let gc = store.collect_garbage(Duration::ZERO).await.unwrap();
-    assert_eq!(gc.pins, 3, "{gc:?}");
+    assert_eq!(gc.pins, 4, "{gc:?}");
     ok(&n, "c1", "POST", "/_snapshot/r/s1/_restore?wait_for_completion=true", r#"{"indices":"closed"}"#).await;
     ok(&n, "c1", "POST", "/closed/_refresh", "").await;
     assert_eq!(count(&ok(&n, "c1", "GET", "/closed/_count", "").await), 2);
@@ -675,7 +690,11 @@ async fn snapshot_contents_survive_unload_crash_gc_and_branches() {
     ok(&n, "c1", "DELETE", "/_snapshot/r/s1,s1c", "").await;
     let left = store.list_pins("c1").await.unwrap();
     assert_eq!(left.len(), 2, "s2's: {left:?}");
-    assert_eq!(store.list_pins("child").await.unwrap().len(), 7);
+    assert_eq!(store.list_pins("child").await.unwrap().len(), 8);
+    // A pin lost some other way fails the restore instead of restoring the shard empty.
+    store.delete_pins("c1", &left[..1]).await.unwrap();
+    let (status, e) = call(&n, "c1", "POST", "/_snapshot/r/s2/_restore?wait_for_completion=true", r#"{"indices":"s","rename_pattern":"s","rename_replacement":"lost"}"#).await;
+    assert_eq!((status, e["error"]["type"].as_str()), (500, Some("snapshot_restore_exception")), "{e}");
     ok(&n, "c1", "DELETE", "/_snapshot/r/s2", "").await;
     assert!(store.list_pins("c1").await.unwrap().is_empty());
 }
@@ -907,7 +926,7 @@ async fn concurrent_snapshot_deletes_keep_the_copies_of_snapshots_in_progress() 
                 assert_eq!(b["snapshot"]["state"], "SUCCESS", "{b}");
                 break;
             }
-            assert_eq!(b["error"]["type"], "invalid_snapshot_name_exception", "{b}");
+            assert_eq!(b["error"]["type"], "snapshot_name_already_in_use_exception", "{b}");
             name.push('x');
         }
         done.store(true, Ordering::SeqCst);

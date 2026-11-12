@@ -230,10 +230,17 @@ impl<'a> Ctx<'a> {
 
 /// Handles one request.
 pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse {
+    handle_admitted(cluster, req, None).await
+}
+
+/// Handles one request whose thread pool slot the caller already took (or was refused,
+/// [`crate::thread_pool::pool_for`]): the server queues for the pool before it takes a
+/// node-wide running slot, so a queued request holds none. `None`: the slot is taken here.
+pub async fn handle_admitted(cluster: &Cluster, req: EsRequest, admitted: Option<Admitted>) -> EsResponse {
     let mut resp = match cluster.dialect {
-        Dialect::Elasticsearch => handle_inner(cluster, &req).await,
+        Dialect::Elasticsearch => handle_inner(cluster, &req, admitted).await,
         // Parsers whose grammar differs between the dialects read `opensearch::active()`.
-        Dialect::OpenSearch => crate::opensearch::Scoped::new(handle_inner(cluster, &req)).await,
+        Dialect::OpenSearch => crate::opensearch::Scoped::new(handle_inner(cluster, &req, admitted)).await,
     };
     finish_headers(&mut resp, &req, cluster.dialect);
     resp
@@ -439,7 +446,11 @@ fn flag(params: &[(String, String)], name: &str) -> Result<bool, EsError> {
     }
 }
 
-async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
+/// A pool slot taken before the request reached its cluster, or the refusal to render once the
+/// request is authenticated (as Elasticsearch rejects the transport action's work).
+pub type Admitted = Result<crate::thread_pool::Admission, crate::thread_pool::Rejected>;
+
+async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admitted>) -> EsResponse {
     let (raw_path, query) = req.uri.split_once('?').unwrap_or((&req.uri, ""));
     let raw_path = if raw_path.is_empty() { "/" } else { raw_path };
     let head_req = req.method.eq_ignore_ascii_case("HEAD");
@@ -477,13 +488,16 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
     let Some(method) = Method::parse(&req.method.to_ascii_uppercase()) else {
         let allowed = routes::allowed_methods(cluster.dialect, raw_path);
         let list: Vec<&str> = allowed.iter().map(|m| m.as_str()).collect();
-        let msg = format!("Unexpected HTTP method: {}, allowed: [{}]", req.method, list.join(", "));
+        // Elasticsearch 9.5.5 writes "http" in lower case here.
+        let http = if cluster.dialect == Dialect::OpenSearch { "HTTP" } else { "http" };
+        let msg = format!("Unexpected {http} method: {}, allowed: [{}]", req.method, list.join(", "));
         return render_simple(405, simple_error(405, &msg), vec![("Allow".into(), list.join(","))], false);
     };
 
     let route = match routes::route_in(cluster.dialect, method, raw_path) {
         // `_knn_search` is only served to REST API compatibility (v8) requests.
-        Routed::Found(r) if r.api == Api::KnnSearch && neg.compat != Some(8) => {
+        // The ES|QL federation APIs are only registered with `esql.federation.enabled`.
+        Routed::Found(r) if (r.api == Api::KnnSearch && neg.compat != Some(8)) || (crate::xpack::esql::datasources::is_federation_api(r.api) && !crate::xpack::esql::datasources::enabled(cluster)) => {
             let msg = format!("no handler found for uri [{}] and method [{method}]", req.uri);
             return render_simple(400, crate::obj! { "error" => msg }, Vec::new(), head_req);
         }
@@ -528,7 +542,7 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
     }
 
     let path = routes::percent_decode(raw_path, false);
-    let ctx = Ctx {
+    let mut ctx = Ctx {
         cluster,
         method,
         api: route.api,
@@ -548,19 +562,45 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
         human,
     };
 
+    // The body counts against the `inflight_requests` breaker until it is answered
+    // (`RestController.dispatchRequest`, before the handler and its security filter run).
+    let in_flight = match crate::breaker::can_trip(ctx.api) {
+        true => cluster.breakers.charge_in_flight(cluster, &ctx.state(), req.body.len() as u64).map(Some),
+        false => Ok(None),
+    };
     // Authentication comes first (Elasticsearch's security REST filter), authorization after
     // the request was parsed (its transport action).
-    let result = match crate::xpack::security::authenticate(&ctx).and_then(|_| params::check_params(&ctx)) {
+    let charged = in_flight.as_ref().map(|_| ()).map_err(Clone::clone);
+    let result = match charged.and_then(|_| crate::xpack::security::authenticate(&ctx)).and_then(|_| params::check_params(&ctx)) {
         Err(e) => Err(e),
         Ok(()) => {
             // OpenSearch (forked before Elasticsearch added this check) ignores a body an API
             // doesn't read.
             if !req.body.is_empty() && cluster.dialect != Dialect::OpenSearch && ctx.api.spec_in(cluster.dialect).body == BodySpec::None && !body_ignorable(ctx.api) {
                 Err(EsError::illegal_argument(format!("request [{} {}] does not support having a body", method, path)))
-            } else if let Err(e) = crate::xpack::security::authorize(&ctx) {
+            } else if let Err(e) = crate::xpack::security::authorize(&ctx).map(|narrowed| {
+                // Wildcards the security layer expanded to the user's authorized indices.
+                if let Some(index) = narrowed {
+                    ctx.route.params.retain(|(n, _)| *n != "index");
+                    ctx.route.params.push(("index", index));
+                }
+            }) {
                 Err(e)
             } else {
-                dispatch_off_reactor(&ctx).await
+                // The API's thread pool slot (`es_rejected_execution_exception` when full).
+                let admission = match admitted {
+                    Some(Ok(a)) => Ok(Some(a)),
+                    Some(Err(r)) => Err(crate::thread_pool::rejection_reply(&ctx, &r)),
+                    None => crate::thread_pool::admit_request(&ctx).await,
+                };
+                match admission {
+                    Ok(admission) => {
+                        let r = dispatch_off_reactor(&ctx).await;
+                        drop(admission);
+                        r
+                    }
+                    Err(rejected) => rejected,
+                }
             }
         }
     };
@@ -617,9 +657,45 @@ fn can_block_in_place() -> bool {
 /// search doesn't stall `GET /`, `_cluster/health` or other searches behind it.
 async fn dispatch_off_reactor(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if runs_searches(ctx.api) && can_block_in_place() {
-        return tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(crate::api::dispatch(ctx)));
+        return tokio::task::block_in_place(|| {
+            // Registered on the thread the search runs on (the task is thread-bound).
+            let _task = crate::tasks::RequestTask::start(ctx);
+            tokio::runtime::Handle::current().block_on(crate::api::dispatch(ctx))
+        });
     }
+    let _task = crate::tasks::RequestTask::start(ctx);
     crate::api::dispatch(ctx).await
+}
+
+/// Runs `f` with the context `req` would get, without running its handler or any check
+/// (`None` when it doesn't route): a task's description re-parses the request it describes.
+pub(crate) fn with_ctx<R>(cluster: &Cluster, req: &EsRequest, f: impl FnOnce(&Ctx) -> R) -> Option<R> {
+    let (raw_path, query) = req.uri.split_once('?').unwrap_or((&req.uri, ""));
+    let raw_path = if raw_path.is_empty() { "/" } else { raw_path };
+    let params = parse_query_strict(query).ok()?;
+    let neg = negotiate(req).ok()?;
+    let method = Method::parse(&req.method.to_ascii_uppercase())?;
+    let Routed::Found(route) = routes::route_in(cluster.dialect, method, raw_path) else { return None };
+    let ctx = Ctx {
+        cluster,
+        method,
+        api: route.api,
+        path: routes::percent_decode(raw_path, false),
+        uri: req.uri.clone(),
+        route,
+        params,
+        body: req.body.clone(),
+        body_type: neg.content.as_ref().and_then(|m| m.xcontent()),
+        request: req,
+        compat: neg.compat,
+        response_compat: compat_of(Some(&neg)),
+        warnings: Mutex::new(Vec::new()),
+        ingest_nanos: std::sync::atomic::AtomicU64::new(0),
+        principal: std::sync::OnceLock::new(),
+        now_ms: crate::time::now_millis(),
+        human: false,
+    };
+    Some(f(&ctx))
 }
 
 /// Sets a search's cancellation flag when dropped without [`CancelOnDrop::disarm`]: the
@@ -646,11 +722,16 @@ impl Drop for CancelOnDrop {
 /// (`RestCancellableNodeClient`). Its scripts and collectors poll the flag, so a script that
 /// loops forever stops instead of burning a core.
 pub async fn handle_shared(cluster: &std::sync::Arc<Cluster>, req: EsRequest) -> EsResponse {
+    handle_shared_admitted(cluster, req, None).await
+}
+
+/// [`handle_shared`] for a request whose pool slot the caller took ([`handle_admitted`]).
+pub async fn handle_shared_admitted(cluster: &std::sync::Arc<Cluster>, req: EsRequest, admitted: Option<Admitted>) -> EsResponse {
     let raw_path = req.uri.split_once('?').map(|(p, _)| p).unwrap_or(&req.uri);
     let searches = Method::parse(&req.method.to_ascii_uppercase())
         .is_some_and(|m| matches!(routes::route_in(cluster.dialect, m, if raw_path.is_empty() { "/" } else { raw_path }), Routed::Found(r) if runs_searches(r.api)));
     if !searches || !can_block_in_place() {
-        return handle(cluster, req).await;
+        return handle_admitted(cluster, req, admitted).await;
     }
     let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut guard = CancelOnDrop(Some(flag.clone()));
@@ -659,7 +740,7 @@ pub async fn handle_shared(cluster: &std::sync::Arc<Cluster>, req: EsRequest) ->
     let task = tokio::task::spawn_blocking(move || {
         let ctl = search_index::search::SearchControl { deadline: None, cancelled: Some(flag), ext: None };
         let _ambient = search_index::search::set_ambient_control(Some(ctl));
-        rt.block_on(handle(&cluster, req))
+        rt.block_on(handle_admitted(&cluster, req, admitted))
     });
     let r = task.await;
     guard.disarm();

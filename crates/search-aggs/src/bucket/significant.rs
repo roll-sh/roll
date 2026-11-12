@@ -10,6 +10,10 @@
 //! reduce sums subset and superset counts per term — iterating terms in the order of
 //! Elasticsearch's paged hash map — rescores and keeps the `size` best with a score above zero
 //! and at least `min_doc_count` documents.
+//!
+//! A keyword field read by ordinals maps each (owning bucket, segment ordinal) to its key once
+//! per segment ([`SegOrds`]): later docs with that term cost one hash probe instead of decoding
+//! the term and building its identity.
 
 use std::sync::Arc;
 
@@ -852,6 +856,7 @@ pub fn create(def: &AggDef, spec: &SignificantSpec, ctx: &mut BindCtx<'_>) -> Re
         sampling: ctx.sampling,
         searcher: ctx.searcher.clone(),
         bytes: None,
+        seg_ords: None,
         nums: None,
         index: hashbrown::HashMap::new(),
         keys: Vec::new(),
@@ -909,6 +914,8 @@ struct SigAgg {
     sampling: Option<crate::bucket::random_sampler::Sampling>,
     searcher: Searcher,
     bytes: Option<BytesReader>,
+    /// Instead of `bytes` for a keyword field with ordinals and no `missing`.
+    seg_ords: Option<SegOrds>,
     nums: Option<NumReader>,
     index: hashbrown::HashMap<(u32, Vec<u8>), u32>,
     keys: Vec<(u32, TermKey)>,
@@ -920,6 +927,16 @@ struct SigAgg {
     doc_count_field: Option<u32>,
     tracker: MemTracker,
 }
+
+/// A segment's ordinals and what each (owning bucket, ordinal) came to: its key's ordinal, or
+/// [`SEG_REJECTED`] when `include` / `exclude` drop the term.
+struct SegOrds {
+    dv: crate::values::DvOrds,
+    map: hashbrown::HashMap<(u32, u64), u32, foldhash::fast::RandomState>,
+    term: Vec<u8>,
+}
+
+const SEG_REJECTED: u32 = u32::MAX;
 
 impl SigAgg {
     /// The background frequency of a term (a count over the superset).
@@ -987,7 +1004,8 @@ impl SigAgg {
         Ok(n)
     }
 
-    fn add(&mut self, owning: u32, key: TermKey, doc: u32, score: f32) -> Result<()> {
+    /// Counts `doc` under `key`; returns the key's ordinal.
+    fn add(&mut self, owning: u32, key: TermKey, doc: u32, score: f32) -> Result<u32> {
         let mut id = Vec::new();
         key.identity(&mut id);
         let ord = match self.index.get(&(owning, id.clone())) {
@@ -1002,7 +1020,33 @@ impl SigAgg {
             }
         };
         self.counts[ord as usize] += self.doc_counter.count(doc);
-        self.subs.push(doc, ord, score)
+        self.subs.push(doc, ord, score)?;
+        Ok(ord)
+    }
+
+    /// One doc's values through the segment's ordinal cache.
+    fn collect_ords(&mut self, so: &mut SegOrds, owning: u32, doc: u32, score: f32) -> Result<()> {
+        let mut ords: smallvec::SmallVec<[u64; 4]> = smallvec::SmallVec::new();
+        so.dv.for_each(doc, |o| ords.push(o));
+        for o in ords {
+            match so.map.get(&(owning, o)).copied() {
+                Some(SEG_REJECTED) => {}
+                Some(k) => {
+                    self.counts[k as usize] += self.doc_counter.count(doc);
+                    self.subs.push(doc, k, score)?;
+                }
+                None => {
+                    so.dv.lookup(o, &mut so.term);
+                    if self.sfilter.as_ref().is_some_and(|f| !f.accept(&so.term)) {
+                        so.map.insert((owning, o), SEG_REJECTED);
+                        continue;
+                    }
+                    let k = self.add(owning, TermKey::Bytes(so.term.clone()), doc, score)?;
+                    so.map.insert((owning, o), k);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1043,6 +1087,11 @@ impl Aggregator for SigAgg {
         }
         if let Some(vs) = &self.vs {
             match self.proto.kind {
+                SigKind::Str if vs.has_ordinals() && vs.missing.is_none() => {
+                    let field = vs.field.as_ref().expect("a field with ordinals");
+                    self.seg_ords = Some(SegOrds { dv: crate::values::DvOrds::for_field(seg, field), map: Default::default(), term: Vec::new() });
+                    self.bytes = None;
+                }
                 SigKind::Str => self.bytes = Some(vs.bytes_reader(seg)?),
                 SigKind::Long => self.nums = Some(vs.numeric_reader(seg)?),
                 SigKind::Unmapped => {}
@@ -1096,6 +1145,11 @@ impl Aggregator for SigAgg {
                     sp.start_new_sequence();
                 }
                 t.stats.collect_analyzed_ns += extracted.elapsed().as_nanos().max(1) as u64;
+            } else if let Some(mut so) = self.seg_ords.take() {
+                let r = self.collect_ords(&mut so, owning, doc, score);
+                self.seg_ords = Some(so);
+                r?;
+                continue;
             } else if let Some(r) = self.bytes.as_mut() {
                 let n = r.load(doc, score)?;
                 for j in 0..n {
@@ -1293,6 +1347,7 @@ pub fn create_text(def: &AggDef, spec: &SigTextSpec, ctx: &mut BindCtx<'_>) -> R
         sampling: ctx.sampling,
         searcher: ctx.searcher.clone(),
         bytes: None,
+        seg_ords: None,
         nums: None,
         index: hashbrown::HashMap::new(),
         keys: Vec::new(),

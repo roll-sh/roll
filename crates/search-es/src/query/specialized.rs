@@ -1286,11 +1286,18 @@ impl Rule {
             Field::new("_name", Tokens::STRING),
         ];
         let (mut organic, mut ids, mut criteria, mut boost, mut name) = (None, Vec::new(), None, None, None);
+        let (mut has_ids, mut has_id) = (false, false);
         p.object("rule", FIELDS, |p, i| {
             match i {
                 0 => organic = Some(parse_inner(p)?),
-                1 => ids.extend(p.array_items(|p| p.text())?),
-                2 => ids.push(p.text()?),
+                1 => {
+                    has_ids = true;
+                    ids.extend(p.array_items(|p| p.text())?)
+                }
+                2 => {
+                    has_id = true;
+                    ids.push(p.text()?)
+                }
                 3 => criteria = Some(p.map()?),
                 4 => boost = Some(p.float_value()?),
                 _ => name = Some(p.text()?),
@@ -1301,8 +1308,21 @@ impl Rule {
         if !missing.is_empty() {
             return Err(EsError::illegal_argument(format!("Required [{}]", missing.join(", "))));
         }
+        // `RuleQueryBuilder`'s parser and constructor checks.
+        if has_id == has_ids {
+            return Err(failed_to_build("rule", EsError::illegal_argument("ruleset information not provided correctly")));
+        }
+        if has_id {
+            p.warnings.push("Using deprecated field [ruleset_id] in query rules, please use [ruleset_ids] instead".into());
+        }
         if ids.is_empty() {
-            return Err(failed_to_build("rule", EsError::illegal_argument("[ruleset_ids] must not be empty")));
+            return Err(failed_to_build("rule", EsError::illegal_argument("rulesetIds must not be null or empty")));
+        }
+        if ids.len() > 10 {
+            return Err(failed_to_build("rule", EsError::illegal_argument("rulesetIds must not contain more than 10 rulesets")));
+        }
+        if ids.iter().any(String::is_empty) {
+            return Err(failed_to_build("rule", EsError::illegal_argument("rulesetIds must not contain null or empty values")));
         }
         let mut q = Rule { organic: organic.unwrap_or_else(|| super::compound::MatchAll::default().into()), ruleset_ids: ids, match_criteria: criteria.unwrap_or_default(), common: Common::default() };
         if let Some(b) = boost {

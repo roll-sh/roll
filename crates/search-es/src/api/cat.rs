@@ -959,22 +959,44 @@ pub fn thread_pools_for(d: Dialect, processors: usize) -> Vec<ThreadPool> {
             fixed("write", p, 10000),
         ];
     }
+    // Elasticsearch 9.5.5 with the default distribution's x-pack pools, checked against
+    // `_cat/thread_pool` at 1, 2, 16 and 36 processors.
+    let search = p * 3 / 2 + 1;
+    let core0 = |name, max: i64, keep_alive| ThreadPool { name, fixed: false, resizable: false, size: max, core: 0, queue_size: -1, keep_alive };
     vec![
         fixed("analyze", 1, 16),
         fixed("auto_complete", (p / 4).max(1), 100),
+        core0("azure_event_loop", (p / 4).max(1), "30s"),
+        fixed("ccr", 32, 100),
         fixed("cluster_coordination", 1, -1),
+        ThreadPool { keep_alive: "10m", ..fixed("dlm_frozen_transition", 2 * p, 20 * p) },
+        fixed("downsample_indexing", (p / 8).max(1), 256),
+        core0("esql_external_io", (3 * p).clamp(16, 100), "30s"),
+        fixed("esql_worker", search, (search * 148).max(1000)),
         scaling("fetch_shard_started", 1, 2 * p, "5m"),
         scaling("fetch_shard_store", 1, 2 * p, "5m"),
         scaling("flush", 1, half_max(5), "5m"),
         fixed("force_merge", (p / 8).max(1), -1),
         scaling("generic", 4, (4 * p).clamp(128, 512), "30s"),
-        fixed("get", p * 3 / 2 + 1, 1000),
+        fixed("get", search, 1000),
+        core0("inference_response", 10, "10m"),
+        core0("inference_utility", 10, "10m"),
         scaling("management", 1, p.min(5), "5m"),
         scaling("merge", 1, p, "5m"),
+        scaling("ml_datafeed", 1, 512, "1m"),
+        scaling("ml_job_comms", 4, 2048, "1m"),
+        scaling("ml_native_inference_comms", 3, 300 + 3 * p, "1m"),
+        scaling("ml_utility", 1, 2048, "10m"),
+        fixed("model_download", 5, -1),
+        core0("profiling", 1, "30m"),
         scaling("refresh", 1, half_max(10), "5m"),
-        fixed("search", p * 3 / 2 + 1, 1000),
+        core0("repository_azure", 5, "30s"),
+        fixed("rollup_indexing", 1, -1),
+        fixed("search", search, search * 1000),
         fixed("search_coordination", half, 1000),
-        scaling("snapshot", 1, half_max(10), "5m"),
+        core0("searchable_snapshots_cache_fetch_async", (3 * p).min(50), "30s"),
+        core0("searchable_snapshots_cache_prewarming", 16, "30s"),
+        scaling("snapshot", 1, 10, "5m"),
         scaling("snapshot_meta", 1, (3 * p).min(50), "30s"),
         fixed("system_critical_read", half_max(5), 2000),
         fixed("system_critical_write", half_max(5), 1500),
@@ -982,9 +1004,27 @@ pub fn thread_pools_for(d: Dialect, processors: usize) -> Vec<ThreadPool> {
         fixed("system_write", half_max(5), 1000),
         fixed("system_write_coordination", half_max(5), 1000),
         scaling("warmer", 1, half_max(5), "5m"),
-        fixed("write", p, 10000),
+        fixed("watcher", (5 * p).min(50), 1000),
+        fixed("write", p, (750 * p).max(10_000)),
         fixed("write_coordination", p, 10000),
     ]
+}
+
+/// [`thread_pools_for`] with the sizes the node's gated pools really have (node settings
+/// such as `thread_pool.search.size` change them) and their live counters.
+pub fn live_thread_pools(cluster: &crate::cluster::Cluster, processors: usize) -> Vec<(ThreadPool, crate::thread_pool::PoolStats)> {
+    thread_pools_for(cluster.dialect, processors)
+        .into_iter()
+        .map(|mut tp| match cluster.thread_pools.by_name(tp.name) {
+            Some(live) => {
+                tp.size = live.size as i64;
+                tp.core = live.size as i64;
+                tp.queue_size = live.queue_size.map_or(-1, |q| q as i64);
+                (tp, live.stats())
+            }
+            None => (tp, Default::default()),
+        })
+        .collect()
 }
 
 pub fn thread_pool(ctx: &Ctx) -> EsResult<Reply> {
@@ -992,7 +1032,7 @@ pub fn thread_pool(ctx: &Ctx) -> EsResult<Reply> {
     let patterns = ctx.list_param("thread_pool_patterns");
     let m = crate::api::nodes::NodeMetrics::sample(ctx.cluster);
     let mut t = table(ctx, columns!(ctx, THREAD_POOL));
-    for tp in thread_pools_for(ctx.cluster.dialect, m.processors) {
+    for (tp, stats) in live_thread_pools(ctx.cluster, m.processors) {
         if let Some(p) = &patterns
             && !p.iter().any(|p| glob_match(p, tp.name))
         {
@@ -1018,8 +1058,12 @@ pub fn thread_pool(ctx: &Ctx) -> EsResult<Reply> {
             "port" => Cell::Int(9300),
             "name" => Cell::str(name),
             "type" => Cell::str(ty),
-            "active" | "queue" | "rejected" | "largest" | "completed" => Cell::Int(0),
-            "pool_size" => Cell::Int(0),
+            "active" => Cell::Int(stats.active as i64),
+            "queue" => Cell::Int(stats.queue as i64),
+            "rejected" => Cell::Int(stats.rejected as i64),
+            "largest" => Cell::Int(stats.largest as i64),
+            "completed" => Cell::Int(stats.completed as i64),
+            "pool_size" => Cell::Int(stats.threads as i64),
             "total_wait_time" => {
                 if waits {
                     Cell::Time(TimeValue::millis(0))
@@ -1032,7 +1076,7 @@ pub fn thread_pool(ctx: &Ctx) -> EsResult<Reply> {
             "max" => if tp.fixed { Cell::Null } else { Cell::Int(tp.size) },
             "size" => if tp.fixed { Cell::Int(tp.size) } else { Cell::Null },
             "keep_alive" => {
-                if tp.fixed {
+                if tp.keep_alive.is_empty() {
                     Cell::Null
                 } else {
                     TimeValue::parse(tp.keep_alive, "keep_alive").map(Cell::Time).unwrap_or(Cell::Null)
@@ -1112,38 +1156,52 @@ pub fn fielddata(ctx: &Ctx) -> EsResult<Reply> {
     finish(t)
 }
 
-/// `_cat/tasks`: the node runs no background tasks between requests, so the list holds the
-/// listing request itself, as on an idle Elasticsearch node.
+/// `_cat/tasks`: the running tasks (searches, by-query runs, …), listing itself as a task
+/// with its node-level child, as Elasticsearch does.
 pub fn tasks(ctx: &Ctx) -> EsResult<Reply> {
     let node = &ctx.cluster.node;
     let mut t = table(ctx, columns!(ctx, TASKS));
-    let now = ctx.now_ms;
-    let opaque = ctx.request.header("x-opaque-id").map(str::to_string);
-    let id = (now.rem_euclid(1_000_000)) as u64;
-    t.push_row(|c| {
-        if let Some(cell) = time_cells(now, c) {
-            return match c {
-                "timestamp" => cell,
+    let headers = crate::tasks::task_headers(ctx.request);
+    let registry = &ctx.cluster.tasks;
+    let me = registry.register("cluster:monitor/tasks/lists", "", None, headers.clone());
+    let _child = registry.register("cluster:monitor/tasks/lists[n]", "", Some(me.id), headers);
+    let detailed = ctx.bool_param("detailed", false)?;
+    let actions: Vec<String> = ctx.list_param("actions").unwrap_or_default();
+    for task in registry.list() {
+        if !actions.is_empty() && !actions.iter().any(|a| glob_match(a, &task.action)) {
+            continue;
+        }
+        let running = task.started.elapsed().as_nanos() as i64;
+        let description = if detailed { task.description_in(ctx.cluster) } else { String::new() };
+        let opaque = task.headers.iter().find(|(k, _)| k == "X-Opaque-Id").map(|(_, v)| v.clone());
+        t.push_row(|c| {
+            if let Some(cell) = time_cells(task.start_ms, c) {
+                return match c {
+                    "timestamp" => cell,
+                    _ => Cell::Null,
+                };
+            }
+            match c {
+                "id" | "task_id" => Cell::str(format!("{}:{}", node.id, task.id)),
+                "action" => Cell::str(task.action.as_ref()),
+                "parent_task_id" => match task.parent {
+                    Some(p) => Cell::str(format!("{}:{p}", node.id)),
+                    None => Cell::str("-"),
+                },
+                "type" => Cell::str("transport"),
+                "start_time" => Cell::Int(task.start_ms),
+                "running_time" => Cell::Time(TimeValue { duration: running, unit: crate::units::TimeUnit::Nanos }),
+                "running_time_ns" => Cell::Int(running),
+                "x_opaque_id" => Cell::opt_str(opaque.clone()),
+                "ip" => Cell::str(&node.ip),
+                "port" => Cell::Int(9300),
+                "node" => Cell::str(&node.name),
+                "version" => Cell::str(crate::version::ES_VERSION),
+                "description" => Cell::str(&description),
                 _ => Cell::Null,
-            };
-        }
-        match c {
-            "id" | "task_id" => Cell::str(format!("{}:{id}", node.id)),
-            "action" => Cell::str("cluster:monitor/tasks/lists"),
-            "parent_task_id" => Cell::str("-"),
-            "type" => Cell::str("transport"),
-            "start_time" => Cell::Int(now),
-            "running_time" => Cell::Time(TimeValue { duration: 100, unit: crate::units::TimeUnit::Micros }),
-            "running_time_ns" => Cell::Int(100_000),
-            "x_opaque_id" => Cell::opt_str(opaque.clone()),
-            "ip" => Cell::str(&node.ip),
-            "port" => Cell::Int(9300),
-            "node" => Cell::str(&node.name),
-            "version" => Cell::str(crate::version::ES_VERSION),
-            "description" => Cell::str(""),
-            _ => Cell::Null,
-        }
-    });
+            }
+        });
+    }
     finish(t)
 }
 
@@ -1234,11 +1292,14 @@ pub fn repositories(ctx: &Ctx) -> EsResult<Reply> {
 /// `_cat/snapshots/{repository}`: every named repository is missing.
 pub fn snapshots(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
-    let rows = super::snapshots::snapshot_rows(&st, &ctx.list_param("repository").unwrap_or_default())?;
+    let rows = super::snapshots::snapshot_rows(&st, &ctx.cluster.snapshot_data, &ctx.list_param("repository").unwrap_or_default())?;
     let mut t = table(ctx, columns!(ctx, SNAPSHOTS));
     let hms = |ms: i64| crate::time::DateFormatter::new("HH:mm:ss").map(|f| f.format_millis(ms)).unwrap_or_default();
     for (repo, s) in rows {
-        let failed = s.total_shards - s.successful_shards;
+        // A running snapshot (no end yet) has lasted until now, and failed nothing yet.
+        let running = s.state == "IN_PROGRESS";
+        let failed = if running { 0 } else { s.total_shards - s.successful_shards };
+        let duration = if running { crate::time::now_millis() - s.start_ms } else { s.end_ms - s.start_ms };
         t.push_row(|c| match c {
             "id" => Cell::str(&s.name),
             "repository" => Cell::str(&repo),
@@ -1247,7 +1308,7 @@ pub fn snapshots(ctx: &Ctx) -> EsResult<Reply> {
             "start_time" => Cell::str(hms(s.start_ms)),
             "end_epoch" => Cell::Int(s.end_ms / 1000),
             "end_time" => Cell::str(hms(s.end_ms)),
-            "duration" => Cell::Time(crate::units::TimeValue::millis((s.end_ms - s.start_ms).max(0))),
+            "duration" => Cell::Time(crate::units::TimeValue::millis(duration.max(0))),
             "indices" => Cell::Int(s.indices.len() as i64),
             "successful_shards" => Cell::Int(s.successful_shards),
             "failed_shards" => Cell::Int(failed),

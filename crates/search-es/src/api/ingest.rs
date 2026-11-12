@@ -18,7 +18,7 @@ const COMMON: &[&str] = &["description", "if", "ignore_failure", "on_failure", "
 /// `(processor, required properties, optional properties)`. A required entry `a|b` means one
 /// of them (the first is reported when both are missing).
 const PROCESSORS: &[(&str, &[&str], &[&str])] = &[
-    ("append", &["field", "value|copy_from"], &["allow_duplicates", "media_type"]),
+    ("append", &["field", "value|copy_from"], &["allow_duplicates", "media_type", "ignore_empty_values"]),
     ("attachment", &["field"], &["target_field", "indexed_chars", "indexed_chars_field", "properties", "ignore_missing", "remove_binary", "resource_name"]),
     ("bytes", &["field"], &["target_field", "ignore_missing"]),
     ("cef", &["field"], &["target_field", "ignore_missing", "ignore_empty_values", "timezone"]),
@@ -37,7 +37,7 @@ const PROCESSORS: &[(&str, &[&str], &[&str])] = &[
     ("foreach", &["field", "processor"], &["ignore_missing"]),
     ("geo_grid", &["field", "tile_type"], &["target_field", "parent_field", "children_field", "non_children_field", "precision_field", "ignore_missing", "target_format"]),
     ("geoip", &["field"], &["target_field", "database_file", "properties", "ignore_missing", "first_only", "download_database_on_pipeline_creation"]),
-    ("grok", &["field", "patterns"], &["pattern_definitions", "trace_match", "ignore_missing", "ecs_compatibility"]),
+    ("grok", &["field", "patterns"], &["pattern_definitions", "trace_match", "ignore_missing", "ecs_compatibility", "validate_only"]),
     ("gsub", &["field", "pattern", "replacement"], &["target_field", "ignore_missing"]),
     ("html_strip", &["field"], &["target_field", "ignore_missing"]),
     ("inference", &["model_id"], &["target_field", "field_map", "inference_config", "input_output", "ignore_missing"]),
@@ -114,6 +114,9 @@ fn validate_processor(ptype: &str, config: &Value) -> EsResult<()> {
         return Err(with_tag(EsError::new(400, "parse_exception", "must specify either [source] for an inline script or [id] for a stored script").with_meta("processor_type", ptype)));
     }
     if let Some(on_failure) = cfg.get("on_failure") {
+        if on_failure.as_array().is_some_and(Vec::is_empty) {
+            return Err(with_tag(parse_err("[on_failure] processors list cannot be empty").with_meta("property_name", "on_failure").with_meta("processor_type", ptype)));
+        }
         validate_processors(on_failure, "on_failure")?;
     }
     if ptype == "foreach"
@@ -158,7 +161,7 @@ pub fn validate_pipeline(id: &str, body: &Map) -> EsResult<()> {
     if let Some(of) = body.get("on_failure") {
         validate_processors(of, "on_failure")?;
         if of.as_array().is_some_and(Vec::is_empty) {
-            return Err(parse_err("pipeline [".to_string() + id + "] cannot have an empty on-failure option defined"));
+            return Err(parse_err("pipeline [".to_string() + id + "] cannot have an empty on_failure option defined"));
         }
     }
     let unknown: Vec<&String> =
@@ -198,21 +201,34 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     validate_pipeline(&id, &body)?;
     crate::xpack::enrich::validate_pipeline_refs(ctx.cluster, &body)?;
+    // The processor factories' own checks (`Pipeline.create` on every ingest node).
+    crate::ingest::pipeline::compile(ctx.cluster, &id, &Value::Obj(body.clone()))?;
     let now = ctx.now_ms;
     ctx.cluster
         .update(move |st| {
             let existing = st.metadata.pipelines.get(&id);
+            let mut stored = body.clone();
             if let Some(req) = if_version {
-                let current = existing.and_then(|p| p.get("version")).and_then(Value::as_i64);
+                let Some(existing) = existing else {
+                    return Err(EsError::illegal_argument(format!("version conflict, required version [{req}] for pipeline [{id}] but no pipeline was found")));
+                };
+                let current = existing.get("version").and_then(Value::as_i64);
                 if current != Some(req as i64) {
                     let shown = current.map(|c| c.to_string()).unwrap_or_else(|| "null".into());
                     return Err(EsError::illegal_argument(format!(
                         "version conflict, required version [{req}] for pipeline [{id}] but current version is [{shown}]"
                     )));
                 }
+                match stored.get("version").and_then(Value::as_i64) {
+                    Some(v) if Some(v) == current => return Err(EsError::illegal_argument(format!("cannot update pipeline [{id}] with the same version [{v}]"))),
+                    Some(_) => {}
+                    // A conditional update without a version bumps it.
+                    None => {
+                        stored.insert("version".into(), Value::from(req as i64 + 1));
+                    }
+                }
             }
             let created = existing.and_then(|p| p.get("created_date_millis")).and_then(Value::as_i64).unwrap_or(now);
-            let mut stored = body.clone();
             stored.shift_remove("created_date_millis");
             stored.shift_remove("modified_date_millis");
             stored.insert("created_date_millis".into(), created.into());

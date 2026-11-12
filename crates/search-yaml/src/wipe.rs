@@ -216,11 +216,26 @@ fn encode(name: &str) -> String {
     out
 }
 
-/// Cleans the cluster.
+/// Cleans the cluster (as the admin client when the target has admin credentials).
 pub async fn wipe(client: &mut Client, target: &TargetInfo, mode: WipeMode) -> Result<()> {
     if mode == WipeMode::None {
         return Ok(());
     }
+    if target.admin_headers.is_empty() {
+        return wipe_as(client, target, mode).await;
+    }
+    let mut headers = client.endpoint().headers.clone();
+    for (k, v) in &target.admin_headers {
+        headers.retain(|(h, _)| !h.eq_ignore_ascii_case(k));
+        headers.push((k.clone(), v.clone()));
+    }
+    let saved = client.replace_headers(headers);
+    let result = wipe_as(client, target, mode).await;
+    client.replace_headers(saved);
+    result
+}
+
+async fn wipe_as(client: &mut Client, target: &TargetInfo, mode: WipeMode) -> Result<()> {
     let full = mode == WipeMode::Full;
     let xpack = target.products.xpack;
     // One cluster-state read answers three questions: searchable-snapshot indices, whether any

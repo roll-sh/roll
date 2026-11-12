@@ -237,6 +237,10 @@ pub fn parse_by_query(ctx: &Ctx, update: bool) -> EsResult<ByScroll> {
     let mut req = ByScroll::new(scroll_search(ctx, SearchSource::default())?);
     let mut rest: Option<Map> = None;
     if let Some(mut body) = body {
+        // `extractRequestSpecificFields` reads the body with `parser.map()`: hash maps at every
+        // level, so the re-serialized search body (and which error comes first) follows their
+        // order.
+        crate::ingest::doc::java_hash_order(&mut body, true);
         if let Some(c) = body.shift_remove("conflicts").filter(|v| !v.is_null()) {
             req.set_conflicts(&c.to_es_string())?;
         }
@@ -414,6 +418,8 @@ pub fn parse_reindex(ctx: &Ctx) -> EsResult<ByScroll> {
     p.object("reindex", REINDEX_FIELDS, |p, i| match REINDEX_FIELDS[i].name {
         "source" => {
             let mut m = p.map()?;
+            // `parser.map()`: hash maps at every level (see `parse_by_query`).
+            crate::ingest::doc::java_hash_order(&mut m, true);
             match m.shift_remove("index") {
                 None | Some(Value::Null) => {}
                 Some(Value::Arr(a)) => req.search.indices = a.iter().map(Value::to_es_string).collect(),

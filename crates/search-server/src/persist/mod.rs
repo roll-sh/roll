@@ -58,7 +58,9 @@
 //! indices and pins that commit point (`Store::write_pin`, `snap.<snapshot uuid>.<index uuid>`),
 //! which keeps its segments alive without copying them; a restore opens the pinned segments
 //! read-only and indexes their documents with their seq_nos, versions and terms; deleting a
-//! snapshot drops its pins. Which pins are garbage is decided by `search_es::api::snapshots`
+//! snapshot drops its pins. Every shard gets a pin, an empty one for an empty shard, so a pin
+//! lost some other way fails the restore instead of restoring the shard empty (snapshots from
+//! before this pinned only shards with documents, and still restore). Which pins are garbage is decided by `search_es::api::snapshots`
 //! (pins are written before their snapshot is recorded, so an unrecorded pin may belong to a
 //! snapshot still being taken): those of a crash between capture and record go once older than
 //! a grace period, swept after snapshot operations and in the background after a wake
@@ -94,6 +96,7 @@ use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use search_codec::{LiveDocs, Slice};
 use search_es::engine::{IndexEngine, LoggedOp, ShardEngine, ShardLog, ShardStorage, SnapshotCopy, SnapshotStorage};
+use search_es::meta::snapshots::ShardFiles;
 use search_es::{Cluster, EsError, EsResult};
 use search_index::shard::gate::SegmentGate;
 use search_index::{PublishedView, SegmentHandle, Shard, ShardConfig};
@@ -955,7 +958,7 @@ impl ClusterData {
         if self.has_pending.swap(false, Ordering::SeqCst) {
             self.drain_all().await?;
         }
-        if !cluster.tasks.list().is_empty() {
+        if !cluster.tasks.is_empty() {
             self.ensure_syncer(cluster);
         }
         let lsn = self.ack_target();
@@ -1536,12 +1539,12 @@ impl ClusterData {
                     let _ = me.classify(e);
                 }
                 me.maybe_commit(&cl);
-                let busy = me.has_pending.load(Ordering::SeqCst) || !cl.tasks.list().is_empty();
+                let busy = me.has_pending.load(Ordering::SeqCst) || !cl.tasks.is_empty();
                 if !busy {
                     me.syncer.store(false, Ordering::SeqCst);
                     // A write that raced this decision may have seen the syncer still running:
                     // take the job back rather than leave it unlogged.
-                    if (me.has_pending.load(Ordering::SeqCst) || !cl.tasks.list().is_empty()) && !me.syncer.swap(true, Ordering::SeqCst) {
+                    if (me.has_pending.load(Ordering::SeqCst) || !cl.tasks.is_empty()) && !me.syncer.swap(true, Ordering::SeqCst) {
                         continue;
                     }
                     return;
@@ -1737,6 +1740,11 @@ impl ShardStorage for ClusterData {
 /// uuid>.<index uuid>`, one per shard. Index and snapshot uuids never contain a dot.
 const SNAPSHOT_PIN_PREFIX: &str = "snap.";
 
+/// Commit data every snapshot pin carries since empty shards are pinned too: with it, a
+/// shard of the index without a pin was lost (a restore fails) rather than empty.
+const SNAPSHOT_PIN_FORMAT_KEY: &str = "roll.snapshot.pin_format";
+const SNAPSHOT_PIN_FORMAT: &str = "2";
+
 fn snapshot_pin(snapshot: &str, index_uuid: &str, shard: u32) -> ShardId {
     ShardId::new(format!("{SNAPSHOT_PIN_PREFIX}{snapshot}.{index_uuid}"), shard)
 }
@@ -1792,26 +1800,42 @@ impl ClusterData {
 
 #[async_trait::async_trait]
 impl SnapshotStorage for ClusterData {
-    async fn capture(&self, snapshot: &str, index_uuid: &str, shards: u32, engine: Option<Arc<IndexEngine>>) -> EsResult<()> {
+    async fn capture(&self, snapshot: &str, index_uuid: &str, n: u32, engine: Option<&Arc<IndexEngine>>, previous: Option<&str>) -> EsResult<ShardFiles> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(PersistError::Lost(Unloaded.to_string()).to_es(&self.cluster));
         }
-        for n in 0..shards {
-            let m = self.commit_for_snapshot(engine.as_ref(), index_uuid, n).await.map_err(|e| self.snapshot_error(snapshot, e))?;
-            // An empty shard needs no pin.
-            let Some(mut m) = m.filter(|m| !m.segments.is_empty()) else { continue };
-            // The segments and how to read them, nothing of the index's running state.
-            m.user_data.retain(|k, _| k == NUMBERS_KEY);
-            self.store.write_pin(&self.cluster, &snapshot_pin(snapshot, index_uuid, n), &m).await.map_err(|e| self.snapshot_error(snapshot, e))?;
-        }
-        Ok(())
+        let m = self.commit_for_snapshot(engine, index_uuid, n).await.map_err(|e| self.snapshot_error(snapshot, e))?;
+        // An empty shard gets an empty pin, so a missing pin is detectably lost.
+        let mut m = m.filter(|m| !m.segments.is_empty()).unwrap_or_default();
+        // The segments and how to read them, nothing of the index's running state.
+        m.user_data.retain(|k, _| k == NUMBERS_KEY);
+        m.user_data.insert(SNAPSHOT_PIN_FORMAT_KEY.into(), SNAPSHOT_PIN_FORMAT.into());
+        let pin_bytes = self.store.write_pin(&self.cluster, &snapshot_pin(snapshot, index_uuid, n), &m).await.map_err(|e| self.snapshot_error(snapshot, e))?;
+        let previous = match previous {
+            Some(p) => self.store.read_pin(&self.cluster, &snapshot_pin(p, index_uuid, n)).await.map_err(|e| self.snapshot_error(snapshot, e))?,
+            None => None,
+        };
+        Ok(pinned_files(&m, previous.as_ref(), pin_bytes))
     }
 
     async fn load(&self, snapshot: &str, index_uuid: &str, shards: u32) -> EsResult<Vec<search_es::engine::SnapshotShard>> {
-        let mut out = Vec::with_capacity(shards as usize);
+        let mut pins = Vec::with_capacity(shards as usize);
         for n in 0..shards {
-            let pin = self.store.read_pin(&self.cluster, &snapshot_pin(snapshot, index_uuid, n)).await.map_err(|e| self.snapshot_error(snapshot, e))?;
+            pins.push(self.store.read_pin(&self.cluster, &snapshot_pin(snapshot, index_uuid, n)).await.map_err(|e| self.snapshot_error(snapshot, e))?);
+        }
+        // Snapshots pin every shard since the format key exists; older ones pinned only
+        // shards with documents, so a shard without a pin there was empty.
+        let every_shard_pinned = pins.iter().flatten().any(|m| m.user_data.contains_key(SNAPSHOT_PIN_FORMAT_KEY));
+        let mut out = Vec::with_capacity(shards as usize);
+        for (n, pin) in pins.into_iter().enumerate() {
             let Some(m) = pin else {
+                if every_shard_pinned {
+                    return Err(EsError::new(
+                        500,
+                        "snapshot_restore_exception",
+                        format!("[{snapshot}] the contents of shard [{index_uuid}][{n}] are missing from the snapshot's storage"),
+                    ));
+                }
                 out.push(search_es::engine::SnapshotShard { segments: Vec::new(), numbers: Vec::new() });
                 continue;
             };
@@ -1865,6 +1889,40 @@ impl SnapshotStorage for ClusterData {
         }
         self.store.delete_pins(&self.cluster, &doomed).await.map_err(|e| self.snapshot_error("_all", e))
     }
+}
+
+/// The files a snapshot pin references: each segment, each live-docs generation and the pin
+/// itself (the commit point). Those `previous` (the shard's pin in the latest earlier
+/// snapshot) doesn't reference are incremental; the pin counts as incremental unless the
+/// commit is the same, as Elasticsearch reuses an unchanged `segments_N`.
+fn pinned_files(m: &ShardManifest, previous: Option<&ShardManifest>, pin_bytes: u64) -> ShardFiles {
+    // `LiveDocs::encode`: a 44-byte header and crc around one bit per document.
+    let live_bytes = |max_doc: u32| 44 + u64::from(max_doc).div_ceil(64) * 8;
+    let mut f = ShardFiles { segments: m.segments.len() as u32, ..ShardFiles::default() };
+    for r in &m.segments {
+        let old = previous.and_then(|p| p.segments.iter().find(|o| o.id == r.id));
+        f.file_count += 1;
+        f.size_in_bytes += r.bytes;
+        if old.is_none() {
+            f.incremental_file_count += 1;
+            f.incremental_size_in_bytes += r.bytes;
+        }
+        if r.live.is_some() {
+            f.file_count += 1;
+            f.size_in_bytes += live_bytes(r.max_doc);
+            if old.is_none_or(|o| o.live != r.live) {
+                f.incremental_file_count += 1;
+                f.incremental_size_in_bytes += live_bytes(r.max_doc);
+            }
+        }
+    }
+    f.file_count += 1;
+    f.size_in_bytes += pin_bytes;
+    if previous.is_none_or(|p| p.segments != m.segments) {
+        f.incremental_file_count += 1;
+        f.incremental_size_in_bytes += pin_bytes;
+    }
+    f
 }
 
 /// The codec's whole-file check for downloaded segments (search-store's [`search_store::Verifier`]).

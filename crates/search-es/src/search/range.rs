@@ -8,7 +8,7 @@ use super::query::{QueryCtx, arc, match_none, normalize, value_text};
 use crate::engine::fields::{FieldInfo, Kind};
 use crate::error::{EsError, EsResult};
 use crate::json::{Number, Value};
-use crate::query::term_level::{Fuzziness, Range, Relation};
+use crate::query::term_level::{Range, Relation};
 use crate::time::{DateFormatter, Zone};
 use search_codec::points::encode;
 use search_index::query::{
@@ -680,7 +680,7 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
             let b = |v: &Value| super::version_field::encode(&value_text(v));
             let lo = from.map(b).transpose()?;
             let hi = to.map(b).transpose()?;
-            Ok(arc(ConstantScoreQuery::new(arc(MultiTermQuery::range(f.number, lo, hi, r.include_lower, r.include_upper)))))
+            Ok(arc(MultiTermQuery::range(f.number, lo, hi, r.include_lower, r.include_upper)))
         }
         Kind::Keyword | Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType | Kind::Flattened | Kind::CountedKeyword | Kind::Wildcard => {
             if !ctx.allow_expensive {
@@ -713,7 +713,9 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
                 let q = arc(ConstantScoreQuery::new(arc(MultiTermQuery::range(f.number, lo.clone(), hi.clone(), r.include_lower, r.include_upper))));
                 Ok(super::extra::wildcard_range(&f, q, lo.as_deref(), hi.as_deref(), r.include_lower, r.include_upper))
             } else if f.index {
-                Ok(arc(ConstantScoreQuery::new(arc(MultiTermQuery::range(f.number, lo, hi, r.include_lower, r.include_upper)))))
+                // Lucene's `TermRangeQuery` scores constantly by its rewrite and prints (and
+                // explains) as itself, without a `ConstantScore(…)` around it.
+                Ok(arc(MultiTermQuery::range(f.number, lo, hi, r.include_lower, r.include_upper)))
             } else if f.doc_values && !f.kind.is_text() {
                 // Text doc values (`doc_values: true`) serve multi-term queries, not ranges.
                 Ok(arc(ConstantScoreQuery::new(arc(DocValuesRangeQuery {
@@ -887,24 +889,3 @@ pub fn range_field_query(ctx: &QueryCtx, f: &FieldInfo, from: Option<&Value>, to
     Ok(arc(ConstantScoreQuery::new(arc(PointRangeQuery::new(f.number, lower, upper, bpd, pt).map_err(super::query::index_err)?))))
 }
 
-/// `fuzzy` on numbers and dates: the range `value ± fuzziness`.
-pub fn numeric_fuzzy(ctx: &QueryCtx, f: &FieldInfo, v: &Value, z: &Fuzziness) -> EsResult<QueryRef> {
-    let _ = ctx;
-    let d = parse_double_value(v)?;
-    let delta = match z {
-        Fuzziness::Edits(n) => *n as f64,
-        Fuzziness::Auto { .. } => 1.0,
-    };
-    let r = Range {
-        field: f.name.clone(),
-        from: Some(Value::Num(Number::Float(d - delta))),
-        to: Some(Value::Num(Number::Float(d + delta))),
-        include_lower: true,
-        include_upper: true,
-        time_zone: None,
-        format: None,
-        relation: None,
-        common: Default::default(),
-    };
-    range_query(ctx, &r)
-}

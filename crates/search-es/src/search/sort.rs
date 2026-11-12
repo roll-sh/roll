@@ -34,6 +34,10 @@ pub enum ValueFormat {
     /// once rescaled).
     ScriptTerms(Arc<super::script_terms_sort::ScriptTerms>),
     UnsignedLong,
+    /// `unsigned_long` under `numeric_type: double` (`DoubleValuesComparatorSource`): the
+    /// shard sorts the sign-flipped longs (the same order), values print as doubles and a
+    /// missing value as an infinity.
+    UnsignedLongDouble,
     /// Epoch millis / nanos (`nanos`, the unit sort values are reported in), formatted when
     /// `format` is given. `field_nanos` is the unit the shard's doc values hold (they differ
     /// under `numeric_type`); `parser` reads string `search_after` values (the sort `format`,
@@ -240,6 +244,25 @@ pub fn build(ctx: &QueryCtx, sorts: &[Sort]) -> EsResult<BuiltSort> {
                     }
                     continue;
                 }
+                // A keyed `flattened` sub-field sorts by its key's values, the key stripped
+                // (`KeyedFlattenedFieldData`), not by the raw `key\0value` terms.
+                if f.kind == Kind::Flattened && f.doc_values && !crate::opensearch::active()
+                    && let Some(k) = &f.flattened_key
+                {
+                    use super::runtime::SortMissing;
+                    let missing = match missing.as_ref() {
+                        None => SortMissing::Last,
+                        Some(Value::Str(s)) if s == "_last" => SortMissing::Last,
+                        Some(Value::Str(s)) if s == "_first" => SortMissing::First,
+                        Some(v) => SortMissing::Bytes(super::query::value_text(v).into_bytes()),
+                    };
+                    let sort_mode = field_mode(ctx, mode.as_deref(), reverse, false)?;
+                    let terms = Arc::new(super::script_terms_sort::ScriptTerms::keyed(f.number, k, ctx.searcher.clone(), reverse, sort_mode, missing));
+                    let sc = Arc::new(super::script_terms_sort::TermsSortScript(terms.clone()));
+                    out.keys.push(SortKey::Script(search_index::collector::top_field::ScriptSort { script: sc, reverse, mode: sort_mode, nested: None }));
+                    out.formats.push(ValueFormat::ScriptTerms(terms));
+                    continue;
+                }
                 let key = field_key(ctx, &f, reverse, missing.as_ref(), mode.as_deref(), numeric_type.as_deref(), nested.as_ref())?;
                 out.formats.push(field_format(&f, format.as_deref(), numeric_type.as_deref())?);
                 out.keys.push(key);
@@ -371,21 +394,56 @@ fn field_key(ctx: &QueryCtx, f: &FieldInfo, reverse: bool, missing: Option<&Valu
 }
 
 fn nested_sort(ctx: &QueryCtx, n: &crate::search_source::NestedSort) -> EsResult<NestedSort> {
-    let Some(o) = ctx.table.objects.get(&n.path).filter(|o| o.nested) else {
-        return Err(super::query::qse(ctx, format!("[nested] nested object under path [{}] is not of nested type", n.path)));
-    };
-    let parent_filter: search_index::QueryRef = match &o.parent_nested {
-        None => search_index::query::nested::root_filter(),
-        Some(p) => Arc::new(TermQuery::new(crate::engine::fields::NESTED_PATH_FIELD, p.as_bytes().to_vec())),
-    };
-    let mut child: search_index::QueryRef = Arc::new(TermQuery::new(crate::engine::fields::NESTED_PATH_FIELD, n.path.as_bytes().to_vec()));
-    if let Some(fq) = &n.filter {
-        let prev = ctx.nested.replace(Some(n.path.clone()));
-        let q = ctx.to_filter(fq);
-        ctx.nested.replace(prev);
-        child = Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, child).add(search_index::query::Occur::Filter, q?));
+    let scope = ctx.nested.borrow().clone();
+    let mut levels = Vec::new();
+    let mut cur = Some(n);
+    while let Some(l) = cur {
+        if !ctx.table.objects.get(&l.path).is_some_and(|o| o.nested) {
+            return Err(super::query::qse(ctx, format!("[nested] nested object under path [{}] is not of nested type", l.path)));
+        }
+        let filter = match &l.filter {
+            Some(fq) => {
+                let prev = ctx.nested.replace(Some(l.path.clone()));
+                let q = ctx.to_filter(fq);
+                ctx.nested.replace(prev);
+                Some(q?)
+            }
+            None => None,
+        };
+        levels.push((l.path.as_str(), filter));
+        cur = l.nested.as_deref();
     }
-    Ok(NestedSort { parent_filter, child_filter: child, max_children: n.max_children.map(|m| m.max(0) as usize) })
+    Ok(nested_chain(scope.as_deref(), &levels, n.max_children.map(|m| m.max(0) as usize)))
+}
+
+/// `FieldSortBuilder.resolveNested`: the docs sorted are the parents of the enclosing nested
+/// scope (the root docs at the top level), and the values come from the deepest level's docs
+/// in each parent's block, each level restricted to the children of the previous level's
+/// matching docs (`ToChildBlockJoinQuery`). So a sort on `a.b.x` with path `a.b` alone reads
+/// every `a.b` doc of the root's block.
+pub(crate) fn nested_chain(scope: Option<&str>, levels: &[(&str, Option<search_index::QueryRef>)], max_children: Option<usize>) -> NestedSort {
+    use crate::engine::fields::NESTED_PATH_FIELD;
+    use search_index::query::{BooleanQuery, Occur};
+    let type_filter = |p: &str| -> search_index::QueryRef { Arc::new(TermQuery::new(NESTED_PATH_FIELD, p.as_bytes().to_vec())) };
+    let parent_filter = match scope {
+        None => search_index::query::nested::root_filter(),
+        Some(p) => type_filter(p),
+    };
+    let mut child: Option<search_index::QueryRef> = None;
+    let mut parent_mapper = scope;
+    for (path, filter) in levels {
+        let mut q = type_filter(path);
+        if let Some(f) = filter {
+            q = Arc::new(BooleanQuery::new().add(Occur::Filter, q).add(Occur::Filter, f.clone()));
+        }
+        if let (Some(prev), Some(pm)) = (child.take(), parent_mapper) {
+            let to_child: search_index::QueryRef = Arc::new(search_index::query::nested::ToChildQuery { parent: prev, parent_filter: type_filter(pm) });
+            q = Arc::new(BooleanQuery::new().add(Occur::Filter, q).add(Occur::Filter, to_child));
+        }
+        child = Some(q);
+        parent_mapper = Some(path);
+    }
+    NestedSort { parent_filter, child_filter: child.expect("a nested sort has a path"), max_children }
 }
 
 fn keyword_missing(m: Option<&Value>) -> EsResult<Missing> {
@@ -493,6 +551,7 @@ fn field_format(f: &FieldInfo, format: Option<&str>, numeric_type: Option<&str>)
         Kind::HalfFloat => ValueFormat::HalfFloat,
         Kind::ScaledFloat(sf) if matches!(numeric_type, Some("long" | "date")) => ValueFormat::ScaledLong(sf),
         Kind::ScaledFloat(sf) => ValueFormat::ScaledFloat(sf),
+        Kind::UnsignedLong if numeric_type == Some("double") => ValueFormat::UnsignedLongDouble,
         Kind::UnsignedLong => ValueFormat::UnsignedLong,
         k if k.is_integral() => {
             if numeric_type == Some("double") {
@@ -544,6 +603,9 @@ pub fn render_value(v: &SortValue, f: &ValueFormat, doc: u32, score: f32) -> Val
             let u = (*l as u64) ^ (1 << 63);
             if u <= i64::MAX as u64 { Value::from(u as i64) } else { Value::Num(Number::UInt(u)) }
         }
+        (ValueFormat::UnsignedLongDouble, SortValue::Long(i64::MAX)) => Value::Num(Number::Float(f64::INFINITY)),
+        (ValueFormat::UnsignedLongDouble, SortValue::Long(i64::MIN)) => Value::Num(Number::Float(f64::NEG_INFINITY)),
+        (ValueFormat::UnsignedLongDouble, SortValue::Long(l)) => Value::Num(Number::Float(((*l as u64) ^ (1 << 63)) as f64)),
         // A missing date (sorted with the type's extreme) prints as null once formatted.
         (ValueFormat::Date { format: Some(_), .. }, SortValue::Long(i64::MAX | i64::MIN)) => Value::Null,
         (ValueFormat::Date { nanos, format: Some(fmt), .. }, SortValue::Long(l)) => Value::Str(fmt.format(crate::fetch::instant_of(*nanos, *l), &crate::time::Zone::UTC)),
@@ -574,7 +636,7 @@ fn merge_type(f: &ValueFormat) -> Option<&'static str> {
         ValueFormat::Score | ValueFormat::Doc | ValueFormat::ShardDoc => return None,
         // `INT` and `LONG` merge as longs, which print the same: one type.
         ValueFormat::Long | ValueFormat::Date { .. } | ValueFormat::Boolean | ValueFormat::UnsignedLong | ValueFormat::ScaledLong(_) => "LONG",
-        ValueFormat::Double | ValueFormat::ScaledFloat(_) => "DOUBLE",
+        ValueFormat::Double | ValueFormat::ScaledFloat(_) | ValueFormat::UnsignedLongDouble => "DOUBLE",
         ValueFormat::Float | ValueFormat::HalfFloat => "FLOAT",
         ValueFormat::Keyword | ValueFormat::Ip | ValueFormat::Version | ValueFormat::ScriptTerms(_) | ValueFormat::Tsid => "STRING",
         ValueFormat::Unmapped(Some(k)) => match k {
@@ -929,6 +991,11 @@ pub fn parse_after(v: &Value, key: &SortKey, f: &ValueFormat, now_ms: i64, pos: 
                         }
                     };
                     SortValue::Long(convert_date(l, *nanos, *field_nanos))
+                }
+                (_, ValueFormat::UnsignedLongDouble) => {
+                    // A double `search_after` value: the unsigned long it stands for.
+                    let d = double(v)?;
+                    SortValue::Long(((d.max(0.0) as u64) ^ (1 << 63)) as i64)
                 }
                 (_, ValueFormat::UnsignedLong) => {
                     let s = super::query::value_text(v);

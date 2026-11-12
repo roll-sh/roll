@@ -228,7 +228,8 @@ impl Loaded {
     fn pinned(&self) -> bool {
         // Open contexts' searchers live only in memory: pinned exactly until the last one is
         // closed or expires.
-        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.list().is_empty()
+        // Running OpenSearch jobs (ISM steps) write through the cluster like requests do.
+        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.is_empty() || self.cluster.jobs.busy()
     }
 }
 
@@ -308,6 +309,9 @@ pub struct Lease {
     /// The node-wide running slot; given back as soon as the cluster has answered (waiting
     /// for durability needs no CPU).
     fair: Mutex<Option<FairPermit>>,
+    /// The request's thread pool slot (or refusal), taken before the running slot so a request
+    /// queued for its pool doesn't hold one; handed to search-es with the request.
+    admitted: Mutex<Option<search_es::rest::Admitted>>,
     bytes: Reservation,
     dialect: Dialect,
     /// Who the node authenticated with the cluster's own credentials (the owner, `elastic`, or
@@ -415,8 +419,9 @@ impl Lease {
     async fn run(&self, req: EsRequest) -> EsResponse {
         let loaded = &self.loaded;
         loaded.requests.fetch_add(1, Ordering::Relaxed);
+        let admitted = self.admitted.lock().take();
         let Some(data) = &loaded.data else {
-            return search_es::rest::handle_shared(&loaded.cluster, req).await;
+            return search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
         };
         if let Err(e) = data.ready(&loaded.cluster).await {
             // A shard whose WAL didn't replay must not be read or written yet.
@@ -431,7 +436,7 @@ impl Lease {
             // response needs (no copy on the search path).
             let err_req = reads_async_results(&req.uri)
                 .then(|| EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
-            let resp = search_es::rest::handle_shared(&loaded.cluster, req).await;
+            let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
             // A read that kept an async result longer (`keep_alive`) or opened a SQL cursor:
             // Elasticsearch answers once the new expiration is stored, so the read is
             // acknowledged like a write, and fails like one when that can't be made durable.
@@ -458,7 +463,7 @@ impl Lease {
             return resp;
         }
         let err_req = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
-        let resp = search_es::rest::handle_shared(&loaded.cluster, req).await;
+        let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
         drop(self.fair.lock().take());
         // Async results the request stored go to `.async-search`, acknowledged with it.
         self.sync_async_results().await;
@@ -496,7 +501,9 @@ impl Lease {
     }
 
     /// Takes a concurrency permit, waiting in the cluster's queue if all are in use (429 when
-    /// the queue is full too), then a node-wide running slot. Idempotent.
+    /// the queue is full too), then the slot of the thread pool the request runs on (queued
+    /// there FIFO; a refusal is answered once the request is authenticated), then a node-wide
+    /// running slot. Idempotent.
     pub async fn acquire(&mut self, req: &EsRequest) -> Result<(), Rejected> {
         if self.permit.is_some() {
             return Ok(());
@@ -525,6 +532,10 @@ impl Lease {
                 p.map_err(|_| Rejected { error: EsError::internal("cluster closed"), dialect: self.dialect })?
             }
         };
+        if let Some(pool) = search_es::thread_pool::pool_for(&loaded.cluster, &req.method, &req.uri) {
+            let admitted = pool.admit().await;
+            *self.admitted.lock() = Some(admitted);
+        }
         if let Some(f) = &self.node.fair {
             let p = f.acquire(&loaded.name).await;
             *self.fair.lock() = Some(p);
@@ -758,6 +769,13 @@ impl Node {
     pub fn loaded(&self) -> Vec<String> {
         let map = self.clusters.read();
         map.iter().filter(|(_, s)| s.initialized()).map(|(k, _)| k.clone()).collect()
+    }
+
+    /// Cancels every cancellable task of every loaded cluster (running searches, by-query
+    /// runs): what a stopping node does with work it won't wait for. Returns how many it
+    /// cancelled.
+    pub fn cancel_tasks(&self) -> usize {
+        self.clusters.read().values().filter_map(|s| s.get()).map(|l| l.cluster.tasks.cancel_all()).sum()
     }
 
     pub fn get_loaded(&self, name: &str) -> Option<Arc<Loaded>> {
@@ -1362,6 +1380,9 @@ impl Node {
     /// refused from now on. For SIGTERM: deploys and Spot reclaims.
     pub async fn shutdown(&self, timeout: Duration) -> anyhow::Result<()> {
         self.shutting_down.store(true, Ordering::SeqCst);
+        // Searches and background tasks stop at their next cancellation check instead of
+        // holding the unload until the deadline.
+        self.cancel_tasks();
         let deadline = Instant::now() + timeout;
         loop {
             let names = self.loaded();
@@ -1536,6 +1557,7 @@ impl Node {
     /// Finds and authenticates a request and pins its cluster (loading it if needed), without
     /// taking a concurrency permit yet ([`Lease::acquire`]). Applies the request rate.
     pub async fn enter(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>) -> Result<Lease, Rejected> {
+        crate::process::note_activity();
         let reject = |error: EsError| Rejected { error, dialect: Dialect::Elasticsearch };
         let presented;
         let mut host_cluster = None;
@@ -1654,7 +1676,17 @@ impl Node {
     /// protocol in the module docs: count first, then check `closed`).
     fn pin(self: &Arc<Self>, loaded: Arc<Loaded>, dialect: Dialect) -> Result<Lease, ()> {
         loaded.in_flight.fetch_add(1, Ordering::SeqCst);
-        let lease = Lease { loaded, node: self.clone(), permit: None, fair: Mutex::new(None), bytes: Reservation::none(), dialect, user: None, native_auth: None };
+        let lease = Lease {
+            loaded,
+            node: self.clone(),
+            permit: None,
+            fair: Mutex::new(None),
+            admitted: Mutex::new(None),
+            bytes: Reservation::none(),
+            dialect,
+            user: None,
+            native_auth: None,
+        };
         if lease.loaded.closed.load(Ordering::SeqCst) {
             // Unloaded (or being unloaded) under us: the lease's drop uncounts it.
             return Err(());

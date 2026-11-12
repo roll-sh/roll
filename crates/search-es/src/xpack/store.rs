@@ -50,6 +50,7 @@ const HOMES: &[Home] = &[
     Home { prefix: "ml.", index: ".ml-meta", alias: None },
     Home { prefix: "connector.sync_job", index: ".elastic-connectors-sync-jobs-v1", alias: Some(".elastic-connectors-sync-jobs") },
     Home { prefix: "connector_secret", index: ".connector-secrets", alias: None },
+    Home { prefix: "fleet_secret", index: ".fleet-secrets-7", alias: Some(".fleet-secrets") },
     Home { prefix: "connector", index: ".elastic-connectors-v1", alias: Some(".elastic-connectors") },
     Home { prefix: "query_rules", index: ".query-rules-2", alias: Some(".query-rules") },
     Home { prefix: "search_application", index: ".search-app-1", alias: Some(".search-app") },

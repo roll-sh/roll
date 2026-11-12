@@ -10,6 +10,11 @@
 //! `null` key part when `missing_bucket` is set. Sub-aggregations run in a second pass over the
 //! recorded documents, for the final keys only. Reduces merge the key-sorted shard lists and
 //! keep the first `size` keys; `after_key` is the last bucket's key.
+//!
+//! When every source reads keyword ordinals, a segment remembers what each combination of its
+//! ordinals came to ([`OrdKeys`]): a queue slot, or a rejection that stays final. A doc with
+//! one value per source whose combination was seen costs an ordinal read per source and one
+//! lookup, instead of decoding, hashing and comparing its key's bytes.
 
 use std::cmp::Ordering;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -663,6 +668,16 @@ impl MultiBuckets for Composite {
 
 /// The Java factory class a parent aggregation type builds (for the parent check's message).
 fn factory_class(t: &str) -> String {
+    // Factories whose class name isn't the type in camel case.
+    match t {
+        "diversified_sampler" => return "DiversifiedAggregatorFactory".into(),
+        "ip_range" => return "BinaryRangeAggregatorFactory".into(),
+        "geo_distance" => return "GeoDistanceRangeAggregatorFactory".into(),
+        "geohash_grid" => return "GeoHashGridAggregatorFactory".into(),
+        "geotile_grid" => return "GeoTileGridAggregatorFactory".into(),
+        "geohex_grid" => return "GeoHexGridAggregatorFactory".into(),
+        _ => {}
+    }
     let camel: String = t
         .split('_')
         .map(|w| {
@@ -1005,7 +1020,103 @@ pub fn create(def: &AggDef, spec: &CompositeSpec, ctx: &mut BindCtx<'_>) -> Resu
         replayed: false,
         idx: Vec::new(),
         ord_bound: None,
+        ord_keys: None,
     }))
+}
+
+/// What a combination of segment ordinals came to: unknown yet, its queue slot plus one, or
+/// [`REJECTED`].
+const REJECTED: u32 = u32::MAX;
+/// The most combinations kept in a flat table (4 bytes each); more use a hash map.
+const DENSE_COMBOS: u64 = 1 << 16;
+
+/// Per segment, when every source reads keyword ordinals: the queue slot (or rejection) of each
+/// combination of the segment's ordinals, one per source (Elasticsearch compares such keys in
+/// ordinal space too). A rejected key sorts after the full queue's largest key or not after
+/// `after`; the queue's bound only shrinks, so it can never enter later in the segment. Slots
+/// are recycled on eviction, so each records the combination it is cached under, and a hit
+/// whose slot moved on is a miss.
+struct OrdKeys {
+    /// Value count of each source: the combination is a mixed-radix number of the ordinals.
+    radix: SmallVec<[u64; 4]>,
+    dense: Vec<u32>,
+    sparse: hashbrown::HashMap<u64, u32, foldhash::fast::RandomState>,
+    /// Per queue slot: the combination it is cached under (`u64::MAX`: none).
+    tags: Vec<u64>,
+}
+
+impl OrdKeys {
+    /// `None` when some source doesn't read plain ordinals or the combinations overflow.
+    fn open(sources: &[BoundSource]) -> Option<OrdKeys> {
+        let mut radix = SmallVec::new();
+        let mut product = 1u64;
+        for s in sources {
+            let SourceReader::Ords { dv, .. } = &s.reader else { return None };
+            if matches!(dv, crate::values::DvOrds::Keyed(_) | crate::values::DvOrds::None) {
+                return None;
+            }
+            let n = dv.value_count().max(1);
+            product = product.checked_mul(n)?;
+            radix.push(n);
+        }
+        let dense = if product <= DENSE_COMBOS { vec![0; product as usize] } else { Vec::new() };
+        Some(OrdKeys { radix, dense, sparse: Default::default(), tags: Vec::new() })
+    }
+
+    /// The doc's combination, when every source has exactly one value.
+    #[inline]
+    fn combo(&self, sources: &[BoundSource], doc: u32) -> Option<u64> {
+        let mut c = 0u64;
+        for (s, &r) in sources.iter().zip(&self.radix) {
+            let SourceReader::Ords { dv, .. } = &s.reader else { return None };
+            let o = match dv {
+                crate::values::DvOrds::Single(d) => d.ord(doc)?,
+                crate::values::DvOrds::Multi(d) => {
+                    let mut it = d.ords(doc);
+                    let o = it.next()?;
+                    if it.next().is_some() {
+                        return None;
+                    }
+                    o
+                }
+                _ => return None,
+            };
+            c = c * r + o;
+        }
+        Some(c)
+    }
+
+    #[inline]
+    fn get(&self, combo: u64) -> u32 {
+        let e = if self.dense.is_empty() { self.sparse.get(&combo).copied().unwrap_or(0) } else { self.dense[combo as usize] };
+        match e {
+            0 | REJECTED => e,
+            slot1 if self.tags.get(slot1 as usize - 1) == Some(&combo) => e,
+            _ => 0,
+        }
+    }
+
+    fn set(&mut self, combo: u64, e: u32) {
+        if self.dense.is_empty() {
+            self.sparse.insert(combo, e);
+        } else {
+            self.dense[combo as usize] = e;
+        }
+        if e != REJECTED {
+            let slot = e as usize - 1;
+            if self.tags.len() <= slot {
+                self.tags.resize(slot + 1, u64::MAX);
+            }
+            self.tags[slot] = combo;
+        }
+    }
+
+    /// `slot` now holds another key.
+    fn forget(&mut self, slot: u32) {
+        if let Some(t) = self.tags.get_mut(slot as usize) {
+            *t = u64::MAX;
+        }
+    }
 }
 
 /// The bounded key queue (`CompositeValuesCollectorQueue`): slots with keys and counts, a map
@@ -1089,6 +1200,8 @@ struct CompositeAgg {
     /// For a leading ordinals source: the segment ordinal bound a doc's ordinals must reach to
     /// compete with the full queue's largest key, and the queue version it was computed at.
     ord_bound: Option<(u64, Option<u64>)>,
+    /// The current segment's ordinal-combination cache (every source reads ordinals).
+    ord_keys: Option<OrdKeys>,
     /// OpenSearch's filter rewrite replay (profiled opensearch-dialect requests).
     os_rewrite: Option<Box<crate::filter_rewrite::FilterRewrite>>,
 }
@@ -1233,17 +1346,18 @@ impl CompositeAgg {
             .copied()
     }
 
-    /// `addIfCompetitive` for the key at `idx`.
-    fn add(&mut self, idx: &[usize], inc: u64) -> Result<()> {
+    /// `addIfCompetitive` for the key at `idx`: the slot that counted it, `None` when it can't
+    /// compete (for good: see [`OrdKeys`]).
+    fn add(&mut self, idx: &[usize], inc: u64) -> Result<Option<u32>> {
         let hash = hash_key(self.parts(idx));
         if let Some(slot) = self.find_slot(idx, hash) {
             self.queue.counts[slot as usize] += inc;
-            return Ok(());
+            return Ok(Some(slot));
         }
         if let Some(a) = &self.after
             && compare_views(self.parts(idx), a.iter().map(KeyPart::view), &self.orders) != Ordering::Greater
         {
-            return Ok(());
+            return Ok(None);
         }
         let max = self.size.max(0) as usize;
         let orders = self.orders.clone();
@@ -1256,9 +1370,12 @@ impl CompositeAgg {
                 ));
             };
             if compare_views(self.parts(idx), self.queue.keys[top as usize].iter().map(KeyPart::view), &orders) == Ordering::Greater {
-                return Ok(());
+                return Ok(None);
             }
             // Evict the largest key and recycle its slot.
+            if let Some(c) = &mut self.ord_keys {
+                c.forget(top);
+            }
             let old_hash = self.queue.hashes[top as usize];
             if let Ok(e) = self.queue.map.find_entry(old_hash, |&s| s == top) {
                 e.remove();
@@ -1271,7 +1388,7 @@ impl CompositeAgg {
             self.queue.map.insert_unique(hash, top, |&s| hashes[s as usize]);
             self.queue.sift_down(0, &orders);
             self.queue.version += 1;
-            return Ok(());
+            return Ok(Some(top));
         }
         let slot = self.queue.keys.len() as u32;
         let key: CompositeKey = self.parts(idx).map(PartView::to_owned_part).collect();
@@ -1286,7 +1403,7 @@ impl CompositeAgg {
         self.queue.sift_up(n, &orders);
         self.queue.version += 1;
         self.tracker.ensure(self.queue.keys.len() * (72 + key_len * 24))?;
-        Ok(())
+        Ok(Some(slot))
     }
 
     /// The queued slots, smallest key first.
@@ -1351,6 +1468,7 @@ impl Aggregator for CompositeAgg {
         }
         self.open_sources(seg)?;
         self.ord_bound = None;
+        self.ord_keys = OrdKeys::open(&self.sources);
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         if !self.subs.is_empty() {
             let ord = self.searcher.segments().iter().position(|s| s.base == seg.base).unwrap_or(0);
@@ -1374,23 +1492,45 @@ impl Aggregator for CompositeAgg {
                     sd.scores.push(score);
                 }
             }
+            // A combination of ordinals seen before in this segment.
+            let combo = match &self.ord_keys {
+                Some(c) => match c.combo(&self.sources, doc) {
+                    Some(k) => match c.get(k) {
+                        0 => Some(k),
+                        REJECTED => continue,
+                        slot1 => {
+                            self.queue.counts[slot1 as usize - 1] += self.doc_counter.count(doc);
+                            continue;
+                        }
+                    },
+                    None => None,
+                },
+                None => None,
+            };
             if !self.load_competitive(doc, score)? {
+                // Every source has one value: the leading one can't compete, for good.
+                if let (Some(k), Some(c)) = (combo, &mut self.ord_keys) {
+                    c.set(k, REJECTED);
+                }
                 continue;
             }
             let inc = self.doc_counter.count(doc);
             let mut idx = std::mem::take(&mut self.idx);
             idx.clear();
             idx.resize(self.sources.len(), 0);
-            let r: Result<()> = (|| {
+            let r: Result<Option<u32>> = (|| {
                 loop {
-                    self.add(&idx, inc)?;
+                    let slot = self.add(&idx, inc)?;
                     if !self.next_key(&mut idx) {
-                        return Ok(());
+                        return Ok(slot);
                     }
                 }
             })();
             self.idx = idx;
-            r?;
+            let slot = r?;
+            if let (Some(k), Some(c)) = (combo, &mut self.ord_keys) {
+                c.set(k, slot.map_or(REJECTED, |s| s + 1));
+            }
         }
         Ok(())
     }

@@ -2,7 +2,9 @@
 //! API (`/{index}/_search/point_in_time`, `_all` listing and deletion), search pipelines
 //! (`/_search/pipeline` and their request and response processors), `_upgrade`, and the
 //! workload management statistics table (`_list/wlm_stats`), and the k-NN plugin's node APIs
-//! (`_plugins/_knn/stats`, `warmup`, `clear_cache`; see `spec/opensearch/plugins`); plus the
+//! (`_plugins/_knn/stats`, `warmup`, `clear_cache`; see `spec/opensearch/plugins`), the SQL
+//! plugin's PPL engine ([`ppl`]: `_plugins/_ppl`, its explain and grammar APIs, and
+//! `_plugins/_query/settings`); plus the
 //! dialect's field-type and query differences that need more than a branch where they occur
 //! (`flat_object` sub-fields, `knn_vector`).
 //!
@@ -15,13 +17,17 @@
 pub mod approximate;
 pub mod bitmap;
 pub mod can_match;
+pub mod cron;
 pub mod flat_object;
 pub mod geo;
 pub mod hybrid;
 pub mod ism;
+pub mod ism_run;
+pub mod jobs;
 pub mod knn;
 pub mod knn_api;
 pub mod pit;
+pub mod ppl;
 pub mod profile;
 pub mod search_pipeline;
 pub mod upgrade;
@@ -48,6 +54,10 @@ pub fn implemented(api: Api) -> bool {
             | Api::KnnStats
             | Api::KnnWarmup
             | Api::KnnClearCache
+            | Api::Ppl
+            | Api::PplExplain
+            | Api::PplGrammar
+            | Api::QuerySettings
     ) || ism::implemented(api)
 }
 
@@ -66,6 +76,10 @@ pub async fn dispatch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::KnnStats => knn_api::stats(ctx),
         Api::KnnWarmup => knn_api::warmup(ctx),
         Api::KnnClearCache => knn_api::clear_cache(ctx),
+        Api::Ppl => ppl::ppl(ctx).await,
+        Api::PplExplain => ppl::explain(ctx).await,
+        Api::PplGrammar => ppl::grammar(ctx),
+        Api::QuerySettings => ppl::settings(ctx).await,
         api if ism::implemented(api) => ism::dispatch(ctx).await,
         other => Err(crate::error::EsError::not_implemented(other.name())),
     }
@@ -489,6 +503,20 @@ pub(crate) fn java_hashmap_order<'a>(keys: &[&'a str], entries: usize) -> Vec<&'
     let mut out: Vec<(usize, usize, &str)> = keys.iter().enumerate().map(|(i, k)| (bucket(k), i, *k)).collect();
     out.sort_unstable();
     out.into_iter().map(|(_, _, k)| k).collect()
+}
+
+/// A value as `XContentHelper.convertToMap(..., ordered = false)` gives it back: every object a
+/// default-sized `HashMap`.
+pub(crate) fn hash_ordered(v: crate::json::Value) -> crate::json::Value {
+    use crate::json::Value;
+    match v {
+        Value::Obj(m) => {
+            let m: crate::json::Map = m.into_iter().map(|(k, v)| (k, hash_ordered(v))).collect();
+            Value::Obj(crate::json::java_hash_map(m, 16))
+        }
+        Value::Arr(a) => Value::Arr(a.into_iter().map(hash_ordered).collect()),
+        other => other,
+    }
 }
 
 #[cfg(test)]

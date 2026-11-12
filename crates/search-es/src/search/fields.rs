@@ -206,7 +206,7 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
                     let h = search_codec::points::encode::f16_to_f32(search_codec::points::encode::f16_bits(d as f32));
                     Value::Num(Number::Float(crate::fetch::java_float_as_double(h)))
                 }
-                Kind::ScaledFloat(sf) => Value::Num(Number::Float((d * sf).round() / sf)),
+                Kind::ScaledFloat(sf) => Value::Num(Number::Float(search_aggs::format::java_round(d * sf) as f64 / sf)),
                 _ => Value::Num(Number::Float(d)),
             }
         }

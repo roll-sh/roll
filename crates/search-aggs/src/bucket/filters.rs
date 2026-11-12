@@ -143,7 +143,14 @@ pub fn parse_adjacency(p: &mut XParser<'_>, name: &str, check_query: &mut dyn Fn
                 Some(Token::FieldName) => {
                     let key = p.current_name().unwrap_or("").to_string();
                     p.next_token();
-                    check_query(p)?;
+                    // `declareNamedObjects`: "[filters] failed to parse field [key]", where
+                    // the query's parser stopped.
+                    if let Err(e) = check_query(p) {
+                        if let Some(loc) = e.location() {
+                            p.pin_location(loc);
+                        }
+                        return Err(p.xcontent_error(format!("[filters] failed to parse field [{key}]")).caused_by(e));
+                    }
                     filters.push((key, p.take_value()));
                 }
                 Some(_) => {}

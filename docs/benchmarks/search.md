@@ -49,10 +49,16 @@ over rounds with the min–max spread; trust a difference only where the spreads
   the track's hard-coded `target-throughput`s, which are sized for the full corpus). It adds
   what geonames lacks: time-series sorts with `search_after`, sorts on a keyword the documents
   don't have, `match_only_text`, ip fields, an hourly `date_histogram` and force-merged
-  1-segment sorts. Left out: `nyc_taxis`, `pmc`, `so` and `noaa` ship as single 4.5–9.5 GB
-  compressed files that Rally decompresses whole (up to 80 GB) before indexing any subset, too
-  much for this shared machine; their query mix (term/range filters, sorts, aggregations) is
-  covered by the two tracks above.
+  1-segment sorts. The other standard tracks ship as single 1–10 GB compressed files that Rally
+  decompresses whole before indexing any subset; `RALLY_DOCS=<n>` (`bench-search.py
+  rally-subset`) instead streams the first n documents of each large corpus once into the data
+  directory and points the local track copy at them, so `nyc_taxis` (10M docs), `so` (3M),
+  `noaa` (5M), `nested` (2M), `pmc` (100k), `so_vector` (200k), `dense_vector` (1M) and the whole
+  `percolator` corpus run here (round 6).
+- **Indexing** (`scripts/bench-search.sh ingest`, `bench-search.py ingest`): one Rally corpus
+  file in 5,000-document bulks at 1, 8 and 32 clients against both targets, interleaved per
+  round: throughput, per-bulk service time percentiles, the final refresh, and server CPU per
+  document during the load and again after merges settle.
 - **Footprint** (`scripts/bench-search.sh footprint`): RSS of the server process (largest
   `VmRSS` in the container's cgroup) idle and with a loaded, force-merged 50k-doc index; store
   bytes per document; cold start: roll unloads an idle cluster after 2 s
@@ -63,6 +69,119 @@ over rounds with the min–max spread; trust a difference only where the spreads
   subset loaded by a small script; A/B numbers in the tuning log are server CPU time per
   request (sum of the process's threads' `schedstat` run time) of two binaries loaded with the
   same data and measured interleaved.
+
+## Round 6: every Rally track, indexing, memory and cold start (perf-bench lane, 2026-10-28)
+
+A busy host this time (1-minute load 30–58 on 36 threads, other lanes building): Rally ran
+with both targets on `14-17,32-35` and Rally on `6-9,24-27` as before; the indexing and
+footprint measurements used a second pair of containers on `10-13,28-31` (`BENCH_CPUS`), every
+comparison interleaved. `base` is the tree at the start of the round, `r5` the tree after this
+lane's indexing changes (both `search-dev --release`). Raw outputs:
+`~/.cache/roll-search/perf-bench/out{,2}/` on the machine that ran them.
+
+**Indexing** (`bench-search.sh ingest`, the first 1M documents of `http_logs`' `logs-181998`,
+5 shards, 5,000-doc bulks, 3 rounds; CPU per document includes the merges that finish within
+10 s of the load):
+
+| clients | metric | roll `base` | roll `r5` | Elasticsearch 9.5.5 |
+|---|---|---:|---:|---:|
+| 1 | docs/s | 91.5k | 103.6k (102.3k–128.0k) | 89.4k (51.5k–116.3k) |
+| 1 | bulk p50 / p99 ms | 48.3 / 241 | 47.1 / 93.5 | 55.9 / 117 |
+| 8 | docs/s | 274k | 246k (232k–319k) | 192k (171k–289k) |
+| 8 | bulk p50 / p99 ms | 134.5 / 252 | 157.3 / 274 | 188.9 / 427 |
+| 32 | docs/s | 277k | 274k (237k–303k) | 227k (152k–243k) |
+| 32 | bulk p50 / p99 ms | 508 / 1,021 | 545 / 1,013 | 660 / 898 |
+| 8 | CPU µs/doc (settled) | 33.6 | 28.0 | 32.5 |
+| 8 | final refresh ms | 444 | 259 | 209 |
+
+The `base` column ran earlier on the quieter `14-17,32-35` pair against an Elasticsearch that
+indexed at 288k (8 clients) and 316k (32 clients) there, so compare each column with its own
+run: against the Elasticsearch of its run, `base` lost at 1 and 32 clients and on CPU per
+document; `r5` wins every row but the final refresh. The same A/B on one pair of CPUs, `r4` →
+`r5` (the fast-path and version-map rows below): 8 clients 225k → 293k docs/s, p50 174 → 133
+ms, 36.2 → 26.6 µs/doc. Rally's `so` corpus (1M posts, text-heavy), 8 clients: roll `r5`
+56.4k docs/s, p50 684 ms, 149 µs/doc against Elasticsearch's 32.0k, 1,015 ms, 191 µs/doc
+(`base` lost this track in Rally: 34.2k vs 43.1k docs/s).
+
+Tuning log (each row identical results: unit, oracle and REST-fixture tests, both YAML suites
+with 0 regressions, the ES suite also with every bulk through the queued path):
+
+| change | where | before | after |
+|---|---|---:|---:|
+| BP keeps each term's gain `log2(right) - log2(left)` current instead of computing both logarithms for every posting on every iteration (the same `f32` sums in the same order: a bit-identical doc map, tested against the old algorithm) | `search-codec` `bp.rs` | BP of 913k http_logs docs 3.26 s | 2.73 s |
+| natural merges BP-reorder only results of at least 2^18 docs (Lucene's suggested `minNaturalMergeNumDocs`; forced merges still from 2^16): BP plus writing the reordered segment were about half of all merge CPU while indexing, and merges 56% of all CPU (http_logs, 8 clients) | `search-index` `shard/mod.rs` | 8 clients, settled CPU 48.4 µs/doc, 5 merges of 1M docs in 8.4 s | 38.5 µs/doc, merges without BP |
+| one-dimensional points of 13–16 bytes (ip) are built from one sort by (value, doc) as integers instead of a median selection per tree level and a sort per leaf over `memcmp`ed slices (same bytes: a 1-d tree is the sorted points cut into leaves) | `search-codec` `points.rs` | `memcmp` from the points builder ~2.8% of bulk CPU | (in the rows below) |
+| `_bulk` applies index items prepared ahead with the other items of their shard, the shards in parallel on the pool, as Elasticsearch runs a request's shard-level bulks; deletes, updates and anything not prepared first wait for the queued writes, so each shard sees request order (a 600-item mixed bulk equals the same items sent one at a time, item results and final versions, seq nos and sources) | `search-es` `api/bulk.rs`, `api/document.rs`, `api/bulk_ahead.rs` | 1 client 54.2k docs/s, p50 84.3 ms | 80.7k docs/s, 56.5 ms |
+| `_refresh` (and `refresh=true` writes) refresh their shards in parallel instead of one after another | `search-es` `engine/mod.rs`, `write.rs` | final refresh after 1M docs 673 ms | 294 ms |
+| the write that crosses the indexing buffer budget hands the buffer's conversion to a thread of its own (writers far over budget still wait: stall control) | `search-index` `shard/mod.rs` | 8 clients p99 364 ms | 239 ms |
+| `ip` (from a string) and `match_only_text` take the bulk fast path: every http_logs document used to fall back to the JSON tree walk (`json::parse`, `json::locate`, `Walker`, an `IndexMap` per document) | `search-es` `document/fast.rs` | 8 clients 225k docs/s, 36.2 µs/doc | 293k docs/s, 26.6 µs/doc (with the next row) |
+| version-map stripes hash ids with foldhash (randomly seeded per map) instead of SipHash | `search-index` `shard/mod.rs` | SipHash ~1% of bulk CPU | 0 |
+| `percolate` verifies each distinct stored query once (stored queries deduplicated by their bytes per segment; a match applies to every document storing it) | `search-es` `search/percolate*.rs` | Rally `percolator_with_content_ignore_me` (2M stored queries, most of them one `match`) 5,903 ms, filter form 4,980 ms | 15.2 ms, 5.6 ms (Elasticsearch 4,618 and 8.6 ms) |
+
+What indexing still spends (8 clients, `r5`): stored-fields zstd at level 3 with a trained
+dictionary at every buffer conversion ~10% of all CPU (Elasticsearch's default stored-fields
+codec is LZ4; handed to the fetch lane, which is changing that format), the allocator ~9%,
+the term hash 2.6%, points 4.6%, the WAL's zstd 3%.
+
+**Memory and cold start** (`r5` unless noted):
+
+| measure | roll | Elasticsearch 9.5.5 |
+|---|---:|---:|
+| idle node, 10 min, a loaded 200k-doc index: CPU / syscalls / context switches (`perf stat`) | `base`: 58 ms / 4,790 / 2,409 (all from the purge governor's 4 Hz tick); `r5`: 0 ms / 0 / 0 | - |
+| sustained load: 12 back-to-back loads of 1M docs with searches running | RSS 375–410 MiB between loads (no upward trend), 961 MiB peak, 384 MiB 30 s after | - |
+| wake from object storage: a fresh node (empty cache) on MinIO, 12M http_logs docs (878 MB, 5 shards), launch to first search hit | p50 582 ms, max 650 ms (12 runs); 742–878 MB in the cache at the first hit; next search 13–32 ms | node restart 21 s (round 3) |
+| RSS at the end of a Rally race (heaviest track per side) | 0.3–2.0 GiB | 1.9–3.5 GiB |
+| `bench-search.sh footprint`: RSS idle node / one loaded 50k-doc index / after idle unload | 24 / 45 / 43 MiB | 2,584 / 2,675 MiB / - |
+| `bench-search.sh footprint`: wake after idle unload (local cache) / warm request | 19.7 / 15.0 ms | node restart 30.6 s |
+| store bytes per document, force-merged (micro corpus) | 199 (perf-fetch's 2 KiB stored chunks; was 192) | 263 |
+
+The governor now parks once it has collected an idle process's memory (12 s idle) and the
+first request wakes it, so an idle node makes no periodic system calls. The wake measurement
+runs MinIO on the same host (no network latency): nearly the whole index is downloaded before
+the first search answers, so on S3 the wake is bounded by object throughput (about 1.5 GB/s
+here); opening shards on their headers and fetching only what the first query reads is the
+next step for large indices.
+
+**Rally, the other standard tracks** (`base`, two rounds, p50 service time in ms unless noted;
+subsets as listed under Methodology; vector tracks with the tracks' default index types):
+
+| track | task | roll | Elasticsearch |
+|---|---|---:|---:|
+| percolator | index (docs/s, p50) | 170k, 205 ms | 127k, 234 ms |
+| percolator | president_bush / saddam_hussein / hurricane_katrina / highlighting | 10.1 / 3.0 / 8.5 / 5.5 | 20.6 / 6.6 / 15.4 / 12.1 |
+| percolator | google / no_score_google | 52.9 / 51.5 | 46.9 / 6.9 |
+| percolator | ignore_me / no_score_ignore_me | 6,794 / 6,824 (`r5` on the same index: 15.2 / 5.6) | 4,618 / 8.6 |
+| pmc | index-append (docs/s, p50) | 1,157, 3,133 ms | 1,050, 3,409 ms |
+| pmc | default / term / phrase | 3.69 / 3.35 / 3.39 | 6.20 / 5.85 / 6.47 |
+| pmc | articles_monthly_agg uncached / cached | 4.71 / 0.97 | 6.17 / 2.74 |
+| pmc | scroll | 441 | 477 |
+| nested | index-append (docs/s, p50) | 81.1k, 239 ms | 78.0k, 199 ms |
+| nested | randomized-term-queries / match-all | 1.59 / 1.37 | 2.10 / 2.44 |
+| nested | randomized-nested-queries / sorted-term-queries | 7.70 / 15.06 | 6.98 / 14.47 |
+| nested | nested-date-histo | 426.6 | 163.6 |
+| nested | inner hits default / big size | 11.8 / 46.7 | 8.8 / 20.5 |
+| noaa | index (docs/s, p50) | 103.2k, 373 ms | 106.5k, 280 ms |
+| noaa | range_field (`double_range`) big / small range | 24.2 / 24.9 | 6.8 / 5.8 |
+| noaa | range_field conjunctions / disjunctions | 26.9–93.5 / 26.2–26.4 | 6.2–7.6 / 6.5–6.8 |
+| so | index-append (docs/s, p50) | 34.2k, 1,226 ms (`r5`: see Indexing) | 43.1k, 711 ms |
+| nyc_taxis | index (docs/s, p50) | 95.3k, 782 ms | 89.3k, 711 ms |
+| nyc_taxis | default / default_1k | 1.55 / 7.54 | 6.12 / 14.75 |
+| nyc_taxis | range / date_histogram_agg | 25.7 / 57.2 | 9.1 / 10.4 |
+| nyc_taxis | autohisto_agg / distance_amount_agg | 107.0 / 829.0 | 31.2 / 311.1 |
+| so_vector | index-append (docs/s, p50) | 1,406, 190 ms | 1,568, 361 ms |
+| so_vector | knn 10-50 / 100-300 (match_all) | 26.8 / 85.1 | 4.8 / 10.7 |
+| so_vector | knn force-merged 10-50 / 100-300 | 16.1 / 69.2 | 4.0 / 9.5 |
+| so_vector | knn filtered (10-50: acceptedAnswerId, java, css, random 10/20%) | 22.7–30.7 | 4.2–5.9 |
+| dense_vector | knn 10-100 / 100-1000 | 4.50 / 7.41 | 2.47 / 4.29 |
+| dense_vector | knn multiple segments 10-100 / 100-1000 | 6.73 / 24.3 | 3.17 / 5.07 |
+
+(`script-score-query` tasks of the vector tracks fail on both sides with the track's
+parameters.) roll wins `pmc` outright and every term, match-all and plain `default` task;
+the losses are in five query families, handed to the query lanes with profiles: k-NN search
+on HNSW (4–9x on `so_vector`'s BBQ index, 2–5x on `dense_vector`'s int8), `range` queries on
+range fields (`noaa`, 3.5–12x), histogram and date-histogram aggregations over range filters
+(`nyc_taxis`, 2.7–5.5x), nested aggregations and inner hits (`nested`, 1.3–2.6x), and the
+percolator's verified-match shortcut, fixed here.
 
 ## Final run (end of the phase 3–5 round, 2026-10-26)
 
@@ -207,10 +326,10 @@ the parallel fetch check, the OpenSearch profile, gzip). It is now looked up onc
 (`search_index::search::pool::cores()`): server CPU of a `size: 0` search 0.50 → 0.24 ms (round
 2: 0.34), of a 10-hit `match` 1.57 → 1.23 ms.
 
-**Still open** (performance): fetching hits decompresses a whole 16 KiB zstd stored-fields chunk
-per hit (36% of a 10-hit `match`'s CPU; Lucene's LZ4 blocks decompress only up to the document);
-a 10-hit fetch still costs about 0.1 ms more CPU than in round 2; the two geonames script scores
-above.
+**Still open** (performance): the two geonames script scores above. (Fetching hits decompressed a
+whole 16 KiB zstd stored-fields chunk per hit, 36% of a 10-hit `match`'s CPU, and a 10-hit fetch
+cost about 0.1 ms more CPU than in round 2: round 6 cut the server CPU of that `match` from 0.78
+to 0.43 ms, below round 2's, see "Fetch phase (round 6)".)
 
 ## Micro suite (round 1 of the perf lane)
 
@@ -566,6 +685,30 @@ docs/s, 59–71 µs/doc):
 | a point range over a segment where every doc has one value and most match starts from all docs and clears those outside (cells inside the range cost nothing: Lucene's inverse visitor); a constant-score scorer over a doc set ends once the collector's minimum competitive score passes its score (Lucene's `ConstantScoreScorer`), and `constant_score` forwards a sorted collector's competitive iterator | `search-index` `query/range.rs` (`InverseVisitor`), `query/basic.rs` (`SetScorer`, `ConstLeaf`), `util/bitset.rs` (`clear_range`) | `match: {status: 200}` (an integer term: a point range matching 87% of docs) wall 16.2 ms, `range` on `@timestamp` 9.1 ms | 3.0 ms (Elasticsearch 3.9), 4.5 ms (4.8) |
 | sorted queue entries keep their natives with the segment they were computed in; an entry from an earlier segment is translated (one terms-dictionary lookup per keyword key) the first time a segment compares against it, and a competitive doc reuses the evicted entry's buffers, so it costs no allocation and no repeated lookups (was: every binary-search probe re-resolved the entry's keyword terms into a new vector, and every bottom change cloned the bottom's bytes). A keyword `missing` value a segment lacks gets its own slot between that segment's ordinals, so foreign values in the same gap order against it by their bytes (a correctness fix found by review) | `search-index` `collector/top_field.rs` (`Entry`, `translate`, `ORD_SCALE`) | geonames 1.1M (`r9c`, 8 pinned threads, median of 15): `name.raw` size 1000 53–71 ms, desc + exact total 46–55, `cc2.raw` missing `M` 41–44, with `search_after` 58–69, `country_code.raw` + `population` size 100 6.8–7.0 | `r10a`: 21–24, 20–29, 21–22, 22–24, 5.1–5.7 ms (identical hits) |
 
+Round 6, query execution (perf-query lane). Collector rows: `cargo test -p search-index --release
+--test bench bench_sorted_collectors -- --ignored` (300,000 docs in 3 segments, doc-values-only
+fields so no competitive pruning helps; best of 7). Query rows: geonames 1.1M docs, 5 shards,
+`search-dev` and a private Elasticsearch 9.5.5 container pinned to the same 8 hardware threads
+(`0-3,18-21`, 4 GiB), measured interleaved on a saturated host (load 33–36 on 36 threads), so
+server CPU per request is the number to compare; hits identical between the binaries (md5 of
+totals, ids, scores, sort values and aggregations).
+
+| change | where | before | after |
+|---|---|---:|---:|
+| the sorted queue keeps its entries in fixed slots and orders 4-byte slot numbers, so an insert moves at most `4 * n` bytes instead of 64-byte entries | `search-index` `collector/top_field.rs` | a sort whose every doc enters at the head: 438–507 ms (`size: 1000`), 79–108 ms (`size: 100`) | 69 ms, 46 ms |
+| `collapse` keeps each group head's natives with its segment generation (translated once per segment, as the sorted queue does) instead of re-deriving them, with a keyword lookup and allocations, on every comparison; group keys are looked up borrowed (no allocation), an evicted group's buffers are reused, a head that improves moves by a binary search and a rotate of the range it crosses, and the maps hash with foldhash | `search-index` `collector/collapse.rs` | collapse by a 20k-value keyword, every doc a new head: 902 ms (`size: 1000`), 475 ms (`size: 100`); sorted by a keyword, `size: 1000`: 120 ms; two keys: 104 ms; geonames `collapse` on `country_code.raw` CPU 78 ms | 191 ms, 125 ms; 21–38 ms; 28 ms; 53 ms (Elasticsearch 68) |
+| `cardinality` on ordinals hashes each segment's seen terms in one forward walk of the dictionary (`TermDictIter::seek_ord`) instead of decoding each term from its 16-term block's start | `search-aggs` `metrics/cardinality.rs`, `search-codec` `docvalues.rs` | geonames `cardinality` of `name.raw` CPU 305 ms (wall 71) | 94 ms (wall 22; Elasticsearch 176, wall 49) |
+| `composite` whose sources all read keyword ordinals caches, per segment, the queue slot or the final rejection of each combination of ordinals; a doc with one value per source whose combination was seen costs an ordinal read per source and a table lookup (slots record the combination they are cached under, so a recycled slot is a miss) | `search-aggs` `bucket/composite.rs` (`OrdKeys`) | geonames `composite` (`country_code.raw` x `feature_class.raw`, `size: 1000`) CPU 291 ms (wall 68) | 100 ms (wall 27; Elasticsearch 153, wall 38) |
+| top hits by score of a `function_score` / `script_score` query (no score bound, every match scored) search a shard in slices when the request has fewer shards than cores (up to `2 * cores / shards` slices of at least 50,000 docs); a search that runs on a pool worker (a shard of a parallel request) splits too, claiming slices with any free worker (`pool::help_each_index`) | `search-es` `search/mod.rs` (`sliced`), `search-index` `search/mod.rs`, `search/pool.rs` | geonames script scores, serial shards (`ROLL_PERF_SERIAL_SLICES=1`) | CPU unchanged (±2%), identical hits; wall 3–15% lower on the saturated host (`painless_static` 47.5 → 40.5 ms); a quiet-host run should show up to 8/5 on 5 shards and 8 threads |
+| term dictionary intersections step a table DFA (`Automaton::as_dfa`) with inlined lookups instead of three virtual calls per byte | `search-codec` `automaton/`, `terms.rs` | geonames `wildcard` `*berg*` on `name.raw` CPU 117–127 ms | 84–86 ms (Elasticsearch 78–93); wall 20 vs 22 ms |
+| batched doc-values reads of a sparse field rank a batch's docs in one pass (`DocSet::for_each_rank`: each block looked up once, a running count from word to word in dense blocks, a forward search in sparse ones) instead of a block lookup, a rank-table read and up to eight popcounts per doc | `search-codec` `docset.rs`, `docvalues.rs` (`batch_ranks`) | geonames `histogram` of `elevation` (sparse) with `avg` and `max` sub-aggregations CPU 60 ms (wall 19), `rank` 80% of it | 32 ms (wall 13; Elasticsearch 53, wall 16) |
+| `significant_terms` on a keyword with ordinals maps each (owning bucket, segment ordinal) to its key once per segment: a seen term costs one hash probe instead of decoding the term and building and cloning its identity | `search-aggs` `bucket/significant.rs` (`SegOrds`) | geonames `significant_terms` of `feature_code.raw` under a `term` query CPU 30–32 ms (wall 12–20) | 12 ms (wall 5.2; Elasticsearch 13–18, wall 5.8–8.7) |
+
+Measured and not adopted in round 6: slicing field sorts and queries with score bounds. Their
+serial competitive pruning is so effective that slices only add work: on geonames
+`desc_sort_geonameid` CPU 3.5 → 10.3 ms, `sort_country_code` 5.6 → 12.6 ms, a 1,000-hit
+`name.raw` sort 137 → 359 ms, with longer wall times too.
+
 Tried and reverted in round 3: an adaptive merge IO throttle modelled on Elasticsearch's merge
 executor (no gain: total CPU per document unchanged); a custom open-addressing term hash with
 term headers in the arena (warm lookups 38 → 59 ns, cold hits equal); a fixed 100 ms mimalloc
@@ -577,6 +720,74 @@ Earlier rounds (same lane): parallel bulk preparation with ordered per-shard app
 top hits stopping once nothing can compete, numeric and keyword competitive pruning for sorts
 (points tree / terms postings), `size: 0` counts from segment statistics, and scroll
 continuation by last hit.
+
+## Fetch phase (round 6, perf-fetch lane)
+
+Profiles (`perf record --call-graph lbr` from the privileged `roll-perf-tools` container
+against a pinned `search-dev`) of the micro suite's 10-hit `match` put 46% of its CPU in zstd
+(`ZSTD_decompressSequences` alone 35%, table building another 10%): every hit decompressed its
+whole 16 KiB stored-fields chunk, about 64 documents of this corpus, to read one.
+
+**Stored-fields layout.** `cargo test --release -p search-codec --lib bench_stored -- --ignored
+--nocapture` with `ROLL_STORED_CORPORA` set to the first 200,000 lines of Rally's geonames and
+http_logs corpora, 1,000 pmc articles and the micro suite's 50,000 documents (each stored with
+its `_id`; per document: stored bytes, then the time to read a random document; busy host,
+the absolute times vary by up to 2x between runs, the ratios between rows don't):
+
+| layout | geonames (338 B) | http_logs (144 B) | micro (251 B) | pmc (38 KB) |
+|---|---:|---:|---:|---:|
+| zstd 3, trained dictionary, 16 KiB chunks (before) | 66.1 B, 20.9 µs | 20.0 B, 17.7 µs | 86.9 B, 33.8 µs | 13,143 B, 63 µs |
+| zstd 3, trained dictionary, 4 KiB chunks | 73.4 B, 7.5 µs | 22.2 B, 5.3 µs | 90.5 B, 8.6 µs | 13,190 B, 66 µs |
+| zstd 3, trained dictionary, 2 KiB chunks (merges now) | 79.5 B, 4.0 µs | 24.1 B, 2.9 µs | 92.6 B, 5.0 µs | 13,191 B, 60 µs |
+| zstd 3, trained dictionary, 1 KiB chunks | 89.0 B, 2.5 µs | 27.4 B, 1.9 µs | 96.4 B, 3.4 µs | 13,192 B, 82 µs |
+| zstd 3, sampled dictionary, 2 KiB chunks (refreshes now) | 79.8 B, 4.3 µs | 24.4 B, 3.4 µs | 96.7 B, 6.4 µs | (none: 14,201 B) |
+| zstd 3, no dictionary, 16 KiB chunks (refreshes before) | 67.1 B, 18.8 µs | 21.7 B, 20.1 µs | 89.8 B, 25.9 µs | 14,124 B, 64 µs |
+| zstd 3, no dictionary, 2 KiB chunks | 102.3 B, 6.5 µs | 36.7 B, 7.0 µs | 106.4 B, 6.9 µs | 14,201 B, 57 µs |
+
+An earlier run of the same corpora (without `_id`) measured the alternatives the assignment
+named: LZ4 (`lz4_flex` block format with the segment dictionary's content as its prefix,
+decompressing whole blocks; stopping at the document's end would halve the block cost) is
+ratio 3.41–3.72 on geonames at 16–4 KiB blocks (zstd 2 KiB: 4.49), 4.65–5.09 on http_logs
+(6.73) and 1.67–1.71 on the micro corpus (2.83), at 3–8.6 µs, 3.9–9 µs and 7–24 µs per random
+document; one zstd frame per document with the dictionary costs 0.6–0.9 µs but stores 117
+(geonames) and 51 (http_logs) bytes per document, 1.6x and 2.4x the 2 KiB chunks. A
+dictionary of raw sampled documents without zstd's entropy tables decodes 2 KiB chunks no
+faster than no dictionary; finalized with the tables (`ZDICT_finalizeDictionary`) it compresses
+within 1–4% of a trained one and takes 4–9 ms instead of 30–130 ms (training on pmc's few large
+samples takes 3.7–7 s; for documents averaging over 4 KiB no sampled dictionary is built: it
+was 0.4 s and a worse ratio than none). Chunks are now 2 KiB with a dictionary in every
+segment that has 64 KiB of samples: trained at merges, sampled at refreshes (which had none
+before). The segment format is unchanged (chunk size is a writer choice), so segments written
+before read as they are and shrink to the new chunks when merged.
+
+**Micro suite** (roll `base` = the tree before this round's changes, `c` = after; both on
+`14-17,32-35`, each loaded with the same 50,000 documents, 3 rounds of 300 requests,
+interleaved; server CPU per request):
+
+| workload | before | after |
+|---|---:|---:|
+| match | 0.782 ms | 0.433 ms |
+| match_or_2 | 0.941 ms | 0.665 ms |
+| match_or_3 | 1.131 ms | 0.781 ms |
+| match_and_2 | 0.721 ms | 0.447 ms |
+| sort_field | 0.731 ms | 0.368 ms |
+| sort_match_all | 1.005 ms | 0.701 ms |
+| get | 0.146 ms | 0.106 ms |
+| terms_agg, range_count, bool_filter_range (no or few hits) | 0.290, 0.203, 0.248 ms | 0.273, 0.189, 0.268 ms |
+| bulk 50k docs (4 rounds) | 1.945 s CPU, 1.98 s wall | 1.997 s CPU, 1.91 s wall |
+| stored fields of the loaded index | 4.49 MB | 4.85 MB (store 9.61 → 9.97 MB) |
+
+The same match with other fetch options (server CPU per request, two runs each):
+`size: 100` 4.9–5.1 → 1.57 ms, `highlight` on `body` 0.96–1.16 → 0.62–0.64 ms, `fields: [n, cat,
+title]` 0.78–0.80 → 0.44–0.45 ms, `docvalue_fields` 0.74 → 0.38–0.47 ms, `_source.includes`
+0.83 → 0.39–0.50 ms.
+
+| change | where | before | after |
+|---|---|---:|---:|
+| 2 KiB stored-fields chunks, a sampled (finalized) dictionary for refreshed segments | `search-codec` `stored.rs` (`CHUNK_BYTES`, `build_dictionary`, `StoredOptions::train`), `writer.rs`; `search-index` `shard/mod.rs` | zstd 46% of a 10-hit `match` | 15–18% |
+| the unified highlighter segments ASCII text with its own UAX #29 word and sentence rules (class tables, a run fast path, no sentence scan without a terminator; checked against `unicode-segmentation` on every string of up to 4 symbols over a 25-symbol alphabet and 100,000 random ones), builds sentence boundaries only for values with matches and word boundaries only for sentences longer than `fragment_size`, and maps UTF-16 offsets of ASCII text as the identity | `search-index` `highlight/breaks.rs`, `unified.rs` | words + sentences of a 130-char value 7.0–7.9 µs (generic segmenter) | 1.2–1.6 µs |
+| `_score` floats whose shortest digits end odd test for an exact decimal tie in `u128` instead of formatting 40 more digits (`java_float` ran for about half of all scores) | `search-es` `json/write.rs` (`is_decimal_tie`) | `java_float_value` 2.6–2.9% of a 10-hit fetch with `fields` / `docvalue_fields` | (only true ties) |
+| runtime-field scopes share the per-mapping field set, slot table and shadowing set across shards (they were rebuilt per shard per search: O(runtime fields) string clones), evaluators in a slot array | `search-es` `search/runtime.rs` (`ScopeFields`) | | |
 
 ## aarch64 (Graviton)
 
@@ -594,4 +805,6 @@ benchmark CPUs): 21 test binaries, 183 tests pass, among them the bit-unpacking,
 vector-distance paths the queries use; one durability test that depends on wall-clock timing
 (`tombstones_are_accounted_and_pruned_by_deletes`: 5,000 deletes must finish inside a 500 ms
 `gc_deletes` window) fails under emulation only and was skipped there. No native Graviton
-numbers yet.
+numbers yet. Round 6 (`QEMU_CPU=max`, with this round's BP and points changes): `search-codec` lib 124 of 124
+(the wall-clock-bound `huge_repetitions_fail_fast` skipped), `es_fixtures` 8 of 8, `segment` 14
+of 14. Native Graviton numbers are still pending (no arm64 hardware here).

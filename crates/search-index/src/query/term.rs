@@ -662,7 +662,13 @@ impl TermWeight {
             let ts = if !mode.needs_scores() {
                 TermStats { doc_freq: 1, total_term_freq: 1 }
             } else {
-                stats.unwrap_or(states.stats())
+                match (stats, s.global_stats()) {
+                    // Explicit statistics still go through a DFS source, as Elasticsearch's
+                    // searcher overrides `termStatistics(term, docFreq, totalTermFreq)`.
+                    (Some(given), Some(g)) => g.term_stats_given(field, term, given).unwrap_or(given),
+                    (Some(given), None) => given,
+                    (None, _) => states.stats(),
+                }
             };
             coll.map(|c| Arc::new(s.schema().similarity(field).scorer(boost, &c, &[ts])))
         };

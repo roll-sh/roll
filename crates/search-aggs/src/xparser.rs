@@ -149,6 +149,8 @@ pub struct XParser<'a> {
     base: Vec<Seg>,
     /// Deprecation warnings raised while parsing.
     pub warnings: Vec<String>,
+    /// Where a failed embedded parse stopped ([`pin_location`](Self::pin_location)).
+    pinned: Option<(usize, usize)>,
 }
 
 impl<'a> XParser<'a> {
@@ -165,7 +167,15 @@ impl<'a> XParser<'a> {
             owned_src: OnceCell::new(),
             base,
             warnings: Vec::new(),
+            pinned: None,
         }
+    }
+
+    /// Reports `loc` as the current token's location from now on: an embedded value parsed
+    /// by someone else (a filter's query) failed there, and Elasticsearch's enclosing parsers
+    /// wrap the failure at the location its parser stopped at. Parsing stops with that error.
+    pub fn pin_location(&mut self, loc: (usize, usize)) {
+        self.pinned = Some(loc);
     }
 
     fn token_of(v: &Json) -> Token {
@@ -308,6 +318,9 @@ impl<'a> XParser<'a> {
 
     /// Where the current token starts (`getTokenLocation()`).
     pub fn token_location(&self) -> (usize, usize) {
+        if let Some(loc) = self.pinned {
+            return loc;
+        }
         let path = self.path();
         let src = self.source();
         let loc = match self.tok {

@@ -288,12 +288,52 @@ fn float_text_fast(f: f32) -> Option<f64> {
     if (last - b'0') % 2 == 1 {
         let mut alt = buf;
         alt[e - 1] -= 1;
-        if std::str::from_utf8(&alt[..n]).ok()?.parse::<f32>().ok() == Some(f.abs()) {
+        // Both read back as the float: Java differs from Rust only on an exact tie.
+        if std::str::from_utf8(&alt[..n]).ok()?.parse::<f32>().ok() == Some(f.abs()) && is_decimal_tie(f.abs(), &buf[..e], std::str::from_utf8(&buf[e + 1..n]).ok()?.parse().ok()?) != Some(false) {
             return None;
         }
     }
     let v = std::str::from_utf8(&buf[..n]).ok()?.parse::<f64>().ok()?;
     Some(if f < 0.0 { -v } else { v })
+}
+
+/// Whether finite positive `x` lies exactly halfway between the decimal `mant`e`exp` (digits
+/// with an optional point, as `{:e}` writes them) and a neighbour in the last digit (the only
+/// case where [`even_on_tie`] changes the digits), in exact integer arithmetic: `x = m * 2^e2`
+/// and the midpoints are `(2D -/+ 1) * 10^q / 2` for the digits `D` and
+/// `q = exp - (digits - 1)`. `None` when the numbers overflow `u128` (the caller then takes the
+/// exact formatting path).
+fn is_decimal_tie(x: f32, mant: &[u8], exp: i32) -> Option<bool> {
+    let mut d: u128 = 0;
+    let mut digits = 0i32;
+    for &b in mant.iter().filter(|b| b.is_ascii_digit()) {
+        d = d * 10 + u128::from(b - b'0');
+        digits += 1;
+    }
+    let bits = x.to_bits();
+    let (frac, be) = (u128::from(bits & 0x7f_ffff), (bits >> 23) & 0xff);
+    let (m, e2) = if be == 0 { (frac, -149) } else { (frac | 1 << 23, be as i32 - 150) };
+    let q = exp - (digits - 1);
+    // 2 * m * 2^e2 == (2D - 1) * 2^q * 5^q, both sides moved to non-negative powers.
+    let five = |k: i32| 5u128.checked_pow(k as u32);
+    let shl = |v: u128, k: i32| if k >= 128 || (k > 0 && v.leading_zeros() < k as u32) { None } else { Some(v << k) };
+    let twos = e2 + 1 - q;
+    let mut tie = false;
+    for odd in [d.checked_mul(2)?.checked_sub(1)?, d.checked_mul(2)?.checked_add(1)?] {
+        let (mut lhs, mut rhs) = (m, odd);
+        if q >= 0 {
+            rhs = rhs.checked_mul(five(q)?)?;
+        } else {
+            lhs = lhs.checked_mul(five(-q)?)?;
+        }
+        if twos >= 0 {
+            lhs = shl(lhs, twos)?;
+        } else {
+            rhs = shl(rhs, -twos)?;
+        }
+        tie |= lhs == rhs;
+    }
+    Some(tie)
 }
 
 /// Java (19+) picks, of two shortest decimals exactly as close to the value, the one with an
@@ -398,6 +438,45 @@ mod tests {
         }
         check(f32::from_bits(0x40C1_A000));
         check(-f32::from_bits(0x40D5_2000));
+    }
+
+    /// The integer tie test agrees with the exact decimal expansion (`…d5000…` after the
+    /// shortest digits) wherever it decides.
+    #[test]
+    fn decimal_tie_matches_the_exact_expansion() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut ties = 0;
+        let mut check = |f: f32| {
+            let f = f.abs();
+            if !f.is_finite() || f == 0.0 {
+                return;
+            }
+            let sci = format!("{f:e}");
+            let (mant, exp) = sci.split_once('e').unwrap();
+            let n = mant.bytes().filter(u8::is_ascii_digit).count();
+            let full = format!("{:.*e}", n + 40, f64::from(f));
+            let (fm, fe) = full.split_once('e').unwrap();
+            let fd: Vec<u8> = fm.bytes().filter(u8::is_ascii_digit).collect();
+            let want = fe == exp && fd[n] == b'5' && fd[n + 1..].iter().all(|&d| d == b'0');
+            if let Some(got) = is_decimal_tie(f, mant.as_bytes(), exp.parse().unwrap()) {
+                assert_eq!(got, want, "{f:e}");
+                ties += usize::from(got);
+            }
+        };
+        for _ in 0..300_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            check(f32::from_bits(x as u32));
+        }
+        // Floats with few significant bits, where ties live (6.05078125 = 0x40C1A000).
+        for m in 0..1u32 << 12 {
+            for e in [110u32, 120, 127, 130, 135, 140, 150, 160] {
+                check(f32::from_bits((e << 23) | (m << 11)));
+            }
+        }
+        check(f32::from_bits(0x40C1_A000));
+        assert!(ties > 0);
     }
 
     /// The plain-notation fast path writes exactly what `java_double` returns.

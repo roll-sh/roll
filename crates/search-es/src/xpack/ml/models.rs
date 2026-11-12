@@ -48,6 +48,15 @@ impl Deployments {
         self.note();
     }
 
+    /// Stops every deployment (`_features/_reset` of the machine learning feature).
+    pub fn clear(&self) {
+        let mut g = self.inner.lock();
+        if !g.is_empty() {
+            g.clear();
+            self.note();
+        }
+    }
+
     /// Whether any deployment runs.
     pub fn has_any(&self) -> bool {
         !self.inner.lock().is_empty()

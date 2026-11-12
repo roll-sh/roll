@@ -40,6 +40,8 @@ Parameters:
   MaxBrokers:
     Type: Number
     Default: 12
+    MinValue: 1
+    MaxValue: 100
   BrokerCompute:
     Type: String
     AllowedValues: [ec2, fargate]
@@ -87,6 +89,9 @@ Parameters:
   IdleMinutesToZero:
     Type: Number
     Default: 0
+    # CloudWatch evaluates at most a day of one-minute periods.
+    MinValue: 0
+    MaxValue: 1440
     Description: >
       Stop every broker after this many minutes without client connections (0: keep BrokerCount
       warm). A shared fleet keeps brokers warm and lets idle vhosts sleep instead; stopping the
@@ -402,9 +407,13 @@ Resources:
     Properties:
       VPCZoneIdentifier: !Ref PrivateSubnets
       MinSize: "0"
-      MaxSize: !Ref MaxBrokers
-      # ECS managed scaling sets the desired count; instances running brokers are protected
-      # from scale-in until ECS has moved their tasks.
+      # ECS managed scaling sets the desired count and BrokerScaling caps the tasks at
+      # MaxBrokers, so this is no cost limit. It must leave room for a deploy: MaximumPercent
+      # 200 starts each new broker before the old one stops, and an instance of the default size
+      # holds one broker (memory, and awsvpc ENIs on smaller types), so up to 2 x MaxBrokers
+      # instances. A MaxSize of MaxBrokers would leave the new tasks unplaceable at full size.
+      MaxSize: "200"
+      # Instances running brokers are protected from scale-in until ECS has moved their tasks.
       NewInstancesProtectedFromScaleIn: true
       # Replace Spot instances at elevated risk of interruption before AWS takes them.
       CapacityRebalance: true
@@ -581,7 +590,8 @@ Resources:
       AlarmDescription: roll queues brokers are mostly idle and there is more than one
       EvaluationPeriods: 15
       DatapointsToAlarm: 15
-      Threshold: 1
+      # The 0/1 expression breaches by +0.5: inside the step's [0, ∞).
+      Threshold: 0.5
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref ScaleInPolicy]
@@ -609,8 +619,11 @@ Resources:
           Expression: IF(cpu < 20 AND tasks > 1, 1, 0)
           ReturnData: true
 
-  # Scale to zero: no client flows through the NLB for IdleMinutesToZero minutes → no brokers.
-  # The proxies stay up and start a broker on the next connection.
+  # Scale to zero: brokers running and no client flow through the NLB for IdleMinutesToZero
+  # minutes → no brokers. The proxies stay up and start a broker on the next connection. A
+  # minute without running brokers doesn't breach, so the alarm returns to OK once the fleet is
+  # at zero: an alarm left in ALARM re-runs its scaling action every minute and would stop the
+  # broker a wake just started, before the load balancer's metrics show the waking connection.
   ToZeroPolicy:
     Condition: ScaleToZero
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
@@ -620,22 +633,47 @@ Resources:
       ScalingTargetId: !Ref BrokerScaling
       StepScalingPolicyConfiguration:
         AdjustmentType: ExactCapacity
-        StepAdjustments: [{ MetricIntervalUpperBound: 0, ScalingAdjustment: 0 }]
+        # The alarm stays in ALARM through the drain and the metric lag after the stop, and an
+        # alarm in ALARM re-runs its policy every minute: this keeps it from stopping the node a
+        # wake starts meanwhile (tests/search/aws/model.py).
+        Cooldown: 600
+        # The 0/1 expression breaches its 0.5 threshold by +0.5, inside [0, ∞). An upper bound of
+        # 0 would cover only breaches below the threshold, which this alarm never has.
+        StepAdjustments: [{ MetricIntervalLowerBound: 0, ScalingAdjustment: 0 }]
   IdleAlarm:
     Condition: ScaleToZero
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: roll queues has had no client connections
-      Namespace: AWS/NetworkELB
-      MetricName: ActiveFlowCount
-      Dimensions: [{ Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }]
-      Statistic: Maximum
-      Period: 60
+      AlarmDescription: roll queues brokers are running and have had no client connections
       EvaluationPeriods: !Ref IdleMinutesToZero
-      Threshold: 0
-      ComparisonOperator: LessThanOrEqualToThreshold
-      TreatMissingData: breaching
+      DatapointsToAlarm: !Ref IdleMinutesToZero
+      Threshold: 0.5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
       AlarmActions: [!Ref ToZeroPolicy]
+      Metrics:
+        - Id: flows
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/NetworkELB
+              MetricName: ActiveFlowCount
+              Dimensions: [{ Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }]
+            Period: 60
+            Stat: Maximum
+        - Id: tasks
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ECS
+              MetricName: CPUUtilization
+              Dimensions: [{ Name: ClusterName, Value: !Ref Cluster }, { Name: ServiceName, Value: !GetAtt BrokerService.Name }]
+            Period: 60
+            Stat: SampleCount
+        # The load balancer publishes nothing for a minute without flows: missing is 0.
+        - Id: idle
+          Expression: "IF(FILL(flows, 0) == 0 AND FILL(tasks, 0) > 0, 1, 0)"
+          ReturnData: true
 
   # ── proxies: one per AZ, AZ-local, wake brokers on connect ──
   ProxyTaskRole:

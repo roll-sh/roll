@@ -49,12 +49,44 @@ enum NumKind {
     Float,
 }
 
+/// How a numeric key's stored values convert before comparing (`numeric_type`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Conv {
+    /// As stored: longs stay raw (`unsigned_long` sign-flipped and `date_nanos` in nanoseconds,
+    /// as Lucene's `SortedNumericSortField` compares them); others decode.
+    Native,
+    /// Floating values cast to long (`FieldData.castToLong`).
+    Truncate,
+    /// `DateUtils.toMilliSeconds` (`date_nanos` sorted as `date`).
+    NanosToMillis,
+    /// `DateUtils.toNanoSeconds` (`date` sorted as `date_nanos`).
+    MillisToNanos,
+}
+
+impl Conv {
+    #[inline]
+    fn long(self, decode: Decode, v: i64) -> i64 {
+        match (self, decode) {
+            (Conv::NanosToMillis, _) => v / 1_000_000,
+            (Conv::MillisToNanos, _) => v.saturating_mul(1_000_000),
+            (Conv::Native, Decode::Long | Decode::UnsignedLong | Decode::Nanos) => v,
+            (Conv::Native | Conv::Truncate, d) => d.to_f64(v) as i64,
+        }
+    }
+
+    /// `getDoubleValues`: `date_nanos` casts its raw nanoseconds.
+    #[inline]
+    fn double(decode: Decode, v: i64) -> f64 {
+        if decode == Decode::Nanos { v as f64 } else { decode.to_f64(v) }
+    }
+}
+
 /// A resolved sort field.
 #[derive(Clone, Debug)]
 enum KeySpec {
     Score,
     Doc,
-    Num { field: u32, decode: Decode, kind: NumKind, mode: SortMode, missing: f64, missing_long: i64 },
+    Num { field: u32, decode: Decode, kind: NumKind, conv: Conv, mode: SortMode, missing: f64, missing_long: i64 },
     Bytes { field: u32, ip: bool, mode: SortMode, missing_first: bool, missing_value: Option<Vec<u8>> },
     Computed(std::sync::Arc<dyn crate::field::ComputedSort>),
 }
@@ -77,7 +109,7 @@ impl DocSort {
                 HitSort::Score { reverse } => (KeySpec::Score, *reverse),
                 HitSort::Doc { reverse } => (KeySpec::Doc, *reverse),
                 HitSort::Computed { sort, reverse } => (KeySpec::Computed(sort.clone()), *reverse),
-                HitSort::Field { field, reverse, missing, mode, .. } => {
+                HitSort::Field { field, reverse, missing, mode, numeric_type, .. } => {
                     let reverse = *reverse;
                     let mode = mode.unwrap_or(if reverse { SortMode::Max } else { SortMode::Min });
                     match field.source {
@@ -111,12 +143,20 @@ impl DocSort {
                             )));
                         }
                         src => {
+                            use crate::field::{NumericType, SortNumericType};
                             let decode = Decode::of(src);
-                            let kind = match src {
-                                SourceType::Numeric(t) if t.is_integral() && !matches!(t, crate::field::NumericType::UnsignedLong) => NumKind::Long,
-                                SourceType::Numeric(crate::field::NumericType::Float | crate::field::NumericType::HalfFloat) => NumKind::Float,
-                                SourceType::Numeric(_) => NumKind::Double,
-                                _ => NumKind::Long,
+                            let floating = matches!(src, SourceType::Numeric(t) if !t.is_integral());
+                            let (kind, conv) = match numeric_type {
+                                // `unsigned_long` sorts its raw sign-flipped longs.
+                                None => match src {
+                                    SourceType::Numeric(NumericType::Float | NumericType::HalfFloat) => (NumKind::Float, Conv::Native),
+                                    SourceType::Numeric(t) if !t.is_integral() => (NumKind::Double, Conv::Native),
+                                    _ => (NumKind::Long, Conv::Native),
+                                },
+                                Some(SortNumericType::Double) => (NumKind::Double, Conv::Native),
+                                Some(SortNumericType::Date) if decode == Decode::Nanos => (NumKind::Long, Conv::NanosToMillis),
+                                Some(SortNumericType::DateNanos) if matches!(src, SourceType::Date { nanos: false }) => (NumKind::Long, Conv::MillisToNanos),
+                                Some(_) => (NumKind::Long, if floating { Conv::Truncate } else { Conv::Native }),
                             };
                             // Missing values: the type's extreme on the side `_last`/`_first` asks for.
                             let high = match missing {
@@ -133,8 +173,9 @@ impl DocSort {
                                     (d, d as i64)
                                 }
                                 _ => match kind {
-                                    // `integer`, `short` and `byte` sort as Lucene `INT`s.
-                                    NumKind::Long if matches!(src, SourceType::Numeric(crate::field::NumericType::Integer | crate::field::NumericType::Short | crate::field::NumericType::Byte)) => {
+                                    // `integer`, `short` and `byte` sort as Lucene `INT`s (a
+                                    // `numeric_type` sorts through a long comparator).
+                                    NumKind::Long if numeric_type.is_none() && matches!(src, SourceType::Numeric(NumericType::Integer | NumericType::Short | NumericType::Byte)) => {
                                         let l = if high { i64::from(i32::MAX) } else { i64::from(i32::MIN) };
                                         (l as f64, l)
                                     }
@@ -146,7 +187,7 @@ impl DocSort {
                                     NumKind::Float => (if high { f64::INFINITY } else { f64::NEG_INFINITY }, 0),
                                 },
                             };
-                            (KeySpec::Num { field: field.number, decode, kind, mode, missing: missing_d, missing_long: missing_l }, reverse)
+                            (KeySpec::Num { field: field.number, decode, kind, conv, mode, missing: missing_d, missing_long: missing_l }, reverse)
                         }
                     }
                 }
@@ -349,7 +390,7 @@ impl SegmentSort {
                 (Reader::Computed(c), _) => c.value(doc, score),
                 (Reader::Score, _) => SortVal::Score(score),
                 (Reader::Doc, _) => SortVal::Doc(self.base + doc),
-                (Reader::Num(dv), KeySpec::Num { decode, kind, mode, missing, missing_long, .. }) => {
+                (Reader::Num(dv), KeySpec::Num { decode, kind, conv, mode, missing, missing_long, .. }) => {
                     self.nums.clear();
                     let nums = &mut self.nums;
                     for &c in &self.children {
@@ -357,14 +398,14 @@ impl SegmentSort {
                     }
                     if self.children.len() > 1 {
                         // Values of several docs: `num_value` expects them in ascending order.
-                        let d = *decode;
+                        let (d, c) = (*decode, *conv);
                         if *kind == NumKind::Long {
-                            nums.sort_unstable_by_key(|&v| d.to_i64(v));
+                            nums.sort_unstable_by_key(|&v| c.long(d, v));
                         } else {
-                            nums.sort_unstable_by(|&a, &b| java_double_cmp(d.to_f64(a), d.to_f64(b)));
+                            nums.sort_unstable_by(|&a, &b| java_double_cmp(Conv::double(d, a), Conv::double(d, b)));
                         }
                     }
-                    num_value(&self.nums, *decode, *kind, *mode, *missing, *missing_long)
+                    num_value(&self.nums, *decode, *kind, *conv, *mode, *missing, *missing_long)
                 }
                 (Reader::Ords(ords), KeySpec::Bytes { mode, missing_value, .. }) => {
                     let mut pick: Option<u64> = None;
@@ -396,7 +437,7 @@ impl SegmentSort {
 }
 
 /// A numeric field's sort value by `mode`, or the missing replacement.
-fn num_value(raw: &[i64], decode: Decode, kind: NumKind, mode: SortMode, missing: f64, missing_long: i64) -> SortVal {
+fn num_value(raw: &[i64], decode: Decode, kind: NumKind, conv: Conv, mode: SortMode, missing: f64, missing_long: i64) -> SortVal {
     if raw.is_empty() {
         return match kind {
             NumKind::Long => SortVal::Long(missing_long),
@@ -406,7 +447,7 @@ fn num_value(raw: &[i64], decode: Decode, kind: NumKind, mode: SortMode, missing
     }
     match kind {
         NumKind::Long => {
-            let vals = raw.iter().map(|&v| decode.to_i64(v));
+            let vals = raw.iter().map(|&v| conv.long(decode, v));
             SortVal::Long(match mode {
                 SortMode::Min => vals.min().unwrap_or(0),
                 SortMode::Max => vals.max().unwrap_or(0),
@@ -425,7 +466,7 @@ fn num_value(raw: &[i64], decode: Decode, kind: NumKind, mode: SortMode, missing
             })
         }
         _ => {
-            let vals: SmallVec<[f64; 4]> = raw.iter().map(|&v| decode.to_f64(v)).collect();
+            let vals: SmallVec<[f64; 4]> = raw.iter().map(|&v| Conv::double(decode, v)).collect();
             let d = match mode {
                 SortMode::Min => vals[0],
                 SortMode::Max => vals[vals.len() - 1],

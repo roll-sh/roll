@@ -1,0 +1,335 @@
+{
+ "found": {
+  "case": 51,
+  "case_seed": 118000405,
+  "seed": 118
+ },
+ "signature": "POST _msearch .responses[].hits.hits[].inner_hits",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "term_vector": "with_positions_offsets",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 3,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m5-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m5-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "25",
+        "_index": "diff-m5-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "25",
+      "_index": "diff-m5-a"
+     }
+    },
+    {
+     "geo0": {
+      "lat": 31.74,
+      "lon": 54.94
+     },
+     "int0": 77,
+     "ip0": "10.0.0.233",
+     "kw0": "Alpha",
+     "kw1": "rho",
+     "long0": 26,
+     "n": [
+      {
+       "kw0": "",
+       "long0": 14,
+       "text0": "roll fast lazy engine fox apple"
+      }
+     ],
+     "o": {
+      "int0": 77,
+      "kw0": "beta"
+     },
+     "sayt0": "Dogs runs running",
+     "scaled0": -18.27,
+     "text0": null,
+     "vec0": [
+      2.41,
+      2.44,
+      2.19
+     ]
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 3,
+      "total": 3
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m5-a/_refresh"
+  },
+  {
+   "es": {
+    "body": {
+     "responses": [
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 3,
+        "total": 3
+       },
+       "hits": {
+        "hits": [
+         {
+          "_id": "25",
+          "_index": "diff-m5-a",
+          "_score": 1.0,
+          "_source": {
+           "geo0": {
+            "lat": 31.74,
+            "lon": 54.94
+           },
+           "int0": 77,
+           "ip0": "10.0.0.233",
+           "kw0": "Alpha",
+           "kw1": "rho",
+           "long0": 26,
+           "n": [
+            {
+             "kw0": "",
+             "long0": 14,
+             "text0": "roll fast lazy engine fox apple"
+            }
+           ],
+           "o": {
+            "int0": 77,
+            "kw0": "beta"
+           },
+           "sayt0": "Dogs runs running",
+           "scaled0": -18.27,
+           "text0": null
+          }
+         }
+        ],
+        "max_score": 1.0,
+        "total": {
+         "relation": "eq",
+         "value": 1
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      },
+      {
+       "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 3,
+        "total": 3
+       },
+       "hits": {
+        "hits": [
+         {
+          "_id": "25",
+          "_index": "diff-m5-a",
+          "_score": 2.0,
+          "_source": {
+           "geo0": {
+            "lat": 31.74,
+            "lon": 54.94
+           },
+           "int0": 77,
+           "ip0": "10.0.0.233",
+           "kw0": "Alpha",
+           "kw1": "rho",
+           "long0": 26,
+           "n": [
+            {
+             "kw0": "",
+             "long0": 14,
+             "text0": "roll fast lazy engine fox apple"
+            }
+           ],
+           "o": {
+            "int0": 77,
+            "kw0": "beta"
+           },
+           "sayt0": "Dogs runs running",
+           "scaled0": -18.27,
+           "text0": null
+          }
+         }
+        ],
+        "max_score": 2.0,
+        "total": {
+         "relation": "eq",
+         "value": 1
+        }
+       },
+       "status": 200,
+       "timed_out": false,
+       "took": 0
+      }
+     ],
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": "diff-m5-a"
+    },
+    {},
+    {
+     "index": "diff-m5-a"
+    },
+    {
+     "rescore": {
+      "query": {
+       "rescore_query": {
+        "nested": {
+         "inner_hits": {},
+         "path": "n",
+         "query": {
+          "range": {
+           "n.long0": {}
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   ],
+   "method": "POST",
+   "path": "/_msearch"
+  }
+ ]
+}

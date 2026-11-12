@@ -252,6 +252,28 @@ pub fn suite_id(root: &Path, file: &Path) -> (String, String) {
 }
 
 impl Suite {
+    /// What Elasticsearch's ES|QL YAML suite class (`EsqlClientYamlIT`) does to every test: after
+    /// each `esql.query` that doesn't set `allow_partial_results: true`, assert `is_false:
+    /// is_partial`. Setup and teardown are left alone, as there.
+    pub fn assert_esql_not_partial(&mut self) {
+        for test in &mut self.tests {
+            let mut steps = Vec::with_capacity(test.steps.len());
+            for step in test.steps.drain(..) {
+                let check = match &step.kind {
+                    StepKind::Do(d) => d.api == "esql.query" && d.param("allow_partial_results") != Some("true"),
+                    _ => false,
+                };
+                let line = step.line;
+                steps.push(step);
+                if check {
+                    let kind = StepKind::Assert(Assertion { op: AssertOp::IsFalse, field: "is_partial".into(), expected: Value::Null });
+                    steps.push(Step { line, kind });
+                }
+            }
+            test.steps = steps;
+        }
+    }
+
     /// Reads and parses a test file.
     pub fn load(root: &Path, file: &Path) -> std::result::Result<Suite, ParseError> {
         let text = std::fs::read_to_string(file).map_err(|e| ParseError { line: 0, message: e.to_string() })?;
@@ -1037,5 +1059,45 @@ teardown:
         assert_eq!((id.as_str(), area.as_str()), ("search.vectors/10_x", "search.vectors"));
         let (id, area) = suite_id(Path::new("/r"), Path::new("/r/a.yml"));
         assert_eq!((id.as_str(), area.as_str()), ("a", ""));
+    }
+
+    #[test]
+    fn esql_not_partial_checks() {
+        let mut suite = parse(
+            r#"---
+setup:
+  - do:
+      esql.query:
+        body: {query: "FROM a"}
+---
+"t":
+  - do:
+      esql.query:
+        body: {query: "FROM a"}
+  - match: {columns.0.name: x}
+  - do:
+      esql.query:
+        allow_partial_results: true
+        body: {query: "FROM a"}
+  - do:
+      esql.query:
+        allow_partial_results: false
+        body: {query: "FROM a"}
+  - do:
+      search: {}
+"#,
+        );
+        suite.assert_esql_not_partial();
+        let names: Vec<String> = suite.tests[0]
+            .steps
+            .iter()
+            .map(|s| match &s.kind {
+                StepKind::Assert(a) => format!("{} {}", a.op.name(), a.field),
+                k => k.name().to_string(),
+            })
+            .collect();
+        assert_eq!(names, ["do", "is_false is_partial", "match columns.0.name", "do", "do", "is_false is_partial", "do"]);
+        assert_eq!(suite.tests[0].steps[1].line, suite.tests[0].steps[0].line);
+        assert_eq!(suite.setup.steps.len(), 1);
     }
 }

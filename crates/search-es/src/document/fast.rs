@@ -48,6 +48,8 @@ enum Kind {
     Boolean,
     Date { fmt: Arc<crate::time::DateFormatter>, nanos: bool },
     GeoPoint,
+    /// `ip` from a string (anything else, and unparseable addresses, take the general path).
+    Ip,
 }
 
 /// A field (or multi-field) the plan parses into.
@@ -85,7 +87,9 @@ fn kind_of(f: &FieldMapper, ctx: &MappingCtx) -> Option<Kind> {
         return None;
     }
     Some(match f.ty {
-        "text" => Kind::Text,
+        // `match_only_text` parses like `text` (only indexing differs).
+        "text" | "match_only_text" => Kind::Text,
+        "ip" => Kind::Ip,
         "keyword" => Kind::Keyword(f.effective("ignore_above", ctx).as_i64()),
         "long" => Kind::Long,
         "integer" => Kind::Integer,
@@ -292,6 +296,7 @@ fn push(t: &Target, tok: &Tok<'_>, out: &mut ParsedDocument, ignored: &mut Vec<A
         (Kind::Double, Tok::Int(i, _)) => FieldValue::Double(*i as f64),
         (Kind::Double, Tok::Float(d, _)) if d.is_finite() => FieldValue::Double(*d),
         (Kind::Boolean, Tok::Bool(b)) => FieldValue::Boolean(*b),
+        (Kind::Ip, Tok::Str(s)) => FieldValue::Ip(super::values::parse_ip(s)?),
         (Kind::Date { fmt, nanos }, Tok::Str(_) | Tok::Int(..) | Tok::Float(..)) => {
             let text: &str = match tok {
                 Tok::Str(s) => s.as_ref(),

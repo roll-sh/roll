@@ -231,6 +231,7 @@ async fn update_attempt(ctx: &Ctx<'_>, expr: &str, id: &str, args: &WriteArgs, b
             total: 0,
             forced_refresh: false,
                 failure_store: None,
+                executed_pipelines: None,
         },
         source,
     };

@@ -247,6 +247,31 @@ pub enum SortMode {
     Median,
 }
 
+/// A numeric sort's `numeric_type`: the type values are converted to before comparing
+/// (`IndexNumericFieldData.sortField(targetNumericType, …)`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortNumericType {
+    /// Longs: floating values truncate.
+    Long,
+    Double,
+    /// Millisecond longs: `date_nanos` values divide down.
+    Date,
+    /// Nanosecond longs: `date` values multiply up.
+    DateNanos,
+}
+
+impl SortNumericType {
+    pub fn parse(s: &str) -> Option<SortNumericType> {
+        Some(match s {
+            "long" => SortNumericType::Long,
+            "double" => SortNumericType::Double,
+            "date" => SortNumericType::Date,
+            "date_nanos" => SortNumericType::DateNanos,
+            _ => return None,
+        })
+    }
+}
+
 /// A sort key of `top_hits` / `top_metrics` resolved against the index.
 // A few per request, never in bulk: the size difference between variants costs nothing.
 #[allow(clippy::large_enum_variant)]
@@ -266,6 +291,8 @@ pub enum HitSort {
         /// (`NestedSortBuilder`: the parent level's docs, the path's docs with the sort's
         /// `filter`, `max_children`).
         nested: Option<search_index::collector::top_field::NestedSort>,
+        /// `numeric_type` (numeric fields only; `None`: the field's own type).
+        numeric_type: Option<SortNumericType>,
     },
     /// A key the embedder computes per document: `_script` and `_geo_distance` sorts.
     Computed { sort: std::sync::Arc<dyn ComputedSort>, reverse: bool },

@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// A query printed (`toString`, explanations, profile descriptions) as `desc`.
 #[derive(Debug)]
 pub struct Described {
-    inner: QueryRef,
+    pub(crate) inner: QueryRef,
     profile: String,
     desc: String,
 }

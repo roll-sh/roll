@@ -97,6 +97,12 @@ pub trait Automaton: Send + Sync {
     /// The state after reading `byte`.
     fn accept(&self, state: u32, byte: u8) -> u32;
 
+    /// This automaton as a table [`Dfa`], when it is one: term dictionary intersections then
+    /// step it with inlined table lookups instead of virtual calls per byte.
+    fn as_dfa(&self) -> Option<&Dfa> {
+        None
+    }
+
     /// The smallest byte `>= from` after which a match is still possible from `state`. Term
     /// dictionaries use it to jump over every term that cannot match.
     fn next_live_byte(&self, state: u32, from: u8) -> Option<u8> {
@@ -135,6 +141,9 @@ impl<A: Automaton + ?Sized> Automaton for &A {
     fn next_live_byte(&self, s: u32, from: u8) -> Option<u8> {
         (**self).next_live_byte(s, from)
     }
+    fn as_dfa(&self) -> Option<&Dfa> {
+        (**self).as_dfa()
+    }
 }
 
 impl<A: Automaton + ?Sized> Automaton for Box<A> {
@@ -155,6 +164,9 @@ impl<A: Automaton + ?Sized> Automaton for Box<A> {
     }
     fn next_live_byte(&self, s: u32, from: u8) -> Option<u8> {
         (**self).next_live_byte(s, from)
+    }
+    fn as_dfa(&self) -> Option<&Dfa> {
+        (**self).as_dfa()
     }
 }
 

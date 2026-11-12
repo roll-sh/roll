@@ -36,6 +36,8 @@ pub mod scripting;
 pub mod search;
 pub mod search_source;
 pub mod stack;
+pub mod tasks;
+pub mod thread_pool;
 pub mod time;
 pub mod tsds;
 pub mod units;

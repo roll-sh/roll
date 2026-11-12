@@ -24,18 +24,18 @@ pub const CLUSTER: &[Named] = &[
     Named { name: "cancel_task", patterns: &["cluster:admin/tasks/cancel"] },
     Named { name: "clone_api_key", patterns: &["cluster:admin/xpack/security/api_key/clone"] },
     Named { name: "create_snapshot", patterns: &["cluster:admin/snapshot/create*", "cluster:admin/snapshot/status*", "cluster:admin/snapshot/get", "cluster:admin/repository/get"] },
-    Named { name: "cross_cluster_replication", patterns: &["cluster:monitor/state", "cluster:admin/xpack/ccr/internal/*"] },
-    Named { name: "cross_cluster_search", patterns: &["cluster:monitor/xpack/enrich/esql/*", "cluster:admin/xpack/security/remote_cluster/*"] },
-    Named { name: "delegate_pki", patterns: &["cluster:admin/xpack/security/delegate_pki"] },
+    Named { name: "cross_cluster_replication", patterns: &["cluster:internal/remote_cluster/handshake", "cluster:internal/remote_cluster/nodes", "internal:admin/tasks/ban", "internal:admin/tasks/cancel_child", "cluster:monitor/xpack/info", "cluster:monitor/state"] },
+    Named { name: "cross_cluster_search", patterns: &["cluster:internal/remote_cluster/handshake", "cluster:internal/remote_cluster/nodes", "internal:admin/tasks/ban", "internal:admin/tasks/cancel_child", "cluster:monitor/xpack/info", "cluster:monitor/xpack/enrich/esql/resolve_policy", "cluster:internal:data/read/esql/open_exchange", "cluster:internal:data/read/esql/exchange", "cluster:monitor/stats/remote", "cluster:monitor/stats", "cluster:monitor/stats[n]"] },
+    Named { name: "delegate_pki", patterns: &["cluster:admin/xpack/security/delegate_pki", "cluster:admin/xpack/security/token/invalidate"] },
     Named { name: "grant_api_key", patterns: &["cluster:admin/xpack/security/api_key/grant*"] },
     Named { name: "manage_own_api_key", patterns: &["cluster:admin/xpack/security/api_key/*"] },
-    Named { name: "manage_token", patterns: &["cluster:admin/xpack/security/token/*", "cluster:admin/xpack/security/refresh_token*"] },
+    Named { name: "manage_token", patterns: &["cluster:admin/xpack/security/token/*"] },
     Named { name: "manage_user_profile", patterns: &["cluster:admin/xpack/security/profile/*"] },
     Named { name: "manage_service_account", patterns: &["cluster:admin/xpack/security/service_account/*"] },
-    Named { name: "monitor_connector", patterns: &["cluster:monitor/xpack/connector/*"] },
+    Named { name: "monitor_connector", patterns: &["cluster:admin/xpack/connector/get", "cluster:admin/xpack/connector/list", "cluster:admin/xpack/connector/sync_job/get", "cluster:admin/xpack/connector/sync_job/list"] },
     Named { name: "monitor_enrich", patterns: &["cluster:monitor/xpack/enrich/*", "cluster:admin/xpack/enrich/get"] },
     Named { name: "monitor_esql", patterns: &["cluster:monitor/xpack/esql/*"] },
-    Named { name: "monitor_inference", patterns: &["cluster:monitor/xpack/inference*"] },
+    Named { name: "monitor_inference", patterns: &["cluster:monitor/xpack/inference*", "cluster:monitor/xpack/ml/trained_models/deployment/infer"] },
     Named { name: "monitor_ml", patterns: &["cluster:monitor/xpack/ml/*"] },
     Named { name: "monitor_rollup", patterns: &["cluster:monitor/xpack/rollup/*"] },
     Named { name: "monitor_snapshot", patterns: &["cluster:admin/snapshot/status*", "cluster:admin/snapshot/get", "cluster:admin/repository/get"] },
@@ -45,26 +45,26 @@ pub const CLUSTER: &[Named] = &[
     Named { name: "monitor_data_frame_transforms", patterns: &["cluster:monitor/data_frame/*", "cluster:monitor/transform/*"] },
     Named { name: "monitor_watcher", patterns: &["cluster:monitor/xpack/watcher/*"] },
     Named { name: "post_behavioral_analytics_event", patterns: &["cluster:admin/xpack/application/analytics/post_event"] },
-    Named { name: "read_ccr", patterns: &["cluster:monitor/state", "cluster:monitor/xpack/ccr/*"] },
+    Named { name: "read_ccr", patterns: &["cluster:monitor/state", "cluster:admin/xpack/security/user/has_privileges"] },
     Named { name: "read_ilm", patterns: &["cluster:admin/ilm/get", "cluster:admin/ilm/operation_mode/get"] },
     Named { name: "read_pipeline", patterns: &["cluster:admin/ingest/pipeline/get", "cluster:admin/ingest/pipeline/simulate"] },
-    Named { name: "read_security", patterns: &["cluster:admin/xpack/security/*/get", "cluster:admin/xpack/security/*/query", "cluster:admin/xpack/security/user/has_privileges", "cluster:admin/xpack/security/profile/suggest"] },
-    Named { name: "read_slm", patterns: &["cluster:admin/slm/get", "cluster:admin/slm/status", "cluster:admin/ilm/operation_mode/get"] },
+    Named { name: "read_security", patterns: &["cluster:admin/xpack/security/api_key/get", "cluster:admin/xpack/security/api_key/query", "cluster:admin/xpack/security/privilege/builtin/get", "cluster:admin/xpack/security/privilege/get", "cluster:admin/xpack/security/profile/get", "cluster:admin/xpack/security/profile/has_privileges", "cluster:admin/xpack/security/profile/suggest", "cluster:admin/xpack/security/role/get", "cluster:admin/xpack/security/role/query", "cluster:admin/xpack/security/role_mapping/get", "cluster:admin/xpack/security/service_account/get", "cluster:admin/xpack/security/service_account/credential/get*", "cluster:admin/xpack/security/user/get", "cluster:admin/xpack/security/user/query", "cluster:admin/xpack/security/user/list_privileges", "cluster:admin/xpack/security/user/has_privileges", "cluster:admin/xpack/security/settings/get"] },
+    Named { name: "read_slm", patterns: &["cluster:admin/slm/status", "cluster:admin/slm/get", "cluster:admin/ilm/operation_mode/get"] },
     Named { name: "transport_client", patterns: &["cluster:monitor/nodes/liveness", "cluster:monitor/state"] },
     Named { name: "manage_autoscaling", patterns: &["cluster:admin/autoscaling/*"] },
     Named { name: "manage_behavioral_analytics", patterns: &["cluster:admin/xpack/application/analytics/*"] },
-    Named { name: "manage_ccr", patterns: &["cluster:admin/xpack/ccr/*", "cluster:monitor/state", "cluster:monitor/xpack/ccr/*"] },
-    Named { name: "manage_connector", patterns: &["cluster:admin/xpack/connector/*", "cluster:monitor/xpack/connector/*"] },
+    Named { name: "manage_ccr", patterns: &["cluster:admin/xpack/ccr/*", "cluster:monitor/state", "cluster:admin/xpack/security/user/has_privileges"] },
+    Named { name: "manage_connector", patterns: &["cluster:admin/xpack/connector/*", "!cluster:admin/xpack/connector/secret/get", "!cluster:admin/xpack/connector/secret/delete", "!cluster:admin/xpack/connector/secret/post", "!cluster:admin/xpack/connector/secret/put"] },
     Named { name: "manage_enrich", patterns: &["cluster:admin/xpack/enrich/*", "cluster:monitor/xpack/enrich/*"] },
     Named { name: "manage_ilm", patterns: &["cluster:admin/ilm/*"] },
     Named { name: "manage_index_templates", patterns: &["indices:admin/template/*", "indices:admin/index_template/*", "cluster:admin/component_template/*"] },
-    Named { name: "manage_inference", patterns: &["cluster:admin/xpack/inference/*", "cluster:monitor/xpack/inference*"] },
+    Named { name: "manage_inference", patterns: &["cluster:admin/xpack/inference/*", "cluster:monitor/xpack/inference*", "cluster:admin/xpack/ml/trained_models/deployment/start", "cluster:admin/xpack/ml/trained_models/deployment/stop", "cluster:monitor/xpack/ml/trained_models/deployment/infer"] },
     Named { name: "manage_logstash_pipelines", patterns: &["cluster:admin/logstash/pipeline/*"] },
     Named { name: "manage_ml", patterns: &["cluster:admin/xpack/ml/*", "cluster:monitor/xpack/ml/*"] },
     Named { name: "manage_rollup", patterns: &["cluster:admin/xpack/rollup/*", "cluster:monitor/xpack/rollup/*"] },
     Named { name: "manage_search_application", patterns: &["cluster:admin/xpack/application/search_application/*"] },
     Named { name: "manage_search_query_rules", patterns: &["cluster:admin/xpack/query_rules/*"] },
-    Named { name: "manage_search_synonyms", patterns: &["cluster:admin/synonyms/*"] },
+    Named { name: "manage_search_synonyms", patterns: &["cluster:admin/synonyms/*", "cluster:admin/synonyms_sets/*", "cluster:admin/synonym_rules/*"] },
     Named { name: "manage_slm", patterns: &["cluster:admin/slm/*", "cluster:admin/ilm/start", "cluster:admin/ilm/stop", "cluster:admin/ilm/operation_mode/get"] },
     Named { name: "manage_watcher", patterns: &["cluster:admin/xpack/watcher/*", "cluster:monitor/xpack/watcher/*"] },
     Named { name: "manage_transform", patterns: &["cluster:admin/data_frame/*", "cluster:monitor/data_frame/*", "cluster:admin/transform/*", "cluster:monitor/transform/*"] },
@@ -72,9 +72,19 @@ pub const CLUSTER: &[Named] = &[
     Named { name: "manage_ingest_pipelines", patterns: &["cluster:admin/ingest/pipeline/*"] },
     Named { name: "manage_pipeline", patterns: &["cluster:admin/ingest/pipeline/*"] },
     Named { name: "manage_api_key", patterns: &["cluster:admin/xpack/security/api_key/*"] },
-    Named { name: "manage_security", patterns: &["cluster:admin/xpack/security/*", "cluster:monitor/xpack/security/*", "cluster:admin/xpack/security_settings/*"] },
-    Named { name: "monitor", patterns: &["cluster:monitor/*"] },
-    Named { name: "manage", patterns: &["cluster:*", "indices:admin/template/*", "indices:admin/index_template/*", "!cluster:admin/xpack/security/*", "!cluster:monitor/xpack/security/*", "!cluster:admin/xpack/security_settings/*"] },
+    Named { name: "manage_security", patterns: &["cluster:admin/xpack/security/*", "!cluster:admin/xpack/security/delegate_pki"] },
+    Named { name: "manage_oidc", patterns: &["cluster:admin/xpack/security/oidc/*"] },
+    Named { name: "manage_saml", patterns: &["cluster:admin/xpack/security/saml/*", "cluster:admin/xpack/security/token/invalidate", "cluster:admin/xpack/security/token/refresh", "cluster:monitor/xpack/security/saml/metadata"] },
+    Named { name: "monitor_reindex", patterns: &["cluster:monitor/reindex/*"] },
+    Named { name: "manage_reindex", patterns: &["cluster:admin/reindex/*", "cluster:monitor/reindex/*"] },
+    Named { name: "read_connector_secrets", patterns: &["cluster:admin/xpack/connector/secret/get"] },
+    Named { name: "write_connector_secrets", patterns: &["cluster:admin/xpack/connector/secret/delete", "cluster:admin/xpack/connector/secret/post", "cluster:admin/xpack/connector/secret/put"] },
+    Named { name: "read_fleet_secrets", patterns: &["cluster:admin/fleet/secrets/get"] },
+    Named { name: "write_fleet_secrets", patterns: &["cluster:admin/fleet/secrets/post", "cluster:admin/fleet/secrets/delete"] },
+    Named { name: "read_project_routing", patterns: &["cluster:monitor/project/*", "cluster:monitor/project_routing/*"] },
+    Named { name: "manage_project_routing", patterns: &["cluster:monitor/project/*", "cluster:monitor/project_routing/*", "cluster:admin/project_routing/*"] },
+    Named { name: "monitor", patterns: &["cluster:monitor/*", "indices:admin/template/get", "cluster:admin/component_template/get", "indices:admin/index_template/get"] },
+    Named { name: "manage", patterns: &["cluster:*", "indices:admin/template/*", "indices:admin/index_template/*", "!cluster:admin/xpack/security/*"] },
     Named { name: "all", patterns: &["cluster:*", "indices:admin/template/*", "indices:admin/index_template/*"] },
 ];
 
@@ -82,16 +92,6 @@ pub const CLUSTER: &[Named] = &[
 const CLUSTER_EXTRA: &[&str] = &[
     "manage_data_stream_global_retention",
     "monitor_data_stream_global_retention",
-    "manage_oidc",
-    "manage_saml",
-    "manage_reindex",
-    "monitor_reindex",
-    "read_connector_secrets",
-    "read_fleet_secrets",
-    "read_project_routing",
-    "write_connector_secrets",
-    "write_fleet_secrets",
-    "manage_project_routing",
 ];
 
 /// Index privileges, narrowest first.
@@ -188,7 +188,12 @@ pub fn index_grants(privilege: &str, action: &str) -> bool {
 /// The named privileges that grant an action, narrowest first ("this action is granted by").
 pub fn granted_by(action: &str, cluster: bool) -> Vec<&'static str> {
     let table = if cluster { CLUSTER } else { INDEX };
-    table.iter().filter(|n| named_matches(n, action)).map(|n| n.name).collect()
+    let mut out: Vec<&'static str> = table.iter().filter(|n| n.name != "manage_own_api_key" && named_matches(n, action)).map(|n| n.name).collect();
+    if cluster {
+        // Elasticsearch's order: by how many other privileges each implies, then by name.
+        out.sort_by_key(|n| CLUSTER_ERROR_ORDER.split(',').position(|x| x == *n).unwrap_or(usize::MAX));
+    }
+    out
 }
 
 /// Every cluster privilege name in the order Elasticsearch lists them in validation errors.
@@ -227,7 +232,8 @@ pub enum Scope {
     Any,
 }
 
-/// The transport action a REST API performs, Elasticsearch's names where they matter.
+/// The transport action a REST API performs: Elasticsearch's name from [`super::actions`], else
+/// one built from the API's name.
 pub fn action_of(api: &str) -> (Scope, String) {
     use Scope::*;
     let fixed: Option<(Scope, &str)> = match api {
@@ -289,8 +295,13 @@ pub fn action_of(api: &str) -> (Scope, String) {
         "security.get_token" | "security.invalidate_token" => Some((Cluster, "cluster:admin/xpack/security/token/manage")),
         _ => None,
     };
+    let es = super::actions::action_name(api).filter(|_| api != "indices.analyze");
     if let Some((s, a)) = fixed {
-        return (s, a.to_string());
+        return (s, es.unwrap_or(a).to_string());
+    }
+    if let Some(a) = es {
+        let template = a.starts_with("indices:admin/template/") || a.starts_with("indices:admin/index_template/");
+        return (if a.starts_with("indices:") && !template { Index } else { Cluster }, a.to_string());
     }
     let (family, name) = api.split_once('.').unwrap_or(("", api));
     let read = name.starts_with("get")
@@ -502,7 +513,7 @@ mod tests {
 
     #[test]
     fn actions_of_apis() {
-        assert_eq!(action_of("cluster.health"), (Scope::Cluster, "cluster:monitor/cluster/health".to_string()));
+        assert_eq!(action_of("cluster.health"), (Scope::Cluster, "cluster:monitor/health".to_string()));
         assert_eq!(action_of("search").0, Scope::Index);
         assert!(cluster_grants("manage_security", &action_of("security.put_user").1));
         assert!(!cluster_grants("manage", &action_of("security.put_user").1));
@@ -510,5 +521,24 @@ mod tests {
         assert!(cluster_grants("manage_ml", &action_of("ml.put_job").1));
         assert!(cluster_grants("monitor_ml", &action_of("ml.get_jobs").1));
         assert!(!cluster_grants("monitor_ml", &action_of("ml.put_job").1));
+    }
+
+    /// "granted by" lists of Elasticsearch 9.5.5's 403s (a user without roles).
+    #[test]
+    fn granted_by_matches_elasticsearch() {
+        let cases = [
+            ("cluster:admin/xpack/security/api_key/get", "read_security,manage_api_key,manage_security,all"),
+            ("cluster:monitor/health", "monitor,manage,all"),
+            ("cluster:admin/xpack/connector/secret/get", "read_connector_secrets,manage,all"),
+            ("cluster:admin/xpack/security/user/query", "read_security,manage_security,all"),
+            ("cluster:admin/xpack/security/token/invalidate", "delegate_pki,manage_saml,manage_token,manage_security,all"),
+        ];
+        for (action, want) in cases {
+            assert_eq!(granted_by(action, true).join(","), want, "{action}");
+        }
+        assert_eq!(action_of("connector.secret_post"), (Scope::Cluster, "cluster:admin/xpack/connector/secret/post".to_string()));
+        assert_eq!(action_of("search_application.search").0, Scope::Index);
+        assert_eq!(action_of("indices.put_index_template").0, Scope::Cluster);
+        assert!(!cluster_grants("manage_connector", "cluster:admin/xpack/connector/secret/get"));
     }
 }

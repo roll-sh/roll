@@ -380,6 +380,11 @@ impl JavaRegex {
         &self.source
     }
 
+    /// `Matcher.groupCount()`: the number of capturing groups.
+    pub fn group_count(&self) -> usize {
+        self.groups
+    }
+
     /// The group number of a named group.
     pub fn group_index(&self, name: &str) -> Option<usize> {
         self.names.iter().find(|(n, _)| n == name).map(|&(_, i)| i)

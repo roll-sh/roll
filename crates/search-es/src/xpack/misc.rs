@@ -103,20 +103,46 @@ pub fn xpack_usage(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let x = &st.metadata.xpack;
     if let Value::Obj(m) = &mut v {
-        let rulesets: Vec<usize> = x.iter("query_rules.ruleset").map(|(_, r)| r.get("rules").and_then(Value::as_array).map_or(0, |a| a.len())).collect();
+        if let Some(Value::Obj(e)) = m.get_mut("esql") {
+            ctx.cluster.xpack.esql_telemetry.fill(e);
+        }
+        let rules_family = crate::xpack::entsearch::query_rules::RULESETS;
+        let rulesets: Vec<usize> = x.iter(rules_family).map(|(_, r)| r.get("rules").and_then(Value::as_array).map_or(0, |a| a.len())).collect();
         let total_rules: usize = rulesets.iter().sum();
+        // `QueryRulesetUsage`: criteria and rule types counted over every rule, the whole
+        // section in a `HashMap`'s order.
+        let (mut criteria, mut types) = (Map::new(), Map::new());
+        for (_, rs) in x.iter(rules_family) {
+            for r in rs.get("rules").and_then(Value::as_array).into_iter().flatten() {
+                let ty = r.get("type").map(Value::to_es_string).unwrap_or_default();
+                let n = types.get(&ty).and_then(Value::as_i64).unwrap_or(0) + 1;
+                types.insert(ty, n.into());
+                for c in r.get("criteria").and_then(Value::as_array).into_iter().flatten() {
+                    let ct = c.get("type").map(Value::to_es_string).unwrap_or_default();
+                    let n = criteria.get(&ct).and_then(Value::as_i64).unwrap_or(0) + 1;
+                    criteria.insert(ct, n.into());
+                }
+            }
+        }
         let mut qr = Map::new();
         qr.insert("total_rule_count".into(), total_rules.into());
+        if !criteria.is_empty() {
+            qr.insert("rule_criteria_total_counts".into(), Value::Obj(crate::json::java_hash_map(criteria, 16)));
+        }
         qr.insert("total_count".into(), rulesets.len().into());
         qr.insert("min_rule_count".into(), rulesets.iter().min().copied().unwrap_or(0).into());
         qr.insert("max_rule_count".into(), rulesets.iter().max().copied().unwrap_or(0).into());
+        if !types.is_empty() {
+            qr.insert("rule_type_total_counts".into(), Value::Obj(crate::json::java_hash_map(types, 16)));
+        }
+        let qr = crate::json::java_hash_map(qr, 16);
         m.insert(
             "enterprise_search".into(),
             obj! {
                 "available" => true,
                 "enabled" => true,
                 "search_applications" => obj! { "count" => x.len("search_application") },
-                "analytics_collections" => obj! { "count" => x.len("search_application.analytics") },
+                "analytics_collections" => obj! { "count" => crate::xpack::entsearch::search_application::collection_count(&st) },
                 "query_rulesets" => Value::Obj(qr),
             },
         );

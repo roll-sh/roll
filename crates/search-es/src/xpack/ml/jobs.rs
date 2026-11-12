@@ -274,6 +274,16 @@ fn job_order(v: Value) -> Value {
     Value::Obj(out)
 }
 
+/// Elasticsearch's deprecation warning for a `bucket_span` that doesn't divide (or, above a
+/// day, isn't a multiple of) one day.
+fn bucket_span_warning(job: &Value) -> Option<String> {
+    let text = job.pointer(&["analysis_config", "bucket_span"]).map(Value::to_es_string)?;
+    let secs = TimeValue::parse(&text, "bucket_span").ok()?.as_millis() / 1000;
+    const DAY: i64 = 86_400;
+    let kind = if secs > DAY { (secs % DAY != 0).then_some("multiple") } else { (secs > 0 && DAY % secs != 0).then_some("divisor") }?;
+    Some(format!("bucket_span {text} [{secs}s] is not an integral {kind} of the number of seconds in 1d [86400s]. This is now deprecated."))
+}
+
 /// Builds a job config in Elasticsearch's field order from a put body.
 fn build_job(src: Option<&[u8]>, id: &str, body: &Map, now: i64) -> EsResult<Value> {
     let mut out = Map::new();
@@ -342,6 +352,9 @@ pub async fn put_job(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Err(invalid_id("job_id", &id));
     }
     let job = build_job(ctx.raw_json(), &id, &body, ctx.now_ms)?;
+    if let Some(w) = bucket_span_warning(&job) {
+        ctx.warn(w);
+    }
     let datafeed = body.get("datafeed_config").cloned();
     let now = ctx.now_ms;
     let out = job.clone();
@@ -574,6 +587,7 @@ pub async fn reset_job(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 pub fn flush_job(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("job_id").unwrap_or_default();
+    ctx.warn("Forcing any buffered data to be processed is deprecated, in a future major version it will be compulsory to use a datafeed");
     require_open(ctx, id)?;
     Reply::ok(obj! { "flushed" => true, "last_finalized_bucket_end" => 0 })
 }
@@ -664,7 +678,10 @@ pub fn validate_job(ctx: &Ctx) -> EsResult<Reply> {
         return Err(invalid_id("job_id", &id));
     }
     let id = body.get("job_id").map(Value::to_es_string).unwrap_or_default();
-    build_job(ctx.raw_json(), &id, &body, ctx.now_ms)?;
+    let job = build_job(ctx.raw_json(), &id, &body, ctx.now_ms)?;
+    if let Some(w) = bucket_span_warning(&job) {
+        ctx.warn(w);
+    }
     Reply::acknowledged()
 }
 
@@ -1123,7 +1140,7 @@ fn build_datafeed(id: &str, body: &Map, roles: &[String]) -> EsResult<Value> {
     out.insert("chunking_config".into(), body.get("chunking_config").cloned().unwrap_or_else(|| obj! { "mode" => "auto" }));
     out.insert(
         "indices_options".into(),
-        body.get("indices_options").cloned().unwrap_or_else(|| obj! { "ignore_unavailable" => false, "expand_wildcards" => crate::arr!["open"], "allow_no_indices" => true, "ignore_throttled" => true }),
+        indices_options(body.get("indices_options")),
     );
     out.insert("query".into(), body.get("query").cloned().unwrap_or_else(|| obj! { "match_all" => obj! {} }));
     if let Some(x) = body.get("frequency") {
@@ -1145,9 +1162,59 @@ fn build_datafeed(id: &str, body: &Map, roles: &[String]) -> EsResult<Value> {
     Ok(Value::Obj(out))
 }
 
+/// Fields of DatafeedConfig's strict parser (`update` adds none).
+const DATAFEED_FIELDS: &[&str] = &[
+    "datafeed_id", "job_id", "indices", "indexes", "query", "frequency", "query_delay", "aggregations", "aggs", "script_fields",
+    "scroll_size", "chunking_config", "delayed_data_check_config", "max_empty_searches", "indices_options", "runtime_mappings",
+];
+
+/// A datafeed's `indices_options` in Elasticsearch's form: every option present (defaults
+/// filled in) and `expand_wildcards` as the states in `open, closed, hidden` order.
+fn indices_options(v: Option<&Value>) -> Value {
+    let get = |k: &str, d: bool| v.and_then(|v| v.get(k)).and_then(|x| x.as_bool().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).unwrap_or(d);
+    let states: Vec<String> = match v.and_then(|v| v.get("expand_wildcards")) {
+        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+        Some(x) => x.to_es_string().split(',').map(|s| s.trim().to_string()).collect(),
+        None => vec!["open".into()],
+    };
+    let has = |s: &str| states.iter().any(|x| x == s || x == "all");
+    let expand: Vec<Value> = ["open", "closed", "hidden"].into_iter().filter(|s| has(s)).map(Value::from).collect();
+    obj! {
+        "ignore_unavailable" => get("ignore_unavailable", false),
+        "expand_wildcards" => Value::Arr(expand),
+        "allow_no_indices" => get("allow_no_indices", true),
+        "ignore_throttled" => get("ignore_throttled", true),
+    }
+}
+
+/// The indices options of a put / update datafeed request's URL parameters (over the defaults;
+/// a body's `indices_options` wins). `ignore_throttled` warns, as on every request.
+fn params_indices_options(ctx: &Ctx) -> Option<Value> {
+    const KEYS: [&str; 4] = ["expand_wildcards", "ignore_unavailable", "allow_no_indices", "ignore_throttled"];
+    if KEYS.iter().all(|k| ctx.param(k).is_none()) {
+        return None;
+    }
+    if ctx.param("ignore_throttled").is_some() {
+        ctx.warn("[ignore_throttled] parameter is deprecated because frozen indices have been deprecated. Consider cold or frozen tiers in place of frozen indices.");
+    }
+    let mut m = Map::new();
+    for k in KEYS {
+        if let Some(v) = ctx.param(k) {
+            m.insert(k.into(), v.into());
+        }
+    }
+    Some(indices_options(Some(&Value::Obj(m))))
+}
+
 pub async fn put_datafeed(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = ctx.path_param("datafeed_id").unwrap_or_default().to_string();
-    let body = ctx.body_map()?.unwrap_or_default();
+    let mut body = ctx.body_map()?.unwrap_or_default();
+    if let Some(k) = body.keys().find(|k| !DATAFEED_FIELDS.contains(&k.as_str())) {
+        return Err(crate::xpack::unknown_field(ctx, "datafeed_config", k));
+    }
+    if let Some(o) = params_indices_options(ctx) {
+        body.entry("indices_options".to_string()).or_insert(o);
+    }
     let roles = crate::xpack::security::principal(ctx).roles.clone();
     let df = build_datafeed(&id, &body, &roles)?;
     let job = df.get("job_id").map(Value::to_es_string).unwrap_or_default();
@@ -1158,11 +1225,11 @@ pub async fn put_datafeed(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if st.metadata.xpack.get(JOBS, &job).is_none() {
                 return Err(no_job(&job));
             }
+            if let Some((other, _)) = st.metadata.xpack.iter(DATAFEEDS).find(|(_, d)| d.get("job_id").and_then(Value::as_str) == Some(job.as_str())) {
+                return Err(EsError::status(409, format!("A datafeed [{other}] already exists for job [{job}]")));
+            }
             if st.metadata.xpack.get(DATAFEEDS, &id).is_some() {
                 return Err(EsError::resource_already_exists(format!("A datafeed with id [{id}] already exists")));
-            }
-            if let Some((other, _)) = st.metadata.xpack.iter(DATAFEEDS).find(|(_, d)| d.get("job_id").and_then(Value::as_str) == Some(job.as_str())) {
-                return Err(EsError::resource_already_exists(format!("A datafeed [{other}] already exists for job [{job}]")));
             }
             store::put(st, DATAFEEDS, &id, df, now).map(|_| ())
         })
@@ -1173,7 +1240,11 @@ pub async fn put_datafeed(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub async fn update_datafeed(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = ctx.path_param("datafeed_id").unwrap_or_default().to_string();
     let body = ctx.body_map()?.unwrap_or_default();
+    if let Some(k) = body.keys().find(|k| !DATAFEED_FIELDS.contains(&k.as_str())) {
+        return Err(crate::xpack::unknown_field(ctx, "datafeed_update", k));
+    }
     let now = ctx.now_ms;
+    let from_params = params_indices_options(ctx).filter(|_| !body.contains_key("indices_options"));
     let out = ctx
         .cluster
         .update(move |st| {
@@ -1182,6 +1253,9 @@ pub async fn update_datafeed(ctx: &Ctx<'_>) -> EsResult<Reply> {
             for (k, v) in &body {
                 let key = if k == "indexes" { "indices" } else { k.as_str() };
                 merged.insert(key.to_string(), v.clone());
+            }
+            if let Some(o) = &from_params {
+                merged.insert("indices_options".into(), o.clone());
             }
             let roles: Vec<String> = cur.pointer(&["authorization", "roles"]).and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
             let mut df = build_datafeed(&id, &merged, &roles)?;

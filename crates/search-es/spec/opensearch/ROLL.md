@@ -12,7 +12,9 @@ with a newer tag's files and update the version above.
 
 `plugins/*.json` are roll's own (not vendored): the REST APIs of the plugins every OpenSearch
 distribution bundles that roll implements (the k-NN plugin's `_plugins/_knn/*`, Index State
-Management's `_plugins/_ism/*` with its `_opendistro/_ism/*` aliases), written in the
+Management's `_plugins/_ism/*` with its `_opendistro/_ism/*` aliases, the SQL plugin's
+`_plugins/_ppl`, `_plugins/_ppl/_explain`, `_plugins/_ppl/_grammar` and
+`_plugins/_query/settings`), written in the
 same format from the plugins' route definitions (`RestKNNStatsHandler`, `RestKNNWarmupHandler`,
 ...). An entry may name `"params_from": "<api>"` to take another API's parameters, and one with
 `"overlay": true` adds parameters to a core API whose spec file lacks them (`search`'s

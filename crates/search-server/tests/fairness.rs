@@ -52,8 +52,11 @@ async fn a_quiet_tenant_is_served_while_a_noisy_one_saturates_the_node() {
     }
     // Let the flood build its queue.
     tokio::time::sleep(alone * 4 + Duration::from_millis(50)).await;
+    // Its requests queue for its write pool (holding no running slot) or for a running slot.
     let sched = t.node.scheduler().unwrap();
-    assert!(sched.waiting() > 4, "the noisy tenant queues ({} waiting)", sched.waiting());
+    let pool = send(t.addr, "GET", "/_cat/thread_pool/write?h=queue", &[("Authorization", &noisy)], b"").await;
+    let pool_queue: usize = pool.text().trim().parse().unwrap_or(0);
+    assert!(sched.waiting() + pool_queue > 4, "the noisy tenant queues ({} waiting for a slot, {pool_queue} for its pool)", sched.waiting());
     let mut worst = Duration::ZERO;
     for _ in 0..10 {
         let s = Instant::now();

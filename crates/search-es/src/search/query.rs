@@ -347,6 +347,10 @@ impl<'a> QueryCtx<'a> {
                 if ids.ids.len() > max {
                     return Err(EsError::illegal_argument(format!("Too many ids specified, allowed max result window is [{max}]")));
                 }
+                // `IdsQueryBuilder.doRewrite` runs before any shard sees the query.
+                if ids.ids.is_empty() {
+                    return Ok(match_none("The \"ids\" query was rewritten to a \"match_none\" query."));
+                }
                 Ok(ids_query(&ids.ids))
             }
             Q::Match(m) => text::match_query(self, m),
@@ -439,12 +443,12 @@ impl<'a> QueryCtx<'a> {
                     return Err(not_searchable(f));
                 }
                 let s = value_text(value);
-                if case_insensitive {
-                    let s = match &f.flattened_key {
-                        Some(k) => format!("{k}\0{s}"),
-                        None => s,
-                    };
-                    return Ok(self.multi_term(f, ci_term(n, &s)?));
+                // An empty value has no case: Elasticsearch builds a plain term query.
+                if case_insensitive && !s.is_empty() {
+                    return Ok(match &f.flattened_key {
+                        Some(k) => self.multi_term(f, ci_term(n, &format!("{k}\0{s}"))?),
+                        None => ci_described(f, &s, self.multi_term(f, ci_term(n, &s)?)),
+                    });
                 }
                 let t = normalize(f, &s);
                 if f.index {
@@ -460,13 +464,13 @@ impl<'a> QueryCtx<'a> {
                 let s = value_text(value);
                 if !f.index {
                     // Doc values hold the whole value: an exact (slow) match on it.
-                    if case_insensitive {
-                        return Ok(self.multi_term(f, ci_term(n, &s)?));
+                    if case_insensitive && !s.is_empty() {
+                        return Ok(ci_described(f, &s, self.multi_term(f, ci_term(n, &s)?)));
                     }
                     return Ok(arc(ConstantScoreQuery::new(arc(DocValuesTermsQuery::new(n, [s.into_bytes()])))));
                 }
-                if case_insensitive {
-                    return Ok(arc(ci_term(n, &s)?));
+                if case_insensitive && !s.is_empty() {
+                    return Ok(ci_described(f, &s, arc(ci_term(n, &s)?)));
                 }
                 let q = arc(TermQuery::new(n, s.into_bytes()));
                 Ok(if f.kind == Kind::MatchOnlyText { arc(ConstantScoreQuery::new(q)) } else { q })
@@ -1022,15 +1026,17 @@ impl<'a> QueryCtx<'a> {
                 if !f.index && !f.doc_values {
                     return Err(not_searchable(&f));
                 }
-                Ok(self.multi_term(&f, q))
+                let q = self.multi_term(&f, q);
+                // `match_only_text` keeps no frequencies: its queries score constantly.
+                Ok(if f.kind == Kind::MatchOnlyText { arc(ConstantScoreQuery::new(q)) } else { q })
             }
-            k if k.is_numeric() || k.is_date() => super::range::numeric_fuzzy(self, &f, &fz.value, &fz.fuzziness),
             Kind::Wildcard if !crate::opensearch::active() => {
                 let v = wildcard_normalized(&f, &value);
                 let edits = fuzzy_edits(&fz.fuzziness, &v);
                 Ok(super::extra::wildcard_fuzzy(&f, &v, edits, fz.prefix_length.max(0) as usize, fz.max_expansions.max(1) as usize, fz.transpositions))
             }
-            _ => Err(qse(self, format!("Can only use fuzzy queries on keyword and text fields - not on [{}] which is of type [{}]", f.name, f.ty))),
+            // `MappedFieldType.fuzzyQuery` (numbers and dates included).
+            _ => Err(EsError::illegal_argument(format!("Can only use fuzzy queries on keyword and text fields - not on [{}] which is of type [{}]", f.name, f.ty))),
         }
     }
 
@@ -1097,6 +1103,10 @@ impl<'a> QueryCtx<'a> {
                 nested
             };
             self.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: Some(n.path.clone()), query: ih_child, join: None, children });
+        } else {
+            // `NestedQueryBuilder.extractInnerHitBuilders` only looks inside a query that has
+            // inner hits of its own: those of deeper queries are dropped.
+            self.inner_hits.borrow_mut().truncate(mark);
         }
         Ok(arc(ToParentQuery { child, parent_filter, score_mode: mode }))
     }
@@ -1212,6 +1222,11 @@ fn normalize_wildcard(f: &FieldInfo, pattern: &str) -> String {
 
 /// A case-insensitive `term` query (`AutomatonQueries.caseInsensitiveTermQuery`): unlike a
 /// wildcard pattern, the empty term matches the empty value. Prints as the escaped term.
+/// A case-insensitive term printed as Elasticsearch's `CaseInsensitiveTermQuery`.
+fn ci_described(f: &FieldInfo, s: &str, q: QueryRef) -> QueryRef {
+    super::ids::described(q, "CaseInsensitiveTermQuery", format!("CaseInsensitiveTermQuery{{{}:{s}}}", f.name))
+}
+
 fn ci_term(field: u32, s: &str) -> EsResult<MultiTermQuery> {
     let aut = search_codec::automaton::Dfa::term_case_insensitive(s, search_codec::automaton::dfa::DEFAULT_WORK_LIMIT)
         .map_err(|e| EsError::new(400, "too_complex_to_determinize_exception", e.to_string()))?;

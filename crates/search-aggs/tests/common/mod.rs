@@ -754,7 +754,7 @@ impl FieldLookup for Lookup<'_> {
                         "avg" => SortMode::Avg,
                         _ => SortMode::Median,
                     });
-                    out.push(HitSort::Field { field, reverse: order == Some("desc"), missing, mode, nested: None });
+                    out.push(HitSort::Field { field, reverse: order == Some("desc"), missing, mode, nested: None, numeric_type: None });
                 }
             }
         }

@@ -1,0 +1,162 @@
+# Tests of Elasticsearch 9.5.5's `data-streams` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security jvm=-Des.queryable_built_in_roles_enabled=false).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+data-streams:data_stream/100_delete_by_query/DBQ from data stream
+data-streams:data_stream/100_delete_by_query/Delete by query for multiple data streams
+data-streams:data_stream/10_basic/Create data stream with invalid name
+data-streams:data_stream/10_basic/Create existing data stream
+data-streams:data_stream/10_basic/Create hidden data stream
+data-streams:data_stream/10_basic/Create index into a namespace that is governed by a data stream template
+data-streams:data_stream/10_basic/Delete data stream by wildcard
+data-streams:data_stream/10_basic/Delete data stream missing behaviour
+data-streams:data_stream/10_basic/Delete data stream with backing indices
+data-streams:data_stream/10_basic/Delete data stream with failure store
+data-streams:data_stream/10_basic/Delete data stream with failure store uninitialized
+data-streams:data_stream/10_basic/Get data stream
+data-streams:data_stream/10_basic/Get data stream and check DSL and ILM information
+data-streams:data_stream/10_basic/Get maximum_timestamp for the data stream
+data-streams:data_stream/10_basic/Include metadata in a data stream
+data-streams:data_stream/10_basic/Indexing a document into a data stream without a timestamp field
+data-streams:data_stream/10_basic/append-only writes to backing indices prohibited
+data-streams:data_stream/110_update_by_query/Update by query for multiple data streams
+data-streams:data_stream/110_update_by_query/Update by query from data stream
+data-streams:data_stream/120_data_streams_stats/Empty data stream
+data-streams:data_stream/120_data_streams_stats/No data streams
+data-streams:data_stream/120_data_streams_stats/Rolled over data stream
+data-streams:data_stream/120_data_streams_stats/Single data stream
+data-streams:data_stream/130_migrate_to_data_stream/Migrate to data stream
+data-streams:data_stream/140_data_stream_aliases/Action Results with multiple matching aliases
+data-streams:data_stream/140_data_stream_aliases/Create data stream alias
+data-streams:data_stream/140_data_stream_aliases/Create data stream alias with filter
+data-streams:data_stream/140_data_stream_aliases/Create data stream aliases using wildcard expression
+data-streams:data_stream/140_data_stream_aliases/Ensure filtered data stream alias is properly removed
+data-streams:data_stream/140_data_stream_aliases/Fix IndexNotFoundException error when handling remove alias action
+data-streams:data_stream/140_data_stream_aliases/Single action result per action
+data-streams:data_stream/140_data_stream_aliases/Test get alias with non-matching data streams
+data-streams:data_stream/150_tsdb/TSDB failures go to failure store
+data-streams:data_stream/150_tsdb/aggregate the tsid
+data-streams:data_stream/150_tsdb/dimensions with ignore_malformed and ignore_above
+data-streams:data_stream/150_tsdb/dynamic templates
+data-streams:data_stream/150_tsdb/dynamic templates - conflicting aliases
+data-streams:data_stream/150_tsdb/dynamic templates - conflicting aliases with top-level field
+data-streams:data_stream/150_tsdb/dynamic templates with incremental indexing
+data-streams:data_stream/150_tsdb/dynamic templates with nesting
+data-streams:data_stream/150_tsdb/enable subobjects in passthrough object
+data-streams:data_stream/150_tsdb/fetch the tsid
+data-streams:data_stream/150_tsdb/index without timestamp
+data-streams:data_stream/150_tsdb/index without timestamp with pipeline
+data-streams:data_stream/150_tsdb/multi value dimensions
+data-streams:data_stream/150_tsdb/non string dimension fields
+data-streams:data_stream/150_tsdb/passthrough objects with duplicate priority
+data-streams:data_stream/150_tsdb/subobject in passthrough object auto flatten
+data-streams:data_stream/170_modify_data_stream/Modify a data stream
+data-streams:data_stream/170_modify_data_stream/Modify a data stream with delete backing index action
+data-streams:data_stream/170_modify_data_stream/Modify a data stream's failure store
+data-streams:data_stream/180_simulate_existing_data_stream/Simulate an index with the same name as a data stream that already exists
+data-streams:data_stream/190_failure_store_redirection/Ensure failure is redirected to correct failure store after a reroute processor
+data-streams:data_stream/190_failure_store_redirection/Failure redirects to correct failure store when index loop is detected
+data-streams:data_stream/190_failure_store_redirection/Failure redirects to correct failure store when pipeline loop is detected
+data-streams:data_stream/190_failure_store_redirection/Failure redirects to original failure store during index change if final pipeline changes target
+data-streams:data_stream/190_failure_store_redirection/Failure redirects to original failure store during index change if self referenced
+data-streams:data_stream/190_failure_store_redirection/Redirect ingest failure in data stream to failure store
+data-streams:data_stream/190_failure_store_redirection/Redirect shard failure in data stream to failure store
+data-streams:data_stream/190_failure_store_redirection/Test failure store status with bulk request failing in ingest
+data-streams:data_stream/190_failure_store_redirection/Test failure store status with bulk request failing on mappings
+data-streams:data_stream/190_failure_store_redirection/Version conflicts are not redirected to failure store
+data-streams:data_stream/200_require_data_stream/Testing require_data_stream in bulk requests
+data-streams:data_stream/200_require_data_stream/Testing require_data_stream in index creation
+data-streams:data_stream/20_unsupported_apis/Non append-only writes into a data stream
+data-streams:data_stream/20_unsupported_apis/Prohibit clone on data stream's write index
+data-streams:data_stream/20_unsupported_apis/Prohibit shrink on data stream's write index
+data-streams:data_stream/20_unsupported_apis/Prohibit split on data stream's write index
+data-streams:data_stream/20_unsupported_apis/Test apis that do not supported data streams
+data-streams:data_stream/210_rollover_failure_store/A failure store marked for lazy rollover should only be rolled over when there is a failure
+data-streams:data_stream/210_rollover_failure_store/Don't roll over a data stream's failure store when conditions aren't met
+data-streams:data_stream/210_rollover_failure_store/Lazily roll over a data stream's failure store after a shard failure
+data-streams:data_stream/210_rollover_failure_store/Lazily roll over a data stream's failure store after an ingest failure
+data-streams:data_stream/210_rollover_failure_store/Roll over a data stream's failure store with conditions
+data-streams:data_stream/210_rollover_failure_store/Roll over a data stream's failure store without conditions
+data-streams:data_stream/210_rollover_failure_store/Rolling over a failure store on a data stream without the failure store enabled should work
+data-streams:data_stream/210_rollover_failure_store/Rolling over an uninitialized failure store should initialize it
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect ingest failure into pre-existing data stream to failure store when enabled by setting but disabled in template
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect ingest failure into pre-existing data stream to failure store when it doesn't match the setting
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect ingest failure when auto-creating data stream to failure store when enabled by setting but disabled in template
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect ingest failure when auto-creating data stream to failure store when it doesn't match the setting
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect mapping failure into pre-existing data stream to failure store when enabled by setting but disabled in template
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect mapping failure into pre-existing data stream to failure store when it doesn't match the setting
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect mapping failure when auto-creating data stream to failure store when enabled by setting but disabled in template
+data-streams:data_stream/220_failure_store_cluster_setting/Do not redirect mapping failure when auto-creating data stream to failure store when it doesn't match the setting
+data-streams:data_stream/220_failure_store_cluster_setting/Redirect ingest failure into pre-existing data stream to failure store when enabled by setting
+data-streams:data_stream/220_failure_store_cluster_setting/Redirect ingest failure when auto-creating data stream to failure store when enabled by setting
+data-streams:data_stream/220_failure_store_cluster_setting/Redirect mapping failure into pre-existing data stream to failure store when enabled by setting
+data-streams:data_stream/220_failure_store_cluster_setting/Redirect mapping failure when auto-creating data stream to failure store when enabled by setting
+data-streams:data_stream/230_data_stream_options/Edit data stream options
+data-streams:data_stream/230_data_stream_options/Setting frozen_after on failure store lifecycle via options API is rejected
+data-streams:data_stream/230_data_stream_options/Test partially resetting failure store options in template composition
+data-streams:data_stream/230_data_stream_options/Test resetting data stream options in template composition
+data-streams:data_stream/240_data_stream_settings/Test dry run
+data-streams:data_stream/240_data_stream_settings/Test invalid settings
+data-streams:data_stream/240_data_stream_settings/Test multiple data streams
+data-streams:data_stream/240_data_stream_settings/Test null out settings
+data-streams:data_stream/240_data_stream_settings/Test single data stream
+data-streams:data_stream/240_data_stream_settings/Test write index only setting
+data-streams:data_stream/240_failure_store_info/Get failure store info from cluster setting enabled failure store
+data-streams:data_stream/240_failure_store_info/Get failure store info from disabled failure store
+data-streams:data_stream/240_failure_store_info/Get failure store info from explicitly enabled failure store
+data-streams:data_stream/240_failure_store_info/Get failure store info from explicitly enabled failure store and disabled lifecycle
+data-streams:data_stream/250_data_stream_mappings/Test single data stream
+data-streams:data_stream/260_logs_failure_store/Test logs-*-* data streams have failure store enabled by default
+data-streams:data_stream/270_small_retention/Test failure store rollover with tiny retention
+data-streams:data_stream/280_data_stream_mappings-timeseries/Test change data stream from standard to time_series with no routing_path
+data-streams:data_stream/280_data_stream_mappings-timeseries/Test change data stream from standard to time_series with routing_path
+data-streams:data_stream/280_data_stream_mappings-timeseries/Test change data stream from time_series to standard with no routing_path
+data-streams:data_stream/280_data_stream_mappings-timeseries/Test change data stream mode
+data-streams:data_stream/280_data_stream_mappings-timeseries/Test mappings component templates only
+data-streams:data_stream/280_data_stream_mappings-timeseries/Test time_series data stream
+data-streams:data_stream/290_columnar/Create columnar data stream with @timestamp indexed, index docs, and retrieve them
+data-streams:data_stream/290_columnar/Create columnar data stream, index docs, and retrieve them
+data-streams:data_stream/290_columnar/Create columnar index, index docs, and retrieve them
+data-streams:data_stream/290_columnar/Create logsdb_columnar data stream with @timestamp indexed, index docs, and retrieve them
+data-streams:data_stream/290_columnar/Create logsdb_columnar data stream, index docs, and retrieve them
+data-streams:data_stream/290_columnar/Create logsdb_columnar index, index docs, and retrieve them
+data-streams:data_stream/290_columnar/store: true is rejected in columnar mode
+data-streams:data_stream/290_columnar/store: true is rejected in logsdb_columnar mode
+data-streams:data_stream/300_past_tsdb_indexing/Index past timestamps with infinite write window creates new backing indices
+data-streams:data_stream/300_past_tsdb_indexing/Past timestamps fail if it's out of the eligible write time window
+data-streams:data_stream/300_past_tsdb_indexing/Past timestamps redirect to failure store if enabled and they are out of the eligible write window
+data-streams:data_stream/30_auto_create_data_stream/Auto-create data stream
+data-streams:data_stream/30_auto_create_data_stream/Don't initialize failure store during data stream auto-creation on successful index
+data-streams:data_stream/40_supported_apis/Open write index for data stream opens all backing indices
+data-streams:data_stream/40_supported_apis/Verify get field mappings api
+data-streams:data_stream/40_supported_apis/Verify get index api
+data-streams:data_stream/40_supported_apis/Verify get mapping api
+data-streams:data_stream/40_supported_apis/Verify rank eval with data streams
+data-streams:data_stream/40_supported_apis/Verify search shards api
+data-streams:data_stream/40_supported_apis/Verify shard stores api
+data-streams:data_stream/50_delete_backing_indices/Attempt to delete write index on data stream is rejected
+data-streams:data_stream/50_delete_backing_indices/Delete backing index on data stream
+data-streams:data_stream/60_get_backing_indices/Get backing indices for data stream
+data-streams:data_stream/70_rollover_data_streams/Roll over a data stream
+data-streams:data_stream/80_resolve_index_data_streams/Resolve index with hidden and closed indices
+data-streams:data_stream/80_resolve_index_data_streams/Resolve index with indices, aliases, and data streams
+data-streams:data_stream/90_reindex/Reindex from data stream into an index
+data-streams:data_stream/90_reindex/Reindex from data stream into another data stream
+data-streams:data_stream/90_reindex/Reindex from index into data stream
+data-streams:data_stream/lifecycle/10_explain_lifecycle/Explain backing index lifecycle
+data-streams:data_stream/lifecycle/190_create_data_stream_with_lifecycle/Create data stream with lifecycle
+data-streams:data_stream/lifecycle/20_basic/Delete data stream lifecycle from the data streams
+data-streams:data_stream/lifecycle/20_basic/Enable lifecycle
+data-streams:data_stream/lifecycle/20_basic/Get data stream lifecycle
+data-streams:data_stream/lifecycle/20_basic/Get data stream lifecycle with defaults
+data-streams:data_stream/lifecycle/20_basic/Get data stream with default lifecycle configuration
+data-streams:data_stream/lifecycle/20_basic/Get data stream with global retention
+data-streams:data_stream/lifecycle/20_basic/Put data stream lifecycle
+data-streams:data_stream/lifecycle/20_basic/Put data stream lifecycle with downsampling method
+data-streams:data_stream/lifecycle/20_basic/Put data stream lifecycle with frozen after
+data-streams:data_stream/lifecycle/30_not_found/Delete data stream lifecycle does not succeed when at lease one data stream does not exist
+data-streams:data_stream/lifecycle/30_not_found/Get data stream lifecycle
+data-streams:data_stream/lifecycle/30_not_found/Get data stream lifecycle when at least one data stream does not exist
+data-streams:data_stream/lifecycle/30_not_found/Put data stream lifecycle does not succeed when at lease one data stream does not exist
+data-streams:data_stream/lifecycle/40_effective_retention/Retrieve effective retention via the data stream API
+data-streams:data_stream/lifecycle/40_effective_retention/Retrieve effective retention with data stream lifecycle
+data-streams:data_stream/lifecycle/40_effective_retention/Retrieve effective retention with explain

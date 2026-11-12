@@ -306,6 +306,9 @@ fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str,
     if st.has_alias(name) || st.metadata.data_stream_aliases.contains_key(name) {
         return Err(EsError::invalid_index_name(name, "already exists as alias"));
     }
+    if crate::xpack::esql::is_view(st, name) {
+        return Err(EsError::invalid_index_name(name, "already exists as an ESQL view"));
+    }
     index_settings::reject_private(st.dialect, &req.settings)?;
     index_settings::reject_translog_retention_in(st.dialect, &req.settings)?;
     if req.settings.get("index.soft_deletes.enabled") == Some("false") {
@@ -504,7 +507,7 @@ fn finish_create(
         if alias == name {
             return Err(EsError::illegal_argument(format!("alias name [{alias}] self-conflicts with index name")));
         }
-        if st.metadata.indices.contains_key(alias) {
+        if st.metadata.indices.contains_key(alias) || crate::xpack::esql::is_view(st, alias) {
             return Err(EsError::invalid_alias_name(alias, "an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias"));
         }
     }
@@ -554,7 +557,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
         })
         .await?;
     ctx.warn_all(warnings);
-    if name.starts_with('.') && !hidden && !names::is_system_index(&name) {
+    if name.starts_with('.') && !hidden && !names::dot_name_allowed(&name) {
         ctx.warn_dialect(
             None,
             Some(format!(

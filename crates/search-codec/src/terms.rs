@@ -36,7 +36,7 @@
 use std::cmp::Ordering;
 use std::ops::Bound;
 
-use crate::automaton::{Automaton, literal_prefix, next_candidate};
+use crate::automaton::{Automaton, Dfa, literal_prefix, next_candidate};
 use crate::bitpack::direct;
 use crate::bloom::BloomFilter;
 use crate::container::{ContainerWriter, SectionKind};
@@ -814,6 +814,8 @@ impl MetaDecoder {
 pub struct TermsIter<'a> {
     reader: &'a TermsReader,
     aut: Option<&'a dyn Automaton>,
+    /// `aut` as a table DFA, looked up once (see [`TermsIter::run_automaton`]).
+    dfa: Option<&'a Dfa>,
     upper: Bound<Vec<u8>>,
     /// Block of the current term, the byte offset of the next entry and the end of the block's
     /// entries.
@@ -853,6 +855,7 @@ impl<'a> TermsIter<'a> {
         let mut it = TermsIter {
             reader,
             aut,
+            dfa: aut.and_then(|a| a.as_dfa()),
             upper: match upper {
                 Bound::Included(u) => Bound::Included(u.to_vec()),
                 Bound::Excluded(u) => Bound::Excluded(u.to_vec()),
@@ -942,7 +945,15 @@ impl<'a> TermsIter<'a> {
             let shared = shared.min(self.term.len());
             self.shared = shared;
             self.term.truncate(shared);
-            self.term.extend_from_slice(suffix);
+            // Most suffixes are short: a fixed 16-byte copy (two vector moves, trimmed after)
+            // instead of a variable-length `memcpy` call.
+            match data.get(at..at + 16) {
+                Some(chunk) if suffix.len() <= 16 => {
+                    self.term.extend_from_slice(&<[u8; 16]>::try_from(chunk).unwrap());
+                    self.term.truncate(shared + suffix.len());
+                }
+                _ => self.term.extend_from_slice(suffix),
+            }
         }
         self.idx = self.idx.wrapping_add(1);
         self.started = true;
@@ -1016,7 +1027,7 @@ impl<'a> TermsIter<'a> {
                 self.valid = true;
                 return Some(&self.term);
             };
-            match self.run_automaton(aut) {
+            match self.run_automaton() {
                 Run::Match => {
                     self.dead_run = 0;
                     self.valid = true;
@@ -1053,9 +1064,20 @@ impl<'a> TermsIter<'a> {
 
     /// Feeds the current term to the automaton, reusing the states of its shared prefix.
     #[inline]
-    fn run_automaton(&mut self, aut: &dyn Automaton) -> Run {
+    fn run_automaton(&mut self) -> Run {
         let keep = self.shared.min(self.states.len() - 1) + 1;
         self.states.truncate(keep);
+        // A table DFA (wildcards, regexps, prefixes compiled to one) steps without a virtual
+        // call per byte: a third of a `*infix*` wildcard's time went to those calls.
+        match (self.dfa, self.aut) {
+            (Some(d), _) => self.step_automaton(d),
+            (None, Some(a)) => self.step_automaton(a),
+            (None, None) => Run::Match,
+        }
+    }
+
+    #[inline(always)]
+    fn step_automaton<A: Automaton + ?Sized>(&mut self, aut: &A) -> Run {
         loop {
             let depth = self.states.len() - 1;
             let s = self.states[depth];
@@ -1330,6 +1352,65 @@ mod tests {
             c += 1;
         }
         println!("prefix intersect: {:.0} ns/term ({c} terms)", t0.elapsed().as_nanos() as f64 / c.max(1) as f64);
+    }
+
+    /// Automaton intersections over a place-name-like dictionary: `ROLL_BENCH_TERMS=<file>`
+    /// reads one term per line (for example the geonames `name` values), else 1M synthetic
+    /// names. `cargo test -p search-codec --release --lib bench_intersect -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_intersect() {
+        let mut set = std::collections::BTreeSet::new();
+        match std::env::var("ROLL_BENCH_TERMS") {
+            Ok(path) => {
+                for l in std::fs::read_to_string(path).unwrap().lines() {
+                    set.insert(l.as_bytes().to_vec());
+                }
+            }
+            Err(_) => {
+                const SYL: [&str; 24] =
+                    ["san", "ta", "ber", "g", "lo", "ri", "ver", "mont", "stein", "ham", "dorf", "el", "ka", "mi", "no", "ra", "be", "rg", "ville", "o", "u", "an", "de", "la"];
+                let mut rng = StdRng::seed_from_u64(9);
+                while set.len() < 1_000_000 {
+                    let mut t = String::new();
+                    for _ in 0..rng.gen_range(2..6) {
+                        t.push_str(SYL[rng.gen_range(0..SYL.len())]);
+                    }
+                    if rng.gen_bool(0.3) {
+                        t = format!("{}{}", t[..1].to_uppercase(), &t[1..]);
+                    }
+                    set.insert(t.into_bytes());
+                }
+            }
+        }
+        let r = build_set(&set);
+        let mut best = f64::MAX;
+        for _ in 0..7 {
+            let t0 = std::time::Instant::now();
+            let mut it = r.iter();
+            let mut c = 0usize;
+            while let Some(t) = it.next() {
+                c += t.len();
+            }
+            assert!(c > 0);
+            best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("{:10} {best:8.2} ms  {:.1} ns/term", "(iterate)", best * 1e6 / set.len() as f64);
+        for pat in ["*berg*", "*ville", "S*a*", "?an*", "*e?n"] {
+            let d = Dfa::wildcard(pat, false, 10_000).unwrap();
+            let mut best = f64::MAX;
+            let mut c = 0u64;
+            for _ in 0..7 {
+                let t0 = std::time::Instant::now();
+                let mut it = r.intersect(&d);
+                c = 0;
+                while it.next().is_some() {
+                    c += 1;
+                }
+                best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("{pat:10} {best:8.2} ms  {:.1} ns/term ({c} of {} terms)", best * 1e6 / set.len() as f64, set.len());
+        }
     }
 
     fn build_set(terms: &std::collections::BTreeSet<Vec<u8>>) -> TermsReader {

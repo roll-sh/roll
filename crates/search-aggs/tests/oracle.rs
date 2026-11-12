@@ -264,6 +264,49 @@ fn composite_pages_cover_every_pair_once() {
 }
 
 #[test]
+fn composite_keyword_pairs_page_exactly() {
+    // Two ordinal sources: single-valued docs go through the per-segment combination cache,
+    // multi-valued ones through the general path; small pages evict often, so cached slots
+    // get recycled.
+    for seed in 13..=14u64 {
+        let docs = docs(seed, 300);
+        let mut want: BTreeMap<(String, String), i64> = BTreeMap::new();
+        for d in docs.iter() {
+            let ks: BTreeSet<&String> = d.k.iter().collect();
+            for a in &ks {
+                for b in &ks {
+                    *want.entry(((*a).clone(), (*b).clone())).or_default() += 1;
+                }
+            }
+        }
+        for (shards, segments) in LAYOUTS {
+            for size in [1usize, 7, 50] {
+                let mut got: BTreeMap<(String, String), i64> = BTreeMap::new();
+                let mut after = String::new();
+                loop {
+                    let aggs = format!(
+                        r#"{{"c":{{"composite":{{"size":{size},"sources":[{{"a":{{"terms":{{"field":"k"}}}}}},{{"b":{{"terms":{{"field":"k","order":"desc"}}}}}}]{after}}}}}}}"#
+                    );
+                    let r = run_layout(&docs, shards, segments, &aggs);
+                    let page = buckets(&r, "c");
+                    if page.is_empty() {
+                        break;
+                    }
+                    for b in &page {
+                        let key = b.get("key").unwrap();
+                        let k = (key.get("a").unwrap().as_str().unwrap().to_string(), key.get("b").unwrap().as_str().unwrap().to_string());
+                        assert!(got.insert(k, b.get("doc_count").unwrap().as_i64().unwrap()).is_none(), "seed {seed}: a pair came twice");
+                    }
+                    let ak = r.get("c").unwrap().get("after_key").unwrap();
+                    after = format!(r#","after":{}"#, ak.to_json_string());
+                }
+                assert_eq!(got, want, "seed {seed} layout {shards}x{segments} size {size}");
+            }
+        }
+    }
+}
+
+#[test]
 fn truncated_terms_bound_their_errors() {
     for seed in 8..=12u64 {
         let docs = docs(seed, 600);

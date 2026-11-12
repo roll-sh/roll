@@ -173,6 +173,9 @@ fn resize(st: &mut ClusterState, kind: ResizeType, source: &str, target: &str, r
         return Err(EsError::illegal_argument("Can't disable [index.soft_deletes.enabled] setting on resize"));
     }
     names::validate_index_name(target)?;
+    if crate::xpack::esql::is_view(st, target) {
+        return Err(EsError::invalid_index_name(target, "already exists as an ESQL view"));
+    }
     // `validateResize`.
     if let Some(existing) = st.metadata.indices.get(target) {
         return Err(EsError::index_already_exists(target, &existing.uuid));

@@ -40,7 +40,7 @@ use crate::points::write_points;
 use crate::postings::PostingsWriter;
 use crate::sort::sort_doc_map;
 use crate::source::{DocValuesSource, RemappedSource, SegmentSource, SortedSetSource, SortedSource};
-use crate::stored::{StoredOptions, StoredWriter, sample_docs, train_dictionary};
+use crate::stored::{StoredOptions, StoredWriter, build_dictionary, sample_docs};
 use crate::terms::TermsWriter;
 use crate::vectors::{GraphSeed, write_vectors};
 use crate::{MAX_DOCS, NO_MORE_DOCS};
@@ -443,21 +443,11 @@ fn write_inner(
         }
     }
 
-    // Stored fields, with a dictionary trained on a sample of documents.
+    // Stored fields, with a dictionary built from a sample of documents.
     let mut doc = Vec::new();
     let dict = if opts.stored.dictionary {
-        let mut samples = Vec::new();
-        let mut total = 0usize;
-        for d in sample_docs(max_doc) {
-            doc.clear();
-            src.stored(d, &mut doc)?;
-            total += doc.len();
-            samples.push(doc.clone());
-            if total > crate::stored::max_sample_bytes() {
-                break;
-            }
-        }
-        train_dictionary(&samples)
+        let samples = sample_docs(max_doc, |d, out| src.stored(d, out))?;
+        build_dictionary(&samples, opts.stored.train, opts.stored.level)
     } else {
         None
     };

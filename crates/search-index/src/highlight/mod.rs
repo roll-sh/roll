@@ -269,6 +269,10 @@ pub type PhraseSlots = Vec<(u32, Vec<Vec<u8>>)>;
 pub struct HighlightTerms {
     pub terms: HashSet<Vec<u8>>,
     pub multi: Vec<TermMatcher>,
+    /// Pattern sources of intervals queries (`consumeTermsMatching` from an
+    /// `IntervalQuery`): the unified and fvh highlighters use them, the plain highlighter's
+    /// extractor (`WeightedSpanTermExtractor`'s term collector) doesn't see them.
+    pub interval_multi: Vec<TermMatcher>,
     /// Phrases: `(relative position, accepted terms)` slots and slop.
     pub phrases: Vec<(PhraseSlots, u32)>,
     /// Span queries: only their terms inside a match of the whole tree highlight
@@ -299,6 +303,11 @@ impl HighlightTerms {
                     self.out.multi.push(m);
                 }
             }
+            fn interval_multi_term(&mut self, field: u32, m: TermMatcher) {
+                if self.ok(field) {
+                    self.out.interval_multi.push(m);
+                }
+            }
             fn phrase(&mut self, field: u32, slots: &[(u32, Vec<Vec<u8>>)], slop: u32) {
                 if self.ok(field) {
                     self.out.phrases.push((slots.to_vec(), slop));
@@ -316,7 +325,7 @@ impl HighlightTerms {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.terms.is_empty() && self.multi.is_empty() && self.phrases.is_empty() && self.spans.is_empty()
+        self.terms.is_empty() && self.multi.is_empty() && self.interval_multi.is_empty() && self.phrases.is_empty() && self.spans.is_empty()
     }
 
     /// The (position, term) occurrences of the span queries' matches in `tokens`.
@@ -391,7 +400,7 @@ pub fn find_matches(tokens: &[HlToken], q: &HighlightTerms, weight_matches: bool
     for t in tokens {
         if q.terms.contains(&t.term) {
             out.push(HlMatch { start: t.start, end: t.end, key: t.term.clone() });
-        } else if let Some(i) = q.multi.iter().position(|m| m(&t.term)) {
+        } else if let Some(i) = q.multi.iter().chain(&q.interval_multi).position(|m| m(&t.term)) {
             // Lucene keys multi-term matches by the query, not the expanded term.
             out.push(HlMatch { start: t.start, end: t.end, key: format!("\u{0}multi{i}").into_bytes() });
         }
@@ -421,7 +430,7 @@ pub fn find_matches(tokens: &[HlToken], q: &HighlightTerms, weight_matches: bool
                 .iter()
                 .filter(|t| {
                     q.terms.contains(&t.term)
-                        || q.multi.iter().any(|m| m(&t.term))
+                        || q.multi.iter().chain(&q.interval_multi).any(|m| m(&t.term))
                         || q.phrases.iter().any(|(slots, _)| slots.iter().any(|(_, ts)| ts.contains(&t.term)))
                         || q.spans.iter().any(|n| spans::extracts(n, &t.term))
                 })
@@ -496,7 +505,10 @@ fn highlight_impl(
         return Ok(Vec::new());
     }
     let mut fields = vec![field];
-    fields.extend(opts.matched_fields.iter().copied());
+    // The plain highlighter ignores `matched_fields`.
+    if opts.kind != HighlighterType::Plain {
+        fields.extend(opts.matched_fields.iter().copied());
+    }
     let only = if opts.require_field_match { Some(fields.as_slice()) } else { None };
     if opts.kind == HighlighterType::Fvh {
         return fvh::highlight(searcher, query, values, analyzer, only, opts);

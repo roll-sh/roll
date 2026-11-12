@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! search-dev --listen 127.0.0.1:59200 [--cluster dev] [--dialect elasticsearch|opensearch]
-//!            [--data-dir .roll/search-dev] [--tls-cert cert.pem --tls-key key.pem]
+//!            [--data-dir .roll/search-dev [--s3-bucket b [--s3-endpoint url] [--s3-prefix p]]]
+//!            [--tls-cert cert.pem --tls-key key.pem]
 //!            [-E node.attr.rack=r1 ...] [--test-features] [--yaml-test-cluster]
 //! ```
 //!
@@ -12,8 +13,8 @@
 //! features published).
 //!
 //! Without `--data-dir` the cluster lives in memory; with it, the cluster (metadata and
-//! documents) is kept through `search-store` in that directory (objects under `objects/`, the
-//! WAL and the local cache under `cache/`): every acknowledged write survives a restart or a
+//! documents) is kept through `search-store` in that directory (objects under `objects/`, or in
+//! S3 with `--s3-bucket`; the WAL and the local cache under `cache/`): every acknowledged write survives a restart or a
 //! crash (`kill -9`). `--idle-unload <s>` (or `--idle-unload-ms`) unloads the cluster when idle (it wakes on the next
 //! request); `--sync-objects` acknowledges writes once they are in object storage. SIGINT and
 //! SIGTERM stop gracefully: requests in flight finish, the cluster is flushed.
@@ -68,6 +69,20 @@ struct Args {
     /// Acknowledge writes once the WAL is in object storage instead of on local disk.
     #[arg(long)]
     sync_objects: bool,
+    /// Keep the objects in this S3 bucket (or one of an S3-compatible endpoint) instead of
+    /// `<data-dir>/objects`; credentials come from the usual AWS environment variables.
+    /// `--data-dir` still holds the local cache and the WAL.
+    #[arg(long, requires = "data_dir")]
+    s3_bucket: Option<String>,
+    /// S3 endpoint URL (MinIO, R2, …).
+    #[arg(long, requires = "s3_bucket")]
+    s3_endpoint: Option<String>,
+    /// Key prefix inside the bucket.
+    #[arg(long, requires = "s3_bucket")]
+    s3_prefix: Option<String>,
+    /// S3 region (default: the AWS environment's).
+    #[arg(long, requires = "s3_bucket")]
+    s3_region: Option<String>,
     /// PEM certificate chain for HTTPS.
     #[arg(long, requires = "tls_key")]
     tls_cert: Option<std::path::PathBuf>,
@@ -123,7 +138,16 @@ async fn run() -> anyhow::Result<()> {
         }
         node_settings.push((k.trim().to_string(), v.trim().to_string()));
     }
+    // `http.max_content_length` sizes the node's body limit, as on Elasticsearch.
+    let max_body_bytes = match node_settings.iter().rev().find(|(k, _)| k == "http.max_content_length") {
+        Some((_, v)) => match search_es::units::ByteSize::parse(v, "http.max_content_length") {
+            Ok(b) if b.bytes() >= 0 => b.bytes() as usize,
+            _ => anyhow::bail!("failed to parse value [{v}] for setting [http.max_content_length]"),
+        },
+        None => search_server::node::DEFAULT_MAX_BODY,
+    };
     let cfg = NodeConfig {
+        max_body_bytes,
         node_name: args.node_name,
         default_cluster: Some(args.cluster.clone()),
         idle_unload: Some(args.idle_unload_ms.map_or(Duration::from_secs(args.idle_unload), Duration::from_millis))
@@ -138,7 +162,16 @@ async fn run() -> anyhow::Result<()> {
     };
     let stores: Arc<dyn search_server::StoreProvider> = match &args.data_dir {
         Some(dir) => {
-            let objects = search_store::Objects::new(&search_store::StorageConfig::Local(dir.join("objects")))?;
+            let storage = match &args.s3_bucket {
+                Some(bucket) => search_store::StorageConfig::S3 {
+                    bucket: bucket.clone(),
+                    region: args.s3_region.clone(),
+                    endpoint: args.s3_endpoint.clone(),
+                    prefix: args.s3_prefix.clone(),
+                },
+                None => search_store::StorageConfig::Local(dir.join("objects")),
+            };
+            let objects = search_store::Objects::new(&storage)?;
             let mut scfg = search_store::StoreConfig { verify: Some(search_server::persist::segment_verifier()), ..Default::default() };
             scfg.wal.sync_objects = args.sync_objects;
             let store = search_store::Store::open(objects, dir.join("cache"), scfg).await?;

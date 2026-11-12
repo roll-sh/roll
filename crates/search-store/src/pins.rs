@@ -25,22 +25,26 @@ impl Store {
     /// returned it) as `pin`. Its segments and live docs must be uploaded. WAL ranges and the
     /// branch base are dropped: a pin is exactly its segments. Writing a pin that exists is a
     /// no-op when it names the same segments and an error otherwise. Fails with
-    /// [`crate::Fenced`] once a newer owner claimed the cluster.
-    pub async fn write_pin(&self, cluster: &str, pin: &ShardId, m: &ShardManifest) -> anyhow::Result<()> {
+    /// [`crate::Fenced`] once a newer owner claimed the cluster. Returns the size of the pin
+    /// object (snapshot status reports it as the shard's commit point file).
+    pub async fn write_pin(&self, cluster: &str, pin: &ShardId, m: &ShardManifest) -> anyhow::Result<u64> {
         keys::validate_cluster(cluster)?;
         keys::validate_shard(pin)?;
         let epoch = self.fence_check(cluster, self.claimed_epoch(cluster).await?)?;
         let key = keys::pin_key(cluster, pin);
-        if let Some(existing) = self.read_pin(cluster, pin).await? {
+        if let Some(raw) = self.inner.objects.get(&key).await.with_context(|| format!("reading pin {key}"))? {
+            let existing = ShardManifest::from_json(&raw).with_context(|| format!("pin {key} is damaged"))?;
             if existing.segments == m.segments {
-                return Ok(());
+                return Ok(raw.len() as u64);
             }
             bail!("pin {pin} of cluster [{cluster}] already exists with other contents");
         }
         let mut m = ShardManifest { epoch, written_ms: now_ms(), wal: Vec::new(), wal_head: None, base: None, ..m.clone() };
         m.user_data.retain(|k, _| !k.starts_with(crate::manifest::INSTANCE_DATA_PREFIX));
-        self.inner.objects.put(&key, Bytes::from(m.to_json())).await.with_context(|| format!("writing pin {key}"))?;
-        Ok(())
+        let body = Bytes::from(m.to_json());
+        let len = body.len() as u64;
+        self.inner.objects.put(&key, body).await.with_context(|| format!("writing pin {key}"))?;
+        Ok(len)
     }
 
     /// A pin, if it exists.

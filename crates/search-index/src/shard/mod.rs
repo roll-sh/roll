@@ -87,11 +87,17 @@ pub use ops::{
 
 const STRIPES: usize = 64;
 
-/// Merged segments smaller than this keep their merge order instead of being BP-reordered
-/// (Lucene's `BPReorderingMergePolicy` default `minNaturalMergeNumDocs`, 2^16). Reordering
-/// small segments buys little search speed and, while indexing, BP was ~40% of all merge CPU
-/// (geonames, 8 clients): every level of the merge tree reordered the same docs again.
+/// Segments a forced merge (`_forcemerge` to a segment count, expunge deletes) produces with
+/// fewer docs than this keep their merge order instead of being BP-reordered: under twice the
+/// smallest partition BP has nothing to gain, and the reorder would only reshuffle small
+/// indices.
 const BP_MIN_MERGE_DOCS: u32 = 1 << 16;
+/// The same for natural merges: the size Lucene's `BPReorderingMergePolicy` suggests for
+/// `minNaturalMergeNumDocs` (2^18), so that only the large segments that matter for search
+/// speed are reordered. With 2^16, BP and writing the reordered segment were about half of all
+/// merge CPU while indexing (http_logs, 8 clients): every mid-size merge reordered docs that the
+/// next level reorders again.
+const BP_MIN_NATURAL_MERGE_DOCS: u32 = 1 << 18;
 /// Segment attribute marking segments that contain nested blocks.
 pub const NESTED_ATTR: &str = "roll.nested";
 
@@ -107,7 +113,8 @@ pub struct ShardConfig {
     pub max_buffer_bytes: usize,
     pub merge_policy: MergePolicyConfig,
     /// Concurrent background merges (`index.merge.scheduler.max_thread_count`); 0 runs
-    /// merges in the thread that triggers them.
+    /// merges, and the buffer conversions memory pressure starts, in the thread that triggers
+    /// them.
     pub merge_threads: usize,
     /// `index.gc_deletes`: how long delete tombstones stay in the version map.
     pub gc_deletes: Duration,
@@ -115,7 +122,8 @@ pub struct ShardConfig {
     pub local_checkpoint: Option<i64>,
     /// Reorder merged segments with BP when the index is not sorted.
     pub bp_reorder: bool,
-    /// Train a zstd dictionary for stored fields of refreshed segments (merges always do).
+    /// Train the stored-fields zstd dictionary of refreshed segments (merges always do);
+    /// otherwise refreshes finalize sampled documents into one, which costs a few ms.
     pub refresh_stored_dictionary: bool,
     /// Threads building HNSW graphs while writing a segment.
     pub vector_threads: usize,
@@ -648,10 +656,12 @@ const fn entry_bytes<V>(id_len: usize) -> usize {
 
 /// Live entries (buffered docs, dropped when their buffer becomes a segment) and tombstones
 /// are separate maps: pruning tombstones walks only tombstones, and an id is in at most one.
+/// One stripe of the version map. Ids hash with foldhash (randomly seeded per map): SipHash
+/// was about 1% of bulk indexing CPU.
 #[derive(Default)]
 struct Stripe {
-    map: HashMap<Bytes, VersionValue>,
-    tombstones: HashMap<Bytes, Tombstone>,
+    map: HashMap<Bytes, VersionValue, foldhash::fast::RandomState>,
+    tombstones: HashMap<Bytes, Tombstone, foldhash::fast::RandomState>,
 }
 
 /// Where the current live doc of an id is.
@@ -702,6 +712,8 @@ struct Inner {
     next_seq: AtomicI64,
     max_seq: AtomicI64,
     refresh_lock: Mutex<()>,
+    /// A memory-driven buffer conversion is running in the background ([`Shard::after_write`]).
+    converting: AtomicBool,
     published: RwLock<Searcher>,
     dirty: AtomicBool,
     ram: AtomicUsize,
@@ -729,6 +741,9 @@ struct Inner {
     last_prune_ms: AtomicU64,
     /// `index.gc_deletes` in ms (dynamic: [`Shard::set_gc_deletes`]).
     gc_deletes_ms: AtomicU64,
+    /// Segments written from now on use [`StoredOptions::best_compression`]
+    /// ([`Shard::set_best_compression`]).
+    best_compression: AtomicBool,
     /// The soft-deletes retention lease ([`Shard::retained_from`]).
     retention: Mutex<Retention>,
     epoch: Instant,
@@ -890,10 +905,12 @@ impl Shard {
             vm_tombstone_bytes: AtomicUsize::new(0),
             last_prune_ms: AtomicU64::new(0),
             gc_deletes_ms: AtomicU64::new(cfg_gc_ms),
+            best_compression: AtomicBool::new(false),
             retention: Mutex::new(Retention { from: checkpoint + 1, next: checkpoint, next_at: Instant::now() }),
             epoch: Instant::now(),
             forced: Mutex::new(Forced::default()),
             weak: Mutex::new(Weak::new()),
+            converting: AtomicBool::new(false),
         });
         *inner.weak.lock() = Arc::downgrade(&inner);
         Ok(Shard { inner })
@@ -1418,6 +1435,13 @@ impl Shard {
         self.inner.gc_deletes_ms.store(gc.as_millis() as u64, Ordering::Relaxed);
     }
 
+    /// `index.codec: best_compression`: segments written from now on (refreshes and merges)
+    /// store their fields in [`StoredOptions::best_compression`]'s larger, slower chunks;
+    /// existing segments change when merged.
+    pub fn set_best_compression(&self, on: bool) {
+        self.inner.best_compression.store(on, Ordering::Relaxed);
+    }
+
     fn gc_deletes(&self) -> Duration {
         Duration::from_millis(self.inner.gc_deletes_ms.load(Ordering::Relaxed))
     }
@@ -1540,6 +1564,23 @@ impl Shard {
             let far = self.indexing_bytes() > self.inner.cfg.max_buffer_bytes.saturating_mul(2);
             if far {
                 self.convert(false, false)?;
+            } else if self.inner.cfg.merge_threads > 0 {
+                // With background threads, a thread of its own writes it: the write that crossed
+                // the budget (and the bulk request waiting on it) doesn't pay a whole segment
+                // write (a 64 MiB buffer took ~300 ms, the p99 of one-client bulks).
+                if !self.inner.converting.swap(true, Ordering::AcqRel) {
+                    let weak = self.inner.weak.lock().clone();
+                    let spawned = std::thread::Builder::new().name("search-flush".into()).spawn(move || {
+                        if let Some(inner) = weak.upgrade() {
+                            let shard = Shard { inner };
+                            let _ = shard.convert(false, false);
+                            shard.inner.converting.store(false, Ordering::Release);
+                        }
+                    });
+                    if spawned.is_err() {
+                        self.inner.converting.store(false, Ordering::Release);
+                    }
+                }
             } else if let Some(g) = self.inner.refresh_lock.try_lock() {
                 self.convert_locked(g, false, false, None)?;
             }
@@ -1783,9 +1824,9 @@ impl Shard {
     }
 
     fn write_options(&self, refresh: bool) -> WriteOptions {
-        let mut stored = StoredOptions::default();
+        let mut stored = if self.inner.best_compression.load(Ordering::Relaxed) { StoredOptions::best_compression() } else { StoredOptions::default() };
         if refresh {
-            stored.dictionary = self.inner.cfg.refresh_stored_dictionary;
+            stored.train = self.inner.cfg.refresh_stored_dictionary;
         }
         WriteOptions {
             stored,
@@ -1982,7 +2023,7 @@ impl Shard {
         }
         if self.inner.cfg.merge_threads == 0 {
             for g in groups {
-                self.run_merge(g)?;
+                self.run_merge(g, false)?;
             }
             return Ok(n);
         }
@@ -2040,7 +2081,7 @@ impl Shard {
                 });
                 for g in groups {
                     *merged = true;
-                    self.run_merge(g)?;
+                    self.run_merge(g, only_expunge_deletes)?;
                 }
                 return Ok(());
             }
@@ -2078,7 +2119,7 @@ impl Shard {
             }
             for g in groups {
                 *merged = true;
-                self.run_merge(g)?;
+                self.run_merge(g, true)?;
             }
         }
     }
@@ -2115,7 +2156,9 @@ impl Shard {
         }
     }
 
-    fn run_merge(&self, group: Vec<Arc<SegEntry>>) -> Result<()> {
+    /// `forced`: a forced merge (to a segment count, or expunging deletes), which BP-reorders
+    /// smaller results than natural merges do.
+    fn run_merge(&self, group: Vec<Arc<SegEntry>>, forced: bool) -> Result<()> {
         let docs: u64 = group.iter().map(|e| e.max_doc as u64).sum();
         let bytes: u64 = group.iter().map(|e| e.size).sum();
         {
@@ -2124,7 +2167,7 @@ impl Shard {
             m.current_bytes += bytes;
         }
         let t = Instant::now();
-        let r = self.do_merge(&group);
+        let r = self.do_merge(&group, forced);
         let took = t.elapsed();
         for s in &group {
             s.merging.store(false, Ordering::Release);
@@ -2145,7 +2188,7 @@ impl Shard {
         r
     }
 
-    fn do_merge(&self, group: &[Arc<SegEntry>]) -> Result<()> {
+    fn do_merge(&self, group: &[Arc<SegEntry>], forced: bool) -> Result<()> {
         let inner = &self.inner;
         let snapshots: Vec<Option<Arc<LiveDocs>>> = group.iter().map(|e| e.live.lock().live.clone()).collect();
         let readers: Vec<SegmentReader> = group.iter().map(|e| e.reader()).collect();
@@ -2183,7 +2226,9 @@ impl Shard {
                     write_segment_with(&r, &mut sink, &opts)?;
                     Some(m)
                 }
-            } else if inner.cfg.bp_reorder && search_codec::SegmentSource::max_doc(&ms) >= BP_MIN_MERGE_DOCS {
+            } else if inner.cfg.bp_reorder
+                && search_codec::SegmentSource::max_doc(&ms) >= if forced { BP_MIN_MERGE_DOCS } else { BP_MIN_NATURAL_MERGE_DOCS }
+            {
                 let bp = BpOptions { parents: parents.as_ref().map(|p| p.words().to_vec()), ..Default::default() };
                 match bp_reorder(&ms, &bp)? {
                     Some(m) => {
@@ -2548,7 +2593,7 @@ fn merge_worker(weak: Weak<Inner>) {
             }
             continue;
         }
-        let _ = shard.run_merge(job);
+        let _ = shard.run_merge(job, false);
         // More work may have appeared (the merged segment can join a new tier).
         let _ = shard.queue_more_merges();
         shard.inner.merge_done.notify_all();

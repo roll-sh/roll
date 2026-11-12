@@ -18,6 +18,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type Docs = Arc<Mutex<HashMap<String, Value>>>;
 
+/// `METHOD path authorization` of every request that carried credentials
+/// (`cleanup_runs_as_the_admin_user`).
+static AUTH_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 struct Req {
     method: String,
     path: String,
@@ -191,6 +195,11 @@ async fn serve(listener: tokio::net::TcpListener, docs: Docs) {
                 if std::env::var("SEARCH_YAML_MOCK_CRASH").is_ok_and(|p| !p.is_empty() && req.path.contains(&p)) {
                     eprintln!("mock: crashing on {}", req.path);
                     std::process::exit(101);
+                }
+                // Who sent what (only that test sends credentials); outside `docs`, which the
+                // wipe empties.
+                if let Some((_, auth)) = req.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("authorization")) {
+                    AUTH_LOG.lock().unwrap().push(format!("{} {} {auth}", req.method, req.path));
                 }
                 if req.method == "PUT" || req.method == "POST" {
                     docs.lock().unwrap().entry("__writes".into()).and_modify(|v| *v = Value::Int(v.as_i64().unwrap_or(0) as i128 + 1)).or_insert(Value::Int(1));
@@ -723,6 +732,44 @@ async fn several_shared_clusters_one_worker_each() {
         let writes = docs.lock().unwrap().get("__writes").and_then(Value::as_i64).unwrap_or(0);
         assert!(writes > 0, "a cluster got no requests");
     }
+}
+
+#[tokio::test]
+async fn cleanup_runs_as_the_admin_user() {
+    // Like ESRestTestCase with restClientSettings / restAdminSettings: the test's requests carry
+    // the client's credentials, the wipe between tests the admin's.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let docs: Docs = Arc::new(Mutex::new(HashMap::new()));
+    tokio::spawn(serve(listener, docs.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let api = dir.path().join("api");
+    std::fs::create_dir_all(&api).unwrap();
+    for (name, body) in SPEC {
+        std::fs::write(api.join(name), body).unwrap();
+    }
+    let tests = dir.path().join("test");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("10_a.yml"), "\"t\":\n  - do:\n      index: { index: t, id: \"1\", body: { a: 1 } }\n").unwrap();
+    let cfg = Config {
+        url: Some(url),
+        suites: vec![SuiteRoot { label: String::new(), path: tests }],
+        api_spec: api,
+        wipe: Some(WipeMode::Full),
+        headers: vec![("Authorization".into(), "Basic client".into())],
+        admin_headers: vec![("Authorization".into(), "Basic admin".into())],
+        ..Config::default()
+    };
+    let report = run(cfg).await.unwrap();
+    assert_eq!(report.totals.passed, 1, "{:?}", report.tests.iter().map(|t| &t.failure).collect::<Vec<_>>());
+    let log = AUTH_LOG.lock().unwrap().clone();
+    assert!(log.iter().any(|l| l == "POST /t/_doc/1 Basic client"), "{log:?}");
+    let deletes: Vec<&String> = log.iter().filter(|l| l.starts_with("DELETE ")).collect();
+    assert!(!deletes.is_empty(), "{log:?}");
+    assert!(deletes.iter().all(|l| l.ends_with(" Basic admin")), "{log:?}");
+    // What the cluster is, the admin client asks (the test user may not be allowed to).
+    assert!(log.iter().any(|l| l == "GET / Basic admin"), "{log:?}");
+    assert!(!log.iter().any(|l| l == "GET / Basic client"), "{log:?}");
 }
 
 /// Not a test: the server process `spawned_clusters_per_file` starts (the test binary re-run with

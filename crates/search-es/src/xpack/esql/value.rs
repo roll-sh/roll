@@ -34,6 +34,23 @@ pub enum DataType {
     TimeDuration,
     /// `METADATA _source`: the document's source (held as its JSON text).
     Source,
+    /// Pre-aggregated metrics, held as Elasticsearch prints them (`{"min":1.0,...}`).
+    AggregateMetricDouble,
+    /// `time_series_metric: counter` fields of time series indices: numbers that only the
+    /// time series functions (and conversions) read.
+    CounterLong,
+    CounterInteger,
+    CounterDouble,
+    /// Histogram-like and vector fields (held as their printed JSON, vectors as doubles).
+    Histogram,
+    ExponentialHistogram,
+    TDigest,
+    DenseVector,
+    /// `METADATA _tsid` (base64 text).
+    Tsid,
+    /// A `flattened` field: its leaves by dotted path, held as the JSON text Elasticsearch
+    /// prints (`{"a.c":["1","3"],"b":"x"}`).
+    Flattened,
     Unsupported,
 }
 
@@ -59,6 +76,16 @@ impl DataType {
             DataType::DatePeriod => "date_period",
             DataType::TimeDuration => "time_duration",
             DataType::Source => "_source",
+            DataType::AggregateMetricDouble => "aggregate_metric_double",
+            DataType::CounterLong => "counter_long",
+            DataType::CounterInteger => "counter_integer",
+            DataType::CounterDouble => "counter_double",
+            DataType::Histogram => "histogram",
+            DataType::ExponentialHistogram => "exponential_histogram",
+            DataType::TDigest => "tdigest",
+            DataType::DenseVector => "dense_vector",
+            DataType::Tsid => "_tsid",
+            DataType::Flattened => "flattened",
             DataType::Unsupported => "unsupported",
         }
     }
@@ -81,8 +108,33 @@ impl DataType {
             "point" => DataType::CartesianPoint,
             "geo_shape" => DataType::GeoShape,
             "shape" => DataType::CartesianShape,
+            "aggregate_metric_double" => DataType::AggregateMetricDouble,
+            "histogram" => DataType::Histogram,
+            "exponential_histogram" => DataType::ExponentialHistogram,
+            "tdigest" => DataType::TDigest,
+            "dense_vector" => DataType::DenseVector,
+            "flattened" => DataType::Flattened,
             _ => DataType::Unsupported,
         }
+    }
+
+    /// The counter type of a numeric field type (`time_series_metric: counter`).
+    pub fn counter_of(self) -> DataType {
+        match self {
+            DataType::Long => DataType::CounterLong,
+            DataType::Integer => DataType::CounterInteger,
+            DataType::Double => DataType::CounterDouble,
+            t => t,
+        }
+    }
+
+    pub fn is_counter(self) -> bool {
+        matches!(self, DataType::CounterLong | DataType::CounterInteger | DataType::CounterDouble)
+    }
+
+    /// The types `SORT` and `STATS ... BY` refuse (`cannot sort on ...`).
+    pub fn unsortable(self) -> bool {
+        self.is_counter() || matches!(self, DataType::AggregateMetricDouble | DataType::Histogram | DataType::ExponentialHistogram | DataType::TDigest | DataType::DenseVector | DataType::Tsid | DataType::Source | DataType::Flattened)
     }
 
     pub fn is_numeric(self) -> bool {
@@ -223,7 +275,7 @@ impl V {
                     Value::from(if *d > 0.0 { "Infinity" } else { "-Infinity" })
                 }
             }
-            V::Str(s) if ty == DataType::Source => crate::json::parse(s.as_bytes()).ok().flatten().unwrap_or(Value::Null),
+            V::Str(s) if matches!(ty, DataType::Source | DataType::Flattened) => crate::json::parse(s.as_bytes()).ok().flatten().unwrap_or(Value::Null),
             V::Str(s) | V::Ip(s) => Value::from(s.clone()),
             V::Date(ms) => Value::from(date_string(*ms)),
             V::Multi(v) => Value::Arr(v.iter().map(|x| x.to_json(ty)).collect()),
@@ -446,7 +498,95 @@ pub fn from_field(v: &Value, ty: DataType) -> V {
 
 /// [`from_field`]; `array_order`: the index keeps arrays in insertion order (strict columnar
 /// index modes), so multi-values aren't put in doc-values order.
+/// An `aggregate_metric_double` value as Elasticsearch prints it: the present sub-metrics in
+/// `min, max, sum, value_count` order, doubles in Java's form, the count an integer.
+pub fn agg_metric_text(min: Option<f64>, max: Option<f64>, sum: Option<f64>, count: Option<i64>) -> Option<String> {
+    if min.is_none() && max.is_none() && sum.is_none() && count.is_none() {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(4);
+    for (k, x) in [("min", min), ("max", max), ("sum", sum)] {
+        if let Some(x) = x {
+            parts.push(format!("\"{k}\":{}", crate::json::write::java_double(x)));
+        }
+    }
+    if let Some(c) = count {
+        parts.push(format!("\"value_count\":{c}"));
+    }
+    Some(format!("{{{}}}", parts.join(",")))
+}
+
+/// The sub-metrics of a printed `aggregate_metric_double`: `[min, max, sum, value_count]`.
+pub fn agg_metric_parts(text: &str) -> [Option<f64>; 4] {
+    let mut out = [None; 4];
+    if let Ok(Some(Value::Obj(m))) = crate::json::parse(text.as_bytes()) {
+        for (i, k) in ["min", "max", "sum", "value_count"].iter().enumerate() {
+            out[i] = m.get(*k).and_then(Value::as_f64);
+        }
+    }
+    out
+}
+
+/// A `flattened` field's value as Elasticsearch's block loader reads it: every leaf by its
+/// dotted path (keys sorted), each value as text, several sorted and deduplicated like the
+/// keyword doc values they come from.
+pub fn flattened_text(v: &Value) -> Option<String> {
+    fn walk(prefix: &str, v: &Value, out: &mut std::collections::BTreeMap<String, Vec<String>>) {
+        match v {
+            Value::Obj(m) => {
+                for (k, x) in m {
+                    let p = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                    walk(&p, x, out);
+                }
+            }
+            Value::Arr(a) => a.iter().for_each(|x| walk(prefix, x, out)),
+            Value::Null => {}
+            leaf => out.entry(prefix.to_string()).or_default().push(leaf.to_es_string()),
+        }
+    }
+    let mut leaves = std::collections::BTreeMap::new();
+    walk("", v, &mut leaves);
+    if leaves.is_empty() {
+        return None;
+    }
+    let mut m = crate::json::Map::new();
+    for (k, mut vs) in leaves {
+        vs.sort();
+        vs.dedup();
+        let val = if vs.len() == 1 { Value::Str(vs.pop().expect("one")) } else { Value::Arr(vs.into_iter().map(Value::Str).collect()) };
+        m.insert(k, val);
+    }
+    Some(Value::Obj(m).to_json())
+}
+
 pub fn from_field_in(v: &Value, ty: DataType, array_order: bool) -> V {
+    match (ty, v) {
+        (DataType::Flattened, Value::Arr(a)) if a.len() == 1 && matches!(a[0], Value::Obj(_)) => return flattened_text(&a[0]).map_or(V::Null, V::Str),
+        (DataType::Flattened, Value::Obj(_)) => return flattened_text(v).map_or(V::Null, V::Str),
+        (DataType::AggregateMetricDouble, Value::Arr(a)) if a.len() == 1 => return from_field_in(&a[0], ty, array_order),
+        (DataType::AggregateMetricDouble, Value::Obj(m)) => {
+            let f = |k: &str| m.get(k).and_then(Value::as_f64);
+            return agg_metric_text(f("min"), f("max"), f("sum"), m.get("value_count").and_then(Value::as_i64)).map_or(V::Null, V::Str);
+        }
+        (DataType::Histogram | DataType::ExponentialHistogram | DataType::TDigest, Value::Arr(a)) if a.len() == 1 => return from_field_in(&a[0], ty, array_order),
+        (DataType::Histogram | DataType::ExponentialHistogram | DataType::TDigest, Value::Obj(_)) => return V::Str(v.to_json()),
+        // A vector keeps its dimensions in order (never sorted or deduplicated).
+        (DataType::DenseVector, Value::Arr(a)) => {
+            let vals: Vec<V> = a.iter().filter_map(Value::as_f64).map(V::Double).collect();
+            return match vals.len() {
+                0 => V::Null,
+                1 => vals.into_iter().next().expect("one"),
+                _ => V::Multi(vals),
+            };
+        }
+        _ => {}
+    }
+    let ty = match ty {
+        DataType::CounterLong => DataType::Long,
+        DataType::CounterInteger => DataType::Integer,
+        DataType::CounterDouble => DataType::Double,
+        t => t,
+    };
     // `[x, y]` is one point, not two values.
     if matches!(ty, DataType::GeoPoint | DataType::CartesianPoint)
         && let Value::Arr(a) = v
@@ -930,6 +1070,10 @@ pub fn convert(v: &V, target: DataType) -> V {
             }
         }
         _ => match target {
+            DataType::AggregateMetricDouble => match v {
+                V::Str(s) => V::Str(s.clone()),
+                other => other.as_f64().and_then(|x| agg_metric_text(Some(x), Some(x), Some(x), Some(1))).map_or(V::Null, V::Str),
+            },
             DataType::Long | DataType::UnsignedLong => match v {
                 // Doubles round like `Math.round` (half up).
                 V::Str(s) => s.trim().parse::<i64>().ok().or_else(|| s.trim().parse::<f64>().ok().filter(|d| d.abs() < 9.2e18).map(|d| (d + 0.5).floor() as i64)).map(V::Long).unwrap_or(V::Null),
@@ -1028,12 +1172,19 @@ fn distinct_hash(x: &V, ty: DataType) -> Option<u64> {
 pub const AGGS: &[&str] = &[
     "count", "count_distinct", "sum", "avg", "min", "max", "median", "percentile", "values", "std_dev", "median_absolute_deviation", "top", "first", "last", "weighted_avg",
     "variance", "present", "absent",
+    // Time series accumulators `TS` rewrites to (the timestamp travels as the weight).
+    "$first", "$last", "$rate", "$irate", "$increase", "$delta", "$idelta", "$deriv",
 ];
 
 /// An aggregation's accumulated state.
 #[derive(Clone, Debug)]
 pub enum Acc {
     Count(i64),
+    /// `SUM`/`MIN`/`MAX`/`COUNT`/`AVG` over `aggregate_metric_double` values: the sub-metric
+    /// each combines (`[min, max, sum, value_count]`, `None` until one is seen).
+    Amd { part: [Option<f64>; 4] },
+    /// A time series' `(timestamp, value)` points, for the functions over time.
+    Points(Vec<(i64, V)>),
     /// `COUNT_DISTINCT`: Elasticsearch's HyperLogLog++ (`HllStates`), so estimates match it
     /// to the unit and memory stays bounded by the precision whatever the cardinality.
     Distinct { hll: Box<Hll>, ty: DataType },
@@ -1054,6 +1205,8 @@ impl Acc {
     pub fn new(name: &str) -> Acc {
         match name {
             "count" => Acc::Count(0),
+            "$amd_sum" | "$amd_min" | "$amd_max" | "$amd_count" | "$amd_avg" => Acc::Amd { part: [None; 4] },
+            "$first" | "$last" | "$rate" | "$irate" | "$increase" | "$delta" | "$idelta" | "$deriv" => Acc::Points(Vec::new()),
             "count_distinct" => Acc::Distinct { hll: Box::new(Hll::new(precision_from_threshold(DEFAULT_DISTINCT_THRESHOLD))), ty: DataType::Null },
             "sum" => Acc::Sum { int: 0, float: 0.0, comp: 0.0, any: false, overflow: false },
             "avg" => Acc::Avg { int: 0, float: 0.0, comp: 0.0, n: 0 },
@@ -1077,6 +1230,22 @@ impl Acc {
 
     pub fn add(&mut self, name: &str, v: &V, star: bool) {
         match self {
+            // Points come with their timestamps (`add_weighted`).
+            Acc::Points(_) => {}
+            Acc::Amd { part } => {
+                for x in v.values() {
+                    let V::Str(t) = x else { continue };
+                    let p = agg_metric_parts(t);
+                    let merge = |a: Option<f64>, b: Option<f64>, f: fn(f64, f64) -> f64| match (a, b) {
+                        (Some(a), Some(b)) => Some(f(a, b)),
+                        (a, b) => a.or(b),
+                    };
+                    part[0] = merge(part[0], p[0], f64::min);
+                    part[1] = merge(part[1], p[1], f64::max);
+                    part[2] = merge(part[2], p[2], |a, b| a + b);
+                    part[3] = merge(part[3], p[3], |a, b| a + b);
+                }
+            }
             Acc::Count(n) => {
                 if star {
                     *n += 1;
@@ -1148,6 +1317,12 @@ impl Acc {
 
     /// `WEIGHTED_AVG(value, weight)`'s row (multi-values: every pair, like Elasticsearch).
     pub fn add_weighted(&mut self, v: &V, weight: &V) {
+        if let Acc::Points(points) = self {
+            if let (Some(t), false) = (weight.as_i64(), v.is_null()) {
+                points.push((t, v.clone()));
+            }
+            return;
+        }
         if let Acc::Weighted(sum, total) = self {
             let ws = weight.values();
             for (i, x) in v.values().iter().enumerate() {
@@ -1163,6 +1338,17 @@ impl Acc {
     pub fn finish(&self, name: &str, ty: DataType, extra: &[V]) -> V {
         match self {
             Acc::Count(n) => V::Long(*n),
+            Acc::Points(points) => time_series_value(name, points),
+            Acc::Amd { part } => match name {
+                "$amd_min" => part[0].map_or(V::Null, V::Double),
+                "$amd_max" => part[1].map_or(V::Null, V::Double),
+                "$amd_sum" => part[2].map_or(V::Null, V::Double),
+                "$amd_count" => V::Long(part[3].unwrap_or(0.0) as i64),
+                _ => match (part[2], part[3]) {
+                    (Some(s), Some(n)) if n > 0.0 => V::Double(s / n),
+                    _ => V::Null,
+                },
+            },
             Acc::Distinct { hll, .. } => V::Long(hll.cardinality() as i64),
             Acc::Sum { int, float, any, overflow, .. } => {
                 if !any || *overflow {
@@ -1294,8 +1480,61 @@ fn kahan(sum: &mut f64, comp: &mut f64, x: f64) {
 }
 
 /// The result type of an aggregation over `arg`.
+/// A time series function over one series' points (in any order): `$first`/`$last` by
+/// timestamp, counter `$increase`/`$rate`/`$irate` (a drop is a reset), gauge `$delta`/
+/// `$idelta`, and `$deriv` (least-squares slope per second).
+fn time_series_value(name: &str, points: &[(i64, V)]) -> V {
+    let mut p: Vec<(i64, &V)> = points.iter().map(|(t, v)| (*t, v)).collect();
+    p.sort_by_key(|(t, _)| *t);
+    let num = |v: &V| v.as_f64();
+    match name {
+        "$first" => p.first().map_or(V::Null, |(_, v)| (*v).clone()),
+        "$last" => p.last().map_or(V::Null, |(_, v)| (*v).clone()),
+        _ => {
+            let xs: Vec<(i64, f64)> = p.iter().filter_map(|(t, v)| Some((*t, num(v)?))).collect();
+            if xs.len() < 2 {
+                return V::Null;
+            }
+            let (t0, v0) = xs[0];
+            let (tn, vn) = xs[xs.len() - 1];
+            let (tp, vp) = xs[xs.len() - 2];
+            let secs = |a: i64, b: i64| (b - a) as f64 / 1000.0;
+            let increase = || xs.windows(2).map(|w| if w[1].1 >= w[0].1 { w[1].1 - w[0].1 } else { w[1].1 }).sum::<f64>();
+            let out = match name {
+                "$increase" => increase(),
+                "$rate" if tn > t0 => increase() / secs(t0, tn),
+                "$irate" if tn > tp => (if vn >= vp { vn - vp } else { vn }) / secs(tp, tn),
+                "$delta" => vn - v0,
+                "$idelta" => vn - vp,
+                "$deriv" => {
+                    let n = xs.len() as f64;
+                    let (mx, my) = xs.iter().fold((0.0, 0.0), |(a, b), (t, v)| (a + secs(t0, *t), b + v));
+                    let (mx, my) = (mx / n, my / n);
+                    let (num, den) = xs.iter().fold((0.0, 0.0), |(a, b), (t, v)| {
+                        let dx = secs(t0, *t) - mx;
+                        (a + dx * (v - my), b + dx * dx)
+                    });
+                    if den == 0.0 {
+                        return V::Null;
+                    }
+                    num / den
+                }
+                _ => return V::Null,
+            };
+            V::Double(out)
+        }
+    }
+}
+
 pub fn agg_type(name: &str, arg: DataType) -> DataType {
     match name {
+        "$first" | "$last" => match arg {
+            DataType::CounterLong => DataType::Long,
+            DataType::CounterInteger => DataType::Integer,
+            DataType::CounterDouble => DataType::Double,
+            t => t,
+        },
+        "$rate" | "$irate" | "$increase" | "$delta" | "$idelta" | "$deriv" => DataType::Double,
         "count" | "count_distinct" => DataType::Long,
         "avg" | "median" | "percentile" | "std_dev" | "median_absolute_deviation" | "weighted_avg" | "variance" => DataType::Double,
         "present" | "absent" => DataType::Boolean,

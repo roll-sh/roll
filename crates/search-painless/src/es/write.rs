@@ -1093,6 +1093,13 @@ fn f_dollar(vm: &mut Vm, a: &mut [Value]) -> VR {
 
 // ------------------------------------------------------------------------------ SourceMapField
 
+/// `$(path, default)` of an ingest condition: `field(path).get(default)`.
+fn c_dollar(vm: &mut Vm, a: &mut [Value]) -> VR {
+    let f = c_field(vm, &mut a[..1])?;
+    let mut args = [f, a[1].clone()];
+    s_get(vm, &mut args)
+}
+
 const SMF: &str = "script.field.SourceMapField";
 
 /// `field(path)` of an ingest condition: a read-only `SourceMapField` over `ctx`.
@@ -1159,6 +1166,15 @@ fn s_iterator(vm: &mut Vm, a: &mut [Value]) -> VR {
         None => JList::array_list(Vec::new()),
     };
     crate::iter::iterator_of(vm, &v)
+}
+fn s_name(_: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(Value::string(sf(&a[0])?.path()))
+}
+fn s_size(vm: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(Value::Int(sf(&a[0])?.values(vm)?.len() as i32))
+}
+fn s_is_empty(vm: &mut Vm, a: &mut [Value]) -> VR {
+    Ok(Value::Bool(matches!(s_size(vm, a)?, Value::Int(0))))
 }
 fn s_get(_: &mut Vm, a: &mut [Value]) -> VR {
     Ok(sf(&a[0])?.value().unwrap_or_else(|| a[1].clone()))
@@ -1539,7 +1555,11 @@ pub fn register(b: &mut Builder) {
 
     b.supers(INGEST_CONDITIONAL_SCRIPT, &[OBJECT]);
     b.s(INGEST_CONDITIONAL_SCRIPT, "SourceMapField field(String)", c_field);
+    b.s(INGEST_CONDITIONAL_SCRIPT, "def $(String,def)", c_dollar);
     b.supers(SOURCE_MAP_FIELD, &[OBJECT, ITERABLE]);
+    b.m(SOURCE_MAP_FIELD, "String getName()", s_name);
+    b.m(SOURCE_MAP_FIELD, "boolean isEmpty()", s_is_empty);
+    b.m(SOURCE_MAP_FIELD, "int size()", s_size);
     b.m(SOURCE_MAP_FIELD, "boolean exists()", s_exists);
     b.m(SOURCE_MAP_FIELD, "Iterator iterator()", s_iterator);
     b.m(SOURCE_MAP_FIELD, "def get(def)", s_get);

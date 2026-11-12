@@ -1,0 +1,12 @@
+# Environment skips of the `repository-url` extended suite: tests that fail on a private single-node
+# Elasticsearch 9.5.5 in Docker for a reason outside the server under test (scripts/search-yaml-suites.sh
+# es-extended-baseline). Format: `<glob over test ids>  # reason`; roll skips them too.
+
+repository-url:repository_url/10_basic/Delete a non existing snapshot  # needs the suite's URL and FTP repository fixtures
+repository-url:repository_url/10_basic/Get a non existing snapshot  # needs the suite's URL and FTP repository fixtures
+repository-url:repository_url/10_basic/Module repository-url is loaded  # needs the suite's URL and FTP repository fixtures
+repository-url:repository_url/10_basic/Restore a non existing snapshot  # needs the suite's URL and FTP repository fixtures
+repository-url:repository_url/10_basic/Restore with repository-url using file://  # needs the suite's URL and FTP repository fixtures
+repository-url:repository_url/10_basic/Restore with repository-url using ftp://  # needs the suite's URL and FTP repository fixtures
+repository-url:repository_url/10_basic/Restore with repository-url using http://  # needs the suite's URL and FTP repository fixtures
+repository-url:repository_url/20_repository/Repository cannot be be registered  # needs the suite's URL and FTP repository fixtures

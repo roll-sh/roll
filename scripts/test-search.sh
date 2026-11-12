@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
 # roll search test suite: build, clippy and the tests of every search-* crate plus rolld and the
 # CLI, the dashboard's search helpers (node --test, when Node 23.6+ is installed), then (unless --unit) the Docker-backed compatibility checks:
-#   - Elastic's YAML REST suites against search-dev (scripts/search-yaml-suites.sh roll), and the
-#     OpenSearch suite against its opensearch dialect (roll-os), each held to a minimum pass count
+#   - Elastic's YAML REST suites against search-dev (scripts/search-yaml-suites.sh roll), the
+#     OpenSearch suite against its opensearch dialect (roll-os), the SQL plugin's PPL suite
+#     (roll-os-sql) and Elasticsearch's module and
+#     x-pack suites (roll-extended, one minimum per suite), each held to a minimum pass count
 #     from docs/search/compatibility.md;
 #   - the differential suite against a real Elasticsearch, when present
 #     (crates/search-server/tests/differential.rs);
 #   - the client matrix of unmodified official clients, when present (tests/search/clients/run.sh).
 #
 # Only runs when something search-related changed since the last green run. `--force` runs
-# regardless; `--unit` skips the Docker checks. Set ROLL_E2E_S3_BUCKET (+ ROLL_E2E_S3_ENDPOINT,
+# regardless; `--unit` skips the Docker checks. `--images` also builds the linux/amd64 and
+# linux/arm64 images and smoke-tests them as AWS runs them (scripts/search-image-smoke.sh; arm64
+# under qemu; amd64 once more on S3 through LocalStack), then rehearses the deployment (scripts/search-aws-rehearsal.sh: the node user data
+# on Amazon Linux 2023, the stack on LocalStack, the Lambda function); about 40 minutes. Set ROLL_E2E_S3_BUCKET (+ ROLL_E2E_S3_ENDPOINT,
 # AWS_* credentials) to run the storage and control-plane tests against S3 instead of a local
 # directory. ROLL_PORT / ROLL_JOBS are passed to the YAML runner (search-dev ports and processes).
 #
 # Pass thresholds: docs/search/compatibility.md lines of the form
 #   <!-- test-search: roll >= 1234 -->
 #   <!-- test-search: roll-os >= 567 -->
+#   <!-- test-search: roll-os-sql >= 204 -->      (the OpenSearch SQL plugin's PPL suite)
+#   <!-- test-search: lang-painless >= 89 -->      (an extended suite, crates/search-yaml/suites/extended.txt)
 # (a missing line means no minimum; the counts are printed either way).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -25,17 +32,18 @@ for d in crates/search-*/; do
   CRATES+=(-p "$(basename "$d")")
 done
 PATHS=(crates/search-* crates/snowball crates/pg-storage crates/rolld crates/roll-cli deploy/search
-       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh
+       Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh scripts/search-image-smoke.sh scripts/search-aws-rehearsal.sh
        docs/search/compatibility.md .github/workflows/search.yml tests/search
        apps/dashboard/src/lib/search-console.ts apps/dashboard/src/lib/search-docs.ts
        apps/dashboard/src/lib/search-console.test.mjs apps/dashboard/src/lib/search-docs.test.mjs)
 STAMP=target/.test-search.hash
 
-force=0 unit_only=0
+force=0 unit_only=0 images=0
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --unit) unit_only=1 ;;
+    --images) images=1 ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
 done
@@ -96,6 +104,29 @@ yaml_suite() {
   fi
 }
 
+# The extended suites (crates/search-yaml/suites/extended.txt), each held to its own minimum.
+extended_suites() {
+  local tsv=target/search-yaml/roll-extended.tsv suite tests es roll rest min failed=0
+  rm -f "$tsv"
+  scripts/search-yaml-suites.sh roll-extended -- --max-failures 0 || true
+  [[ -f $tsv ]] || { echo "search: roll-extended produced no table ($tsv)" >&2; exit 1; }
+  while read -r suite tests es roll rest; do
+    [[ $suite == suite ]] && continue
+    min=$(threshold "$suite")
+    if (( roll < min )); then
+      echo "search: YAML $suite fell below its minimum: $roll < $min (docs/search/compatibility.md)" >&2
+      failed=1
+    fi
+  done <"$tsv"
+  # A suite with a minimum must have run.
+  for suite in $(grep -oE 'test-search: [a-z0-9.-]+ >=' docs/search/compatibility.md | awk '{print $2}'); do
+    [[ $suite == roll || $suite == roll-os || $suite == roll-os-sql ]] && continue
+    grep -q "^$suite	" "$tsv" || { echo "search: extended suite $suite has a minimum but didn't run" >&2; failed=1; }
+  done
+  (( failed == 0 )) || exit 1
+  echo "search: extended YAML suites at or above their minimums"
+}
+
 # The fleet tests (in-process nodes behind the proxy) once more with their catalog, leases and
 # node records in Postgres instead of SQLite. They wipe the tables, so they run one at a time.
 fleet_on_postgres() {
@@ -127,6 +158,8 @@ if [[ $unit_only == 0 ]]; then
   fi
   yaml_suite roll target/search-yaml/roll.json
   yaml_suite roll-os target/search-yaml/roll-opensearch.json
+  yaml_suite roll-os-sql target/search-yaml/roll-opensearch-sql.json
+  extended_suites
   if [[ -f crates/search-server/tests/differential.rs ]]; then
     ROLL_E2E=1 cargo test -p search-server --test differential
   fi
@@ -135,6 +168,13 @@ if [[ $unit_only == 0 ]]; then
   fi
   fleet_on_postgres
   lint_template
+  # The template's scaling and capacity rules under AWS's documented semantics.
+  scripts/search-aws-rehearsal.sh model
+  if [[ $images == 1 ]]; then
+    IMAGE=roll-search-test PORT=${ROLL_IMAGE_SMOKE_PORT:-19280} scripts/search-image-smoke.sh --build --install-binfmt amd64 arm64
+    IMAGE=roll-search-test PORT=${ROLL_IMAGE_SMOKE_PORT:-19280} scripts/search-image-smoke.sh --s3 amd64
+    IMAGE=roll-search-test scripts/search-aws-rehearsal.sh userdata localstack
+  fi
 fi
 
 # Only a full run counts as green.

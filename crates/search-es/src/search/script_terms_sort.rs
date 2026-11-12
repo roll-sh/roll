@@ -15,6 +15,10 @@
 //! `null` result is a missing value, sorted last in both directions. Scripts see `_score` = 0:
 //! the values are computed before any query runs (`string` sorts on scores are vanishingly rare).
 //!
+//! Keyed `flattened` sub-fields sort the same way (their values are slices of the `._keyed`
+//! field's terms, which a keyword sort can't strip): the dictionary is built from doc values
+//! ordinals instead of a script, one term lookup per distinct value of a segment.
+//!
 //! `version` scripts may return a `Version` (its encoding is used) or any other value, whose
 //! string form is encoded as a version (`DocValueFormat.VERSION.parseBytesRef`).
 
@@ -76,6 +80,10 @@ enum TermsSource {
     /// `SortedBinaryDocValues` under the sort mode; docs without values by `missing` (a value
     /// they sort and print as) when given.
     Runtime { ev: Arc<super::runtime::Evaluator>, max: bool, missing: Option<Vec<u8>> },
+    /// A keyed `flattened` sub-field (`KeyedFlattenedFieldData`): the `key\0value` terms of the
+    /// `._keyed` field's doc values, the key stripped; each doc by its smallest value (`max`:
+    /// largest), docs without one by `missing` when given.
+    Keyed { field: u32, key: Vec<u8>, max: bool, missing: Option<Vec<u8>> },
 }
 
 impl ScriptTerms {
@@ -94,6 +102,18 @@ impl ScriptTerms {
             _ => None,
         };
         ScriptTerms { source: TermsSource::Runtime { ev, max, missing }, searcher, version: false, ip, reverse, missing_first, dict: OnceLock::new() }
+    }
+
+    /// The sort of a keyed `flattened` sub-field `key` of the `._keyed` field `field`.
+    pub fn keyed(field: u32, key: &str, searcher: Searcher, reverse: bool, mode: search_index::collector::top_field::SortMode, missing: super::runtime::SortMissing) -> ScriptTerms {
+        use super::runtime::SortMissing;
+        let max = mode == search_index::collector::top_field::SortMode::Max;
+        let missing_first = missing == SortMissing::First;
+        let missing = match missing {
+            SortMissing::Bytes(b) => Some(b),
+            _ => None,
+        };
+        ScriptTerms { source: TermsSource::Keyed { field, key: key.as_bytes().to_vec(), max, missing }, searcher, version: false, ip: false, reverse, missing_first, dict: OnceLock::new() }
     }
 
     /// Docs without a value sort first.
@@ -115,6 +135,9 @@ impl ScriptTerms {
     }
 
     fn build(&self) -> Result<Dict, EsError> {
+        if let TermsSource::Keyed { field, key, max, missing } = &self.source {
+            return Ok(self.build_keyed(*field, key, *max, missing.as_deref()));
+        }
         let segs = self.searcher.segments();
         let mut raw: Vec<Vec<Option<Vec<u8>>>> = Vec::with_capacity(segs.len());
         let mut errors = HashMap::new();
@@ -184,6 +207,81 @@ impl ScriptTerms {
             })
             .collect();
         Ok(Dict { values, docs, errors })
+    }
+
+    /// [`build`](Self::build) for a keyed `flattened` field, from doc values ordinals: each
+    /// segment's slice of `key\0…` ordinals is looked up once, then mapped to the shard's
+    /// sorted values, so documents cost an ordinal lookup each.
+    fn build_keyed(&self, field: u32, key: &[u8], max: bool, missing: Option<&[u8]>) -> Dict {
+        let segs = self.searcher.segments();
+        let mut prefix = Vec::with_capacity(key.len() + 1);
+        prefix.extend_from_slice(key);
+        prefix.push(0);
+        // Per segment: its keyed values (key stripped) and each doc's index into them.
+        let mut per_seg: Vec<(Vec<Vec<u8>>, Vec<u32>)> = Vec::with_capacity(segs.len());
+        for seg in segs {
+            let mut docs = vec![NULL_ORD; seg.max_doc() as usize];
+            let mut local = Vec::new();
+            if let Some(search_codec::DocValuesReader::SortedSet(dv)) = seg.reader.doc_values(field) {
+                let lo = dv.lookup_term(&prefix).unwrap_or_else(|ip| ip);
+                let mut end = prefix.clone();
+                *end.last_mut().unwrap() = 1;
+                let hi = dv.lookup_term(&end).unwrap_or_else(|ip| ip);
+                let mut buf = Vec::new();
+                for o in lo..hi {
+                    dv.lookup_ord(o, &mut buf);
+                    local.push(buf[prefix.len().min(buf.len())..].to_vec());
+                }
+                if lo < hi {
+                    for (doc, slot) in docs.iter_mut().enumerate() {
+                        if !seg.is_live(doc as u32) {
+                            continue;
+                        }
+                        // Ordinals come sorted: the first in range is the smallest.
+                        let mut picked = None;
+                        for o in dv.ords(doc as u32) {
+                            if o >= hi {
+                                break;
+                            }
+                            if o >= lo {
+                                picked = Some(o);
+                                if !max {
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(o) = picked {
+                            *slot = (o - lo) as u32;
+                        }
+                    }
+                }
+            }
+            if let Some(m) = missing {
+                let mi = local.len() as u32;
+                let mut used = false;
+                for (doc, slot) in docs.iter_mut().enumerate() {
+                    if *slot == NULL_ORD && seg.is_live(doc as u32) {
+                        *slot = mi;
+                        used = true;
+                    }
+                }
+                if used {
+                    local.push(m.to_vec());
+                }
+            }
+            per_seg.push((local, docs));
+        }
+        let mut values: Vec<Vec<u8>> = per_seg.iter().flat_map(|(l, _)| l.iter().cloned()).collect();
+        values.sort_unstable();
+        values.dedup();
+        let docs = per_seg
+            .into_iter()
+            .map(|(local, docs)| {
+                let global: Vec<u32> = local.iter().map(|v| values.binary_search(v).map_or(NULL_ORD, |o| o as u32)).collect();
+                docs.into_iter().map(|d| if d == NULL_ORD { NULL_ORD } else { global[d as usize] }).collect()
+            })
+            .collect();
+        Dict { values, docs, errors: HashMap::new() }
     }
 
     /// The sort value a collected ordinal stands for: the bytes (`Null` when missing).

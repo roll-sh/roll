@@ -50,6 +50,10 @@ on the merged tree as the lanes left it and again after the integration fix:
   not in the baseline), 95 skipped: 0 regressions, threshold raised to 3809;
 - OpenSearch 3.9.0 YAML: 1506 tests, 1455 passed, 0 failed, 51 skipped: 0 regressions,
   threshold 1455;
+- extended suites (round 6: Elasticsearch's module, plugin and x-pack YAML suites outside
+  `test/free`, 66 suites, 6,044 tests, each on its own test cluster's configuration;
+  `scripts/search-yaml-suites.sh roll-extended`): roll passes 3,463, 3,424 of the 5,541 that pass
+  on Elasticsearch 9.5.5; per-suite table and thresholds in compatibility.md, "Extended suites";
 - differential suite: 10 of 10 (replay of 69 fixtures; seed 1, 60 cases: 2321 of 2329 steps
   equal, known differences only);
 - client matrix: 11 of 11 (searchkick 540 runs, 0 failures);
@@ -104,14 +108,13 @@ in 27 ms.
 
 Ordered by importance; deduplicated from every lane's `remaining` list.
 
-1. **First real AWS deployment** (aws). Nothing has run on AWS yet. Check the EC2 data-volume
-   user data (device detection on Graviton/AL2023, mounted before the ECS agent starts tasks),
-   `distinctInstance` with managed scaling during deploys (MaximumPercent 200 needs spare
-   instances), the Lambda `Command [--lambda]` override, `ToZeroPolicy` really scaling to 0,
-   Spot draining inside 120 s, a rolling upgrade from a pre-`api_tls` fleet (proxies first).
-   Commit an image smoke test (the old one lived in /tmp). Fix
-   `deploy/queues/aws/roll-queues.yaml:623` (`MetricIntervalUpperBound: 0` step never matches;
-   use `MetricIntervalLowerBound: 0`, as `roll-search.yaml` now does).
+1. **First real AWS deployment** (aws). Nothing has run on AWS yet; everything that can be is
+   rehearsed locally (docs/search/deploy-aws.md, "What was verified locally": both images, also
+   on S3 through LocalStack, the AL2023 user data, the scaling model, the stack on LocalStack,
+   the Lambda path, fleet upgrades). What only AWS can show is step 6 of that runbook: the EC2
+   data volume and AMI, the Lambda `ImageConfig`, `distinctInstance` with managed scaling during
+   a deploy, `ToZeroPolicy` reaching 0 (and the alarm's `tasks` SampleCount term), a Spot
+   interruption through FIS with real S3 latency, lifecycle rules, log retention and SG rules.
 2. **Search operations safety** (compat-es, server). Register searches as tasks
    (`indices:data/read/search` in `_tasks`, `_tasks/_cancel`; wire `SearchControl.cancelled`
    to `TaskRegistry`) so graceful shutdown doesn't wait on a search without timeout; a bounded

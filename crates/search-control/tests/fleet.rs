@@ -2,7 +2,8 @@
 //! node is killed, a deposed owner fenced, a SIGTERM handoff under load, changes and deletes
 //! made through one node reaching the others, API calls forwarded to the owner, a streamed
 //! `_bulk` refused mid-upload and resent whole, nodes serving TLS with pinned boot-time
-//! certificates, and the fleet woken from zero through a fake ECS API.
+//! certificates, the fleet woken from zero through a fake ECS API, and a fleet from before
+//! `api_tls` upgraded in place (proxies first).
 //!
 //! Every node runs on its own runtime and thread, so "killing" one stops all of its tasks at
 //! once (lease renewals, heartbeats, listeners), as a crash would. Metadata is a SQLite file
@@ -72,6 +73,12 @@ impl TestNode {
     /// With `tls`, the REST and API listeners serve a certificate made for the run, and the
     /// heartbeat publishes its pin (rolld's `--search-only --search-tls-self-signed`).
     fn start_with(id: &str, meta: &str, objects: search_store::Objects, az: &str, tls: bool) -> TestNode {
+        Self::start_tls(id, meta, objects, az, tls, tls)
+    }
+
+    /// `api_tls: false` with `tls`: a node from before `api_tls`, its REST port on TLS (pinned)
+    /// and its control API plain, publishing no API pin.
+    fn start_tls(id: &str, meta: &str, objects: search_store::Objects, az: &str, tls: bool, api_tls: bool) -> TestNode {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let home = tmp(id);
         let (id2, meta2, az2, home2) = (id.to_string(), meta.to_string(), az.to_string(), home.clone());
@@ -98,17 +105,17 @@ impl TestNode {
                         let c = search_proxy::upstream::self_signed(&["localhost".into()]).unwrap();
                         opts.tls = Some(search_server::net::tls_acceptor(c.cert_pem.as_bytes(), c.key_pem.as_bytes()).unwrap());
                         f.tls_pin = Some(c.fingerprint);
-                        f.api_tls = true;
+                        f.api_tls = api_tls;
                         cfg.tls = true;
                     }
                     cfg.fleet = Some(f);
                     let control = Control::new(cfg, objects).await.unwrap();
-                    let api_tls = opts.tls.clone();
+                    let api_tls = opts.tls.clone().filter(|_| api_tls);
                     tokio::spawn(search_server::serve(es_l, control.node.clone(), opts));
                     let router = search_control::api::router(control.clone());
                     match api_tls {
                         Some(a) => {
-                            let l = search_control::api::TlsListener::new(api_l, a).unwrap();
+                            let l = search_control::api::TlsListener::for_fleet(api_l, a, control.clone()).unwrap();
                             tokio::spawn(async move { axum::serve(l, router).await });
                         }
                         None => {
@@ -191,6 +198,11 @@ async fn fleet_with(n: usize, waker: Option<Arc<dyn search_proxy::Waker>>, tls: 
     }
     let objects = search_store::test_objects("fleet");
     let nodes: Vec<TestNode> = (0..n).map(|i| TestNode::start_with(&format!("node-{i}"), &meta, objects.clone(), "az1", tls)).collect();
+    fleet_of(nodes, dir, meta, waker, tls).await
+}
+
+/// The proxy (REST and API ports) in front of `nodes`.
+async fn fleet_of(nodes: Vec<TestNode>, dir: PathBuf, meta: String, waker: Option<Arc<dyn search_proxy::Waker>>, tls: bool) -> Fleet {
     let members = search_proxy::fleet::open(&meta, None, None).await.unwrap();
     let cfg = ProxyConfig { az: Some("az1".into()), node_ttl: NODE_TTL, refresh: Duration::from_millis(100), hold_timeout: Duration::from_secs(30), ..ProxyConfig::default() };
     let d = Directory::new(members, cfg);
@@ -211,7 +223,8 @@ async fn fleet_with(n: usize, waker: Option<Arc<dyn search_proxy::Waker>>, tls: 
 
 impl Fleet {
     async fn api(&self, node: usize, method: reqwest::Method, path: &str, body: Option<Value>) -> (u16, Value) {
-        let scheme = if self.tls { "https" } else { "http" };
+        // Per node: in a fleet being upgraded some API ports serve TLS and some don't.
+        let scheme = if self.tls && self.proxy.directory.tls(&self.nodes[node].api) { "https" } else { "http" };
         let mut r = self.http.request(method, format!("{scheme}://{}{path}", self.nodes[node].api));
         if let Some(b) = body {
             r = r.json(&b);
@@ -408,6 +421,26 @@ async fn a_sigterm_hands_clusters_over_under_load() {
     assert!(missing.is_empty(), "acknowledged writes lost across the handoff: {missing:?} of {n}");
     assert_eq!(count(&f, &u, &p).await, n as i64, "every acknowledged write is there");
     assert!(f.proxy.stats.retries.load(Ordering::SeqCst) + f.proxy.stats.redirects.load(Ordering::SeqCst) > 0);
+}
+
+/// An always-on cluster (`idle_timeout_s` 0) is loaded once created, by one node, and comes
+/// back up on another node when its node stops, with no request asking for it.
+#[tokio::test]
+async fn always_on_clusters_move_when_their_node_stops() {
+    let f = fleet(2, None).await;
+    let (s, v) = f.api(0, reqwest::Method::POST, "/v1/search/clusters", Some(json!({ "name": "steady", "idle_timeout_s": 0 }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (u, p) = (v["username"].as_str().unwrap().to_string(), v["password"].as_str().unwrap().to_string());
+    assert_eq!(f.owners("steady"), ["node-0"]);
+    let (s, v) = f.es(&u, &p, reqwest::Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({ "n": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    f.nodes[0].terminate().await;
+    let deadline = Instant::now() + LEASE_TTL * 3 + Duration::from_secs(10);
+    while f.nodes[1].loaded() != ["steady"] {
+        assert!(Instant::now() < deadline, "never loaded on the other node");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(count(&f, &u, &p).await, 1);
 }
 
 #[tokio::test]
@@ -634,4 +667,114 @@ async fn nodes_serving_tls_are_reached_through_their_pinned_certificates() {
     let v: Value = r.json().await.unwrap();
     assert!(v.to_string().contains("docs"), "{v}");
     assert_eq!(f.owners("secure"), [f.nodes[owner].id.clone()], "nothing moved");
+}
+
+/// The node records' table as fleets before `api_tls` made it (the column is added in place).
+async fn old_node_table(meta: &str) {
+    if meta.starts_with("postgres") {
+        wipe_pg(meta).await;
+        let pg = search_proxy::pg::Pg::connect(meta, None, None).await.unwrap();
+        pg.client()
+            .await
+            .unwrap()
+            .batch_execute(
+                "DROP TABLE IF EXISTS roll_search_nodes; CREATE TABLE roll_search_nodes (id TEXT PRIMARY KEY, http TEXT NOT NULL,
+                 api TEXT, az TEXT, draining BOOLEAN NOT NULL, loaded INTEGER NOT NULL, beat TIMESTAMPTZ NOT NULL, tls TEXT)",
+            )
+            .await
+            .unwrap();
+    } else {
+        rusqlite::Connection::open(meta)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE search_nodes (id TEXT PRIMARY KEY, http TEXT NOT NULL, api TEXT, az TEXT, draining INTEGER NOT NULL,
+                 loaded INTEGER NOT NULL, beat_ms INTEGER NOT NULL, tls TEXT)",
+            )
+            .unwrap();
+    }
+}
+
+/// A fleet from before `api_tls` (REST pinned, control API plain, node records without the
+/// column) upgraded the documented way: the proxies first, then the nodes with a deploy's
+/// overlap. The new proxy serves the old node (pinned REST, plain API); old and new nodes serve
+/// side by side, a new node forwards console calls to an old one in plain HTTP and answers an
+/// old one's plain calls on its TLS API (until no old node is left), and the old node's SIGTERM
+/// hands its clusters to the new one without losing an acknowledged write.
+#[tokio::test]
+async fn a_fleet_from_before_api_tls_upgrades_proxies_first() {
+    let dir = meta_dir("upgrade");
+    std::fs::create_dir_all(&dir).unwrap();
+    let meta = meta(&dir);
+    old_node_table(&meta).await;
+    let objects = search_store::test_objects("upgrade");
+    let old = TestNode::start_tls("node-old", &meta, objects.clone(), "az1", true, false);
+    // The proxies are replaced first: a new proxy in front of the old fleet.
+    let mut f = fleet_of(vec![old], dir, meta.clone(), None, true).await;
+    let (old_es, old_api) = (f.nodes[0].es, f.nodes[0].api);
+    assert!(f.proxy.directory.tls(&old_es) && !f.proxy.directory.tls(&old_api), "the old node publishes a REST pin only");
+    let (u, p) = f.create("legacy").await;
+    for i in 0..5 {
+        let (s, v) = f.es(&u, &p, reqwest::Method::PUT, &format!("/docs/_doc/{i}"), Some(json!({ "n": i }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    f.es(&u, &p, reqwest::Method::POST, "/docs/_refresh", None).await;
+    assert_eq!(count(&f, &u, &p).await, 5);
+    let r = f.http.get(format!("{}/v1/search/clusters/legacy/indices", f.api_url)).send().await.unwrap();
+    assert_eq!(r.status(), 200, "the proxy's API port reaches the old node's plain API");
+
+    // The node deploy: a new node joins before the old one stops.
+    f.nodes.push(TestNode::start_tls("node-new", &meta, objects.clone(), "az1", true, true));
+    let new_api = f.nodes[1].api;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f.proxy.directory.tls(&new_api) {
+        assert!(Instant::now() < deadline, "the proxy never saw the new node's API pin");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!f.proxy.directory.tls(&old_api), "the old node's record still says plain");
+    // A console request at the new node runs on the old owner, forwarded in plain HTTP.
+    let (s, v) = f.api(1, reqwest::Method::POST, "/v1/search/clusters/legacy/request", Some(json!({ "method": "GET", "path": "/docs/_count" }))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(serde_json::from_str::<Value>(v["body"].as_str().unwrap()).unwrap()["count"], 5, "{v}");
+    // The old node calls the new one the only way it knows, in plain HTTP (a forwarded call):
+    // the new node's TLS API answers it while an old node runs.
+    let plain = reqwest::Client::new();
+    let r = plain.get(format!("http://{new_api}/v1/search/clusters/legacy")).header("x-roll-search-forwarded", "1").send().await.unwrap();
+    assert_eq!(r.status(), 200, "an old node's plain call to a new node");
+    assert_eq!(r.json::<Value>().await.unwrap()["name"], "legacy");
+    // Clusters created during the deploy work wherever they open.
+    let (s, v) = f.api(1, reqwest::Method::POST, "/v1/search/clusters", Some(json!({ "name": "fresh" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (u2, p2) = (v["username"].as_str().unwrap().to_string(), v["password"].as_str().unwrap().to_string());
+    let (s, v) = f.es(&u2, &p2, reqwest::Method::PUT, "/docs/_doc/a?refresh=true", Some(json!({ "n": 1 }))).await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(count(&f, &u2, &p2).await, 1);
+    for i in 5..10 {
+        let (s, v) = f.es(&u, &p, reqwest::Method::PUT, &format!("/docs/_doc/{i}"), Some(json!({ "n": i }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+
+    // The old node stops (SIGTERM): its clusters move to the new node, every write kept.
+    f.nodes[0].terminate().await;
+    for i in 10..15 {
+        let (s, v) = f.es(&u, &p, reqwest::Method::PUT, &format!("/docs/_doc/{i}"), Some(json!({ "n": i }))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    f.es(&u, &p, reqwest::Method::POST, "/docs/_refresh", None).await;
+    assert_eq!(count(&f, &u, &p).await, 15);
+    assert_eq!(count(&f, &u2, &p2).await, 1);
+    assert_eq!(f.owners("legacy"), ["node-new"]);
+    // Fully upgraded: the proxy reaches the API over pinned TLS.
+    let r = f.http.get(format!("{}/v1/search/clusters/legacy/indices", f.api_url)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.json::<Value>().await.unwrap().to_string().contains("docs"));
+    // With no old node left, the API answers TLS only again: a plain connection is closed.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let fresh = reqwest::Client::builder().pool_max_idle_per_host(0).build().unwrap();
+        if fresh.get(format!("http://{new_api}/v1/search/clusters/legacy")).send().await.is_err() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "plain HTTP still answered after the old node left");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

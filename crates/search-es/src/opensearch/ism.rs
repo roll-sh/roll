@@ -15,10 +15,10 @@
 //! Managed indices: `add`, `remove`, `change_policy` and `retry` act on index expressions;
 //! `ism_template`s manage matching indices (or data streams' backing indices) on creation
 //! unless they are hidden or `index.plugins.index_state_management.auto_manage` is false.
-//! The plugin's job scheduler then runs each policy's state machine every `job_interval`
-//! minutes; roll does not run policies (a serverless cluster has no background sweeps), so
-//! explain always reports what OpenSearch reports between registering a managed index and
-//! its first job run: the index, its policy and `enabled`, with no state yet.
+//! Each managed index's record is also its job: a copy of the policy, the interval schedule
+//! and, after the first run, the `ManagedIndexMetaData` explain prints. The job scheduler
+//! ([`super::jobs`]) runs each policy's state machine every `job_interval` minutes
+//! ([`super::ism_run`]).
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -32,9 +32,9 @@ use crate::xpack::store;
 
 /// The plugin's config index.
 pub const CONFIG_INDEX: &str = ".opendistro-ism-config";
-const POLICIES: &str = "ism.policy";
+pub(super) const POLICIES: &str = "ism.policy";
 /// Managed indices by index name.
-const MANAGED: &str = "ism.managed";
+pub(super) const MANAGED: &str = "ism.managed";
 const META: &str = "ism.meta";
 /// `IndexManagementIndices`' config mapping schema version, which `GET` reports.
 const SCHEMA_VERSION: i64 = 31;
@@ -64,7 +64,7 @@ pub async fn dispatch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::IsmAddPolicy => add(ctx).await,
         Api::IsmRemovePolicy => remove(ctx).await,
         Api::IsmChangePolicy => change_policy(ctx).await,
-        Api::IsmRetry => retry(ctx),
+        Api::IsmRetry => retry(ctx).await,
         Api::IsmExplain => explain(ctx),
         other => Err(EsError::not_implemented(other.name())),
     }
@@ -666,7 +666,7 @@ fn parse_conditions(p: &mut XParser<'_>) -> EsResult<Value> {
 // ------------------------------------------------------------------------------ storage
 
 /// The config index's next sequence number (advanced).
-fn next_seq(st: &mut ClusterState) -> i64 {
+pub(super) fn next_seq(st: &mut ClusterState) -> i64 {
     let n = st.metadata.xpack.get(META, "seq").and_then(Value::as_i64).unwrap_or(0);
     store::family_mut(st, META).insert("seq".into(), Value::from(n + 1));
     n
@@ -685,19 +685,57 @@ fn config_uuid(st: &ClusterState) -> String {
 }
 
 /// A stored policy: its document metadata and normalized body.
-struct Stored {
-    seq_no: i64,
+pub(super) struct Stored {
+    pub(super) seq_no: i64,
     version: i64,
-    policy: Map,
+    pub(super) policy: Map,
 }
 
-fn stored(st: &ClusterState, id: &str) -> Option<Stored> {
+pub(super) fn stored(st: &ClusterState, id: &str) -> Option<Stored> {
     let v = st.metadata.xpack.get(POLICIES, id)?;
     Some(Stored {
         seq_no: v.get("seq_no").and_then(Value::as_i64).unwrap_or(0),
         version: v.get("version").and_then(Value::as_i64).unwrap_or(1),
         policy: v.get("policy").and_then(Value::as_object).cloned().unwrap_or_default(),
     })
+}
+
+/// The job's own copy of its policy (`ManagedIndexConfig.policy`): a managed index keeps
+/// running the policy version it was given, whatever happens to the policy later. Copies are
+/// kept once per policy version (`ism.meta` `policy:<id>:<seq_no>`) and shared by every
+/// managed index on that version, so a thousand managed indices don't make a thousand copies
+/// of the cluster state's largest objects.
+pub(super) fn job_policy<'a>(st: &'a ClusterState, rec: &Value) -> Option<&'a Map> {
+    let id = rec.get("policy_id").and_then(Value::as_str)?;
+    let seq = rec.get("policy_seq_no").and_then(Value::as_i64)?;
+    st.metadata.xpack.get(META, &format!("policy:{id}:{seq}")).and_then(Value::as_object)
+}
+
+/// Keeps a copy of the policy's current version for jobs: its sequence number.
+pub(super) fn keep_policy_copy(st: &mut ClusterState, id: &str) -> Option<i64> {
+    let s = stored(st, id)?;
+    let key = format!("policy:{id}:{}", s.seq_no);
+    if st.metadata.xpack.get(META, &key).is_none() {
+        store::family_mut(st, META).insert(key, Value::Obj(s.policy));
+    }
+    Some(s.seq_no)
+}
+
+/// Drops policy copies no job uses any more.
+pub(super) fn gc_policy_copies(st: &mut ClusterState) {
+    let used: std::collections::HashSet<String> = st
+        .metadata
+        .xpack
+        .iter(MANAGED)
+        .filter_map(|(_, r)| Some(format!("policy:{}:{}", r.get("policy_id")?.as_str()?, r.get("policy_seq_no")?.as_i64()?)))
+        .collect();
+    let stale: Vec<String> = st.metadata.xpack.iter(META).map(|(k, _)| k).filter(|k| k.starts_with("policy:") && !used.contains(*k)).cloned().collect();
+    if !stale.is_empty() {
+        let fam = store::family_mut(st, META);
+        for k in stale {
+            fam.remove(&k);
+        }
+    }
 }
 
 /// A policy as `GET` prints it (the current schema version).
@@ -1186,7 +1224,7 @@ async fn delete_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 // ------------------------------------------------------------------------------ managed indices
 
-fn managed<'a>(st: &'a ClusterState, index: &str) -> Option<&'a Value> {
+pub(super) fn managed<'a>(st: &'a ClusterState, index: &str) -> Option<&'a Value> {
     st.metadata.xpack.get(MANAGED, index)
 }
 
@@ -1199,7 +1237,23 @@ fn manage(st: &mut ClusterState, index: &str, uuid: &str, policy: &str, writes: 
     for _ in 1..writes {
         next_seq(st);
     }
-    store::put(st, MANAGED, index, obj! { "index_uuid" => uuid, "policy_id" => policy, "enabled" => true, "seq_no" => seq }, now)?;
+    // The job document: the policy as it is now (later policy updates don't reach it), and an
+    // interval schedule starting now.
+    let copy = keep_policy_copy(st, policy);
+    let interval = super::ism_run::job_interval(st);
+    let next = super::ism_run::next_run(st, now, interval, now);
+    let rec = obj! {
+        "index_uuid" => uuid,
+        "policy_id" => policy,
+        "enabled" => true,
+        "seq_no" => seq,
+        "policy_seq_no" => copy.map_or(Value::Null, Value::from),
+        "enabled_time" => now,
+        "schedule_start" => now,
+        "job_interval" => interval,
+        "next_run" => next,
+    };
+    store::put(st, MANAGED, index, rec, now)?;
     Ok(())
 }
 
@@ -1294,6 +1348,7 @@ async fn remove(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     continue;
                 }
                 store::remove(st, MANAGED, name);
+                gc_policy_copies(st);
                 // The config and its metadata documents go.
                 next_seq(st);
                 next_seq(st);
@@ -1312,18 +1367,18 @@ async fn remove(ctx: &Ctx<'_>) -> EsResult<Reply> {
 }
 
 /// `ChangePolicy.parse`: `policy_id`, `state`, `include` (state filters), `is_safe`, `user`.
-fn parse_change_policy(ctx: &Ctx<'_>) -> EsResult<(String, Option<String>)> {
+fn parse_change_policy(ctx: &Ctx<'_>) -> EsResult<(String, Option<String>, Vec<String>)> {
     let Some(body) = ctx.body()? else { return Err(iae("ChangePolicy policy id is null")) };
     let mut p = XParser::new(&body, ctx.raw_json(), Vec::new());
     p.next_token();
     expect(&p, Tk::StartObject)?;
-    let (mut policy, mut state) = (None, None);
+    let (mut policy, mut state, mut include) = (None, None, Vec::new());
     while let Some(field) = next_field(&mut p) {
         match field.as_str() {
             "policy_id" => policy = Some(text(&p)?),
             "state" => state = if p.current_token() == Some(Tk::Null) { None } else { Some(text(&p)?) },
             "include" => {
-                array(&mut p, |p| {
+                include = array(&mut p, |p| {
                     expect(p, Tk::StartObject)?;
                     let mut st = None;
                     while let Some(f) = next_field(p) {
@@ -1332,7 +1387,7 @@ fn parse_change_policy(ctx: &Ctx<'_>) -> EsResult<(String, Option<String>)> {
                             _ => p.skip_children(),
                         }
                     }
-                    st.map(|_| ()).ok_or_else(|| iae("Must include a state when using include filter"))
+                    st.ok_or_else(|| iae("Must include a state when using include filter"))
                 })?;
             }
             "is_safe" => {
@@ -1342,11 +1397,11 @@ fn parse_change_policy(ctx: &Ctx<'_>) -> EsResult<(String, Option<String>)> {
             other => return Err(invalid(other, "ChangePolicy")),
         }
     }
-    Ok((policy.ok_or_else(|| iae("ChangePolicy policy id is null"))?, state))
+    Ok((policy.ok_or_else(|| iae("ChangePolicy policy id is null"))?, state, include))
 }
 
 async fn change_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
-    let (policy, state_name) = parse_change_policy(ctx)?;
+    let (policy, state_name, include) = parse_change_policy(ctx)?;
     let st = ctx.state();
     if stored(&st, &policy).is_none() {
         return Err(status(404, format!("Could not find policy={policy}")));
@@ -1361,9 +1416,29 @@ async fn change_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     failed.push(failure(name, uuid, "This index is not being managed"));
                     continue;
                 };
-                // The change waits for the job's next safe point; until then the index keeps
-                // its policy (explain shows it).
-                m.insert("change_policy".into(), obj! { "policy_id" => policy.as_str(), "state" => state_name.clone().map_or(Value::Null, Value::Str) });
+                let meta = super::ism_run::meta_of(&Value::Obj(m.clone()));
+                if meta.as_ref().is_some_and(|x| x.transitioning()) {
+                    failed.push(failure(name, uuid, "Cannot change policy while transitioning to new state"));
+                    continue;
+                }
+                // `include` limits the change to indices in those states (uninitialized ones
+                // always change).
+                if let Some(x) = &meta
+                    && !include.is_empty()
+                    && !x.state_name().is_some_and(|s| include.iter().any(|i| i == s))
+                {
+                    continue;
+                }
+                // The change waits for the job's next run (a safe one switches right away,
+                // others at the state's transitions); until then the index keeps its policy.
+                let current = job_policy(st, &Value::Obj(m.clone())).cloned().unwrap_or_default();
+                let new_policy = stored(st, &policy).map(|s| s.policy).unwrap_or_default();
+                let safe = super::ism_run::safe_to_change(&current, &new_policy, meta.as_ref().and_then(|x| x.state_name()), state_name.is_some());
+                let include_v: Vec<Value> = include.iter().map(|s| obj! { "state" => s.as_str() }).collect();
+                m.insert(
+                    "change_policy".into(),
+                    obj! { "policy_id" => policy.as_str(), "state" => state_name.clone().map_or(Value::Null, Value::Str), "include" => Value::Arr(include_v), "is_safe" => safe },
+                );
                 // The config document is rewritten (it moves to the end of the index).
                 m.insert("seq_no".into(), Value::from(next_seq(st)));
                 store::family_mut(st, MANAGED).insert(name.clone(), Value::Obj(m));
@@ -1375,18 +1450,70 @@ async fn change_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
     outcome(r)
 }
 
-fn retry(ctx: &Ctx<'_>) -> EsResult<Reply> {
+/// `TransportRetryFailedManagedIndexAction`: failed jobs are enabled again with their action's
+/// retries reset (optionally restarting from the body's `state`).
+async fn retry(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    let start_state = match ctx.body_map()? {
+        Some(m) => match m.get("state") {
+            None | Some(Value::Null) => None,
+            Some(Value::Str(s)) => Some(s.clone()),
+            Some(other) => return Err(EsError::java(500, "class_cast_exception", format!("class {} cannot be cast to class java.lang.String", java_class(other)))),
+        },
+        None => None,
+    };
     let st = ctx.state();
     let indices = targets(ctx, &st, true)?;
-    let failed = indices
-        .iter()
-        .map(|(name, uuid)| {
-            // Managed indices have no metadata until the plugin's job first runs them.
-            let reason = if managed(&st, name).is_some() { "This index has no metadata information" } else { "This index is not being managed." };
-            failure(name, uuid, reason)
+    let now = ctx.now_ms;
+    let r = ctx
+        .cluster
+        .update(move |st| {
+            let (mut updated, mut failed) = (0usize, Vec::new());
+            for (name, uuid) in &indices {
+                let reason = match managed(st, name) {
+                    None => Some("This index is not being managed."),
+                    Some(rec) => match super::ism_run::meta_of(rec) {
+                        None => Some("This index has no metadata information"),
+                        Some(m) if !m.is_failed() => Some("This index is not in failed state."),
+                        Some(_) => None,
+                    },
+                };
+                if let Some(reason) = reason {
+                    failed.push(failure(name, uuid, reason));
+                    continue;
+                }
+                let Some(meta) = managed(st, name).and_then(super::ism_run::meta_of) else { continue };
+                let retried = super::ism_run::retried(&meta, start_state.clone());
+                let interval = super::ism_run::job_interval(st);
+                let start = managed(st, name).and_then(|r| r.get("schedule_start")).and_then(Value::as_i64).unwrap_or(now);
+                let next = super::ism_run::next_run(st, start, interval, now);
+                // The job is enabled (one config write), then its metadata replaced (another).
+                next_seq(st);
+                next_seq(st);
+                if let Some(Value::Obj(r)) = store::family_mut(st, MANAGED).get_mut(name) {
+                    r.insert("enabled".into(), Value::Bool(true));
+                    r.insert("enabled_time".into(), Value::from(now));
+                    r.insert("last_updated_time".into(), Value::from(now));
+                    r.insert("next_run".into(), Value::from(next));
+                    r.insert("metadata".into(), retried);
+                }
+                updated += 1;
+            }
+            Ok((updated, failed))
         })
-        .collect();
-    outcome((0, failed))
+        .await?;
+    outcome(r)
+}
+
+/// The Java class name of a parsed JSON value (cast failures name it).
+fn java_class(v: &Value) -> &'static str {
+    match v {
+        Value::Bool(_) => "java.lang.Boolean",
+        Value::Arr(_) => "java.util.ArrayList",
+        Value::Obj(_) => "java.util.HashMap",
+        Value::Str(_) => "java.lang.String",
+        Value::Null => "java.lang.Object",
+        _ => "java.lang.Integer",
+    }
 }
 
 fn explain_entry(st: &ClusterState, name: &str, show_policy: bool, validate: bool) -> (Value, bool) {
@@ -1395,15 +1522,14 @@ fn explain_entry(st: &ClusterState, name: &str, show_policy: bool, validate: boo
     let policy = rec.and_then(|r| r.get("policy_id")).and_then(Value::as_str);
     let id = policy.map_or(Value::Null, |p| Value::Str(p.to_string()));
     m.insert("index.plugins.index_state_management.policy_id".into(), id.clone());
-    m.insert("index.opendistro.index_state_management.policy_id".into(), id.clone());
+    m.insert("index.opendistro.index_state_management.policy_id".into(), id);
     if let Some(r) = rec {
-        m.insert("index".into(), Value::Str(name.to_string()));
-        m.insert("index_uuid".into(), r.get("index_uuid").cloned().unwrap_or(Value::Null));
-        m.insert("policy_id".into(), id);
+        super::ism_run::explain_record(name, r, &mut m);
     }
     m.insert("enabled".into(), rec.map_or(Value::Null, |r| r.get("enabled").cloned().unwrap_or(Value::Bool(true))));
-    if show_policy && let Some(s) = policy.and_then(|p| stored(st, p)) {
-        m.insert("policy".into(), as_read(s.policy));
+    // The job's own copy of its policy (`ManagedIndexConfig.policy`).
+    if show_policy && let Some(p) = rec.and_then(|r| job_policy(st, r)) {
+        m.insert("policy".into(), as_read(p.clone()));
     }
     if validate {
         m.insert("validate".into(), obj! { "validation_message" => "Starting Validation", "validation_status" => "passed" });
@@ -1411,11 +1537,64 @@ fn explain_entry(st: &ClusterState, name: &str, show_policy: bool, validate: boo
     (Value::Obj(m), rec.is_some())
 }
 
+/// `ExplainFilter`: the body of a `POST` explain.
+#[derive(Default)]
+struct ExplainFilter {
+    policy_id: Option<String>,
+    state: Option<String>,
+    action_type: Option<String>,
+    failed: Option<bool>,
+}
+
+impl ExplainFilter {
+    fn parse(ctx: &Ctx<'_>) -> EsResult<Option<ExplainFilter>> {
+        if ctx.method != crate::routes::Method::Post {
+            return Ok(None);
+        }
+        let Some(body) = ctx.body()? else { return Err(EsError::parse("request body is required")) };
+        let mut p = XParser::new(&body, ctx.raw_json(), Vec::new());
+        p.next_token();
+        expect(&p, Tk::StartObject)?;
+        let mut f = ExplainFilter::default();
+        while let Some(field) = next_field(&mut p) {
+            if field != "filter" {
+                p.skip_children();
+                continue;
+            }
+            expect(&p, Tk::StartObject)?;
+            while let Some(k) = next_field(&mut p) {
+                match k.as_str() {
+                    "policy_id" => f.policy_id = Some(text(&p)?),
+                    "state" => f.state = Some(text(&p)?),
+                    "action_type" => f.action_type = Some(text(&p)?),
+                    "failed" => f.failed = Some(p.boolean_value()?),
+                    _ => p.skip_children(),
+                }
+            }
+        }
+        Ok(Some(f))
+    }
+
+    /// Whether the managed-index search finds the config (`filterByPolicyID`).
+    fn finds(&self, rec: &Value) -> bool {
+        self.policy_id.as_deref().is_none_or(|p| rec.get("policy_id").and_then(Value::as_str) == Some(p))
+    }
+
+    /// `byMetaData`: indices whose metadata doesn't match drop out (those without stay).
+    fn keeps(&self, rec: Option<&Value>) -> bool {
+        match rec.and_then(super::ism_run::meta_of) {
+            Some(m) => m.matches_filter(self.state.as_deref(), self.action_type.as_deref(), self.failed),
+            None => true,
+        }
+    }
+}
+
 fn explain(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let st = ctx.state();
     let flag = |k: &str| ctx.query(k).is_some_and(|v| v != "false");
     let (show, validate) = (flag("show_policy"), flag("validate_action"));
     let params = search_params(ctx, "managed_index.index")?;
+    let filter = ExplainFilter::parse(ctx)?.unwrap_or_default();
     let mut out = Map::new();
     let mut total = 0usize;
     match ctx.path_param("index") {
@@ -1429,12 +1608,16 @@ fn explain(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 .xpack
                 .iter(MANAGED)
                 .filter(|(name, rec)| st.metadata.indices.get(*name).is_some_and(|i| rec.get("index_uuid").and_then(Value::as_str) == Some(i.uuid.as_str())))
-                .filter(|(name, _)| query_matches(&params.query, name))
+                .filter(|(name, rec)| query_matches(&params.query, name) && filter.finds(rec))
                 .collect();
             let seq = |r: &Value| r.get("seq_no").and_then(Value::as_i64).unwrap_or(0);
             list.sort_by(|a, b| sort_cmp(&managed_sort_value(a, key), &managed_sort_value(b, key), params.desc).then_with(|| seq(a.1).cmp(&seq(b.1))));
             total = list.len();
-            for (name, _) in list.into_iter().skip(params.from).take(params.size) {
+            for (name, rec) in list.into_iter().skip(params.from).take(params.size) {
+                if !filter.keeps(Some(rec)) {
+                    total -= 1;
+                    continue;
+                }
                 out.insert(name.clone(), explain_entry(&st, name, show, validate).0);
             }
         }
@@ -1450,34 +1633,33 @@ fn explain(ctx: &Ctx<'_>) -> EsResult<Reply> {
             sort_key(ctx, &st, &params.sort_field, Doc::Managed)?;
             let opts = IndicesOptions { ignore_unavailable: true, ..IndicesOptions::STRICT_EXPAND_HIDDEN };
             let exprs = crate::meta::resolve::split_expressions(expr);
-            let mut names = crate::meta::resolve::resolve(&st, &exprs, &opts, ctx.now_ms)?;
-            if exprs.iter().any(|e| crate::meta::resolve::is_wildcard(e)) {
-                names = cluster_order(&st, names);
-            } else {
-                // `resolve` sorts; listed names answer in the order given.
-                names.sort_by_key(|n| exprs.iter().position(|e| e == n).unwrap_or(usize::MAX));
-            }
+            // `DefaultIndexMetadataService` collects the names in a `HashMap` (filled in cluster
+            // order) that explain copies with `putAll` into a fresh `HashMap`, presized for them.
+            let names = cluster_order(&st, crate::meta::resolve::resolve(&st, &exprs, &opts, ctx.now_ms)?);
+            let order = crate::json::java_hash_order(&names, 16);
+            let names: Vec<String> = order.iter().map(|&i| names[i].clone()).collect();
+            let presized = ((names.len() as f32 / 0.75 + 1.0) as usize).next_power_of_two();
+            let order = crate::json::java_hash_order(&names, presized);
+            let names: Vec<String> = order.iter().map(|&i| names[i].clone()).collect();
             if names.is_empty() {
                 return Err(EsError::action_request_validation(&["no documents to get".into()]));
             }
-            // A `queryString` narrows the managed-index configs the plugin finds: the listed
-            // indices it matches answer alone, and when it matches none every listed index
-            // answers as unmanaged.
-            let narrowed = params.query.trim() != "*";
-            let found: Vec<&String> = names.iter().filter(|n| managed(&st, n).is_some() && query_matches(&params.query, n)).collect();
+            // A `queryString` (or a policy filter) narrows the managed-index configs the plugin
+            // finds: the listed indices it matches answer alone, and when it matches none every
+            // listed index answers as unmanaged.
+            let narrowed = params.query.trim() != "*" || filter.policy_id.is_some();
+            let found: Vec<&String> = names.iter().filter(|n| managed(&st, n).is_some_and(|r| query_matches(&params.query, n) && filter.finds(r))).collect();
             for name in &names {
                 if narrowed && !found.is_empty() && !found.contains(&name) {
                     continue;
                 }
-                let (v, is_managed) = if narrowed && found.is_empty() { (explain_entry(&ClusterState::default(), name, false, validate).0, false) } else { explain_entry(&st, name, show, validate) };
+                let unmanaged = narrowed && found.is_empty();
+                if !unmanaged && !filter.keeps(managed(&st, name)) {
+                    continue;
+                }
+                let (v, is_managed) = if unmanaged { (explain_entry(&ClusterState::default(), name, false, validate).0, false) } else { explain_entry(&st, name, show, validate) };
                 out.insert(name.clone(), v);
                 total += usize::from(is_managed);
-            }
-            // Wildcards expand in the order of a `HashMap` keyed by index name (filled in cluster
-            // order, which breaks bucket ties); listed names keep their order. (Long lists come
-            // back in an order that varies between OpenSearch clusters, uuid-dependent.)
-            if crate::meta::resolve::split_expressions(expr).iter().any(|e| crate::meta::resolve::is_wildcard(e)) {
-                out = crate::json::java_hash_map(out, 16);
             }
         }
     }
@@ -1585,6 +1767,7 @@ pub fn on_index_deleted(st: &mut ClusterState, name: &str) {
     }
     if managed(st, name).is_some() {
         store::remove(st, MANAGED, name);
+        gc_policy_copies(st);
         // The config and its metadata documents are deleted (the metadata delete is written
         // even before the job first ran).
         next_seq(st);

@@ -49,6 +49,9 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
     for t in targets.iter_mut() {
         t.searcher = Some(t.searcher()?);
     }
+    for t in &targets {
+        t.shard.counters.pit_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let n = targets.len() as i64;
     let created = ctx.now_ms;
     let id = ctx.cluster.contexts.open(SearchContext {

@@ -560,7 +560,14 @@ impl LeafFn {
                 };
                 Ok(((hash & 0x00FF_FFFF) as f32 / (1u32 << 24) as f32) as f64)
             }
-            LeafFn::Script(s) => s.score(doc, sub),
+            LeafFn::Script(s) => {
+                let v = s.score(doc, sub)?;
+                // `ScriptScoreFunction`: a function score script can't lower a score below 0.
+                if v < 0.0 {
+                    return Err(Error::illegal(format!("script score function must not produce negative scores, but got: [{}]", double_to_string(v))));
+                }
+                Ok(v)
+            }
         }
     }
 
@@ -698,6 +705,12 @@ impl LeafFn {
                     }
                 }
             },
+        }
+        // A negative script score is the doc's error (`score` reports it).
+        if let LeafFn::Script(_) = self {
+            for (i, (b, v)) in bad.iter_mut().zip(out.iter()).enumerate() {
+                *b |= needed(i) && *v < 0.0;
+            }
         }
     }
 

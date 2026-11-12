@@ -145,6 +145,8 @@ pub struct BindCtx<'a> {
     pub time_series_request: bool,
     /// The query matches every live doc ([`ShardOptions::matches_all`]).
     pub matches_all: bool,
+    /// [`ShardOptions::terminate_after`].
+    pub terminate_after: bool,
     /// [`ShardOptions::filter_by_filter`].
     pub filter_by_filter: bool,
     /// `search.max_buckets`.
@@ -252,6 +254,12 @@ impl<'a> BindCtx<'a> {
     /// (Elasticsearch's points shortcut of top-level `min` / `max` under `match_all`).
     pub fn whole_segments(&self) -> bool {
         self.matches_all && self.parents.is_empty()
+    }
+
+    /// [`whole_segments`](Self::whole_segments) for a shortcut Elasticsearch doesn't take,
+    /// which must collect what `terminate_after` lets through.
+    pub fn whole_segments_unless_terminating(&self) -> bool {
+        self.whole_segments() && !self.terminate_after
     }
 
     pub fn tracker(&self, def: &AggDef) -> crate::memory::MemTracker {
@@ -719,6 +727,10 @@ pub struct ShardOptions {
     /// may then read segment statistics instead of docs. [`AggRequest::run`](crate::AggRequest::run)
     /// sets it for a `MatchAllQuery`.
     pub matches_all: bool,
+    /// The search sets `terminate_after`: collection may stop early, so statistics may stand
+    /// for whole segments only where Elasticsearch's own shortcuts do (`min`/`max` points,
+    /// filter by filter), not for `value_count` or `range`.
+    pub terminate_after: bool,
     /// `search.max_buckets` (None: the default 65536); `composite` checks its `size` against it
     /// on the shard.
     pub max_buckets: Option<usize>,
@@ -774,6 +786,7 @@ impl AggCollector {
             nested_agg: None,
             time_series_request: has_type(&req.aggs, "time_series"),
             matches_all: opts.matches_all,
+            terminate_after: opts.terminate_after,
             filter_by_filter: opts.filter_by_filter,
             max_buckets: opts.max_buckets.unwrap_or(crate::internal::DEFAULT_MAX_BUCKETS),
             profiler: opts.profiler.clone(),

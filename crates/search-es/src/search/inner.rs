@@ -221,7 +221,7 @@ fn nested_hits(
                 }
                 v
             });
-            let out = super::highlight::highlight_hit(qctx, hl, &def.query, wrapped.as_ref(), &parent_id, searcher, Some(seg.base + *d))?;
+            let out = super::highlight::highlight_hit(qctx, hl, &def.query, wrapped.as_ref(), &parent_id, searcher, Some(seg.base + *d), None, None)?;
             if !out.is_empty() {
                 h.insert("highlight".into(), Value::Obj(out));
             }

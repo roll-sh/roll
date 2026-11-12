@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! search-yaml run --url http[s]://127.0.0.1:9200 --suite target/search-yaml/es-9.5.5/rest-api-spec/test/free \
-//!     [--api-spec DIR] [--filter RE] [--skip-list FILE] [--report out.json] [--baseline FILE] \
+//!     [--api-spec DIR]... [--filter RE] [--skip-list FILE] [--report out.json] [--baseline FILE] \
 //!     [--write-baseline FILE] [--jobs N --cluster-hook URL | --jobs N --spawn CMD] [--flavor elasticsearch|opensearch] \
 //!     [--ids FILE] [--rerun REPORT.json] [--junit FILE] [--ca-cert PEM | --insecure] \
 //!     [--content-type json|yaml|cbor|smile|vnd-<type>|random] [--method-strategy natural|first|random] \
@@ -98,8 +98,9 @@ struct RunArgs {
     #[arg(long, required = true)]
     suite: Vec<String>,
     /// The REST API spec directory (rest-api-spec/api). Defaults to one found next to the suite.
+    /// Repeatable: later directories add their APIs (a module's own) to the first's.
     #[arg(long)]
-    api_spec: Option<PathBuf>,
+    api_spec: Vec<PathBuf>,
     /// Only tests whose id matches this regex.
     #[arg(long)]
     filter: Option<String>,
@@ -205,6 +206,12 @@ struct RunArgs {
     /// For https:// targets: don't verify the server certificate.
     #[arg(long)]
     insecure: bool,
+    /// Basic auth user for the cleanup between tests, when the tests run as a less privileged
+    /// `--user` (with --admin-password).
+    #[arg(long)]
+    admin_user: Option<String>,
+    #[arg(long)]
+    admin_password: Option<String>,
     /// API key (`Authorization: ApiKey <key>`).
     #[arg(long, env = "SEARCH_YAML_API_KEY")]
     api_key: Option<String>,
@@ -217,6 +224,10 @@ struct RunArgs {
     /// Log every request (method, target, status, time) to stderr.
     #[arg(long)]
     trace: bool,
+    /// Assert `is_false: is_partial` after every `esql.query` that doesn't allow partial results,
+    /// as Elasticsearch's ES|QL YAML suite class does.
+    #[arg(long)]
+    esql_not_partial: bool,
 }
 
 fn parse_header(h: &str) -> anyhow::Result<(String, String)> {
@@ -281,7 +292,8 @@ fn list(args: &ListArgs, check: bool) -> anyhow::Result<bool> {
 async fn run_cmd(a: RunArgs) -> anyhow::Result<bool> {
     search_yaml::http::set_tls_options(search_yaml::http::TlsOptions { ca_file: a.ca_cert.clone(), insecure: a.insecure });
     let suites = roots(&a.suite);
-    let api_spec = match a.api_spec {
+    let mut api_specs = a.api_spec.into_iter();
+    let api_spec = match api_specs.next() {
         Some(p) => p,
         None => suites
             .iter()
@@ -298,6 +310,10 @@ async fn run_cmd(a: RunArgs) -> anyhow::Result<bool> {
     if let Some(key) = &a.api_key {
         headers.push(("Authorization".into(), format!("ApiKey {key}")));
     }
+    let admin_headers = match &a.admin_user {
+        Some(user) => vec![("Authorization".to_owned(), search_yaml::http::basic_auth(user, a.admin_password.as_deref().unwrap_or("")))],
+        None => Vec::new(),
+    };
     let mut claimed = HashSet::new();
     for f in &a.features_file {
         claimed.extend(load_features_file(f)?);
@@ -363,6 +379,7 @@ async fn run_cmd(a: RunArgs) -> anyhow::Result<bool> {
         more_urls: a.url.iter().skip(1).cloned().collect(),
         suites,
         api_spec,
+        extra_api_specs: api_specs.collect(),
         filter: a.filter.as_deref().map(Regex::new).transpose()?,
         only_ids,
         skip_list,
@@ -382,8 +399,10 @@ async fn run_cmd(a: RunArgs) -> anyhow::Result<bool> {
         serverless: a.serverless,
         feature_flags: a.feature_flag.iter().cloned().collect(),
         headers,
+        admin_headers,
         progress: !a.quiet,
         trace: a.trace,
+        esql_not_partial: a.esql_not_partial,
     };
     let mut report = run(cfg).await?;
     if let Some(b) = &a.baseline {

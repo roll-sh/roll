@@ -506,6 +506,9 @@ fn apply(st: &mut ClusterState, actions: &[Action], now: i64) -> EsResult<Vec<Ou
                         if let Some(f) = &meta.filter {
                             crate::meta::aliases::validate_filter(alias, f)?;
                         }
+                        if crate::xpack::esql::is_view(st, alias) {
+                            return Err(EsError::invalid_alias_name(alias, "an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias"));
+                        }
                         for d in &streams {
                             st.metadata.add_data_stream_alias(alias, d, meta.is_write_index, meta.filter.clone());
                         }
@@ -530,7 +533,7 @@ fn apply(st: &mut ClusterState, actions: &[Action], now: i64) -> EsResult<Vec<Ou
                     if meta.index_routing.as_deref().is_some_and(|r| r.contains(',')) {
                         return Err(EsError::illegal_argument(format!("alias [{alias}] has several index routing values associated with it")));
                     }
-                    if st.metadata.indices.contains_key(alias) {
+                    if st.metadata.indices.contains_key(alias) || crate::xpack::esql::is_view(st, alias) {
                         return Err(EsError::invalid_alias_name(alias, "an index, data stream, ESQL view, or ESQL dataset exists with the same name as the alias"));
                     }
                     for n in &names {

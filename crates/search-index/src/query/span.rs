@@ -128,6 +128,21 @@ impl SpanNode {
         }
     }
 
+    /// Calls `f` on every `span_multi` leaf that scores (not `span_not` excludes).
+    pub fn for_each_multi(&self, f: &mut dyn FnMut(&MultiTermQuery)) {
+        match self {
+            SpanNode::Multi(m) => f(m),
+            SpanNode::Near { clauses, .. } | SpanNode::Or(clauses) => clauses.iter().for_each(|c| c.for_each_multi(f)),
+            SpanNode::Not { include, .. } => include.for_each_multi(f),
+            SpanNode::First { inner, .. } | SpanNode::Mask { inner, .. } => inner.for_each_multi(f),
+            SpanNode::Containing { big, little } | SpanNode::Within { big, little } => {
+                big.for_each_multi(f);
+                little.for_each_multi(f);
+            }
+            SpanNode::Term { .. } | SpanNode::Gap { .. } => {}
+        }
+    }
+
     /// Every term the spans read, including `span_not` excludes (which don't score).
     fn all_terms(&self, out: &mut Vec<(u32, Vec<u8>)>) {
         match self {
@@ -1175,6 +1190,11 @@ impl Weight for SpanWeight {
 
 impl Query for SpanQuery {
     fn weight(&self, s: &Searcher, mode: ScoreMode, boost: f32) -> Result<Box<dyn Weight>> {
+        // `FieldMaskingSpanQuery.createWeight` is the masked query's weight: it scores, explains
+        // and prints as that query (the masking only matters to an enclosing span query).
+        if let SpanNode::Mask { inner, .. } = &self.node {
+            return SpanQuery { node: (**inner).clone() }.weight(s, mode, boost);
+        }
         let mut terms = Vec::new();
         self.node.terms(&mut terms);
         let mut states = BTreeMap::new();

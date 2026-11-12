@@ -16,6 +16,12 @@
 //! (few) terms of its in-memory document index, looks each one up, and verifies only the union
 //! of hits and the always list.
 //!
+//! Stored queries are deduplicated by their stored bytes: an index often holds the same query
+//! for many documents (Rally's `percolator` track: 2M stored queries, most of them one
+//! `match`), and a query's verification doesn't depend on the document storing it, so each
+//! distinct query is parsed, indexed and verified once and its result applies to all its
+//! documents.
+//!
 //! The extraction is conservative: it may keep a query that can't match (verification drops
 //! it), never drop one that can. Terms come from converting the stored query under the index's
 //! current mapping, the same analysis the verification uses. When the percolated documents
@@ -31,6 +37,7 @@ use search_index::query::{
 };
 use search_index::{QueryRef, Searcher};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// What a document must contain for a query to match it.
 #[derive(Clone, Debug, PartialEq)]
@@ -170,15 +177,14 @@ fn selectivity(ts: &[(u32, Vec<u8>)]) -> (std::cmp::Reverse<usize>, usize) {
     (std::cmp::Reverse(ts.len()), ts.iter().map(|(_, t)| t.len()).min().unwrap_or(0))
 }
 
-/// One stored query of a segment.
-pub struct Stored {
-    pub doc: u32,
-    pub query: crate::query::Query,
-}
-
-/// A segment's stored queries, parsed, with their term requirements inverted.
+/// A segment's distinct stored queries, parsed, with their term requirements inverted.
 pub struct StoredQueries {
-    pub queries: Vec<Stored>,
+    /// The distinct stored queries.
+    pub queries: Vec<Arc<crate::query::Query>>,
+    /// Per distinct query, the docs storing it (ascending).
+    pub docs_of: Vec<Vec<u32>>,
+    /// Every doc with a parseable stored query and the index of its query, by doc.
+    by_doc: Vec<(u32, u32)>,
     /// Field name -> term -> indexes into `queries` needing it.
     by_term: HashMap<String, HashMap<Vec<u8>, Vec<u32>>>,
     /// Indexes into `queries` that are candidates for every request.
@@ -189,20 +195,38 @@ impl StoredQueries {
     /// Parses and analyses the stored queries of `field` (binary doc values) in `seg`.
     /// Unparseable stored queries are left out, as the verification would skip them anyway.
     pub fn build(ctx: &QueryCtx, seg: &search_index::SegmentContext, field: u32) -> StoredQueries {
-        let mut out = StoredQueries { queries: Vec::new(), by_term: HashMap::new(), always: Vec::new() };
+        let mut out = StoredQueries { queries: Vec::new(), docs_of: Vec::new(), by_doc: Vec::new(), by_term: HashMap::new(), always: Vec::new() };
         let Some(dv) = seg.reader.binary(field) else { return out };
         let schema = ctx.searcher.schema();
+        // Stored bytes -> distinct query; unparseable bytes map to `None`.
+        let mut seen: HashMap<Vec<u8>, Option<u32>> = HashMap::new();
         for d in 0..seg.reader.max_doc() {
             let Some(bytes) = dv.get(d) else { continue };
-            let Ok(Some(v)) = crate::json::parse(bytes) else { continue };
-            let Ok((parsed, _)) = crate::query::parse_query(&v, None, &[]) else { continue };
+            if let Some(known) = seen.get(bytes) {
+                if let Some(i) = *known {
+                    out.docs_of[i as usize].push(d);
+                    out.by_doc.push((d, i));
+                }
+                continue;
+            }
+            let parsed = match crate::json::parse(bytes) {
+                Ok(Some(v)) => crate::query::parse_query(&v, None, &[]).ok().map(|(q, _)| q),
+                _ => None,
+            };
+            let Some(parsed) = parsed else {
+                seen.insert(bytes.to_vec(), None);
+                continue;
+            };
             let qctx = QueryCtx::new(ctx.cluster, ctx.st, ctx.idx, ctx.table, ctx.searcher, ctx.now_ms);
             let n = match qctx.to_query(&parsed) {
                 Ok(q) => needs(&q),
                 Err(_) => Needs::Unknown,
             };
             let i = out.queries.len() as u32;
-            out.queries.push(Stored { doc: d, query: parsed });
+            seen.insert(bytes.to_vec(), Some(i));
+            out.queries.push(Arc::new(parsed));
+            out.docs_of.push(vec![d]);
+            out.by_doc.push((d, i));
             match n {
                 // Stays out of the candidates; but conversions can depend on the request's
                 // documents (dynamic fields), so it's verified if fields were added.
@@ -256,10 +280,15 @@ impl StoredQueries {
         hit.iter().enumerate().filter(|(_, h)| **h).map(|(i, _)| i as u32).collect()
     }
 
+    /// The index into [`queries`](Self::queries) of the query `doc` stores.
+    pub fn query_of(&self, doc: u32) -> Option<u32> {
+        self.by_doc.binary_search_by_key(&doc, |e| e.0).ok().map(|i| self.by_doc[i].1)
+    }
+
     /// Approximate heap bytes (segment cache accounting).
     pub fn heap_bytes(&self) -> usize {
         let terms: usize = self.by_term.values().flat_map(|m| m.iter()).map(|(t, ids)| t.len() + ids.len() * 4 + 48).sum();
-        self.queries.len() * 256 + terms + self.always.len() * 4
+        self.queries.len() * 280 + self.by_doc.len() * 12 + terms + self.always.len() * 4
     }
 }
 
@@ -272,7 +301,6 @@ pub fn adds_fields(index: &FieldTable, mem: &FieldTable) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use search_index::query::{BooleanQuery, MatchAllQuery, Occur, PhraseQuery, TermQuery};
 
     fn term(f: u32, t: &str) -> QueryRef {

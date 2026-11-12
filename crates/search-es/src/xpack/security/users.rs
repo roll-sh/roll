@@ -868,7 +868,7 @@ pub fn get_user_privileges(ctx: &Ctx) -> EsResult<Reply> {
         return Reply::ok(crate::json::parse(SUPERUSER_PRIVILEGES.as_bytes()).ok().flatten().unwrap_or_else(Value::object));
     }
     let st = ctx.state();
-    let eff = super::effective(&st, p);
+    let eff = super::effective(&super::file_roles(ctx.cluster), &st, p);
     let mut cluster: Vec<String> = eff.own.iter().flat_map(|r| r.cluster.iter().cloned()).collect();
     cluster.sort();
     cluster.dedup();
@@ -904,9 +904,9 @@ const SUPERUSER_PRIVILEGES: &str = r#"{"cluster":["all"],"global":[],"indices":[
 
 /// The privilege checks of `_has_privileges` (also used for user profiles): `(all granted,
 /// cluster, index, application)`.
-pub fn check_privileges(st: &crate::meta::ClusterState, p: &Principal, body: &Value) -> EsResult<(bool, Value, Value, Value)> {
+pub fn check_privileges(file: &super::FileRoles, st: &crate::meta::ClusterState, p: &Principal, body: &Value) -> EsResult<(bool, Value, Value, Value)> {
     let superuser = p.is_superuser();
-    let eff = super::effective(st, p);
+    let eff = super::effective(file, st, p);
     let mut all = true;
     let mut cluster = Map::new();
     for c in strs(body.get("cluster")) {
@@ -960,7 +960,7 @@ pub fn has_privileges(ctx: &Ctx) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let p = super::principal(ctx);
     let st = ctx.state();
-    let (all, cluster, index, application) = check_privileges(&st, p, &body)?;
+    let (all, cluster, index, application) = check_privileges(&super::file_roles(ctx.cluster), &st, p, &body)?;
     Reply::ok(obj! { "username" => p.username.clone(), "has_all_requested" => all, "cluster" => cluster, "index" => index, "application" => application })
 }
 

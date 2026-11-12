@@ -277,7 +277,7 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
         super::hits::render_doc_stored(qctx.table, Some(&t.idx), searcher, *d, &stored, &opts, &mut h, shown, qctx.now_ms)?;
         if let Some(hl) = &highlight {
             let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-            let out = super::highlight::highlight_hit(qctx, hl, &def.query, source.as_ref(), &id, searcher, Some(*d))?;
+            let out = super::highlight::highlight_hit(qctx, hl, &def.query, source.as_ref(), &id, searcher, Some(*d), Some(&stored), None)?;
             if !out.is_empty() {
                 h.insert("highlight".into(), Value::Obj(out));
             }

@@ -15,6 +15,7 @@ use search_codec::{Impact, NO_MORE_DOCS, PostingsCursor, PostingsFlags};
 
 use crate::error::{Error, Result};
 use crate::query::boolean::{BooleanQuery, Occur};
+use crate::query::multiterm::MultiTermQuery;
 use crate::query::term::{AdvanceShallow, ImpactSource, MaxScoreCache, Norms, competitive_target, SIMILARITY_NAME, TermQuery, TermStates, scoring_stats, term_text};
 use crate::schema::Schema;
 use crate::search::{Explanation, Query, QueryRef, QueryVisitor, Scorable, ScoreMode, Scorer, Searcher, SegmentContext, Weight};
@@ -1583,18 +1584,32 @@ impl Query for MultiPhrasePrefixQuery {
         b
     }
 
+    /// Several positions visit as the span query Elasticsearch's highlighters rewrite it to
+    /// (`rewriteCustomQuery`: a near of the positions, the last one span prefixes; slop plus
+    /// the position gaps, in order when the slop is 0), so only whole matches highlight.
     fn visit(&self, v: &mut dyn QueryVisitor) {
+        use crate::query::SpanNode;
         let n = self.terms.len();
-        for (i, terms) in self.terms.iter().enumerate() {
-            if i + 1 < n {
-                for t in terms {
-                    v.term(self.field, t);
-                }
-            } else {
-                let prefixes = terms.clone();
-                v.multi_term(self.field, Arc::new(move |t: &[u8]| prefixes.iter().any(|p| t.starts_with(p))));
-            }
+        if n == 1 {
+            let prefixes = self.terms[0].clone();
+            v.multi_term(self.field, Arc::new(move |t: &[u8]| prefixes.iter().any(|p| t.starts_with(p))));
+            return;
         }
+        let field = self.field;
+        let clauses: Vec<SpanNode> = self
+            .terms
+            .iter()
+            .enumerate()
+            .map(|(i, terms)| {
+                let mut alts: Vec<SpanNode> = terms
+                    .iter()
+                    .map(|t| if i + 1 == n { SpanNode::Multi(Box::new(MultiTermQuery::prefix(field, t.clone()))) } else { SpanNode::Term { field, term: t.clone() } })
+                    .collect();
+                if alts.len() == 1 { alts.pop().expect("one") } else { SpanNode::Or(alts) }
+            })
+            .collect();
+        let gaps = (self.positions[n - 1] as i64 - self.positions[0] as i64 - n as i64 + 1).max(0) as u32;
+        v.span(&SpanNode::Near { clauses, slop: self.slop + gaps, in_order: self.slop == 0 });
     }
 
     fn as_any(&self) -> &dyn Any {

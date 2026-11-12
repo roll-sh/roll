@@ -1,4 +1,4 @@
-//! The node's `request` circuit breaker.
+//! The node's circuit breakers: `request`, `inflight_requests` and `parent`.
 //!
 //! Elasticsearch charges memory a request holds on to while it runs (aggregation buffers and
 //! reduces, buffered `_msearch` responses) to the `request` breaker, whose limit is
@@ -8,7 +8,17 @@
 //! release on drop) and re-reads the limit from the cluster settings whenever a request takes
 //! the breaker, so a settings change applies to the next request, as Elasticsearch's dynamic
 //! setting does. The "heap" is the node's memory budget ([`NodeMetrics::heap_max`]).
+//!
+//! Every REST request's body is charged to `inflight_requests` until it is answered
+//! (`RestController`: `network.breaker.inflight_requests.limit`, 100% of the heap, overhead 2),
+//! except on the handlers Elasticsearch lets through whatever the memory (health, node and
+//! cluster stats, cluster state and settings, task listing and cancelling). Each charge is
+//! then checked against the `parent` breaker (`indices.breaker.total.limit`, 95%). The parent
+//! sums what the children hold, with their overheads, where Elasticsearch measures the real
+//! heap: roll has no garbage-collected heap whose usage would mean the same, so only memory
+//! roll accounts can trip it.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use search_aggs::memory::MemoryBudget;
@@ -17,16 +27,100 @@ use crate::api::nodes::NodeMetrics;
 use crate::cluster::Cluster;
 use crate::meta::ClusterState;
 
-/// The breakers of a node (only `request` accounts anything).
+/// The breakers of a node.
 #[derive(Debug)]
 pub struct Breakers {
     request: Arc<MemoryBudget>,
+    /// Bytes of the request bodies being handled.
+    in_flight: AtomicU64,
+    in_flight_tripped: AtomicU64,
+    parent_tripped: AtomicU64,
+    /// The heap limits are relative to, and when it was sampled (ms; refreshed each second,
+    /// so charging a request body costs no metrics sample).
+    heap: std::sync::atomic::AtomicI64,
+    heap_at: std::sync::atomic::AtomicI64,
 }
 
 impl Default for Breakers {
     fn default() -> Self {
-        Breakers { request: MemoryBudget::new(u64::MAX) }
+        Breakers {
+            request: MemoryBudget::new(u64::MAX),
+            in_flight: AtomicU64::new(0),
+            in_flight_tripped: AtomicU64::new(0),
+            parent_tripped: AtomicU64::new(0),
+            heap: std::sync::atomic::AtomicI64::new(0),
+            heap_at: std::sync::atomic::AtomicI64::new(i64::MIN),
+        }
     }
+}
+
+/// The overhead `inflight_requests` multiplies its bytes by (`network.breaker.inflight_requests.overhead`).
+const IN_FLIGHT_OVERHEAD: f64 = 2.0;
+
+/// The label Elasticsearch charges request bodies under.
+const HTTP_REQUEST: &str = "<http_request>";
+
+/// A limit setting against the heap, `-1` meaning none (`ChildMemoryCircuitBreaker`).
+fn limit_of(st: &ClusterState, key: &str, default: &str, heap: i64) -> i64 {
+    let v = st.metadata.cluster_setting(key).unwrap_or(default);
+    match memory_size(v, heap).or_else(|| memory_size(default, heap)) {
+        Some(u64::MAX) | None => -1,
+        Some(b) => b.min(i64::MAX as u64) as i64,
+    }
+}
+
+/// `CircuitBreakingException` (429, `TRANSIENT`) with Elasticsearch's suffix.
+fn breaking(reason: String, wanted: i64, limit: i64) -> crate::error::EsError {
+    let suffix = if crate::opensearch::active() { "" } else { search_aggs::memory::CIRCUIT_BREAKER_DOCS };
+    crate::error::EsError::new(429, "circuit_breaking_exception", format!("{reason}{suffix}"))
+        .with_meta("bytes_wanted", crate::json::Value::from(wanted))
+        .with_meta("bytes_limit", crate::json::Value::from(limit))
+        .with_meta("durability", crate::json::Value::from("TRANSIENT"))
+}
+
+/// `[name/human]` as breaker messages print sizes.
+fn sized(bytes: i64) -> String {
+    format!("{bytes}/{}", crate::units::ByteSize(bytes).human())
+}
+
+/// A request body charged to `inflight_requests`, released when dropped (the response sent).
+pub struct InFlight<'a> {
+    breakers: &'a Breakers,
+    bytes: u64,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.breakers.in_flight.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+/// Handlers Elasticsearch never refuses for memory (`canTripCircuitBreaker() == false`), so a
+/// node under memory pressure can still be watched and fixed (checked against 9.5.5).
+pub fn can_trip(api: crate::routes::Api) -> bool {
+    use crate::routes::Api;
+    !matches!(
+        api,
+        Api::Info
+            | Api::Ping
+            | Api::ClusterHealth
+            | Api::NodesInfo
+            | Api::NodesStats
+            | Api::NodesUsage
+            | Api::NodesHotThreads
+            | Api::ClusterStats
+            | Api::ClusterState
+            | Api::ClusterGetSettings
+            | Api::ClusterPutSettings
+            | Api::TasksList
+            | Api::TasksCancel
+            | Api::IndicesStats
+            | Api::HealthReport
+            | Api::ClusterAllocationExplain
+            | Api::ClusterRemoteInfo
+            | Api::ClusterPostVotingConfigExclusions
+            | Api::ClusterDeleteVotingConfigExclusions
+    )
 }
 
 /// `indices.breaker.request.limit` against a heap of `heap` bytes: a percentage of it or an
@@ -59,6 +153,84 @@ impl Breakers {
     /// The `request` breaker as it stands (node stats), without refreshing its limit.
     pub fn request_budget(&self) -> &Arc<MemoryBudget> {
         &self.request
+    }
+
+    /// Charges a request body of `bytes` to `inflight_requests` until the guard drops
+    /// (`addEstimateBytesAndMaybeBreak(contentLength, "<http_request>")`), then checks the
+    /// parent; either refusal is Elasticsearch's 429 with its text and byte counts.
+    pub fn charge_in_flight(&self, cluster: &Cluster, st: &ClusterState, bytes: u64) -> crate::error::EsResult<InFlight<'_>> {
+        let heap = self.heap(cluster);
+        let limit = limit_of(st, "network.breaker.inflight_requests.limit", "100%", heap);
+        let trip = |wanted: i64| {
+            self.in_flight_tripped.fetch_add(1, Ordering::Relaxed);
+            breaking(format!("[inflight_requests] Data too large, data for [{HTTP_REQUEST}] would be [{}], which is larger than the limit of [{}]", sized(wanted), sized(limit)), wanted, limit)
+        };
+        if limit == 0 {
+            return Err(trip(bytes as i64));
+        }
+        let new = self.in_flight.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        let guard = InFlight { breakers: self, bytes };
+        let with_overhead = (new as f64 * IN_FLIGHT_OVERHEAD) as i64;
+        if limit > 0 && with_overhead > limit {
+            return Err(trip(with_overhead));
+        }
+        self.check_parent(st, (bytes as f64 * IN_FLIGHT_OVERHEAD) as i64, HTTP_REQUEST, heap)?;
+        Ok(guard)
+    }
+
+    /// The node's heap as of at most a second ago.
+    fn heap(&self, cluster: &Cluster) -> i64 {
+        let now = crate::time::now_millis();
+        if now.saturating_sub(self.heap_at.load(Ordering::Relaxed)) >= 1000 {
+            self.heap.store(NodeMetrics::sample(cluster).heap_max, Ordering::Relaxed);
+            self.heap_at.store(now, Ordering::Relaxed);
+        }
+        self.heap.load(Ordering::Relaxed)
+    }
+
+    /// What each child holds with its overhead, in the order Elasticsearch lists them.
+    fn usages(&self) -> [(&'static str, i64); 5] {
+        [
+            ("fielddata", 0),
+            ("request", self.request.used().min(i64::MAX as u64) as i64),
+            ("inflight_requests", (self.in_flight.load(Ordering::Relaxed) as f64 * IN_FLIGHT_OVERHEAD) as i64),
+            ("model_inference", 0),
+            ("eql_sequence", 0),
+        ]
+    }
+
+    /// `HierarchyCircuitBreakerService.checkParentLimit` for `new_bytes` just reserved
+    /// (already in a child's usage).
+    fn check_parent(&self, st: &ClusterState, new_bytes: i64, label: &str, heap: i64) -> crate::error::EsResult<()> {
+        let limit = limit_of(st, "indices.breaker.total.limit", "95%", heap);
+        let usages = self.usages();
+        let total: i64 = usages.iter().map(|(_, b)| b).sum();
+        if limit < 0 || total <= limit {
+            return Ok(());
+        }
+        self.parent_tripped.fetch_add(1, Ordering::Relaxed);
+        let list: Vec<String> = usages.iter().map(|(n, b)| format!("{n}={}", sized(*b))).collect();
+        Err(breaking(
+            format!(
+                "[parent] Data too large, data for [{label}] would be [{}], which is larger than the limit of [{}], real usage: [{}], new bytes reserved: [{}], usages [{}]",
+                sized(total),
+                sized(limit),
+                sized(total - new_bytes),
+                sized(new_bytes),
+                list.join(", ")
+            ),
+            total,
+            limit,
+        ))
+    }
+
+    /// `(estimated bytes, tripped)` of `inflight_requests` and of the parent (node stats).
+    pub fn in_flight_stats(&self) -> ((i64, i64), (i64, i64)) {
+        let parent: i64 = self.usages().iter().map(|(_, b)| b).sum();
+        (
+            (self.in_flight.load(Ordering::Relaxed) as i64, self.in_flight_tripped.load(Ordering::Relaxed) as i64),
+            (parent, self.parent_tripped.load(Ordering::Relaxed) as i64),
+        )
     }
 }
 

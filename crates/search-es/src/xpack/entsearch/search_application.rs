@@ -55,6 +55,69 @@ fn normalize_template(t: Option<&Value>) -> Value {
     Value::Obj(out)
 }
 
+/// `SearchApplicationTemplate` parsing: only inline mustache scripts, a dictionary that is a
+/// valid JSON schema, and a script at all (`PutSearchApplicationAction.Request.validate`).
+fn validate_template(ctx: &Ctx, t: Option<&Value>) -> EsResult<()> {
+    let Some(Value::Obj(t)) = t else { return Ok(()) };
+    let loc = crate::xpack::value_loc(ctx, "template");
+    let wrap = |inner: EsError| EsError::x_content_parse(loc.0, loc.1, "[search_application] failed to parse field [template]").caused_by(inner);
+    if let Some(Value::Obj(script)) = t.get("script") {
+        let built = |cause: EsError| wrap(EsError::x_content_parse_bare("Failed to build [search_template] after last required field arrived").caused_by(cause));
+        if script.get("lang").and_then(Value::as_str).is_some_and(|l| l != "mustache") {
+            return Err(built(EsError::illegal_argument("only [mustache] scripting language is supported")));
+        }
+        if script.contains_key("id") {
+            return Err(built(EsError::illegal_argument("only [inline] script type is supported")));
+        }
+    }
+    if let Some(d) = t.get("dictionary") {
+        let mut errors = Vec::new();
+        meta_schema_errors(d, "$", &mut errors);
+        if !errors.is_empty() {
+            return Err(wrap(EsError::x_content_parse(loc.0, loc.1, "[search_template] failed to parse field [dictionary]").caused_by(validation_exception(&errors))));
+        }
+    }
+    if !t.contains_key("script") {
+        return Err(EsError::action_request_validation(&["script required for template".into()]));
+    }
+    Ok(())
+}
+
+/// Elasticsearch's `ValidationException` (`validation_exception`, numbered errors).
+fn validation_exception(errors: &[String]) -> EsError {
+    let mut reason = String::from("Validation Failed: ");
+    for (i, e) in errors.iter().enumerate() {
+        reason.push_str(&format!("{}: {e};", i + 1));
+    }
+    EsError::new(400, "validation_exception", reason)
+}
+
+/// What the JSON Schema draft 7 meta-schema reports for a dictionary: `type` must name JSON
+/// types (networknt's two messages per bad type).
+fn meta_schema_errors(schema: &Value, path: &str, errors: &mut Vec<String>) {
+    const TYPES: [&str; 7] = ["array", "boolean", "integer", "null", "number", "object", "string"];
+    let Value::Obj(m) = schema else { return };
+    if let Some(t) = m.get("type") {
+        let bad = match t {
+            Value::Str(s) => !TYPES.contains(&s.as_str()),
+            Value::Arr(a) => a.iter().any(|x| x.as_str().is_none_or(|s| !TYPES.contains(&s))),
+            _ => true,
+        };
+        if bad {
+            errors.push(format!("{path}.type: does not have a value in the enumeration [{}]", TYPES.join(", ")));
+            errors.push(format!("{path}.type: should be valid to any of the schemas array"));
+        }
+    }
+    if let Some(Value::Obj(props)) = m.get("properties") {
+        for (k, v) in props {
+            meta_schema_errors(v, &format!("{path}.properties.{k}"), errors);
+        }
+    }
+    if let Some(items) = m.get("items") {
+        meta_schema_errors(items, &format!("{path}.items"), errors);
+    }
+}
+
 pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let name = ctx.path_param("name").unwrap_or_default().to_string();
     let create = ctx.bool_param("create", false)?;
@@ -69,6 +132,11 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Some(Value::Str(s)) => vec![s.clone()],
         _ => return Err(EsError::action_request_validation(&["indices are missing".into()])),
     };
+    validate_template(ctx, body.get("template"))?;
+    if body.get("template").is_none_or(Value::is_null) {
+        ctx.warn("Using default search application template which is subject to change. We recommend storing a template to avoid breaking changes.");
+    }
+    crate::xpack::security::check_alias_privileges(ctx, &indices, &name)?;
     let st = ctx.state();
     for i in &indices {
         let exists = st.metadata.indices.contains_key(i) || st.metadata.data_streams.contains_key(i) || st.metadata.indices.values().any(|x| x.aliases.contains_key(i))
@@ -105,7 +173,11 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 pub fn get(ctx: &Ctx) -> EsResult<Reply> {
     let name = ctx.path_param("name").unwrap_or_default();
-    ctx.state().metadata.xpack.get(APPS, name).cloned().map_or_else(|| Err(not_found(name)), Reply::ok)
+    let app = ctx.state().metadata.xpack.get(APPS, name).cloned().ok_or_else(|| not_found(name))?;
+    if app.pointer(&["template", "script", "source"]).and_then(Value::as_str) == Some(DEFAULT_TEMPLATE) {
+        ctx.warn("Using default search application template which is subject to change. We recommend storing a template to avoid breaking changes.");
+    }
+    Reply::ok(app)
 }
 
 pub fn list(ctx: &Ctx) -> EsResult<Reply> {
@@ -249,7 +321,42 @@ fn render(ctx: &Ctx, app: &Value, req: &Map, validate_merged: bool) -> EsResult<
     let mut tb = Map::new();
     tb.insert("source".into(), app.pointer(&["template", "script", "source"]).cloned().unwrap_or(Value::Null));
     tb.insert("params".into(), Value::Obj(params));
-    crate::search::misc::render_template(ctx, &tb, None)
+    // `SearchTemplateHelper.stripTrailingComma`: list sections may leave a comma before `]`.
+    let text = strip_trailing_commas(&crate::search::misc::render_template_text(ctx, &tb, None)?);
+    match crate::json::parse(text.as_bytes()) {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Ok(Value::Obj(Map::new())),
+        Err(e) => Err(EsError::x_content_parse_bare(e.to_string())),
+    }
+}
+
+/// Drops commas that only whitespace separates from a closing `]` or `}` (outside strings), as
+/// Jackson's `ALLOW_TRAILING_COMMA` reads them.
+fn strip_trailing_commas(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let (mut in_str, mut esc, mut start) = (false, false, 0);
+    for (i, &c) in b.iter().enumerate() {
+        if in_str {
+            match (esc, c) {
+                (true, _) => esc = false,
+                (false, b'\\') => esc = true,
+                (false, b'"') => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b',' if b[i + 1..].iter().find(|x| !x.is_ascii_whitespace()).is_some_and(|x| matches!(x, b']' | b'}')) => {
+                out.push_str(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push_str(&s[start..]);
+    out
 }
 
 /// The search body in `SearchSourceBuilder`'s field order, with the query in canonical form.
@@ -332,6 +439,27 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 const EVENTS_PREFIX: &str = "behavioral_analytics-events-";
 const EVENTS_TEMPLATE: &str = "behavioral_analytics-events-default";
+
+/// `m` with the `first` keys (those present) in that order, then the rest.
+fn reorder(m: &Map, first: &[&str]) -> Value {
+    let mut out = Map::new();
+    for k in first {
+        if let Some(v) = m.get(*k) {
+            out.insert((*k).to_string(), v.clone());
+        }
+    }
+    for (k, v) in m {
+        if !out.contains_key(k) {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Obj(out)
+}
+
+/// How many analytics collections exist (their event data streams).
+pub fn collection_count(st: &crate::meta::ClusterState) -> usize {
+    st.metadata.data_streams.keys().filter(|k| k.starts_with(EVENTS_PREFIX)).count()
+}
 
 fn events_stream(name: &str) -> String {
     format!("{EVENTS_PREFIX}{name}")
@@ -422,13 +550,18 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let name = ctx.path_param("collection_name").unwrap_or_default().to_string();
     let ty = ctx.path_param("event_type").unwrap_or_default().to_string();
     let debug = ctx.bool_param("debug", false)?;
+    // `PostAnalyticsEventAction.Request.validate` runs before the collection is looked up.
+    if !matches!(ty.as_str(), "page_view" | "search" | "search_click") {
+        return Err(EsError::action_request_validation(&[format!("invalid event type: [{ty}]")]));
+    }
     if !ctx.state().metadata.data_streams.contains_key(&events_stream(&name)) {
         return Err(EsError::resource_not_found(format!("no such analytics collection [{name}]")));
     }
-    if !matches!(ty.as_str(), "page_view" | "search" | "search_click") {
-        return Err(EsError::illegal_argument(format!("{ty} is not a valid event type")));
-    }
     let body = ctx.body_map()?.unwrap_or_default();
+    let optional: &[&str] = if ty == "search" { &[] } else { &["document", "page"] };
+    if let Some(k) = body.keys().find(|k| !required_fields(&ty).contains(&k.as_str()) && !optional.contains(&k.as_str())) {
+        return Err(crate::xpack::unknown_field(ctx, &format!("{ty}_event"), k));
+    }
     let missing: Vec<String> = required_fields(&ty)
         .iter()
         .filter(|f| **f != "session" && !body.contains_key(**f))
@@ -440,20 +573,57 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !missing.is_empty() {
         return Err(EsError::illegal_argument(missing.join(" ")));
     }
+    if ty == "search_click" && !body.contains_key("document") && !body.contains_key("page") {
+        return Err(EsError::illegal_argument("Required one of fields [document, page], but none were specified."));
+    }
     let mut session = body.get("session").and_then(Value::as_object).cloned().unwrap_or_default();
     if let Some(ua) = ctx.request.header("user-agent") {
         session.insert("user_agent".into(), ua.into());
+    }
+    // The client's address: the first `X-Forwarded-For` entry when it is an address.
+    if let Some(ip) = ctx.request.header("x-forwarded-for").and_then(|h| h.split(',').next()).map(str::trim).filter(|ip| ip.parse::<std::net::IpAddr>().is_ok()) {
+        session.insert("ip".into(), ip.into());
     }
     let mut ev = Map::new();
     ev.insert("@timestamp".into(), ctx.now_ms.into());
     ev.insert("event".into(), obj! { "action" => ty.clone() });
     ev.insert("data_stream".into(), obj! { "type" => "behavioral_analytics", "dataset" => "events", "namespace" => name.clone() });
-    ev.insert("session".into(), Value::Obj(session));
+    // The event's own fields come out of a `HashMap` (Java's bucket order); a document is
+    // `index, id`, and search filter values are always lists.
+    let mut payload = Map::new();
+    payload.insert("session".into(), Value::Obj(session));
     for (k, v) in &body {
+        let v = match (k.as_str(), v) {
+            ("document", Value::Obj(d)) => reorder(d, &["index", "id"]),
+            ("search", Value::Obj(q)) => {
+                let mut q = q.clone();
+                if let Some(Value::Obj(f)) = q.get_mut("filters") {
+                    for fv in f.values_mut() {
+                        if !matches!(fv, Value::Arr(_)) {
+                            *fv = Value::Arr(vec![fv.clone()]);
+                        }
+                    }
+                }
+                if let Some(Value::Obj(results)) = q.get_mut("results")
+                    && let Some(Value::Arr(items)) = results.get_mut("items")
+                {
+                    for it in items.iter_mut() {
+                        if let Some(Value::Obj(d)) = it.get("document").cloned()
+                            && let Value::Obj(m) = it
+                        {
+                            m.insert("document".into(), reorder(&d, &["index", "id"]));
+                        }
+                    }
+                }
+                reorder(&q, &["filters", "page", "sort", "results", "query", "search_application"])
+            }
+            _ => v.clone(),
+        };
         if k != "session" {
-            ev.insert(k.clone(), v.clone());
+            payload.insert(k.clone(), v);
         }
     }
+    ev.extend(crate::json::java_hash_map(payload, 16));
     let ev = Value::Obj(ev);
     // Event data streams require routing: events are routed by session.
     let session_id = ev.pointer(&["session", "id"]).map(Value::to_es_string).unwrap_or_default();

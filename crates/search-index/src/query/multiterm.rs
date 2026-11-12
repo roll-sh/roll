@@ -410,8 +410,9 @@ impl Query for MultiTermQuery {
 
     fn visit(&self, v: &mut dyn QueryVisitor) {
         if let TermsMatcher::Set(terms) = &self.matcher {
-            for t in terms.iter() {
-                v.term(self.field, t);
+            match terms.as_slice() {
+                [t] => v.term(self.field, t),
+                ts => v.term_set(self.field, ts),
             }
             return;
         }

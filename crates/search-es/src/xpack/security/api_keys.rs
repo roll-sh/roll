@@ -59,14 +59,14 @@ pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
 }
 
 /// The owner's role descriptors (`limited_by`) for a key `p` creates.
-fn limited_by(st: &crate::meta::ClusterState, p: &Principal) -> Value {
+fn limited_by(file: &super::FileRoles, st: &crate::meta::ClusterState, p: &Principal) -> Value {
     match &p.kind {
         // A key created with an API key is limited by that key's own limits.
         AuthKind::ApiKey(a) => a.limited_by.clone(),
         _ => {
             let mut m = Map::new();
             for r in &p.roles {
-                if let Some(d) = super::role_descriptor(st, r) {
+                if let Some(d) = super::resolve_role(file, st, r) {
                     m.insert(r.clone(), d);
                 }
             }
@@ -121,7 +121,7 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
     let id = crate::meta::names::time_based_id();
     let secret = super::random_b64url(16);
     let st = ctx.state();
-    let limited = if k.cross_cluster.is_some() { Value::object() } else { limited_by(&st, owner) };
+    let limited = if k.cross_cluster.is_some() { Value::object() } else { limited_by(&super::file_roles(ctx.cluster), &st, owner) };
     let (realm, realm_type) = match &owner.kind {
         AuthKind::ApiKey(_) => ("_es_api_key", "_es_api_key"),
         _ => (owner.realm_name, owner.realm_type),
@@ -304,7 +304,7 @@ pub async fn grant(ctx: &Ctx<'_>) -> EsResult<Reply> {
 /// Whether the principal may see and manage every key (`manage_api_key`), not only its own.
 fn manages_all(ctx: &Ctx) -> bool {
     let p = super::principal(ctx);
-    p.is_superuser() || super::effective(&ctx.state(), p).has_cluster_privilege("manage_api_key")
+    p.is_superuser() || super::effective(&super::file_roles(ctx.cluster), &ctx.state(), p).has_cluster_privilege("manage_api_key")
 }
 
 fn owned_by(k: &Value, p: &Principal) -> bool {
@@ -466,7 +466,7 @@ pub async fn invalidate(ctx: &Ctx<'_>) -> EsResult<Reply> {
 }
 
 /// Applies an update to one key; `Ok(true)` when it changed anything.
-fn apply_update(st: &mut crate::meta::ClusterState, id: &str, p: &Principal, upd: &Update, cross: bool, now: i64) -> EsResult<bool> {
+fn apply_update(st: &mut crate::meta::ClusterState, file: &super::FileRoles, id: &str, p: &Principal, upd: &Update, cross: bool, now: i64) -> EsResult<bool> {
     let not_found = || EsError::resource_not_found(format!("no API key owned by requesting user found for ID [{id}]"));
     let Some(mut k) = st.metadata.xpack.get(KEYS, id).cloned() else { return Err(not_found()) };
     if !owned_by(&k, p) || k.get("invalidated").and_then(Value::as_bool) == Some(true) {
@@ -481,7 +481,7 @@ fn apply_update(st: &mut crate::meta::ClusterState, id: &str, p: &Principal, upd
         }));
     }
     let before = k.clone();
-    let limited = if cross { Value::object() } else { limited_by(st, p) };
+    let limited = if cross { Value::object() } else { limited_by(file, st, p) };
     if let Value::Obj(m) = &mut k {
         if let Some(rd) = &upd.role_descriptors {
             m.insert("role_descriptors".into(), rd.clone());
@@ -532,7 +532,8 @@ pub async fn update(ctx: &Ctx<'_>, cross: bool) -> EsResult<Reply> {
     let upd = parse_update(&body, ctx.now_ms, cross)?;
     let p = super::principal(ctx).clone();
     let now = ctx.now_ms;
-    let updated = ctx.cluster.update(move |st| apply_update(st, &id, &p, &upd, cross, now)).await?;
+    let file = super::file_roles(ctx.cluster);
+    let updated = ctx.cluster.update(move |st| apply_update(st, &file, &id, &p, &upd, cross, now)).await?;
     Reply::ok(obj! { "updated" => updated })
 }
 
@@ -542,12 +543,13 @@ pub async fn bulk_update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let upd = parse_update(&body, ctx.now_ms, false)?;
     let p = super::principal(ctx).clone();
     let now = ctx.now_ms;
+    let file = super::file_roles(ctx.cluster);
     let results = ctx
         .cluster
         .update(move |st| {
             Ok(ids
                 .iter()
-                .map(|id| (id.clone(), apply_update(st, id, &p, &upd, false, now)))
+                .map(|id| (id.clone(), apply_update(st, &file, id, &p, &upd, false, now)))
                 .collect::<Vec<_>>())
         })
         .await?;

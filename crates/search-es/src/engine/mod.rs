@@ -57,11 +57,20 @@ pub trait ShardStorage: Send + Sync {
 /// shards' searchers in memory for as long as the process runs (`api::snapshots`).
 #[async_trait::async_trait]
 pub trait SnapshotStorage: Send + Sync {
-    /// Makes the current contents of the `shards` shards of index `index_uuid` (its engine when
+    /// Makes the current contents of shard `shard` of index `index_uuid` (its engine when
     /// loaded; a closed index's shards are committed already) durable as snapshot `snapshot`'s
-    /// copy: commits each shard, as Elasticsearch flushes a shard before snapshotting it, and
-    /// keeps that commit point.
-    async fn capture(&self, snapshot: &str, index_uuid: &str, shards: u32, engine: Option<Arc<IndexEngine>>) -> EsResult<()>;
+    /// copy: commits the shard, as Elasticsearch flushes a shard before snapshotting it, and
+    /// keeps that commit point. Returns the files the copy references; those not in snapshot
+    /// `previous`'s copy of the shard (the latest earlier one) count as incremental.
+    /// `start_ms` and `time_ms` are left to the caller.
+    async fn capture(
+        &self,
+        snapshot: &str,
+        index_uuid: &str,
+        shard: u32,
+        engine: Option<&Arc<IndexEngine>>,
+        previous: Option<&str>,
+    ) -> EsResult<crate::meta::snapshots::ShardFiles>;
 
     /// Snapshot `snapshot`'s copy of index `index_uuid`, one entry per shard (no segments for
     /// a shard that held nothing).
@@ -182,6 +191,8 @@ pub struct ShardCounters {
     pub fetch_total: AtomicU64,
     pub fetch_time_nanos: AtomicU64,
     pub scroll_total: AtomicU64,
+    /// Point-in-time contexts opened on the shard (OpenSearch's `point_in_time_total`).
+    pub pit_total: AtomicU64,
     pub suggest_total: AtomicU64,
     pub flush_total: AtomicU64,
     pub refresh_external: AtomicU64,
@@ -522,6 +533,7 @@ impl ShardEngine {
         let c = &self.counters;
         let ld = |a: &AtomicU64| a.load(Ordering::Relaxed) as i64;
         let ms = |a: &AtomicU64| (a.load(Ordering::Relaxed) / 1_000_000) as i64;
+        let pit_stats = block.get("search").and_then(|m| m.get("point_in_time_total")).is_some();
         let mut add = |section: &str, key: &str, v: i64| {
             if let Some(Value::Obj(m)) = block.get_mut(section) {
                 let cur = m.get(key).and_then(Value::as_i64).unwrap_or(0);
@@ -552,6 +564,10 @@ impl ShardEngine {
         add("search", "fetch_total", ld(&c.fetch_total));
         add("search", "fetch_time_in_millis", ms(&c.fetch_time_nanos));
         add("search", "scroll_total", ld(&c.scroll_total));
+        // OpenSearch's block only (the key is absent from Elasticsearch's).
+        if pit_stats {
+            add("search", "point_in_time_total", ld(&c.pit_total));
+        }
         add("search", "suggest_total", ld(&c.suggest_total));
         add("request_cache", "hit_count", ld(&c.request_cache_hit));
         add("request_cache", "miss_count", ld(&c.request_cache_miss));
@@ -782,10 +798,7 @@ impl IndexEngine {
     }
 
     pub fn refresh_all(&self) -> EsResult<()> {
-        for s in &self.shards {
-            s.refresh()?;
-        }
-        Ok(())
+        refresh_shards(&self.shards.iter().map(|s| &**s).collect::<Vec<_>>())
     }
 
     /// The largest point value of a long-encoded field (`long`, `date`, `date_nanos`) across
@@ -804,6 +817,20 @@ impl IndexEngine {
     pub fn doc_count(&self) -> u64 {
         self.shards.iter().map(|s| s.searcher().count(&search_index::query::nested::root_filter()).unwrap_or(0)).sum()
     }
+}
+
+/// Refreshes `shards` (external refreshes) in parallel on the search pool workers, as
+/// Elasticsearch broadcasts a refresh to every shard at once: each converts its own buffers,
+/// so a refresh takes the slowest shard's time rather than the sum. The first failure in
+/// `shards` order is returned, after every shard ran.
+pub fn refresh_shards(shards: &[&ShardEngine]) -> EsResult<()> {
+    if shards.len() <= 1 {
+        return shards.iter().try_for_each(|s| s.refresh().map(|_| ()));
+    }
+    let out: Vec<parking_lot::Mutex<EsResult<()>>> = shards.iter().map(|_| parking_lot::Mutex::new(Ok(()))).collect();
+    let helpers = search_index::search::pool::cores().saturating_sub(1).min(shards.len() - 1);
+    search_index::search::pool::for_each_index(shards.len(), helpers, &|i| *out[i].lock() = shards[i].refresh().map(|_| ()));
+    out.into_iter().try_for_each(parking_lot::Mutex::into_inner)
 }
 
 /// The index sort segments keep (`index.sort.*`, or the index mode's default sort): keys over
@@ -1048,15 +1075,19 @@ impl Engine {
     }
 }
 
-/// Dynamic index settings the shards apply themselves (`index.gc_deletes`).
+/// Index settings the shards apply themselves: `index.gc_deletes` (dynamic) and
+/// `index.codec` (static: only the stored fields' compression; `best_compression`, and
+/// OpenSearch's `zlib`, trade fetch speed for size).
 pub(crate) fn apply_shard_settings(idx: &IndexMeta, shards: &[Arc<ShardEngine>]) {
     let gc = idx
         .settings
         .get("index.gc_deletes")
         .and_then(|v| crate::units::TimeValue::parse(v, "index.gc_deletes").ok())
         .map_or(std::time::Duration::from_secs(60), |t| std::time::Duration::from_millis(t.as_millis().max(0) as u64));
+    let best = matches!(idx.settings.get("index.codec"), Some("best_compression" | "legacy_best_compression" | "zlib"));
     for s in shards {
         s.shard.set_gc_deletes(gc);
+        s.shard.set_best_compression(best);
     }
 }
 

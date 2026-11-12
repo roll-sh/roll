@@ -314,6 +314,21 @@ fn mask_explained_doc(s: &str) -> String {
     format!("{} in <masked>{}", &s[..at], &tail[digits..])
 }
 
+/// Whether two query descriptions hold the same clauses in another order. Lucene's
+/// `BooleanQuery.rewrite` dedupes SHOULD clauses through a `HashMap` keyed by the clauses'
+/// hash codes when some are equal (lenient `MatchNoDocsQuery`s of numeric fields always are),
+/// and term hash codes are murmur3 with a seed chosen per JVM
+/// (`StringHelper.GOOD_FAST_HASH_SEED`): the same request prints its clauses in another order
+/// after an Elasticsearch restart (verified on 9.5.5), so only the clause multiset compares.
+fn same_clauses(x: &str, y: &str) -> bool {
+    fn tokens(s: &str) -> Vec<&str> {
+        let mut t: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == '(' || c == ')').filter(|t| !t.is_empty()).collect();
+        t.sort_unstable();
+        t
+    }
+    x.len() == y.len() && tokens(x) == tokens(y)
+}
+
 /// `dis_max` explanations list their clauses in the iteration order of Lucene's `Multiset`
 /// (a `HashMap` keyed by the clause queries' Java hash codes): the order differs by nature,
 /// so both sides' `max of:` details are compared sorted.
@@ -324,7 +339,17 @@ fn sort_disjunction_details(v: &mut Value) {
             m.values_mut().for_each(sort_disjunction_details);
             // `sum of:` too: a `dis_max` with tie breaker 1.0 rewrites to a boolean over the
             // same `Multiset` order.
-            let dismax = m.get("description").and_then(Value::as_str).is_some_and(|d| d == "max of:" || d == "sum of:" || (d.starts_with("max plus ") && d.ends_with(" times others of:")));
+            // Boolean explanations too: their clauses come out of the query's rewrite in an
+            // order that differs between two Elasticsearch JVMs (verified: the same
+            // `simple_query_string` over 12 fields explained on two 9.5.5 nodes).
+            let dismax = m.get("description").and_then(Value::as_str).is_some_and(|d| {
+                d == "max of:"
+                    || d == "sum of:"
+                    || d == "No matching clauses"
+                    || d == "No matching clause"
+                    || d == "Failure to meet condition(s) of required/prohibited clause(s)"
+                    || (d.starts_with("max plus ") && d.ends_with(" times others of:"))
+            });
             if dismax && let Some(Value::Array(d)) = m.get_mut("details") {
                 d.sort_by_cached_key(|x| x.to_string());
             }
@@ -557,6 +582,7 @@ fn diff_values(a: &Value, b: &Value, path: &str) -> Option<Diff> {
             if same { None } else { Some(Diff { path: path.to_string(), es: a.clone(), roll: b.clone() }) }
         }
         _ if a == b => None,
+        (Value::String(x), Value::String(y)) if (path.ends_with(".description") || path.ends_with(".explanation")) && same_clauses(x, y) => None,
         _ => Some(Diff { path: path.to_string(), es: a.clone(), roll: b.clone() }),
     }
 }

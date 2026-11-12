@@ -1117,15 +1117,15 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
             },
             "fs" => obj! { "total_in_bytes" => m.disk_total, "free_in_bytes" => m.disk_free, "available_in_bytes" => m.disk_avail },
             "plugins" => Value::Arr(Vec::new()),
-            "network_types" => obj! { "transport_types" => obj! {}, "http_types" => obj! { "roll" => 1 } },
+            "network_types" => obj! { "transport_types" => obj! { "netty4" => 1 }, "http_types" => obj! { "netty4" => 1 } },
             "discovery_types" => obj! { "single-node" => 1 },
             "packaging_types" => Value::Arr(vec![obj! { "flavor" => "default", "type" => "docker", "count" => 1 }]),
             "ingest" => obj! { "number_of_pipelines" => st.metadata.pipelines.len(), "processor_stats" => obj! {} },
             "indexing_pressure" => super::nodes::indexing_pressure(m.heap_max / 10),
         },
         "snapshots" => obj! {
-            "current_counts" => obj! { "snapshots" => 0, "shard_snapshots" => 0, "snapshot_deletions" => 0, "concurrent_operations" => 0, "cleanups" => 0 },
-            "repositories" => super::snapshots::stats_repositories(&st, ctx.now_ms),
+            "current_counts" => super::snapshots::current_counts(&st, &ctx.cluster.snapshot_data),
+            "repositories" => super::snapshots::stats_repositories(&st, &ctx.cluster.snapshot_data, ctx.now_ms),
         },
         "repositories" => super::snapshots::repository_usage(&st),
         "ccs" => obj! { "_search" => ctx.cluster.ccs.to_value() },
@@ -1460,12 +1460,23 @@ pub fn info(ctx: &Ctx) -> EsResult<Reply> {
         out.insert("http".into(), obj! { "current_open" => 1, "total_opened" => 1, "clients" => Value::Arr(vec![client]) });
     }
     if want("ingest") {
-        out.insert("ingest".into(), obj! { "total" => obj! { "count" => 0, "time_in_millis" => 0, "current" => 0, "failed" => 0 }, "pipelines" => obj! {} });
+        let mut ingest = crate::ingest::pipeline::stats_value(ctx.cluster);
+        if ctx.human {
+            crate::units::humanize(&mut ingest);
+        }
+        out.insert("ingest".into(), ingest);
     }
     if want("thread_pool") {
         let mut tp = Map::new();
-        for p in super::cat::thread_pools(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)) {
-            tp.insert(p.name.to_string(), obj! { "threads" => 0, "queue" => 0, "active" => 0, "rejected" => 0, "largest" => 0, "completed" => 0 });
+        let processors = super::nodes::NodeMetrics::sample(ctx.cluster).processors;
+        for (p, st) in super::cat::live_thread_pools(ctx.cluster, processors) {
+            tp.insert(
+                p.name.to_string(),
+                obj! {
+                    "threads" => st.threads as i64, "queue" => st.queue as i64, "active" => st.active as i64,
+                    "rejected" => st.rejected as i64, "largest" => st.largest as i64, "completed" => st.completed as i64,
+                },
+            );
         }
         out.insert("thread_pool".into(), Value::Obj(tp));
     }

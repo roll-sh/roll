@@ -663,13 +663,22 @@ impl Aggregator for CardinalityAgg {
         let dv = dv.clone();
         let mut term = Vec::new();
         let seen = std::mem::take(&mut self.seen);
+        // The set ordinals come in ascending order: one forward walk of the dictionary
+        // decodes each term once (a lookup per ordinal decodes from its block's start).
+        let dict = dv.dict().cloned();
+        let mut walk = dict.as_ref().map(|d| d.iter_from(0));
         for (w, &word) in seen.iter().enumerate() {
             let mut bits = word;
             while bits != 0 {
                 let o = (w as u64) * 64 + bits.trailing_zeros() as u64;
                 bits &= bits - 1;
-                dv.lookup(o, &mut term);
-                let h = hash_bytes(&term);
+                let h = match &mut walk {
+                    Some(it) => hash_bytes(it.seek_ord(o).unwrap_or(&[])),
+                    None => {
+                        dv.lookup(o, &mut term);
+                        hash_bytes(&term)
+                    }
+                };
                 self.hll(0).collect(h);
             }
         }

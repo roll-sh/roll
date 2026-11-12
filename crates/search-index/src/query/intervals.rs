@@ -473,7 +473,7 @@ impl IntervalsSource {
             Src::Term(t) => v.term(field, t),
             Src::MultiTerm { query, .. } => {
                 let q = query.clone();
-                v.multi_term(field, Arc::new(move |t: &[u8]| q.matches_term(t)));
+                v.interval_multi_term(field, Arc::new(move |t: &[u8]| q.matches_term(t)));
             }
             Src::Block(xs) | Src::Ordered(xs) | Src::Unordered(xs) | Src::Or(xs, _) | Src::AtLeast(xs, _) => xs.iter().for_each(|s| s.visit(field, v)),
             Src::Repeating(s, ..) | Src::MaxGaps(s, _) | Src::MaxWidth(s, _) | Src::Extend(s, ..) | Src::Offset(s, _) | Src::Scripted(s, _) => s.visit(field, v),

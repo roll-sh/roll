@@ -207,8 +207,18 @@ async fn responses_match_elasticsearch() {
         // Scenarios captured from OpenSearch run against the opensearch dialect.
         if scenario.get("dialect").and_then(Value::as_str) == Some("opensearch") {
             cfg.dialect = search_es::Dialect::OpenSearch;
+            // OpenSearch's default of `action.destructive_requires_name`.
+            cfg.destructive_requires_name = false;
+        }
+        // Node settings the reference cluster was started with (`path.repo` for fs snapshot
+        // repositories).
+        if let Some(Value::Obj(m)) = scenario.get("node_settings") {
+            for (k, v) in m {
+                cfg.node_settings.push((k.clone(), v.to_es_string()));
+            }
         }
         let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+        let mut ism_clock = 0i64;
         for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
             let req = step.get("req").and_then(Value::as_str).unwrap();
             let label = format!("{file} #{i} {req}");
@@ -218,6 +228,16 @@ async fn responses_match_elasticsearch() {
             r.headers = headers_of(step, body.is_some());
             if let Some(b) = &body {
                 r.body = b.clone().into();
+            }
+            // `ism_run`: the ISM jobs of these indices run once first (captured by moving their
+            // job's start time on the reference cluster, see `capture`).
+            // The reference cluster's runs are seconds apart (retry backoffs pass), so each run
+            // here happens 10 s after the previous one on a clock of its own.
+            if let Some(Value::Arr(names)) = step.get("ism_run") {
+                let names: Vec<String> = names.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+                ism_clock += 10_000;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+                search_es::opensearch::ism_run::run_at(&cluster, &names, now + ism_clock).await;
             }
             let resp = search_es::handle(&cluster, r).await;
             // An ISM template applies only to indices created strictly after its
@@ -308,6 +328,21 @@ async fn capture() {
             // registers managed indices in the background) gets a pause first; roll needs none.
             if let Some(ms) = step.get("capture_sleep_ms").and_then(Value::as_i64) {
                 tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            }
+            // `ism_run`: run each index's ISM job once now, as the plugin's own tests do: move
+            // the job's interval start so its next execution is two seconds away (the reference
+            // cluster runs with `plugins.index_state_management.job_interval: 1` and
+            // `jitter: 0`), then wait for it.
+            if let Some(Value::Arr(names)) = step.get("ism_run") {
+                for n in names.iter().filter_map(Value::as_str) {
+                    let r = client.get(format!("{base}/{n}/_settings/index.uuid")).send().await.unwrap().bytes().await.unwrap();
+                    let v = parse(&r).unwrap().unwrap();
+                    let uuid = v.get(n).and_then(|x| x.get("settings")).and_then(|x| x.get("index")).and_then(|x| x.get("uuid")).and_then(Value::as_str).unwrap_or_default().to_string();
+                    let start = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 - 58_000;
+                    let body = format!(r#"{{"doc":{{"managed_index":{{"schedule":{{"interval":{{"start_time":{start}}}}}}}}}}}"#);
+                    client.post(format!("{base}/.opendistro-ism-config/_update/{uuid}")).header("content-type", "application/json").body(body).send().await.unwrap();
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             }
             let req = step.get("req").and_then(Value::as_str).unwrap();
             let (method, uri) = split_req(req);

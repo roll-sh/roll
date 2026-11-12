@@ -46,6 +46,8 @@ pub struct Stats {
     pub fields: Vec<String>,
     /// The mapping types of the source's `unsupported` columns (several: a union type).
     pub original_types: Vec<(String, Vec<String>)>,
+    /// Column `_meta` (`SET column_metadata=true`), by column name.
+    pub col_meta: Vec<(String, Value)>,
 }
 
 /// The default and maximum number of rows a query returns.
@@ -86,6 +88,35 @@ pub struct Resources {
     /// unknown-column suggestions only come from resolved fields, like Elasticsearch's, whose
     /// field-caps request asks for just those.
     suggest: std::sync::OnceLock<(Option<std::collections::HashSet<String>>, std::collections::HashSet<String>)>,
+    /// `SET column_metadata=true`: the `_meta` of `BUCKET` groups, by output name.
+    col_meta: parking_lot::Mutex<Vec<(String, Value)>>,
+}
+
+/// The `_meta.bucket` Elasticsearch reports for a `BUCKET` group: the numeric interval, or
+/// the date rounding's unit and count.
+fn bucket_meta(c: &CE) -> Option<Value> {
+    match c {
+        CE::ToLocal(x, _) | CE::FromLocal(x, _) => bucket_meta(x),
+        CE::Bucket(_, BucketSpan::Num(s)) => Some(obj! { "bucket" => obj! { "interval" => *s } }),
+        CE::Bucket(_, BucketSpan::Date(span)) => {
+            let (n, unit) = span.split_once(' ')?;
+            let n: i64 = n.parse().ok()?;
+            let unit = match unit.trim_end_matches('s') {
+                "millisecond" | "m" => "millisecond",
+                "second" | "sec" => "second",
+                "minute" | "min" => "minute",
+                "hour" | "h" => "hour",
+                "day" | "d" => "day",
+                "week" | "w" => "week",
+                "month" | "mo" => "month",
+                "quarter" | "q" => "quarter",
+                "year" | "yr" | "y" => "year",
+                other => return Some(obj! { "bucket" => obj! { "unit" => other.to_string(), "interval" => n } }),
+            };
+            Some(obj! { "bucket" => obj! { "unit" => unit, "interval" => n } })
+        }
+        _ => None,
+    }
 }
 
 impl std::ops::Deref for Src<'_> {
@@ -165,7 +196,7 @@ fn es_unsupported_type(t: &str) -> bool {
     DataType::of_mapping(t) == DataType::Unsupported
         && !matches!(
             t,
-            "object" | "nested" | "aggregate_metric_double" | "date_range" | "dense_vector" | "exponential_histogram" | "flattened" | "histogram" | "token_count" | "tdigest" | "counter_long" | "counter_double" | "counter_integer" | "alias"
+            "object" | "nested" | "date_range" | "token_count" | "alias"
         )
 }
 
@@ -206,7 +237,11 @@ enum CE {
     /// A function of SQL's that ES|QL doesn't have ([`value::scalar`]).
     Call(String, Vec<CE>, Vec<DataType>),
     Fn(F, Vec<CE>, Vec<DataType>, std::sync::Arc<At>),
-    Case(Vec<CE>),
+    /// The average (`sum / value_count`) of an `aggregate_metric_double`, what functions
+    /// that don't know the type read.
+    AmdAverage(Box<CE>),
+    /// `CASE`: conditions and values, with each condition's place for its multi-value warning.
+    Case(Vec<CE>, Vec<std::sync::Arc<At>>),
     Cast(Box<CE>, DataType),
     /// A date plus or minus a span literal.
     DateShift(Box<CE>, Box<CE>, i64),
@@ -320,10 +355,16 @@ fn compile_bucket(src: &Src<'_>, cols: &[Col], e: &Expr, args: &[Expr]) -> EsRes
     }
     if args.len() == 2 {
         if is_date {
-            let ExprKind::Span(span) = &args[1].kind else {
+            // A string literal (or parameter) naming a span works like the span literal.
+            let span = match &args[1].kind {
+                ExprKind::Span(span) => Some(span.clone()),
+                ExprKind::Lit(V::Str(s)) => super::parser::span_text(s),
+                _ => None,
+            };
+            let Some(span) = span else {
                 return Err(verification(src, e.start, &format!("second argument of [{call}] must be [date_period or time_duration], found value [{}] type [{}]", &src[args[1].start..args[1].end], functions::type_name_static(bt))));
             };
-            return Ok((zoned_bucket(src, field, BucketSpan::Date(span.clone())), ft));
+            return Ok((zoned_bucket(src, field, BucketSpan::Date(span)), ft));
         }
         let Some(span) = lit(&args[1]).and_then(|v| v.as_f64()).filter(|_| bt.is_numeric()) else {
             return Err(verification(src, e.start, &format!("second argument of [{call}] must be [numeric], found value [{}] type [{}]", &src[args[1].start..args[1].end], functions::type_name_static(bt))));
@@ -509,8 +550,32 @@ impl Compiler<'_> {
                 (CE::Not(Box::new(c)), DataType::Boolean)
             }
             ExprKind::Bin(op, l, r) => {
-                let (lc, lt) = self.compile(l)?;
-                let (rc, rt) = self.compile(r)?;
+                let (mut lc, mut lt) = self.compile(l)?;
+                let (mut rc, mut rt) = self.compile(r)?;
+                if matches!(op, BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte) {
+                    // Comparisons read an `aggregate_metric_double` as its average; the other
+                    // metric and binary types don't compare.
+                    for (c, t) in [(&mut lc, &mut lt), (&mut rc, &mut rt)] {
+                        if *t == DataType::AggregateMetricDouble {
+                            *c = CE::AmdAverage(Box::new(std::mem::replace(c, CE::Lit(V::Null))));
+                            *t = DataType::Double;
+                        }
+                    }
+                    for (i, (t, x)) in [(lt, l), (rt, r)].into_iter().enumerate() {
+                        if t.is_counter() || matches!(t, DataType::Histogram | DataType::ExponentialHistogram | DataType::TDigest | DataType::Tsid) {
+                            let accepted = if matches!(op, BinOp::Eq | BinOp::Neq) {
+                                "boolean, cartesian_point, cartesian_shape, date_nanos, date_range, datetime, dense_vector, double, flattened, geo_point, geo_shape, geohash, geohex, geotile, integer, ip, keyword, long, text, unsigned_long or version"
+                            } else {
+                                "date_nanos, datetime, double, integer, ip, keyword, long, text, unsigned_long or version"
+                            };
+                            return Err(verification(
+                                self.src,
+                                e.start,
+                                &format!("{} argument of [{}] must be [{accepted}], found value [{}] type [{}]", if i == 0 { "first" } else { "second" }, &self.src[e.start..e.end], &self.src[x.start..x.end], t.name()),
+                            ));
+                        }
+                    }
+                }
                 match op {
                     BinOp::And => (CE::And(Box::new(lc), Box::new(rc)), DataType::Boolean),
                     BinOp::Or => (CE::Or(Box::new(lc), Box::new(rc)), DataType::Boolean),
@@ -580,7 +645,8 @@ impl Compiler<'_> {
                 (CE::In(Box::new(c), l, *neg, at_of(self.src, e)), DataType::Boolean)
             }
             ExprKind::Cast(x, ty) => {
-                let Some(t) = DataType::parse_name(ty) else {
+                // `::text` is no conversion Elasticsearch has (`TO_STRING` gives keywords).
+                let Some(t) = DataType::parse_name(ty).filter(|t| *t != DataType::Text) else {
                     return Err(verification(self.src, e.start, &format!("Unsupported conversion to type [{}]", ty.to_ascii_uppercase())));
                 };
                 // A cast resolves a union type when every one of its types converts.
@@ -616,6 +682,13 @@ impl Compiler<'_> {
             }
             ExprKind::Call(name, args) => {
                 if value::AGGS.contains(&name.as_str()) {
+                    // A field that is `aggregate_metric_double` in some indices and numeric in
+                    // the others aggregates as metrics (the numbers cast implicitly).
+                    let amd_union = args
+                        .first()
+                        .and_then(|a| self.union_of(a))
+                        .filter(|(_, u)| u.iter().any(|(t, _)| t == "aggregate_metric_double") && u.iter().all(|(t, _)| t == "aggregate_metric_double" || DataType::of_mapping(t).is_numeric()))
+                        .map(|(i, _)| i);
                     let Some(aggs) = self.aggs.as_deref_mut() else {
                         return Err(verification(self.src, e.start, &format!("aggregate function [{}] not allowed outside STATS command", &self.src[e.start..e.end])));
                     };
@@ -624,12 +697,30 @@ impl Compiler<'_> {
                         return Err(verification(self.src, e.start, &format!("error building [{name}]: expects exactly one argument")));
                     }
                     let mut inner = Compiler { src: self.src, cols: self.cols, aggs: None };
-                    let (arg, arg_ty) = if star || args.is_empty() {
+                    let (mut arg, mut arg_ty) = if let Some(i) = amd_union {
+                        (Some(CE::Cast(Box::new(CE::Col(i)), DataType::AggregateMetricDouble)), DataType::AggregateMetricDouble)
+                    } else if star || args.is_empty() {
                         (None, DataType::Null)
                     } else {
                         let (c, t) = inner.compile(&args[0])?;
                         (Some(c), t)
                     };
+                    // `aggregate_metric_double`: SUM/MIN/MAX/COUNT/AVG combine the sub-metrics,
+                    // every other aggregation reads each value's average.
+                    let mut amd_func: Option<String> = None;
+                    if arg_ty == DataType::AggregateMetricDouble {
+                        if matches!(name.as_str(), "sum" | "min" | "max" | "count" | "avg") {
+                            amd_func = Some(format!("$amd_{name}"));
+                        } else if let Some(a) = arg.take() {
+                            arg = Some(CE::AmdAverage(Box::new(a)));
+                            arg_ty = DataType::Double;
+                        }
+                    }
+                    if let Some(f) = amd_func {
+                        let ty = if f == "$amd_count" { DataType::Long } else { DataType::Double };
+                        aggs.push(AggSpec { func: f, arg, arg_ty, extra: Vec::new(), filter: None, weight: None });
+                        return Ok((CE::Agg(aggs.len() - 1), ty));
+                    }
                     if matches!(name.as_str(), "sum" | "avg" | "median" | "percentile" | "std_dev" | "median_absolute_deviation") && !arg_ty.is_numeric() && arg_ty != DataType::Null {
                         return Err(verification(
                             self.src,
@@ -684,7 +775,7 @@ impl Compiler<'_> {
                         return Err(verification(self.src, args[2].start, &format!("Invalid order value in [{call}], expected [ASC, DESC] but got [{o}]")));
                     }
                     let ty = value::agg_type(name, arg_ty);
-                    let weight = if name == "weighted_avg" {
+                    let weight = if name == "weighted_avg" || name.starts_with('$') {
                         match args.get(1) {
                             Some(w) => Some(Compiler { src: self.src, cols: self.cols, aggs: None }.compile(w)?.0),
                             None => return Err(verification(self.src, e.start, "error building [weighted_avg]: expects exactly two arguments")),
@@ -794,7 +885,16 @@ impl Compiler<'_> {
                 }
                 if name == "case" {
                     let ty = ts.iter().skip(1).step_by(2).copied().chain(if ts.len() % 2 == 1 { ts.last().copied() } else { None }).find(|t| *t != DataType::Null).unwrap_or(DataType::Null);
-                    return Ok((CE::Case(cs), ty));
+                    // A union-type conversion reports the field it converts.
+                    let ats = args
+                        .iter()
+                        .step_by(2)
+                        .map(|a| match &a.kind {
+                            ExprKind::Cast(x, _) if matches!(x.kind, ExprKind::Col(_)) => at_of(self.src, x),
+                            _ => at_of(self.src, a),
+                        })
+                        .collect();
+                    return Ok((CE::Case(cs, ats), ty));
                 }
                 let Some(ty) = value::scalar_type(name, &ts).filter(|_| self.src.sql) else {
                     // The name as written.
@@ -922,10 +1022,24 @@ fn eval(c: &CE, row: &[V], aggs: &[V], w: &mut Warnings) -> EsResult<V> {
                 V::Bool(*neg)
             }
         }
-        CE::Case(args) => {
+        CE::AmdAverage(x) => match eval(x, row, aggs, w)? {
+            V::Str(t) => match value::agg_metric_parts(&t) {
+                [_, _, Some(sum), Some(n)] if n > 0.0 => V::Double(sum / n),
+                _ => V::Null,
+            },
+            _ => V::Null,
+        },
+        CE::Case(args, ats) => {
             let mut i = 0;
             while i + 1 < args.len() {
-                if eval(&args[i], row, aggs, w)?.truthy() == Some(true) {
+                let cond = eval(&args[i], row, aggs, w)?;
+                if matches!(cond, V::Multi(_)) {
+                    // A multi-valued condition is false, with Elasticsearch's warning.
+                    if let Some(at) = ats.get(i / 2) {
+                        w.add(format!("Line {}: evaluation of [{}] failed, treating result as false. Only first 20 failures recorded.", at.loc, at.text));
+                        w.add(format!("Line {}: java.lang.IllegalArgumentException: CASE expects a single-valued boolean", at.loc));
+                    }
+                } else if cond.truthy() == Some(true) {
                     return eval(&args[i + 1], row, aggs, w);
                 }
                 i += 2;
@@ -1287,6 +1401,11 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
             for (f, at) in on {
                 let Some(i) = cols.iter().rposition(|c| c.name == *f) else { return Err(verification(src, *at, &format!("Unknown column [{f}] in left side of join"))) };
                 let Some(j) = lt.cols.iter().position(|c| c.name == *f) else { return Err(verification(src, *at, &format!("Unknown column [{f}] in right side of join"))) };
+                for (side, ty) in [("right", lt.cols[j].ty), ("left", cols[i].ty)] {
+                    if ty == DataType::Flattened {
+                        return Err(verification(src, *at, &format!("JOIN with {side} field [{f}] of type [FLATTENED] is not supported")));
+                    }
+                }
                 on_idx.push(i);
                 lk_idx.push(j);
             }
@@ -1599,8 +1718,22 @@ impl Grouper {
         for n in by {
             let (c, t) = match &n.expr.kind {
                 ExprKind::Call(f, args) if f == "bucket" || f == "bin" => compile_bucket(src, cols, &n.expr, args)?,
+                // `TBUCKET(span)`: `BUCKET(@timestamp, span)`.
+                ExprKind::Call(f, args) if f == "tbucket" => {
+                    let mut full = vec![Expr { kind: ExprKind::Col("@timestamp".into()), start: n.expr.start, end: n.expr.start }];
+                    full.extend(args.iter().cloned());
+                    compile_bucket(src, cols, &n.expr, &full)?
+                }
                 _ => Compiler { src, cols, aggs: None }.compile(&n.expr)?,
             };
+            if t.unsortable() && !matches!(t, DataType::Tsid | DataType::Flattened) {
+                return Err(verification(src, n.expr.start, &format!("cannot group by on [{}] type for grouping [{}]", t.name(), &src[n.expr.start..n.expr.end])));
+            }
+            if let Some(m) = bucket_meta(&c) {
+                let mut cm = src.res.col_meta.lock();
+                cm.retain(|(k, _)| *k != n.name);
+                cm.push((n.name.clone(), m));
+            }
             keys.push((c, t, n.name.clone()));
         }
         let mut specs = Vec::new();
@@ -1795,7 +1928,7 @@ impl SortSpec {
         let mut compiled = Vec::with_capacity(keys.len());
         for k in keys {
             let (c, ty) = Compiler { src, cols, aggs: None }.compile(&k.expr)?;
-            if ty == DataType::Source || super::spatial::is_spatial(ty) {
+            if ty.unsortable() || super::spatial::is_spatial(ty) {
                 return Err(verification(src, k.expr.start, &format!("cannot sort on {}", ty.name())));
             }
             compiled.push((c, k.asc, k.nulls_first, ty));
@@ -2044,6 +2177,8 @@ struct Source {
     unions: HashMap<String, Vec<(String, Vec<String>)>>,
     /// Fields of a type Elasticsearch doesn't support, with that type.
     unsupported: HashMap<String, String>,
+    /// Fields that are `flattened` in some target index.
+    flattened: Vec<String>,
 }
 
 async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metadata: &[String], at: usize) -> EsResult<Source> {
@@ -2073,7 +2208,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         // Patterns that match nothing are an empty result with no columns.
         if sources.iter().all(|s| s.contains('*')) {
-            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new() });
+            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new() });
         }
         return Err(verification_plain(&format!("Unknown index [{index}]")));
     }
@@ -2092,17 +2227,49 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
         let is_meta = |caps: &Value| caps.as_object().is_some_and(|m| m.values().any(|t| t.get("metadata_field").and_then(Value::as_bool) == Some(true)));
         let mut names: Vec<&String> = fields.iter().filter(|(_, c)| !is_meta(c)).map(|(k, _)| k).collect();
         names.sort();
-        // Fields inside nested objects aren't columns.
-        let nested: Vec<String> = names.iter().filter(|n| fields[n.as_str()].as_object().is_some_and(|m| m.contains_key("nested"))).map(|n| format!("{n}.")).collect();
+        // Fields inside nested objects aren't columns: in the indices where their parent is
+        // nested they don't exist (they read as null there), elsewhere they resolve as usual.
+        // `None`: nested in every index.
+        let nested: Vec<(String, Option<Vec<String>>)> = names
+            .iter()
+            .filter_map(|n| {
+                let m = fields[n.as_str()].as_object()?;
+                let caps = m.get("nested")?;
+                let only = (m.len() > 1).then(|| caps.get("indices").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default());
+                Some((format!("{n}."), only))
+            })
+            .collect();
         for name in names {
-            let types: Vec<&String> = fields[name].as_object().map(|m| m.keys().collect()).unwrap_or_default();
+            let mut types: Vec<&String> = fields[name].as_object().map(|m| m.keys().collect()).unwrap_or_default();
             let object = |t: &&String| matches!(t.as_str(), "object" | "nested");
-            if types.iter().all(object) || nested.iter().any(|p| name.starts_with(p.as_str())) {
+            let under: Vec<&Option<Vec<String>>> = nested.iter().filter(|(p, _)| name.starts_with(p.as_str())).map(|(_, i)| i).collect();
+            if !under.is_empty() {
+                if under.iter().any(|i| i.is_none()) {
+                    continue;
+                }
+                let nested_in: Vec<&String> = under.iter().filter_map(|i| i.as_ref()).flatten().collect();
+                let in_nested = |t: &&String| {
+                    let idx: Vec<String> = fields[name].get(t.as_str()).and_then(|c| c.get("indices")).and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
+                    !idx.is_empty() && idx.iter().all(|i| nested_in.contains(&i))
+                };
+                types.retain(|t| !in_nested(t));
+                if types.is_empty() {
+                    continue;
+                }
+            }
+            if types.iter().all(object) {
                 continue;
             }
+            // `time_series_metric: counter` (in time series indices) makes counter types; a
+            // field that is a counter in some indices only is unsupported.
+            let caps_of = |t: &str| fields[name].get(t);
+            let counter = types.iter().any(|t| caps_of(t).and_then(|c| c.get("time_series_metric")).and_then(Value::as_str) == Some("counter"));
+            let metric_conflict = types.iter().any(|t| caps_of(t).and_then(|c| c.get("metric_conflicts_indices")).is_some());
             let ty = match types.as_slice() {
                 // An object in some indices and a leaf in others.
                 _ if types.iter().any(object) => DataType::Unsupported,
+                _ if metric_conflict => DataType::Unsupported,
+                [one] if counter => DataType::of_mapping(one).counter_of(),
                 // Dates and nanosecond dates read as nanosecond dates.
                 [a, b] if matches!((a.as_str(), b.as_str()), ("date", "date_nanos") | ("date_nanos", "date")) => DataType::DateNanos,
                 [one] => DataType::of_mapping(one),
@@ -2163,11 +2330,16 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
             "_version" => DataType::Long,
             "_source" => DataType::Source,
             "_score" => DataType::Double,
+            "_tsid" => DataType::Tsid,
             other => return Err(verification(src, at, &format!("unsupported metadata field [{other}]"))),
         };
         cols.push(Col { name: m.clone(), ty });
     }
-    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported })
+    let flattened = match caps.get("fields") {
+        Some(Value::Obj(f)) => f.iter().filter(|(_, c)| c.get("flattened").is_some()).map(|(k, _)| k.clone()).collect(),
+        _ => Vec::new(),
+    };
+    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened })
 }
 
 fn verification_plain(msg: &str) -> EsError {
@@ -2487,6 +2659,11 @@ async fn scan(cluster: &Cluster, s: &Source, query: Option<Value>, limit: Option
     {
         m.insert("version".into(), true.into());
     }
+    if s.metadata.iter().any(|m| m == "_tsid")
+        && let Value::Obj(m) = &mut body
+    {
+        m.insert("docvalue_fields".into(), crate::arr!["_tsid"]);
+    }
     if s.metadata.iter().any(|m| m == "_source")
         && let Value::Obj(m) = &mut body
     {
@@ -2540,6 +2717,7 @@ async fn scan(cluster: &Cluster, s: &Source, query: Option<Value>, limit: Option
                     "_source" => h.get("_source").map(|x| V::Str(x.to_json())).unwrap_or(V::Null),
                     // The ignored fields: keyword doc values, sorted.
                     "_ignored" => h.get("_ignored").map(|x| value::from_field_in(x, DataType::Keyword, false)).unwrap_or(V::Null),
+                    "_tsid" => h.pointer(&["fields", "_tsid"]).and_then(Value::as_array).and_then(|a| a.first()).map(|x| V::Str(x.to_es_string())).unwrap_or(V::Null),
                     other => h.get(other).map(|x| V::Str(x.to_es_string())).unwrap_or(V::Null),
                 });
             }
@@ -2596,17 +2774,296 @@ fn constant_of(cluster: &Cluster, cache: &mut HashMap<(String, String), V>, inde
 }
 
 /// Splices views: `FROM <view>` runs the view's query.
-fn expand_views(st: &crate::meta::ClusterState, q: Query) -> EsResult<Query> {
-    let Some(Cmd::From { sources, .. }) = q.cmds.first() else { return Ok(q) };
-    if sources.len() != 1 || st.metadata.indices.contains_key(&sources[0]) || st.has_alias(&sources[0]) {
+/// Rewrites a `FROM` that names ES|QL views (exactly, or through a wildcard) into a
+/// [`Cmd::Union`] of the views' queries plus one branch for the remaining index patterns, the
+/// way Elasticsearch resolves views as subqueries; nested views and subqueries resolve the
+/// same way, and a view reached again along its own chain is a circular reference.
+fn expand_views(st: &crate::meta::ClusterState, mut q: Query) -> EsResult<Query> {
+    if st.metadata.xpack.len(super::VIEWS) == 0 && !matches!(q.cmds.first(), Some(Cmd::Union { .. })) {
         return Ok(q);
     }
-    let Some(view) = st.metadata.xpack.get(super::VIEWS, &sources[0]) else { return Ok(q) };
-    let text = view.get("query").map(Value::to_es_string).unwrap_or_default();
-    let inner = super::parser::parse(&text, &[], &[])?;
-    let mut cmds = inner.cmds;
-    cmds.extend(q.cmds.into_iter().skip(1));
-    Ok(Query { src: q.src, cmds, sql: q.sql, locale: q.locale, settings: q.settings })
+    let text: std::sync::Arc<str> = q.src.as_str().into();
+    if let Some(first) = q.cmds.first_mut() {
+        expand_source(st, first, &text, &mut Vec::new())?;
+    }
+    Ok(q)
+}
+
+/// Whether `name` is something an index pattern resolves to (index, alias or data stream).
+fn is_index_abstraction(st: &crate::meta::ClusterState, name: &str) -> bool {
+    st.metadata.indices.contains_key(name) || st.has_alias(name) || st.metadata.data_streams.contains_key(name)
+}
+
+fn expand_source(st: &crate::meta::ClusterState, cmd: &mut Cmd, text: &std::sync::Arc<str>, chain: &mut Vec<String>) -> EsResult<()> {
+    match cmd {
+        Cmd::Union { branches, .. } => {
+            for b in branches.iter_mut().filter(|b| b.view.is_none()) {
+                let src = b.src.clone();
+                if let Some(first) = b.cmds.first_mut() {
+                    expand_source(st, first, &src, chain)?;
+                }
+            }
+            Ok(())
+        }
+        Cmd::From { sources, metadata, at } => {
+            let views: Vec<&String> = st.metadata.xpack.iter(super::VIEWS).map(|(k, _)| k).collect();
+            if views.is_empty() {
+                return Ok(());
+            }
+            // Written order: each view where it is named, the index patterns together at the
+            // first of them.
+            enum Part {
+                Indices,
+                View(String),
+            }
+            let mut parts: Vec<Part> = Vec::new();
+            let mut plain: Vec<String> = Vec::new();
+            for s in sources.iter() {
+                let mut hit: Vec<String> = Vec::new();
+                if s.contains('*') {
+                    hit.extend(views.iter().filter(|v| crate::xcontent::filter::glob_match(s, v)).map(|v| v.to_string()));
+                } else if views.iter().any(|v| *v == s) && !is_index_abstraction(st, s) {
+                    hit.push(s.clone());
+                }
+                let keep = hit.is_empty() || (s.contains('*') && (st.metadata.indices.keys().any(|i| crate::xcontent::filter::glob_match(s, i)) || st.metadata.data_streams.keys().any(|i| crate::xcontent::filter::glob_match(s, i))));
+                if keep {
+                    if plain.is_empty() {
+                        parts.push(Part::Indices);
+                    }
+                    plain.push(s.clone());
+                }
+                for v in hit {
+                    if !parts.iter().any(|p| matches!(p, Part::View(x) if *x == v)) {
+                        parts.push(Part::View(v));
+                    }
+                }
+            }
+            if !parts.iter().any(|p| matches!(p, Part::View(_))) {
+                return Ok(());
+            }
+            let mut branches = Vec::new();
+            for part in parts {
+                match part {
+                    Part::Indices => branches.push(super::parser::Branch { cmds: vec![Cmd::From { sources: plain.clone(), metadata: metadata.clone(), at: *at }], src: text.clone(), view: None, at: *at }),
+                    Part::View(v) => {
+                        if chain.contains(&v) {
+                            return Err(verification_plain(&format!("circular view reference '{v}': {}", chain.join(" -> "))));
+                        }
+                        let body = st.metadata.xpack.get(super::VIEWS, &v).and_then(|x| x.get("query")).map(Value::to_es_string).unwrap_or_default();
+                        let vq = super::parser::parse(&body, &[], &[])?;
+                        let vtext: std::sync::Arc<str> = body.as_str().into();
+                        let mut cmds = vq.cmds;
+                        chain.push(v.clone());
+                        if let Some(first) = cmds.first_mut() {
+                            expand_source(st, first, &vtext, chain)?;
+                        }
+                        chain.pop();
+                        // `METADATA` fields of the outer `FROM` are null over a view.
+                        let nulls: Vec<super::parser::Named> = metadata
+                            .iter()
+                            .map(|m| {
+                                let ty = match m.as_str() {
+                                    "_score" => "double",
+                                    "_version" => "long",
+                                    _ => "keyword",
+                                };
+                                let lit = Expr { kind: ExprKind::Lit(V::Null), start: 0, end: 0 };
+                                super::parser::Named { name: m.clone(), expr: Expr { kind: ExprKind::Cast(Box::new(lit), ty.into()), start: 0, end: 0 } }
+                            })
+                            .collect();
+                        if !nulls.is_empty() {
+                            cmds.push(Cmd::Eval(nulls));
+                        }
+                        branches.push(super::parser::Branch { cmds, src: vtext, view: Some(v), at: 0 });
+                    }
+                }
+            }
+            *cmd = Cmd::Union { branches, at: *at };
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Elasticsearch's checks on `FORK` placement: one `FORK` per query (each branch of a later
+/// `FORK` repeats the earlier one, and is reported once per branch), none inside a subquery.
+fn check_forks(text: &str, cmds: &[Cmd]) -> EsResult<()> {
+    let mut problems: Vec<(usize, &str)> = Vec::new();
+    const MULTIPLE: &str = "Only a single FORK command is supported, but found multiple";
+    let mut seen: Vec<usize> = Vec::new();
+    for c in cmds {
+        if let Cmd::Fork { branches, at } = c {
+            for b in branches {
+                problems.extend(seen.iter().map(|s| (*s, MULTIPLE)));
+                for inner in b {
+                    if let Cmd::Fork { at, .. } = inner {
+                        problems.push((*at, MULTIPLE));
+                    }
+                }
+            }
+            seen.push(*at);
+        }
+    }
+    if let Some(Cmd::Union { branches, .. }) = cmds.first() {
+        for b in branches.iter().filter(|b| b.view.is_none()) {
+            for c in &b.cmds {
+                if let Cmd::Fork { at, .. } = c {
+                    problems.push((*at, "FORK inside subquery is not supported"));
+                }
+            }
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let n = problems.len();
+    let mut msg = format!("Found {n} problem{}", if n == 1 { "" } else { "s" });
+    for (at, p) in problems {
+        let (l, c) = super::parser::location(text, at);
+        msg.push_str(&format!("\nline {l}:{c}: {p}"));
+    }
+    Err(EsError::new(400, "verification_exception", msg))
+}
+
+/// Whether any command of the query, inside `FORK` branches too, is a `LIMIT`.
+fn has_limit(cmds: &[Cmd]) -> bool {
+    cmds.iter().any(|c| match c {
+        Cmd::Limit(_) => true,
+        Cmd::Fork { branches, .. } => branches.iter().any(|b| has_limit(b)),
+        _ => false,
+    })
+}
+
+/// Elasticsearch's name for a type in verification messages.
+fn type_text(t: DataType) -> &'static str {
+    match t {
+        DataType::Date => "datetime",
+        t => t.name(),
+    }
+}
+
+/// Where `name` is defined by the commands (the alias of `EVAL name = ...`, `STATS name = ...`).
+fn definition_at(text: &str, cmds: &[Cmd], name: &str) -> Option<usize> {
+    let alias = |n: &super::parser::Named| {
+        let before = text.get(..n.expr.start)?.trim_end();
+        let before = before.strip_suffix('=')?.trim_end();
+        let start = before.rfind(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '@' | '`'))).map_or(0, |i| i + 1);
+        Some(start)
+    };
+    for c in cmds.iter().rev() {
+        let list: Vec<&super::parser::Named> = match c {
+            Cmd::Eval(l) | Cmd::Row(l) => l.iter().collect(),
+            Cmd::Stats { aggs, by } | Cmd::InlineStats { aggs, by } => aggs.iter().chain(by).collect(),
+            _ => continue,
+        };
+        if let Some(n) = list.into_iter().find(|n| n.name == name) {
+            return alias(n).or(Some(n.expr.start));
+        }
+    }
+    None
+}
+
+/// The column names a command reads (expressions, `KEEP`/`DROP` names, renamed columns).
+fn cmd_refs(c: &Cmd, out: &mut std::collections::HashSet<String>) {
+    match c {
+        Cmd::Where(e) => refs(e, out),
+        Cmd::Eval(l) | Cmd::Row(l) => l.iter().for_each(|n| refs(&n.expr, out)),
+        Cmd::Stats { aggs, by } | Cmd::InlineStats { aggs, by } => aggs.iter().chain(by).for_each(|n| refs(&n.expr, out)),
+        Cmd::Sort(keys) => keys.iter().for_each(|k| refs(&k.expr, out)),
+        Cmd::Keep(p) | Cmd::Drop(p) => p.iter().filter(|(n, _)| !n.contains('*')).for_each(|(n, _)| {
+            out.insert(n.clone());
+        }),
+        Cmd::Rename(l) => l.iter().for_each(|(a, _, _)| {
+            out.insert(a.clone());
+        }),
+        Cmd::MvExpand(n, _) => {
+            out.insert(n.clone());
+        }
+        Cmd::Dissect { field, .. } | Cmd::Grok { field, .. } => refs(field, out),
+        Cmd::LookupJoin { on, .. } => on.iter().for_each(|(n, _)| {
+            out.insert(n.clone());
+        }),
+        Cmd::Enrich { on: Some((n, _)), .. } => {
+            out.insert(n.clone());
+        }
+        Cmd::Fork { branches, .. } => branches.iter().flatten().for_each(|c| cmd_refs(c, out)),
+        _ => {}
+    }
+}
+
+/// The union of tables (`FORK` branches, subqueries): columns in order of first appearance,
+/// rows of each table in turn, null where a table lacks a column. A column of two types is an
+/// error (`conflict(name, existing, new, table)`), unless `union_ok` lets it become a union type.
+fn union_tables(parts: Vec<Table>, conflict: &dyn Fn(&str, DataType, DataType, usize) -> EsError, union_ok: &dyn Fn(&str, usize) -> bool, original: &mut Vec<(String, Vec<String>)>) -> EsResult<Table> {
+    let mut cols: Vec<Col> = Vec::new();
+    let mut maps: Vec<Vec<usize>> = Vec::with_capacity(parts.len());
+    for (pi, t) in parts.iter().enumerate() {
+        let mut map = Vec::with_capacity(t.cols.len());
+        for c in &t.cols {
+            match cols.iter().position(|x| x.name == c.name) {
+                Some(i) => {
+                    let have = cols[i].ty;
+                    if have != c.ty && c.ty != DataType::Null {
+                        if have == DataType::Null {
+                            cols[i].ty = c.ty;
+                        } else if have.is_string() && c.ty.is_string() {
+                            cols[i].ty = DataType::Keyword;
+                        } else if union_ok(&c.name, pi) {
+                            let mut types: Vec<String> = original.iter().find(|(n, _)| *n == c.name).map(|(_, t)| t.clone()).unwrap_or_else(|| vec![have.name().to_string()]);
+                            if !types.iter().any(|t| t == c.ty.name()) {
+                                types.push(c.ty.name().to_string());
+                            }
+                            types.sort();
+                            original.retain(|(n, _)| *n != c.name);
+                            original.push((c.name.clone(), types));
+                            cols[i].ty = DataType::Unsupported;
+                        } else {
+                            return Err(conflict(&c.name, have, c.ty, pi));
+                        }
+                    }
+                    map.push(i);
+                }
+                None => {
+                    map.push(cols.len());
+                    cols.push(c.clone());
+                }
+            }
+        }
+        maps.push(map);
+    }
+    let total = parts.iter().map(|t| t.rows.len()).sum();
+    let mut rows = Vec::with_capacity(total);
+    for (t, map) in parts.into_iter().zip(&maps) {
+        for r in t.rows {
+            let mut out = vec![V::Null; cols.len()];
+            for (v, &i) in r.into_iter().zip(map) {
+                out[i] = v;
+            }
+            rows.push(out);
+        }
+    }
+    Ok(Table { cols, rows })
+}
+
+fn merge_stats(into: &mut Stats, from: Stats) {
+    into.documents_found += from.documents_found;
+    into.values_loaded += from.values_loaded;
+    match (&mut into.indices, from.indices) {
+        (Some(a), Some(b)) => a.extend(b.into_iter().filter(|x| !a.contains(x)).collect::<Vec<_>>()),
+        (a @ None, b) => *a = b,
+        _ => {}
+    }
+    for f in from.fields {
+        if !into.fields.contains(&f) {
+            into.fields.push(f);
+        }
+    }
+    into.col_meta.extend(from.col_meta);
+    for (n, t) in from.original_types {
+        if !into.original_types.iter().any(|(x, _)| *x == n) {
+            into.original_types.push((n, t));
+        }
+    }
 }
 
 /// Runs a parsed query.
@@ -2636,20 +3093,318 @@ pub async fn execute(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut
 
 async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings) -> EsResult<(Table, Stats)> {
     let q = expand_views(&cluster.state(), q)?;
+    // An implicit `LIMIT 1000` ends every query without a limit.
+    if !has_limit(&q.cmds) && !q.sql {
+        w.add(format!("No limit defined, adding default limit of [{DEFAULT_LIMIT}]"));
+    }
+    check_forks(&q.src, &q.cmds)?;
+    run_query(cluster, q, filter, w, true, &[]).await
+}
+
+/// Every column name the commands reference, with where (expressions, `KEEP`/`DROP`
+/// patterns, renamed and expanded columns), in source order.
+fn ref_positions(cmds: &[Cmd]) -> Vec<(String, usize)> {
+    fn expr(e: &Expr, out: &mut Vec<(String, usize)>) {
+        match &e.kind {
+            ExprKind::Col(n) => out.push((n.clone(), e.start)),
+            ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => expr(x, out),
+            ExprKind::Bin(_, a, b) => {
+                expr(a, out);
+                expr(b, out);
+            }
+            ExprKind::In(x, l, _) => {
+                expr(x, out);
+                l.iter().for_each(|a| expr(a, out));
+            }
+            ExprKind::Call(_, args) => args.iter().for_each(|a| expr(a, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for c in cmds {
+        match c {
+            Cmd::Where(e) => expr(e, &mut out),
+            Cmd::Eval(l) | Cmd::Row(l) => l.iter().for_each(|n| expr(&n.expr, &mut out)),
+            Cmd::Stats { aggs, by } | Cmd::InlineStats { aggs, by } => aggs.iter().chain(by).for_each(|n| expr(&n.expr, &mut out)),
+            Cmd::Sort(k) => k.iter().for_each(|k| expr(&k.expr, &mut out)),
+            Cmd::Keep(p) | Cmd::Drop(p) => out.extend(p.iter().cloned()),
+            Cmd::Rename(l) => out.extend(l.iter().map(|(a, _, at)| (a.clone(), *at))),
+            Cmd::MvExpand(n, at) => out.push((n.clone(), *at)),
+            Cmd::Dissect { field, .. } | Cmd::Grok { field, .. } => expr(field, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `unmapped_fields="load"` can't read below a `flattened` field: a mapped field under one
+/// (in another index) fails at the `FROM`, a referenced unmapped name under one where it is.
+fn check_flattened_load(src: &Src<'_>, source: &Source, cmds: &[Cmd], from_at: usize) -> EsResult<()> {
+    let parent = |name: &str| source.flattened.iter().filter(|f| name.len() > f.len() && name.starts_with(f.as_str()) && name.as_bytes()[f.len()] == b'.').max_by_key(|f| f.len()).cloned();
+    let mut problems: Vec<(usize, String, String)> = Vec::new();
+    let refs = ref_positions(cmds);
+    // A mapped field under a flattened parent, when something reads it (or below it).
+    for f in &source.fields {
+        let read = refs.iter().any(|(r, _)| r == f || (r.starts_with(f.as_str()) && r.as_bytes().get(f.len()) == Some(&b'.')));
+        if read && let Some(p) = parent(f) {
+            problems.push((from_at, f.clone(), p));
+        }
+    }
+    for (name, at) in refs {
+        let known = source.cols.iter().any(|c| c.name == name || (name.contains('*') && glob(&name, &c.name)));
+        if !known && let Some(p) = parent(&name) {
+            problems.push((at, name, p));
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let n = problems.len();
+    let mut msg = format!("Found {n} problem{}", if n == 1 { "" } else { "s" });
+    for (at, name, p) in problems {
+        let (l, c) = super::parser::location(src, at);
+        msg.push_str(&format!("\nline {l}:{c}: Loading subfield [{name}] when parent [{p}] is of flattened field type is not supported with unmapped_fields=\"load\""));
+    }
+    Err(EsError::new(400, "verification_exception", msg))
+}
+
+/// `TS`'s time series functions and what each aggregates per series (`$` names take the
+/// timestamp too).
+fn ts_inner(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "avg_over_time" => "avg",
+        "sum_over_time" => "sum",
+        "min_over_time" => "min",
+        "max_over_time" => "max",
+        "count_over_time" => "count",
+        "count_distinct_over_time" => "count_distinct",
+        "present_over_time" => "present",
+        "absent_over_time" => "absent",
+        "stddev_over_time" => "std_dev",
+        "variance_over_time" => "variance",
+        "percentile_over_time" => "percentile",
+        "first_over_time" => "$first",
+        "last_over_time" => "$last",
+        "rate" => "$rate",
+        "irate" => "$irate",
+        "increase" => "$increase",
+        "delta" => "$delta",
+        "idelta" => "$idelta",
+        "deriv" => "$deriv",
+        _ => return None,
+    })
+}
+
+/// Rewrites a `TS` query: the source becomes a `FROM` that also reads `_tsid`, and the first
+/// `STATS` becomes two: per time series (`_tsid` plus the groups) the inner functions (a plain
+/// aggregate reads each series' last value), then the outer aggregates across series.
+fn ts_rewrite(text: &str, cmds: &mut Vec<Cmd>) -> EsResult<()> {
+    let Some(Cmd::Ts { sources, metadata, at }) = cmds.first().cloned() else { return Ok(()) };
+    let Some(si) = cmds.iter().position(|c| matches!(c, Cmd::Stats { .. })) else {
+        cmds[0] = Cmd::From { sources, metadata, at };
+        return Ok(());
+    };
+    let mut md = metadata.clone();
+    if !md.iter().any(|m| m == "_tsid") {
+        md.push("_tsid".into());
+    }
+    cmds[0] = Cmd::From { sources, metadata: md, at };
+    // `@timestamp` must survive the commands before `STATS`.
+    let mut has_ts = true;
+    for c in &cmds[1..si] {
+        match c {
+            Cmd::Rename(l) if l.iter().any(|(a, _, _)| a == "@timestamp") => has_ts = false,
+            Cmd::Drop(p) if p.iter().any(|(n, _)| glob(n, "@timestamp")) => has_ts = false,
+            Cmd::Keep(p) if !p.iter().any(|(n, _)| glob(n, "@timestamp")) => has_ts = false,
+            _ => {}
+        }
+    }
+    let Cmd::Stats { aggs, by } = cmds[si].clone() else { unreachable!() };
+    let col = |name: &str, at: usize| Expr { kind: ExprKind::Col(name.into()), start: at, end: at };
+    let call = |f: &str, args: Vec<Expr>, e: &Expr| Expr { kind: ExprKind::Call(f.into(), args), start: e.start, end: e.end };
+    let mut inner_aggs = Vec::new();
+    let mut outer_aggs = Vec::new();
+    for (i, a) in aggs.iter().enumerate() {
+        let slot = format!("$ts{i}");
+        let needs_ts = |e: &Expr| -> EsResult<()> {
+            if has_ts {
+                return Ok(());
+            }
+            Err(verification(text, e.start, &format!("[{}] requires the [@timestamp] field, which was either not present in the source index, or has been dropped or renamed", &text[e.start..e.end])))
+        };
+        let inner_of = |e: &Expr| -> EsResult<Expr> {
+            match &e.kind {
+                ExprKind::Call(f, args) if ts_inner(f).is_some() => {
+                    let to = ts_inner(f).expect("checked");
+                    needs_ts(e)?;
+                    let mut args = args.clone();
+                    if to.starts_with('$') {
+                        args.truncate(1);
+                        args.push(col("@timestamp", e.start));
+                    }
+                    Ok(call(to, args, e))
+                }
+                // Anything else reads each series' last value in the bucket.
+                _ => Ok(call("$last", vec![e.clone(), col("@timestamp", e.start)], e)),
+            }
+        };
+        match &a.expr.kind {
+            ExprKind::Call(f, args) if (f == "first" || f == "last") && args.len() == 2 && matches!(args[1].kind, ExprKind::Lit(V::Null)) => {
+                needs_ts(&a.expr)?;
+                let to = if f == "first" { "$first" } else { "$last" };
+                inner_aggs.push(super::parser::Named { name: slot.clone(), expr: call(to, vec![args[0].clone(), col("@timestamp", a.expr.start)], &a.expr) });
+                outer_aggs.push(super::parser::Named { name: a.name.clone(), expr: call(to.trim_start_matches('$'), vec![col(&slot, a.expr.start)], &a.expr) });
+            }
+            ExprKind::Call(f, args) if value::AGGS.contains(&f.as_str()) && !f.starts_with('$') && !args.is_empty() => {
+                let inner = if matches!(args[0].kind, ExprKind::Star) { call("count", vec![args[0].clone()], &a.expr) } else { inner_of(&args[0])? };
+                let outer_fn = if matches!(args[0].kind, ExprKind::Star) { "sum".to_string() } else { f.clone() };
+                inner_aggs.push(super::parser::Named { name: slot.clone(), expr: inner });
+                let mut oargs = vec![col(&slot, a.expr.start)];
+                oargs.extend(args.iter().skip(1).cloned());
+                outer_aggs.push(super::parser::Named { name: a.name.clone(), expr: call(&outer_fn, oargs, &a.expr) });
+            }
+            ExprKind::Call(f, _) if ts_inner(f).is_some() => {
+                inner_aggs.push(super::parser::Named { name: slot.clone(), expr: inner_of(&a.expr)? });
+                outer_aggs.push(super::parser::Named { name: a.name.clone(), expr: call("$last", vec![col(&slot, a.expr.start), col("@timestamp", a.expr.start)], &a.expr) });
+            }
+            _ => {
+                inner_aggs.push(a.clone());
+                outer_aggs.push(super::parser::Named { name: a.name.clone(), expr: col(&a.name, a.expr.start) });
+            }
+        }
+    }
+    let mut inner_by = vec![super::parser::Named { name: "_tsid".into(), expr: col("_tsid", at) }];
+    inner_by.extend(by.iter().cloned());
+    let outer_by: Vec<super::parser::Named> = by.iter().map(|n| super::parser::Named { name: n.name.clone(), expr: col(&n.name, n.expr.start) }).collect();
+    cmds[si] = Cmd::Stats { aggs: inner_aggs, by: inner_by };
+    cmds.insert(si + 1, Cmd::Stats { aggs: outer_aggs, by: outer_by });
+    Ok(())
+}
+
+/// Runs a query (`top`: the request's own, which gets the implicit limit; branches of a union
+/// don't). `outer`: the commands that will run over this query's result, for fields they
+/// reference that `SET unmapped_fields` has to provide.
+fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &'a mut Warnings, top: bool, outer: &'a [Cmd]) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<(Table, Stats)>> + Send + 'a>> {
+    Box::pin(async move {
+        if matches!(q.cmds.first(), Some(Cmd::Ts { .. })) {
+            ts_rewrite(&q.src, &mut q.cmds)?;
+        }
+        if top && !q.cmds.iter().any(|c| matches!(c, Cmd::Limit(_))) {
+            q.cmds.push(Cmd::Limit(DEFAULT_LIMIT));
+        }
+        let fork = q.cmds.iter().position(|c| matches!(c, Cmd::Fork { .. }));
+        let union = matches!(q.cmds.first(), Some(Cmd::Union { .. }));
+        if fork.is_none() && !union {
+            return execute_plain(cluster, q, filter, w, outer).await;
+        }
+        let mut stats = Stats::default();
+        let (parts, rest): (Vec<Table>, Vec<Cmd>) = if let Some(f) = fork {
+            let Cmd::Fork { branches, at } = q.cmds[f].clone() else { unreachable!() };
+            let rest: Vec<Cmd> = q.cmds[f + 1..].to_vec();
+            let refs: Vec<Cmd> = rest.iter().chain(outer).cloned().collect();
+            let mut parts = Vec::with_capacity(branches.len());
+            for (i, b) in branches.iter().enumerate() {
+                let mut cmds: Vec<Cmd> = q.cmds[..f].to_vec();
+                cmds.extend(b.iter().cloned());
+                if !b.iter().any(|c| matches!(c, Cmd::Limit(_))) {
+                    cmds.push(Cmd::Limit(DEFAULT_LIMIT));
+                }
+                let tag = Expr { kind: ExprKind::Lit(V::Str(format!("fork{}", i + 1))), start: at, end: at };
+                cmds.push(Cmd::Eval(vec![super::parser::Named { name: "_fork".into(), expr: tag }]));
+                let bq = Query { src: q.src.clone(), cmds, sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
+                let (t, s) = run_query(cluster, bq, filter.clone(), w, false, &refs).await?;
+                merge_stats(&mut stats, s);
+                parts.push(t);
+            }
+            let text = q.src.clone();
+            let conflict = |name: &str, have: DataType, new: DataType, pi: usize| {
+                let at = definition_at(&text, &branches[pi], name).unwrap_or(at);
+                verification(&text, at, &format!("Column [{name}] has conflicting data types in FORK branches: [{}] and [{}]", type_text(new).to_ascii_uppercase(), type_text(have).to_ascii_uppercase()))
+            };
+            let mut original = std::mem::take(&mut stats.original_types);
+            let t = union_tables(parts, &conflict, &|_, _| false, &mut original)?;
+            stats.original_types = original;
+            (vec![t], rest)
+        } else {
+            let Cmd::Union { branches, at } = q.cmds[0].clone() else { unreachable!() };
+            let rest: Vec<Cmd> = q.cmds[1..].to_vec();
+            // Names the commands over the union read reach the branches' `unmapped_fields`
+            // only when no branch reads them itself (that branch provides the column then).
+            let refs: Vec<Cmd> = rest.iter().chain(outer).cloned().collect();
+            let mut mentioned = std::collections::HashSet::new();
+            for b in &branches {
+                for c in b.cmds.iter().skip(1) {
+                    cmd_refs(c, &mut mentioned);
+                }
+            }
+            let mut wanted = std::collections::HashSet::new();
+            for c in &refs {
+                cmd_refs(c, &mut wanted);
+            }
+            let mut pass: Vec<String> = wanted.into_iter().filter(|n| !mentioned.contains(n)).collect();
+            pass.sort();
+            let carry: Vec<Cmd> = if pass.is_empty() { Vec::new() } else { vec![Cmd::Keep(pass.into_iter().map(|n| (n, 0)).collect())] };
+            let mut parts = Vec::with_capacity(branches.len());
+            for b in &branches {
+                let bq = Query { src: b.src.to_string(), cmds: b.cmds.clone(), sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
+                let (t, s) = run_query(cluster, bq, filter.clone(), w, false, &carry).await?;
+                merge_stats(&mut stats, s);
+                parts.push(t);
+            }
+            let parts_types: Vec<Vec<(String, DataType)>> = parts.iter().map(|t| t.cols.iter().map(|c| (c.name.clone(), c.ty)).collect()).collect();
+            let text = q.src.clone();
+            let first_view = branches.first().and_then(|b| b.view.clone());
+            let conflict = |name: &str, have: DataType, new: DataType, _pi: usize| {
+                let (l, c) = if first_view.is_some() { (1, 1) } else { super::parser::location(&text, at) };
+                let inv = first_view.as_ref().map(|v| format!(" (in view [{v}])")).unwrap_or_default();
+                EsError::new(400, "verification_exception", format!("Found 1 problem\nline {l}:{c}{inv}: Column [{name}] has conflicting data types in subqueries: [{}, {}]", type_text(have), type_text(new)))
+            };
+            // A column of several types is tolerated (an unsupported union type) until a
+            // command after the union reads it.
+            let deferred: std::cell::RefCell<Vec<(String, EsError)>> = std::cell::RefCell::new(Vec::new());
+            let lazy = |name: &str, pi: usize| {
+                let have = parts_types[..pi].iter().find_map(|t| t.iter().find(|(n, _)| n == name).map(|(_, t)| *t));
+                let new = parts_types[pi].iter().find(|(n, _)| n == name).map(|(_, t)| *t);
+                if let (Some(h), Some(n)) = (have, new) {
+                    deferred.borrow_mut().push((name.to_string(), conflict(name, h, n, pi)));
+                }
+                true
+            };
+            let mut original = std::mem::take(&mut stats.original_types);
+            let t = union_tables(parts, &conflict, &lazy, &mut original)?;
+            stats.original_types = original;
+            let mut used = std::collections::HashSet::new();
+            for c in rest.iter().filter(|c| !matches!(c, Cmd::Keep(_) | Cmd::Drop(_))) {
+                cmd_refs(c, &mut used);
+            }
+            if let Some((_, e)) = deferred.into_inner().into_iter().find(|(n, _)| used.contains(n)) {
+                return Err(e);
+            }
+            (vec![t], rest)
+        };
+        let t = parts.into_iter().next().unwrap_or_default();
+        let text = q.src.clone();
+        let res = load_resources(cluster, &text, &rest).await?;
+        let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
+        let src = Src { text: &text, sql: q.sql, locale: q.locale.as_deref(), res: &res, tz };
+        let t = run_rest(&src, t, &rest, w)?;
+        stats.rows_emitted = t.rows.len() as i64;
+        stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
+        Ok((t, stats))
+    })
+}
+
+/// Runs a query with no `FORK` and no union source.
+async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings, outer: &[Cmd]) -> EsResult<(Table, Stats)> {
     let text = q.src.clone();
     let res = load_resources(cluster, &text, &q.cmds).await?;
     let tz = q.settings.time_zone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok()).filter(|z| *z != crate::time::Zone::UTC);
     let src = Src { text: &text, sql: q.sql, locale: q.locale.as_deref(), res: &res, tz };
     let mut stats = Stats::default();
     let mut cmds: Vec<Cmd> = q.cmds.clone();
-    // An implicit `LIMIT 1000` ends every query without a limit.
-    if !cmds.iter().any(|c| matches!(c, Cmd::Limit(_))) {
-        cmds.push(Cmd::Limit(DEFAULT_LIMIT));
-        if !q.sql {
-            w.add(format!("No limit defined, adding default limit of [{DEFAULT_LIMIT}]"));
-        }
-    }
     let first = cmds.remove(0);
+    // Fields the commands over this query's result reference count for `unmapped_fields`.
+    let ref_cmds: Vec<Cmd> = cmds.iter().chain(outer).cloned().collect();
     let ft = if matches!(first, Cmd::From { .. }) { super::fulltext::extract(&src, &mut cmds)? } else { Vec::new() };
     // The row-wise prefix runs on every batch.
     let split = cmds.iter().position(|c| !is_row_wise(c)).unwrap_or(cmds.len());
@@ -2669,7 +3424,7 @@ async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                 row.push(v);
             }
             if q.settings.unmapped != Unmapped::Default {
-                for name in unmapped_references(&cmds, &cols) {
+                for name in unmapped_references(&ref_cmds, &cols) {
                     cols.push(Col { name, ty: DataType::Null });
                     row.push(V::Null);
                 }
@@ -2688,15 +3443,34 @@ async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         }
         Cmd::From { sources, metadata, at } => {
             let mut source = resolve_source(cluster, &src, sources, metadata, *at).await?;
+            if q.settings.unmapped == Unmapped::Load && !source.flattened.is_empty() {
+                check_flattened_load(&src, &source, &ref_cmds, *at)?;
+            }
             if q.settings.unmapped != Unmapped::Default && source.cols.first().is_none_or(|c| c.name != "<no-fields>") {
                 let load = q.settings.unmapped == Unmapped::Load;
-                for name in unmapped_references(&cmds, &source.cols) {
+                for name in unmapped_references(&ref_cmds, &source.cols) {
                     let at = source.fields.len();
                     source.cols.insert(at, Col { name: name.clone(), ty: if load { DataType::Keyword } else { DataType::Null } });
                     source.fields.push(name.clone());
                     if load {
                         source.source_order.insert(name.clone());
                         source.load.push(name);
+                    }
+                }
+                // A keyword some target indices leave unmapped loads from their `_source`.
+                if load && source.indices.len() > 1 {
+                    let mut used = std::collections::HashSet::new();
+                    ref_cmds.iter().for_each(|c| cmd_refs(c, &mut used));
+                    let candidates: Vec<String> = source.fields.iter().zip(&source.cols).filter(|(f, c)| c.ty == DataType::Keyword && used.contains(*f) && !source.load.contains(f)).map(|(f, _)| f.clone()).collect();
+                    if !candidates.is_empty() {
+                        let path = format!("/{}/_field_caps?fields={}&include_unmapped=true&ignore_unavailable=true&expand_wildcards=open", encode(&source.index), encode(&candidates.join(",")));
+                        let caps = internal::call(cluster, "GET", &path, None).await.unwrap_or(Value::Null);
+                        for f in candidates {
+                            if caps.get("fields").and_then(|m| m.get(&f)).and_then(|m| m.get("unmapped")).is_some() {
+                                source.source_order.insert(f.clone());
+                                source.load.push(f);
+                            }
+                        }
                     }
                 }
             }
@@ -2783,6 +3557,7 @@ async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
     }
     table = run_rest(&src, table, rest, w)?;
     stats.rows_emitted = table.rows.len() as i64;
+    stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
     Ok((table, stats))
 }
 
@@ -2831,16 +3606,30 @@ async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult
                 if res.lookup.contains_key(index) {
                     continue;
                 }
-                let mode = {
+                // The name may be an index, an alias or a data stream: it must resolve to one
+                // concrete index, in lookup mode.
+                let (concrete, mode) = {
                     let st = cluster.state();
-                    let Some(m) = st.metadata.indices.get(index.as_str()) else { continue };
-                    m.settings.get("index.mode").map(|s| s.to_string()).unwrap_or_else(|| "standard".into())
+                    let concrete: Vec<String> = if st.metadata.indices.contains_key(index.as_str()) {
+                        vec![index.clone()]
+                    } else if let Some(ds) = st.metadata.data_streams.get(index.as_str()) {
+                        ds.indices.clone()
+                    } else {
+                        st.metadata.indices.iter().filter(|(_, m)| m.aliases.contains_key(index.as_str())).map(|(k, _)| k.clone()).collect()
+                    };
+                    match concrete.as_slice() {
+                        [] => continue,
+                        [one] => {
+                            let mode = st.metadata.indices.get(one.as_str()).and_then(|m| m.settings.get("index.mode")).map(|s| s.to_string()).unwrap_or_else(|| "standard".into());
+                            (one.clone(), mode)
+                        }
+                        _ => return Err(verification(text, *index_at, &format!("Lookup Join requires a single lookup mode index; [{index}] resolves to multiple indices"))),
+                    }
                 };
                 if mode != "lookup" {
-                    let _ = index_at;
-                    return Err(verification_plain(&format!("Lookup Join requires a single lookup mode index; [{index}] resolves to [{index}] in [{mode}] mode")));
+                    return Err(verification_plain(&format!("Lookup Join requires a single lookup mode index; [{index}] resolves to [{concrete}] in [{mode}] mode")));
                 }
-                let source = resolve_source(cluster, text, std::slice::from_ref(index), &[], *index_at).await?;
+                let source = resolve_source(cluster, text, std::slice::from_ref(&concrete), &[], *index_at).await?;
                 let mut rows: Vec<Vec<V>> = Vec::new();
                 let mut stats = Stats::default();
                 scan(cluster, &source, None, None, &mut stats, |batch| {
@@ -2859,6 +3648,7 @@ async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult
 async fn finish(_cluster: &Cluster, src: &Src<'_>, t: Table, rest: &[Cmd], w: &mut Warnings, mut stats: Stats) -> EsResult<(Table, Stats)> {
     let t = run_rest(src, t, rest, w)?;
     stats.rows_emitted = t.rows.len() as i64;
+    stats.col_meta.extend(std::mem::take(&mut *src.res.col_meta.lock()));
     Ok((t, stats))
 }
 

@@ -134,7 +134,7 @@ pub fn parse(data: &Bytes, defaults: &WriteArgs, default_index: Option<&str>, de
                         "_source" => source = Some(FetchSource::from_value(x)?),
                         "require_alias" => args.require_alias = crate::units::parse_bool(&text())?,
                         "require_data_stream" => args.require_data_stream = crate::units::parse_bool(&text())?,
-                        "list_executed_pipelines" => {}
+                        "list_executed_pipelines" => args.list_executed_pipelines = crate::units::parse_bool(&text())?,
                         "dynamic_templates" => {
                             if let Value::Obj(dt) = x {
                                 args.dynamic_templates = Some(dt.clone());
@@ -184,6 +184,7 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
         pipeline: ctx.query("pipeline").map(str::to_string),
         require_alias: ctx.bool_param("require_alias", false)?,
         require_data_stream: ctx.bool_param("require_data_stream", false)?,
+        list_executed_pipelines: ctx.bool_param("list_executed_pipelines", false)?,
         ..Default::default()
     };
     let default_source = FetchSource::from_params(ctx.query("_source"), ctx.query("_source_includes"), ctx.query("_source_excludes"))?;
@@ -220,18 +221,42 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .map(|(it, &a)| if a { Some(crate::meta::names::time_based_id()) } else { it.args.id.clone() })
         .collect();
     let mut ahead = super::bulk_ahead::Ahead::new(ctx.cluster, &items, &ids);
+    // Index items with a document prepared ahead are applied with the other items of their
+    // shard, the shards in parallel (Elasticsearch's shard-level bulk requests); every other
+    // item first waits for the writes queued before it, so each shard sees request order.
+    let mut slots: Vec<Option<Slot>> = (0..items.len()).map(|_| None).collect();
+    let mut queued: Queue = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        if !ahead.has(i) {
+            apply_queued(&mut queued, &mut slots);
+        }
+        let expr = it.index.clone().unwrap_or_default();
+        let generated = auto[i].then(|| ids[i].clone()).flatten();
+        let run = {
+            let (q, sl) = (&mut queued, &mut slots);
+            let mut take = |idx: &std::sync::Arc<crate::meta::IndexMeta>| ahead.take(ctx.cluster, &items, &ids, i, idx);
+            let mut barrier = || apply_queued(q, sl);
+            run_item(ctx, it, &expr, generated, document::Ahead { take: &mut take, defer: Some(&mut barrier) }).await
+        };
+        match run {
+            Run::Done(r) => slots[i] = Some(Slot::Done(r)),
+            Run::Ready(w) => queued.push((i, w)),
+        }
+    }
+    apply_queued(&mut queued, &mut slots);
     // Items are written straight into one pre-rendered JSON array (`json::raw`): about 200
     // bytes each, instead of a tree of maps per item.
     let mut out_items = crate::json::raw::buffer(items.len() * 200 + 2);
     out_items.push(b'[');
     let mut errors = false;
     let mut written: Vec<(String, u32)> = Vec::new();
-    for (i, it) in items.iter().enumerate() {
+    for ((i, it), slot) in items.iter().enumerate().zip(slots) {
         let name = it.action.name();
-        let expr = it.index.clone().unwrap_or_default();
-        let mut take = |idx: &std::sync::Arc<crate::meta::IndexMeta>| ahead.take(ctx.cluster, &items, &ids, i, idx);
-        let generated = auto[i].then(|| ids[i].clone()).flatten();
-        let r = run_item(ctx, it, &expr, generated, &mut take).await;
+        let r = match slot {
+            Some(Slot::Done(r)) => r,
+            Some(Slot::Applied(r, id)) => index_result(ctx, it.index.as_deref().unwrap_or_default(), auto[i], Some(id), r),
+            None => Err(Box::new((EsError::internal("bulk item was not run"), String::new(), None, None))),
+        };
         if i > 0 {
             out_items.push(b',');
         }
@@ -328,80 +353,162 @@ enum ItemBody {
 /// or its error: the exception, the index and id it names, and its `failure_store` status.
 type ItemResult = Result<(ItemBody, String, u32, bool), Box<(EsError, String, Option<String>, Option<&'static str>)>>;
 
-/// Runs one item; `generated`: the auto id of an index/create item without one, `ahead`: its
-/// document prepared ahead, if any.
-async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str, generated: Option<String>, ahead: document::PreparedAhead<'_>) -> ItemResult {
-    let fail = |e: EsError, index: &str, id: Option<String>| Err(Box::new((e, index.to_string(), id, None)));
-    let target_name = |e: &EsError| -> String {
-        // Errors on a resolved index name it (an ingest failure after a pipeline re-targeted
-        // the document names the new target); others the expression.
-        if let Some(i) = e.hidden("item_index").and_then(Value::as_str) {
-            return i.to_string();
+/// An item's outcome while the request runs: its result, or the outcome of its write applied
+/// with its shard's queue (and the id it was written with).
+enum Slot {
+    Done(ItemResult),
+    Applied(EsResult<write::WriteOutcome>, String),
+}
+
+/// What running an item gave: its result, or its write, ready to queue.
+enum Run {
+    Done(ItemResult),
+    Ready(Box<document::ReadyWrite>),
+}
+
+/// Writes waiting for their shard (item position and write), in request order.
+type Queue = Vec<(usize, Box<document::ReadyWrite>)>;
+
+/// Applies the queued writes, each shard's in order, different shards in parallel on the search
+/// pool workers (a single shard's on the calling thread).
+fn apply_queued(queued: &mut Queue, slots: &mut [Option<Slot>]) {
+    if queued.is_empty() {
+        return;
+    }
+    let mut shards: Vec<(*const crate::engine::ShardEngine, Queue)> = Vec::new();
+    for (i, w) in queued.drain(..) {
+        let key = std::sync::Arc::as_ptr(&w.prepared.shard);
+        match shards.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, q)) => q.push((i, w)),
+            None => shards.push((key, vec![(i, w)])),
         }
-        e.meta().iter().find(|(k, _)| k == "index").and_then(|(_, v)| v.as_str().map(str::to_string)).unwrap_or_else(|| expr.to_string())
+    }
+    let run = |q: Queue| -> Vec<(usize, Slot)> {
+        q.into_iter()
+            .map(|(i, w)| {
+                let id = w.id.clone();
+                (i, Slot::Applied(w.apply(), id))
+            })
+            .collect()
     };
-    match it.action {
-        Action::Index | Action::Create => {
-            let mut args = it.args.clone();
-            let auto_id = args.id.is_none();
-            if let Some(e) = crate::xpack::streams::check_item(ctx, expr, args.pipeline.as_deref()) {
-                return fail(e, expr, args.id.clone());
-            }
-            if it.action == Action::Index
-                && !args.create
-                && let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), expr, "INDEX", args.id.as_deref())
-            {
-                return fail(e, expr, args.id.clone());
-            }
-            if auto_id {
-                // Auto ids are unique, so `index` behaves as `create` without forcing it: time
-                // series ids are generated from the document and an `index` overwrites.
-                args.id = Some(generated.unwrap_or_else(crate::meta::names::time_based_id));
-            }
-            let id = args.id.clone();
-            if id.as_deref() == Some("") {
-                // Bulk items fail this check while being routed, once their target resolved.
-                if let Err(e) = write::resolve_target(ctx.cluster, expr, &args, ctx.now_ms).await {
-                    return fail(e, expr, id);
-                }
-                return fail(EsError::illegal_argument("if _id is specified it must not be empty"), expr, id);
-            }
-            let errs = write::validate_args(&args, it.action);
-            if !errs.is_empty() {
-                return fail(EsError::action_request_validation(&errs), expr, id);
-            }
-            match document::index_one_ahead(ctx, expr, args, it.data.clone(), auto_id, Some(ahead)).await {
-                Ok(mut o) => {
-                    let ok = o.result != "noop";
-                    let (uuid, shard) = (std::mem::take(&mut o.uuid), o.shard);
-                    Ok((ItemBody::Write(o), uuid, shard, ok))
-                }
-                Err(e) => {
-                    let idx = target_name(&e);
-                    // Time series ids are generated from the document: items name the id once
-                    // it is known (a version conflict says it), `null` before.
-                    let id = if auto_id && write::resolve_existing(&ctx.state(), expr).is_some_and(|i| crate::engine::tsdb::is_time_series(&i)) {
-                        (e.kind == "version_conflict_engine_exception").then(|| e.reason().strip_prefix('[').and_then(|r| r.split(']').next()).map(str::to_string)).flatten()
-                    } else if auto_id && before_routing(&e) {
-                        // Ids are generated once the target index is known.
-                        None
-                    } else {
-                        id
-                    };
-                    // A data stream without a failure store says so (on the item).
-                    let mut e = e;
-                    let fs = e.take_trailing("failure_store").map(|_| "not_enabled");
-                    // Document failures name the concrete index they were written to.
-                    let idx = match fs {
-                        // Timestamp errors happen before a backing index is chosen.
-                        Some(_) if e.kind == "timestamp_error" => expr.to_string(),
-                        Some(_) => write::resolve_existing(&ctx.state(), expr).map(|i| i.name.clone()).unwrap_or(idx),
-                        None => idx,
-                    };
-                    Err(Box::new((e, idx, id, fs)))
-                }
-            }
+    if shards.len() == 1 {
+        for (i, s) in run(shards.pop().map(|(_, q)| q).unwrap_or_default()) {
+            slots[i] = Some(s);
         }
+        return;
+    }
+    let work: Vec<parking_lot::Mutex<Queue>> = shards.into_iter().map(|(_, q)| parking_lot::Mutex::new(q)).collect();
+    let done: Vec<parking_lot::Mutex<Vec<(usize, Slot)>>> = work.iter().map(|_| parking_lot::Mutex::new(Vec::new())).collect();
+    let opensearch = crate::opensearch::active();
+    let helpers = search_index::search::pool::cores().saturating_sub(1).min(work.len() - 1);
+    search_index::search::pool::for_each_index(work.len(), helpers, &|g| {
+        crate::opensearch::with(opensearch, || *done[g].lock() = run(std::mem::take(&mut *work[g].lock())));
+    });
+    for (i, s) in done.into_iter().flat_map(parking_lot::Mutex::into_inner) {
+        slots[i] = Some(s);
+    }
+}
+
+/// An index or create item's result from its write's outcome.
+fn index_result(ctx: &Ctx<'_>, expr: &str, auto_id: bool, id: Option<String>, r: EsResult<write::WriteOutcome>) -> ItemResult {
+    match r {
+        Ok(mut o) => {
+            let ok = o.result != "noop";
+            let (uuid, shard) = (std::mem::take(&mut o.uuid), o.shard);
+            Ok((ItemBody::Write(o), uuid, shard, ok))
+        }
+        Err(e) => {
+            let idx = target_name(&e, expr);
+            // Time series ids are generated from the document: items name the id once
+            // it is known (a version conflict says it), `null` before.
+            let id = if auto_id && write::resolve_existing(&ctx.state(), expr).is_some_and(|i| crate::engine::tsdb::is_time_series(&i)) {
+                (e.kind == "version_conflict_engine_exception").then(|| e.reason().strip_prefix('[').and_then(|r| r.split(']').next()).map(str::to_string)).flatten()
+            } else if auto_id && before_routing(&e) {
+                // Ids are generated once the target index is known.
+                None
+            } else {
+                id
+            };
+            // A data stream without a failure store says so (on the item).
+            let mut e = e;
+            let fs = e.take_trailing("failure_store").map(|_| "not_enabled");
+            // Document failures name the concrete index they were written to.
+            let idx = match fs {
+                // Timestamp errors happen before a backing index is chosen.
+                Some(_) if e.kind == "timestamp_error" => expr.to_string(),
+                Some(_) => write::resolve_existing(&ctx.state(), expr).map(|i| i.name.clone()).unwrap_or(idx),
+                None => idx,
+            };
+            Err(Box::new((e, idx, id, fs)))
+        }
+    }
+}
+
+/// The index an item's error names: a resolved index named by the error (an ingest failure
+/// after a pipeline re-targeted the document names the new target), otherwise the expression.
+fn target_name(e: &EsError, expr: &str) -> String {
+    if let Some(i) = e.hidden("item_index").and_then(Value::as_str) {
+        return i.to_string();
+    }
+    e.meta().iter().find(|(k, _)| k == "index").and_then(|(_, v)| v.as_str().map(str::to_string)).unwrap_or_else(|| expr.to_string())
+}
+
+/// Runs one item; `generated`: the auto id of an index/create item without one, `ahead`: its
+/// document prepared ahead, if any (an index write ready to apply comes back as [`Run::Ready`]).
+async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str, generated: Option<String>, ahead: document::Ahead<'_>) -> Run {
+    match it.action {
+        Action::Index | Action::Create => run_index(ctx, it, expr, generated, ahead).await,
+        _ => {
+            // Anything else may read or change what the queued writes change.
+            if let Some(barrier) = ahead.defer {
+                barrier();
+            }
+            Run::Done(run_other(ctx, it, expr).await)
+        }
+    }
+}
+
+async fn run_index(ctx: &Ctx<'_>, it: &Item, expr: &str, generated: Option<String>, ahead: document::Ahead<'_>) -> Run {
+    let fail = |e: EsError, index: &str, id: Option<String>| Run::Done(Err(Box::new((e, index.to_string(), id, None))));
+    let mut args = it.args.clone();
+    let auto_id = args.id.is_none();
+    if let Some(e) = crate::xpack::streams::check_item(ctx, expr, args.pipeline.as_deref()) {
+        return fail(e, expr, args.id.clone());
+    }
+    if it.action == Action::Index
+        && !args.create
+        && let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), expr, "INDEX", args.id.as_deref())
+    {
+        return fail(e, expr, args.id.clone());
+    }
+    if auto_id {
+        // Auto ids are unique, so `index` behaves as `create` without forcing it: time
+        // series ids are generated from the document and an `index` overwrites.
+        args.id = Some(generated.unwrap_or_else(crate::meta::names::time_based_id));
+    }
+    let id = args.id.clone();
+    if id.as_deref() == Some("") {
+        // Bulk items fail this check while being routed, once their target resolved.
+        if let Err(e) = write::resolve_target(ctx.cluster, expr, &args, ctx.now_ms).await {
+            return fail(e, expr, id);
+        }
+        return fail(EsError::illegal_argument("if _id is specified it must not be empty"), expr, id);
+    }
+    let errs = write::validate_args(&args, it.action);
+    if !errs.is_empty() {
+        return fail(EsError::action_request_validation(&errs), expr, id);
+    }
+    match document::index_one_ahead(ctx, expr, args, it.data.clone(), auto_id, Some(ahead)).await {
+        Ok(document::Indexed::Ready(w)) => Run::Ready(w),
+        Ok(document::Indexed::Done(o)) => Run::Done(index_result(ctx, expr, auto_id, id, Ok(o))),
+        Err(e) => Run::Done(index_result(ctx, expr, auto_id, id, Err(e))),
+    }
+}
+
+/// Runs a delete or update item.
+async fn run_other(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
+    let fail = |e: EsError, index: &str, id: Option<String>| Err(Box::new((e, index.to_string(), id, None)));
+    match it.action {
         Action::Delete => {
             let args = it.args.clone();
             let id = args.id.clone().unwrap_or_default();
@@ -429,12 +536,13 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str, generated: Option<String
                     Ok((ItemBody::Write(o), uuid, shard, true))
                 }
                 Err(e) => {
-                    let idx = target_name(&e);
+                    let idx = target_name(&e, expr);
                     fail(e, &idx, Some(id))
                 }
             }
         }
-        Action::Update => {
+        // Update (index and create items go through `run_index`).
+        _ => {
             let id = it.args.id.clone().unwrap_or_default();
             if let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), expr, "UPDATE", Some(&id)) {
                 return fail(e, expr, Some(id));
@@ -472,7 +580,7 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str, generated: Option<String
                     Ok((ItemBody::Tree(Value::Obj(m)), o.write.uuid, o.write.shard, ok))
                 }
                 Err(e) => {
-                    let idx = target_name(&e);
+                    let idx = target_name(&e, expr);
                     fail(e, &idx, Some(id))
                 }
             }
@@ -515,6 +623,7 @@ mod tests {
             total: 2,
             forced_refresh: false,
             failure_store: None,
+            executed_pipelines: None,
         };
         let mut cases = vec![base.clone()];
         for result in ["updated", "deleted", "not_found", "noop"] {
@@ -554,6 +663,7 @@ mod tests {
             total: 1,
             forced_refresh: false,
             failure_store: None,
+            executed_pipelines: None,
         };
         let mut b = crate::json::raw::buffer(0);
         b.push(b'[');

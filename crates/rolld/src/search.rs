@@ -235,10 +235,11 @@ impl Search {
     }
 
     /// Serves the control API on its own listener (`--search-only`): TLS with the REST
-    /// listener's certificate when that serves TLS, else plain HTTP.
+    /// listener's certificate when that serves TLS (and plain HTTP too while the fleet still
+    /// has a node from before `api_tls`), else plain HTTP.
     pub async fn serve_api(&self, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
         match &self.api_tls {
-            Some(acceptor) => axum::serve(search_control::api::TlsListener::new(listener, acceptor.clone())?, self.router()).await?,
+            Some(acceptor) => axum::serve(search_control::api::TlsListener::for_fleet(listener, acceptor.clone(), self.control.clone())?, self.router()).await?,
             None => axum::serve(listener, self.router()).await?,
         }
         Ok(())

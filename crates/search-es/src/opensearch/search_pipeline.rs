@@ -188,6 +188,9 @@ enum ResponseKind {
 struct Proc<K> {
     kind: K,
     ignore_failure: bool,
+    /// The processor type and tag `verbose_pipeline` reports.
+    name: String,
+    tag: Option<String>,
 }
 
 /// A compiled pipeline.
@@ -199,6 +202,8 @@ pub struct Pipeline {
     /// The neural-search plugin's phase-results processor (`normalization-processor`,
     /// `score-ranker-processor`): how a `hybrid` query's sub-query results are fused.
     pub phase: Option<std::sync::Arc<super::hybrid::Phase>>,
+    /// An inline definition (`search_pipeline` in the body), which the request still prints.
+    inline: Option<Value>,
 }
 
 const REQUEST_TYPES: &[&str] = &["filter_query", "script", "oversample", "hierarchical_routing_search", "temporal_routing_search", "acl_routing_search"];
@@ -424,7 +429,7 @@ fn read_processors<K>(list: Option<Vec<Value>>, known: &[&str], mut build: impl 
                 };
                 return Err(EsError::new(400, "parse_exception", format!("processor [{name}] doesn't support one or more provided configuration parameters: {left}")));
             }
-            out.push(Proc { kind, ignore_failure });
+            out.push(Proc { kind, ignore_failure, name: ptype.to_string(), tag: c.tag.clone() });
         }
     }
     Ok(out)
@@ -445,7 +450,7 @@ pub fn compile(ctx: &Ctx, id: &str, def: &Map) -> EsResult<Pipeline> {
     if let Some(left) = c.leftovers() {
         return Err(EsError::new(400, "parse_exception", format!("pipeline [{id}] doesn't support one or more provided configuration parameters {left}")));
     }
-    Ok(Pipeline { id: id.to_string(), request, response, phase: phase.into_iter().next().map(|p| std::sync::Arc::new(p.kind)) })
+    Ok(Pipeline { id: id.to_string(), request, response, phase: phase.into_iter().next().map(|p| std::sync::Arc::new(p.kind)), inline: None })
 }
 
 // ---- the CRUD APIs ---------------------------------------------------------------------
@@ -508,6 +513,9 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
 #[derive(Default, Debug)]
 pub struct RunContext {
     attributes: HashMap<String, Value>,
+    /// `verbose_pipeline`: record each processor's run (`processor_results`).
+    pub verbose: bool,
+    results: Vec<Value>,
 }
 
 /// `SearchPipelineService.resolvePipeline`: the pipeline a search runs, if any. Takes the
@@ -525,7 +533,9 @@ pub fn resolve(ctx: &Ctx, body: &mut Option<Value>, indices: &[String]) -> EsRes
         let Value::Obj(def) = def else {
             return Err(EsError::x_content_parse_bare(format!("[search_pipeline] expected an object, got {}", def.kind_name())));
         };
-        return compile(ctx, "_ad_hoc_pipeline", &def).map(Some);
+        let mut p = compile(ctx, "_ad_hoc_pipeline", &def)?;
+        p.inline = Some(Value::Obj(def));
+        return Ok(Some(p));
     }
     let st = ctx.state();
     let id = match named {
@@ -573,10 +583,27 @@ impl Pipeline {
         Some(std::sync::Arc::new(p))
     }
 
-    /// `Pipeline.transformRequest`.
+    /// `Pipeline.transformRequest`. With `verbose_pipeline` each processor's run is recorded
+    /// in `rc` (the request as `SearchSourceBuilder` prints it before and after, converted to
+    /// a `HashMap` like the plugin's `ProcessorExecutionDetail` does).
     pub fn transform_request(&self, req: &mut crate::search::SearchRequest, rc: &mut RunContext) -> EsResult<()> {
+        let source = |req: &crate::search::SearchRequest| {
+            let mut v = crate::tasks::source_value(&req.source, crate::cluster::Dialect::OpenSearch);
+            if let Value::Obj(m) = &mut v {
+                m.shift_insert(0, "verbose_pipeline".into(), Value::Bool(true));
+                if let Some(def) = &self.inline {
+                    m.insert("search_pipeline".into(), def.clone());
+                }
+            }
+            super::hash_ordered(v)
+        };
         for p in &self.request {
-            match run_request(&p.kind, req, rc) {
+            let started = rc.verbose.then(|| (std::time::Instant::now(), source(req)));
+            let r = run_request(&p.kind, req, rc);
+            if let Some((t, input)) = started {
+                rc.results.push(detail(p, t, input, source(req), r.as_ref().err()));
+            }
+            match r {
                 Err(e) if !p.ignore_failure => return Err(e),
                 _ => {}
             }
@@ -584,16 +611,50 @@ impl Pipeline {
         Ok(())
     }
 
-    /// `Pipeline.transformResponse`, over the rendered response.
-    pub fn transform_response(&self, resp: &mut Value, rc: &RunContext) -> EsResult<()> {
+    /// `Pipeline.transformResponse`, over the rendered response; with `verbose_pipeline` each
+    /// run records the hits before and after, and the response gets `processor_results`.
+    pub fn transform_response(&self, resp: &mut Value, rc: &mut RunContext) -> EsResult<()> {
+        let hits = |resp: &mut Value| hits_mut(resp).map_or(Value::Arr(Vec::new()), |h| Value::Arr(h.clone()));
         for p in &self.response {
-            match run_response(&p.kind, resp, rc) {
+            let started = rc.verbose.then(|| (std::time::Instant::now(), hits(resp)));
+            let r = run_response(&p.kind, resp, rc);
+            if let Some((t, input)) = started {
+                let output = hits(resp);
+                rc.results.push(detail(p, t, input, output, r.as_ref().err()));
+            }
+            match r {
                 Err(e) if !p.ignore_failure => return Err(e),
                 _ => {}
             }
         }
+        if rc.verbose
+            && let Value::Obj(m) = resp
+        {
+            m.insert("processor_results".into(), Value::Arr(std::mem::take(&mut rc.results)));
+        }
         Ok(())
     }
+}
+
+/// `ProcessorExecutionDetail.toXContent`.
+fn detail<K>(p: &Proc<K>, started: std::time::Instant, input: Value, output: Value, error: Option<&EsError>) -> Value {
+    let mut m = Map::new();
+    m.insert("processor_name".into(), Value::Str(p.name.clone()));
+    if let Some(t) = &p.tag {
+        m.insert("tag".into(), Value::Str(t.clone()));
+    }
+    m.insert("duration_millis".into(), Value::from(started.elapsed().as_millis() as i64));
+    m.insert("status".into(), Value::from(if error.is_some() { "fail" } else { "success" }));
+    m.insert("input_data".into(), input);
+    match error {
+        Some(e) => {
+            m.insert("error".into(), Value::Str(e.reason().to_string()));
+        }
+        None => {
+            m.insert("output_data".into(), output);
+        }
+    }
+    Value::Obj(m)
 }
 
 fn run_request(k: &RequestKind, req: &mut crate::search::SearchRequest, rc: &mut RunContext) -> EsResult<()> {
@@ -693,7 +754,16 @@ fn hit_id(h: &Map) -> String {
     h.get("_id").map(Value::to_es_string).unwrap_or_else(|| "null".into())
 }
 
+/// A hit whose `_source` a processor rewrote through `getSourceAsMap`: its keys come back in
+/// `HashMap` order.
+fn rehash_source(hit: &mut Map) {
+    if let Some(src) = hit.get_mut("_source") {
+        *src = super::hash_ordered(std::mem::take(src));
+    }
+}
+
 fn run_response(k: &ResponseKind, resp: &mut Value, rc: &RunContext) -> EsResult<()> {
+    let mut truncated = false;
     let Some(hits) = hits_mut(resp) else { return Ok(()) };
     match k {
         ResponseKind::HybridExplanation => {}
@@ -708,12 +778,14 @@ fn run_response(k: &ResponseKind, resp: &mut Value, rc: &RunContext) -> EsResult
                     found = true;
                     fields.insert(target.clone(), v);
                 }
-                // `sourceAsMap.remove` then `put`: the renamed field moves to the end.
+                // `getSourceAsMap` (a `HashMap`), `remove` and `put`, written back: the source
+                // comes out in `HashMap` order.
                 if let Some(Value::Obj(source)) = hm.get_mut("_source")
                     && let Some(v) = source.shift_remove(field)
                 {
                     found = true;
                     source.insert(target.clone(), v);
+                    rehash_source(hm);
                 }
                 if !found && !ignore_missing {
                     return Err(EsError::illegal_argument(format!("Document with id {} is missing field {field}", hit_id(hm))));
@@ -730,6 +802,7 @@ fn run_response(k: &ResponseKind, resp: &mut Value, rc: &RunContext) -> EsResult
             } else {
                 *size as usize
             };
+            truncated = hits.len() > size;
             hits.truncate(size);
         }
         ResponseKind::Collapse { field } => {
@@ -768,10 +841,13 @@ fn run_response(k: &ResponseKind, resp: &mut Value, rc: &RunContext) -> EsResult
                     fields.insert(target.clone(), Value::Arr(sorted));
                 }
                 if let Some(Value::Obj(source)) = hm.get_mut("_source")
-                    && let Some(Value::Arr(vals)) = source.get(field)
+                    && source.contains_key(field.as_str())
                 {
-                    let sorted = sorted_values(field, vals, *desc)?;
-                    source.insert(target.clone(), Value::Arr(sorted));
+                    if let Some(Value::Arr(vals)) = source.get(field) {
+                        let sorted = sorted_values(field, vals, *desc)?;
+                        source.insert(target.clone(), Value::Arr(sorted));
+                    }
+                    rehash_source(hm);
                 }
             }
         }
@@ -799,9 +875,18 @@ fn run_response(k: &ResponseKind, resp: &mut Value, rc: &RunContext) -> EsResult
                 {
                     let parts = pattern.split(s, limit)?;
                     source.insert(target.clone(), Value::Arr(parts.into_iter().map(Value::Str).collect()));
+                    rehash_source(hm);
                 }
             }
         }
+    }
+    // A truncating processor rebuilds the response with an empty profile
+    // (`SearchProfileShardResults`), which prints.
+    if truncated
+        && let Value::Obj(m) = resp
+        && !m.contains_key("profile")
+    {
+        m.insert("profile".into(), crate::obj! { "shards" => Value::Arr(Vec::new()) });
     }
     Ok(())
 }
@@ -872,7 +957,8 @@ mod tests {
         assert_eq!(resp.get("hits").unwrap().get("hits").unwrap().as_array().unwrap()[0].get("_source").unwrap().to_json(), r#"{"a":"x,y","b":1,"s":["x","y"]}"#);
         run_response(&ResponseKind::Rename { field: "a".into(), target: "r".into(), ignore_missing: false }, &mut resp, &rc).unwrap();
         let first = resp.get("hits").unwrap().get("hits").unwrap().as_array().unwrap()[0].clone();
-        assert_eq!(first.get("_source").unwrap().to_json(), r#"{"b":1,"s":["x","y"],"r":"x,y"}"#);
+        // Rewritten through `getSourceAsMap`: `HashMap` order (`b` and `r` share a bucket).
+        assert_eq!(first.get("_source").unwrap().to_json(), r#"{"b":1,"r":"x,y","s":["x","y"]}"#);
         assert_eq!(first.get("fields").unwrap().to_json(), r#"{"s":["x","y"],"r":["x,y"]}"#);
         run_response(&ResponseKind::Truncate { size: 1, prefix: None }, &mut resp, &rc).unwrap();
         assert_eq!(hits_mut(&mut resp).unwrap().len(), 1);

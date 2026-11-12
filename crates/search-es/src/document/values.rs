@@ -576,7 +576,9 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                     let d = w.p.double_value()?;
                     finite_check("scaled_float", d, crate::json::write::java_double(d))?;
                     let factor = f.effective("scaling_factor", ctx).as_f64().unwrap_or(1.0);
-                    let scaled = (d * factor).round();
+                    // Java's `Math.round`: ties go up (-22.5 is -22).
+                    let x = d * factor;
+                    let scaled = if x - x.floor() >= 0.5 { x.floor() + 1.0 } else { x.floor() };
                     if scaled > i64::MAX as f64 || scaled < i64::MIN as f64 {
                         return Err(EsError::illegal_argument(format!(
                             "[scaled_float] exceeds the maximum value of long: [{}]",

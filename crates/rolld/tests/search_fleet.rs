@@ -123,8 +123,11 @@ async fn sigterm_hands_over_and_sigkill_fails_over() {
     assert!(d.tls(&a.http) && !d.tls(&b.http), "A publishes a certificate pin, B none");
     let a_api: std::net::SocketAddr = a.api.trim_start_matches("https://").parse().unwrap();
     assert!(d.tls(&a_api), "A's API serves TLS with the same certificate");
-    let plain = http.get(format!("http://{a_api}/v1/search")).send().await;
-    assert!(!matches!(&plain, Ok(r) if r.status().is_success()), "A's API refuses plain HTTP: {plain:?}");
+    // B serves its API in plain HTTP, so the fleet's API calls aren't all TLS yet: A's API
+    // answers plain HTTP too (what nodes from before api_tls call it with) until no such node
+    // is left (checked at the end).
+    let plain = http.get(format!("http://{a_api}/v1/search")).send().await.unwrap();
+    assert!(plain.status().is_success(), "A's API answers plain HTTP beside a plain node: {plain:?}");
     d.spawn_refresh();
     let proxy = Proxy::new(d.clone(), None);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -204,6 +207,14 @@ async fn sigterm_hands_over_and_sigkill_fails_over() {
     assert_eq!(count(&http).await, n_acked as i64 + 20);
     assert!(t.elapsed() < Duration::from_secs(30), "failover took {:?}", t.elapsed());
     assert_eq!(owner(&dir, "shop").as_deref(), Some("node-c"));
+    // Alone in the fleet (the others left, or their records aged out), C's API is TLS only.
+    let c_api = c.api.trim_start_matches("https://").to_string();
+    until("node-c's API to refuse plain HTTP", Duration::from_secs(30), async || {
+        let fresh = reqwest::Client::builder().pool_max_idle_per_host(0).build().unwrap();
+        fresh.get(format!("http://{c_api}/v1/search")).send().await.is_err()
+    })
+    .await;
+    assert!(http.get(format!("{}/v1/search", c.api)).send().await.unwrap().status().is_success(), "and TLS still works");
     c.signal(libc::SIGTERM);
     assert!(c.wait(Duration::from_secs(30)).await.success());
     // Leaving removes the node record.

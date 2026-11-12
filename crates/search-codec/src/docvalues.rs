@@ -383,6 +383,24 @@ impl TermDictIter<'_> {
         Some(&self.cur)
     }
 
+    /// The term of ordinal `ord`, for lookups in ascending order (the set ordinals of a
+    /// segment): within the block of the last term it decodes forward from there, anywhere
+    /// else it starts at `ord`'s block, so a walk over ascending ordinals decodes each entry
+    /// at most once instead of from its block's start every time. `None` past the end.
+    pub fn seek_ord(&mut self, ord: u64) -> Option<&[u8]> {
+        let last = self.next_ord.wrapping_sub(1);
+        if !self.primed || ord < self.next_ord || ord >> DICT_BLOCK_SHIFT != last >> DICT_BLOCK_SHIFT {
+            self.next_ord = ord;
+            self.primed = false;
+            return self.next();
+        }
+        while self.next_ord < ord {
+            self.shared = next_entry(&self.dict.data, &mut self.pos, &mut self.cur);
+            self.next_ord += 1;
+        }
+        self.next()
+    }
+
     /// Ordinal of the term last returned by `next`.
     pub fn ord(&self) -> u64 {
         self.next_ord.wrapping_sub(1)
@@ -895,12 +913,10 @@ fn batch_ranks<T: Copy>(set: &DocSet, docs: &[u32], found: &mut Vec<u32>, slots:
         found.extend_from_slice(&docs[..n]);
         slots.extend(docs[..n].iter().map(|&d| rank(d)));
     } else if !set.is_empty() {
-        for &d in docs {
-            if let Some(r) = set.rank(d) {
-                found.push(d);
-                slots.push(rank(r));
-            }
-        }
+        set.for_each_rank(docs, |d, r| {
+            found.push(d);
+            slots.push(rank(r));
+        });
     }
     start
 }
@@ -1127,6 +1143,11 @@ impl SortedDocValues {
         self.ords.get_range(start as u64, out);
     }
 
+    /// The ordinals, one per doc of [`docs`](Self::docs) in doc order (index = the doc's rank).
+    pub fn ord_values(&self) -> &NumericValues {
+        &self.ords
+    }
+
     pub fn docs(&self) -> &DocSet {
         &self.docs
     }
@@ -1269,6 +1290,12 @@ impl SortedSetDocValues {
     /// Whether every doc has at most one value (the field could be read as sorted).
     pub fn is_single_valued(&self) -> bool {
         self.addresses.is_none()
+    }
+
+    /// The ordinals of a single-valued field — one per doc with a value, in doc order (index =
+    /// the doc's rank in [`docs`](Self::docs)) — for batch decoding.
+    pub fn singleton_ords(&self) -> Option<&NumericValues> {
+        self.addresses.is_none().then_some(&self.ords)
     }
 
     pub fn docs(&self) -> &DocSet {
@@ -1641,6 +1668,20 @@ mod tests {
                     o += 1;
                 }
                 assert_eq!(o.max(start), (terms.len() as u64).max(start));
+            }
+            // Ascending (and occasionally repeated or backwards) seeks give `term(ord)`.
+            let mut rng = StdRng::seed_from_u64(n as u64);
+            for density in [0.02, 0.3, 0.9] {
+                let mut it = d.iter_from(0);
+                let mut o = 0u64;
+                while o < terms.len() as u64 + 2 {
+                    let t = it.seek_ord(o).map(|t| t.to_vec());
+                    assert_eq!(t.as_ref(), terms.get(o as usize), "n {n} ord {o}");
+                    if t.is_some() {
+                        assert_eq!(it.ord(), o);
+                    }
+                    o = if rng.gen_bool(0.05) { o.saturating_sub(rng.gen_range(0..20)) } else { o + 1 + (rng.gen_range(0.0..1.0f64) / density) as u64 % 40 };
+                }
             }
         }
     }

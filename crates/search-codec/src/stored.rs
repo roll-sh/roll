@@ -9,11 +9,16 @@
 //!
 //! # Chunks
 //!
-//! Documents are grouped into chunks of about 16 KiB (at most 128 docs) compressed with zstd. A
-//! dictionary trained on a sample of the segment's documents is stored once (`StoredDict`) and
-//! used by every chunk, which is what makes small chunks compress almost as well as large ones —
-//! small chunks keep random access (the fetch phase) cheap. A fixed-width index of
-//! `(first doc, offset)` per chunk, after the chunks, is binary searched to find a doc's chunk:
+//! Documents are grouped into chunks of about 2 KiB (at most 128 docs; a larger document is a
+//! chunk of its own) compressed with zstd. Reading a document decompresses its whole chunk, so
+//! the chunk size is the cost of a random fetch (zstd, unlike LZ4, cannot stop at the document's
+//! end inside a block; independent small frames are what bound the work). A dictionary built
+//! from a sample of the segment's documents is stored once (`StoredDict`) and used by every
+//! chunk, which is what makes small chunks compress almost as well as large ones: merges train
+//! it, refreshes finalize sampled documents into one ([`StoredOptions::train`]). Segments
+//! written with other chunk sizes (16 KiB before round 6) read the same way. A fixed-width
+//! index of `(first doc, offset)` per chunk, after the chunks, is binary searched to find a
+//! doc's chunk:
 //!
 //! ```text
 //! chunk*  (doc count varint, raw length varint, compressed length varint, zstd frame)
@@ -233,44 +238,131 @@ pub struct StoredOptions {
     pub chunk_bytes: usize,
     /// Maximum docs per chunk.
     pub chunk_docs: usize,
-    /// Train and use a shared zstd dictionary when the segment has enough data.
+    /// Use a shared zstd dictionary built from sampled documents when the segment has enough
+    /// data.
     pub dictionary: bool,
+    /// Train the dictionary (zstd's cover algorithm: tens of ms per segment, the best ratio;
+    /// merges) instead of finalizing sampled documents into one (a few ms, within 1-4% of the
+    /// trained ratio at 2 KiB chunks; refreshes).
+    pub train: bool,
 }
 
 impl Default for StoredOptions {
     fn default() -> StoredOptions {
         StoredOptions {
             level: 3,
-            chunk_bytes: 16 * 1024,
+            chunk_bytes: CHUNK_BYTES,
             chunk_docs: 128,
             dictionary: true,
+            train: true,
         }
     }
 }
 
-/// Dictionary size and the sampled bytes below which no dictionary is trained.
+impl StoredOptions {
+    /// `index.codec: best_compression`: zstd level 6 in 16 KiB chunks. On 200k geonames /
+    /// http_logs documents 59.3 / 16.7 B per document against the default's 78.7 / 23.4 (-25%,
+    /// -29%), at 20 µs per random document instead of 3-4 µs and a third of the write speed.
+    pub fn best_compression() -> StoredOptions {
+        StoredOptions { level: 6, chunk_bytes: 16 * 1024, ..StoredOptions::default() }
+    }
+}
+
+/// Default uncompressed bytes per chunk. Reading a document decompresses its whole chunk, so a
+/// chunk is the unit of random-access cost; the dictionary keeps small chunks compact. Measured
+/// on 200k geonames / http_logs documents with a 16 KiB dictionary: 16 KiB chunks 5.30x / 7.95x
+/// at 14.8 / 12.5 µs per random document, 2 KiB chunks 4.49x / 6.73x at 3.0 / 2.2 µs.
+pub const CHUNK_BYTES: usize = 2 * 1024;
+
+/// Dictionary size and the sampled bytes below which no dictionary is built.
 const DICT_SIZE: usize = 16 * 1024;
 const DICT_MIN_SAMPLE_BYTES: usize = 64 * 1024;
 const DICT_MAX_SAMPLE_BYTES: usize = 1 << 20;
+/// A sampled dictionary's statistics read at most about this many sampled bytes.
+const SAMPLED_DICT_STATS_BYTES: usize = 256 * 1024;
+/// Average sampled document size above which no sampled dictionary is built.
+const SAMPLED_DICT_MAX_DOC_BYTES: usize = 4 * 1024;
 
-/// Trains a dictionary from a sample of documents (`None` if too little data).
-pub(crate) fn train_dictionary(samples: &[Vec<u8>]) -> Option<Vec<u8>> {
+/// A dictionary for a segment's stored fields from a sample of its documents (`None` if too
+/// little data): trained, or the sampled documents themselves finalized with zstd's entropy
+/// tables for them (a raw-content dictionary without the tables decodes 2 KiB chunks no
+/// faster than no dictionary).
+pub(crate) fn build_dictionary(samples: &[Vec<u8>], train: bool, level: i32) -> Option<Vec<u8>> {
     let total: usize = samples.iter().map(|s| s.len()).sum();
     if total < DICT_MIN_SAMPLE_BYTES || samples.len() < 16 {
         return None;
     }
-    zstd::dict::from_samples(samples, DICT_SIZE).ok()
+    if train {
+        return zstd::dict::from_samples(samples, DICT_SIZE).ok();
+    }
+    // Documents that fill a chunk on their own gain little from shared content, and finalizing
+    // statistics over them is slow (pmc articles of 38 KB: 0.4 s, ratio 2.47 against 2.68
+    // without a dictionary).
+    if total / samples.len() > SAMPLED_DICT_MAX_DOC_BYTES {
+        return None;
+    }
+    // The statistics come from an evenly spaced subset (their cost grows with the bytes), the
+    // content from evenly spaced documents up to the dictionary size.
+    let every = total.div_ceil(SAMPLED_DICT_STATS_BYTES).max(1);
+    let stats: Vec<&[u8]> = samples.iter().step_by(every).map(Vec::as_slice).collect();
+    let mut content = Vec::with_capacity(DICT_SIZE);
+    let step = total.div_ceil(DICT_SIZE).max(1);
+    for s in samples.iter().step_by(step) {
+        if content.len() + s.len() > DICT_SIZE {
+            break;
+        }
+        content.extend_from_slice(s);
+    }
+    let flat = stats.concat();
+    let sizes: Vec<usize> = stats.iter().map(|s| s.len()).collect();
+    let mut out = vec![0u8; DICT_SIZE + 4096];
+    let params = zstd::zstd_safe::zstd_sys::ZDICT_params_t { compressionLevel: level, notificationLevel: 0, dictID: 0 };
+    // SAFETY: every pointer comes with its buffer's length; `sizes` sums to `flat.len()`; zstd
+    // writes at most `out.len()` bytes and reads only the given ranges.
+    let n = unsafe {
+        zstd::zstd_safe::zstd_sys::ZDICT_finalizeDictionary(
+            out.as_mut_ptr().cast(),
+            out.len(),
+            content.as_ptr().cast(),
+            content.len(),
+            flat.as_ptr().cast(),
+            sizes.as_ptr(),
+            sizes.len() as u32,
+            params,
+        )
+    };
+    // SAFETY: a pure function of the returned code.
+    if unsafe { zstd::zstd_safe::zstd_sys::ZDICT_isError(n) } != 0 {
+        return None;
+    }
+    out.truncate(n);
+    Some(out)
 }
 
-/// Sample doc ids for dictionary training: evenly spaced, capped by count.
-pub(crate) fn sample_docs(max_doc: u32) -> impl Iterator<Item = u32> {
+/// The documents a dictionary is built from: up to 2048 evenly spaced slots, read in
+/// bit-reversed slot order until [`DICT_MAX_SAMPLE_BYTES`], so a sample cut short by large
+/// documents still spans the whole segment instead of its first documents.
+pub(crate) fn sample_docs(max_doc: u32, mut read: impl FnMut(u32, &mut Vec<u8>) -> Result<()>) -> Result<Vec<Vec<u8>>> {
     let n = max_doc.min(2048);
     let step = max_doc.checked_div(n).unwrap_or(1).max(1);
-    (0..n).map(move |i| i * step)
-}
-
-pub(crate) fn max_sample_bytes() -> usize {
-    DICT_MAX_SAMPLE_BYTES
+    let bits = n.next_power_of_two().trailing_zeros();
+    let mut samples = Vec::new();
+    let mut total = 0usize;
+    let mut doc = Vec::new();
+    for i in 0..n.next_power_of_two() {
+        let slot = if bits == 0 { 0 } else { i.reverse_bits() >> (32 - bits) };
+        if slot >= n {
+            continue;
+        }
+        doc.clear();
+        read(slot * step, &mut doc)?;
+        total += doc.len();
+        samples.push(doc.clone());
+        if total > DICT_MAX_SAMPLE_BYTES {
+            break;
+        }
+    }
+    Ok(samples)
 }
 
 /// Accumulates documents into compressed chunks.
@@ -642,9 +734,13 @@ mod tests {
     fn build(n: u32, opts: StoredOptions) -> (StoredFields, Vec<Vec<u8>>) {
         let mut rng = StdRng::seed_from_u64(n as u64);
         let docs: Vec<Vec<u8>> = (0..n).map(|i| doc(&mut rng, i)).collect();
-        let samples: Vec<Vec<u8>> = sample_docs(n).map(|d| docs[d as usize].clone()).collect();
+        let samples = sample_docs(n, |d, out| {
+            out.extend_from_slice(&docs[d as usize]);
+            Ok(())
+        })
+        .unwrap();
         let dict_bytes = if opts.dictionary {
-            train_dictionary(&samples)
+            build_dictionary(&samples, opts.train, opts.level)
         } else {
             None
         };
@@ -706,12 +802,13 @@ mod tests {
 
     #[test]
     fn round_trips_with_and_without_dictionary() {
-        for dictionary in [false, true] {
+        for (dictionary, train) in [(false, true), (true, true), (true, false)] {
             for n in [0u32, 1, 127, 128, 129, 3000] {
                 let (f, docs) = build(
                     n,
                     StoredOptions {
                         dictionary,
+                        train,
                         ..Default::default()
                     },
                 );
@@ -731,6 +828,65 @@ mod tests {
                 assert!(r.raw(n).is_err());
             }
         }
+    }
+
+    #[test]
+    fn samples_span_the_segment_when_cut_short() {
+        // Small documents: every evenly spaced slot, each once.
+        let mut seen = Vec::new();
+        let all = sample_docs(10_000, |d, out| {
+            seen.push(d);
+            out.extend_from_slice(&[0; 100]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(all.len(), 2048);
+        seen.sort_unstable();
+        assert_eq!(seen, (0..2048).map(|i| i * 4).collect::<Vec<u32>>());
+        // Large documents stop the sample at the byte budget, spread over the whole segment.
+        let mut seen = Vec::new();
+        let few = sample_docs(10_000, |d, out| {
+            seen.push(d);
+            out.resize(40_000, 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(few.len(), DICT_MAX_SAMPLE_BYTES / 40_000 + 1);
+        assert!(seen.iter().any(|&d| d < 1_000) && seen.iter().any(|&d| d > 7_000), "{seen:?}");
+        let mut distinct = seen.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), seen.len());
+        for max_doc in [0u32, 1, 2, 3, 2047, 2049] {
+            let mut n = 0;
+            sample_docs(max_doc, |d, _| {
+                assert!(d < max_doc);
+                n += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(n, max_doc.min(2048));
+        }
+    }
+
+    #[test]
+    fn finalized_dictionary_compresses_like_a_trained_one() {
+        let opts = |dictionary, train| StoredOptions { dictionary, train, ..Default::default() };
+        let (none, _) = build(5000, opts(false, true));
+        let (trained, _) = build(5000, opts(true, true));
+        let (sampled, docs) = build(5000, opts(true, false));
+        assert!(sampled.dict.is_some());
+        let (n, t, s) = (none.chunks.len() as f64, trained.chunks.len() as f64, sampled.chunks.len() as f64);
+        assert!(s < n * 0.9, "sampled {s} vs none {n}");
+        assert!(s < t * 1.15, "sampled {s} vs trained {t}");
+        let mut r = sampled.reader();
+        for d in (0..5000).rev().step_by(7) {
+            assert_eq!(r.raw(d).unwrap(), &docs[d as usize][..]);
+        }
+        // Too little data, or documents that fill chunks alone: no sampled dictionary.
+        let docs = |len: usize, n: usize| std::iter::repeat_n(vec![1u8; len], n).collect::<Vec<_>>();
+        assert!(build_dictionary(&docs(100, 100), false, 3).is_none());
+        assert!(build_dictionary(&docs(8192, 64), false, 3).is_none());
     }
 
     #[test]
@@ -782,59 +938,102 @@ mod tests {
         assert_eq!(v.0, [2]);
     }
 
-    /// `cargo test --release -p search-codec --lib bench_stored -- --ignored --nocapture`
+    /// `cargo test --release -p search-codec --lib bench_stored -- --ignored --nocapture`;
+    /// `ROLL_STORED_CORPORA=a.json,b.json` (one JSON document per line, e.g. the first 200k
+    /// lines of Rally's geonames or http_logs corpora) measures those instead of the synthetic
+    /// documents.
     #[test]
     #[ignore]
     fn bench_stored() {
         let mut rng = StdRng::seed_from_u64(9);
-        let words = ["alpha", "beta", "gamma", "delta", "search", "engine", "rust", "lucene", "shard", "segment"];
-        let n = 100_000u32;
-        let docs: Vec<Vec<u8>> = (0..n)
-            .map(|i| {
-                let mut w = StoredDocWriter::new();
-                w.add(0, StoredValue::Str(&format!("id-{i}")));
-                let body: Vec<&str> = (0..rng.gen_range(50..250)).map(|_| words[rng.gen_range(0..words.len())]).collect();
-                let src = format!(r#"{{"title":"doc {i}","price":{},"tags":["a","b"],"body":"{}"}}"#, rng.gen_range(0..1000), body.join(" "));
-                w.add(1, StoredValue::Bytes(src.as_bytes()));
-                w.into_bytes()
-            })
-            .collect();
-        let raw: usize = docs.iter().map(|d| d.len()).sum();
-        for (name, opts) in [
-            ("zstd3+dict 16K", StoredOptions::default()),
-            ("zstd1+dict 16K", StoredOptions { level: 1, ..Default::default() }),
-            ("zstd3 no dict 16K", StoredOptions { dictionary: false, ..Default::default() }),
-        ] {
-            let samples: Vec<Vec<u8>> = sample_docs(n).map(|d| docs[d as usize].clone()).collect();
-            let dict = if opts.dictionary { train_dictionary(&samples) } else { None };
-            let enc = dict.as_ref().map(|d| zstd::dict::EncoderDictionary::copy(d, opts.level));
-            let t = std::time::Instant::now();
-            let mut w = StoredWriter::new(opts.clone(), enc.as_ref()).unwrap();
-            let mut bytes = Vec::new();
-            for d in &docs {
-                w.add(d, &mut bytes).unwrap();
+        let corpora: Vec<(String, Vec<Vec<u8>>)> = match std::env::var("ROLL_STORED_CORPORA") {
+            Ok(paths) => paths
+                .split(',')
+                .map(|p| {
+                    let text = std::fs::read(p).unwrap();
+                    let docs = text
+                        .split(|b| *b == b'\n')
+                        .filter(|l| !l.is_empty())
+                        .take(200_000)
+                        .enumerate()
+                        .map(|(i, l)| {
+                            let mut w = StoredDocWriter::new();
+                            w.add(0, StoredValue::Bytes(i.to_string().as_bytes()));
+                            w.add(8, StoredValue::Bytes(l));
+                            w.into_bytes()
+                        })
+                        .collect();
+                    (p.to_string(), docs)
+                })
+                .collect(),
+            Err(_) => {
+                let words = ["alpha", "beta", "gamma", "delta", "search", "engine", "rust", "lucene", "shard", "segment"];
+                let docs = (0..100_000u32)
+                    .map(|i| {
+                        let mut w = StoredDocWriter::new();
+                        w.add(0, StoredValue::Str(&format!("id-{i}")));
+                        let body: Vec<&str> = (0..rng.gen_range(50..250)).map(|_| words[rng.gen_range(0..words.len())]).collect();
+                        let src = format!(r#"{{"title":"doc {i}","price":{},"tags":["a","b"],"body":"{}"}}"#, rng.gen_range(0..1000), body.join(" "));
+                        w.add(1, StoredValue::Bytes(src.as_bytes()));
+                        w.into_bytes()
+                    })
+                    .collect();
+                vec![("synthetic".to_string(), docs)]
             }
-            w.finish(&mut bytes).unwrap();
-            let write = t.elapsed();
-            let f = StoredFields::open(Slice::from(bytes.clone()), dict.map(Slice::from)).unwrap();
-            let mut r = f.reader();
-            let t = std::time::Instant::now();
-            let mut sum = 0usize;
-            let k = 20_000;
-            for _ in 0..k {
-                sum += r.raw(rng.gen_range(0..n)).unwrap().len();
+        };
+        for (corpus, docs) in &corpora {
+            let n = docs.len() as u32;
+            let raw: usize = docs.iter().map(|d| d.len()).sum();
+            println!("{corpus}: {n} docs, {:.0} B/doc", raw as f64 / n as f64);
+            let chunk = |chunk_bytes, train| StoredOptions { chunk_bytes, train, ..Default::default() };
+            for (name, opts) in [
+                ("zstd3, trained dict, 16K chunks", chunk(16 * 1024, true)),
+                ("zstd3, trained dict, 4K chunks", chunk(4 * 1024, true)),
+                ("zstd3, trained dict, 2K chunks", chunk(2 * 1024, true)),
+                ("zstd3, trained dict, 1K chunks", chunk(1024, true)),
+                ("best_compression (zstd6, trained dict, 16K chunks)", StoredOptions::best_compression()),
+                ("zstd3, sampled dict, 2K chunks", chunk(2 * 1024, false)),
+                ("zstd3, no dict, 16K chunks", StoredOptions { dictionary: false, chunk_bytes: 16 * 1024, ..Default::default() }),
+                ("zstd3, no dict, 2K chunks", StoredOptions { dictionary: false, ..Default::default() }),
+            ] {
+                let samples = sample_docs(n, |d, out| {
+                    out.extend_from_slice(&docs[d as usize]);
+                    Ok(())
+                })
+                .unwrap();
+                let t = std::time::Instant::now();
+                let dict = if opts.dictionary { build_dictionary(&samples, opts.train, opts.level) } else { None };
+                let dict_time = t.elapsed();
+                let enc = dict.as_ref().map(|d| zstd::dict::EncoderDictionary::copy(d, opts.level));
+                let t = std::time::Instant::now();
+                let mut w = StoredWriter::new(opts.clone(), enc.as_ref()).unwrap();
+                let mut bytes = Vec::new();
+                for d in docs {
+                    w.add(d, &mut bytes).unwrap();
+                }
+                w.finish(&mut bytes).unwrap();
+                let write = t.elapsed();
+                let f = StoredFields::open(Slice::from(bytes.clone()), dict.map(Slice::from)).unwrap();
+                let mut r = f.reader();
+                let t = std::time::Instant::now();
+                let mut sum = 0usize;
+                let k = 20_000;
+                for _ in 0..k {
+                    sum += r.raw(rng.gen_range(0..n)).unwrap().len();
+                }
+                let random = t.elapsed() / k;
+                let t = std::time::Instant::now();
+                for d in 0..n {
+                    sum += r.raw(d).unwrap().len();
+                }
+                let seq = t.elapsed() / n;
+                println!(
+                    "  {name}: {:.1} B/doc (ratio {:.2}), dictionary {dict_time:?}, write {:.0} MB/s, random doc {random:?}, sequential doc {seq:?} ({sum})",
+                    bytes.len() as f64 / n as f64,
+                    raw as f64 / bytes.len() as f64,
+                    raw as f64 / write.as_secs_f64() / 1e6
+                );
             }
-            let random = t.elapsed() / k;
-            let t = std::time::Instant::now();
-            for d in 0..n {
-                sum += r.raw(d).unwrap().len();
-            }
-            let seq = t.elapsed() / n;
-            println!(
-                "{name}: ratio {:.2}, write {:.0} MB/s, random doc {random:?}, sequential doc {seq:?} ({sum})",
-                raw as f64 / bytes.len() as f64,
-                raw as f64 / write.as_secs_f64() / 1e6
-            );
         }
     }
 

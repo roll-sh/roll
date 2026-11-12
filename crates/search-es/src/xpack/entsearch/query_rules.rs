@@ -124,7 +124,12 @@ fn parse_rule(src: Option<&[u8]>, path: &[Seg<'_>], rule: &Value, id_override: O
     let Value::Obj(m) = rule else { return Err(RuleError { error: EsError::illegal_argument("rule must be an object"), loc: loc_in(src, path, None) }) };
     // Criteria parse (and fail) as the rule's fields arrive, before the rule is built.
     let mut out_criteria = Vec::new();
-    if let Some(Value::Arr(criteria)) = m.get("criteria") {
+    let criteria = match m.get("criteria") {
+        Some(Value::Arr(a)) => a.clone(),
+        Some(o @ Value::Obj(_)) => vec![o.clone()],
+        _ => Vec::new(),
+    };
+    {
         for (j, c) in criteria.iter().enumerate() {
             let mut cpath = path.to_vec();
             cpath.push(Seg::Key("criteria"));
@@ -220,7 +225,12 @@ pub async fn put_ruleset(ctx: &Ctx<'_>) -> EsResult<Reply> {
             return Err(crate::xpack::unknown_field(ctx, "query_ruleset", k));
         }
     }
-    let Some(Value::Arr(rules)) = body.get("rules") else { return Err(EsError::illegal_argument("Required [rules]")) };
+    // An object array field also takes a single object (ObjectParser.declareObjectArray).
+    let rules = match body.get("rules") {
+        Some(Value::Arr(a)) => a.clone(),
+        Some(o @ Value::Obj(_)) => vec![o.clone()],
+        _ => return Err(EsError::illegal_argument("Required [rules]")),
+    };
     let mut parsed = Vec::with_capacity(rules.len());
     for (i, r) in rules.iter().enumerate() {
         let path = [Seg::Key("rules"), Seg::Index(i)];
@@ -355,6 +365,11 @@ pub async fn delete_rule(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if rules.len() == before {
                 return Err(rule_not_found(&rule, &ruleset));
             }
+            // Deleting a ruleset's last rule deletes the ruleset.
+            if rules.is_empty() {
+                store::remove(st, RULESETS, &ruleset);
+                return Ok(());
+            }
             store::put(st, RULESETS, &ruleset, obj! { "ruleset_id" => ruleset.clone(), "rules" => Value::Arr(rules) }, now).map(|_| ())
         })
         .await?;
@@ -412,8 +427,10 @@ fn criterion_matches(ty: &str, input: &Value, value: &Value) -> EsResult<bool> {
         "lt" | "lte" | "gt" | "gte" => as_double(input).is_some(),
         _ => true,
     };
+    // Matching never fails on an input of the wrong kind (`QueryRule.applyRule` validates with
+    // `throwOnInvalidInput = false`): the criterion just doesn't match.
     if !valid {
-        return Err(EsError::illegal_argument(format!("Input [{}] is not valid for CriteriaType [{ty}]", input.to_es_string())));
+        return Ok(false);
     }
     let (si, sv) = (input.as_str(), value.as_str());
     Ok(match ty {
@@ -467,6 +484,36 @@ pub fn rule_matches(rule: &Value, criteria: &Map) -> EsResult<bool> {
 }
 
 /// The `rule` query as the `pinned` (and `bool` for exclusions) query it stands for.
+/// Elasticsearch fetches the rulesets of `rule` queries and retrievers while it rewrites the
+/// request on the coordinating node, so a missing ruleset fails the search with a 404 before
+/// any shard runs. Checks every `ruleset_ids` / `ruleset_id` the request body names.
+pub fn check_rulesets(ctx: &Ctx, body: Option<&Value>) -> EsResult<()> {
+    let (Some(body), Some(raw)) = (body, ctx.raw_json()) else { return Ok(()) };
+    if !raw.windows(10).any(|w| w == b"ruleset_id") {
+        return Ok(());
+    }
+    fn walk(v: &Value, st: &crate::meta::ClusterState) -> EsResult<()> {
+        match v {
+            Value::Obj(m) => {
+                for key in ["ruleset_ids", "ruleset_id"] {
+                    let ids: Vec<String> = match m.get(key) {
+                        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+                        Some(Value::Str(s)) => vec![s.clone()],
+                        _ => Vec::new(),
+                    };
+                    if let Some(id) = ids.iter().find(|id| st.metadata.xpack.get(RULESETS, id).is_none()) {
+                        return Err(EsError::resource_not_found(format!("query ruleset {id} not found")));
+                    }
+                }
+                m.values().try_for_each(|x| walk(x, st))
+            }
+            Value::Arr(a) => a.iter().try_for_each(|x| walk(x, st)),
+            _ => Ok(()),
+        }
+    }
+    walk(body, &ctx.state())
+}
+
 pub fn rewrite(st: &crate::meta::ClusterState, r: &crate::query::specialized::Rule) -> EsResult<crate::query::Query> {
     let mut pinned_ids: Vec<Value> = Vec::new();
     let mut pinned_docs: Vec<Value> = Vec::new();
@@ -556,8 +603,10 @@ mod tests {
         let mut c = Map::new();
         c.insert("n".into(), "7".into());
         assert!(rule_matches(&num, &c).unwrap());
+        // An input of the wrong kind doesn't match (Elasticsearch 9.5.5's `_test` and rule
+        // queries don't fail on it).
         c.insert("n".into(), "x".into());
-        assert!(rule_matches(&num, &c).is_err());
+        assert!(!rule_matches(&num, &c).unwrap());
     }
 
     #[test]

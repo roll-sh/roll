@@ -361,6 +361,80 @@ impl DocSet {
         self.rank(doc).is_some()
     }
 
+    /// Calls `f(doc, rank)` for every doc of `docs` (ascending) that is in the set. One pass:
+    /// each block is looked up once, dense blocks keep a running count from word to word and
+    /// sparse ones search forward from the last position, instead of a block lookup, a rank
+    /// table read and up to eight popcounts per doc ([`rank`](Self::rank)).
+    pub fn for_each_rank(&self, docs: &[u32], mut f: impl FnMut(u32, u32)) {
+        debug_assert!(docs.windows(2).all(|w| w[0] < w[1]), "docs must be ascending");
+        match &self.repr {
+            Repr::Empty => {}
+            Repr::All => {
+                for &d in docs.iter().take_while(|&&d| d < self.max_doc) {
+                    f(d, d);
+                }
+            }
+            Repr::Blocks { .. } => {
+                let mut i = 0;
+                while i < docs.len() && docs[i] < self.max_doc {
+                    let b = docs[i] >> BLOCK_SHIFT;
+                    let end = (u64::from(b) + 1) << BLOCK_SHIFT;
+                    let n = docs[i..].partition_point(|&x| u64::from(x) < end && x < self.max_doc);
+                    let run = &docs[i..i + n];
+                    i += n;
+                    let blk = self.block(b);
+                    match blk.kind {
+                        KIND_ALL => {
+                            for &x in run {
+                                f(x, blk.rank + (x & (BLOCK_DOCS - 1)));
+                            }
+                        }
+                        KIND_SPARSE => {
+                            let list = &self.data()[blk.offset as usize..][..blk.count as usize * 2];
+                            let mut p = 0usize;
+                            for &x in run {
+                                match sparse_search(&list[p * 2..], (x & (BLOCK_DOCS - 1)) as u16) {
+                                    Ok(k) => {
+                                        f(x, blk.rank + (p + k) as u32);
+                                        p += k + 1;
+                                    }
+                                    Err(k) => p += k,
+                                }
+                            }
+                        }
+                        KIND_DENSE => {
+                            let d = &self.data()[blk.offset as usize..];
+                            // `base`: set bits before word `cw`.
+                            let (mut cw, mut word, mut base) = (usize::MAX, 0u64, 0u32);
+                            for &x in run {
+                                let o = x & (BLOCK_DOCS - 1);
+                                let w = (o >> 6) as usize;
+                                if w != cw {
+                                    base = if cw != usize::MAX && w - cw <= RANK_EVERY_WORDS {
+                                        let mut r = base + word.count_ones();
+                                        for k in cw + 1..w {
+                                            r += read_word(d, k).count_ones();
+                                        }
+                                        r
+                                    } else {
+                                        dense_rank(d, w)
+                                    };
+                                    cw = w;
+                                    word = read_word(d, w);
+                                }
+                                let bit = 1u64 << (o & 63);
+                                if word & bit != 0 {
+                                    f(x, blk.rank + base + (word & (bit - 1)).count_ones());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     /// First doc `>= target` in the set, or [`NO_MORE_DOCS`].
     pub fn next_from(&self, target: u32) -> u32 {
         if target >= self.max_doc {
@@ -813,6 +887,14 @@ mod tests {
         for (i, &x) in docs.iter().enumerate() {
             assert_eq!(set.rank(x), Some(i as u32));
             assert_eq!(set.select(i as u32), Some(x));
+        }
+        // Batched ranks of ascending probes (members, gaps, every k-th doc, past the end).
+        for k in [1u32, 2, 7, 64, 1000] {
+            let probes: Vec<u32> = (0..max_doc.saturating_add(3)).step_by(k as usize).collect();
+            let mut got = Vec::new();
+            set.for_each_rank(&probes, |d, r| got.push((d, r)));
+            let want: Vec<(u32, u32)> = probes.iter().filter_map(|&d| set.rank(d).map(|r| (d, r))).collect();
+            assert_eq!(got, want, "for_each_rank step {k}");
         }
         assert_eq!(set.select(docs.len() as u32), None);
         assert_eq!(set.next_from(max_doc), NO_MORE_DOCS);

@@ -2,8 +2,8 @@
 //!
 //! Scripts are stored as Elasticsearch stores them: `lang` and `source`, with mustache sources
 //! given as objects kept as their JSON text (plus the `content_type` option Elasticsearch adds).
-//! Painless sources are compiled only when a `context` is given, as in Elasticsearch; until the
-//! Painless engine is wired in, any source is accepted.
+//! Sources are compiled only when a `context` is given, as in Elasticsearch (runtime field
+//! contexts refuse stored scripts).
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -21,6 +21,9 @@ pub const CONTEXTS: &[&str] = &[
     "processor_conditional", "score", "script_heuristic", "similarity", "similarity_weight", "string_sort", "template", "terms_set",
     "update", "xpack_template",
 ];
+
+/// Contexts whose scripts can't be stored (runtime fields define theirs inline).
+const RUNTIME_FIELD_CONTEXTS: &[&str] = &["boolean_field", "composite_field", "date_field", "double_field", "geo_point_field", "ip_field", "keyword_field", "long_field"];
 
 fn parsing(line: usize, col: usize, msg: impl Into<String>) -> EsError {
     EsError::new(400, "parsing_exception", msg).with_meta("line", line as i64).with_meta("col", col as i64)
@@ -87,6 +90,26 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     if options.as_ref().is_some_and(Map::is_empty) {
         options = None;
+    }
+    // `ScriptService.putStoredScript`: with a context, the script must compile in it (script
+    // exceptions surface as they are, anything else is wrapped).
+    if let Some(c) = ctx.param("context") {
+        let failed = |cause: EsError| EsError::illegal_argument(format!("failed to parse/compile stored script [{id}]")).caused_by(cause);
+        if RUNTIME_FIELD_CONTEXTS.contains(&c) {
+            return Err(failed(EsError::illegal_argument(format!("cannot store a script for context [{c}]"))));
+        }
+        if let Some(context) = search_painless::Context::from_name(c) {
+            let mut inline = crate::query::script::Script::inline(source.as_str().unwrap_or_default());
+            inline.lang = Some(lang.clone());
+            inline.options = options.clone().unwrap_or_default();
+            if let Err(e) = ctx.cluster.scripts.compile(&ctx.state(), &inline, context) {
+                return Err(match e.kind.as_ref() {
+                    "script_exception" => e,
+                    "general_script_exception" => failed(e.caused_by.map(|c| *c).unwrap_or_else(|| EsError::illegal_argument("compile error"))),
+                    _ => failed(e),
+                });
+            }
+        }
     }
     let script = StoredScript { lang, source, options };
     ctx.cluster

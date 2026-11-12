@@ -6,7 +6,9 @@ pub mod doc;
 pub mod jregex;
 pub mod pipeline;
 pub mod processors;
+pub mod registered_domain;
 pub mod simulate;
+pub mod user_agent;
 
 use crate::cluster::Cluster;
 use crate::error::EsResult;
@@ -16,10 +18,20 @@ use bytes::Bytes;
 
 /// What the pipelines decided.
 pub enum Outcome {
-    /// Index this document (possibly rewritten, possibly into another index).
-    Index(Target, Value, Bytes),
+    /// Index this document (possibly rewritten, possibly into another index), with the write
+    /// arguments the pipelines' metadata changes give (`_id`, `_routing`, `_version`, …;
+    /// `None` when no pipeline ran).
+    Index(Target, Value, Bytes, Option<Box<Ingested>>),
     /// A `drop` processor dropped it (the index name for the response).
     Dropped(String),
+}
+
+/// What ingest changed about a write.
+pub struct Ingested {
+    /// The write arguments with the document's metadata changes.
+    pub args: WriteArgs,
+    /// The pipelines the write ran (request or default, final, and those of reroute targets).
+    pub executed: Vec<String>,
 }
 
 /// Runs the pipelines that apply to a write into `target`.
@@ -36,10 +48,10 @@ pub async fn run_for_write(cluster: &Cluster, target: Target, args: &WriteArgs, 
     };
     let _ = request_pipeline;
     if first.is_none() && fin.is_none() {
-        return Ok(Outcome::Index(target, value, source));
+        return Ok(Outcome::Index(target, value, source, None));
     }
     let started = std::time::Instant::now();
-    let out = pipeline::run_write(cluster, target, args, id, value, first, fin, now_ms).await;
+    let out = pipeline::run_write(cluster, target, args, id, value, first, fin, now_ms, source.len()).await;
     if let Some(clock) = clock {
         clock.fetch_add(started.elapsed().as_nanos() as u64 + 1, std::sync::atomic::Ordering::Relaxed);
     }

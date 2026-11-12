@@ -185,14 +185,14 @@ pub fn field_query(ctx: &QueryCtx, field: &str, value: &Value, ty: MatchType, o:
         return Ok(None);
     }
     let q = match ty {
-        MatchType::Boolean => boolean(ctx, &f, &toks, o)?,
+        MatchType::Boolean => boolean(&f, &toks, o)?,
         MatchType::BooleanPrefix => {
             // `analyzeTerm` / `analyzeMultiBoolean`: the last term is a prefix only when it ends
             // where the analyzed text does (not before trailing punctuation or stop words).
             let mut last_end = 0;
             analyzer.analyze(&text, &mut |t| last_end = t.end_offset);
             let prefix_last = last_end as usize == text.encode_utf16().count();
-            boolean_prefix(ctx, &f, &toks, o, prefix_last)?
+            boolean_prefix(&f, &toks, o, prefix_last)?
         }
         MatchType::Phrase => phrase(ctx, &f, &toks, o.slop, o.auto_generate_synonyms_phrase_query)?,
         MatchType::PhrasePrefix => phrase_prefix(ctx, &f, &toks, o.slop, o.max_expansions)?,
@@ -207,7 +207,7 @@ pub fn lenient_none(field: &str, e: &EsError) -> QueryRef {
 
 fn term_or_lenient(ctx: &QueryCtx, f: &FieldInfo, value: &Value, o: &MatchOpts) -> EsResult<QueryRef> {
     let r = match o.fuzzy.and_then(|fz| fz.fuzziness.as_ref().map(|z| (fz, z))) {
-        Some((fz, z)) => fuzzy_term(ctx, f, &value_text(value), z, fz),
+        Some((fz, z)) => fuzzy_term(f, &value_text(value), z, fz),
         None => ctx.term_query(f, value, false),
     };
     match r {
@@ -217,11 +217,8 @@ fn term_or_lenient(ctx: &QueryCtx, f: &FieldInfo, value: &Value, o: &MatchOpts) 
     }
 }
 
-fn fuzzy_term(ctx: &QueryCtx, f: &FieldInfo, term: &str, z: &Fuzziness, fz: &FuzzyOpts) -> EsResult<QueryRef> {
+fn fuzzy_term(f: &FieldInfo, term: &str, z: &Fuzziness, fz: &FuzzyOpts) -> EsResult<QueryRef> {
     if !f.kind.is_text() && !f.kind.is_keyword_like() {
-        if f.kind.is_numeric() || f.kind.is_date() {
-            return super::range::numeric_fuzzy(ctx, f, &Value::Str(term.to_string()), z);
-        }
         return Err(EsError::illegal_argument(format!("Can only use fuzzy queries on keyword and text fields - not on [{}] which is of type [{}]", f.name, f.ty)));
     }
     let t = if f.kind.is_text() { term.to_string() } else { normalize(f, term) };
@@ -251,11 +248,11 @@ fn unscored_if_match_only(f: &FieldInfo, q: QueryRef) -> QueryRef {
 }
 
 /// One analyzed term: a term query, or a fuzzy one.
-fn term_q(ctx: &QueryCtx, f: &FieldInfo, term: &str, o: &MatchOpts) -> EsResult<QueryRef> {
+fn term_q(f: &FieldInfo, term: &str, o: &MatchOpts) -> EsResult<QueryRef> {
     if let Some(fz) = o.fuzzy
         && let Some(z) = &fz.fuzziness
     {
-        return fuzzy_term(ctx, f, term, z, fz);
+        return fuzzy_term(f, term, z, fz).map(|q| unscored_if_match_only(f, q));
     }
     Ok(unscored_if_match_only(f, crate::opensearch::keyword_term(f, arc(TermQuery::new(f.number, term.as_bytes().to_vec())))))
 }
@@ -272,13 +269,13 @@ fn positions(toks: &[Tok]) -> Vec<(u32, Vec<&Tok>)> {
     out
 }
 
-fn synonym_q(ctx: &QueryCtx, f: &FieldInfo, terms: &[&Tok], o: &MatchOpts) -> EsResult<QueryRef> {
+fn synonym_q(f: &FieldInfo, terms: &[&Tok], o: &MatchOpts) -> EsResult<QueryRef> {
     if let Some(fz) = o.fuzzy
         && fz.fuzziness.is_some()
     {
         let mut b = BooleanQuery::new();
         for t in terms {
-            b = b.add(Occur::Should, term_q(ctx, f, &t.term, o)?);
+            b = b.add(Occur::Should, term_q(f, &t.term, o)?);
         }
         return Ok(arc(b));
     }
@@ -295,21 +292,21 @@ fn is_graph(toks: &[Tok]) -> bool {
 }
 
 /// `createBooleanQuery`.
-fn boolean(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts) -> EsResult<QueryRef> {
+fn boolean(f: &FieldInfo, toks: &[Tok], o: &MatchOpts) -> EsResult<QueryRef> {
     if toks.len() == 1 {
-        return term_q(ctx, f, &toks[0].term, o);
+        return term_q(f, &toks[0].term, o);
     }
     if is_graph(toks) {
-        return graph_boolean(ctx, f, toks, o);
+        return graph_boolean(f, toks, o);
     }
     let groups = positions(toks);
     if groups.len() == 1 {
-        return synonym_q(ctx, f, &groups[0].1, o);
+        return synonym_q(f, &groups[0].1, o);
     }
     let occur = if o.operator == Operator::And { Occur::Must } else { Occur::Should };
     let mut b = BooleanQuery::new();
     for (_, g) in &groups {
-        let q = if g.len() == 1 { term_q(ctx, f, &g[0].term, o)? } else { synonym_q(ctx, f, g, o)? };
+        let q = if g.len() == 1 { term_q(f, &g[0].term, o)? } else { synonym_q(f, g, o)? };
         b = b.add(occur, q);
     }
     Ok(arc(b))
@@ -317,28 +314,28 @@ fn boolean(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts) -> EsResu
 
 /// Token graphs (multi-term synonyms): split at articulation points; each side path becomes a
 /// phrase (or a conjunction), alternatives a disjunction (`analyzeGraphBoolean`).
-fn graph_boolean(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts) -> EsResult<QueryRef> {
+fn graph_boolean(f: &FieldInfo, toks: &[Tok], o: &MatchOpts) -> EsResult<QueryRef> {
     let occur = if o.operator == Operator::And { Occur::Must } else { Occur::Should };
     let mut b = BooleanQuery::new();
     for seg in graph_segments(toks) {
         let paths = graph_paths(&seg);
         let q = if paths.len() == 1 && paths[0].len() == 1 {
-            term_q(ctx, f, &paths[0][0], o)?
+            term_q(f, &paths[0][0], o)?
         } else if paths.iter().all(|p| p.len() == 1) {
             let refs: Vec<Tok> = paths.iter().map(|p| Tok { term: p[0].clone(), pos: 0, pos_len: 1 }).collect();
             let r: Vec<&Tok> = refs.iter().collect();
-            synonym_q(ctx, f, &r, o)?
+            synonym_q(f, &r, o)?
         } else {
             let mut alts = BooleanQuery::new();
             for p in &paths {
                 let q: QueryRef = if p.len() == 1 {
-                    term_q(ctx, f, &p[0], o)?
+                    term_q(f, &p[0], o)?
                 } else if o.auto_generate_synonyms_phrase_query && f.has_positions() {
                     arc(PhraseQuery::new(f.number, p.iter().map(|t| t.as_bytes().to_vec()).collect(), 0))
                 } else {
                     let mut c = BooleanQuery::new();
                     for t in p {
-                        c = c.add(Occur::Must, term_q(ctx, f, t, o)?);
+                        c = c.add(Occur::Must, term_q(f, t, o)?);
                     }
                     arc(c)
                 };
@@ -413,11 +410,11 @@ fn phrase(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], slop: i32, auto_syn: bool
     let groups = positions(toks);
     if groups.len() == 1 {
         let o = MatchOpts::default();
-        return synonym_q(ctx, f, &groups[0].1, &o);
+        return synonym_q(f, &groups[0].1, &o);
     }
     if is_graph(toks) {
         let o = MatchOpts { operator: Operator::And, auto_generate_synonyms_phrase_query: auto_syn, ..Default::default() };
-        return graph_boolean(ctx, f, toks, &o);
+        return graph_boolean(f, toks, &o);
     }
     // `TextFieldType.phraseQuery` / `multiPhraseQuery`.
     check_positions(f, if groups.iter().any(|(_, g)| g.len() > 1) { "MultiPhraseQuery" } else { "PhraseQuery" })?;
@@ -472,7 +469,9 @@ fn phrase_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], slop: i32, max_exp
         let q: QueryRef = arc(MultiTermQuery::prefix(f.number, t.as_bytes().to_vec()).with_rewrite(RewriteMethod::TopTermsBlendedFreqs(max_expansions.max(1) as usize)));
         let _ = q;
         let mp = MultiPhrasePrefixQuery::new(f.number, vec![vec![t.as_bytes().to_vec()]], vec![0], slop.max(0) as u32, max_expansions.max(1) as usize).map_err(index_err)?;
-        return Ok(arc(mp));
+        // `match_only_text` positions are confirmed against `_source` only for several terms;
+        // one term just scores constantly.
+        return Ok(unscored_if_match_only(f, arc(mp)));
     }
     if is_graph(toks) {
         return graph_phrase_prefix(f, toks, slop, max_expansions);
@@ -566,7 +565,7 @@ fn graph_span_phrase(f: &FieldInfo, toks: &[Tok], prefix: bool) -> EsResult<Quer
 
 /// `createBooleanPrefixQuery`: terms, the last one a prefix (when `prefix_last`; synonyms at
 /// the last position stay a synonym query, Elasticsearch applies no prefix to them).
-fn boolean_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts, prefix_last: bool) -> EsResult<QueryRef> {
+fn boolean_prefix(f: &FieldInfo, toks: &[Tok], o: &MatchOpts, prefix_last: bool) -> EsResult<QueryRef> {
     let groups = positions(toks);
     let prefix = |t: &str| -> QueryRef {
         if let Some((pf, min, max)) = f.prefix_field {
@@ -578,7 +577,7 @@ fn boolean_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts, pr
         arc(MultiTermQuery::prefix(f.number, t.as_bytes().to_vec()))
     };
     if groups.len() == 1 && groups[0].1.len() == 1 {
-        return if prefix_last { Ok(prefix(&groups[0].1[0].term)) } else { term_q(ctx, f, &groups[0].1[0].term, o) };
+        return if prefix_last { Ok(prefix(&groups[0].1[0].term)) } else { term_q(f, &groups[0].1[0].term, o) };
     }
     let occur = if o.operator == Operator::And { Occur::Must } else { Occur::Should };
     let mut b = BooleanQuery::new();
@@ -587,9 +586,9 @@ fn boolean_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts, pr
         let q = if i == last && prefix_last && g.len() == 1 {
             prefix(&g[0].term)
         } else if g.len() == 1 {
-            term_q(ctx, f, &g[0].term, o)?
+            term_q(f, &g[0].term, o)?
         } else {
-            synonym_q(ctx, f, g, o)?
+            synonym_q(f, g, o)?
         };
         b = b.add(occur, q);
     }

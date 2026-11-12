@@ -22,6 +22,16 @@ Python's standard library only.
 summarizes Rally races (`scripts/bench-search.sh rally`): files are named `...-<target>-<round>.csv`;
 per task and target, the median over rounds of the p50 service time (indexing: median throughput),
 with the min-max spread, and the error rate where it is not zero.
+
+    scripts/bench-search.py ingest --target roll=... --target es=... --file docs.json --body index.json \
+        [--docs 1000000] [--bulk 5000] [--clients 1,8,32] [--rounds 3] [--cgroup name=dir]
+
+bulk indexing throughput, per-bulk service time and server CPU per document at each client count
+(see `ingest`).
+
+    scripts/bench-search.py rally-subset <local track dir> <rally data dir> <docs> [corpus regex]
+
+cuts a local track copy's large corpora to their first <docs> documents (see `rally_subset`).
 """
 
 import argparse
@@ -193,9 +203,192 @@ def rally_summary(files):
         print("| %s | %s | %s |" % (task, name, " | ".join(cells)))
 
 
+def rally_subset(track_dir, data_dir, limit, only=""):
+    """Points a local track copy's large corpora at their first `limit` documents.
+
+    Rally decompresses a whole corpus file before it indexes any part of it (nyc_taxis, pmc, so
+    and the vector tracks are 10-80 GB uncompressed), so `ingest_percentage` doesn't save any
+    scratch space. Instead, every document entry with more than `limit` documents (and, with
+    `only`, a `<corpus>/<source-file>` matching that regex) is streamed once from its base URL
+    through the decompressor and cut after `limit` lines into `<data_dir>/<corpus>/<name>-<limit>.json`
+    (only the needed prefix is downloaded), and the entry is rewritten to that uncompressed file
+    with its real size, so Rally finds it ready and verifies it."""
+    import glob
+    import os
+    import re
+    import subprocess
+
+    entry = re.compile(r'\{[^{}]*"source-file"\s*:\s*"([^"]+)"[^{}]*\}')
+    for path in glob.glob(os.path.join(track_dir, "**", "*.json"), recursive=True):
+        with open(path) as fh:
+            text = fh.read()
+        if '"corpora"' not in text:
+            continue
+        out, pos = [], 0
+        for m in entry.finditer(text):
+            try:
+                doc = json.loads(m.group(0))
+            except ValueError:
+                continue  # a templated entry: leave it alone
+            head = text[: m.start()]
+            names = re.findall(r'"name"\s*:\s*"([^"]+)"', head)
+            bases = re.findall(r'"base-url"\s*:\s*"([^"]+)"', head)
+            src = doc["source-file"]
+            if doc.get("document-count", 0) <= limit or not names or not bases:
+                continue
+            if only and not re.search(only, "%s/%s" % (names[-1], src)):
+                continue
+            stem = re.sub(r"\.(bz2|zst|gz)$", "", src)
+            sub = re.sub(r"(\.json)?$", "-%d.json" % limit, stem, count=1)
+            dest = os.path.join(data_dir, names[-1], sub)
+            if not os.path.exists(dest):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                unpack = {"bz2": "bzip2 -dc", "zst": "zstd -dc", "gz": "gzip -dc"}.get(src.rsplit(".", 1)[-1], "cat")
+                url = "%s/%s" % (bases[-1].rstrip("/"), src)
+                print("rally-subset: %s -> %s" % (url, dest), file=sys.stderr)
+                # head closes the pipe after `limit` lines; curl and the decompressor then die of
+                # SIGPIPE, which is the point: only the prefix is downloaded.
+                subprocess.run("curl -sfL %s | %s | head -n %d > %s.part" % (url, unpack, limit, dest), shell=True, check=False)
+                with open(dest + ".part", "rb") as fh:
+                    lines = sum(chunk.count(b"\n") for chunk in iter(lambda: fh.read(1 << 24), b""))
+                if lines != limit:
+                    raise SystemExit("rally-subset: %s has %d lines, expected %d" % (dest, lines, limit))
+                os.rename(dest + ".part", dest)
+            doc["source-file"] = sub
+            doc["document-count"] = limit
+            doc.pop("compressed-bytes", None)
+            doc["uncompressed-bytes"] = os.path.getsize(dest)
+            out.append(text[pos : m.start()])
+            out.append(json.dumps(doc))
+            pos = m.end()
+        if out:
+            out.append(text[pos:])
+            with open(path, "w") as fh:
+                fh.write("".join(out))
+
+
+def ingest(argv):
+    """Bulk indexing at several client counts, interleaved between targets.
+
+    Reads `--docs` documents (one JSON per line, e.g. a Rally corpus file), builds `--bulk`-doc
+    `_bulk` bodies once, then per round and client count recreates `--index` on each target
+    (body from `--body`), sends every body from that many threads and refreshes. Reports
+    throughput, per-bulk service time percentiles and, with `--cgroup`, server CPU per document
+    (sampled again after `--settle` seconds so merges that finish after the load count too)."""
+    ap = argparse.ArgumentParser(prog="bench-search.py ingest")
+    ap.add_argument("--target", action="append", required=True, help="name=url")
+    ap.add_argument("--file", required=True)
+    ap.add_argument("--body", required=True, help="index creation body (JSON file)")
+    ap.add_argument("--index", default="perf-bench-ingest")
+    ap.add_argument("--docs", type=int, default=1000000)
+    ap.add_argument("--bulk", type=int, default=5000)
+    ap.add_argument("--clients", default="1,8,32")
+    ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--settle", type=float, default=5.0)
+    ap.add_argument("--cgroup", action="append", default=[], help="name=cgroup dir")
+    ap.add_argument("--out", default="")
+    ap.add_argument("--keep", action="store_true", help="keep the index after the last load")
+    a = ap.parse_args(argv)
+    targets = [(t.split("=", 1)[0], t.split("=", 1)[1].rstrip("/")) for t in a.target]
+    cgroups = dict(c.split("=", 1) for c in a.cgroup)
+    with open(a.body) as f:
+        body = json.load(f)
+    bodies, cur, n = [], [], 0
+    with open(a.file, "rb") as f:
+        for line in f:
+            if n == a.docs:
+                break
+            cur.append(b'{"index":{}}\n' + line.rstrip(b"\n") + b"\n")
+            n += 1
+            if len(cur) == a.bulk:
+                bodies.append(b"".join(cur))
+                cur = []
+    if cur:
+        bodies.append(b"".join(cur))
+
+    def cpu_ms(name):
+        d = cgroups.get(name)
+        if not d:
+            return None
+        with open(d + "/cpu.stat") as f:
+            return next(int(l.split()[1]) for l in f if l.startswith("usage_usec")) / 1000.0
+
+    results = {}  # (clients, target) -> [round dicts]
+    for rnd in range(a.rounds):
+        for clients in [int(c) for c in a.clients.split(",")]:
+            order = targets if rnd % 2 == 0 else targets[::-1]
+            for name, url in order:
+                c = Client(url)
+                c.req("DELETE", "/" + a.index)
+                s, out = c.req("PUT", "/" + a.index, body)
+                assert s == 200, (name, s, out[:300])
+                lat, errors, lock = [], [], threading.Lock()
+                queue = list(range(len(bodies)))
+
+                def run():
+                    cl = Client(url)
+                    while True:
+                        with lock:
+                            if not queue:
+                                return
+                            i = queue.pop(0)
+                        t = time.perf_counter()
+                        s, out = cl.req("POST", "/%s/_bulk" % a.index, bodies[i], "application/x-ndjson")
+                        dt = (time.perf_counter() - t) * 1000
+                        with lock:
+                            lat.append(dt)
+                            if s != 200 or b'"errors":true' in out[:64]:
+                                errors.append((s, out[:300]))
+
+                c0 = cpu_ms(name)
+                threads = [threading.Thread(target=run) for _ in range(clients)]
+                t0 = time.perf_counter()
+                for th in threads:
+                    th.start()
+                for th in threads:
+                    th.join()
+                load = time.perf_counter() - t0
+                c1 = cpu_ms(name)
+                t = time.perf_counter()
+                c.req("POST", "/%s/_refresh" % a.index)
+                refresh = (time.perf_counter() - t) * 1000
+                time.sleep(a.settle)
+                c2 = cpu_ms(name)
+                if errors:
+                    raise SystemExit("bulk failed on %s: %r" % (name, errors[0]))
+                r = {"docs_s": n / load, "p50": pct(lat, 50), "p90": pct(lat, 90), "p99": pct(lat, 99), "refresh_ms": refresh}
+                if c0 is not None:
+                    r["cpu_us_doc"] = (c1 - c0) * 1000 / n
+                    r["cpu_us_doc_settled"] = (c2 - c0) * 1000 / n
+                r["stats"] = json.loads(c.req("GET", "/%s/_stats/merge,refresh,flush,segments" % a.index)[1])["_all"]["primaries"]
+                results.setdefault((clients, name), []).append(r)
+                print("round %d %-5s %2d clients: %.0f docs/s p50 %.1f p90 %.1f p99 %.1f ms refresh %.0f ms%s" % (
+                    rnd, name, clients, r["docs_s"], r["p50"], r["p90"], r["p99"], refresh,
+                    " cpu %.1f/%.1f us/doc" % (r["cpu_us_doc"], r["cpu_us_doc_settled"]) if "cpu_us_doc" in r else ""), file=sys.stderr, flush=True)
+                if not a.keep:
+                    c.req("DELETE", "/" + a.index)
+    keys = ["docs_s", "p50", "p90", "p99", "refresh_ms", "cpu_us_doc", "cpu_us_doc_settled"]
+    print("| clients | target | " + " | ".join(keys) + " |")
+    print("|---|---|" + "---:|" * len(keys))
+    for (clients, name), rs in results.items():
+        cells = []
+        for k in keys:
+            xs = [r[k] for r in rs if k in r]
+            cells.append("%.1f (%.1f-%.1f)" % (statistics.median(xs), min(xs), max(xs)) if xs else "-")
+        print("| %d | %s | %s |" % (clients, name, " | ".join(cells)))
+    if a.out:
+        with open(a.out, "w") as f:
+            json.dump({"%d-%s" % k: v for k, v in results.items()}, f, indent=1)
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "rally-summary":
         return rally_summary(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "ingest":
+        return ingest(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "rally-subset":
+        a = sys.argv[2:]
+        return rally_subset(a[0], a[1], int(a[2]), a[3] if len(a) > 3 else "")
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", action="append", required=True, help="name=url")
     ap.add_argument("--docs", type=int, default=50000)

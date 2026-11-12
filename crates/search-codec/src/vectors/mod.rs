@@ -607,6 +607,20 @@ impl VectorsReader {
         &self.vectors[ord as usize * self.vb..(ord as usize + 1) * self.vb]
     }
 
+    /// The float vector of `ord` borrowed in place (for `Float32` fields), when the stored bytes
+    /// happen to be 4-byte aligned on a little-endian target; else [`vector_f32`](Self::vector_f32)
+    /// decodes a copy.
+    #[inline]
+    pub fn vector_f32_slice(&self, ord: u32) -> Option<&[f32]> {
+        if cfg!(target_endian = "big") {
+            return None;
+        }
+        // SAFETY: every bit pattern is a valid f32, and `align_to` only yields the aligned
+        // middle; the bytes are little-endian floats, the target's own order (checked above).
+        let (head, mid, tail) = unsafe { self.vector(ord).align_to::<f32>() };
+        (head.is_empty() && tail.is_empty()).then_some(mid)
+    }
+
     /// Decodes a float vector (for `Float32` fields).
     pub fn vector_f32(&self, ord: u32, out: &mut Vec<f32>) {
         out.clear();

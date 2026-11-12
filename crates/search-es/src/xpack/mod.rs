@@ -16,10 +16,12 @@
 
 pub mod async_results;
 pub mod async_search;
+pub mod autoscaling;
 pub mod downsample;
 pub mod enrich;
 pub mod entsearch;
 pub mod eql;
+pub mod fleet;
 pub mod esql;
 pub mod graph;
 pub mod ilm;
@@ -58,6 +60,10 @@ pub struct Runtime {
     pub deployments: ml::models::Deployments,
     /// Enrich indices loaded for the enrich processor.
     pub enrich: enrich::Tables,
+    /// The file realm's roles (`roll.security.file_roles`), parsed on first use.
+    pub file_roles: std::sync::OnceLock<security::FileRoles>,
+    /// ES|QL usage counters (`_xpack/usage` `esql`).
+    pub esql_telemetry: esql::telemetry::Telemetry,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.
@@ -267,6 +273,12 @@ handlers! { ctx;
     EsqlPutView => esql::put_view(ctx).await,
     EsqlGetView => esql::get_view(ctx),
     EsqlDeleteView => esql::delete_view(ctx).await,
+    EsqlPutDataSource => esql::datasources::put_data_source(ctx).await,
+    EsqlGetDataSource => esql::datasources::get_data_source(ctx),
+    EsqlDeleteDataSource => esql::datasources::delete_data_source(ctx).await,
+    EsqlPutDataset => esql::datasources::put_dataset(ctx).await,
+    EsqlGetDataset => esql::datasources::get_dataset(ctx),
+    EsqlDeleteDataset => esql::datasources::delete_dataset(ctx).await,
 
     SqlQuery => sql::query(ctx).await,
     SqlTranslate => sql::translate(ctx).await,
@@ -322,6 +334,16 @@ handlers! { ctx;
     EnrichExecutePolicy => enrich::execute_policy(ctx).await,
     EnrichStats => enrich::stats(ctx),
 
+    FleetGlobalCheckpoints => fleet::global_checkpoints(ctx).await,
+    FleetSearch => fleet::search(ctx).await,
+    FleetMsearch => fleet::msearch(ctx).await,
+    FleetPostSecret => fleet::post_secret(ctx).await,
+    FleetGetSecret => fleet::get_secret(ctx),
+    FleetDeleteSecret => fleet::delete_secret(ctx).await,
+    AutoscalingPutAutoscalingPolicy => autoscaling::put(ctx).await,
+    AutoscalingGetAutoscalingPolicy => autoscaling::get(ctx),
+    AutoscalingDeleteAutoscalingPolicy => autoscaling::delete(ctx).await,
+    AutoscalingGetAutoscalingCapacity => autoscaling::capacity(ctx),
     ConnectorPut => entsearch::connectors::put(ctx).await,
     ConnectorPost => entsearch::connectors::post(ctx).await,
     ConnectorGet => entsearch::connectors::get(ctx),

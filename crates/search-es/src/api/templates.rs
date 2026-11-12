@@ -270,12 +270,16 @@ pub async fn delete_component_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if matched.is_empty() {
                 return Err(EsError::resource_not_found(raw.clone()));
             }
+            // A template that lists the component in `ignore_missing_component_templates` doesn't
+            // need it (Elasticsearch's innerRemoveComponentTemplate): `metrics@custom` can go.
+            let uses = |t: &crate::meta::templates::ComposableTemplate, c: &String| {
+                t.composed_of.contains(c) && !t.ignore_missing_component_templates.as_ref().is_some_and(|i| i.contains(c))
+            };
             let mut users: Vec<String> =
-                st.metadata.index_templates.iter().filter(|(_, t)| t.composed_of.iter().any(|c| matched.contains(c))).map(|(n, _)| n.clone()).collect();
+                st.metadata.index_templates.iter().filter(|(_, t)| matched.iter().any(|c| uses(t, c))).map(|(n, _)| n.clone()).collect();
             users.sort();
             if !users.is_empty() {
-                let in_use: Vec<&String> =
-                    matched.iter().filter(|c| st.metadata.index_templates.values().any(|t| t.composed_of.contains(c))).collect();
+                let in_use: Vec<&String> = matched.iter().filter(|c| st.metadata.index_templates.values().any(|t| uses(t, c))).collect();
                 return Err(EsError::illegal_argument(format!(
                     "component templates [{}] cannot be removed as they are still in use by index templates [{}]",
                     in_use.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),

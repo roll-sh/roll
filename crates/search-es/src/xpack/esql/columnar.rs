@@ -85,6 +85,13 @@ fn conv_of(table: &crate::engine::fields::FieldTable, f: &FieldInfo, ty: DataTyp
     if f.flattened_key.is_some() || f.nested_path.is_some() {
         return None;
     }
+    // Counters read as the numbers they are.
+    let ty = match ty {
+        DataType::CounterLong => DataType::Long,
+        DataType::CounterInteger => DataType::Integer,
+        DataType::CounterDouble => DataType::Double,
+        t => t,
+    };
     if matches!(f.kind, Kind::Text | Kind::MatchOnlyText)
         && ty == DataType::Text
         && let Some(spec) = text_delegate(table, f)

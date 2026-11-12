@@ -1,0 +1,30 @@
+# Tests of Elasticsearch 9.5.5's `ilm` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+ilm:ilm/10_basic/Test Basic Policy CRUD
+ilm:ilm/10_basic/Test Deprecated Condition On Policy Put / Update
+ilm:ilm/10_basic/Test Invalid Policy
+ilm:ilm/10_basic/Test Policy Get
+ilm:ilm/10_basic/Test Policy Update
+ilm:ilm/10_basic/Test Undeletable Policy In Use
+ilm:ilm/10_basic/Test increasing phase timings validated
+ilm:ilm/20_move_to_step/Test Invalid Move To Step With Incorrect Current Step
+ilm:ilm/20_move_to_step/Test Invalid Move To Step With Invalid Index
+ilm:ilm/20_move_to_step/Test Invalid Move To Step With Invalid Policy
+ilm:ilm/30_retry/Test Invalid Re-run With Invalid Index
+ilm:ilm/30_retry/Test Invalid Retry With No Policy
+ilm:ilm/30_retry/Test Invalid Retry With Non-errored Policy
+ilm:ilm/40_explain_lifecycle/Test Unmanaged Index Lifecycle Explain
+ilm:ilm/40_explain_lifecycle/Test expand_wildcards supports hidden indices
+ilm:ilm/40_explain_lifecycle/Test filter for only error indices
+ilm:ilm/40_explain_lifecycle/Test filter for only managed indices
+ilm:ilm/60_operation_mode/Test Changing Operation Modes
+ilm:ilm/60_remove_policy_for_index/Test Remove Policy Index Does Not Exist
+ilm:ilm/60_remove_policy_for_index/Test Remove Policy Index Pattern
+ilm:ilm/60_remove_policy_for_index/Test Remove Policy Single Index
+ilm:ilm/60_remove_policy_for_index/Test Remove Policy Unmanaged Index
+ilm:ilm/70_downsampling/Test downsample in hot phase without rollover
+ilm:ilm/70_downsampling/Test downsample timeout parameter
+ilm:ilm/70_downsampling/Test downsampling in multiple phases with the same interval
+ilm:ilm/80_health/basic ILM health indicator test
+ilm:ilm/90_searchable_snapshot/Test put lifecycle with searchable snapshot action including force_merge_on_clone

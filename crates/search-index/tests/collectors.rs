@@ -164,6 +164,48 @@ fn concurrent_search_equals_sequential() {
     }
 }
 
+/// Concurrent searches started on pool workers (the shards of one request running in
+/// parallel) split into slices too, and give the sequential results; many at once don't
+/// deadlock even when every worker is busy.
+#[test]
+fn concurrent_search_inside_pool_workers_equals_sequential() {
+    use search_index::search::pool;
+    let corpus = build(9, 3000, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    let par = s.with_limits(SearchLimits { parallel_min_docs: 64, parallelism: 4, ..SearchLimits::default() });
+    assert!(par.slices().len() > 1);
+    let qs = queries();
+    let want: Vec<_> = qs
+        .iter()
+        .map(|q| {
+            let mut c = TopScoreCollector::new(10, u64::MAX);
+            s.search(q, &mut c).unwrap();
+            let td = c.top_docs();
+            let keys = vec![num_sort(true), SortKey::Score { reverse: false }];
+            let mut f = TopFieldCollector::new(keys, 15, u64::MAX, true).with_searcher(&s);
+            s.search(q, &mut f).unwrap();
+            (td, f.top_docs())
+        })
+        .collect();
+    // More jobs than workers, each a concurrent search: workers split their own searches.
+    let jobs = qs.len() * 8;
+    let ok = std::sync::atomic::AtomicUsize::new(0);
+    pool::for_each_index(jobs, jobs, &|i| {
+        let qi = i % qs.len();
+        let m = TopScoreManager { n: 10, threshold: u64::MAX, after: None, min_score: None };
+        let got = par.search_concurrent(&qs[qi], &m, &SearchControl::default()).unwrap();
+        assert_eq!(got.hits, want[qi].0.hits, "q{qi}");
+        assert_eq!(got.total_hits, want[qi].0.total_hits, "q{qi}");
+        let keys = vec![num_sort(true), SortKey::Score { reverse: false }];
+        let m = TopFieldManager { keys, n: 15, threshold: u64::MAX, track_scores: true, after: None, searcher: par.clone() };
+        let got = par.search_concurrent(&qs[qi], &m, &SearchControl::default()).unwrap();
+        assert_eq!(got.hits, want[qi].1.hits, "q{qi} sorted");
+        assert_eq!(got.total_hits, want[qi].1.total_hits, "q{qi} sorted");
+        ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+    assert_eq!(ok.into_inner(), jobs);
+}
+
 #[test]
 fn multi_collector_matches_separate_runs() {
     let corpus = build(42, 1200, ShardConfig { merge_threads: 0, ..Default::default() });
@@ -246,9 +288,10 @@ fn terminate_after_counts_filtered_hits_only() {
 }
 
 const GRP: u32 = 30;
+const LBL: u32 = 31;
 
-/// Per `_id`: words, group and number.
-type Model = HashMap<String, (Vec<String>, Option<String>, i64)>;
+/// Per `_id`: words, group, number and label.
+type Model = HashMap<String, (Vec<String>, Option<String>, i64, Option<String>)>;
 
 fn collapse_shard(seed: u64) -> (Shard, Model) {
     let schema = Schema::new()
@@ -257,6 +300,8 @@ fn collapse_shard(seed: u64) -> (Shard, Model) {
         .with_field(FieldSchema::new(GRP, "grp").indexed(IndexOptions::Docs, false).with_doc_values(DocValuesType::Sorted))
         .unwrap()
         .with_field(FieldSchema::new(NUM, "num").with_doc_values(DocValuesType::Numeric))
+        .unwrap()
+        .with_field(FieldSchema::new(LBL, "lbl").indexed(IndexOptions::Docs, false).with_doc_values(DocValuesType::Sorted))
         .unwrap();
     let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema, Vec::new()).unwrap();
     let mut rng = common::rng(seed);
@@ -281,8 +326,13 @@ fn collapse_shard(seed: u64) -> (Shard, Model) {
             d.fields.push(IndexableField::DocValue { field: GRP, value: DocValue::Sorted(g.clone().into_bytes().into()) });
         }
         d.fields.push(IndexableField::DocValue { field: NUM, value: DocValue::Numeric(num) });
+        // Labels: few distinct values, so heads tie on them and per-segment ordinals differ.
+        let lbl = rng.gen_bool(0.8).then(|| format!("l{:02}", rng.gen_range(0..40)));
+        if let Some(l) = &lbl {
+            d.fields.push(IndexableField::DocValue { field: LBL, value: DocValue::Sorted(l.clone().into_bytes().into()) });
+        }
         shard.index(IndexOp::new(d)).unwrap();
-        model.insert(id, (words, grp, num));
+        model.insert(id, (words, grp, num, lbl));
         if i % 97 == 0 {
             shard.refresh().unwrap();
         }
@@ -342,6 +392,109 @@ fn collapse_matches_brute_force() {
                     if by_num {
                         for h in &got.hits {
                             assert_eq!(h.values, vec![SortValue::Long(num(h.doc))]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn lbl_sort(reverse: bool, missing: Missing) -> SortKey {
+    SortKey::Field(FieldSort { field: LBL, kind: SortType::Keyword, reverse, missing, mode: SortMode::Min, nested: None })
+}
+
+/// Collapsing with keyword and multi-key sorts (heads from earlier segments compare through
+/// translated ordinals) and on a numeric field, against a brute-force model.
+#[test]
+fn collapse_with_keyword_and_multi_key_sorts_matches_brute_force() {
+    use std::cmp::Ordering;
+    for seed in 0..std::env::var("SWEEP_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(4u64) {
+        let (shard, model) = collapse_shard(seed + 100);
+        let s = shard.searcher();
+        assert!(s.segments().len() > 3, "several segments");
+        let ids = common::ids(&s);
+        // (keys, model comparator over (doc, score)) per variant.
+        type Cmp = Box<dyn Fn(&Model, &HashMap<u32, String>, (u32, f32), (u32, f32)) -> Ordering>;
+        let lbl_cmp = |reverse: bool, first: bool| {
+            move |m: &Model, ids: &HashMap<u32, String>, a: u32, b: u32| -> Ordering {
+                match (&m[&ids[&a]].3, &m[&ids[&b]].3) {
+                    (None, None) => Ordering::Equal,
+                    (None, _) => if first { Ordering::Less } else { Ordering::Greater },
+                    (_, None) => if first { Ordering::Greater } else { Ordering::Less },
+                    (Some(x), Some(y)) => if reverse { y.cmp(x) } else { x.cmp(y) },
+                }
+            }
+        };
+        let num_cmp = |reverse: bool| move |m: &Model, ids: &HashMap<u32, String>, a: u32, b: u32| -> Ordering {
+            let o = m[&ids[&a]].2.cmp(&m[&ids[&b]].2);
+            if reverse { o.reverse() } else { o }
+        };
+        let variants: Vec<(Vec<SortKey>, Cmp)> = vec![
+            (vec![lbl_sort(false, Missing::Last)], {
+                let l = lbl_cmp(false, false);
+                Box::new(move |m, ids, a, b| l(m, ids, a.0, b.0))
+            }),
+            (vec![lbl_sort(true, Missing::First), num_sort(false)], {
+                let (l, n) = (lbl_cmp(true, true), num_cmp(false));
+                Box::new(move |m, ids, a, b| l(m, ids, a.0, b.0).then_with(|| n(m, ids, a.0, b.0)))
+            }),
+            (vec![lbl_sort(false, Missing::Value(SortValue::Bytes(b"l20x".to_vec()))), SortKey::Score { reverse: false }], {
+                // A custom missing value sorts as that term.
+                Box::new(move |m: &Model, ids: &HashMap<u32, String>, a: (u32, f32), b: (u32, f32)| {
+                    let v = |d: u32| m[&ids[&d]].3.clone().unwrap_or_else(|| "l20x".into());
+                    v(a.0).cmp(&v(b.0)).then(b.1.total_cmp(&a.1))
+                })
+            }),
+            (vec![num_sort(true), lbl_sort(false, Missing::Last)], {
+                let (n, l) = (num_cmp(true), lbl_cmp(false, false));
+                Box::new(move |m, ids, a, b| n(m, ids, a.0, b.0).then_with(|| l(m, ids, a.0, b.0)))
+            }),
+        ];
+        for w in [0usize, 1, 4] {
+            let q: QueryRef = Arc::new(TermQuery::new(BODY, word(w).into_bytes()));
+            let mut all = TopScoreCollector::new(s.num_docs() as usize, u64::MAX);
+            s.search(&q, &mut all).unwrap();
+            let all = all.top_docs();
+            for (vi, (keys, cmp)) in variants.iter().enumerate() {
+                for field in [CollapseField::Keyword(GRP), CollapseField::Numeric(NUM)] {
+                    for n in [1usize, 5, 30] {
+                        let mut c = CollapseCollector::new(field, keys.clone(), n, u64::MAX, true);
+                        s.search(&q, &mut c).unwrap();
+                        let got = c.top_docs();
+                        assert_eq!(got.total_hits, all.total_hits);
+                        let group = |d: u32| match field {
+                            CollapseField::Keyword(_) => model[&ids[&d]].1.clone().map_or(SortValue::Null, |g| SortValue::Bytes(g.into_bytes())),
+                            CollapseField::Numeric(_) => SortValue::Long(model[&ids[&d]].2),
+                        };
+                        let order = |a: (u32, f32), b: (u32, f32)| cmp(&model, &ids, a, b).then(a.0.cmp(&b.0));
+                        let mut best: Vec<(SortValue, (u32, f32))> = Vec::new();
+                        for h in &all.hits {
+                            let g = group(h.doc);
+                            let cand = (h.doc, h.score);
+                            match best.iter_mut().find(|(k, _)| *k == g) {
+                                Some((_, cur)) => {
+                                    if order(cand, *cur) == Ordering::Less {
+                                        *cur = cand;
+                                    }
+                                }
+                                None => best.push((g, cand)),
+                            }
+                        }
+                        best.sort_by(|a, b| order(a.1, b.1));
+                        best.truncate(n);
+                        let want: Vec<(u32, SortValue)> = best.into_iter().map(|(g, (d, _))| (d, g)).collect();
+                        let have: Vec<(u32, SortValue)> = got.hits.iter().map(|h| (h.doc, h.group.clone())).collect();
+                        assert_eq!(have, want, "seed {seed} word {w} variant {vi} field {field:?} n {n}");
+                        for h in &got.hits {
+                            let lbl = model[&ids[&h.doc]].3.clone();
+                            let want_lbl = match (lbl, &keys[0], keys.get(1)) {
+                                (Some(l), _, _) => SortValue::Bytes(l.into_bytes()),
+                                (None, SortKey::Field(FieldSort { missing: Missing::Value(v), .. }), _) if vi == 2 => v.clone(),
+                                (None, _, _) => SortValue::Null,
+                            };
+                            let at = keys.iter().position(|k| matches!(k, SortKey::Field(f) if f.field == LBL)).unwrap();
+                            assert_eq!(h.values[at], want_lbl, "label value of doc {}", h.doc);
                         }
                     }
                 }

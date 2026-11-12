@@ -1,0 +1,345 @@
+# Tests of Elasticsearch 9.5.5's `lang-painless` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+lang-painless:painless/100_terms_agg/Bucket script with keys
+lang-painless:painless/100_terms_agg/Double Value Script with doc notation
+lang-painless:painless/100_terms_agg/Long Value Script with doc notation
+lang-painless:painless/100_terms_agg/String Value Script with doc notation
+lang-painless:painless/10_basic/Painless plugin loaded
+lang-painless:painless/110_script_score_boost/Boost script_score
+lang-painless:painless/110_script_score_boost/Boost script_score and boost internal query
+lang-painless:painless/110_script_score_boost/Boost script_score with explain
+lang-painless:painless/120_stored_scripts/Test runtime field contexts allowed as stored script
+lang-painless:painless/120_stored_scripts/Test runtime field contexts not allowed as stored script
+lang-painless:painless/130_metric_agg/Scripted Metric Agg Non String Map Key
+lang-painless:painless/130_metric_agg/Scripted Metric Agg String Map Key
+lang-painless:painless/130_metric_agg/Scripted Metric Agg Total
+lang-painless:painless/140_dense_vector_basic/Cosine Similarity
+lang-painless:painless/140_dense_vector_basic/Cosine similarity with indexed vector
+lang-painless:painless/140_dense_vector_basic/Dot Product
+lang-painless:painless/140_dense_vector_basic/L1 similarity with indexed cosine similarity vector
+lang-painless:painless/140_dense_vector_basic/L2 similarity with indexed cosine similarity vector
+lang-painless:painless/140_dense_vector_basic/Test hamming distance fails on float
+lang-painless:painless/140_dense_vector_basic/Test vector magnitude equality
+lang-painless:painless/145_dense_vector_byte_basic/Cosine Similarity
+lang-painless:painless/145_dense_vector_byte_basic/Cosine Similarity float
+lang-painless:painless/145_dense_vector_byte_basic/Cosine Similarity hexidecimal
+lang-painless:painless/145_dense_vector_byte_basic/Cosine similarity with indexed vector
+lang-painless:painless/145_dense_vector_byte_basic/Dot Product
+lang-painless:painless/145_dense_vector_byte_basic/Dot Product float
+lang-painless:painless/145_dense_vector_byte_basic/Dot Product hexidecimal
+lang-painless:painless/146_dense_vector_bit_basic/Cosine Similarity is not supported
+lang-painless:painless/146_dense_vector_bit_basic/Dot product with byte
+lang-painless:painless/146_dense_vector_bit_basic/Dot product with float
+lang-painless:painless/146_dense_vector_bit_basic/Hamming distance
+lang-painless:painless/146_dense_vector_bit_basic/Hamming distance hexidecimal
+lang-painless:painless/146_dense_vector_bit_basic/L1 norm
+lang-painless:painless/146_dense_vector_bit_basic/L1 norm hexidecimal
+lang-painless:painless/146_dense_vector_bit_basic/L2 norm
+lang-painless:painless/146_dense_vector_bit_basic/L2 norm hexidecimal
+lang-painless:painless/146_dense_vector_bit_basic/Test vector magnitude equality
+lang-painless:painless/150_dense_vector_l1l2/L1 norm
+lang-painless:painless/150_dense_vector_l1l2/L2 norm
+lang-painless:painless/151_dense_vector_byte_hamming/Hamming distance
+lang-painless:painless/151_dense_vector_byte_hamming/Hamming distance hexidecimal
+lang-painless:painless/155_dense_vector_byte_l1l2/L1 norm
+lang-painless:painless/155_dense_vector_byte_l1l2/L1 norm hexidecimal
+lang-painless:painless/155_dense_vector_byte_l1l2/L2 norm
+lang-painless:painless/155_dense_vector_byte_l1l2/L2 norm hexidecimal
+lang-painless:painless/15_update/Script Update Metadata
+lang-painless:painless/15_update/Script Write Field
+lang-painless:painless/15_update/Update Script
+lang-painless:painless/15_update/Update Script with script error
+lang-painless:painless/160_dense_vector_special_cases/Documents missing a vector field
+lang-painless:painless/160_dense_vector_special_cases/Functions with query vectors with dims different from docs vectors should error
+lang-painless:painless/160_dense_vector_special_cases/Indexing of Dense vectors should error when dims don't match defined in the mapping
+lang-painless:painless/160_dense_vector_special_cases/Vectors of mixed integers and floats
+lang-painless:painless/165_dense_vector_byte_special_cases/Documents missing a vector field
+lang-painless:painless/165_dense_vector_byte_special_cases/Functions with query vectors with dims different from docs vectors should error
+lang-painless:painless/165_dense_vector_byte_special_cases/Indexing of Dense vectors should error when dims don't match defined in the mapping
+lang-painless:painless/165_dense_vector_byte_special_cases/Vectors of mixed integers and floats
+lang-painless:painless/16_update2/Stored script
+lang-painless:painless/170_dense_vector_script_access/Access to values of dense_vector in script
+lang-painless:painless/170_dense_vector_script_access/Access to values of indexed dense_vector in script
+lang-painless:painless/175_dense_vector_byte_script_access/Access to values of dense_vector in script
+lang-painless:painless/175_dense_vector_byte_script_access/Access to values of indexed dense_vector in script
+lang-painless:painless/17_update_error/Script errors contain position
+lang-painless:painless/180_knn_and_binary_dv_fields_api/cosineSimilarity works on dense vectors
+lang-painless:painless/180_knn_and_binary_dv_fields_api/dot product works on dense vectors
+lang-painless:painless/180_knn_and_binary_dv_fields_api/empty dense vector throws for vector accesses
+lang-painless:painless/180_knn_and_binary_dv_fields_api/iterator over dense vector values
+lang-painless:painless/180_knn_and_binary_dv_fields_api/l1Norm works on dense vectors
+lang-painless:painless/180_knn_and_binary_dv_fields_api/l2Norm works on dense vectors
+lang-painless:painless/180_knn_and_binary_dv_fields_api/null can be used for default value
+lang-painless:painless/180_knn_and_binary_dv_fields_api/query vector of wrong type errors
+lang-painless:painless/180_knn_and_binary_dv_fields_api/size and isEmpty code works for any vector, including empty
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/cosineSimilarity works on dense vectors
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/dot product works on dense vectors
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/empty dense vector throws for vector accesses
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/iterator over dense vector values
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/l1Norm works on dense vectors
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/l2Norm works on dense vectors
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/null can be used for default value
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/query vector of wrong type errors
+lang-painless:painless/185_knn_and_binary_byte_dv_fields_api/size and isEmpty code works for any vector, including empty
+lang-painless:painless/190_term_statistics_script_score/Complex bool query: uniqueTermsCount
+lang-painless:painless/190_term_statistics_script_score/match query: docFreq max with DFS
+lang-painless:painless/190_term_statistics_script_score/match query: docFreq max without DFS
+lang-painless:painless/190_term_statistics_script_score/match query: docFreq min with DFS
+lang-painless:painless/190_term_statistics_script_score/match query: docFreq min without DFS
+lang-painless:painless/190_term_statistics_script_score/match query: matchedTermsCount with DFS
+lang-painless:painless/190_term_statistics_script_score/match query: matchedTermsCount without DFS
+lang-painless:painless/190_term_statistics_script_score/match query: termFreq sum with DFS
+lang-painless:painless/190_term_statistics_script_score/match query: termFreq sum without DFS
+lang-painless:painless/190_term_statistics_script_score/match query: termPositions avg with DFS
+lang-painless:painless/190_term_statistics_script_score/match query: termPositions avg without DFS
+lang-painless:painless/190_term_statistics_script_score/match query: totalTermFreq sum with DFS
+lang-painless:painless/190_term_statistics_script_score/match query: totalTermFreq sum without DFS
+lang-painless:painless/190_term_statistics_script_score/match query: uniqueTermsCount with DFS
+lang-painless:painless/190_term_statistics_script_score/match query: uniqueTermsCount without DFS
+lang-painless:painless/190_term_statistics_script_score/match_all query: docFreq
+lang-painless:painless/190_term_statistics_script_score/match_all query: termFreq
+lang-painless:painless/190_term_statistics_script_score/match_all query: termPositions
+lang-painless:painless/190_term_statistics_script_score/match_all query: totalTermFreq
+lang-painless:painless/190_term_statistics_script_score/match_all query: uniqueTermsCount
+lang-painless:painless/190_term_statistics_script_score/term query: docFreq max with DFS
+lang-painless:painless/190_term_statistics_script_score/term query: docFreq max without DFS
+lang-painless:painless/190_term_statistics_script_score/term query: docFreq min with DFS
+lang-painless:painless/190_term_statistics_script_score/term query: docFreq min without DFS
+lang-painless:painless/190_term_statistics_script_score/term query: matchedTermsCount with DFS
+lang-painless:painless/190_term_statistics_script_score/term query: matchedTermsCount without DFS
+lang-painless:painless/190_term_statistics_script_score/term query: termFreq sum with DFS
+lang-painless:painless/190_term_statistics_script_score/term query: termFreq sum without DFS
+lang-painless:painless/190_term_statistics_script_score/term query: termPositions avg with DFS
+lang-painless:painless/190_term_statistics_script_score/term query: termPositions avg without DFS
+lang-painless:painless/190_term_statistics_script_score/term query: totalTermFreq sum with DFS
+lang-painless:painless/190_term_statistics_script_score/term query: totalTermFreq sum without DFS
+lang-painless:painless/190_term_statistics_script_score/term query: uniqueTermsCount with DFS
+lang-painless:painless/190_term_statistics_script_score/term query: uniqueTermsCount without DFS
+lang-painless:painless/191_term_statistics_function_score/Complex bool query: uniqueTermsCount
+lang-painless:painless/191_term_statistics_function_score/match query: docFreq max with DFS
+lang-painless:painless/191_term_statistics_function_score/match query: docFreq max without DFS
+lang-painless:painless/191_term_statistics_function_score/match query: docFreq min with DFS
+lang-painless:painless/191_term_statistics_function_score/match query: docFreq min without DFS
+lang-painless:painless/191_term_statistics_function_score/match query: matchedTermsCount with DFS
+lang-painless:painless/191_term_statistics_function_score/match query: matchedTermsCount without DFS
+lang-painless:painless/191_term_statistics_function_score/match query: termFreq sum with DFS
+lang-painless:painless/191_term_statistics_function_score/match query: termFreq sum without DFS
+lang-painless:painless/191_term_statistics_function_score/match query: termPositions avg with DFS
+lang-painless:painless/191_term_statistics_function_score/match query: termPositions avg without DFS
+lang-painless:painless/191_term_statistics_function_score/match query: totalTermFreq sum with DFS
+lang-painless:painless/191_term_statistics_function_score/match query: totalTermFreq sum without DFS
+lang-painless:painless/191_term_statistics_function_score/match query: uniqueTermsCount with DFS
+lang-painless:painless/191_term_statistics_function_score/match query: uniqueTermsCount without DFS
+lang-painless:painless/191_term_statistics_function_score/match_all query: docFreq
+lang-painless:painless/191_term_statistics_function_score/match_all query: termFreq
+lang-painless:painless/191_term_statistics_function_score/match_all query: termPositions
+lang-painless:painless/191_term_statistics_function_score/match_all query: totalTermFreq
+lang-painless:painless/191_term_statistics_function_score/match_all query: uniqueTermsCount
+lang-painless:painless/191_term_statistics_function_score/term query: docFreq max with DFS
+lang-painless:painless/191_term_statistics_function_score/term query: docFreq max without DFS
+lang-painless:painless/191_term_statistics_function_score/term query: docFreq min with DFS
+lang-painless:painless/191_term_statistics_function_score/term query: docFreq min without DFS
+lang-painless:painless/191_term_statistics_function_score/term query: matchedTermsCount with DFS
+lang-painless:painless/191_term_statistics_function_score/term query: matchedTermsCount without DFS
+lang-painless:painless/191_term_statistics_function_score/term query: termFreq sum with DFS
+lang-painless:painless/191_term_statistics_function_score/term query: termFreq sum without DFS
+lang-painless:painless/191_term_statistics_function_score/term query: termPositions avg with DFS
+lang-painless:painless/191_term_statistics_function_score/term query: termPositions avg without DFS
+lang-painless:painless/191_term_statistics_function_score/term query: totalTermFreq sum with DFS
+lang-painless:painless/191_term_statistics_function_score/term query: totalTermFreq sum without DFS
+lang-painless:painless/191_term_statistics_function_score/term query: uniqueTermsCount with DFS
+lang-painless:painless/191_term_statistics_function_score/term query: uniqueTermsCount without DFS
+lang-painless:painless/20_scriptfield/Access a date
+lang-painless:painless/20_scriptfield/Access many dates
+lang-painless:painless/20_scriptfield/Scripted Field
+lang-painless:painless/20_scriptfield/Scripted Field Doing Compare
+lang-painless:painless/20_scriptfield/Scripted Field with a null safe dereference (non-null)
+lang-painless:painless/20_scriptfield/Scripted Field with a null safe dereference (null)
+lang-painless:painless/20_scriptfield/Scripted Field with script error
+lang-painless:painless/25_script_upsert/Script Upsert Metadata
+lang-painless:painless/25_script_upsert/Script Write Field
+lang-painless:painless/25_script_upsert/Script upsert
+lang-painless:painless/30_search/Agg _value
+lang-painless:painless/30_search/Custom Script Boost
+lang-painless:painless/30_search/Exception on negative score
+lang-painless:painless/30_search/Painless Query
+lang-painless:painless/30_search/Return self-referencing map
+lang-painless:painless/30_search/Scores Nested
+lang-painless:painless/30_search/Scores With Agg
+lang-painless:painless/30_search/Script Sort + _score
+lang-painless:painless/30_search/Use List Size In Scripts
+lang-painless:painless/45_script_doc_values_cache/test_leaf_cache_long_doc_first
+lang-painless:painless/45_script_doc_values_cache/test_leaf_cache_long_field_first
+lang-painless:painless/45_script_doc_values_cache/test_leaf_cache_text_doc_first
+lang-painless:painless/45_script_doc_values_cache/test_leaf_cache_text_field_first
+lang-painless:painless/50_script_doc_values/boolean
+lang-painless:painless/50_script_doc_values/boolean_no_doc_values
+lang-painless:painless/50_script_doc_values/boolean_synthetic
+lang-painless:painless/50_script_doc_values/byte
+lang-painless:painless/50_script_doc_values/byte_no_doc_values
+lang-painless:painless/50_script_doc_values/byte_synthetic
+lang-painless:painless/50_script_doc_values/date
+lang-painless:painless/50_script_doc_values/date_no_doc_values
+lang-painless:painless/50_script_doc_values/date_synthetic
+lang-painless:painless/50_script_doc_values/double
+lang-painless:painless/50_script_doc_values/double_no_doc_values
+lang-painless:painless/50_script_doc_values/double_synthetic
+lang-painless:painless/50_script_doc_values/empty
+lang-painless:painless/50_script_doc_values/flattened fields api
+lang-painless:painless/50_script_doc_values/float
+lang-painless:painless/50_script_doc_values/float_no_doc_values
+lang-painless:painless/50_script_doc_values/float_synthetic
+lang-painless:painless/50_script_doc_values/geo_point
+lang-painless:painless/50_script_doc_values/geo_point_no_doc_values
+lang-painless:painless/50_script_doc_values/geo_point_synthetic
+lang-painless:painless/50_script_doc_values/half_float
+lang-painless:painless/50_script_doc_values/half_float_no_doc_values
+lang-painless:painless/50_script_doc_values/half_float_synthetic
+lang-painless:painless/50_script_doc_values/integer
+lang-painless:painless/50_script_doc_values/integer_no_doc_values
+lang-painless:painless/50_script_doc_values/integer_synthetic
+lang-painless:painless/50_script_doc_values/ip
+lang-painless:painless/50_script_doc_values/ip_synthetic
+lang-painless:painless/50_script_doc_values/keyword
+lang-painless:painless/50_script_doc_values/keyword_no_doc_values
+lang-painless:painless/50_script_doc_values/keyword_stored_synthetic
+lang-painless:painless/50_script_doc_values/keyword_synthetic
+lang-painless:painless/50_script_doc_values/long
+lang-painless:painless/50_script_doc_values/long_no_doc_values
+lang-painless:painless/50_script_doc_values/long_synthetic
+lang-painless:painless/50_script_doc_values/match_only_text
+lang-painless:painless/50_script_doc_values/match_only_text_synthetic
+lang-painless:painless/50_script_doc_values/scaled_float
+lang-painless:painless/50_script_doc_values/scaled_float_no_doc_values
+lang-painless:painless/50_script_doc_values/scaled_float_synthetic
+lang-painless:painless/50_script_doc_values/short
+lang-painless:painless/50_script_doc_values/short_no_doc_values
+lang-painless:painless/50_script_doc_values/short_synthetic
+lang-painless:painless/50_script_doc_values/text
+lang-painless:painless/50_script_doc_values/text_no_field_data
+lang-painless:painless/50_script_doc_values/text_stored_synthetic
+lang-painless:painless/50_script_doc_values/text_sub_stored_keyword_synthetic
+lang-painless:painless/50_script_doc_values/text_synthetic
+lang-painless:painless/50_script_doc_values/token_count
+lang-painless:painless/50_script_doc_values/unsupported date methods
+lang-painless:painless/50_script_doc_values/version and sequence number
+lang-painless:painless/50_script_doc_values/version and sequence number synthetic _source
+lang-painless:painless/55_script_doc_values_dup/boolean_dup_order
+lang-painless:painless/55_script_doc_values_dup/byte_dup_order
+lang-painless:painless/55_script_doc_values_dup/double_dup_order
+lang-painless:painless/55_script_doc_values_dup/float_dup_order
+lang-painless:painless/55_script_doc_values_dup/geo_point_dup_order
+lang-painless:painless/55_script_doc_values_dup/half_float_dup_order
+lang-painless:painless/55_script_doc_values_dup/integer_dup_order
+lang-painless:painless/55_script_doc_values_dup/keyword_dup_order
+lang-painless:painless/55_script_doc_values_dup/long_dup_order
+lang-painless:painless/55_script_doc_values_dup/scaled_float_dup_order
+lang-painless:painless/55_script_doc_values_dup/short_dup_order
+lang-painless:painless/60_script_doc_values_binary/binary
+lang-painless:painless/65_runtime_doc_values/doc_from_doc
+lang-painless:painless/65_runtime_doc_values/doc_from_field
+lang-painless:painless/65_runtime_doc_values/field_from_doc
+lang-painless:painless/65_runtime_doc_values/field_from_field
+lang-painless:painless/65_runtime_doc_values/qt_doc_from_doc
+lang-painless:painless/65_runtime_doc_values/qt_doc_from_field
+lang-painless:painless/65_runtime_doc_values/qt_field_from_doc
+lang-painless:painless/65_runtime_doc_values/qt_field_from_field
+lang-painless:painless/70_execute_painless_scripts/Execute against an empty index with no mappings
+lang-painless:painless/70_execute_painless_scripts/Execute with boolean field context (multi-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with boolean field context (single-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with date field context (multi-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with date field context (single-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with defaults
+lang-painless:painless/70_execute_painless_scripts/Execute with double field context (multi-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with double field context (single-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with filter context
+lang-painless:painless/70_execute_painless_scripts/Execute with geo point field context (multi-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with geo point field context (single-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with ip field context (multi-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with ip field context (single-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with keyword field context (multi-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with keyword field context (single-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with long field context (multi-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with long field context (single-value)
+lang-painless:painless/70_execute_painless_scripts/Execute with painless_test context
+lang-painless:painless/70_execute_painless_scripts/Execute with score context
+lang-painless:painless/80_script_score/Decay date functions
+lang-painless:painless/80_script_score/Decay geo functions
+lang-painless:painless/80_script_score/Decay numeric functions
+lang-painless:painless/80_script_score/Explain nested script_score within rescore
+lang-painless:painless/80_script_score/Math functions
+lang-painless:painless/80_script_score/Script Score With Highlight
+lang-painless:painless/85_script_score_random_score/Random score function with _seq_no field
+lang-painless:painless/85_script_score_random_score/Random score function with internal doc Ids
+lang-painless:painless/90_interval_query_filter/Test filtering by script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in aggregation script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in boolean runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in bytesref (version) sort script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in composite runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in date runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in double runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in filter script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in geo_point runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in interval filter script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in ip runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in keyword runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in long runtime field script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in number sort script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in script_score
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in scripted_metric map_script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in string sort script
+lang-painless:painless/95_script_cancellation/Def lambda loop cancelled in terms_set minimum_should_match script
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Collection findAll augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running IntStream reduce augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Iterable findResults augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Map findAll augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running PrimitiveIterator.OfDouble forEachRemaining augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running PrimitiveIterator.OfInt forEachRemaining augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running PrimitiveIterator.OfLong forEachRemaining augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Spliterator.OfDouble forEachRemaining augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Spliterator.OfInt forEachRemaining augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Spliterator.OfLong forEachRemaining augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Stream collect(Collector) augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running Stream forEach augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running String indexOf augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running String.replace augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running aggregation script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running boolean runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running bytesref (version) sort script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running composite runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running date runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running def each augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running double runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running each augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running filter script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running geo_point runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running interval filter script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running ip runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running keyword runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running long runtime field script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running number sort script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running removeIf augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running replaceAll augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running script_score loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running scripted_metric map_script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running string sort script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a long-running terms_set minimum_should_match script loop
+lang-painless:painless/95_script_cancellation/Search timeout aborts a nested each-in-each augmentation loop
+lang-painless:painless/95_script_cancellation/Search timeout cancels a loop inside a static lambda in a filter script
+lang-painless:painless/95_script_cancellation/Search timeout cancels a loop inside a static lambda in a runtime long field
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in aggregation script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in boolean runtime field script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in bytesref (version) sort script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in composite runtime field script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in date runtime field script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in double runtime field script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in geo_point runtime field script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in interval filter script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in ip runtime field script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in keyword runtime field script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in number sort script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in script_score
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in scripted_metric map_script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in string sort script
+lang-painless:painless/95_script_cancellation/Static lambda loop cancelled in terms_set minimum_should_match script

@@ -568,6 +568,7 @@ pub fn suggest_profiles(ctx: &Ctx) -> EsResult<Reply> {
 pub fn has_privileges_profile(ctx: &Ctx) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let st = ctx.state();
+    let file = super::file_roles(ctx.cluster);
     let uids: Vec<String> = body.get("uids").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
     let privs = body.get("privileges").cloned().unwrap_or_else(Value::object);
     let mut has = Vec::new();
@@ -588,7 +589,7 @@ pub fn has_privileges_profile(ctx: &Ctx) -> EsResult<Reply> {
             realm_type: "native",
             kind: AuthKind::Realm,
         };
-        let (all, ..) = super::users::check_privileges(&st, &principal, &privs)?;
+        let (all, ..) = super::users::check_privileges(&file, &st, &principal, &privs)?;
         if all {
             has.push(Value::from(u));
         }

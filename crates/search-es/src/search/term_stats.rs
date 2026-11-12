@@ -47,6 +47,10 @@ impl QueryVisitor for Collector<'_> {
             self.seen.insert(key);
         }
     }
+
+    /// Lucene's `termCollector` only implements `consumeTerms`: a `TermInSetQuery` of
+    /// several terms contributes none.
+    fn term_set(&mut self, _field: u32, _terms: &[Vec<u8>]) {}
 }
 
 impl QueryTerms {

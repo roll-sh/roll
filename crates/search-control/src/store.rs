@@ -113,6 +113,10 @@ CREATE INDEX search_clusters_seq ON search_clusters (seq);
 CREATE TABLE search_tombstones (name TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX search_tombstones_seq ON search_tombstones (seq);
 "#,
+    // Nodes look up the always-on clusters every few lease periods; few clusters are.
+    r#"
+CREATE INDEX search_clusters_always_on ON search_clusters (created_at) WHERE idle_timeout_s = 0;
+"#,
 ];
 
 const PG_SCHEMA: &str = r#"
@@ -127,6 +131,7 @@ CREATE TABLE IF NOT EXISTS roll_search_clusters (
 );
 CREATE INDEX IF NOT EXISTS roll_search_clusters_seq ON roll_search_clusters (seq);
 CREATE INDEX IF NOT EXISTS roll_search_clusters_parent ON roll_search_clusters (parent_id);
+CREATE INDEX IF NOT EXISTS roll_search_clusters_always_on ON roll_search_clusters (created_at) WHERE idle_timeout_s = 0;
 CREATE TABLE IF NOT EXISTS roll_search_tombstones (name TEXT NOT NULL, seq BIGINT NOT NULL, at BIGINT NOT NULL);
 CREATE INDEX IF NOT EXISTS roll_search_tombstones_seq ON roll_search_tombstones (seq);
 CREATE TABLE IF NOT EXISTS roll_search_usage (
@@ -415,6 +420,12 @@ impl Store {
         self.many("", None).await
     }
 
+    /// Clusters that never unload (`idle_timeout_s` 0), through a partial index: what every node
+    /// of a fleet polls, so it stays cheap however large the catalog grows.
+    pub async fn always_on(&self) -> anyhow::Result<Vec<SearchCluster>> {
+        self.many("AND idle_timeout_s = 0", None).await
+    }
+
     /// Clusters branched from `id`.
     pub async fn children(&self, id: &str) -> anyhow::Result<Vec<SearchCluster>> {
         self.many("AND parent_id = ?1", Some(id)).await
@@ -687,6 +698,13 @@ mod tests {
         let back = s.get("srch_a").await.unwrap().unwrap();
         assert_eq!((back.flavor.as_str(), back.password.as_str(), back.max_in_flight), ("opensearch", "new", 8));
         assert_eq!(s.list().await.unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["app", "app-dev"]);
+        assert!(s.always_on().await.unwrap().is_empty());
+        c.idle_timeout_s = 0;
+        s.update(&c).await.unwrap();
+        assert_eq!(s.always_on().await.unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["app"]);
+        s.set_deleting("srch_a", true).await.unwrap();
+        assert!(s.always_on().await.unwrap().is_empty(), "a cluster being deleted is never loaded");
+        s.set_deleting("srch_a", false).await.unwrap();
         s.delete("srch_a").await.unwrap();
         assert!(s.get("srch_a").await.unwrap().is_none());
         s.delete("srch_c").await.unwrap();

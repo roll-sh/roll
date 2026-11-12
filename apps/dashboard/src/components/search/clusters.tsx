@@ -154,8 +154,8 @@ function ClusterList({
                 </div>
                 <div className="hidden min-w-0 font-mono text-[11px] text-subtle md:block">
                   <p className="truncate">
-                    <span className={on ? "text-fg" : ""}>{formatCount(c.status.indices ?? c.indices)}</span> indices ·{" "}
-                    {formatCount(c.docs)} docs
+                    <span className={on ? "text-fg" : ""}>{formatCount(c.status.indices ?? c.indices)}</span>{" "}
+                    {(c.status.indices ?? c.indices) === 1 ? "index" : "indices"} · {formatCount(c.docs)} {c.docs === 1 ? "doc" : "docs"}
                   </p>
                   <p className="truncate">{formatBytes(c.stored_bytes)} stored</p>
                 </div>

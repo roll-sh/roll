@@ -9,8 +9,9 @@
 //!
 //! A snapshot records what restoring needs: the metadata of each index (settings, mappings,
 //! aliases), the data streams, and with `include_global_state` the templates, pipelines,
-//! stored scripts and persistent settings. Shard data is not captured yet (there is no
-//! engine), so every shard snapshot is empty and successful.
+//! stored scripts and persistent settings, plus what each shard snapshot holds
+//! ([`ShardFiles`]: the files it references and those it added, for `_snapshot/_status` and
+//! `index_details`). The shard contents themselves are kept by `api::snapshots`.
 
 use crate::json::{Map, Value};
 use crate::meta::settings::Settings;
@@ -74,9 +75,65 @@ pub struct Snapshot {
     pub data_stream_meta: BTreeMap<String, Value>,
     /// The global state when `include_global_state`: templates, pipelines, scripts, settings.
     pub global: Option<Value>,
+    /// Each shard's files by index name (shard order). Empty for snapshots recorded before
+    /// shard files were.
+    pub shard_files: BTreeMap<String, Vec<ShardFiles>>,
+}
+
+/// One shard snapshot's files (Elasticsearch's `IndexShardSnapshotStatus` counts): every file
+/// it references (`total`) and those this snapshot added, the rest being shared with an
+/// earlier snapshot of the same shard (`incremental`), plus when it was taken.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShardFiles {
+    pub file_count: u64,
+    pub size_in_bytes: u64,
+    pub incremental_file_count: u64,
+    pub incremental_size_in_bytes: u64,
+    /// Segments in the shard (`max_segments_per_shard`).
+    pub segments: u32,
+    pub start_ms: i64,
+    pub time_ms: i64,
+}
+
+impl ShardFiles {
+    /// What a snapshot recorded before shard files were reports: one small commit point.
+    pub const UNRECORDED: ShardFiles =
+        ShardFiles { file_count: 1, size_in_bytes: 227, incremental_file_count: 1, incremental_size_in_bytes: 227, segments: 0, start_ms: 0, time_ms: 0 };
+
+    fn to_stored(self) -> Value {
+        Value::Arr(
+            [self.file_count as i64, self.size_in_bytes as i64, self.incremental_file_count as i64, self.incremental_size_in_bytes as i64, self.segments as i64, self.start_ms, self.time_ms]
+                .into_iter()
+                .map(Value::from)
+                .collect(),
+        )
+    }
+
+    fn from_stored(v: &Value) -> Option<ShardFiles> {
+        let a = v.as_array()?;
+        let n = |i: usize| a.get(i).and_then(Value::as_i64);
+        Some(ShardFiles {
+            file_count: n(0)? as u64,
+            size_in_bytes: n(1)? as u64,
+            incremental_file_count: n(2)? as u64,
+            incremental_size_in_bytes: n(3)? as u64,
+            segments: n(4)? as u32,
+            start_ms: n(5)?,
+            time_ms: n(6)?,
+        })
+    }
 }
 
 impl Snapshot {
+    /// The files of index `index`'s `shards` shards, as recorded or (older snapshots) as
+    /// [`ShardFiles::UNRECORDED`] taken over the snapshot's whole duration.
+    pub fn files(&self, index: &str, shards: usize) -> std::borrow::Cow<'_, [ShardFiles]> {
+        match self.shard_files.get(index) {
+            Some(f) if f.len() == shards => std::borrow::Cow::Borrowed(f),
+            _ => std::borrow::Cow::Owned(vec![ShardFiles { start_ms: self.start_ms, time_ms: (self.end_ms - self.start_ms).max(0), ..ShardFiles::UNRECORDED }; shards]),
+        }
+    }
+
     pub fn to_stored(&self) -> Value {
         obj! {
             "name" => self.name.clone(), "uuid" => self.uuid.clone(),
@@ -89,6 +146,7 @@ impl Snapshot {
             "index_meta" => Value::Obj(self.index_meta.clone().into_iter().collect()),
             "data_stream_meta" => Value::Obj(self.data_stream_meta.clone().into_iter().collect()),
             "global" => self.global.clone().unwrap_or(Value::Null),
+            "shard_files" => Value::Obj(self.shard_files.iter().map(|(k, v)| (k.clone(), Value::Arr(v.iter().map(|f| f.to_stored()).collect()))).collect()),
         }
     }
 
@@ -111,6 +169,11 @@ impl Snapshot {
             index_meta: map("index_meta"),
             data_stream_meta: map("data_stream_meta"),
             global: v.get("global").filter(|g| !g.is_null()).cloned(),
+            shard_files: v
+                .get("shard_files")
+                .and_then(Value::as_object)
+                .map(|m| m.iter().map(|(k, a)| (k.clone(), a.as_array().map(|a| a.iter().filter_map(ShardFiles::from_stored).collect()).unwrap_or_default())).collect())
+                .unwrap_or_default(),
         })
     }
 }
@@ -182,6 +245,7 @@ mod tests {
             index_meta: BTreeMap::new(),
             data_stream_meta: BTreeMap::new(),
             global: None,
+            shard_files: BTreeMap::from([("i".to_string(), vec![ShardFiles { file_count: 3, size_in_bytes: 900, incremental_file_count: 1, incremental_size_in_bytes: 100, segments: 2, start_ms: 1, time_ms: 1 }])]),
         };
         let data = RepositoryData { uuid: "r".into(), generation: 3, snapshots: vec![Arc::new(snap)] };
         assert_eq!(RepositoryData::from_stored(&data.to_stored()).unwrap(), data);

@@ -211,8 +211,17 @@ fn write_points_impl<O: Out + ?Sized>(
             order.push(i)?;
         }
         let mut order = order.finish()?;
+        // One dimension of 13-16 bytes (ip): one sort by (value, doc) as integers instead of a
+        // median selection per level and a sort per leaf over `memcmp`ed slices. A 1-d tree is
+        // the sorted points cut into leaves, so the output is the same.
+        let sorted = fast && spec.dims == 1 && plen <= 16;
+        if sorted {
+            let key = |p: u32| (be_u128(&values[p as usize * plen..(p as usize + 1) * plen]), docs[p as usize]);
+            order.sort_unstable_by_key(|&p| key(p));
+        }
         let scratch = if bpd <= 8 { Some(SpillSlice::<u128>::zeroed(n, spill)?) } else { None };
         let mut b = Builder {
+            sorted,
             scratch,
             spec,
             plen,
@@ -264,6 +273,8 @@ struct Builder<'a> {
     offsets: Vec<u64>,
     leaf_docs: Vec<u32>,
     leaf_values: Vec<u8>,
+    /// The points are already in (value, doc) order (one dimension): no selection, no leaf sort.
+    sorted: bool,
     /// Selection keys for values of at most 8 bytes (one per point).
     scratch: Option<SpillSlice<u128>>,
     out: SinkOut<'a>,
@@ -288,6 +299,7 @@ impl Builder<'_> {
         let left = pts.len() * ll / tl;
         let (bpd, plen, values, docs) = (self.bpd, self.plen, self.values, self.docs);
         let best = match self.scratch.take() {
+            _ if self.sorted => 0,
             Some(mut scratch) => {
                 // Values of at most 8 bytes compare as integers: spans and the median selection
                 // run over contiguous (value, doc, index) keys instead of indirect slices.
@@ -382,11 +394,13 @@ impl Builder<'_> {
                 self.leaf_values.extend_from_slice(&(k >> 32).to_be_bytes()[16 - plen..]);
             }
         } else {
-            pts.sort_unstable_by(|&a, &b| {
-                values[a as usize * plen..(a as usize + 1) * plen]
-                    .cmp(&values[b as usize * plen..(b as usize + 1) * plen])
-                    .then(docs[a as usize].cmp(&docs[b as usize]))
-            });
+            if !self.sorted {
+                pts.sort_unstable_by(|&a, &b| {
+                    values[a as usize * plen..(a as usize + 1) * plen]
+                        .cmp(&values[b as usize * plen..(b as usize + 1) * plen])
+                        .then(docs[a as usize].cmp(&docs[b as usize]))
+                });
+            }
             for &p in pts.iter() {
                 self.leaf_docs.push(docs[p as usize]);
                 self.leaf_values.extend_from_slice(&values[p as usize * plen..(p as usize + 1) * plen]);
@@ -572,6 +586,19 @@ impl<O: Out + ?Sized> KeyBuilder<'_, O> {
         let (l, r) = keys.split_at_mut(left);
         self.build(2 * node, l, sorted);
         self.build(2 * node + 1, r, sorted);
+    }
+}
+
+/// A big-endian value of at most 16 bytes as an integer (orders like the bytes).
+#[inline]
+fn be_u128(b: &[u8]) -> u128 {
+    match <[u8; 16]>::try_from(b) {
+        Ok(a) => u128::from_be_bytes(a),
+        Err(_) => {
+            let mut a = [0u8; 16];
+            a[16 - b.len()..].copy_from_slice(b);
+            u128::from_be_bytes(a)
+        }
     }
 }
 
@@ -1748,6 +1775,10 @@ mod tests {
             (20_000, 12, u64::MAX),
             (3001, 1, 200),
             (70_000, 8, 5000),
+            (9000, 16, 40),
+            (9000, 16, u64::MAX),
+            (2049, 13, 7),
+            (600, 15, u64::MAX),
         ] {
             let spec = PointsSpec::new(1, bpd);
             let mut docs = Vec::new();
@@ -1757,8 +1788,11 @@ mod tests {
                 let v: u64 = rng.gen_range(0..distinct.max(1));
                 let mut be = [0u8; 16];
                 be[8..].copy_from_slice(&v.to_be_bytes());
-                if bpd > 8 {
+                if bpd > 8 && distinct > 100 {
                     rng.fill(&mut be[..8]);
+                } else if bpd > 8 {
+                    // Few distinct wide values: runs of duplicates across leaves.
+                    be[..8].copy_from_slice(&(v * 0x0101_0101).to_be_bytes());
                 }
                 values.extend_from_slice(&be[16 - bpd as usize..]);
             }

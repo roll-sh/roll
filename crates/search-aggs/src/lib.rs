@@ -63,7 +63,7 @@ pub mod xparser;
 pub use collect::{AggCollector, ShardOptions};
 pub use error::{AggError, Result};
 pub use field::{
-    AggField, FetchHit, FieldLookup, HitSort, JoinRelation, NestedLookup, NestedPath, NumericType, SortMissing, SortMode, SourceType, StaticFields, TextTerms,
+    AggField, FetchHit, FieldLookup, HitSort, JoinRelation, NestedLookup, NestedPath, NumericType, SortMissing, SortMode, SortNumericType, SourceType, StaticFields, TextTerms,
     TimeSeriesInfo, TopHitsFetcher,
 };
 pub use format::{DateFormatter, DocValueFormat, NumberFormatter, TimeZone};

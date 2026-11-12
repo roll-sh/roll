@@ -70,7 +70,7 @@ pub fn apply(source: &mut SearchSource, url_sort: bool) -> EsResult<()> {
     let mut errors: Vec<String> = Vec::new();
     for (name, field, window) in &checks {
         // Compound retrievers only check a `size` the request sets.
-        if matches!(name.as_str(), "rrf" | "linear" | "pinned") && source.size.is_none() {
+        if matches!(name.as_str(), "rrf" | "linear" | "pinned" | "rule") && source.size.is_none() {
             if *window < 0 {
                 errors.push(format!("[{field}] parameter cannot be negative, found [{window}]"));
             }
@@ -836,6 +836,63 @@ fn extract(
                 _ => None,
             };
             *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic }, window, min_score: None, children: vec![src], names: vec![inner_name], tails: vec![Some(query)] });
+            let _ = out;
+            Ok(())
+        }
+        "rule" => {
+            // `QueryRuleRetrieverBuilder`: like `pinned`, the child's query becomes the organic
+            // query of a `rule` query, whose matching rules pin and exclude documents.
+            for k in body.keys() {
+                if !matches!(k.as_str(), "ruleset_ids" | "match_criteria" | "retriever" | "rank_window_size" | "filter" | "min_score" | "_name") {
+                    return Err(unknown(name, k));
+                }
+            }
+            let mut absent: Vec<&str> = ["match_criteria", "retriever", "ruleset_ids"].into_iter().filter(|k| !body.contains_key(*k)).collect();
+            if !absent.is_empty() {
+                absent.sort_unstable();
+                return Err(EsError::parse(format!("Required [{}]", absent.join(", "))));
+            }
+            let ruleset_ids = match &body["ruleset_ids"] {
+                Value::Arr(a) => Value::Arr(a.clone()),
+                other => crate::arr![other.clone()],
+            };
+            let Some(Value::Obj(inner)) = body.get("retriever") else { return Err(EsError::parse("Required [retriever]")) };
+            if matches!(entry(inner)?.0, "rrf" | "linear") {
+                return Err(EsError::not_implemented("[rule] retriever over a compound retriever"));
+            }
+            let window = body.get("rank_window_size").and_then(Value::as_i64).unwrap_or(10);
+            checks.push((name.to_string(), "rank_window_size", window));
+            let mut fs = filters(body.get("filter"));
+            fs.extend(inherited.iter().cloned());
+            let inner_name = entry(inner)?.1.get("_name").map(Value::to_es_string);
+            let mut sub = Map::new();
+            crate::stack::maybe_grow(|| extract(inner, true, depth + 1, &fs, &mut sub, checks, diversify, fusion))?;
+            if let Some(sort) = sub.get("sort") {
+                let first = match sort {
+                    Value::Arr(a) => a.first().cloned(),
+                    other => Some(other.clone()),
+                };
+                let by_score = match &first {
+                    None => true,
+                    Some(Value::Str(s)) => s == "_score",
+                    Some(Value::Obj(m)) => m.contains_key("_score"),
+                    _ => false,
+                };
+                if !by_score {
+                    let e = EsError::illegal_argument(format!("[rule] retriever only supports sort by score, got: [{}]", sort.to_json()));
+                    return Err(EsError::parse(e.reason().to_string()).caused_by(e));
+                }
+            }
+            let organic = sub.shift_remove("query").unwrap_or_else(|| crate::obj! { "match_all" => crate::obj! {} });
+            let query = crate::obj! { "rule" => crate::obj! {
+                "organic" => organic.clone(),
+                "match_criteria" => body["match_criteria"].clone(),
+                "ruleset_ids" => ruleset_ids,
+            } };
+            sub.insert("query".into(), query.clone());
+            let mut src = SearchSource::parse(&Value::Obj(sub), None)?;
+            src.diversify = diversify.take();
+            *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic: Some(organic) }, window, min_score: None, children: vec![src], names: vec![inner_name], tails: vec![Some(query)] });
             let _ = out;
             Ok(())
         }

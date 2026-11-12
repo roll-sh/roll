@@ -135,7 +135,9 @@ fn merge_key(by_shard: bool, doc: u32, shard: usize) -> u64 {
 /// Shard failures fail the whole operation as Elasticsearch's scroll does
 /// (`search_phase_execution_exception`, "all shards failed" / "Partial shards failure");
 /// `need_source` (reindex, update by query) rejects documents without a stored `_source`;
-/// `by_shard` (reindex) reads the shards one after the other (see [`Scanner`]).
+/// `by_shard` (reindex) reads the shards one after the other (see [`Scanner`]). The search runs
+/// as an `indices:data/read/search` child of task `parent` (with its per-shard children), as
+/// the scroll an Elasticsearch by-query run opens does.
 #[allow(clippy::too_many_arguments)]
 pub fn scan(
     ctx: &Ctx,
@@ -146,6 +148,7 @@ pub fn scan(
     slice: Option<(u32, u32)>,
     need_source: bool,
     by_shard: bool,
+    parent: u64,
 ) -> EsResult<Scanner> {
     let cluster = ctx.cluster;
     let st = cluster.state();
@@ -168,6 +171,7 @@ pub fn scan(
         now_ms: ctx.now_ms,
     };
     let targets = crate::search::shard_targets(cluster, &st, &req)?;
+    let _tasks = crate::tasks::scan_started(ctx, parent, &req, &targets);
     let mut shards = Vec::new();
     let mut matched = 0u64;
     let mut failures: Vec<(usize, EsError)> = Vec::new();
@@ -370,6 +374,8 @@ impl std::fmt::Debug for Live {
 /// rate, which `_rethrottle` changes while it runs, its progress for `GET _tasks`, and the
 /// states of its slices (child tasks).
 pub struct Live {
+    /// The task this run (or slice) reports as; its searches are its children.
+    task: u64,
     slice_id: Option<u32>,
     /// Documents per second; not positive or not finite: unthrottled.
     rps: parking_lot::Mutex<f64>,
@@ -387,8 +393,9 @@ fn per_slice(rps: f64, n: usize) -> f64 {
 }
 
 impl Live {
-    fn new(slice_id: Option<u32>, rps: f64, cancelled: Vec<Arc<std::sync::atomic::AtomicBool>>) -> Arc<Live> {
+    fn new(task: u64, slice_id: Option<u32>, rps: f64, cancelled: Vec<Arc<std::sync::atomic::AtomicBool>>) -> Arc<Live> {
         Arc::new(Live {
+            task,
             slice_id,
             rps: parking_lot::Mutex::new(rps),
             changed: tokio::sync::Notify::new(),
@@ -552,7 +559,7 @@ where
     let headers = ctx.request.header("x-opaque-id").map(|v| vec![("X-Opaque-Id".to_string(), v.to_string())]).unwrap_or_default();
     let new_live = |id: u64| {
         let flag = tasks.get(id).map(|t| t.cancelled).unwrap_or_default();
-        let live = Live::new(None, rps, vec![flag]);
+        let live = Live::new(id, None, rps, vec![flag]);
         tasks.set_live(id, live.clone());
         live
     };
@@ -700,7 +707,7 @@ where
     for i in 0..n {
         let g = tasks.register(action, description, Some(task), headers.clone());
         let flag = tasks.get(g.id).map(|t| t.cancelled).unwrap_or_default();
-        let live = Live::new(Some(i), per_slice(parent.rate(), n as usize), vec![flag, parent_flag.clone()]);
+        let live = Live::new(g.id, Some(i), per_slice(parent.rate(), n as usize), vec![flag, parent_flag.clone()]);
         tasks.set_live(g.id, live.clone());
         guards.push(g);
         lives.push(live);
@@ -907,7 +914,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing) = (&indices, &query, &routing);
             async move {
-                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false, false)?;
+                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false, false, live.task)?;
                 let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                 let mut touched = Vec::new();
                 let mut throttle = Throttle::new(live.clone());
@@ -983,7 +990,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing, bound, pipeline) = (&indices, &query, &routing, &bound, &pipeline);
             async move {
-                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false)?;
+                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false, live.task)?;
                 let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                 let mut touched = Vec::new();
                 let mut throttle = Throttle::new(live.clone());
@@ -1326,7 +1333,7 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
                     let (src_indices, query, plan) = (&src_indices, &query, &plan);
                     async move {
-                        let mut scanner = scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true, true)?;
+                        let mut scanner = scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true, true, live.task)?;
                         let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                         let mut touched = Vec::new();
                         let mut throttle = Throttle::new(live.clone());

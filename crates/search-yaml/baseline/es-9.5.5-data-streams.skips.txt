@@ -1,0 +1,14 @@
+# Environment skips of the `data-streams` extended suite: tests that fail on a private single-node
+# Elasticsearch 9.5.5 in Docker for a reason outside the server under test (scripts/search-yaml-suites.sh
+# es-extended-baseline). Format: `<glob over test ids>  # reason`; roll skips them too.
+
+data-streams:data_stream/10_basic/Create data stream  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/10_basic/Create data stream with failure store  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/10_basic/Create data stream with match all template  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/10_basic/Create hidden data stream with match all template  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/10_basic/Get data stream api check existence of allow_custom_routing field  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/10_basic/Get data stream api check existence of replicated field  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/120_data_streams_stats/Multiple data stream  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/150_tsdb/created the data stream  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/240_data_stream_settings/Test null out settings component templates only  # needs two nodes (waits for green with a replica)
+data-streams:data_stream/250_data_stream_mappings/Test mappings component templates only  # needs two nodes (waits for green with a replica)

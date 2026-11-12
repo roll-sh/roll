@@ -10,7 +10,8 @@
 //! [`BODY_TIMEOUT`] overall — and only then does it take the cluster's concurrency permit and a
 //! node-wide running slot, so stalled uploads can't exhaust them.
 //!
-//! Elasticsearch's HTTP limits and failures, as Netty reports them: a request line over
+//! Elasticsearch's HTTP limits and failures, as Netty reports them: an `Expect` other than
+//! `100-continue` gets an empty `417 Expectation Failed`; a request line over
 //! [`MAX_INITIAL_LINE`] bytes or headers over [`MAX_HEADER_SIZE`] get 400
 //! `too_long_http_line_exception` / `too_long_http_header_exception` and the connection closes;
 //! a body over `http.max_content_length` gets an empty `413 Request Entity Too Large` and the
@@ -23,8 +24,10 @@
 //!
 //! [`serve_until`] stops gracefully: it stops accepting, lets every request in flight finish
 //! (closing keep-alive connections after their current response) and returns once all
-//! connections are gone; the caller then shuts the node down ([`Node::shutdown`]), which
-//! flushes.
+//! connections are gone. A request still running after [`DRAIN_TIMEOUT`] has its task
+//! cancelled ([`Node::cancel_tasks`]: a search without a timeout answers with its
+//! cancellation instead of holding the stop), and the stop goes ahead after as long again. The
+//! caller then shuts the node down ([`Node::shutdown`]), which flushes.
 
 use crate::net::read_proxy_header;
 use crate::node::{Node, Rejected};
@@ -63,7 +66,13 @@ pub struct ListenOptions {
     pub proxy_protocol: bool,
     /// Overrides [`BODY_IDLE_TIMEOUT`] and [`BODY_TIMEOUT`] (tests).
     pub body_timeouts: Option<(Duration, Duration)>,
+    /// Overrides [`DRAIN_TIMEOUT`] (tests).
+    pub drain_timeout: Option<Duration>,
 }
+
+/// How long a graceful stop lets requests in flight finish before cancelling the node's tasks
+/// (searches, by-query runs); they then get as long again to answer.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Triggers a graceful stop of [`serve_until`].
 #[derive(Clone)]
@@ -158,12 +167,32 @@ pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOpt
         });
     }
     drop(listener);
+    // Requests in flight finish; a search still running after the drain period is cancelled
+    // (it answers with its cancellation), and after as long again the stop goes ahead.
+    let drain = opts.drain_timeout.unwrap_or(DRAIN_TIMEOUT);
+    if !wait_closed(&conns, drain).await {
+        let n = node.cancel_tasks();
+        tracing::info!(cancelled = n, "requests still running after the drain period: cancelling their tasks");
+        if !wait_closed(&conns, drain).await {
+            tracing::warn!(open = conns.open.load(std::sync::atomic::Ordering::SeqCst), "connections still open at shutdown");
+        }
+    }
+    Ok(())
+}
+
+/// Waits until every connection has closed, at most `timeout`; whether they all did.
+async fn wait_closed(conns: &Conns, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let idle = conns.idle.notified();
+        tokio::pin!(idle);
+        idle.as_mut().enable();
         if conns.open.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-            return Ok(());
+            return true;
         }
-        idle.await;
+        if tokio::time::timeout_at(deadline, idle).await.is_err() {
+            return conns.open.load(std::sync::atomic::Ordering::SeqCst) == 0;
+        }
     }
 }
 
@@ -201,7 +230,7 @@ where
         .auto_date_header(false)
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Duration::from_secs(30));
-    let conn = builder.serve_connection(TokioIo::new(io), svc);
+    let conn = builder.serve_connection(TokioIo::new(crate::http_head::FirstHead::new(io)), svc);
     tokio::pin!(conn);
     let stopped = *stop.borrow();
     let r = if stopped {
@@ -223,7 +252,12 @@ where
 }
 
 fn head_of(req: &Request<Incoming>) -> EsRequest {
-    let uri = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+    // An absolute-form target (`GET http://host/ HTTP/1.1`) is routed as written, as Netty
+    // hands it to Elasticsearch: no handler matches it.
+    let uri = match req.uri().authority() {
+        Some(_) => req.uri().to_string(),
+        None => req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into()),
+    };
     let mut headers = Vec::with_capacity(req.headers().len());
     for (k, v) in req.headers() {
         headers.push((k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()));
@@ -282,6 +316,16 @@ fn too_large() -> Response<Full<Bytes>> {
 }
 
 fn closing(mut r: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+    r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+    r
+}
+
+/// Netty's `HttpObjectAggregator` answer to an `Expect` it can't meet: an empty
+/// `417 Expectation Failed`, then the connection closes.
+fn expectation_failed() -> Response<Full<Bytes>> {
+    let mut r = Response::new(Full::new(Bytes::new()));
+    *r.status_mut() = StatusCode::EXPECTATION_FAILED;
+    r.headers_mut().insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
     r.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
     r
 }
@@ -347,6 +391,10 @@ async fn respond(node: Arc<Node>, req: Request<Incoming>, sni: Option<&str>, tim
     let gzip_ok = accepts_gzip(es.header("accept-encoding")) && es.method != "HEAD";
     if let Some(e) = head_too_long(&req) {
         return Ok(closing(to_hyper(search_es::rest::error_response(&e, &es, search_es::Dialect::Elasticsearch), gzip_ok).await));
+    }
+    // Only `100-continue` can be met (hyper sends the `100 Continue` when the body is read).
+    if es.header("expect").is_some_and(|v| !v.trim().eq_ignore_ascii_case("100-continue")) {
+        return Ok(expectation_failed());
     }
     let mut lease = match node.enter(&es, sni).await {
         Ok(l) => l,

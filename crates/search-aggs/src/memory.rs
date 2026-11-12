@@ -70,15 +70,20 @@ impl MemoryBudget {
     }
 }
 
+/// What Elasticsearch 9.5.5 appends to every circuit breaker message
+/// (`ReferenceDocs.CIRCUIT_BREAKER_ERRORS`); OpenSearch appends nothing.
+pub const CIRCUIT_BREAKER_DOCS: &str = "; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5";
+
 /// `CircuitBreakingException` as Elasticsearch renders it.
 pub fn breaking_error(name: &str, label: &str, wanted: u64, limit: u64) -> AggError {
     AggError::new(
         429,
         "circuit_breaking_exception",
         format!(
-            "[{name}] Data too large, data for [{label}] would be [{wanted}/{}], which is larger than the limit of [{limit}/{}]",
+            "[{name}] Data too large, data for [{label}] would be [{wanted}/{}], which is larger than the limit of [{limit}/{}]{}",
             byte_size(wanted),
-            byte_size(limit)
+            byte_size(limit),
+            if crate::dialect::opensearch() { "" } else { CIRCUIT_BREAKER_DOCS }
         ),
     )
     .with_meta("bytes_wanted", Json::from(wanted))

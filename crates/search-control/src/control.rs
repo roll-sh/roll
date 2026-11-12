@@ -375,6 +375,8 @@ pub struct Fleet {
     /// it, as the proxies do.
     http: Forwarder,
     pins: Arc<search_proxy::upstream::Pins>,
+    /// The last answer of [`Control::plain_api_callers`] and when it was read.
+    plain_callers: Mutex<Option<(Instant, bool)>>,
 }
 
 /// The client API calls are forwarded to other nodes with.
@@ -489,6 +491,7 @@ impl Control {
                         .pool_idle_timeout(Duration::from_secs(60))
                         .build(search_proxy::upstream::Connector::new(connector, pins.clone(), Duration::from_secs(5))),
                     pins,
+                    plain_callers: Mutex::new(None),
                 }))
             }
             _ => None,
@@ -512,6 +515,9 @@ impl Control {
         let _ = control.me.set(Arc::downgrade(&control));
         control.start_metering();
         control.start_gc();
+        if control.fleet.is_none() {
+            control.start_always_on();
+        }
         Ok(control)
     }
 
@@ -538,6 +544,7 @@ impl Control {
         };
         let hb = Heartbeat::start(f.members.clone(), beat, f.cfg.heartbeat).await?;
         let _ = f.heartbeat.set(hb);
+        self.start_always_on();
         Ok(())
     }
 
@@ -669,7 +676,55 @@ impl Control {
         self.check_free(name).await?;
         self.insert(&c).await?;
         self.store.set_stats(&c.id, c.created_at, 0, 0, 0).await?;
+        self.open_always_on(&c).await;
         Ok(c)
+    }
+
+    /// Loads a cluster that never unloads (`idle_timeout_s` 0) when it isn't loaded anywhere:
+    /// it is up from the moment it exists (or the setting changes, or a node starts), not from
+    /// its first request. A failure leaves it to wake with that request.
+    async fn open_always_on(&self, c: &SearchCluster) {
+        if c.idle_timeout_s != 0 || self.node.get_loaded(&c.name).is_some() || self.wakes.is_deleting(&c.name) {
+            return;
+        }
+        if let Some(f) = &self.fleet
+            && let Ok(Some(o)) = f.leases.owner(&c.name).await
+            && o.remaining_ms > 0
+            && o.node != f.node_id
+        {
+            return;
+        }
+        if let Err(e) = self.node.open(spec_for(c)).await {
+            tracing::info!(cluster = c.name, error = %e, "loading an always-on cluster failed; its first request wakes it");
+        }
+    }
+
+    /// [`Self::open_always_on`] for every always-on cluster of the catalog, in the background: when a
+    /// node starts, and in a fleet (once announced) again every few lease periods until the
+    /// node drains, so the clusters a stopped node held come back up elsewhere; the leases
+    /// pick one node per cluster.
+    fn start_always_on(&self) {
+        let Some(me) = self.me.get().cloned() else { return };
+        let every = self.fleet.as_ref().map(|f| f.cfg.lease_ttl.saturating_mul(3));
+        tokio::spawn(async move {
+            loop {
+                let Some(c) = me.upgrade() else { return };
+                if c.fleet.as_ref().and_then(|f| f.heartbeat()).is_some_and(|hb| hb.beat().draining) {
+                    return;
+                }
+                match c.store.always_on().await {
+                    Ok(all) => {
+                        for cluster in &all {
+                            c.open_always_on(cluster).await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "listing always-on search clusters failed"),
+                }
+                drop(c);
+                let Some(every) = every else { return };
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
@@ -773,6 +828,7 @@ impl Control {
         if self.reloads.lock().contains(&c.name) && self.try_reload(&c.name).await {
             self.reloads.lock().remove(&c.name);
         }
+        self.open_always_on(&c).await;
         Ok(c)
     }
 
@@ -919,13 +975,23 @@ impl Control {
             // Asleep: the next wake reads the catalog (a wake in progress is reconciled).
             return !self.wakes.is_loading(name);
         };
-        let needed = match self.store.by_name(name).await {
-            Ok(Some(row)) => live_spec(spec_for(&row), &l).1,
-            Ok(None) => true,
+        let row = match self.store.by_name(name).await {
+            Ok(r) => r,
             Err(_) => return false,
         };
+        let needed = row.as_ref().is_none_or(|r| live_spec(spec_for(r), &l).1);
         drop(l);
-        !needed || self.node.unload(name).await
+        if !needed {
+            return true;
+        }
+        if !self.node.unload(name).await {
+            return false;
+        }
+        // An always-on cluster comes straight back with its new settings.
+        if let Some(row) = row {
+            self.open_always_on(&row).await;
+        }
+        true
     }
 
     /// Unloads `name`, waiting up to `wait` for its running requests and for a load in progress.
@@ -1072,6 +1138,31 @@ impl Control {
         };
         f.pins.replace(members.iter().filter_map(|r| r.beat.pins().ok()).flatten().collect());
         Some(format!("{}://{api}", if tls { "https" } else { "http" }))
+    }
+
+    /// In a fleet: whether a live node other than this one may call node APIs in plain HTTP:
+    /// its record has no API pin, as every node from before `api_tls` (and a full rolld, whose
+    /// shared API port stays plain) publishes. A TLS API also answers plain HTTP while one runs
+    /// ([`crate::api::TlsListener::for_fleet`]), so a deploy that replaces such nodes never
+    /// leaves them unable to reach the new ones. Read at most once per heartbeat period.
+    pub async fn plain_api_callers(&self) -> bool {
+        let Some(f) = &self.fleet else { return false };
+        if let Some((at, v)) = *f.plain_callers.lock()
+            && at.elapsed() < f.cfg.heartbeat
+        {
+            return v;
+        }
+        let ttl = f.cfg.heartbeat.saturating_mul(5).max(f.cfg.lease_ttl).as_millis() as u64;
+        let v = match f.members.list().await {
+            Ok(m) => m.iter().any(|r| r.beat.id != f.node_id && r.age_ms < ttl && !r.beat.api_tls),
+            Err(e) => {
+                // Keep the last answer: a slow metadata store must not cut an upgrade off.
+                tracing::warn!(error = %e, "reading the node records failed");
+                return f.plain_callers.lock().is_some_and(|(_, v)| v);
+            }
+        };
+        *f.plain_callers.lock() = Some((Instant::now(), v));
+        v
     }
 
     /// The HTTP client API calls are forwarded with.

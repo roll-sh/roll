@@ -157,6 +157,8 @@ pub struct SearchSource {
     pub track_scores: bool,
     pub track_total_hits: Option<TrackTotalHits>,
     pub profile: bool,
+    /// OpenSearch's `verbose_pipeline` (search pipelines report each processor's run).
+    pub verbose_pipeline: bool,
     pub source: Option<FetchSource>,
     pub stored_fields: Option<StoredFields>,
     pub docvalue_fields: Vec<FieldAndFormat>,
@@ -355,6 +357,7 @@ impl SearchSource {
                 nested: None,
             }),
             "profile" => self.profile = p.boolean_value()?,
+            "verbose_pipeline" if crate::opensearch::active() => self.verbose_pipeline = p.boolean_value()?,
             _ => return Err(unknown_key(p, t, key)),
         }
         Ok(())
@@ -380,7 +383,13 @@ impl SearchSource {
             }
             "aggregations" | "aggs" => {
                 self.aggs_raw = p.raw().map(|r| std::sync::Arc::new(AggsRaw { body: r.to_vec(), key: key.to_string() }));
-                self.aggs = Some(p.map()?);
+                let aggs = p.map()?;
+                // `SearchSourceBuilder.parseXContent` parses the aggregations (their embedded
+                // queries included) in body order: a malformed one fails before later keys.
+                if let Some(raw) = &self.aggs_raw {
+                    crate::search::aggs::parse_error(&aggs, Some(raw))?;
+                }
+                self.aggs = Some(aggs);
             }
             "highlight" => {
                 check_highlight(p)?;

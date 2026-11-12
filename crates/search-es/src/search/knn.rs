@@ -274,7 +274,15 @@ pub fn dfs(ctx: &crate::cluster::Cluster, st: &crate::meta::ClusterState, now: i
             searcher.search(&base, &mut c).map_err(crate::engine::convert::index_error)?;
             let top = c.top_docs();
             if let Some(p) = &profiler {
-                let ops = searcher.max_doc() as u64;
+                // The search visits every vector of these small segments; `rescore_vector` on a
+                // quantized field then compares the gathered `ceil(k · oversample)` candidates
+                // again at full precision.
+                let mut ops = searcher.max_doc() as u64;
+                let quantized = qctx.field(&k.field).and_then(|f| f.vector).is_some_and(|v| !matches!(v.quantization, search_codec::VectorQuantization::None));
+                if let Some(o) = k.rescore_oversample.filter(|o| *o > 0.0 && quantized) {
+                    let kk = k.k.unwrap_or(10).max(1) as f64;
+                    ops += ((kk * o as f64).ceil() as u64).min(searcher.max_doc() as u64);
+                }
                 profiles[ti].push(super::profile::knn_dfs_entry(p, started.elapsed().as_nanos() as u64, ops));
             }
             for h in top.hits {

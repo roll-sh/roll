@@ -13,7 +13,7 @@ use crate::error::{EsError, EsResult};
 use crate::json::Value;
 use crate::query::full_text::{MultiMatchType, Operator, QueryString, SimpleQueryString, sqs_flags};
 use crate::query::term_level::Fuzziness;
-use search_index::query::{BooleanQuery, BoostQuery, DisMaxQuery, Occur};
+use search_index::query::{BooleanQuery, BoostQuery, DisMaxQuery, Occur, TermQuery};
 use search_index::QueryRef;
 
 /// `field^boost`.
@@ -397,23 +397,9 @@ fn tokenize_spanned(q: &str) -> EsResult<(Vec<Tk>, Spans)> {
                     "AND" => out.push(Tk::And),
                     "OR" => out.push(Tk::Or),
                     "NOT" => out.push(Tk::Not),
-                    _ => {
-                        // `>=x`, `<y`: Elasticsearch's range shortcuts, for text longer than
-                        // the operator (a bare `>` is a term; `>=` is `>` of `=`).
-                        if s.len() <= 1 {
-                            out.push(Tk::Term(s, wild));
-                        } else if let Some(rest) = s.strip_prefix(">=").filter(|r| !r.is_empty()) {
-                            out.push(Tk::Range { lo: rest.to_string(), hi: "*".into(), il: true, iu: true });
-                        } else if let Some(rest) = s.strip_prefix("<=").filter(|r| !r.is_empty()) {
-                            out.push(Tk::Range { lo: "*".into(), hi: rest.to_string(), il: true, iu: true });
-                        } else if let Some(rest) = s.strip_prefix('>') {
-                            out.push(Tk::Range { lo: rest.to_string(), hi: "*".into(), il: false, iu: true });
-                        } else if let Some(rest) = s.strip_prefix('<') {
-                            out.push(Tk::Range { lo: "*".into(), hi: rest.to_string(), il: true, iu: false });
-                        } else {
-                            out.push(Tk::Term(s, wild));
-                        }
-                    }
+                    // `>=x` / `<y` are plain terms here: Elasticsearch reads its range
+                    // shortcuts out of the analyzed text (`Parser::bare_text`).
+                    _ => out.push(Tk::Term(s, wild)),
                 }
             }
         }
@@ -478,9 +464,9 @@ struct Parser<'c, 'q> {
     at: ClausePos,
     /// Whether a `^` boost / a `~` fuzzy slop could still follow the last clause.
     tails: (bool, bool),
-    /// Consecutive bare terms in the current query: two or more parse as Lucene's
-    /// `MultiTerm`, which takes neither tail.
-    bare_run: usize,
+    /// Whether the last clause was a Lucene `MultiTerm` (a run of bare terms), which takes
+    /// neither tail.
+    multi_term: bool,
 }
 
 impl Parser<'_, '_> {
@@ -515,7 +501,7 @@ impl Parser<'_, '_> {
 
     /// The tokens that may follow a complete clause at the current depth.
     fn after_clause(&self) -> Vec<u8> {
-        self.after_clause_with(if self.bare_run >= 2 { (false, false) } else { self.tails })
+        self.after_clause_with(if self.multi_term { (false, false) } else { self.tails })
     }
 
     fn after_clause_with(&self, (caret, fuzzy): (bool, bool)) -> Vec<u8> {
@@ -582,10 +568,9 @@ impl Parser<'_, '_> {
     }
 
     fn query(&mut self, field: Option<&str>) -> EsResult<Option<QueryRef>> {
-        self.bare_run = 0;
+        self.multi_term = false;
         let mut clauses: Vec<(Occur, QueryRef)> = Vec::new();
         let mut first: Option<QueryRef> = None;
-        let mut count = 0;
         let mut first_conj = true;
         loop {
             match self.peek() {
@@ -596,6 +581,23 @@ impl Parser<'_, '_> {
             // wanted whatever may follow a clause.
             if !first_conj && matches!(self.peek(), Some(Tk::Caret(_) | Tk::Tilde(_))) {
                 return Err(self.unexpected(self.pos, &self.after_clause()));
+            }
+            // Lucene's `MultiTerm` (tried before a clause, `splitOnWhitespace=false`): a run of
+            // bare terms is analyzed as one text, joined by single spaces.
+            if let Some(end) = self.multi_term_end() {
+                let text = (self.pos..end).map(|i| match &self.toks[i] {
+                    Tk::Term(t, _) => t.as_str(),
+                    _ => unreachable!("multi_term_end only spans bare terms"),
+                }).collect::<Vec<_>>().join(" ");
+                self.pos = end;
+                let q = self.bare_text(field, &unescape(&text))?;
+                self.add_multi_term_clauses(&mut clauses, q.clone());
+                if first_conj {
+                    first = q;
+                }
+                self.multi_term = true;
+                first_conj = false;
+                continue;
             }
             let conj = if first_conj {
                 Conj::None
@@ -632,21 +634,15 @@ impl Parser<'_, '_> {
             } else {
                 ClausePos::Implicit
             };
-            let body = self.pos;
             let q = self.clause(field)?;
-            let bare = mods == Mods::None
-                && conj == Conj::None
-                && self.pos == body + 1
-                && matches!(&self.toks[body], Tk::Term(t, false) if t != "*");
-            self.bare_run = if bare { self.bare_run + 1 } else { 0 };
+            self.multi_term = false;
             self.add_clause(&mut clauses, conj, mods, q.clone());
             if first_conj && mods == Mods::None {
                 first = q;
             }
-            count += 1;
             first_conj = false;
         }
-        if count == 1
+        if clauses.len() == 1
             && let Some(f) = first
         {
             return Ok(Some(f));
@@ -663,6 +659,42 @@ impl Parser<'_, '_> {
             b = b.add(Occur::Filter, arc(search_index::query::MatchAllQuery));
         }
         Ok(Some(arc(b)))
+    }
+
+    /// The end of a `MultiTerm` starting at the current token: two or more bare terms, each
+    /// after the first followed by a token other than `:`, `*`, `~`, `^`, `AND` or `OR`
+    /// (`allowedPostMultiTerm`).
+    fn multi_term_end(&self) -> Option<usize> {
+        let bare = |i: usize| matches!(self.toks.get(i), Some(Tk::Term(t, false)) if t != "*");
+        let allowed_after = |i: usize| match self.toks.get(i) {
+            None => true,
+            Some(Tk::Caret(_) | Tk::Tilde(_) | Tk::And | Tk::Or) => false,
+            Some(Tk::Term(t, _)) | Some(Tk::Field(t)) => t != "*",
+            Some(_) => true,
+        };
+        if !bare(self.pos) {
+            return None;
+        }
+        let mut end = self.pos + 1;
+        while bare(end) && allowed_after(end + 1) {
+            end += 1;
+        }
+        (end >= self.pos + 2).then_some(end)
+    }
+
+    /// Lucene's `addMultiTermClauses`: a boolean query of term queries lends its clauses as
+    /// they are; anything else joins (a boolean query, clause by clause) with the default
+    /// operator's occur.
+    fn add_multi_term_clauses(&self, clauses: &mut Vec<(Occur, QueryRef)>, q: Option<QueryRef>) {
+        let Some(q) = q else { return };
+        let occur = if self.qs.default_operator == Operator::And { Occur::Must } else { Occur::Should };
+        match q.as_any().downcast_ref::<BooleanQuery>() {
+            Some(b) if b.clauses.iter().all(|c| c.query.as_any().is::<TermQuery>()) => {
+                clauses.extend(b.clauses.iter().map(|c| (c.occur, c.query.clone())));
+            }
+            Some(b) => clauses.extend(b.clauses.iter().map(|c| (occur, c.query.clone()))),
+            None => clauses.push((occur, q)),
+        }
     }
 
     fn add_clause(&self, clauses: &mut Vec<(Occur, QueryRef)>, conj: Conj, mods: Mods, q: Option<QueryRef>) {
@@ -847,21 +879,8 @@ impl Parser<'_, '_> {
                 self.apply_boost(q, boost)
             }
             Some(Tk::Range { lo, hi, il, iu }) => {
-                let q = self.each_field(field.as_deref(), &mut |ctx, f| {
-                    let v = |s: &str| if s == "*" { None } else { Some(Value::Str(s.to_string())) };
-                    let r = crate::query::term_level::Range {
-                        field: f.to_string(),
-                        from: v(&lo),
-                        to: v(&hi),
-                        include_lower: il,
-                        include_upper: iu,
-                        time_zone: self.qs.time_zone.clone(),
-                        format: None,
-                        relation: None,
-                        common: Default::default(),
-                    };
-                    super::range::range_query(ctx, &r).map(Some)
-                })?;
+                let (lo, hi) = ((lo != "*").then_some(lo.as_str()), (hi != "*").then_some(hi.as_str()));
+                let q = self.range(field.as_deref(), lo, hi, il, iu)?;
                 self.boost(q)
             }
             Some(_) | None => Err(self.bad_clause_start(self.pos - 1, prefixed)),
@@ -1010,7 +1029,60 @@ impl Parser<'_, '_> {
                 ctx.to_query(&crate::query::Query::Fuzzy(Box::new(fq))).map(Some)
             });
         }
-        self.field_text(field, &term, false, 0)
+        self.bare_text(field, &term)
+    }
+
+    /// The field Lucene's parser was given for a clause: its own, else the single default
+    /// field (`*` in all-fields mode); `None` when a `fields` list stands in for it.
+    fn parser_field(&self, field: Option<&str>) -> Option<String> {
+        if let Some(f) = field {
+            return Some(f.to_string());
+        }
+        if let Some(df) = &self.qs.default_field {
+            return Some(df.clone());
+        }
+        if !self.qs.fields.is_empty() {
+            return None;
+        }
+        let defaults = text::default_fields(self.ctx);
+        defaults.iter().any(|(f, _)| f == "*").then(|| "*".to_string())
+    }
+
+    /// `QueryStringQueryParser.getFieldQuery` for unquoted text: with a parser field,
+    /// `>x` / `>=x` / `<x` / `<=x` are one-sided ranges (the rest of the text is the bound);
+    /// anything else is analyzed text.
+    fn bare_text(&mut self, field: Option<&str>, text: &str) -> EsResult<Option<QueryRef>> {
+        if text.chars().count() > 1
+            && self.parser_field(field).is_some()
+            && let Some(op) = text.chars().next().filter(|c| matches!(c, '>' | '<'))
+        {
+            let rest = &text[1..];
+            let (bound, inclusive) = match rest.strip_prefix('=') {
+                Some(r) if !r.is_empty() => (r, true),
+                _ => (rest, false),
+            };
+            let (lo, hi, il, iu) = if op == '>' { (Some(bound), None, inclusive, true) } else { (None, Some(bound), true, inclusive) };
+            return self.range(field, lo, hi, il, iu);
+        }
+        self.field_text(field, text, false, 0)
+    }
+
+    /// A range on the clause's fields; a `None` bound is open.
+    fn range(&self, field: Option<&str>, lo: Option<&str>, hi: Option<&str>, il: bool, iu: bool) -> EsResult<Option<QueryRef>> {
+        self.each_field(field, &mut |ctx, f| {
+            let r = crate::query::term_level::Range {
+                field: f.to_string(),
+                from: lo.map(|s| Value::Str(s.to_string())),
+                to: hi.map(|s| Value::Str(s.to_string())),
+                include_lower: il,
+                include_upper: iu,
+                time_zone: self.qs.time_zone.clone(),
+                format: None,
+                relation: None,
+                common: Default::default(),
+            };
+            super::range::range_query(ctx, &r).map(Some)
+        })
     }
 
     /// `ExistsQueryBuilder.newFilter` as the query string parser calls it: an unmapped field
@@ -1108,7 +1180,7 @@ pub fn query_string(ctx: &QueryCtx, qs: &QueryString) -> EsResult<QueryRef> {
         }
     };
     let (toks, spans) = tokenize_spanned(&qs.query).map_err(wrap)?;
-    let mut p = Parser { ctx, qs, toks, pos: 0, src: qs.query.clone(), spans, depth: 0, at: ClausePos::First, tails: (true, true), bare_run: 0 };
+    let mut p = Parser { ctx, qs, toks, pos: 0, src: qs.query.clone(), spans, depth: 0, at: ClausePos::First, tails: (true, true), multi_term: false };
     let q = p.top().map_err(wrap)?;
     let q = match q {
         Some(q) => q,
@@ -1493,7 +1565,8 @@ mod tests {
         assert!(t.contains(&Tk::Term("ab*".into(), true)));
         assert!(t.contains(&Tk::Regex("re.ex".into())));
         assert!(t.contains(&Tk::Range { lo: "1".into(), hi: "5".into(), il: true, iu: true }));
-        assert!(t.contains(&Tk::Range { lo: "10".into(), hi: "*".into(), il: true, iu: true }));
+        // `>=10` is a term: the range shortcut is read from its text with a parser field.
+        assert!(t.contains(&Tk::Term(">=10".into(), false)));
         assert!(t.contains(&Tk::Caret("2".into())));
         assert!(tokenize("\"open").is_err());
         assert_eq!(parse_field_boost("title^3"), ("title".into(), 3.0));

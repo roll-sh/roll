@@ -23,9 +23,14 @@ pub struct Compiled {
     pub tag: Option<String>,
     pub description: Option<String>,
     pub cond: Option<crate::scripting::Bound>,
+    /// The condition's source (or stored script id), as verbose simulations show it.
+    pub cond_src: Option<String>,
     pub ignore_failure: bool,
     pub on_failure: Vec<Compiled>,
     pub kind: Kind,
+    /// Index of this processor's counters in its pipeline's [`ProcMetrics`]
+    /// (`usize::MAX`: not counted, as a `foreach` processor's inner processor).
+    pub slot: usize,
 }
 
 /// A compiled pipeline.
@@ -33,12 +38,64 @@ pub struct Pipeline {
     pub id: String,
     pub processors: Vec<Compiled>,
     pub on_failure: Vec<Compiled>,
+    /// `field_access_pattern: flexible`.
+    pub flexible: bool,
+    /// The pipeline's counters (kept across recompilations of the same id).
+    pub metrics: Arc<Metric>,
+    /// Its processors' counters, in `Pipeline.flattenAllProcessors` order.
+    pub procs: Arc<ProcMetrics>,
 }
 
-/// Compiled pipelines of a cluster, valid for one metadata version.
+/// Counters of the ingest stats (`IngestMetric`): executions, their time, failures.
+#[derive(Default, Debug)]
+pub struct Metric {
+    count: AtomicU64,
+    nanos: AtomicU64,
+    failed: AtomicU64,
+    /// `ingested_as_first_pipeline_in_bytes` / `produced_as_first_pipeline_in_bytes`
+    /// (pipelines only).
+    ingested: AtomicU64,
+    produced: AtomicU64,
+}
+
+impl Metric {
+    fn record(&self, started: std::time::Instant, failed: bool) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.nanos.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if failed {
+            self.failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// `IngestStats.Stats` (`current` is 0: a document's ingest never outlives its request).
+    fn stats(&self, out: &mut Map) {
+        out.insert("count".into(), Value::from(self.count.load(Ordering::Relaxed) as i64));
+        out.insert("time_in_millis".into(), Value::from((self.nanos.load(Ordering::Relaxed) / 1_000_000) as i64));
+        out.insert("current".into(), Value::from(0i64));
+        out.insert("failed".into(), Value::from(self.failed.load(Ordering::Relaxed) as i64));
+    }
+}
+
+/// A pipeline's per-processor counters with each processor's stats name and type.
+#[derive(Default, Debug)]
+pub struct ProcMetrics {
+    names: Vec<(String, String)>,
+    metrics: Vec<Metric>,
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Compiled pipelines of a cluster, valid for one metadata version, and the ingest stats.
 #[derive(Default)]
 pub struct Cache {
     map: parking_lot::Mutex<std::collections::HashMap<String, (u64, Arc<Pipeline>)>>,
+    /// Per pipeline id: its counters and its processors' (these restart when the processor
+    /// list changes).
+    /// Keyed by the pipeline's `created_date_millis` too, so a deleted and recreated pipeline
+    /// starts over.
+    metrics: parking_lot::Mutex<std::collections::HashMap<String, (Option<i64>, Arc<Metric>, Arc<ProcMetrics>)>>,
+    /// Documents that went through ingest (`IngestService.totalMetrics`).
+    total: Metric,
 }
 
 impl std::fmt::Debug for Cache {
@@ -59,15 +116,15 @@ pub fn compile_list(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
             _ => Map::new(),
         };
         let tag = cfg.get("tag").map(|v| v.to_es_string());
-        let cond = match cfg.get("if") {
+        let (cond, cond_src) = match cfg.get("if") {
             Some(c) => {
                 let mut p = crate::query::XParser::from_value(c);
                 p.next_token();
                 let s = crate::query::script::Script::parse(&mut p)?;
                 let st = cluster.state();
-                Some(cluster.scripts.compile(&st, &s, search_painless::Context::ProcessorConditional)?)
+                (Some(cluster.scripts.compile(&st, &s, search_painless::Context::ProcessorConditional)?), Some(s.id_or_code))
             }
-            None => None,
+            None => (None, None),
         };
         let on_failure = match cfg.get("on_failure") {
             Some(of) => compile_list(cluster, of)?,
@@ -75,10 +132,12 @@ pub fn compile_list(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
         };
         let kind = Kind::compile(cluster, ptype, &cfg, tag.as_deref())?;
         out.push(Compiled {
+            slot: usize::MAX,
             ptype: ptype.clone(),
             tag,
             description: cfg.get("description").map(|v| v.to_es_string()),
             cond,
+            cond_src,
             ignore_failure: matches!(cfg.get("ignore_failure"), Some(Value::Bool(true))),
             on_failure,
             kind,
@@ -89,11 +148,40 @@ pub fn compile_list(cluster: &Cluster, v: &Value) -> EsResult<Vec<Compiled>> {
 
 /// Compiles a pipeline definition.
 pub fn compile(cluster: &Cluster, id: &str, def: &Value) -> EsResult<Pipeline> {
+    let mut processors = compile_list(cluster, def.get("processors").unwrap_or(&Value::Null))?;
+    let mut on_failure = compile_list(cluster, def.get("on_failure").unwrap_or(&Value::Null))?;
+    let mut names = Vec::new();
+    assign_slots(&mut processors, &mut names);
+    assign_slots(&mut on_failure, &mut names);
+    let metrics = names.iter().map(|_| Metric::default()).collect();
     Ok(Pipeline {
         id: id.to_string(),
-        processors: compile_list(cluster, def.get("processors").unwrap_or(&Value::Null))?,
-        on_failure: compile_list(cluster, def.get("on_failure").unwrap_or(&Value::Null))?,
+        processors,
+        on_failure,
+        flexible: def.get("field_access_pattern").and_then(Value::as_str) == Some("flexible"),
+        metrics: Arc::default(),
+        procs: Arc::new(ProcMetrics { names, metrics }),
     })
+}
+
+/// Numbers processors in `Pipeline.flattenAllProcessors` order (each processor, then its
+/// `on_failure` handlers) and names them as the stats do (`IngestService.getProcessorName`:
+/// the type, a `pipeline` processor's pipeline name, then the tag).
+fn assign_slots(list: &mut [Compiled], names: &mut Vec<(String, String)>) {
+    for p in list {
+        p.slot = names.len();
+        let mut name = p.ptype.clone();
+        if let Kind::Pipeline { name: pipeline, .. } = &p.kind {
+            name.push(':');
+            name.push_str(&pipeline.render_empty());
+        }
+        if let Some(t) = p.tag.as_deref().filter(|t| !t.is_empty()) {
+            name.push(':');
+            name.push_str(t);
+        }
+        names.push((name, p.ptype.clone()));
+        assign_slots(&mut p.on_failure, names);
+    }
 }
 
 thread_local! {
@@ -122,7 +210,23 @@ pub fn get(cluster: &Cluster, id: &str) -> EsResult<Option<Arc<Pipeline>>> {
         return Ok(Some(p.clone()));
     }
     let Some(def) = st.metadata.pipelines.get(id) else { return Ok(None) };
-    let p = Arc::new(compile(cluster, id, def)?);
+    let mut p = compile(cluster, id, def)?;
+    {
+        // A recompiled pipeline keeps its counters, and its processors' while they are the same.
+        let created = def.get("created_date_millis").and_then(Value::as_i64);
+        let mut reg = cluster.ingest.metrics.lock();
+        let entry = reg.entry(id.to_string()).or_insert_with(|| (created, p.metrics.clone(), p.procs.clone()));
+        if entry.0 != created {
+            *entry = (created, p.metrics.clone(), p.procs.clone());
+        }
+        p.metrics = entry.1.clone();
+        if entry.2.names == p.procs.names {
+            p.procs = entry.2.clone();
+        } else {
+            entry.2 = p.procs.clone();
+        }
+    }
+    let p = Arc::new(p);
     cluster.ingest.map.lock().insert(id.to_string(), (version, p.clone()));
     Ok(Some(p))
 }
@@ -303,14 +407,122 @@ fn root_message(e: &EsError) -> String {
     cur.reason().to_string()
 }
 
+/// What a verbose simulation records for one processor run (`SimulateProcessorResult`).
+enum Traced<'a> {
+    /// The condition was false.
+    Skipped,
+    /// It ran (`doc` snapshot unless the document was dropped or it is a `pipeline` processor).
+    Done { doc: bool },
+    /// It failed; `ignored` keeps the document snapshot (`error_ignored`).
+    Failed { error: &'a EsError, ignored: bool },
+}
+
+/// Appends one `processor_results` entry (key order of `SimulateProcessorResult.toXContent`).
+fn trace(d: &mut IngestDoc, p: &Compiled, cond: Option<bool>, what: Traced<'_>) {
+    if d.trace.is_none() {
+        return;
+    }
+    let mut r = Map::new();
+    r.insert("processor_type".into(), Value::Str(p.ptype.clone()));
+    let status = match &what {
+        Traced::Skipped => "skipped",
+        Traced::Done { doc: false } if p.ptype != "pipeline" => "dropped",
+        Traced::Done { .. } => "success",
+        Traced::Failed { ignored: true, .. } => "error_ignored",
+        Traced::Failed { .. } => "error",
+    };
+    r.insert("status".into(), Value::Str(status.into()));
+    if let Some(desc) = &p.description {
+        r.insert("description".into(), Value::Str(desc.clone()));
+    }
+    if let Some(t) = &p.tag {
+        r.insert("tag".into(), Value::Str(t.clone()));
+    }
+    if let (Some(src), Some(result)) = (&p.cond_src, cond) {
+        r.insert("if".into(), obj! { "condition" => src.clone(), "result" => result });
+    }
+    let doc = match what {
+        Traced::Failed { error, ignored } => {
+            let e = error.clone().without_headers(&["processor_type", "processor_tag"]).to_value_with_root(false);
+            if ignored {
+                r.insert("ignored_error".into(), obj! { "error" => e });
+            } else {
+                r.insert("error".into(), e);
+            }
+            ignored
+        }
+        Traced::Done { doc } => doc,
+        Traced::Skipped => false,
+    };
+    if doc {
+        r.insert("doc".into(), d.to_simulate(true));
+    }
+    if let Some(t) = &mut d.trace {
+        t.push(Value::Obj(r));
+    }
+}
+
+/// A `pipeline` processor in a verbose simulation (`TrackingResultProcessor`): a missing
+/// pipeline is an `illegal_argument_exception` result, the outermost call first checks the
+/// called pipeline for cycles on a copy of the document, and the call's own result comes
+/// before the results of the processors it runs.
+fn run_traced_pipeline(cluster: &Cluster, p: &Compiled, name: &processors::Template, ignore_missing: bool, d: &mut IngestDoc, depth: usize, cond: Option<bool>) -> EsResult<Flow> {
+    let n = name.render(d)?;
+    let Some(pl) = get(cluster, &n)? else {
+        let e = EsError::illegal_argument(format!("Pipeline processor configured for non-existent pipeline [{n}]"));
+        trace(d, p, cond, Traced::Failed { error: &e, ignored: ignore_missing });
+        return if ignore_missing { Ok(Flow::Continue) } else { Err(e) };
+    };
+    if d.pipelines.len() == 1 {
+        let mut copy = d.clone();
+        copy.trace = None;
+        if let Err(e) = run_pipeline(cluster, &pl, &mut copy, depth + 1)
+            && e.kind == "graph_structure_exception"
+        {
+            trace(d, p, cond, Traced::Failed { error: &e, ignored: p.ignore_failure });
+            return Err(e);
+        }
+    }
+    trace(d, p, cond, Traced::Done { doc: false });
+    run_pipeline(cluster, &pl, d, depth + 1)
+}
+
 /// Runs one processor (condition, failure handling).
 pub fn run_one(cluster: &Cluster, p: &Compiled, d: &mut IngestDoc, depth: usize) -> EsResult<Flow> {
-    if let Some(c) = &p.cond
-        && !cond_true(c, d)?
-    {
-        return Ok(Flow::Continue);
+    let mut cond = None;
+    if let Some(c) = &p.cond {
+        let ok = cond_true(c, d)?;
+        if !ok {
+            trace(d, p, Some(false), Traced::Skipped);
+            return Ok(Flow::Continue);
+        }
+        cond = Some(true);
     }
-    let r = processors::run(cluster, &p.kind, d, depth);
+    let started = d.procs.is_some().then(std::time::Instant::now);
+    let r = match &p.kind {
+        Kind::Pipeline { name, ignore_missing } if d.trace.is_some() => run_traced_pipeline(cluster, p, name, *ignore_missing, d, depth, cond),
+        kind => {
+            let r = processors::run(cluster, kind, d, depth);
+            if d.trace.is_some() {
+                match &r {
+                    Ok(_) if d.self_reference.is_some() => {
+                        // A self-referencing document can't be rendered: every processor from the
+                        // one that made it reports the serialization failure instead.
+                        let e = d.self_reference.clone().unwrap_or_else(|| EsError::illegal_argument("self-referencing document"));
+                        trace(d, p, cond, Traced::Failed { error: &e, ignored: false });
+                    }
+                    Ok(f) => trace(d, p, cond, Traced::Done { doc: matches!(f, Flow::Continue) }),
+                    Err(e) => trace(d, p, cond, Traced::Failed { error: e, ignored: p.ignore_failure }),
+                }
+            }
+            r
+        }
+    };
+    if let Some(t) = started
+        && let Some(m) = d.procs.as_ref().and_then(|m| m.metrics.get(p.slot))
+    {
+        m.record(t, r.is_err());
+    }
     d.track_size();
     // A self-referencing document is only detected once the pipeline is done.
     let r = match r {
@@ -363,6 +575,9 @@ pub fn run_pipeline(cluster: &Cluster, pl: &Pipeline, d: &mut IngestDoc, depth: 
     }
     d.pipelines.push(pl.id.clone());
     d.ingest.insert("pipeline".into(), Value::Str(pl.id.clone()));
+    let outer_flexible = std::mem::replace(&mut d.flexible, pl.flexible);
+    let started = d.count_stats.then(std::time::Instant::now);
+    let outer_procs = if d.count_stats { std::mem::replace(&mut d.procs, Some(pl.procs.clone())) } else { None };
     let mut result = Ok(Flow::Continue);
     for p in &pl.processors {
         match run_one(cluster, p, d, depth) {
@@ -371,7 +586,7 @@ pub fn run_pipeline(cluster: &Cluster, pl: &Pipeline, d: &mut IngestDoc, depth: 
                 break;
             }
             Ok(Flow::Continue) => {
-                if matches!(p.kind, Kind::Terminate) || matches!(p.kind, Kind::Reroute { .. }) {
+                if d.terminate || d.reroute.is_some() {
                     break;
                 }
             }
@@ -415,6 +630,12 @@ pub fn run_pipeline(cluster: &Cluster, pl: &Pipeline, d: &mut IngestDoc, depth: 
     if let Some(saved) = saved_failure {
         restore(d, saved);
     }
+    d.flexible = outer_flexible;
+    d.terminate = false;
+    if let Some(t) = started {
+        pl.metrics.record(t, result.is_err());
+        d.procs = outer_procs;
+    }
     d.pipelines.pop();
     match d.pipelines.last() {
         Some(prev) => {
@@ -427,12 +648,45 @@ pub fn run_pipeline(cluster: &Cluster, pl: &Pipeline, d: &mut IngestDoc, depth: 
     result
 }
 
+/// The `ingest` section of node stats and `_info/ingest` (`IngestStats`): totals, then every
+/// stored pipeline with its processors (pipelines in hash map order, as Elasticsearch keeps them).
+pub fn stats_value(cluster: &Cluster) -> Value {
+    let mut total = Map::new();
+    cluster.ingest.total.stats(&mut total);
+    let st = cluster.state();
+    let mut pipelines = Map::new();
+    for id in st.metadata.pipelines.keys() {
+        let Ok(Some(pl)) = get(cluster, id) else { continue };
+        let mut m = Map::new();
+        pl.metrics.stats(&mut m);
+        m.insert("ingested_as_first_pipeline_in_bytes".into(), Value::from(pl.metrics.ingested.load(Ordering::Relaxed) as i64));
+        m.insert("produced_as_first_pipeline_in_bytes".into(), Value::from(pl.metrics.produced.load(Ordering::Relaxed) as i64));
+        let procs = pl
+            .procs
+            .names
+            .iter()
+            .zip(&pl.procs.metrics)
+            .map(|((name, ty), metric)| {
+                let mut stats = Map::new();
+                metric.stats(&mut stats);
+                let mut one = Map::new();
+                one.insert(name.clone(), obj! { "type" => ty.clone(), "stats" => Value::Obj(stats) });
+                Value::Obj(one)
+            })
+            .collect();
+        m.insert("processors".into(), Value::Arr(procs));
+        pipelines.insert(id.clone(), Value::Obj(m));
+    }
+    super::doc::java_hash_order(&mut pipelines, false);
+    obj! { "total" => Value::Obj(total), "pipelines" => Value::Obj(pipelines) }
+}
+
 /// The `pipeline` processor.
 pub fn run_named(cluster: &Cluster, name: &str, d: &mut IngestDoc, depth: usize, ignore_missing: bool) -> EsResult<Flow> {
     match get(cluster, name)? {
         Some(p) => run_pipeline(cluster, &p, d, depth),
         None if ignore_missing => Ok(Flow::Continue),
-        None => Err(EsError::illegal_argument(format!("Pipeline processor configured for non-existent pipeline [{name}]"))),
+        None => Err(EsError::illegal_state(format!("Pipeline processor configured for non-existent pipeline [{name}]"))),
     }
 }
 
@@ -519,11 +773,43 @@ fn meta_of(target: &Target, args: &WriteArgs, id: &str) -> Map {
 /// pipeline ends. Failures record the target their pipeline started from (whose failure store
 /// takes the document).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: &str, value: Value, first: Option<String>, fin: Option<String>, now_ms: i64) -> EsResult<Outcome> {
-    let Value::Obj(src) = value else { return Ok(Outcome::Index(target, Value::Obj(Map::new()), Bytes::new())) };
+pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: &str, value: Value, first: Option<String>, fin: Option<String>, now_ms: i64, source_len: usize) -> EsResult<Outcome> {
+    let started = std::time::Instant::now();
+    let mut first_metrics = None;
+    let out = run_write_counted(cluster, target, args, id, value, first, fin, now_ms, source_len, &mut first_metrics).await;
+    cluster.ingest.total.record(started, out.is_err());
+    if let (Some(m), Ok(Outcome::Index(_, _, source, Some(i)))) = (&first_metrics, &out) {
+        m.produced.fetch_add(request_bytes(i.args.id.as_deref(), source.len()), Ordering::Relaxed);
+    }
+    out
+}
+
+/// `IndexRequest.ramBytesUsed()` (what the byte stats count): the request object's shallow
+/// size, its id string (`RamUsageEstimator.sizeOf(String)`) and the source.
+fn request_bytes(id: Option<&str>, source_len: usize) -> u64 {
+    const SHALLOW_SIZE: u64 = 152;
+    let id = id.map_or(0, |id| (24 + 16 + 2 * id.encode_utf16().count() as u64).div_ceil(8) * 8);
+    SHALLOW_SIZE + id + source_len as u64
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_write_counted(
+    cluster: &Cluster,
+    target: Target,
+    args: &WriteArgs,
+    id: &str,
+    value: Value,
+    first: Option<String>,
+    fin: Option<String>,
+    now_ms: i64,
+    source_len: usize,
+    first_metrics: &mut Option<Arc<Metric>>,
+) -> EsResult<Outcome> {
+    let Value::Obj(src) = value else { return Ok(Outcome::Index(target, Value::Obj(Map::new()), Bytes::new(), None)) };
     // Enrich processors read in-memory tables of the enrich indices.
     crate::xpack::enrich::warm(cluster).await;
     let mut d = IngestDoc::new(src, meta_of(&target, args, id), now_ms);
+    d.count_stats = true;
     let doc_id = args.id.clone().unwrap_or_else(|| "null".to_string());
     let index_of = |d: &IngestDoc| match d.meta.get("_index") {
         Some(Value::Str(s)) => s.clone(),
@@ -533,6 +819,7 @@ pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: 
     let mut current = target;
     let mut history: Vec<String> = vec![index_of(&d)];
     let mut created: Vec<String> = Vec::new();
+    let mut executed: Vec<String> = Vec::new();
     let _ = take_failure();
     // `(pipeline, is_final)`, in execution order.
     let mut queue: std::collections::VecDeque<(String, bool)> = first.map(|p| (p, false)).into_iter().chain(fin.map(|f| (f, true))).collect();
@@ -551,6 +838,11 @@ pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: 
             Some(pl) => pl,
             None => return Err(fail(EsError::illegal_argument(format!("pipeline with id [{pid}] does not exist")), vec![pid.clone()])),
         };
+        executed.push(pid.clone());
+        if first_metrics.is_none() {
+            pl.metrics.ingested.fetch_add(request_bytes(args.id.as_deref(), source_len), Ordering::Relaxed);
+            *first_metrics = Some(pl.metrics.clone());
+        }
         match run_pipeline(cluster, &pl, &mut d, 0) {
             Ok(Flow::Drop) => return Ok(Outcome::Dropped(current.index.name.clone())),
             Ok(Flow::Continue) => {}
@@ -605,7 +897,40 @@ pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: 
     let mut doc = Value::Obj(d.ordered_source());
     crate::json::write::quote_non_finite(&mut doc);
     let source = Bytes::from(doc.to_json());
-    Ok(Outcome::Index(current, doc, source))
+    Ok(Outcome::Index(current, doc, source, Some(Box::new(super::Ingested { args: args_of(&d.meta, args)?, executed }))))
+}
+
+/// The write arguments after a pipeline: its metadata fields replace the request's
+/// (`IndexRequest` gets `_id`, `_routing`, `_version`, `_version_type`, `_if_seq_no`,
+/// `_if_primary_term` and `_dynamic_templates` back from the ingest document).
+fn args_of(meta: &Map, args: &WriteArgs) -> EsResult<WriteArgs> {
+    let mut a = args.clone();
+    let str_of = |k: &str| match meta.get(k) {
+        None | Some(Value::Null) => None,
+        Some(Value::Str(s)) => Some(s.clone()),
+        Some(v) => Some(v.to_es_string()),
+    };
+    let long_of = |k: &str| match meta.get(k) {
+        Some(Value::Num(n)) => n.as_i64(),
+        Some(Value::Str(s)) => s.parse().ok(),
+        _ => None,
+    };
+    if let Some(id) = str_of("_id") {
+        a.id = Some(id);
+    }
+    a.routing = str_of("_routing");
+    // `Versions.MATCH_ANY` (-3) is no version.
+    a.version = long_of("_version").filter(|v| *v != -3);
+    a.version_type = match str_of("_version_type") {
+        Some(t) => Some(crate::write::parse_version_type(&t.to_lowercase())?),
+        None => args.version_type,
+    };
+    a.if_seq_no = long_of("_if_seq_no");
+    a.if_primary_term = long_of("_if_primary_term");
+    if let Some(Value::Obj(m)) = meta.get("_dynamic_templates") {
+        a.dynamic_templates = Some(m.clone());
+    }
+    Ok(a)
 }
 
 /// `POST _ingest/pipeline/_simulate`, `POST _ingest/pipeline/{id}/_simulate`.
@@ -644,48 +969,10 @@ pub fn simulate(ctx: &Ctx) -> EsResult<Reply> {
         }
         let mut d = IngestDoc::new(src, meta, ctx.now_ms);
         if verbose {
-            let mut results = Vec::new();
-            d.pipelines.push(pipeline.id.clone());
-            d.ingest.insert("pipeline".into(), Value::Str(pipeline.id.clone()));
-            for p in &pipeline.processors {
-                let mut r = Map::new();
-                r.insert("processor_type".into(), Value::Str(p.ptype.clone()));
-                match run_one(ctx.cluster, p, &mut d, 0) {
-                    Ok(Flow::Drop) => {
-                        r.insert("status".into(), Value::Str("dropped".into()));
-                        results.push(Value::Obj(r));
-                        break;
-                    }
-                    // A self-referencing document can't be rendered: every processor from
-                    // the one that made it reports the serialization failure instead.
-                    Ok(_) if d.self_reference.is_some() => {
-                        r.insert("status".into(), Value::Str("error".into()));
-                        if let Some(t) = &p.tag {
-                            r.insert("tag".into(), Value::Str(t.clone()));
-                        }
-                        let e = d.self_reference.clone().unwrap_or_else(|| EsError::illegal_argument("self-referencing document"));
-                        r.insert("error".into(), e.to_value_with_root(false));
-                        results.push(Value::Obj(r));
-                    }
-                    Ok(_) => {
-                        r.insert("status".into(), Value::Str("success".into()));
-                        if let Some(t) = &p.tag {
-                            r.insert("tag".into(), Value::Str(t.clone()));
-                        }
-                        r.insert("doc".into(), d.to_simulate(true));
-                        results.push(Value::Obj(r));
-                    }
-                    Err(e) => {
-                        r.insert("status".into(), Value::Str("error".into()));
-                        if let Some(t) = &p.tag {
-                            r.insert("tag".into(), Value::Str(t.clone()));
-                        }
-                        r.insert("error".into(), e.without_headers(&["processor_type", "processor_tag"]).to_value_with_root(false));
-                        results.push(Value::Obj(r));
-                        break;
-                    }
-                }
-            }
+            d.trace = Some(Vec::new());
+            // The verbose result is the processor list whatever the outcome.
+            let _ = run_pipeline(ctx.cluster, &pipeline, &mut d, 0);
+            let results = d.trace.take().unwrap_or_default();
             out.push(obj! { "processor_results" => Value::Arr(results) });
         } else {
             match run_pipeline(ctx.cluster, &pipeline, &mut d, 0) {

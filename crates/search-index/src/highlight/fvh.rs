@@ -25,6 +25,10 @@
 //!    (`chars`: the nearest `boundary_chars` within `boundary_max_scan`; `word`/`sentence`:
 //!    break iterators over the text before and after).
 //!
+//! With `matched_fields`, steps 1-3 run once per listed field (its own analysis of the values
+//! stands for its term vectors; the highlighted field itself only counts when listed) and the
+//! phrase lists merge as Lucene's `FieldPhraseList(FieldPhraseList[])` merges them.
+//!
 //! Offsets are UTF-16 code units over the values joined with one separator char, as in Java.
 
 use std::collections::{HashMap, VecDeque};
@@ -392,6 +396,190 @@ fn phrase_list(map: &PhraseMap, infos: &[TermInfo], mut stack: VecDeque<usize>, 
     list
 }
 
+/// Steps 1-3 for one field: its field query, the term stack of `values` analyzed by
+/// `analyzer`, and the phrases found. `seq` numbers the query's terms and phrases across the
+/// fields of one highlight (`FieldQuery.nextTermOrPhraseNumber`).
+fn field_phrases(
+    searcher: Option<&Searcher>,
+    query: &QueryRef,
+    values: &[&str],
+    analyzer: Option<&Analyzer>,
+    fields: Option<&[u32]>,
+    opts: &HighlightOptions,
+    seq: &mut usize,
+) -> Result<Vec<PhraseInfo>> {
+    // 1. Field query.
+    let mut fl = Flatten { fields, boosts: Vec::new(), out: Vec::new() };
+    query.visit(&mut fl);
+    let tokens: Vec<HlToken> = analyze(values, analyzer, None, opts.tokenized);
+    // Multi-term queries expand to their terms in the index (Lucene's top-terms rewrite, in
+    // term order), or without a searcher to the doc's matching terms.
+    let mut flat = Vec::new();
+    let push = |flat: &mut Vec<Flat>, f: Flat| {
+        if !flat.iter().any(|x: &Flat| x.same(&f)) {
+            flat.push(f);
+        }
+    };
+    for f in fl.out {
+        match f {
+            Flat::MultiQuery { q, boost } => match searcher {
+                Some(s) => {
+                    for (term, b, _) in q.top_terms(s, MAX_MTQ_TERMS)? {
+                        push(&mut flat, Flat::Term { term, boost: boost * b });
+                    }
+                }
+                None => {
+                    let mut ts: Vec<&[u8]> = tokens.iter().map(|t| t.term.as_slice()).filter(|t| q.matches_term(t)).collect();
+                    ts.sort_unstable();
+                    ts.dedup();
+                    for t in ts {
+                        push(&mut flat, Flat::Term { term: t.to_vec(), boost });
+                    }
+                }
+            },
+            Flat::Multi { matcher, boost } => {
+                let mut ts: Vec<&[u8]> = tokens.iter().map(|t| t.term.as_slice()).filter(|t| matcher(t)).collect();
+                ts.sort_unstable();
+                ts.dedup();
+                for t in ts {
+                    let f = Flat::Term { term: t.to_vec(), boost };
+                    if !flat.iter().any(|x: &Flat| x.same(&f)) {
+                        flat.push(f);
+                    }
+                }
+            }
+            f => flat.push(f),
+        }
+    }
+    let mut terms: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    for f in &flat {
+        match f {
+            Flat::Term { term, .. } => {
+                terms.insert(term.clone());
+            }
+            Flat::Phrase { terms: ts, .. } => terms.extend(ts.iter().cloned()),
+            Flat::Multi { .. } | Flat::MultiQuery { .. } => {}
+        }
+    }
+    let mut map = PhraseMap { nodes: vec![Node::default()], seq: *seq };
+    for f in expand(flat) {
+        match f {
+            Flat::Term { term, boost } => {
+                let n = map.child(0, &term);
+                map.mark(n, 0, boost);
+            }
+            Flat::Phrase { terms, slop, boost } => {
+                let mut n = 0;
+                for t in &terms {
+                    n = map.child(n, t);
+                }
+                map.mark(n, slop, boost);
+            }
+            Flat::Multi { .. } | Flat::MultiQuery { .. } => {}
+        }
+    }
+    // 2. Term stack: query terms in position order, then term order.
+    let mut sel: Vec<&HlToken> = tokens.iter().filter(|t| terms.contains(&t.term)).collect();
+    sel.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.term.cmp(&b.term)));
+    let mut infos: Vec<TermInfo> = Vec::with_capacity(sel.len());
+    let mut stack = VecDeque::new();
+    let mut i = 0;
+    while i < sel.len() {
+        let mut j = i;
+        while j < sel.len() && sel[j].position == sel[i].position {
+            j += 1;
+        }
+        let base = infos.len();
+        for (k, t) in sel[i..j].iter().enumerate() {
+            let next = if i + k + 1 < j { base + k + 1 } else { base };
+            infos.push(TermInfo { term: t.term.clone(), start: t.start as i64, end: t.end as i64, position: t.position, next });
+        }
+        stack.push_back(base);
+        i = j;
+    }
+    // 3. Phrases.
+    *seq = map.seq;
+    Ok(phrase_list(&map, &infos, stack, opts.phrase_limit))
+}
+
+/// The fields a query's clauses name, in first-visit order.
+struct FieldOrder(Vec<u32>);
+
+impl FieldOrder {
+    fn see(&mut self, f: u32) {
+        if !self.0.contains(&f) {
+            self.0.push(f);
+        }
+    }
+}
+
+impl QueryVisitor for FieldOrder {
+    fn term(&mut self, field: u32, _term: &[u8]) {
+        self.see(field);
+    }
+    fn multi_term(&mut self, field: u32, _matcher: TermMatcher) {
+        self.see(field);
+    }
+    fn phrase(&mut self, field: u32, _slots: &[(u32, Vec<Vec<u8>>)], _slop: u32) {
+        self.see(field);
+    }
+    fn span(&mut self, node: &crate::query::SpanNode) {
+        if let crate::query::SpanNode::Term { field, .. } = node {
+            self.see(*field);
+        }
+    }
+    fn multi_term_query(&mut self, q: &MultiTermQuery) {
+        self.see(q.field);
+    }
+}
+
+/// `FieldPhraseList(FieldPhraseList[])`: the fields' phrases sorted by start offset, end
+/// offset and boost, overlapping runs merged into one phrase (boosts summed, offsets united,
+/// the first one's sequence number).
+fn merge_phrase_lists(lists: Vec<Vec<PhraseInfo>>) -> Vec<PhraseInfo> {
+    let mut all: Vec<PhraseInfo> = lists.into_iter().flatten().collect();
+    // Stable: equal phrases keep the fields' order, as Lucene's `MergedIterator`.
+    all.sort_by(|a, b| a.start().cmp(&b.start()).then(a.end().cmp(&b.end())).then(a.boost.total_cmp(&b.boost)));
+    let mut out = Vec::new();
+    let mut work: Vec<PhraseInfo> = Vec::new();
+    let mut work_end = 0;
+    for p in all {
+        if !work.is_empty() && p.start() <= work_end {
+            work_end = work_end.max(p.end());
+            work.push(p);
+            continue;
+        }
+        if !work.is_empty() {
+            out.push(merge_phrases(std::mem::take(&mut work)));
+        }
+        work_end = p.end();
+        work.push(p);
+    }
+    if !work.is_empty() {
+        out.push(merge_phrases(work));
+    }
+    out
+}
+
+/// `WeightedPhraseInfo(Collection)`: one phrase over overlapping ones.
+fn merge_phrases(mut work: Vec<PhraseInfo>) -> PhraseInfo {
+    if work.len() == 1 {
+        return work.pop().unwrap();
+    }
+    let boost = work.iter().map(|p| p.boost).sum();
+    let seqnum = work[0].seqnum;
+    let mut toffs: Vec<(i64, i64)> = work.into_iter().flat_map(|p| p.toffs).collect();
+    toffs.sort();
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(toffs.len());
+    for t in toffs {
+        match merged.last_mut() {
+            Some(w) if t.0 <= w.1 => w.1 = w.1.max(t.1),
+            _ => merged.push(t),
+        }
+    }
+    PhraseInfo { toffs: merged, boost, seqnum }
+}
+
 /// A fragment: offsets, the matches inside, summed boost (`WeightedFragInfo`).
 #[derive(Clone)]
 struct FragInfo {
@@ -696,97 +884,30 @@ pub fn highlight(
     if !whole && frag_size < min_frag {
         return Err(Error::illegal(format!("fragCharSize({frag_size}) is too small. It must be {min_frag} or higher.")));
     }
-    // 1. Field query.
-    let mut fl = Flatten { fields, boosts: Vec::new(), out: Vec::new() };
-    query.visit(&mut fl);
-    let tokens: Vec<HlToken> = analyze(values, analyzer, None, opts.tokenized);
-    // Multi-term queries expand to their terms in the index (Lucene's top-terms rewrite, in
-    // term order), or without a searcher to the doc's matching terms.
-    let mut flat = Vec::new();
-    let push = |flat: &mut Vec<Flat>, f: Flat| {
-        if !flat.iter().any(|x: &Flat| x.same(&f)) {
-            flat.push(f);
+    // 1-3 per matched field (`FieldPhraseList` per field, merged): with `matched_fields`
+    // only those fields highlight, each through its own analysis of the values (its term
+    // vectors), and the main field only when it is listed.
+    let phrases = if opts.matched_fields.is_empty() {
+        field_phrases(searcher, query, values, analyzer, fields, opts, &mut 0)?
+    } else {
+        // The query's terms and phrases are numbered in query order (which picks `styled`
+        // tags): the fields go in the order the query first mentions them.
+        let mut order = FieldOrder(Vec::new());
+        query.visit(&mut order);
+        let rank = |f: &u32| order.0.iter().position(|x| x == f).unwrap_or(usize::MAX);
+        let mut by_query: Vec<usize> = (0..opts.matched_fields.len()).collect();
+        by_query.sort_by_key(|&i| rank(&opts.matched_fields[i]));
+        let mut seq = 0;
+        let mut lists = Vec::with_capacity(opts.matched_fields.len());
+        for i in by_query {
+            let f = &opts.matched_fields[i];
+            let a = opts.matched_analyzers.get(i).and_then(|a| a.as_ref()).or(analyzer);
+            let only = std::slice::from_ref(f);
+            lists.push(field_phrases(searcher, query, values, a, opts.require_field_match.then_some(only), opts, &mut seq)?);
         }
+        merge_phrase_lists(lists)
     };
-    for f in fl.out {
-        match f {
-            Flat::MultiQuery { q, boost } => match searcher {
-                Some(s) => {
-                    for (term, b, _) in q.top_terms(s, MAX_MTQ_TERMS)? {
-                        push(&mut flat, Flat::Term { term, boost: boost * b });
-                    }
-                }
-                None => {
-                    let mut ts: Vec<&[u8]> = tokens.iter().map(|t| t.term.as_slice()).filter(|t| q.matches_term(t)).collect();
-                    ts.sort_unstable();
-                    ts.dedup();
-                    for t in ts {
-                        push(&mut flat, Flat::Term { term: t.to_vec(), boost });
-                    }
-                }
-            },
-            Flat::Multi { matcher, boost } => {
-                let mut ts: Vec<&[u8]> = tokens.iter().map(|t| t.term.as_slice()).filter(|t| matcher(t)).collect();
-                ts.sort_unstable();
-                ts.dedup();
-                for t in ts {
-                    let f = Flat::Term { term: t.to_vec(), boost };
-                    if !flat.iter().any(|x: &Flat| x.same(&f)) {
-                        flat.push(f);
-                    }
-                }
-            }
-            f => flat.push(f),
-        }
-    }
-    let mut terms: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-    for f in &flat {
-        match f {
-            Flat::Term { term, .. } => {
-                terms.insert(term.clone());
-            }
-            Flat::Phrase { terms: ts, .. } => terms.extend(ts.iter().cloned()),
-            Flat::Multi { .. } | Flat::MultiQuery { .. } => {}
-        }
-    }
-    let mut map = PhraseMap { nodes: vec![Node::default()], seq: 0 };
-    for f in expand(flat) {
-        match f {
-            Flat::Term { term, boost } => {
-                let n = map.child(0, &term);
-                map.mark(n, 0, boost);
-            }
-            Flat::Phrase { terms, slop, boost } => {
-                let mut n = 0;
-                for t in &terms {
-                    n = map.child(n, t);
-                }
-                map.mark(n, slop, boost);
-            }
-            Flat::Multi { .. } | Flat::MultiQuery { .. } => {}
-        }
-    }
-    // 2. Term stack: query terms in position order, then term order.
-    let mut sel: Vec<&HlToken> = tokens.iter().filter(|t| terms.contains(&t.term)).collect();
-    sel.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.term.cmp(&b.term)));
-    let mut infos: Vec<TermInfo> = Vec::with_capacity(sel.len());
-    let mut stack = VecDeque::new();
-    let mut i = 0;
-    while i < sel.len() {
-        let mut j = i;
-        while j < sel.len() && sel[j].position == sel[i].position {
-            j += 1;
-        }
-        let base = infos.len();
-        for (k, t) in sel[i..j].iter().enumerate() {
-            let next = if i + k + 1 < j { base + k + 1 } else { base };
-            infos.push(TermInfo { term: t.term.clone(), start: t.start as i64, end: t.end as i64, position: t.position, next });
-        }
-        stack.push_back(base);
-        i = j;
-    }
-    // 3-4. Phrases and fragments.
-    let phrases = phrase_list(&map, &infos, stack, opts.phrase_limit);
+    // 4. Fragments.
     let frags = if whole {
         if phrases.is_empty() { Vec::new() } else { vec![frag(0, i32::MAX as i64, phrases)] }
     } else {

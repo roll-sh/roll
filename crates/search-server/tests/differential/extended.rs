@@ -452,7 +452,9 @@ impl Gen<'_> {
             }
             13 => {
                 let n = num(self)?;
-                let s = self.agg_field(in_nested, |f| matches!(f.kind, Kind::Date | Kind::Long | Kind::Integer))?;
+                // Not on dates: Elasticsearch 9.5.5 drops the connection when a document
+                // lacks the date it sorts by (an exception on its network thread).
+                let s = self.agg_field(in_nested, |f| matches!(f.kind, Kind::Long | Kind::Integer))?;
                 ("top_metrics", json!({"top_metrics": {"metrics": [{"field": n.path}], "sort": {s.path: *self.rng.pick(&["asc", "desc"])}, "size": 1 + self.rng.below(2)}}))
             }
             14 => {

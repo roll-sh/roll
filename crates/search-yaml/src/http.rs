@@ -266,6 +266,12 @@ impl Client {
         Client { endpoint, sender: None, timeout, tls: None }
     }
 
+    /// Replaces the headers sent with every request (keeping the connection), returning the old
+    /// ones: the cluster wipe swaps in the admin client's credentials this way.
+    pub fn replace_headers(&mut self, headers: Vec<(String, String)>) -> Vec<(String, String)> {
+        std::mem::replace(&mut self.endpoint.headers, headers)
+    }
+
     /// Uses `connector` for `https://` instead of the process-wide options.
     pub fn with_tls(mut self, connector: TlsConnector) -> Client {
         self.tls = Some(connector);

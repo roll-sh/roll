@@ -4,7 +4,7 @@
 //!   ([`auth`]), wakes clusters from their [`catalog::StoreProvider`], enforces per-cluster
 //!   limits and unloads idle clusters.
 //! - [`http`] is the hyper HTTP/1.1 listener (keep-alive, pipelining, TLS with SNI routing,
-//!   PROXY protocol, gzip).
+//!   PROXY protocol, gzip); `http_head` answers malformed first request heads as Netty does.
 //! - [`store::ObjectStores`] keeps clusters on object storage through `search-store`: metadata
 //!   as cluster states, shards through [`persist`] (WAL cut records, segments, manifests).
 //!   [`catalog::MemoryStores`] keeps everything in memory.
@@ -20,6 +20,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod http;
+mod http_head;
 pub mod lease;
 pub mod limits;
 pub mod meta_guard;

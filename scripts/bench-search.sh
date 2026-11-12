@@ -5,6 +5,9 @@
 #   scripts/bench-search.sh start | stop       start (stop) both targets
 #   scripts/bench-search.sh micro [args...]    the in-repo micro suite (scripts/bench-search.py)
 #                                              against both, interleaved per workload
+#   scripts/bench-search.sh ingest --file <docs.json> --body <index.json> [args...]
+#                                              bulk indexing at 1/8/32 clients against both
+#                                              (`bench-search.py ingest`)
 #   scripts/bench-search.sh rally <track> [rounds]
 #                                              Elastic's Rally (elastic/rally image, benchmark-only
 #                                              pipeline), alternating roll and Elasticsearch per
@@ -26,6 +29,8 @@
 #      tracks and corpora, about 300 MB for geonames), RALLY_PARAMS (extra track params),
 #      RALLY_TASKS / RALLY_EXCLUDE (Rally --include-tasks / --exclude-tasks filters),
 #      RALLY_INDICES (the indices the track creates, default <track>*; http_logs: logs-*,reindexed-logs),
+#      RALLY_DOCS / RALLY_CORPORA (index only the first N documents of the large corpora, see
+#      `bench-search.py rally-subset`),
 #      OUT (target/bench-search).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -145,6 +150,12 @@ local_track() {
   if ! grep -rq include_target_throughput "$dst"; then
     find "$dst" -name '*.json' -exec perl -0pi -e 's/,\s*"target-throughput": *[0-9.]+//g' {} +
   fi
+  # RALLY_DOCS: index only the first N documents of each larger corpus (RALLY_CORPORA: a regex on
+  # <corpus>/<source-file> limiting which ones); streamed once into the data directory.
+  if [[ -n ${RALLY_DOCS:-} ]]; then
+    python3 "$ROOT/scripts/bench-search.py" rally-subset "$dst" "$RALLY_HOME/benchmarks/data" \
+      "$RALLY_DOCS" "${RALLY_CORPORA:-}" >&2
+  fi
   echo "--track-path=/rally/.rally/local-tracks/$1"
 }
 
@@ -185,6 +196,13 @@ case ${1:-} in
     python3 scripts/bench-search.py --target "roll=http://127.0.0.1:$ROLL_PORT" \
       --target "es=http://127.0.0.1:$ES_PORT" $(cgroup_of "$ROLL_NAME" roll) $(cgroup_of "$ES_NAME" es) \
       --out "$OUT/micro.json" "$@"
+    ;;
+  ingest)
+    shift
+    start_es
+    start_roll
+    python3 scripts/bench-search.py ingest --target "roll=http://127.0.0.1:$ROLL_PORT" \
+      --target "es=http://127.0.0.1:$ES_PORT" $(cgroup_of "$ROLL_NAME" roll) $(cgroup_of "$ES_NAME" es) "$@"
     ;;
   rally)
     track=${2:?track}

@@ -151,6 +151,9 @@ pub struct ShardResult {
     pub timed_out: bool,
     /// The search's runtime fields on this shard, for the scripts of the fetch phase.
     pub runtime: Option<Arc<runtime::RuntimeScope>>,
+    /// The leaf weights highlighting builds to test which clauses match a hit, shared by
+    /// the page's hits.
+    pub match_weights: highlight::MatchWeights,
 }
 
 /// The outcome of a search before rendering.
@@ -891,9 +894,12 @@ pub(crate) fn check_inner_hit_names(src: &SearchSource) -> EsResult<()> {
             _ => Ok(()),
         }
     }
-    match src.query.as_ref().map(|q| level(q, &mut Vec::new())) {
-        Some(Err(name)) => Err(EsError::illegal_argument(format!("[inner_hits] already contains an entry for key [{name}]"))),
-        _ => Ok(()),
+    // `SearchService.parseSource` extracts the query's and then the post filter's inner hits
+    // into one map.
+    let mut names = Vec::new();
+    match src.query.iter().chain(&src.post_filter).try_for_each(|q| level(q, &mut names)) {
+        Err(name) => Err(EsError::illegal_argument(format!("[inner_hits] already contains an entry for key [{name}]"))),
+        Ok(()) => Ok(()),
     }
 }
 
@@ -909,6 +915,9 @@ fn shortcut_total_hit_count(searcher: &Searcher, q: &QueryRef) -> EsResult<Optio
             c.query.clone()
         } else if let Some(b) = q.as_any().downcast_ref::<BoostQuery>() {
             b.query.clone()
+        } else if let Some(d) = q.as_any().downcast_ref::<ids::Described>() {
+            // Printed like Elasticsearch's query (`_field_names:f`), counted like it.
+            d.inner.clone()
         } else {
             break;
         };
@@ -1080,6 +1089,7 @@ pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t:
                 percolate: Vec::new(),
                 timed_out: true,
                 runtime: None,
+                match_weights: Default::default(),
             })
         }
         r => r,
@@ -1197,6 +1207,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
                 percolate: Vec::new(),
                 timed_out: false,
                 runtime: None,
+                match_weights: Default::default(),
             });
         }
         let counter = if warm { &t.shard.counters.request_cache_hit } else { &t.shard.counters.request_cache_miss };
@@ -1243,6 +1254,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
                 // Top-level aggregations may answer from segment statistics only when the query
                 // matches every live doc (`match_all`, nothing else filtering).
                 matches_all: q.as_any().is::<MatchAllQuery>() && post.is_none() && src.min_score.is_none(),
+                terminate_after: src.terminate_after.is_some_and(|t| t > 0),
                 profiler: profiler.as_ref().map(|_| search_aggs::profile::Profiler::new()),
                 budget: Some(cluster.breakers.request(cluster, st)),
                 // OpenSearch (forked before 7.13) has no filter-by-filter aggregations.
@@ -1307,6 +1319,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
             percolate: Vec::new(),
             timed_out: false,
             runtime: None,
+            match_weights: Default::default(),
         });
     }
     // OpenSearch's query phase whether it gets there or not (`QueryPhase`): the count
@@ -1433,7 +1446,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
     } else if built.by_score && profiler.is_none() && agg_collector.is_none() && post.is_none() && src.min_score.is_none() && src.terminate_after.is_none() && after.is_none() {
         // The concurrent fast path.
         let m = search_index::collector::compose::TopScoreManager { n, threshold: threshold.unwrap_or(0).max(n as u64), after: scroll_after, min_score: None };
-        let td = searcher.search_concurrent(&q, &m, &Default::default()).map_err(crate::engine::convert::index_error)?;
+        let td = sliced(&searcher, shards, &q).unwrap_or_else(|| searcher.clone()).search_concurrent(&q, &m, &Default::default()).map_err(crate::engine::convert::index_error)?;
         let max = td.max_score();
         let hits: Vec<ShardHit> = td.hits.iter().map(|h| ShardHit { doc: h.doc, score: h.score, sort: Vec::new(), group: None }).collect();
         (hits, td.total_hits, td.relation, max)
@@ -1453,9 +1466,11 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
     } else {
         // `size: 0` collects no top docs, so `track_scores` scores nothing (a `min_score` still
         // does).
-        let mut top = TopFieldCollector::new(built.keys.clone(), n, threshold.unwrap_or(0).max(n as u64), (track_scores && !empty_hits) || src.min_score.is_some()).with_searcher(&searcher);
+        let field_threshold = threshold.unwrap_or(0).max(n as u64);
+        let field_scores = (track_scores && !empty_hits) || src.min_score.is_some();
+        let mut field_after = None;
         if let Some((contexts::CursorKind::Doc, Some((_, d)))) = scroll_page {
-            top = top.with_after(vec![SortValue::Long(i64::from(d))], Some(d));
+            field_after = Some((vec![SortValue::Long(i64::from(d))], Some(d)));
         }
         if let Some(a) = after {
             if a.len() != built.keys.len() {
@@ -1476,7 +1491,11 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
                 };
                 vals.push(sort::parse_after(v, k, f, req.now_ms, pos, field.unwrap_or("null"))?);
             }
-            top = top.with_after(vals, None);
+            field_after = Some((vals, None));
+        }
+        let mut top = TopFieldCollector::new(built.keys.clone(), n, field_threshold, field_scores).with_searcher(&searcher);
+        if let Some((vals, d)) = field_after {
+            top = top.with_after(vals, d);
         }
         let td = run_collect(&searcher, &q, top, post.as_ref(), src, agg_collector.as_mut(), &mut terminated_early, |c| c.top_docs())?;
         let hits: Vec<ShardHit> = td
@@ -1518,6 +1537,15 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
                     }
                     if c > limit { (limit, TotalRelation::GreaterThanOrEqualTo) } else { (c, TotalRelation::EqualTo) }
                 }
+                None => (total, relation),
+            }
+        }
+        // A timed-out search keeps `shortcutTotalHitCount`'s total too: Elasticsearch reads it
+        // before collecting, so the interruption doesn't shorten it.
+        (_, Some(limit)) if n > 0 && SHARD_TIMED_OUT.with(std::cell::Cell::get) && collapse.is_none() && post.is_none() && src.min_score.is_none() && profiler.is_none() => {
+            match shortcut_total_hit_count(&searcher, &q)? {
+                Some(c) if c > limit => (limit, TotalRelation::GreaterThanOrEqualTo),
+                Some(c) => (c, TotalRelation::EqualTo),
                 None => (total, relation),
             }
         }
@@ -1687,6 +1715,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         percolate: qctx.percolate.take(),
         timed_out: false,
         runtime: None,
+        match_weights: Default::default(),
     })
 }
 
@@ -1760,7 +1789,11 @@ enum RescoreKind {
 }
 
 pub(crate) fn prepare_rescore(qctx: &QueryCtx, src: &SearchSource) -> Vec<PreparedRescore> {
-    src.rescore
+    // Elasticsearch extracts inner hits from the query and post filter only: a rescore
+    // query's `inner_hits` are ignored (its named queries still count).
+    let inner_hits = qctx.inner_hits.borrow().len();
+    let prepared = src
+        .rescore
         .iter()
         .map(|r| PreparedRescore {
             window: r.window_size.unwrap_or(10).max(0) as usize,
@@ -1773,7 +1806,9 @@ pub(crate) fn prepare_rescore(qctx: &QueryCtx, src: &SearchSource) -> Vec<Prepar
                 None => qctx.to_query(&r.query).map(RescoreKind::Query).map_err(|e| query::shard_exception(qctx.idx, e)),
             },
         })
-        .collect()
+        .collect();
+    qctx.inner_hits.borrow_mut().truncate(inner_hits);
+    prepared
 }
 
 /// Rescores `hits` (best first) with each rescorer in turn: the hits after a rescorer's window
@@ -1894,6 +1929,42 @@ fn explain_rescored(qctx: &QueryCtx, searcher: &Searcher, src: &SearchSource, re
         }
     }
     Ok(e)
+}
+
+/// The fewest docs a slice of a concurrent shard search gets (Elasticsearch's
+/// `MINIMUM_DOCS_PER_SLICE`).
+const MIN_DOCS_PER_SLICE: u32 = 50_000;
+
+/// Intra-shard concurrency (Elasticsearch's `search_worker` slices) for top hits by score of a
+/// `function_score` or `script_score` query: those score every match (no score bound lets
+/// collection skip any), so splitting the work divides the wall time while the CPU stays the
+/// same. Queries with score bounds and field sorts prune so well serially that slices only
+/// add work: on geonames (1.1M docs, 5 shards) slicing them doubled their CPU time and
+/// lengthened every one.
+///
+/// When a request has fewer shards than the node has cores, each shard's view searches in up
+/// to `2 * cores / shards` slices (capped at the core count) of at least
+/// [`MIN_DOCS_PER_SLICE`] docs, so a request on one or a few shards still uses every core.
+/// Twice the cores' worth of slices keeps every thread busy when shards end unevenly (slices
+/// are claimed, not assigned). Hits and totals are those of a serial search (the merge breaks
+/// ties on doc ids). `None`: search serially — one slice would do, a deadline is set (a
+/// timed-out serial search keeps its partial hits), the dialect is OpenSearch (its scripts
+/// read the dialect from a thread-local the slice threads don't have), or
+/// `ROLL_PERF_SERIAL_SLICES` is set (for A/B measurements).
+fn sliced(searcher: &Searcher, shards: usize, q: &QueryRef) -> Option<Searcher> {
+    use search_index::query::{FunctionScoreQuery, ScriptScoreQuery};
+    use search_index::search::{SearchLimits, pool};
+    static SERIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let unbounded = q.as_any().is::<FunctionScoreQuery>() || q.as_any().is::<ScriptScoreQuery>();
+    let cores = pool::cores();
+    let k = (2 * cores).div_ceil(shards.max(1)).min(cores);
+    if !unbounded || k <= 1 || searcher.max_doc() < 2 * MIN_DOCS_PER_SLICE || *SERIAL.get_or_init(|| std::env::var_os("ROLL_PERF_SERIAL_SLICES").is_some()) || crate::opensearch::active() {
+        return None;
+    }
+    if search_index::search::ambient_control().is_some_and(|c| c.deadline.is_some()) {
+        return None;
+    }
+    Some(searcher.with_limits(SearchLimits { parallelism: k, parallel_min_docs: MIN_DOCS_PER_SLICE, ..*searcher.limits() }))
 }
 
 /// Collects with the composition the request asks for (min score, post filter, aggregations,
@@ -2131,9 +2202,11 @@ pub fn execute(cluster: &Cluster, req: &SearchRequest) -> EsResult<SearchOutcome
     execute_on(cluster, req, &targets)
 }
 
-/// `matched_fields` with `require_field_match: false` (`HighlightBuilder.build`).
+/// `matched_fields` with `require_field_match: false` under the unified highlighter (the
+/// default; `plain` ignores matched fields and `fvh` takes them).
 fn highlight_shard_error(h: &Map) -> Option<EsError> {
     let global = h.get("require_field_match").and_then(Value::as_bool);
+    let global_type = h.get("type").and_then(Value::as_str);
     let fields: Vec<&Value> = match h.get("fields") {
         Some(Value::Obj(m)) => m.values().collect(),
         Some(Value::Arr(a)) => a.iter().filter_map(|x| x.as_object().and_then(|m| m.values().next())).collect(),
@@ -2141,7 +2214,8 @@ fn highlight_shard_error(h: &Map) -> Option<EsError> {
     };
     for f in fields {
         let rfm = f.get("require_field_match").and_then(Value::as_bool).or(global).unwrap_or(true);
-        if !rfm && f.get("matched_fields").is_some() {
+        let unified = f.get("type").and_then(Value::as_str).or(global_type).is_none_or(|t| t == "unified");
+        if !rfm && unified && f.get("matched_fields").is_some() {
             return Some(EsError::illegal_argument("Matched fields are not supported when [require_field_match] is set to [false]"));
         }
     }
@@ -2223,8 +2297,11 @@ fn run_query_phases(n: usize, run: &(dyn Fn(usize) -> EsResult<ShardResult> + Sy
     let opensearch = crate::opensearch::active();
     let lookups = extra::LookupScope::current();
     let page = contexts::page_state();
+    // The request's cancellation (`_tasks/_cancel`, a closed connection) reaches every shard.
+    let cancelled = search_index::search::ambient_control().and_then(|c| c.cancelled);
     pool::for_each_index(n, (n - 1).min(cores - 1), &|i| {
         let _lookups = extra::LookupScope::adopt(lookups.clone());
+        let _ambient = cancelled.clone().map(|c| search_index::search::set_ambient_control(Some(search_index::search::SearchControl { deadline: None, cancelled: Some(c), ext: None })));
         let r = crate::opensearch::with(opensearch, || contexts::with_page(page.clone(), || run(i)));
         *slots[i].lock() = Some(r);
     });
@@ -2237,10 +2314,12 @@ fn run_query_phases(n: usize, run: &(dyn Fn(usize) -> EsResult<ShardResult> + Sy
 /// phase, or the DFS phase of `dfs_query_then_fetch`.
 fn context_checks(t: &Target, req: &SearchRequest, from: usize, size: usize) -> EsResult<()> {
     let src = &req.source;
+    // `preProcess` returns at once for a suggest-only request (an empty `suggest` too).
     let only_suggest = src.suggest.is_some() && src.query.is_none() && src.knn.is_empty() && src.aggs.is_none();
-    if !only_suggest {
-        check_window(&t.idx, from as i64, size as i64, req.scroll.is_some())?;
+    if only_suggest {
+        return Ok(());
     }
+    check_window(&t.idx, from as i64, size as i64, req.scroll.is_some())?;
     check_rescore_sort(src)?;
     check_limits(&t.idx, src)?;
     check_slices(&t.idx, src, req.scroll.is_some())
@@ -2255,6 +2334,8 @@ pub(super) fn context_checks_of(t: &Target, req: &SearchRequest) -> EsResult<()>
 
 /// Runs a search on given shard targets (scrolls and PITs pass their snapshots).
 pub fn execute_on(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -> EsResult<SearchOutcome> {
+    // The search's shard tasks (`_tasks`), under the request's task.
+    let _tasks = crate::tasks::search_started(cluster, req, targets);
     // `dfs_query_then_fetch` over more than one shard (a single shard runs query_then_fetch):
     // a DFS phase, then the query phase Elasticsearch calls `dfs_query`.
     if req.dfs && targets.len() > 1 && targets.iter().all(|t| t.searcher.as_ref().is_none_or(|s| s.global_stats().is_none())) {
@@ -2977,9 +3058,9 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
             (Some(n), 2..) => format!("_percolator_document_slot_{n}"),
             _ => "_percolator_document_slot".to_string(),
         };
-        if let Some(s) = pc.slots.get(&h.doc) {
+        if let Some(s) = pc.slots(h.doc) {
             let mut add: Vec<(String, Value)> = vec![(field.clone(), Value::Arr(s.iter().map(|x| Value::from(*x as i64)).collect()))];
-            for (slot, names) in pc.named.get(&h.doc).into_iter().flatten() {
+            for (slot, names) in pc.named(h.doc) {
                 add.push((format!("{field}_{slot}_matched_queries"), Value::Arr(names.iter().cloned().map(Value::Str).collect())));
             }
             for (k, v) in add {
@@ -3037,11 +3118,11 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if let Some(hl) = &src.highlight {
         let mut spec = highlight::Spec::parse(hl)?;
         spec.weight_matches = highlight::weight_matches_supported(src);
-        let stored = r.searcher.stored(h.doc).map_err(crate::engine::convert::index_error)?;
+        // The stored fields read at the top serve the highlighter too.
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
         let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
-        let mut out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(h.doc))?;
+        let mut out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(h.doc), Some(&stored), Some(&r.match_weights))?;
         // Percolated documents are highlighted with the stored query that matched them.
         for pc in &r.percolate {
             out.extend(pc.highlight(cluster, st, &spec, h.doc, req.now_ms)?);
@@ -3089,6 +3170,30 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
         let mut ih = inner::render(&qctx, t, r, h.doc, source.as_ref(), req.total_as_int)?;
+        // `stored_fields: _none_` reaches nested inner hits (their sub-context reads the
+        // search's stored fields context): they print no `_id` either.
+        if req.source.stored_fields.as_ref().is_some_and(|sf| sf.fields.is_none())
+            && let Value::Obj(defs) = &mut ih
+        {
+            for d in defs.values_mut() {
+                let hits = match d {
+                    Value::Obj(dm) => match dm.get_mut("hits") {
+                        Some(Value::Obj(hm)) => hm.get_mut("hits"),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(Value::Arr(hits)) = hits {
+                    for hit in hits.iter_mut() {
+                        if let Value::Obj(hm) = hit
+                            && hm.contains_key("_nested")
+                        {
+                            hm.shift_remove("_id");
+                        }
+                    }
+                }
+            }
+        }
         // `ExpandSearchPhase` puts the collapse groups' inner hits into the same `HashMap`,
         // after the fetch phase's (a group of the same name replaces a nested one).
         if let (Some(Value::Obj(groups)), Value::Obj(nested)) = (m.shift_remove("inner_hits"), &mut ih) {
@@ -3215,7 +3320,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
             let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
             let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
             let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
-            let out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(root))?;
+            let out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(root), Some(&stored), Some(&r.match_weights))?;
             if !out.is_empty() {
                 insert_before(m, "highlight", Value::Obj(out), AFTER_FIELDS);
             }
@@ -3733,7 +3838,16 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         None
     };
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
+    crate::xpack::entsearch::query_rules::check_rulesets(ctx, body.as_ref())?;
     let phase_took = crate::opensearch::phase_took_requested(ctx)?;
+    // OpenSearch's `verbose_pipeline` (the URL parameter wins over the body's).
+    let verbose = match ctx.query("verbose_pipeline") {
+        Some(_) => ctx.bool_param("verbose_pipeline", false)?,
+        None => req.source.verbose_pipeline,
+    };
+    if verbose && pipeline.is_none() {
+        return Err(EsError::illegal_argument("The 'verbose pipeline' option requires a search pipeline to be defined."));
+    }
     let Some(pipeline) = pipeline else {
         // Hits carry their stored `_source` bytes as they are when the page goes straight out
         // (`json::raw`).
@@ -3745,6 +3859,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Reply::ok(v);
     };
     let mut rc = crate::opensearch::search_pipeline::RunContext::default();
+    rc.verbose = verbose;
     pipeline.transform_request(&mut req, &mut rc)?;
     // The pipeline's phase-results processor fuses a top-level `hybrid` query's results.
     if let (Some(phase), Some(h)) = (pipeline.hybrid_phase(), req.source.query.as_mut().and_then(crate::opensearch::hybrid::top_level_mut)) {
@@ -3753,7 +3868,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let out = run(ctx, req.clone())?;
     let mut v = render(&out, &req);
     crate::opensearch::add_reduce_phases(ctx, &out, &req, &mut v)?;
-    pipeline.transform_response(&mut v, &rc)?;
+    pipeline.transform_response(&mut v, &mut rc)?;
     crate::opensearch::add_search_extras(&out, &req, phase_took, &mut v);
     Reply::ok(v)
 }
@@ -4110,11 +4225,14 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
 /// `RestActions.getQueryContent` (`_count`, `_explain`): an `XContentParseException` from the
 /// query becomes a `ParsingException` "Failed to parse" at the same location, caused by it.
 fn query_content_error(e: EsError) -> EsError {
-    if e.kind != "x_content_parse_exception" {
-        return e;
-    }
     let reason = e.reason();
-    let loc = reason.strip_prefix('[').and_then(|r| r.split_once(']')).and_then(|(lc, _)| lc.split_once(':')).and_then(|(l, c)| Some((l.parse::<usize>().ok()?, c.parse::<usize>().ok()?)));
+    let lc = match e.kind.as_ref() {
+        "x_content_parse_exception" => reason.strip_prefix('[').and_then(|r| r.split_once(']')).map(|(lc, _)| lc),
+        // `{}` as a query: the parser stands on the empty object's end, where the message says.
+        "illegal_argument_exception" => reason.strip_prefix("query malformed, empty clause found at [").and_then(|r| r.strip_suffix(']')),
+        _ => None,
+    };
+    let loc = lc.and_then(|lc| lc.split_once(':')).and_then(|(l, c)| Some((l.parse::<usize>().ok()?, c.parse::<usize>().ok()?)));
     match loc {
         Some((line, col)) => EsError::parsing(line, col, "Failed to parse").caused_by(e),
         None => e,
@@ -4153,7 +4271,8 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
     let table = engine.table();
     let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms);
     let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), alias_filter: None, boost: 1.0, searcher: Some(searcher.clone()) };
-    let q = shard_query(&qctx, &t, &req.source).map_err(|e| query::shard_exception(&idx, e))?;
+    // `TransportExplainAction.shardOperation` looks the document up before it builds the
+    // query: a missing document answers 404 whatever the query.
     let doc = find_doc(&searcher, &id);
     let mut m = Map::new();
     m.insert("_index".into(), Value::Str(idx.name.clone()));
@@ -4162,6 +4281,7 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
         m.insert("matched".into(), Value::Bool(false));
         return Ok(Reply::Body(404, Value::Obj(m)));
     };
+    let q = shard_query(&qctx, &t, &req.source).map_err(|e| query::shard_exception(&idx, e))?;
     let e = searcher.explain(&q, doc).map_err(crate::engine::convert::index_error)?;
     m.insert("matched".into(), Value::Bool(e.is_match()));
     m.insert("explanation".into(), explanation_json(&e));
@@ -4234,7 +4354,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                         }
                     };
                     let id = id.to_string();
-                    let h = highlight::highlight_hit(&qctx, spec, &r.query, source.as_ref(), &id, &r.searcher, Some(doc))?;
+                    let h = highlight::highlight_hit(&qctx, spec, &r.query, source.as_ref(), &id, &r.searcher, Some(doc), Some(&stored), Some(&r.match_weights))?;
                     if !h.is_empty() {
                         m.insert("highlight".into(), Value::Obj(h));
                     }
@@ -4302,6 +4422,7 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
             let searcher = t.searcher()?;
             let table = t.engine.table();
             let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
+            check_inner_hit_names(&req.source)?;
             let q = shard_query(&qctx, t, &req.source).map_err(|e| query::shard_exception(&t.idx, e))?;
             match (req.source.min_score, req.source.terminate_after) {
                 (None, None) => searcher.count(&q).map_err(crate::engine::convert::index_error),

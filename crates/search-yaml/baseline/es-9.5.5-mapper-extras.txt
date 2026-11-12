@@ -1,0 +1,146 @@
+# Tests of Elasticsearch 9.5.5's `mapper-extras` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+mapper-extras:match_only_text/10_basic/Exist query
+mapper-extras:match_only_text/10_basic/Field caps
+mapper-extras:match_only_text/10_basic/Fuzzy intervals query
+mapper-extras:match_only_text/10_basic/Fuzzy query
+mapper-extras:match_only_text/10_basic/Match Phrase Prefix query
+mapper-extras:match_only_text/10_basic/Match Phrase query
+mapper-extras:match_only_text/10_basic/Match query
+mapper-extras:match_only_text/10_basic/Prefix intervals query
+mapper-extras:match_only_text/10_basic/Prefix query
+mapper-extras:match_only_text/10_basic/Query String query with phrase
+mapper-extras:match_only_text/10_basic/Regexp query
+mapper-extras:match_only_text/10_basic/Span query
+mapper-extras:match_only_text/10_basic/Term intervals query
+mapper-extras:match_only_text/10_basic/Wildcard highlighting
+mapper-extras:match_only_text/10_basic/Wildcard intervals query
+mapper-extras:match_only_text/10_basic/Wildcard query
+mapper-extras:match_only_text/10_basic/synthetic_source
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text as multi-field
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text as multi-field with ignored keyword as parent
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text as multi-field with ignored stored keyword as parent
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text as multi-field with stored keyword as parent
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text with ignored multi-field
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text with ignored multi-field and multiple values in the same doc
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text with ignored multi-field and multiple values in the same doc and preserved order
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text with ignored stored multi-field
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text with multi-field
+mapper-extras:match_only_text/10_basic/synthetic_source match_only_text with stored multi-field
+mapper-extras:match_only_text/10_basic/synthetic_source with copy_to
+mapper-extras:match_only_text/10_basic/tsdb
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values - match query
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values - multi value
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values - phrase query still works
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values - synthetic source
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values - synthetic source aggregation
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values - synthetic source multi-value
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values - synthetic source search
+mapper-extras:match_only_text/20_doc_values/match_only_text with doc_values enabled
+mapper-extras:rank_feature/10_basic/Negative linear
+mapper-extras:rank_feature/10_basic/Negative log
+mapper-extras:rank_feature/10_basic/Negative saturation
+mapper-extras:rank_feature/10_basic/Negative sigmoid
+mapper-extras:rank_feature/10_basic/Positive linear
+mapper-extras:rank_feature/10_basic/Positive log
+mapper-extras:rank_feature/10_basic/Positive saturation
+mapper-extras:rank_feature/10_basic/Positive sigmoid
+mapper-extras:rank_feature/20_null_value/Non positive null_value
+mapper-extras:rank_feature/20_null_value/Search rank_feature with and without null_value
+mapper-extras:rank_feature/30_synthetic_source/synthetic source sanity test
+mapper-extras:rank_features/10_basic/Dot in feature name
+mapper-extras:rank_features/10_basic/Linear
+mapper-extras:rank_features/10_basic/Linear negative impact
+mapper-extras:rank_features/10_basic/Log
+mapper-extras:rank_features/10_basic/Saturation
+mapper-extras:rank_features/10_basic/Sigmoid
+mapper-extras:rank_features/20_synthetic_source/synthetic source sanity test
+mapper-extras:scaled_float/10_basic/Aggregations
+mapper-extras:scaled_float/10_basic/Search
+mapper-extras:scaled_float/10_basic/Sort
+mapper-extras:scaled_float/10_basic/Sort with numeric_type
+mapper-extras:scaled_float/10_basic/docvalue_fields
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field out of order partial leading term
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field out of order partial trailing term
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 1 infix term
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 1 prefix term
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 2 infix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 2 prefix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 3 infix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 3 prefix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 4 infix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 4 prefix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 5 infix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with 5 prefix terms
+mapper-extras:search-as-you-type/10_basic/bool prefix query on root field with trailing term
+mapper-extras:search-as-you-type/10_basic/get document
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query out of order with partial leading term
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query out of order with partial trailing term
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 1 infix term
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 1 prefix term
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 2 infix terms
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 2 prefix terms
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 3 infix terms
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 3 prefix terms
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 4 infix terms
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 4 prefix terms
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with 5 prefix terms
+mapper-extras:search-as-you-type/10_basic/multi match bool prefix query with trailing term
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 1 infix term
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 1 prefix term
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 2 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 2 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 3 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 3 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 4 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 4 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 5 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with 5 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase prefix query on root field with trailing term
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 1 infix term
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 1 prefix term
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 2 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 2 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 3 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 3 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 4 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 4 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 5 infix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with 5 prefix terms
+mapper-extras:search-as-you-type/10_basic/phrase query on root field with trailing term
+mapper-extras:search-as-you-type/10_basic/prefix query on 2gram with infix term
+mapper-extras:search-as-you-type/10_basic/prefix query on 2gram with prefix term
+mapper-extras:search-as-you-type/10_basic/prefix query on 3gram with infix term
+mapper-extras:search-as-you-type/10_basic/prefix query on 3gram with prefix term
+mapper-extras:search-as-you-type/10_basic/prefix query on 4gram with infix term
+mapper-extras:search-as-you-type/10_basic/prefix query on 4gram with prefix term
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 1 infix term
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 1 prefix term
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 2 infix terms
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 2 prefix terms
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 3 infix terms
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 3 prefix terms
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 4 infix terms
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with 4 prefix terms
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with infix term
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with prefix term
+mapper-extras:search-as-you-type/10_basic/prefix query on root field with trailing term
+mapper-extras:search-as-you-type/10_basic/term query on 2gram
+mapper-extras:search-as-you-type/10_basic/term query on 3gram
+mapper-extras:search-as-you-type/10_basic/term query on 4gram
+mapper-extras:search-as-you-type/10_basic/term query on prefix field with infix term
+mapper-extras:search-as-you-type/10_basic/term query on prefix field with prefix term
+mapper-extras:search-as-you-type/10_basic/term query on prefix field with trailing term
+mapper-extras:search-as-you-type/10_basic/term query on root field
+mapper-extras:search-as-you-type/20_highlighting/bool prefix query
+mapper-extras:search-as-you-type/20_highlighting/multi match bool prefix query 1 complete term
+mapper-extras:search-as-you-type/20_highlighting/multi match bool prefix query 2 complete term
+mapper-extras:search-as-you-type/20_highlighting/multi match bool prefix query 3 complete term
+mapper-extras:search-as-you-type/20_highlighting/multi match bool prefix query 4 complete term
+mapper-extras:search-as-you-type/20_highlighting/phrase query
+mapper-extras:search-as-you-type/30_synthetic_source/synthetic source sanity test
+mapper-extras:search-as-you-type/40_reloadable_search_analyzer/search_as_you_type with reloadable search_analyzer
+mapper-extras:search-as-you-type/40_reloadable_search_analyzer/search_as_you_type with reloadable search_analyzer after synonym reload
+mapper-extras:token_count/10_basic/Synthetic source
+mapper-extras:token_count/10_basic/Test token count

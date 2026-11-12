@@ -113,6 +113,7 @@ pub enum F {
     ToLong,
     ToString,
     ToText,
+    ToAggregateMetricDouble,
     ToUnsignedLong,
     ToVersion,
     ToGeoPoint,
@@ -245,6 +246,8 @@ const NAMES: &[(&str, F)] = &[
     ("to_string", F::ToString),
     ("to_str", F::ToString),
     ("to_text", F::ToText),
+    ("to_aggregate_metric_double", F::ToAggregateMetricDouble),
+    ("to_aggregatemetricdouble", F::ToAggregateMetricDouble),
     ("to_unsigned_long", F::ToUnsignedLong),
     ("to_ulong", F::ToUnsignedLong),
     ("to_ul", F::ToUnsignedLong),
@@ -441,6 +444,16 @@ impl F {
                 is_date(t) || matches!(t, DataType::Double | DataType::Long | DataType::UnsignedLong) || t.is_string()
             }),
             (ToIp, 0) => ("ip or string", |t| t == DataType::Ip || t.is_string()),
+            (ToAggregateMetricDouble, 0) => ("numeric or aggregate_metric_double", |t| t.is_numeric() || t == DataType::AggregateMetricDouble),
+            (ToDouble, 0) => ("boolean or counter_double or counter_integer or counter_long or datetime or numeric or string", |t| t.is_counter() || t.is_numeric() || t.is_string() || matches!(t, DataType::Boolean | DataType::Date)),
+            (ToLong, 0) if n == 1 => ("boolean or counter_integer or counter_long or date_nanos or datetime or geohash or geohex or geotile or numeric or string", |t| {
+                matches!(t, DataType::CounterInteger | DataType::CounterLong | DataType::Boolean | DataType::Date | DataType::DateNanos) || t.is_numeric() || t.is_string()
+            }),
+            (ToInteger, 0) if n == 1 => ("boolean or counter_integer or datetime or numeric or string", |t| matches!(t, DataType::CounterInteger | DataType::Boolean | DataType::Date) || t.is_numeric() || t.is_string()),
+            (ToString, 0) => (
+                "aggregate_metric_double or boolean or cartesian_point or cartesian_shape or date_nanos or date_range or datetime or dense_vector or exponential_histogram or flattened or geo_point or geo_shape or geohash or geohex or geotile or histogram or ip or numeric or string or version",
+                |t| !t.is_counter() && !matches!(t, DataType::TDigest | DataType::Tsid | DataType::Source | DataType::DatePeriod | DataType::TimeDuration | DataType::Unsupported),
+            ),
             (ToVersion, 0) => ("string or version", |t| t == DataType::Version || t.is_string()),
             (ToGeoPoint, 0) => ("geo_point or string", |t| t == DataType::GeoPoint || t.is_string()),
             (ToCartesianPoint, 0) => ("cartesian_point or string", |t| t == DataType::CartesianPoint || t.is_string()),
@@ -483,6 +496,7 @@ impl F {
                 | ToLong
                 | ToString
                 | ToText
+                | ToAggregateMetricDouble
                 | ToUnsignedLong
                 | ToVersion
                 | ToGeoPoint
@@ -554,6 +568,7 @@ impl F {
             ToDateNanos => T::DateNanos,
             IpPrefix | ToIp => T::Ip,
             ToText => T::Text,
+            ToAggregateMetricDouble => T::AggregateMetricDouble,
             ToUnsignedLong => T::UnsignedLong,
             ToVersion => T::Version,
             ToGeoPoint => T::GeoPoint,
@@ -1135,6 +1150,17 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
             }
         })?,
         ToString | ToText | ToVersion => map_values(a0, |v| V::Str(v.to_text())),
+        // Every value of the (multi-)value folds into one metric; metrics stay as they are.
+        ToAggregateMetricDouble => match a0 {
+            V::Null => V::Null,
+            V::Str(s) => V::Str(s.clone()),
+            v => {
+                let xs: Vec<f64> = v.values().into_iter().filter_map(V::as_f64).collect();
+                let (min, max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+                let sum: f64 = xs.iter().sum();
+                super::value::agg_metric_text(Some(min), Some(max), Some(sum), Some(xs.len() as i64)).map_or(V::Null, V::Str)
+            }
+        },
         ToGeoPoint | ToCartesianPoint | ToGeoShape | ToCartesianShape => {
             let to = f.result_type(types);
             // Spatial inputs already hold normalized text; strings that don't read are null

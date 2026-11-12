@@ -55,6 +55,19 @@ pub struct DocHost {
     pub chain: Vec<Box<str>>,
     /// Runtime fields this script read, bound to the segment.
     rt_leaves: Vec<(Box<str>, Box<super::runtime::EvalLeaf>)>,
+    /// The vector field [`Host::with_vector`] reads, resolved once, and a buffer for vectors
+    /// whose bytes are not aligned as floats.
+    vector: Option<(Box<str>, VectorSlot)>,
+    vector_buf: Vec<f32>,
+}
+
+/// How [`Host::with_vector`] reads its field in this segment.
+enum VectorSlot {
+    /// Not an indexed float vector field: read through [`Host::doc_values`].
+    Other,
+    /// No vectors in this segment.
+    Absent,
+    Reader(search_codec::VectorsReader),
 }
 
 /// A literal doc field of the script, as [`DocHost::doc_values_at`] resolved it.
@@ -92,7 +105,7 @@ impl DocHost {
     pub fn new(table: Arc<FieldTable>, seg: SegmentContext, shard: i32, index: String) -> DocHost {
         let ctl = search_index::search::ambient_control();
         let runtime = super::runtime::RuntimeScope::of_control(ctl.as_ref());
-        DocHost { table, seg, doc: 0, score: 0.0, shard, index, id_fielddata: crate::opensearch::active(), buf: Vec::new(), resolved: Vec::new(), slots: Vec::new(), cols: Vec::new(), block_start: 0, cancellable: search_scripts_poll(), ctl, term_stats: None, runtime, chain: Vec::new(), rt_leaves: Vec::new() }
+        DocHost { table, seg, doc: 0, score: 0.0, shard, index, id_fielddata: crate::opensearch::active(), buf: Vec::new(), resolved: Vec::new(), slots: Vec::new(), cols: Vec::new(), block_start: 0, cancellable: search_scripts_poll(), ctl, term_stats: None, runtime, chain: Vec::new(), rt_leaves: Vec::new(), vector: None, vector_buf: Vec::new() }
     }
 
     /// `doc[field]` of a runtime field (`None`: `field` is no runtime field of the search on
@@ -158,11 +171,17 @@ fn resolve<'a>(resolved: &'a mut Vec<(Box<str>, Arc<crate::engine::fields::Field
     if let Some(i) = resolved.iter().position(|(n, _)| &**n == name) {
         return Some(&resolved[i].1);
     }
-    let f = table.get(name)?;
-    if resolved.len() < RESOLVED_MAX {
-        resolved.push((name.into(), f.clone()));
+    // `root.key` of a `flattened` field reads its keyed values (`KeyedFlattenedFieldType`).
+    let f = match table.get(name) {
+        Some(f) => f.clone(),
+        None => table.keyed(name)?,
+    };
+    // Keyed fields aren't in the table, so they are kept even past the cache's size.
+    if resolved.len() < RESOLVED_MAX || f.flattened_key.is_some() {
+        resolved.push((name.into(), f));
+        return resolved.last().map(|(_, f)| &**f);
     }
-    Some(f)
+    table.get(name).map(|f| &**f)
 }
 
 fn kind_of(k: Kind) -> Option<DocKind> {
@@ -225,7 +244,139 @@ fn push_numeric(kind: Kind, v: i64, out: &mut DocValues) {
     }
 }
 
+/// `MappedFieldType.failIfNoDocValues`, which a script's fielddata lookup reaches for a field
+/// mapped with `doc_values: false` (`None` when the field has doc values or isn't such a type).
+fn no_doc_values(f: &crate::engine::fields::FieldInfo) -> Option<HostError> {
+    if f.doc_values {
+        return None;
+    }
+    let server = |frame: &str| format!("{}org.elasticsearch.index.mapper.{frame}", search_painless::es::SERVER);
+    let builder = match f.kind {
+        Kind::Boolean => server("BooleanFieldMapper$BooleanFieldType.fielddataBuilder(BooleanFieldMapper.java:451)"),
+        Kind::Keyword => server("KeywordFieldMapper$KeywordFieldType.fielddataBuilder(KeywordFieldMapper.java:1094)"),
+        Kind::Long | Kind::Integer | Kind::Short | Kind::Byte | Kind::Double | Kind::Float | Kind::HalfFloat => {
+            server("NumberFieldMapper$NumberFieldType.fielddataBuilder(NumberFieldMapper.java:2346)")
+        }
+        Kind::Date | Kind::DateNanos => server("DateFieldMapper$DateFieldType.fielddataBuilder(DateFieldMapper.java:1109)"),
+        Kind::GeoPoint => server("GeoPointFieldMapper$GeoPointFieldType.fielddataBuilder(GeoPointFieldMapper.java:482)"),
+        Kind::Ip => server("IpFieldMapper$IpFieldType.fielddataBuilder(IpFieldMapper.java:674)"),
+        Kind::UnsignedLong => "org.elasticsearch.mapper.unsignedlong@9.5.5/org.elasticsearch.xpack.unsignedlong.UnsignedLongFieldMapper$UnsignedLongFieldType.fielddataBuilder(UnsignedLongFieldMapper.java:526)".to_string(),
+        Kind::ScaledFloat(_) => "org.elasticsearch.mapper.extras@9.5.5/org.elasticsearch.index.mapper.extras.ScaledFloatFieldMapper$ScaledFloatFieldType.fielddataBuilder(ScaledFloatFieldMapper.java:498)".to_string(),
+        _ => return None,
+    };
+    let mut e = HostError::illegal_argument(format!("Can't load fielddata on [{}] because fielddata is unsupported on fields of type [{}]. Use doc values instead.", f.name, f.ty));
+    e.frames = vec![server("MappedFieldType.failIfNoDocValues(MappedFieldType.java:497)"), builder];
+    e.frames.extend(
+        [
+            "index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+            "index.IndexService.loadFielddata(IndexService.java:1451)",
+            "index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+        ]
+        .iter()
+        .map(|f| format!("{}org.elasticsearch.{f}", search_painless::es::SERVER)),
+    );
+    Some(e)
+}
+
 impl DocHost {
+    /// The field API's values of a field without doc values, from `_source`, sorted like doc
+    /// values (numbers ascending, strings by their bytes; values that don't parse are skipped).
+    fn source_values(&mut self, f: &crate::engine::fields::FieldInfo, out: &mut DocValues) -> Result<bool, HostError> {
+        use crate::json::Value;
+        use crate::mapping::params::NumKind;
+        let Some(kind) = kind_of(f.kind) else { return Ok(true) };
+        out.clear(kind);
+        if self.seg.ensure_stored().is_err() {
+            return Ok(true);
+        }
+        let Ok(stored) = self.seg.reader.stored().document(self.doc) else { return Ok(true) };
+        let Some(Ok(Some(Value::Obj(src)))) = crate::fetch::source_bytes(&stored).map(crate::json::parse) else { return Ok(true) };
+        let mut vals = Vec::new();
+        if f.kind == Kind::GeoPoint {
+            crate::engine::source::extract_values_keeping_coordinates(&src, &f.name, &mut vals);
+        } else {
+            crate::engine::source::extract_values(&src, &f.name, &mut vals);
+        }
+        let num = |k: NumKind, v: &Value| crate::mapping::params::parse_number(k, v, true).ok();
+        let mut strs: Vec<String> = Vec::new();
+        for v in vals.into_iter().filter(|v| !v.is_null()) {
+            match f.kind {
+                Kind::Boolean => match v {
+                    Value::Bool(b) => out.longs.push(*b as i64),
+                    Value::Str(s) if s == "true" => out.longs.push(1),
+                    Value::Str(s) if s == "false" || s.is_empty() => out.longs.push(0),
+                    _ => {}
+                },
+                Kind::Keyword => strs.push(v.to_es_string()),
+                Kind::Long | Kind::Integer | Kind::Short | Kind::Byte => {
+                    let k = match f.kind {
+                        Kind::Long => NumKind::Long,
+                        Kind::Integer => NumKind::Integer,
+                        Kind::Short => NumKind::Short,
+                        _ => NumKind::Byte,
+                    };
+                    if let Some(n) = num(k, v).and_then(|n| n.as_i64()) {
+                        out.longs.push(n);
+                    }
+                }
+                Kind::UnsignedLong => {
+                    if let Some(Value::Num(n)) = num(NumKind::UnsignedLong, v)
+                        && let Ok(u) = n.to_string().parse::<u64>()
+                    {
+                        out.longs.push(u as i64);
+                    }
+                }
+                Kind::Double | Kind::Float | Kind::HalfFloat => {
+                    let k = match f.kind {
+                        Kind::Double => NumKind::Double,
+                        Kind::Float => NumKind::Float,
+                        _ => NumKind::HalfFloat,
+                    };
+                    if let Some(d) = num(k, v).and_then(|n| n.as_f64()) {
+                        out.doubles.push(match f.kind {
+                            Kind::Float => d as f32 as f64,
+                            Kind::HalfFloat => encode::sortable_f16(encode::f16_sortable(d as f32)) as f64,
+                            _ => d,
+                        });
+                    }
+                }
+                Kind::ScaledFloat(sf) => {
+                    if let Some(d) = num(NumKind::Double, v).and_then(|n| n.as_f64()) {
+                        out.doubles.push(super::hits::scaled_double((d * sf).round() as i64, sf));
+                    }
+                }
+                Kind::Date | Kind::DateNanos => {
+                    let text = v.to_es_string();
+                    let parsed = match &f.date_format {
+                        Some(fmt) => fmt.parse(&text, None, false).ok(),
+                        None => crate::time::DateFormatter::new(crate::time::DateFormatter::DEFAULT).ok().and_then(|fmt| fmt.parse(&text, None, false).ok()),
+                    };
+                    if let Some(i) = parsed {
+                        out.longs.push(if f.kind == Kind::DateNanos { i.nanos_since_epoch().unwrap_or(i64::MAX) } else { i.millis() });
+                    }
+                }
+                Kind::GeoPoint => {
+                    if let Ok(p) = crate::mapping::parse_geo_point(v)
+                        && let (Some(lat), Some(lon)) = (p.get("lat").and_then(Value::as_f64), p.get("lon").and_then(Value::as_f64))
+                    {
+                        // Doc values precision, as the fallback stores encoded points.
+                        let (y, x) = (encode::encode_latitude(lat), encode::encode_longitude(lon));
+                        out.geo.push([encode::decode_latitude(y), encode::decode_longitude(x)]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.longs.sort_unstable();
+        out.doubles.sort_unstable_by(f64::total_cmp);
+        out.geo.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        strs.sort_unstable();
+        for s in &strs {
+            out.push_str(s);
+        }
+        Ok(true)
+    }
+
     /// Decodes ahead, for the consecutive docs `docs` (ascending), the values of the numeric
     /// fields this script already read that hold one value in every doc (`match_all` scoring
     /// over a dense field): [`Host::doc_values_at`] then reads them from the run instead of
@@ -350,7 +501,7 @@ impl Host for DocHost {
         if matches!(self.slots[slot], Slot::Unresolved) {
             self.slots[slot] = match self.table.get(field) {
                 Some(f) => match kind_of(f.kind) {
-                    Some(doc_kind) if sorted_numeric_kind(f.kind) => {
+                    Some(doc_kind) if sorted_numeric_kind(f.kind) && f.doc_values => {
                         Slot::Numeric { kind: f.kind, doc_kind, dv: self.seg.reader.sorted_numeric(f.number).cloned().map(Box::new) }
                     }
                     _ => Slot::Other,
@@ -388,6 +539,15 @@ impl Host for DocHost {
         }
         let Some(f) = resolve(&mut self.resolved, &self.table, field) else {
             return match field {
+                // Numeric doc values Lucene keeps for every document.
+                "_seq_no" | "_version" => {
+                    out.clear(DocKind::Long);
+                    let n = if field == "_seq_no" { search_index::schema::SEQ_NO_FIELD } else { search_index::schema::VERSION_FIELD };
+                    if let Some(v) = self.seg.reader.numeric(n).and_then(|dv| dv.get(self.doc)) {
+                        out.longs.push(v);
+                    }
+                    Ok(true)
+                }
                 "_id" if self.id_fielddata => {
                     out.clear(DocKind::String);
                     if super::id_fielddata::value(&self.seg, self.doc, &mut self.buf) {
@@ -432,6 +592,9 @@ impl Host for DocHost {
         let Some(kind) = kind_of(f.kind) else {
             return Err(HostError::illegal_argument(format!("Field [{}] of type [{}] doesn't support scripts", f.name, f.ty)));
         };
+        if let Some(e) = no_doc_values(f) {
+            return Err(e);
+        }
         out.clear(kind);
         let r = &self.seg.reader;
         let d = self.doc;
@@ -461,6 +624,18 @@ impl Host for DocHost {
                         self.buf.clear();
                         dv.lookup_ord(o, &mut self.buf);
                         out.push_str(&super::version_field::decode(&self.buf));
+                    }
+                }
+            }
+            Kind::Flattened if f.flattened_key.is_some() => {
+                let key = f.flattened_key.as_deref().unwrap_or_default();
+                if let Some(dv) = r.sorted_set(f.number) {
+                    for o in dv.ords(d) {
+                        self.buf.clear();
+                        dv.lookup_ord(o, &mut self.buf);
+                        if let Some(v) = self.buf.strip_prefix(key.as_bytes()).and_then(|rest| rest.strip_prefix(b"\0")) {
+                            out.push_str(&String::from_utf8_lossy(v));
+                        }
                     }
                 }
             }
@@ -518,18 +693,24 @@ impl Host for DocHost {
                     Some(search_codec::VectorElement::Bit) => search_painless::VectorElement::Bit,
                     _ => search_painless::VectorElement::Float,
                 };
-                let raw: Option<Vec<u8>> = if f.index {
-                    r.vectors(f.number).and_then(|v| v.ord(d).map(|o| v.vector(o).to_vec()))
+                // Decoded straight from the segment's bytes (no copy per doc: `script_score`
+                // over vectors reads one per doc).
+                let fill = |raw: &[u8], out: &mut DocValues| match out.element {
+                    search_painless::VectorElement::Float | search_painless::VectorElement::BFloat16 => {
+                        out.vector.extend(raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
+                    }
+                    _ => out.vector_bytes.extend(raw.iter().map(|b| *b as i8)),
+                };
+                if f.index {
+                    if let Some(v) = r.vectors(f.number)
+                        && let Some(o) = v.ord(d)
+                    {
+                        fill(v.vector(o), out);
+                    }
                 } else {
                     out.vector_binary = true;
-                    r.binary(f.number).and_then(|b| b.get(d).map(|x| x.to_vec()))
-                };
-                if let Some(raw) = raw {
-                    match out.element {
-                        search_painless::VectorElement::Float | search_painless::VectorElement::BFloat16 => {
-                            out.vector.extend(raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
-                        }
-                        _ => out.vector_bytes.extend(raw.iter().map(|b| *b as i8)),
+                    if let Some(x) = r.binary(f.number).and_then(|b| b.get(d)) {
+                        fill(x, out);
                     }
                 }
             }
@@ -542,6 +723,43 @@ impl Host for DocHost {
         Ok(true)
     }
 
+    /// An indexed float vector lent in place (or decoded into a reused buffer when its bytes
+    /// are not aligned): `script_score` over vectors costs no field lookup and no copy per
+    /// doc. Anything else (runtime fields, byte and doc-values-only vectors) goes through
+    /// [`Host::doc_values`].
+    fn with_vector(&mut self, field: &str, f: &mut dyn FnMut(&search_painless::VectorView<'_>)) -> Result<Option<bool>, HostError> {
+        if self.runtime.is_some() {
+            return Ok(None);
+        }
+        if self.vector.as_ref().is_none_or(|(n, _)| &**n != field) {
+            let slot = match resolve(&mut self.resolved, &self.table, field) {
+                Some(fi) if fi.kind == Kind::DenseVector && fi.index && fi.vector.is_some_and(|s| s.element == search_codec::VectorElement::Float32) => {
+                    match self.seg.reader.vectors(fi.number) {
+                        Some(v) => VectorSlot::Reader(v.clone()),
+                        None => VectorSlot::Absent,
+                    }
+                }
+                _ => VectorSlot::Other,
+            };
+            self.vector = Some((field.into(), slot));
+        }
+        let v = match &self.vector {
+            Some((_, VectorSlot::Reader(v))) => v,
+            Some((_, VectorSlot::Absent)) => return Ok(Some(false)),
+            _ => return Ok(None),
+        };
+        let Some(o) = v.ord(self.doc) else { return Ok(Some(false)) };
+        let floats = match v.vector_f32_slice(o) {
+            Some(x) => x,
+            None => {
+                v.vector_f32(o, &mut self.vector_buf);
+                &self.vector_buf
+            }
+        };
+        f(&search_painless::VectorView { element: search_painless::VectorElement::Float, floats, bytes: &[], binary: false, magnitude: None });
+        Ok(Some(true))
+    }
+
     fn has_field(&mut self, field: &str) -> bool {
         self.table.get(field).is_some() || self.runtime.as_ref().is_some_and(|r| r.get(field).is_some())
     }
@@ -550,7 +768,15 @@ impl Host for DocHost {
     /// values (`SourceValueFetcherSortedBinaryIndexFieldData`: as strings, sorted).
     fn field_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError> {
         let text = match resolve(&mut self.resolved, &self.table, field) {
-            Some(f) if matches!(f.kind, Kind::Text | Kind::MatchOnlyText) && f.subfield("fielddata").is_none() => f.name.clone(),
+            // `TextFieldMapper.fielddataBuilder` with `FielddataOperation.SCRIPT` reads `_source`
+            // whether or not fielddata is enabled.
+            Some(f) if matches!(f.kind, Kind::Text | Kind::MatchOnlyText) => f.name.clone(),
+            // Fields without doc values read `_source` (`SourceValueFetcher*IndexFieldData`),
+            // except `ip`, whose field type has no source fallback.
+            Some(f) if f.kind != Kind::Ip && no_doc_values(f).is_some() => {
+                let f = f.clone();
+                return self.source_values(&f, out);
+            }
             _ => return self.doc_values(field, out),
         };
         out.clear(DocKind::String);

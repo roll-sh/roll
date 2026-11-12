@@ -37,6 +37,18 @@ impl AggError {
         AggError { kind: kind.into(), reason: reason.into(), status, meta: Vec::new(), caused_by: None }
     }
 
+    /// The `[line:col]` of a parsing failure: its `line`/`col` fields or its `[l:c] ` reason
+    /// prefix.
+    pub fn location(&self) -> Option<(usize, usize)> {
+        let field = |k: &str| self.meta.iter().find(|(m, _)| m == k).and_then(|(_, v)| v.as_f64()).map(|v| v as usize);
+        if let (Some(l), Some(c)) = (field("line"), field("col")) {
+            return Some((l, c));
+        }
+        let (lc, _) = self.reason.strip_prefix('[')?.split_once("] ")?;
+        let (l, c) = lc.split_once(':')?;
+        Some((l.parse().ok()?, c.parse().ok()?))
+    }
+
     /// `IllegalArgumentException` (400).
     pub fn illegal_argument(reason: impl Into<String>) -> AggError {
         AggError::new(400, "illegal_argument_exception", reason)

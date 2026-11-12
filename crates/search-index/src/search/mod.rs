@@ -23,7 +23,9 @@
 //! Concurrent searches ([`Searcher::search_concurrent`]) split the segments into slices of
 //! [`Partition`]s — large segments into several doc id ranges, as Lucene 10 does — and run
 //! them on [`pool`]'s on-demand workers plus the calling thread; [`Searcher::count`] iterates
-//! the segments [`Weight::count`] can't answer the same way.
+//! the segments [`Weight::count`] can't answer the same way. A concurrent search that itself
+//! runs on a pool worker (one shard of a request whose shards run in parallel) splits too:
+//! its slices are claimed by that worker and any free ones, so no thread waits on queued work.
 
 pub mod cache;
 pub mod explain;
@@ -484,9 +486,22 @@ type CacheEntry = (&'static str, u64, Arc<dyn Any + Send + Sync>, usize);
 pub trait QueryVisitor {
     /// A term the query matches on `field`.
     fn term(&mut self, field: u32, term: &[u8]);
+    /// A set of several exact terms (Lucene's `TermInSetQuery`, which reports them through
+    /// `consumeTermsMatching`, so term collectors such as `_termStats` see none). The default
+    /// reports each through [`term`](Self::term).
+    fn term_set(&mut self, field: u32, terms: &[Vec<u8>]) {
+        for t in terms {
+            self.term(field, t);
+        }
+    }
     /// A query on `field` that matches terms by an automaton or other logic (highlighters
     /// re-run it over the doc's terms).
     fn multi_term(&mut self, _field: u32, _matcher: TermMatcher) {}
+    /// A pattern source of an intervals query (Lucene's `consumeTermsMatching` from an
+    /// `IntervalQuery`, which some term extractors skip); a multi-term otherwise.
+    fn interval_multi_term(&mut self, field: u32, matcher: TermMatcher) {
+        self.multi_term(field, matcher)
+    }
     /// A phrase: terms per relative position (several terms at one position for
     /// multi-phrases) and its slop. Phrase queries report this instead of their terms.
     fn phrase(&mut self, field: u32, slots: &[(u32, Vec<Vec<u8>>)], _slop: u32) {
@@ -502,6 +517,7 @@ pub trait QueryVisitor {
         for (f, t) in node.leaf_terms() {
             self.term(f, &t);
         }
+        node.for_each_multi(&mut |m| self.multi_term_query(m));
     }
     /// Whether to descend into must-not clauses (default no).
     fn wants_negated(&self) -> bool {
@@ -874,6 +890,13 @@ struct SearcherInner {
 /// (Elasticsearch's `AggregatedDfs` behind `CachedDfSource`). `None` keeps the view's own.
 pub trait StatsSource: Send + Sync {
     fn term_stats(&self, field: u32, term: &[u8]) -> Option<TermStats>;
+    /// The statistics of a term a weight scores with `given` statistics of its own (Lucene's
+    /// `IndexSearcher.termStatistics(term, docFreq, totalTermFreq)`: a blended multi-term
+    /// rewrite's frequencies). `None` keeps `given`.
+    fn term_stats_given(&self, field: u32, term: &[u8], given: TermStats) -> Option<TermStats> {
+        let _ = given;
+        self.term_stats(field, term)
+    }
     /// `Some(None)`: no doc anywhere has the field.
     fn collection_stats(&self, field: u32) -> Option<Option<CollectionStats>>;
 }
@@ -1238,13 +1261,32 @@ impl Searcher {
         };
         let w = self.create_weight(q, m.score_mode())?;
         let slices = self.slices();
-        // Workers run nested concurrent searches inline: they never wait on each other.
-        if slices.len() <= 1 || pool::in_worker() {
+        if slices.len() <= 1 {
             let mut c = m.new_collector()?;
             search_segments(&self.inner.segments, w.as_ref(), &mut c, ctl)?;
             return m.reduce(vec![c]);
         }
         let collectors = m.new_collectors(slices.len())?;
+        if pool::in_worker() {
+            // A search nested in pool work (a shard of a multi-shard request): the slices are
+            // claimed by this worker and whichever others are free, so no worker ever waits
+            // for a slice that hasn't started.
+            type Slot<C> = parking_lot::Mutex<(Option<C>, Option<Result<()>>)>;
+            let slots: Vec<Slot<M::C>> = collectors.into_iter().map(|c| parking_lot::Mutex::new((Some(c), None))).collect();
+            pool::help_each_index(slices.len(), slices.len() - 1, &|i| {
+                let mut slot = slots[i].lock();
+                let mut c = slot.0.take().expect("each slice runs once");
+                let r = search_partitions(&slices[i], w.as_ref(), &mut c, ctl);
+                *slot = (Some(c), Some(r));
+            });
+            let mut cs = Vec::with_capacity(slots.len());
+            for s in slots {
+                let (c, r) = s.into_inner();
+                r.expect("every slice ran")?;
+                cs.push(c.expect("every slice ran"));
+            }
+            return m.reduce(cs);
+        }
         let cs = run_slices(Arc::from(w), slices, collectors, ctl)?;
         m.reduce(cs)
     }

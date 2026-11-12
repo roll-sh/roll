@@ -67,6 +67,7 @@ pub fn write_args(ctx: &Ctx) -> EsResult<WriteArgs> {
         require_data_stream: ctx.bool_param("require_data_stream", false)?,
         dynamic_templates: None,
         internal: false,
+        list_executed_pipelines: false,
     })
 }
 
@@ -171,15 +172,49 @@ pub async fn index(ctx: &Ctx<'_>, create_api: bool) -> EsResult<Reply> {
 /// Indexes one document through the full write path (target, pipelines, routing, mapping);
 /// a document failure in a data stream with a failure store goes to its failure store.
 pub async fn index_one(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source: Bytes, auto_id: bool) -> EsResult<WriteOutcome> {
-    index_one_ahead(ctx, expr, args, source, auto_id, None).await
+    match index_one_ahead(ctx, expr, args, source, auto_id, None).await? {
+        Indexed::Done(o) => Ok(o),
+        Indexed::Ready(w) => w.apply(),
+    }
 }
 
 /// A document prepared ahead of its turn (`_bulk`'s parallel preparation): given the index the
 /// write resolved to, the prepared document if it is still valid for it.
 pub type PreparedAhead<'a> = &'a mut (dyn FnMut(&std::sync::Arc<crate::meta::IndexMeta>) -> Option<write::Prepared> + Send);
 
+/// `_bulk`'s side of an index item: the document prepared ahead, and whether to hand the write
+/// back once every check before its apply passed.
+pub struct Ahead<'a> {
+    pub take: PreparedAhead<'a>,
+    /// With `Some`, a write that uses the prepared document comes back as [`Indexed::Ready`]
+    /// (`_bulk` applies the writes of different shards in parallel, as Elasticsearch runs a
+    /// request's shard-level bulks). The callback applies every write handed back so far; it
+    /// runs before this item writes any other way, so each shard sees its items in order.
+    pub defer: Option<&'a mut (dyn FnMut() + Send)>,
+}
+
+/// An index write done, or (with [`Ahead::defer`]) ready to apply.
+pub enum Indexed {
+    Done(WriteOutcome),
+    Ready(Box<ReadyWrite>),
+}
+
+/// A write whose checks passed: what [`write::apply_index`] takes.
+pub struct ReadyWrite {
+    pub prepared: write::Prepared,
+    pub args: WriteArgs,
+    pub auto_id: bool,
+    pub id: String,
+}
+
+impl ReadyWrite {
+    pub fn apply(self) -> EsResult<WriteOutcome> {
+        write::apply_index(self.prepared, &self.args, self.auto_id, &self.id)
+    }
+}
+
 /// [`index_one`], using a document prepared ahead when the write goes straight to an index.
-pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source: Bytes, auto_id: bool, ahead: Option<PreparedAhead<'_>>) -> EsResult<WriteOutcome> {
+pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source: Bytes, auto_id: bool, ahead: Option<Ahead<'_>>) -> EsResult<Indexed> {
     let cluster = ctx.cluster;
     let existed = ctx.state().metadata.data_streams.contains_key(expr);
     let target = write::resolve_target(cluster, expr, &args, ctx.now_ms).await?;
@@ -204,13 +239,19 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
         }
     }
     let initial_ds = target.data_stream.clone().filter(|_| !direct);
+    let mut ahead = ahead;
+    if initial_ds.is_none()
+        && let Some(a) = &mut ahead
+        && let Some(r) = index_prepared(ctx, &target, &args, auto_id, a).await
+    {
+        return r;
+    }
+    // Any other write applies here: the writes handed back go first.
+    if let Some(barrier) = ahead.and_then(|a| a.defer) {
+        barrier();
+    }
     let Some(initial_ds) = initial_ds else {
-        if let Some(ahead) = ahead
-            && let Some(r) = index_prepared(ctx, &target, &args, auto_id, ahead).await
-        {
-            return r;
-        }
-        return index_resolved(ctx, target, args, source, auto_id).await;
+        return index_resolved(ctx, target, args, source, auto_id).await.map(Indexed::Done);
     };
     let original = parse_doc(&source).ok();
     let mut args = args;
@@ -222,7 +263,10 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
     let given_id = args.id.clone();
     let routing = args.routing.clone();
     let r = index_resolved(ctx, target, args, source, auto_id).await;
-    let Err(e) = r else { return r };
+    let e = match r {
+        Ok(o) => return Ok(Indexed::Done(o)),
+        Err(e) => e,
+    };
     let (ingest, created) = match crate::ingest::pipeline::failure_of(&e) {
         Some((f, c)) => (Some(f), c),
         None => (None, Vec::new()),
@@ -238,9 +282,9 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
                 let _ = cluster.update(move |st| crate::api::data_streams::delete_data_streams(st, std::slice::from_ref(&n))).await;
             }
             let id = if ingest.is_some() && auto_id { None } else { given_id };
-            let src = original.unwrap_or(Value::Obj(Map::new()));
+            let src = e.hidden("ingested_source").cloned().or(original).unwrap_or(Value::Obj(Map::new()));
             let fresh = (!existed && ingest.is_some() && ds == initial_ds) || created.contains(&ds);
-            crate::failure_store::redirect(cluster, &ds, id.as_deref(), routing.as_deref(), &src, &e, ingest.as_ref(), Some(&initial_ds), fresh, ctx.now_ms).await
+            crate::failure_store::redirect(cluster, &ds, id.as_deref(), routing.as_deref(), &src, &e, ingest.as_ref(), Some(&initial_ds), fresh, ctx.now_ms).await.map(Indexed::Done)
         }
         crate::failure_store::Store::Enabled(_) => Err(e),
         // A data stream without a failure store says so on document failures.
@@ -258,14 +302,27 @@ pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source:
     }
 }
 
-async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, args: WriteArgs, source: Bytes, auto_id: bool) -> EsResult<WriteOutcome> {
+async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArgs, source: Bytes, mut auto_id: bool) -> EsResult<WriteOutcome> {
     let cluster = ctx.cluster;
-    let id = args.id.clone().unwrap_or_else(crate::meta::names::time_based_id);
+    let mut id = args.id.clone().unwrap_or_else(crate::meta::names::time_based_id);
+    let mut executed = Vec::new();
     let value = parse_doc(&source)?;
     // Ingest runs before auto ids exist.
     let ingest_args = if auto_id { std::borrow::Cow::Owned(WriteArgs { id: None, ..args.clone() }) } else { std::borrow::Cow::Borrowed(&args) };
     let (target, value, source) = match crate::ingest::run_for_write(cluster, target, &ingest_args, &id, value, source, ctx.now_ms, Some(&ctx.ingest_nanos)).await? {
-        crate::ingest::Outcome::Index(t, v, s) => (t, v, s),
+        crate::ingest::Outcome::Index(t, v, s, ingested) => {
+            if let Some(ingested) = ingested {
+                let crate::ingest::Ingested { args: changed, executed: ran } = *ingested;
+                let new_id = changed.id.clone().unwrap_or_else(|| id.clone());
+                if new_id != id {
+                    id = new_id;
+                    auto_id = false;
+                }
+                args = WriteArgs { id: if auto_id { args.id } else { Some(id.clone()) }, ..changed };
+                executed = ran;
+            }
+            (t, v, s)
+        }
         crate::ingest::Outcome::Dropped(idx) => {
             return Ok(WriteOutcome {
                 index: idx,
@@ -279,6 +336,7 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, args: WriteArgs, s
                 total: 0,
                 forced_refresh: false,
                 failure_store: None,
+                executed_pipelines: None,
             });
         }
     };
@@ -295,40 +353,53 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, args: WriteArgs, s
         let given = if auto_id { String::new() } else { args.id.clone().unwrap_or_default() };
         let prepared = write::prepare(cluster, target.index.clone(), &given, Some(&routing), &source, &value, args.dynamic_templates.as_ref()).await?;
         let id = prepared.id.clone();
-        return write::apply_index(prepared, &args, false, &id);
+        return write::apply_index(prepared, &args, false, &id).map(|o| with_executed(o, &args, executed));
     }
     let routing = write::effective_routing(&target, args.routing.as_deref(), &id)?;
     write::check_routing(&target.index, &id, routing.as_deref())?;
     let shard = crate::meta::routing::shard_for(&target.index, &id, routing.as_deref());
     check_active_shards(ctx, &target.index, shard).await?;
-    let prepared = write::prepare(cluster, target.index.clone(), &id, routing.as_deref(), &source, &value, args.dynamic_templates.as_ref()).await?;
-    write::apply_index(prepared, &args, auto_id, &id)
+    // A document that fails to index after a pipeline rewrote it goes to the failure store as
+    // rewritten (`IndexRequest.source()` is the ingested document by then).
+    let ingested = |e: EsError| if executed.is_empty() { e } else { e.with_hidden("ingested_source", value.clone()) };
+    let prepared = write::prepare(cluster, target.index.clone(), &id, routing.as_deref(), &source, &value, args.dynamic_templates.as_ref()).await.map_err(ingested)?;
+    write::apply_index(prepared, &args, auto_id, &id).map(|o| with_executed(o, &args, executed))
+}
+
+/// Lists the pipelines a write ran when the bulk item asked (`list_executed_pipelines`).
+fn with_executed(mut o: WriteOutcome, args: &WriteArgs, executed: Vec<String>) -> WriteOutcome {
+    if args.list_executed_pipelines {
+        o.executed_pipelines = Some(executed);
+    }
+    o
 }
 
 /// The tail of [`index_resolved`] for a document prepared ahead: `None` (nothing done) unless
 /// the write goes straight to a plain index, runs no pipeline and the prepared document is
 /// still valid for that index and routing; then routing checks and the apply, as there.
-async fn index_prepared(ctx: &Ctx<'_>, target: &write::Target, args: &WriteArgs, auto_id: bool, ahead: PreparedAhead<'_>) -> Option<EsResult<WriteOutcome>> {
+async fn index_prepared(ctx: &Ctx<'_>, target: &write::Target, args: &WriteArgs, auto_id: bool, ahead: &mut Ahead<'_>) -> Option<EsResult<Indexed>> {
     let idx = &target.index;
     if target.data_stream.is_some() || target.alias_routing.is_some() || crate::engine::tsdb::is_time_series(idx) {
         return None;
     }
     let none = |k: &str| idx.settings.get(k).is_none_or(|p| p == "_none");
     let default_skipped = args.pipeline.as_deref() == Some("_none");
-    if args.pipeline.as_deref().is_some_and(|p| p != "_none") || !none("index.final_pipeline") || !(default_skipped || none("index.default_pipeline")) {
+    if args.pipeline.as_deref().is_some_and(|p| p != "_none") || !none("index.final_pipeline") || !(default_skipped || none("index.default_pipeline")) || args.list_executed_pipelines {
         return None;
     }
     let id = args.id.as_deref()?;
-    let p = ahead(idx)?;
+    let p = (ahead.take)(idx)?;
     if p.id != id || p.routing.as_deref() != args.routing.as_deref() {
         return None;
     }
+    let defer = ahead.defer.is_some();
     let r = async {
         let routing = write::effective_routing(target, args.routing.as_deref(), id)?;
         write::check_routing(idx, id, routing.as_deref())?;
         let shard = crate::meta::routing::shard_for(idx, id, routing.as_deref());
         check_active_shards(ctx, idx, shard).await?;
-        write::apply_index(p, args, auto_id, id)
+        let w = ReadyWrite { prepared: p, args: args.clone(), auto_id, id: id.to_string() };
+        if defer { Ok(Indexed::Ready(Box::new(w))) } else { w.apply().map(Indexed::Done) }
     };
     Some(r.await)
 }

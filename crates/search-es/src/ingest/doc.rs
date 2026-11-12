@@ -26,6 +26,91 @@ pub struct IngestDoc {
     /// A script made the document reference itself; Elasticsearch notices when the pipeline
     /// ends (`ensureNoSelfReferences`), so the error is held until then.
     pub self_reference: Option<EsError>,
+    /// A verbose `_simulate`'s processor results (`TrackingResultProcessor`), in execution
+    /// order; `None` outside verbose simulations.
+    pub trace: Option<Vec<Value>>,
+    /// The running pipeline's `field_access_pattern` is `flexible` (dotted keys are fields).
+    pub flexible: bool,
+    /// A `terminate` processor ran: the current pipeline stops (`IngestDocument.terminate`).
+    pub terminate: bool,
+    /// The running pipeline's processor counters, while a write counts ingest stats.
+    pub procs: Option<std::sync::Arc<super::pipeline::ProcMetrics>>,
+    /// This run counts towards the ingest stats (writes do, simulations don't).
+    pub count_stats: bool,
+}
+
+/// Where a `flexible` path leads (`IngestDocument` with `IngestPipelineFieldAccessPattern.FLEXIBLE`):
+/// the existing keys to walk, and the leaf key in the last map.
+struct FlexPath {
+    keys: Vec<String>,
+    leaf: String,
+}
+
+/// Resolves `rest` (the path `path` without its root prefix) in `root` the flexible way: at
+/// each map a path element is looked up alone, then joined by dots with the following elements
+/// until such a key exists; when none does, the remaining elements and the leaf form one dotted
+/// leaf key in that map. Flexible paths never create maps and can't index lists.
+fn flexible_path(root: &Map, path: &str, rest: &str) -> EsResult<FlexPath> {
+    let elems: Vec<&str> = rest.split('.').collect();
+    let last = elems.len() - 1;
+    let mut keys = Vec::new();
+    let mut leaf = elems[last].to_string();
+    let mut ctx: Result<&Map, &Value> = Ok(root);
+    let mut i = 0;
+    while i < last {
+        let m = match ctx {
+            Ok(m) => m,
+            Err(v) => return Err(not_a_map(path, elems[i], v)),
+        };
+        let mut key = elems[i].to_string();
+        let mut next = m.get(&key);
+        let mut j = i;
+        while next.is_none() && j + 1 < last {
+            j += 1;
+            key.push('.');
+            key.push_str(elems[j]);
+            next = m.get(&key);
+        }
+        match next {
+            Some(v) => {
+                ctx = match v {
+                    Value::Obj(m) => Ok(m),
+                    other => Err(other),
+                };
+                keys.push(key);
+                i = j + 1;
+            }
+            None => {
+                leaf = format!("{key}.{leaf}");
+                break;
+            }
+        }
+    }
+    match ctx {
+        Ok(_) => Ok(FlexPath { keys, leaf }),
+        Err(v) => Err(not_a_map(path, &leaf, v)),
+    }
+}
+
+fn not_a_map(path: &str, key: &str, v: &Value) -> EsError {
+    match v {
+        Value::Arr(_) => iae(format!("path [{path}] is not valid")),
+        Value::Null => iae(format!("cannot resolve [{key}] from null as part of path [{path}]")),
+        other => iae(format!("cannot resolve [{key}] from object of type [{}] as part of path [{path}]", java_type(other))),
+    }
+}
+
+/// The map a [`FlexPath`] ends in.
+fn flex_map_mut<'a>(root: &'a mut Map, keys: &[String]) -> &'a mut Map {
+    let mut cur = root;
+    for k in keys {
+        cur = match cur.get_mut(k) {
+            Some(Value::Obj(m)) => m,
+            // `flexible_path` only lists keys of maps.
+            _ => unreachable!("flexible path through a non-map"),
+        };
+    }
+    cur
 }
 
 fn iae(msg: impl Into<String>) -> EsError {
@@ -97,6 +182,16 @@ impl IngestDoc {
         if r == 1 {
             return root.get(rest).ok_or_else(|| iae(format!("field [{rest}] not present as part of path [{path}]")));
         }
+        if self.flexible {
+            let fp = flexible_path(root, path, rest)?;
+            let mut m = root;
+            for k in &fp.keys {
+                if let Some(Value::Obj(x)) = m.get(k) {
+                    m = x;
+                }
+            }
+            return m.get(&fp.leaf).ok_or_else(|| iae(format!("field [{}] not present as part of path [{path}]", fp.leaf)));
+        }
         let mut parts = rest.split('.');
         let first = parts.next().unwrap_or("");
         let mut cur = root.get(first).ok_or_else(|| iae(format!("field [{first}] not present as part of path [{path}]")))?;
@@ -127,8 +222,10 @@ impl IngestDoc {
         self.set_with(path, v, false)
     }
 
-    /// `appendFieldValue`: appends to a list (making one of a scalar).
-    pub fn append(&mut self, path: &str, v: Value, allow_duplicates: bool) -> EsResult<()> {
+    /// `appendFieldValue`: appends to a list (making one of a scalar). When nothing is appended
+    /// (duplicates, or empty values with `ignore_empty`) the field stays as it was: a scalar
+    /// stays a scalar and a missing field stays missing.
+    pub fn append(&mut self, path: &str, v: Value, allow_duplicates: bool, ignore_empty: bool) -> EsResult<()> {
         let cur = self.get_opt(path).cloned();
         let mut list = match cur {
             None => Vec::new(),
@@ -139,10 +236,16 @@ impl IngestDoc {
             Value::Arr(a) => a,
             other => vec![other],
         };
+        let mut appended = false;
         for i in items {
-            if allow_duplicates || !list.contains(&i) {
+            let empty = matches!(&i, Value::Null) || matches!(&i, Value::Str(s) if s.is_empty());
+            if (allow_duplicates || !list.contains(&i)) && !(ignore_empty && empty) {
                 list.push(i);
+                appended = true;
             }
+        }
+        if !appended {
+            return Ok(());
         }
         self.set(path, Value::Arr(list))
     }
@@ -152,9 +255,15 @@ impl IngestDoc {
         if rest.is_empty() {
             return Err(iae("path cannot be null nor empty".to_string()));
         }
+        let flexible = self.flexible;
         let root = self.root_mut(r);
         if r == 1 {
             root.insert(rest.to_string(), v);
+            return Ok(());
+        }
+        if flexible {
+            let fp = flexible_path(root, path, rest)?;
+            flex_map_mut(root, &fp.keys).insert(fp.leaf, v);
             return Ok(());
         }
         let parts: Vec<&str> = rest.split('.').collect();
@@ -210,9 +319,14 @@ impl IngestDoc {
     /// Removes `path`.
     pub fn remove(&mut self, path: &str) -> EsResult<Value> {
         let (r, rest) = self.root_of(path);
+        let flexible = self.flexible;
         let root = self.root_mut(r);
         if r == 1 {
             return root.shift_remove(rest).ok_or_else(|| iae(format!("field [{rest}] not present as part of path [{path}]")));
+        }
+        if flexible && !rest.is_empty() {
+            let fp = flexible_path(root, path, rest)?;
+            return flex_map_mut(root, &fp.keys).shift_remove(&fp.leaf).ok_or_else(|| iae(format!("field [{}] not present as part of path [{path}]", fp.leaf)));
         }
         let parts: Vec<&str> = rest.split('.').collect();
         let (last, init) = parts.split_last().unwrap();

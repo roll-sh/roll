@@ -97,3 +97,61 @@ async fn bulk_cost() {
     let stats = search_es::handle(&c, EsRequest::new("GET", "/idx/_stats/indexing?filter_path=_all.primaries.indexing.index_time_in_millis")).await;
     println!("shard indexing time: {}", String::from_utf8_lossy(&stats.body));
 }
+
+/// What registering a search as tasks, taking its thread pool slot and charging its body to the
+/// `inflight_requests` breaker add to a search: the `size: 0` search end to end, and those
+/// steps alone (run with `--release -- --ignored
+/// --nocapture`).
+#[tokio::test]
+#[ignore]
+async fn search_task_and_pool_cost() {
+    let c = Cluster::in_memory("bench").await;
+    search_es::handle(&c, EsRequest::json("PUT", "/idx", r#"{"settings":{"number_of_shards":1}}"#)).await;
+    for i in 0..100 {
+        search_es::handle(&c, EsRequest::json("PUT", &format!("/idx/_doc/{i}"), r#"{"a":"x"}"#)).await;
+    }
+    search_es::handle(&c, EsRequest::new("POST", "/idx/_refresh")).await;
+    let n = 20_000u32;
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(search_es::handle(&c, EsRequest::json("POST", "/idx/_search", r#"{"size":0}"#)).await);
+    }
+    println!("{:>24}: {:>6} ns/request", "_search size 0", t.elapsed().as_nanos() / u128::from(n));
+    let t = Instant::now();
+    for _ in 0..n {
+        let parent = c.tasks.start_detached(search_es::cluster::NewTask {
+            action: "indices:data/read/search".into(),
+            description: String::new(),
+            describe: None,
+            parent: None,
+            headers: Vec::new(),
+            cancellable: true,
+            cancelled: None,
+        });
+        let child = c.tasks.start_detached(search_es::cluster::NewTask {
+            action: "indices:data/read/search[phase/query]".into(),
+            description: format!("shardId[[{}][{}]]", "idx", 0),
+            describe: None,
+            parent: Some(parent),
+            headers: Vec::new(),
+            cancellable: true,
+            cancelled: None,
+        });
+        c.tasks.end_all(&[child]);
+        c.tasks.end(parent);
+    }
+    println!("{:>24}: {:>6} ns/request", "two tasks", t.elapsed().as_nanos() / u128::from(n));
+    let pool = c.thread_pools.pool(search_es::thread_pool::PoolName::Search).clone();
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(pool.admit().await.ok());
+    }
+    println!("{:>24}: {:>6} ns/request", "search pool slot", t.elapsed().as_nanos() / u128::from(n));
+    // The `inflight_requests` charge (and parent check) every request body takes.
+    let st = c.state();
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(c.breakers.charge_in_flight(&c, &st, 11).ok());
+    }
+    println!("{:>24}: {:>6} ns/request", "in-flight breaker", t.elapsed().as_nanos() / u128::from(n));
+}

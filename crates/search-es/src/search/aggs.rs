@@ -196,11 +196,18 @@ pub fn parse(aggs: &Map, raw: Option<(&crate::search_source::AggsRaw, &Map)>) ->
         tsid_after_keys(aggs.to_mut())?;
     }
     let j = to_json(&Value::Obj(aggs.into_owned()));
-    let req = match search_aggs::parse(&j, &search_aggs::ParseOptions::default()) {
+    let check = |q: &Json, path: &[search_aggs::xparser::Seg]| check_agg_query(q, path, None);
+    let req = match search_aggs::parse(&j, &search_aggs::ParseOptions { check_query: Some(&check), ..Default::default() }) {
         Ok(r) => r,
         Err(e) => {
             if let Some((r, original)) = raw {
-                let opts = search_aggs::ParseOptions { src: Some(&r.body), base: vec![search_aggs::xparser::Seg::Key(r.key.clone())], ..Default::default() };
+                let check = |q: &Json, path: &[search_aggs::xparser::Seg]| check_agg_query(q, path, Some(&r.body));
+                let opts = search_aggs::ParseOptions {
+                    src: Some(&r.body),
+                    base: vec![search_aggs::xparser::Seg::Key(r.key.clone())],
+                    check_query: Some(&check),
+                    ..Default::default()
+                };
                 if let Err(located) = search_aggs::parse(&to_json(&Value::Obj(original.clone())), &opts) {
                     return Err(agg_error(located));
                 }
@@ -220,11 +227,35 @@ pub fn parse(aggs: &Map, raw: Option<(&crate::search_source::AggsRaw, &Map)>) ->
 /// before running any).
 pub fn parse_error(aggs: &Map, raw: Option<&crate::search_source::AggsRaw>) -> EsResult<()> {
     let j = to_json(&Value::Obj(aggs.clone()));
+    let src = raw.map(|r| r.body.as_slice());
+    let check = |q: &Json, path: &[search_aggs::xparser::Seg]| check_agg_query(q, path, src);
     let opts = match raw {
-        Some(r) => search_aggs::ParseOptions { src: Some(&r.body), base: vec![search_aggs::xparser::Seg::Key(r.key.clone())], ..Default::default() },
-        None => search_aggs::ParseOptions::default(),
+        Some(r) => search_aggs::ParseOptions { src, base: vec![search_aggs::xparser::Seg::Key(r.key.clone())], check_query: Some(&check), ..Default::default() },
+        None => search_aggs::ParseOptions { check_query: Some(&check), ..Default::default() },
     };
     search_aggs::parse(&j, &opts).map(|_| ()).map_err(agg_error)
+}
+
+/// Parses a query embedded in an aggregation (`filter`, `filters`, `adjacency_matrix`) as
+/// Elasticsearch does while it parses the request: a malformed one fails the whole request,
+/// located in the body, before any shard runs.
+fn check_agg_query(q: &Json, path: &[search_aggs::xparser::Seg], src: Option<&[u8]>) -> search_aggs::Result<()> {
+    let segs: Vec<crate::json::locate::Seg<'_>> = path
+        .iter()
+        .map(|s| match s {
+            search_aggs::xparser::Seg::Key(k) => crate::json::locate::Seg::Key(k.as_str()),
+            search_aggs::xparser::Seg::Index(i) => crate::json::locate::Seg::Index(*i),
+        })
+        .collect();
+    crate::query::parse_query(&from_json(q), src, &segs).map(|_| ()).map_err(es_to_agg_error)
+}
+
+/// The inverse of [`agg_error`], for query errors raised inside aggregation parsing.
+fn es_to_agg_error(e: EsError) -> search_aggs::AggError {
+    let mut out = search_aggs::AggError::new(e.status, e.kind.clone(), e.reason().to_string());
+    out.meta = e.meta().iter().map(|(k, v)| (k.to_string(), to_json(v))).collect();
+    out.caused_by = e.caused_by.map(|c| Box::new(es_to_agg_error(*c)));
+    out
 }
 
 /// `AggregatorFactories.Builder.validate` messages of an `aggs` section that parses (a
@@ -552,25 +583,19 @@ impl Lookup<'_> {
     }
 
     fn nested_sort(&self, n: &Json) -> search_aggs::Result<search_index::collector::top_field::NestedSort> {
-        let mut cur = n;
-        while let Some(inner) = cur.get("nested") {
-            cur = inner;
+        let mut levels = Vec::new();
+        let mut cur = Some(n);
+        while let Some(l) = cur {
+            let path = l.get("path").and_then(Json::as_str).unwrap_or_default();
+            if !self.table.objects.get(path).is_some_and(|o| o.nested) {
+                return Err(search_aggs::AggError::new(400, "query_shard_exception", format!("[nested] nested object under path [{path}] is not of nested type")));
+            }
+            let filter = l.get("filter").map(|f| FieldLookup::query(self, f)).transpose()?;
+            levels.push((path, filter));
+            cur = l.get("nested");
         }
-        let path = cur.get("path").and_then(Json::as_str).unwrap_or_default();
-        let Some(o) = self.table.objects.get(path).filter(|o| o.nested) else {
-            return Err(search_aggs::AggError::new(400, "query_shard_exception", format!("[nested] nested object under path [{path}] is not of nested type")));
-        };
-        let parent_filter: QueryRef = match &o.parent_nested {
-            None => search_index::query::nested::root_filter(),
-            Some(p) => Arc::new(TermQuery::new(NESTED_PATH_FIELD, p.as_bytes().to_vec())),
-        };
-        let mut child_filter: QueryRef = Arc::new(TermQuery::new(NESTED_PATH_FIELD, path.as_bytes().to_vec()));
-        if let Some(f) = cur.get("filter") {
-            let q = FieldLookup::query(self, f)?;
-            child_filter = Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, child_filter).add(search_index::query::Occur::Filter, q));
-        }
-        let max_children = cur.get("max_children").and_then(Json::as_i64).map(|m| m.max(0) as usize);
-        Ok(search_index::collector::top_field::NestedSort { parent_filter, child_filter, max_children })
+        let max_children = n.get("max_children").and_then(Json::as_i64).map(|m| m.max(0) as usize);
+        Ok(super::sort::nested_chain(None, &levels, max_children))
     }
 }
 
@@ -859,7 +884,8 @@ impl FieldLookup for Lookup<'_> {
                         Some(n) => Some(self.nested_sort(n)?),
                         None => None,
                     };
-                    out.push(HitSort::Field { field: f, reverse, missing, mode, nested });
+                    let numeric_type = opts.as_ref().and_then(|o| o.get("numeric_type")).and_then(Json::as_str).and_then(search_aggs::SortNumericType::parse);
+                    out.push(HitSort::Field { field: f, reverse, missing, mode, nested, numeric_type });
                 }
             }
         }

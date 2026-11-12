@@ -64,6 +64,8 @@ pub struct WriteArgs {
     pub dynamic_templates: Option<Map>,
     /// The op comes from an internal action (update, reindex): no versioning validation.
     pub internal: bool,
+    /// Bulk `list_executed_pipelines`.
+    pub list_executed_pipelines: bool,
 }
 
 /// The outcome of one write.
@@ -83,6 +85,9 @@ pub struct WriteOutcome {
     pub forced_refresh: bool,
     /// `failure_store: used` when the document went to its data stream's failure store.
     pub failure_store: Option<&'static str>,
+    /// `executed_pipelines` (bulk `list_executed_pipelines`): the pipelines the document went
+    /// through, outermost first.
+    pub executed_pipelines: Option<Vec<String>>,
 }
 
 impl WriteOutcome {
@@ -151,6 +156,16 @@ impl WriteOutcome {
             out.extend_from_slice(num.format(self.seq_no).as_bytes());
             out.extend_from_slice(b",\"_primary_term\":");
             out.extend_from_slice(num.format(self.primary_term).as_bytes());
+        }
+        if let Some(p) = &self.executed_pipelines {
+            out.extend_from_slice(b",\"executed_pipelines\":[");
+            for (i, name) in p.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                write_str(out, name);
+            }
+            out.push(b']');
         }
         if let Some(f) = self.failure_store {
             out.extend_from_slice(b",\"failure_store\":");
@@ -248,6 +263,10 @@ pub fn parse_version_type(s: &str) -> EsResult<VersionType> {
 pub fn check_may_auto_create(st: &ClusterState, name: &str) -> EsResult<()> {
     if write_index_of(st, name).ok().flatten().is_some() {
         return Ok(());
+    }
+    // An ES|QL view's name is no index to write to (Elasticsearch resolves it as missing).
+    if crate::xpack::esql::is_view(st, name) {
+        return Err(EsError::index_not_found(name));
     }
     match crate::meta::templates::find_composable(&st.metadata, name, false).map(|(n, t)| (n.clone(), t.allow_auto_create)) {
         Some((n, Some(false))) => Err(EsError::index_not_found_msg(name, format!("no such index [{name}] and composable template [{n}] forbids index auto creation"))),
@@ -357,11 +376,27 @@ pub async fn resolve_target(cluster: &Cluster, expr: &str, args: &WriteArgs, now
         return Err(EsError::index_not_found_msg(&name, format!("no such index [{name}] and [require_alias] request flag is [true] and [{name}] is not an alias")));
     }
     if let Some(t) = write_index_of(&st, &name)? {
+        // A write through a data stream marked for lazy rollover rolls it over first.
+        if let Some(ds) = t.data_stream.clone()
+            && t.index.name != name
+            && st.metadata.data_streams.get(&ds).is_some_and(|d| d.rollover_on_write)
+        {
+            cluster.update(move |st| crate::api::rollover::rollover_on_write(st, &ds, now_ms)).await?;
+            let st = cluster.state();
+            if let Some(t) = write_index_of(&st, &name)? {
+                check_target(&st, &t, args, &name)?;
+                return Ok(t);
+            }
+        }
         check_target(&st, &t, args, &name)?;
         return Ok(t);
     }
     if crate::meta::resolve::is_wildcard(&name) {
         return Err(EsError::invalid_index_name(&name, "must not contain the following characters [ , \", *, \\, <, |, ,, >, /, ?]"));
+    }
+    // An ES|QL view's name is no index to write to (Elasticsearch resolves it as missing).
+    if crate::xpack::esql::is_view(&st, &name) {
+        return Err(EsError::index_not_found(&name));
     }
     // Auto-create: a data stream when a data stream template matches, an index otherwise.
     let template = crate::meta::templates::find_composable(&st.metadata, &name, false).map(|(n, t)| (n.clone(), t.data_stream.is_some(), t.allow_auto_create));
@@ -812,6 +847,7 @@ pub fn apply_index(p: Prepared, args: &WriteArgs, auto_id: bool, id: &str) -> Es
                 total: copies(&p.index),
                 forced_refresh: false,
                 failure_store: None,
+                executed_pipelines: None,
             })
         }
         OpResult::Conflict(vc) => {
@@ -873,6 +909,7 @@ pub fn apply_delete(cluster: &Cluster, idx: &Arc<IndexMeta>, id: &str, routing: 
                 total: copies(idx),
                 forced_refresh: false,
                 failure_store: None,
+                executed_pipelines: None,
             })
         }
         OpResult::Conflict(vc) => Err(shard_error(EsError::new(409, "version_conflict_engine_exception", vc.reason(id)), idx, shard.id)),
@@ -912,16 +949,17 @@ impl RefreshPolicy {
 /// Refreshes the shards written (`refresh=true|wait_for`).
 pub fn refresh_shards(cluster: &Cluster, written: &[(String, u32)]) -> EsResult<()> {
     let mut seen: Vec<&(String, u32)> = Vec::new();
+    let mut engines = Vec::new();
     for w in written {
         if seen.contains(&w) {
             continue;
         }
         seen.push(w);
         if let Some(e) = cluster.engine.loaded(&w.0) {
-            e.shard(w.1).refresh()?;
+            engines.push((e, w.1));
         }
     }
-    Ok(())
+    crate::engine::refresh_shards(&engines.iter().map(|(e, s)| &**e.shard(*s)).collect::<Vec<_>>())
 }
 
 /// Copies every document of `src` into `dst` keeping ids, routing, versions and sequence

@@ -167,6 +167,9 @@ pub struct MoreLikeThisQuery {
     /// Elasticsearch's description of the original query (`like:[…]`, shown when nothing
     /// was selected).
     pub description: String,
+    /// The term disjunction the last rewrite selected: highlighters visit it (Lucene's
+    /// rewrite the query against the shard before extracting terms).
+    pub selected: Arc<parking_lot::Mutex<Option<QueryRef>>>,
 }
 
 struct ScoreTerm {
@@ -403,10 +406,12 @@ impl Query for MoreLikeThisQuery {
     }
 
     fn rewrite(&self, s: &Searcher) -> Result<Option<QueryRef>> {
-        Ok(Some(match self.build(s)? {
+        let q: QueryRef = match self.build(s)? {
             Some(b) => Arc::new(b),
             None => Arc::new(MatchNoneQuery::new("no terms selected by more_like_this")),
-        }))
+        };
+        *self.selected.lock() = Some(q.clone());
+        Ok(Some(q))
     }
 
     fn lucene_string(&self, _schema: &Schema) -> String {
@@ -418,7 +423,12 @@ impl Query for MoreLikeThisQuery {
         format!("like:[{}]", texts.join(", "))
     }
 
-    fn visit(&self, _v: &mut dyn QueryVisitor) {}
+    fn visit(&self, v: &mut dyn QueryVisitor) {
+        let selected = self.selected.lock().clone();
+        if let Some(q) = selected {
+            q.visit(v);
+        }
+    }
 
     fn as_any(&self) -> &dyn Any {
         self

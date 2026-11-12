@@ -59,6 +59,11 @@ impl Ahead {
         a
     }
 
+    /// Whether item `i` has a prepared document waiting.
+    pub fn has(&self, i: usize) -> bool {
+        self.slots.get(i).is_some_and(Option::is_some)
+    }
+
     /// The prepared document of item `i`, if it is still valid for `idx` (the index the item's
     /// target resolves to now). An invalid one triggers a new round for the items after it.
     pub fn take(&mut self, cluster: &Cluster, items: &[Item], ids: &[Option<String>], i: usize, idx: &Arc<IndexMeta>) -> Option<Prepared> {

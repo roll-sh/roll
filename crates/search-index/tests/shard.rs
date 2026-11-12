@@ -295,6 +295,29 @@ fn memory_pressure_converts_buffers_without_publishing() {
     assert_eq!(st.num_docs, 3000);
 }
 
+/// With background threads, the write that crosses the buffer budget hands the conversion to a
+/// thread of its own; memory stays bounded (writers far over budget wait) and nothing is
+/// published before a refresh.
+#[test]
+fn memory_pressure_converts_buffers_in_the_background() {
+    let cfg = ShardConfig { max_buffer_bytes: 256 * 1024, merge_threads: 1, ..Default::default() };
+    let s = Shard::open(cfg, schema(), Vec::new()).unwrap();
+    let mut rng = rng(1);
+    for i in 0..3000 {
+        let d = random_doc(&mut rng, i);
+        s.index(IndexOp::new(to_indexable(&d))).unwrap();
+        assert!(s.buffer_bytes() <= 2 * 256 * 1024 + (1 << 20), "{}", s.buffer_bytes());
+    }
+    let start = std::time::Instant::now();
+    while s.segments().is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(30), "no background conversion");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(s.searcher().num_docs(), 0, "nothing published before refresh");
+    s.refresh().unwrap();
+    assert_eq!(s.searcher().num_docs(), 3000);
+}
+
 #[test]
 fn stats_count_refreshes_flushes_and_merges() {
     let s = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(), Vec::new()).unwrap();
@@ -1074,3 +1097,78 @@ fn a_commit_describes_a_searcher_over_segments_merged_since() {
     assert!(s.flush().unwrap().published.is_none());
 }
 
+
+/// Natural merges BP-reorder only results of at least 2^18 docs (the size Lucene's
+/// `BPReorderingMergePolicy` suggests for natural merges); a forced merge reorders from 2^16.
+#[test]
+fn bp_reorders_forced_merges_and_only_large_natural_ones() {
+    use search_index::merge::policy::MergePolicyConfig;
+    const N: usize = 100_000;
+    // Docs alternate between two vocabularies: BP pulls each topic together, merge order keeps
+    // them interleaved.
+    let load = |segments_per_tier: f64| {
+        let merge_policy = MergePolicyConfig { segments_per_tier, ..Default::default() };
+        let s = Shard::open(ShardConfig { merge_threads: 0, merge_policy, ..Default::default() }, schema(), Vec::new()).unwrap();
+        for i in 0..N {
+            let topic = if i % 2 == 0 { 'a' } else { 'b' };
+            let words: Vec<String> = (0..4).map(|w| format!("{topic}{}", (i / 2 + w) % 8)).collect();
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            s.index(IndexOp::new(doc(&format!("{i}"), &words))).unwrap();
+            if i % 10_000 == 9_999 {
+                s.refresh().unwrap();
+            }
+        }
+        s.refresh().unwrap();
+        s
+    };
+    // Share of neighbouring docs (in doc id order) of the same topic.
+    let clustered = |s: &Shard| {
+        let mut docs: Vec<(u32, String)> = ids(&s.searcher()).into_iter().collect();
+        docs.sort();
+        assert_eq!(docs.len(), N);
+        let parity = |id: &str| id.parse::<usize>().unwrap() % 2;
+        docs.windows(2).filter(|w| parity(&w[0].1) == parity(&w[1].1)).count() as f64 / (docs.len() - 1) as f64
+    };
+    // Two segments per tier: the refreshes merge naturally, into a segment of more than 2^16
+    // docs (which BP used to reorder) but less than 2^18.
+    let natural = load(2.0);
+    let largest = natural.segments().iter().map(|g| g.max_doc).max().unwrap();
+    assert!(largest >= 1 << 16, "{:?}", natural.segments().iter().map(|g| g.max_doc).collect::<Vec<_>>());
+    assert!(clustered(&natural) < 0.01, "a natural merge under 2^18 docs was reordered");
+    // Fifty per tier: the refreshes stay apart until a forced merge joins them.
+    let forced = load(50.0);
+    assert!(forced.segments().len() > 1);
+    forced.force_merge(Some(1), false).unwrap();
+    assert_eq!(forced.segments().len(), 1);
+    assert!(clustered(&forced) > 0.95, "the forced merge kept the merge order");
+}
+
+/// `index.codec: best_compression` (`Shard::set_best_compression`): segments written after it
+/// store the same values in fewer bytes.
+#[test]
+fn best_compression_stores_the_same_values_smaller() {
+    let stored_bytes = |best: bool| {
+        let s = Shard::in_memory(schema());
+        s.set_best_compression(best);
+        for i in 0..3000 {
+            let mut d = doc(&i.to_string(), &["w1"]);
+            let src = format!(r#"{{"name":"place {i}","country":"{}","population":{},"tags":["city","town"]}}"#, ["FR", "DE", "IT"][i % 3], i * 37 % 1000);
+            d.stored.push(search_index::doc::StoredField { field: 20, value: search_codec::stored::OwnedStoredValue::Bytes(src.into_bytes()) });
+            s.index(IndexOp::new(d)).unwrap();
+        }
+        s.refresh().unwrap();
+        let se = s.searcher();
+        let mut values = Vec::new();
+        for seg in se.segments().iter() {
+            for d in 0..seg.max_doc() {
+                values.push(seg.reader.stored().document(d).unwrap());
+            }
+        }
+        let size: u64 = se.segments().iter().map(|seg| seg.reader.size_in_bytes()).sum();
+        (size, values)
+    };
+    let (default, a) = stored_bytes(false);
+    let (best, b) = stored_bytes(true);
+    assert_eq!(a, b);
+    assert!(best < default, "best_compression {best} B, default {default} B");
+}

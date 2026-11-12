@@ -161,7 +161,7 @@ impl RuntimeFields {
     /// The runtime fields of `mapping` (parsed once per mapping version: an index's every
     /// search would parse its runtime section otherwise), overridden by the request's.
     pub fn of_index(mapping: &Arc<Mapping>, request: Option<&Map>) -> EsResult<RuntimeFields> {
-        let mut out = (*mapping_fields(mapping)?).clone();
+        let mut out = mapping_fields(mapping)?.fields.clone();
         if let Some(req) = request {
             for (name, v) in req {
                 let rf = RuntimeField::parse_def(name, v)?;
@@ -211,8 +211,8 @@ fn default_format() -> Arc<crate::time::DateFormatter> {
 
 /// The parsed runtime section of a mapping, cached by the mapping's identity (a mapping
 /// change publishes a new `Arc`; entries of dropped mappings are purged as others arrive).
-fn mapping_fields(mapping: &Arc<Mapping>) -> EsResult<Arc<RuntimeFields>> {
-    type Cache = std::collections::HashMap<usize, (std::sync::Weak<Mapping>, Arc<RuntimeFields>)>;
+fn mapping_fields(mapping: &Arc<Mapping>) -> EsResult<Arc<ScopeFields>> {
+    type Cache = std::collections::HashMap<usize, (std::sync::Weak<Mapping>, Arc<ScopeFields>)>;
     static CACHE: std::sync::OnceLock<parking_lot::Mutex<Cache>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let key = Arc::as_ptr(mapping) as usize;
@@ -222,7 +222,7 @@ fn mapping_fields(mapping: &Arc<Mapping>) -> EsResult<Arc<RuntimeFields>> {
     {
         return Ok(f.clone());
     }
-    let fields = Arc::new(RuntimeFields::of(mapping, None)?);
+    let fields = Arc::new(ScopeFields::new(RuntimeFields::of(mapping, None)?, mapping, None));
     let mut c = cache.lock();
     if c.len() >= 64 {
         c.retain(|_, (w, _)| w.strong_count() > 0);
@@ -407,10 +407,10 @@ pub const MAX_FIELD_CHAIN_DEPTH: usize = 5;
 /// first use, so an index with hundreds of runtime fields costs a search nothing for the
 /// ones it doesn't read.
 pub struct RuntimeScope {
-    fields: RuntimeFields,
-    evaluators: BTreeMap<String, std::sync::OnceLock<Option<Arc<Evaluator>>>>,
-    /// Runtime field names (mapping and request): they shadow mapped fields of the same name.
-    shadowing: std::collections::HashSet<String>,
+    /// Shared by every shard's scope of a mapping version when the request adds no fields.
+    shared: Arc<ScopeFields>,
+    /// One slot per field of `shared` ([`ScopeFields::slots`]).
+    evaluators: Box<[std::sync::OnceLock<Option<Arc<Evaluator>>>]>,
     scripts: Arc<crate::scripting::ScriptService>,
     st: Arc<crate::meta::ClusterState>,
     table: Arc<FieldTable>,
@@ -420,7 +420,28 @@ pub struct RuntimeScope {
 
 impl std::fmt::Debug for RuntimeScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RuntimeScope({:?})", self.evaluators.keys().collect::<Vec<_>>())
+        write!(f, "RuntimeScope({:?})", self.shared.fields.fields.keys().collect::<Vec<_>>())
+    }
+}
+
+/// The shard-independent part of a [`RuntimeScope`]: built once per mapping version (and per
+/// search when the request defines runtime fields), so a search over many shards copies no
+/// field names per shard.
+#[derive(Debug)]
+struct ScopeFields {
+    fields: RuntimeFields,
+    /// Each field's evaluator slot.
+    slots: std::collections::HashMap<String, usize>,
+    /// Runtime field names (mapping and request): they shadow mapped fields of the same name.
+    shadowing: std::collections::HashSet<String>,
+}
+
+impl ScopeFields {
+    fn new(fields: RuntimeFields, mapping: &Mapping, request: Option<&Map>) -> ScopeFields {
+        let slots = fields.fields.keys().enumerate().map(|(i, k)| (k.clone(), i)).collect();
+        let mut shadowing: std::collections::HashSet<String> = mapping.runtime.keys().cloned().collect();
+        shadowing.extend(request.into_iter().flat_map(|r| r.keys().cloned()));
+        ScopeFields { fields, slots, shadowing }
     }
 }
 
@@ -431,20 +452,22 @@ impl RuntimeScope {
         if idx.mapping.runtime.is_empty() && request.is_none_or(|r| r.is_empty()) {
             return Ok(None);
         }
-        let fields = RuntimeFields::of_index(&idx.mapping, request)?;
-        if fields.is_empty() {
+        let request = request.filter(|r| !r.is_empty());
+        let shared = match request {
+            None => mapping_fields(&idx.mapping)?,
+            Some(r) => Arc::new(ScopeFields::new(RuntimeFields::of_index(&idx.mapping, Some(r))?, &idx.mapping, Some(r))),
+        };
+        if shared.fields.is_empty() {
             return Ok(None);
         }
-        let mut shadowing: std::collections::HashSet<String> = idx.mapping.runtime.keys().cloned().collect();
-        shadowing.extend(request.into_iter().flat_map(|r| r.keys().cloned()));
-        let evaluators = fields.fields.keys().map(|k| (k.clone(), std::sync::OnceLock::new())).collect();
-        let scope = RuntimeScope { fields, evaluators, shadowing, scripts: scripts.clone(), st, table: table.clone(), shard, index: idx.name.clone() };
+        let evaluators = (0..shared.fields.fields.len()).map(|_| std::sync::OnceLock::new()).collect();
+        let scope = RuntimeScope { shared, evaluators, scripts: scripts.clone(), st, table: table.clone(), shard, index: idx.name.clone() };
         if let Some(r) = request {
-            for (name, f) in &scope.fields.fields {
+            for (i, (name, f)) in scope.shared.fields.fields.iter().enumerate() {
                 let parent = f.composite_key.as_ref().and_then(|k| name.strip_suffix(k.as_str())).and_then(|p| p.strip_suffix('.'));
                 if r.contains_key(name) || parent.is_some_and(|p| r.contains_key(p)) {
                     let ev = Evaluator::new(&scope.scripts, &scope.st, &scope.table, shard, &scope.index, f.clone())?.counted();
-                    let _ = scope.evaluators[name].set(Some(Arc::new(ev)));
+                    let _ = scope.evaluators[i].set(Some(Arc::new(ev)));
                 }
             }
         }
@@ -475,9 +498,9 @@ impl RuntimeScope {
     /// script doesn't compile: reading it fails as reading an unmapped field does, and the
     /// consumers that compile it report the error).
     pub fn get(&self, name: &str) -> Option<Arc<Evaluator>> {
-        let cell = self.evaluators.get(name)?;
+        let cell = &self.evaluators[*self.shared.slots.get(name)?];
         cell.get_or_init(|| {
-            let f = self.fields.get(name)?.clone();
+            let f = self.shared.fields.get(name)?.clone();
             Evaluator::new(&self.scripts, &self.st, &self.table, self.shard, &self.index, f).ok().map(|e| Arc::new(e.counted()))
         })
         .clone()
@@ -485,18 +508,18 @@ impl RuntimeScope {
 
     /// The definition of runtime field `name`.
     pub fn field(&self, name: &str) -> Option<&Arc<RtField>> {
-        self.fields.get(name)
+        self.shared.fields.get(name)
     }
 
     /// The runtime fields of the search.
     pub fn fields(&self) -> &RuntimeFields {
-        &self.fields
+        &self.shared.fields
     }
 
     /// Whether `name` is a runtime field (or a composite sub-field of one): it shadows a
     /// mapped field of that name.
     pub fn shadows(&self, name: &str) -> bool {
-        self.shadowing.contains(name) || name.rsplit_once('.').is_some_and(|(p, _)| self.shadowing.contains(p))
+        self.shared.shadowing.contains(name) || name.rsplit_once('.').is_some_and(|(p, _)| self.shared.shadowing.contains(p))
     }
 }
 
@@ -601,8 +624,18 @@ pub struct EvalLeaf {
 }
 
 impl EvalLeaf {
-    /// The values of segment doc `doc`, in emission (or `_source`) order.
+    /// The values of segment doc `doc`, as doc values hold them (see below).
     pub fn values(&mut self, doc: u32) -> EsResult<Vec<RtValue>> {
+        self.collect(doc, true)
+    }
+
+    /// The values in emission order, as the `_execute` API returns them (`*FieldScript`'s
+    /// value array; booleans are counts either way).
+    pub fn emitted_values(&mut self, doc: u32) -> EsResult<Vec<RtValue>> {
+        self.collect(doc, false)
+    }
+
+    fn collect(&mut self, doc: u32, sorted: bool) -> EsResult<Vec<RtValue>> {
         let f = &self.field;
         let mut out = Vec::new();
         match &mut self.leaf {
@@ -649,7 +682,9 @@ impl EvalLeaf {
         // and friends); booleans as counts of falses then trues; keywords in emission order.
         match f.ty {
             RtType::Keyword | RtType::GeoPoint => {}
-            _ => out.sort_by(|a, b| a.cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
+            RtType::Boolean => out.sort_by(|a, b| a.cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
+            _ if sorted => out.sort_by(|a, b| a.cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
+            _ => {}
         }
         Ok(out)
     }

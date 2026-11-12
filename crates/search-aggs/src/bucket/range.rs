@@ -338,7 +338,7 @@ pub fn create_range(def: &AggDef, spec: &RangeSpec, ctx: &mut BindCtx<'_>) -> Re
         RangeKind::DateRange => RangeResultKind::DateRange,
         RangeKind::GeoDistance { .. } => RangeResultKind::GeoDistance,
     };
-    let counters = if ctx.whole_segments() && subs.is_empty() && !geo && !histogram && ctx.doc_count_field.is_none() {
+    let counters = if ctx.whole_segments_unless_terminating() && subs.is_empty() && !geo && !histogram && ctx.doc_count_field.is_none() {
         range_counters(&vs, &ranges, ctx)?
     } else {
         None

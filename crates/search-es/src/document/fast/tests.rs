@@ -79,6 +79,33 @@ fn geonames_documents_take_the_fast_path() {
     }
 }
 
+const HTTP_LOGS: &str = r#"{"dynamic":"strict","_source":{"enabled":true},"properties":{
+    "@timestamp":{"format":"epoch_second","type":"date"},
+    "message":{"type":"keyword","index":false,"doc_values":false},
+    "clientip":{"type":"ip"},
+    "request":{"type":"match_only_text","fields":{"raw":{"ignore_above":256,"type":"keyword"}}},
+    "status":{"type":"integer"},
+    "size":{"type":"integer"},
+    "geoip":{"properties":{"country_name":{"type":"keyword"},"city_name":{"type":"keyword"},"location":{"type":"geo_point"}}}
+}}"#;
+
+/// Rally's `http_logs` documents (an `ip`, a `match_only_text` with a keyword multi-field).
+#[test]
+fn http_logs_documents_take_the_fast_path() {
+    let idx = index(HTTP_LOGS, &[]);
+    let plan = FastPlan::new(&idx).expect("plan");
+    for doc in [
+        r#"{"@timestamp": 893964617, "clientip":"40.135.0.0", "request": "GET /images/hm_bg.jpg HTTP/1.0", "status": 200, "size": 24736}"#,
+        r#"{"@timestamp": 894146400, "clientip":"2001:db8::1", "request": "GET /english/index.html HTTP/1.0", "status": 304, "size": 0, "message": "m"}"#,
+    ] {
+        assert!(agree(&idx, &plan, doc), "not taken: {doc}");
+    }
+    // Malformed addresses and objects stay with the general path (its errors).
+    for doc in [r#"{"clientip": "1.2.3"}"#, r#"{"clientip": 1}"#, r#"{"geoip": {"city_name": "x"}}"#] {
+        assert!(plan.parse(doc.as_bytes()).is_none(), "taken: {doc}");
+    }
+}
+
 #[test]
 fn everything_else_takes_the_general_path() {
     let idx = index(GEONAMES, &[]);
@@ -136,7 +163,9 @@ const TYPES: &str = r#"{"properties":{
     "g":{"type":"geo_point"},
     "f":{"type":"float"},
     "o":{"properties":{"x":{"type":"keyword"}}},
-    "c":{"type":"keyword","copy_to":"t"}
+    "c":{"type":"keyword","copy_to":"t"},
+    "ip":{"type":"ip"},
+    "mot":{"type":"match_only_text","fields":{"raw":{"type":"keyword","ignore_above":4}}}
 }}"#;
 
 /// A deterministic generator (xorshift) instead of a dependency.
@@ -171,6 +200,13 @@ fn scalar(r: &mut Rng) -> String {
         r#""\ud800""#,
         r#""true""#,
         r#""bad date""#,
+        r#""192.168.0.1""#,
+        r#""::1""#,
+        r#""2001:db8::ff00:42:8329""#,
+        r#""::ffff:10.0.0.1""#,
+        r#""1.2.3""#,
+        r#""010.0.0.1""#,
+        r#""fe80::1%eth0""#,
     ];
     let nums = [
         "0", "-0", "1", "-1", "127", "128", "-129", "32767", "32768", "2147483647", "-2147483649", "9223372036854775807", "-9223372036854775808",
@@ -189,7 +225,7 @@ fn scalar(r: &mut Rng) -> String {
 fn random_documents_agree() {
     let idx = index(TYPES, &[]);
     let plan = FastPlan::new(&idx).unwrap();
-    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "c", "zz"];
+    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "c", "zz", "ip", "mot"];
     let mut r = Rng(0x9E37_79B9_7F4A_7C15);
     let seeds: u64 = std::env::var("FAST_DOCS").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let (mut fast, mut total) = (0, 0);

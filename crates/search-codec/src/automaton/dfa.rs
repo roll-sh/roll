@@ -743,6 +743,9 @@ impl Automaton for Dfa {
         let row = &self.trans[s as usize * self.nclasses as usize..][..self.nclasses as usize];
         (from..=255).find(|&b| row[self.classes[b as usize] as usize] != DEAD)
     }
+    fn as_dfa(&self) -> Option<&Dfa> {
+        Some(self)
+    }
 }
 
 /// The Levenshtein NFA (see [`Dfa::levenshtein`]).

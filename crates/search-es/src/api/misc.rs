@@ -143,6 +143,9 @@ pub fn get_features(ctx: &Ctx) -> EsResult<Reply> {
 /// results are not kept).
 pub async fn reset_features(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
+    // Machine learning's reset stops its trained model deployments (their models are in the
+    // system indices deleted below).
+    ctx.cluster.xpack.deployments.clear();
     let st = ctx.state();
     if !st.metadata.synonyms.is_empty() || st.metadata.indices.values().any(|i| i.system) {
         ctx.cluster

@@ -747,3 +747,87 @@ fn bench_source_confirmed() {
     let el = t.elapsed();
     println!("source confirmed: {cands} candidates, {hits} hits, {:.2} µs/candidate", el.as_secs_f64() * 1e6 / cands as f64);
 }
+
+/// Sorted top hits and collapsing where competitive pruning can't help (doc-values-only
+/// fields): every insert into the queue, and every comparison against queued entries from
+/// earlier segments, is on the hot path. `dec` falls with the doc id, so ascending it every doc
+/// enters the queue at its head (the worst case of a sorted queue); `rnd` and `kw` are random.
+/// Three segments, so queued entries are translated between segment spaces.
+#[test]
+#[ignore]
+fn bench_sorted_collectors() {
+    use search_index::collector::{CollapseCollector, CollapseField, FieldSort, Missing, SortKey, SortMode, SortType, TopFieldCollector};
+    const DEC: u32 = 20;
+    const RND: u32 = 21;
+    const KW: u32 = 22;
+    const GRP: u32 = 23;
+    let schema = Schema::new()
+        .with_field(FieldSchema::new(DEC, "dec").with_doc_values(DocValuesType::Numeric))
+        .unwrap()
+        .with_field(FieldSchema::new(RND, "rnd").with_doc_values(DocValuesType::Numeric))
+        .unwrap()
+        .with_field(FieldSchema::new(KW, "kw").with_doc_values(DocValuesType::Sorted))
+        .unwrap()
+        .with_field(FieldSchema::new(GRP, "grp").with_doc_values(DocValuesType::Sorted))
+        .unwrap();
+    let n = 300_000usize;
+    let s = Shard::open(ShardConfig { merge_threads: 0, bp_reorder: false, ..Default::default() }, schema, Vec::new()).unwrap();
+    let mut rng = StdRng::seed_from_u64(5);
+    for i in 0..n {
+        let kw: String = (0..8).map(|_| (b'a' + rng.gen_range(0..26u8)) as char).collect();
+        let d = IndexableDoc::new(format!("d{i}").into_bytes())
+            .field(IndexableField::DocValue { field: DEC, value: DocValue::Numeric((n - i) as i64) })
+            .field(IndexableField::DocValue { field: RND, value: DocValue::Numeric(rng.gen_range(0..1_000_000_000i64)) })
+            .field(IndexableField::DocValue { field: KW, value: DocValue::Sorted(kw.into_bytes().into()) })
+            .field(IndexableField::DocValue { field: GRP, value: DocValue::Sorted(format!("g{}", rng.gen_range(0..20_000)).into_bytes().into()) });
+        s.index(IndexOp::new(d)).unwrap();
+        if (i + 1) % 100_000 == 0 {
+            s.refresh().unwrap();
+        }
+    }
+    s.refresh().unwrap();
+    let se = s.searcher();
+    let q: QueryRef = Arc::new(search_index::query::MatchAllQuery);
+    let key = |field: u32, kind: SortType, reverse: bool| {
+        SortKey::Field(FieldSort { field, kind, reverse, missing: Missing::Last, mode: SortMode::Min, nested: None })
+    };
+    let time = |name: &str, run: &dyn Fn() -> usize| {
+        run();
+        let mut best = f64::MAX;
+        let mut got = 0;
+        for _ in 0..7 {
+            let t = Instant::now();
+            got = run();
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("{name:44} {best:8.2} ms  ({got} hits)");
+    };
+    for size in [100usize, 1000] {
+        let cases: Vec<(&str, Vec<SortKey>)> = vec![
+            ("dec asc (every doc enters at the head)", vec![key(DEC, SortType::Long, false)]),
+            ("rnd asc", vec![key(RND, SortType::Long, false)]),
+            ("kw asc", vec![key(KW, SortType::Keyword, false)]),
+            ("kw desc, rnd asc", vec![key(KW, SortType::Keyword, true), key(RND, SortType::Long, false)]),
+        ];
+        for (name, keys) in &cases {
+            time(&format!("sort {name}, size {size}"), &|| {
+                let mut c = TopFieldCollector::new(keys.clone(), size, u64::MAX, false).with_searcher(&se);
+                se.search(&q, &mut c).unwrap();
+                c.top_docs().hits.len()
+            });
+        }
+        let collapses: Vec<(&str, Vec<SortKey>)> = vec![
+            ("rnd asc", vec![key(RND, SortType::Long, false)]),
+            ("dec asc", vec![key(DEC, SortType::Long, false)]),
+            ("kw asc", vec![key(KW, SortType::Keyword, false)]),
+            ("kw desc, rnd asc", vec![key(KW, SortType::Keyword, true), key(RND, SortType::Long, false)]),
+        ];
+        for (name, keys) in &collapses {
+            time(&format!("collapse grp, {name}, size {size}"), &|| {
+                let mut c = CollapseCollector::new(CollapseField::Keyword(GRP), keys.clone(), size, u64::MAX, false).with_searcher(&se);
+                se.search(&q, &mut c).unwrap();
+                c.top_docs().hits.len()
+            });
+        }
+    }
+}

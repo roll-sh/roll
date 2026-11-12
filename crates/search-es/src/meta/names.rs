@@ -77,7 +77,7 @@ pub fn validate_index_name(name: &str) -> Result<(), EsError> {
 
 /// Index name patterns of Elasticsearch's system indices (no dot-prefix deprecation warning).
 const SYSTEM_INDEX_PATTERNS: &[&str] = &[
-    ".tasks*", ".security*", ".async-search*", ".fleet-*", ".kibana*", ".ml-*", ".transform-internal-*", ".watches*",
+    ".tasks*", ".security*", ".async-search*", ".fleet-*", ".kibana*", ".ml-meta*", ".ml-config*", ".ml-inference-*", ".transform-internal-*", ".watches*",
     ".triggered_watches*", ".geoip_databases*", ".snapshot-blob-cache*", ".logstash*", ".apm-*", ".synonyms*", ".enrich-*",
     ".connector-secrets*", ".secrets-inference*", ".inference*", ".query-rules*", ".search-app*", ".slm-history*",
 ];
@@ -86,9 +86,18 @@ pub fn is_system_index(name: &str) -> bool {
     SYSTEM_INDEX_PATTERNS.iter().any(|p| crate::xcontent::filter::glob_match(p, name))
 }
 
+/// ML's result and state indices: not system indices (no access warning), yet their dot
+/// prefix is not deprecated either (Elasticsearch 9.5.5 creates them without warnings).
+const ML_ASSOCIATED_PATTERNS: &[&str] = &[".ml-anomalies-*", ".ml-state*", ".ml-stats-*", ".ml-notifications-*"];
+
+/// Whether a dot-prefixed name may be created without the dot-prefix deprecation warnings.
+pub fn dot_name_allowed(name: &str) -> bool {
+    is_system_index(name) || ML_ASSOCIATED_PATTERNS.iter().any(|p| crate::xcontent::filter::glob_match(p, name))
+}
+
 /// Deprecation warnings for an index name (dot-prefixed names that aren't system indices).
 pub fn index_name_warnings(name: &str) -> Vec<String> {
-    if name.starts_with('.') && !is_system_index(name) {
+    if name.starts_with('.') && !dot_name_allowed(name) {
         vec![format!("Index [{name}] name begins with a dot (.), which is deprecated, and will not be allowed in a future Elasticsearch version.")]
     } else {
         Vec::new()

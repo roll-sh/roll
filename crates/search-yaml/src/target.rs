@@ -132,6 +132,10 @@ pub struct TargetInfo {
     pub serverless: bool,
     /// Feature flags enabled on the target (clients-tests `requires.feature_flag`).
     pub feature_flags: HashSet<String>,
+    /// Headers that replace the test client's for the cleanup between tests (credentials of
+    /// `ESRestTestCase.restAdminSettings` where a suite runs its tests as a less privileged
+    /// user); empty: the test client's.
+    pub admin_headers: Vec<(String, String)>,
     capabilities: Mutex<HashMap<CapabilityCheck, Option<bool>>>,
 }
 
@@ -148,6 +152,7 @@ impl TargetInfo {
             claimed_features: HashSet::new(),
             serverless: false,
             feature_flags: HashSet::new(),
+            admin_headers: Vec::new(),
             capabilities: Mutex::new(HashMap::new()),
         }
     }

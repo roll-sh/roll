@@ -35,12 +35,17 @@ fn state(st: &crate::meta::ClusterState) -> Map {
 
 /// Checks a Quartz cron expression's shape (6 or 7 fields of the allowed characters).
 fn check_cron(expr: &str) -> Result<(), EsError> {
-    let invalid = |detail: String| {
-        EsError::new(400, "parse_exception", "could not parse [cron] schedule").caused_by(
+    cron_problem(expr).map_or(Ok(()), |detail| {
+        Err(EsError::new(400, "parse_exception", "could not parse [cron] schedule").caused_by(
             EsError::illegal_argument(format!("invalid cron expression [{expr}]"))
                 .caused_by(EsError::illegal_argument(format!("illegal cron expression format [java.lang.IllegalArgumentException: {detail}]"))),
-        )
-    };
+        ))
+    })
+}
+
+/// Why Elasticsearch's `Cron` rejects a Quartz expression (the message of its
+/// `IllegalArgumentException`), or `None`. Shared with the connectors' schedules.
+pub(crate) fn cron_problem(expr: &str) -> Option<String> {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     let mut pos = 0;
     for f in &fields {
@@ -48,17 +53,42 @@ fn check_cron(expr: &str) -> Result<(), EsError> {
         let word: String = up.chars().filter(|c| c.is_ascii_alphabetic()).collect();
         const NAMES: [&str; 22] = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT", "L", "W", "LW"];
         if !word.is_empty() && !NAMES.iter().any(|n| word.contains(n)) && !word.chars().all(|c| matches!(c, 'L' | 'W')) {
-            return Err(invalid(format!("illegal characters [{word}] at pos [{pos}] '")));
+            return Some(format!("illegal characters [{word}] at pos [{pos}] '"));
         }
         if f.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '*' | '?' | ',' | '-' | '/' | '#'))) {
-            return Err(invalid(format!("illegal characters [{f}] at pos [{pos}] '")));
+            return Some(format!("illegal characters [{f}] at pos [{pos}] '"));
         }
         pos += f.len() + 1;
     }
     if fields.len() < 6 || fields.len() > 7 {
-        return Err(invalid("Unexpected end of expression.".into()));
+        return Some("Unexpected end of expression.".into());
     }
-    Ok(())
+    // Value ranges per field (the numbers of each list item and range, not increments).
+    const RANGES: [(u32, u32, &str); 6] = [
+        (0, 59, "Minute and Second values must be between 0 and 59"),
+        (0, 59, "Minute and Second values must be between 0 and 59"),
+        (0, 23, "Hour values must be between 0 and 23"),
+        (1, 31, "Day of month values must be between 1 and 31"),
+        (1, 12, "Month values must be between 1 and 12"),
+        (1, 7, "Day-of-Week values must be between 1 and 7"),
+    ];
+    for (f, (lo, hi, msg)) in fields.iter().zip(RANGES) {
+        for item in f.split(',') {
+            let base = item.split('/').next().unwrap_or("");
+            for n in base.split(['-', '#']).take(1).chain(base.split('-').skip(1)) {
+                let digits: String = n.chars().take_while(char::is_ascii_digit).collect();
+                if let Ok(v) = digits.parse::<u32>()
+                    && (v < lo || v > hi)
+                {
+                    return Some(msg.into());
+                }
+            }
+        }
+    }
+    if fields[3] != "?" && fields[5] != "?" {
+        return Some("support for specifying both a day-of-week AND a day-of-month parameter is not implemented.".into());
+    }
+    None
 }
 
 /// Validates a watch definition (`WatchParser`).
@@ -843,6 +873,19 @@ mod tests {
         assert!(check_cron("0 0 12 ? * MON-FRI").is_ok());
         let e = check_cron("bad").unwrap_err();
         assert_eq!(e.reason(), "could not parse [cron] schedule");
+        // Elasticsearch 9.5.5's `Cron` messages.
+        for (expr, msg) in [
+            ("61 0 0 * * ?", Some("Minute and Second values must be between 0 and 59")),
+            ("0 0 24 * * ?", Some("Hour values must be between 0 and 23")),
+            ("0 0 0 1-40 * ?", Some("Day of month values must be between 1 and 31")),
+            ("0 0 0 * 13 ?", Some("Month values must be between 1 and 12")),
+            ("0 0 0 ? * 8", Some("Day-of-Week values must be between 1 and 7")),
+            ("0 0 0 * * *", Some("support for specifying both a day-of-week AND a day-of-month parameter is not implemented.")),
+            ("0 0/70 0 * * ?", None),
+            ("0 0 0 ? * 5#3", None),
+        ] {
+            assert_eq!(cron_problem(expr).as_deref(), msg, "{expr}");
+        }
     }
 
     #[test]

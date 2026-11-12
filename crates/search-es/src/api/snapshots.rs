@@ -22,15 +22,20 @@
 //! and restores running here are tracked in [`SnapshotData`], so concurrent deletions neither
 //! drop an unfinished snapshot's copies nor the ones a restore is reading (Elasticsearch's
 //! `SnapshotsInProgress` and `RestoreInProgress`). Without one they live with the process:
-//! after a restart a snapshot restores its metadata only. Shard file statistics are reported
-//! as one small file per shard.
+//! after a restart a snapshot restores its metadata only.
+//!
+//! While a snapshot is being taken it is visible as Elasticsearch shows a `SnapshotsInProgress`
+//! entry: `IN_PROGRESS` to `GET _snapshot` (and `_current`), `STARTED` with per-shard stages to
+//! `_status`, and its name is taken. Each shard's files (what its copy references and what it
+//! added since the latest earlier snapshot of the shard in the repository) are recorded with
+//! the snapshot, for `_status` and `index_details`.
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::meta::names::random_uuid;
 use crate::meta::resolve::{self, IndicesOptions};
 use crate::meta::settings::Settings;
-use crate::meta::snapshots::{Repository, RepositoryData, Snapshot};
+use crate::meta::snapshots::{Repository, RepositoryData, ShardFiles, Snapshot};
 use crate::meta::{ClusterState, IndexMeta, IndexState, Metadata};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
@@ -48,6 +53,55 @@ pub struct SnapshotData {
     /// Restores running here (Elasticsearch's `RestoreInProgress`): their snapshots can't be
     /// deleted until they finish, or the copies they are reading would go.
     restoring: parking_lot::Mutex<Vec<Restoring>>,
+    /// Snapshots being taken here, as `GET _snapshot` and `_status` show them until they are
+    /// recorded (Elasticsearch's `SnapshotsInProgress`).
+    running: parking_lot::Mutex<Vec<Arc<Running>>>,
+}
+
+/// A snapshot being taken: what it will record, and how far each shard got.
+struct Running {
+    repo: String,
+    /// The snapshot as planned (state `IN_PROGRESS`, no end time).
+    snapshot: Snapshot,
+    /// `(index name, index uuid, shard stages)`, by index name.
+    shards: parking_lot::Mutex<Vec<(String, String, Vec<ShardRun>)>>,
+}
+
+/// One shard of a running snapshot (`SnapshotsInProgress.ShardState` as `_status` maps it).
+#[derive(Clone, Copy, Debug)]
+enum ShardRun {
+    /// Not started (`INIT`).
+    Queued,
+    Started { start_ms: i64 },
+    Done(ShardFiles),
+}
+
+impl Running {
+    fn set(&self, index_uuid: &str, shard: u32, run: ShardRun) {
+        let mut g = self.shards.lock();
+        if let Some(slot) = g.iter_mut().find(|(_, u, _)| u == index_uuid).and_then(|(_, _, v)| v.get_mut(shard as usize)) {
+            *slot = run;
+        }
+    }
+
+    /// The snapshot as `GET _snapshot` shows it now (`SnapshotInfo.inProgress`): no end time,
+    /// the shards done so far successful, no index details.
+    fn info(&self) -> Snapshot {
+        let done = self.shards.lock().iter().flat_map(|(_, _, v)| v.iter()).filter(|r| matches!(r, ShardRun::Done(_))).count() as i64;
+        Snapshot { end_ms: 0, successful_shards: done, index_meta: Default::default(), ..self.snapshot.clone() }
+    }
+}
+
+/// Marks a snapshot as running while alive.
+struct RunningGuard<'a> {
+    data: &'a SnapshotData,
+    entry: Arc<Running>,
+}
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) {
+        self.data.running.lock().retain(|r| !Arc::ptr_eq(r, &self.entry));
+    }
 }
 
 /// A running restore: `(restore uuid, repository, snapshot name)`.
@@ -98,6 +152,38 @@ impl SnapshotData {
         Taking { data: self, uuid: uuid.to_string() }
     }
 
+    /// Shows `planned` (state `IN_PROGRESS`) as running in repository `repo` until the guard
+    /// drops. Fails when a snapshot of that name is already running there
+    /// (`SnapshotsServiceUtils.ensureSnapshotNameNotRunning`).
+    fn start_running(&self, repo: &str, planned: &Snapshot, st: &ClusterState) -> EsResult<RunningGuard<'_>> {
+        let mut g = self.running.lock();
+        if g.iter().any(|r| r.repo == repo && r.snapshot.name == planned.name) {
+            let snap = &planned.name;
+            return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(
+                "[{repo}:{snap}] Invalid snapshot name [{snap}], snapshot with the same name is already in-progress"
+            )));
+        }
+        let shards = planned
+            .indices
+            .iter()
+            .filter_map(|n| st.metadata.indices.get(n).map(|i| (n.clone(), i.uuid.clone(), vec![ShardRun::Queued; i.number_of_shards() as usize])))
+            .collect();
+        let snapshot = Snapshot { state: "IN_PROGRESS".into(), end_ms: 0, successful_shards: 0, shard_files: Default::default(), ..planned.clone() };
+        let entry = Arc::new(Running { repo: repo.to_string(), snapshot, shards: parking_lot::Mutex::new(shards) });
+        g.push(entry.clone());
+        Ok(RunningGuard { data: self, entry })
+    }
+
+    /// The snapshots running in repository `repo` that it hasn't recorded yet.
+    fn running_in(&self, repo: &str, recorded: Option<&RepositoryData>) -> Vec<Arc<Running>> {
+        self.running
+            .lock()
+            .iter()
+            .filter(|r| r.repo == repo && !recorded.is_some_and(|d| d.snapshots.iter().any(|s| s.uuid == r.snapshot.uuid)))
+            .cloned()
+            .collect()
+    }
+
     fn restoring(&self, repo: &str, snapshot: &str) -> RestoreGuard<'_> {
         let id = random_uuid();
         self.restoring.lock().push((id.clone(), repo.to_string(), snapshot.to_string()));
@@ -126,18 +212,92 @@ impl SnapshotData {
     }
 }
 
-/// Captures the shards of a snapshot's indices (refreshed, so every acknowledged write is in).
-fn capture_shards(ctx: &Ctx, snapshot: &Snapshot) -> EsResult<()> {
+/// The files of each captured shard, by index uuid: what a snapshot records
+/// ([`Snapshot::shard_files`]) once it is.
+type CapturedFiles = parking_lot::Mutex<std::collections::HashMap<String, Vec<ShardFiles>>>;
+
+/// The size of a shard snapshot's commit point when the shard has no durable one (in-memory
+/// snapshots): what an empty shard's `segments_N` takes in Elasticsearch 9.5.5.
+const COMMIT_BYTES: u64 = 227;
+
+/// `LiveDocs::encode`'s size: a 44-byte header and checksum around one bit per document.
+fn live_docs_bytes(max_doc: u32) -> u64 {
+    44 + u64::from(max_doc).div_ceil(64) * 8
+}
+
+/// The latest snapshot recorded at `location` that holds index `index_uuid`, as `(snapshot
+/// uuid, index name in it)`: the files a new snapshot of the index shares with it are not
+/// incremental.
+fn previous_snapshot(st: &ClusterState, location: &str, index_uuid: &str) -> Option<(String, String)> {
+    let data = st.metadata.repository_data.get(location)?;
+    data.snapshots.iter().rev().find_map(|s| {
+        s.index_meta.iter().find(|(_, m)| stored_index(m).is_some_and(|(u, _)| u == index_uuid)).map(|(name, _)| (s.uuid.clone(), name.clone()))
+    })
+}
+
+/// An in-memory shard snapshot's files: its segments, their live docs and a commit point,
+/// those `previous` (the same shard in the previous snapshot) shares not being incremental.
+fn searcher_files(s: &search_index::Searcher, previous: Option<&search_index::Searcher>) -> ShardFiles {
+    let mut f = ShardFiles { segments: s.segments().len() as u32, ..ShardFiles::default() };
+    let mut changed = previous.is_none_or(|p| p.segments().len() != s.segments().len());
+    for seg in s.segments() {
+        let old = previous.and_then(|p| p.segments().iter().find(|o| o.reader.id() == seg.reader.id()));
+        let bytes = seg.reader.size_in_bytes();
+        f.file_count += 1;
+        f.size_in_bytes += bytes;
+        if old.is_none() {
+            changed = true;
+            f.incremental_file_count += 1;
+            f.incremental_size_in_bytes += bytes;
+        }
+        if seg.live.is_some() {
+            let live = live_docs_bytes(seg.max_doc());
+            f.file_count += 1;
+            f.size_in_bytes += live;
+            if old.is_none_or(|o| o.num_docs != seg.num_docs) {
+                changed = true;
+                f.incremental_file_count += 1;
+                f.incremental_size_in_bytes += live;
+            }
+        }
+    }
+    f.file_count += 1;
+    f.size_in_bytes += COMMIT_BYTES;
+    if changed {
+        f.incremental_file_count += 1;
+        f.incremental_size_in_bytes += COMMIT_BYTES;
+    }
+    f
+}
+
+/// In-memory snapshots: captures the shards of `indices` (names; refreshed, so every
+/// acknowledged write is in) as snapshot `snapshot`'s, noting their files in `files`.
+fn capture_shards(ctx: &Ctx, snapshot: &str, location: &str, indices: &[String], running: Option<&Running>, files: &CapturedFiles) -> EsResult<()> {
     let st = ctx.state();
-    for name in &snapshot.indices {
+    for name in indices {
         let Some(idx) = st.metadata.indices.get(name) else { continue };
         let Some(e) = ctx.cluster.engine.loaded(&idx.uuid) else { continue };
+        let previous = previous_snapshot(&st, location, &idx.uuid).and_then(|(u, n)| ctx.cluster.snapshot_data.get(&u, &n));
         let mut shards = Vec::with_capacity(e.shards.len());
-        for s in &e.shards {
+        let mut out = Vec::with_capacity(e.shards.len());
+        for (n, s) in e.shards.iter().enumerate() {
+            let start_ms = crate::time::now_millis();
+            if let Some(r) = running {
+                r.set(&idx.uuid, n as u32, ShardRun::Started { start_ms });
+            }
             s.shard.refresh().map_err(crate::engine::convert::index_error)?;
-            shards.push(s.searcher());
+            let searcher = s.searcher();
+            let mut f = searcher_files(&searcher, previous.as_ref().and_then(|p| p.get(n)));
+            f.start_ms = start_ms;
+            f.time_ms = (crate::time::now_millis() - start_ms).max(0);
+            if let Some(r) = running {
+                r.set(&idx.uuid, n as u32, ShardRun::Done(f));
+            }
+            shards.push(searcher);
+            out.push(f);
         }
-        ctx.cluster.snapshot_data.put(&snapshot.uuid, name, shards);
+        ctx.cluster.snapshot_data.put(snapshot, name, shards);
+        files.lock().insert(idx.uuid.clone(), out);
     }
     Ok(())
 }
@@ -150,6 +310,11 @@ fn stored_index(meta: &Value) -> Option<(String, u32)> {
     Some((uuid, shards))
 }
 
+/// The shard count of an index as a snapshot stored it.
+fn stored_shards(meta: &Value) -> usize {
+    meta.get("settings").and_then(|s| s.get("index.number_of_shards")).and_then(|v| v.as_str()).and_then(|v| v.parse().ok()).unwrap_or(1)
+}
+
 /// The indices a snapshot records, as `(index uuid, shards)`: what its durable copies are
 /// keyed by and what a restore loads.
 fn recorded_indices(s: &Snapshot) -> Vec<(String, u32)> {
@@ -157,10 +322,34 @@ fn recorded_indices(s: &Snapshot) -> Vec<(String, u32)> {
 }
 
 /// Durable snapshots: pins the current contents of `indices` (`(index uuid, shards)`) as
-/// snapshot `uuid`'s copies.
-async fn capture_durable(ctx: &Ctx<'_>, store: &dyn crate::engine::SnapshotStorage, uuid: &str, indices: &[(String, u32)]) -> EsResult<()> {
+/// snapshot `uuid`'s copies, noting their files in `files`.
+async fn capture_durable(
+    ctx: &Ctx<'_>,
+    store: &dyn crate::engine::SnapshotStorage,
+    uuid: &str,
+    location: &str,
+    indices: &[(String, u32)],
+    running: Option<&Running>,
+    files: &CapturedFiles,
+) -> EsResult<()> {
     for (index_uuid, shards) in indices {
-        store.capture(uuid, index_uuid, *shards, ctx.cluster.engine.loaded(index_uuid)).await?;
+        let engine = ctx.cluster.engine.loaded(index_uuid);
+        let previous = previous_snapshot(&ctx.state(), location, index_uuid).map(|(u, _)| u);
+        let mut out = Vec::with_capacity(*shards as usize);
+        for n in 0..*shards {
+            let start_ms = crate::time::now_millis();
+            if let Some(r) = running {
+                r.set(index_uuid, n, ShardRun::Started { start_ms });
+            }
+            let mut f = store.capture(uuid, index_uuid, n, engine.as_ref(), previous.as_deref()).await?;
+            f.start_ms = start_ms;
+            f.time_ms = (crate::time::now_millis() - start_ms).max(0);
+            if let Some(r) = running {
+                r.set(index_uuid, n, ShardRun::Done(f));
+            }
+            out.push(f);
+        }
+        files.lock().insert(index_uuid.clone(), out);
     }
     Ok(())
 }
@@ -229,17 +418,32 @@ pub async fn sweep_leftover_copies(cluster: &crate::Cluster, grace: std::time::D
 /// unless it would now include an index without a copy (created, or deleted and created again,
 /// since the plan): that one is captured and recording is tried again. An error carries whether
 /// the snapshot may have been recorded anyway (saving the cluster state failed).
-async fn create_durable<B>(ctx: &Ctx<'_>, store: &dyn crate::engine::SnapshotStorage, uuid: &str, repo: &str, snap: &str, build: B) -> Result<Arc<Snapshot>, (EsError, bool)>
+#[allow(clippy::too_many_arguments)]
+async fn create_durable<B>(
+    ctx: &Ctx<'_>,
+    store: &dyn crate::engine::SnapshotStorage,
+    uuid: &str,
+    repo: &str,
+    snap: &str,
+    planned: &Snapshot,
+    running: &Running,
+    files: &CapturedFiles,
+    build: B,
+) -> Result<Arc<Snapshot>, (EsError, bool)>
 where
     B: FnOnce(&mut ClusterState) -> EsResult<Arc<Snapshot>> + Clone + Send,
 {
     use std::sync::atomic::{AtomicBool, Ordering};
     const ROUNDS: usize = 8;
+    let location = ctx.state().metadata.repositories.get(repo).map(|r| r.location_key()).unwrap_or_default();
     let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for _ in 0..ROUNDS {
-        let planned = build.clone()(&mut (*ctx.state()).clone()).map_err(|e| (e, false))?;
+    for round in 0..ROUNDS {
+        let planned = match round {
+            0 => planned.clone(),
+            _ => (*build.clone()(&mut (*ctx.state()).clone()).map_err(|e| (e, false))?).clone(),
+        };
         let missing: Vec<(String, u32)> = recorded_indices(&planned).into_iter().filter(|(u, _)| !captured.contains(u)).collect();
-        capture_durable(ctx, store, uuid, &missing).await.map_err(|e| (e, false))?;
+        capture_durable(ctx, store, uuid, &location, &missing, Some(running), files).await.map_err(|e| (e, false))?;
         captured.extend(missing.into_iter().map(|(u, _)| u));
         let (late, saving) = (AtomicBool::new(false), AtomicBool::new(false));
         let attempt = build.clone();
@@ -263,9 +467,6 @@ where
     }
     Err((EsError::new(500, "snapshot_exception", format!("[{repo}:{snap}] indices kept being created while the snapshot was being taken")), false))
 }
-
-/// Bytes and files reported for each shard snapshot (an empty shard's commit point).
-const SHARD_BYTES: i64 = 225;
 
 /// `Strings.INVALID_FILENAME_CHARS` in the order Elasticsearch prints the set.
 const INVALID_CHARS: &[char] = &[' ', '"', '*', '\\', '<', '|', ',', '>', '/', '?'];
@@ -629,14 +830,16 @@ fn snapshot_info(ctx: &Ctx, repo: Option<&str>, s: &Snapshot, verbose: bool, ind
     if index_details && verbose && !s.index_meta.is_empty() {
         let mut d = Map::new();
         for (name, meta) in &s.index_meta {
-            let shards = meta.get("settings").and_then(|st| st.get("index.number_of_shards")).and_then(|v| v.as_str().and_then(|s| s.parse::<i64>().ok())).unwrap_or(1);
+            let shards = stored_shards(meta);
+            let files = s.files(name, shards);
+            let size = files.iter().map(|f| f.size_in_bytes as i64).sum::<i64>();
             let mut e = Map::new();
             e.insert("shard_count".into(), shards.into());
             if ctx.human {
-                e.insert("size".into(), crate::units::ByteSize(shards * SHARD_BYTES).human().into());
+                e.insert("size".into(), crate::units::ByteSize(size).human().into());
             }
-            e.insert("size_in_bytes".into(), (shards * SHARD_BYTES).into());
-            e.insert("max_segments_per_shard".into(), 0.into());
+            e.insert("size_in_bytes".into(), size.into());
+            e.insert("max_segments_per_shard".into(), files.iter().map(|f| f.segments).max().unwrap_or(0).into());
             d.insert(name.clone(), Value::Obj(e));
         }
         m.insert("index_details".into(), Value::Obj(d));
@@ -660,7 +863,9 @@ fn snapshot_info(ctx: &Ctx, repo: Option<&str>, s: &Snapshot, verbose: bool, ind
         }
         m.insert("duration_in_millis".into(), dur.into());
         m.insert("failures".into(), Value::Arr(Vec::new()));
-        m.insert("shards".into(), obj! { "total" => s.total_shards, "failed" => s.total_shards - s.successful_shards, "successful" => s.successful_shards });
+        // A running snapshot's shards that aren't done yet haven't failed.
+        let failed = if s.state == "IN_PROGRESS" { 0 } else { s.total_shards - s.successful_shards };
+        m.insert("shards".into(), obj! { "total" => s.total_shards, "failed" => failed, "successful" => s.successful_shards });
         if !os {
             m.insert("feature_states".into(), Value::Arr(s.feature_states.clone()));
         }
@@ -709,6 +914,8 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let r2 = repo.clone();
     let uuid = random_uuid();
     let (snap_name, snap_uuid) = (snap.clone(), uuid.clone());
+    let files: Arc<CapturedFiles> = Arc::default();
+    let files_in = files.clone();
     let build = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&r2).cloned() else { return Err(repository_missing(&r2)) };
             if r.read_only() {
@@ -716,7 +923,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             let key = r.location_key();
             if st.metadata.repository_data.get(&key).is_some_and(|d| d.find(&snap).is_some()) {
-                return Err(EsError::new(400, "invalid_snapshot_name_exception", format!(
+                return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(
                     "[{r2}:{snap}] Invalid snapshot name [{snap}], snapshot with the same name already exists"
                 )));
             }
@@ -749,6 +956,16 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             names.sort();
             names.dedup();
             let shards: i64 = names.iter().map(|n| st.metadata.indices[n].number_of_shards() as i64).sum();
+            let shard_files = {
+                let captured = files_in.lock();
+                names
+                    .iter()
+                    .filter_map(|n| {
+                        let idx = &st.metadata.indices[n];
+                        captured.get(&idx.uuid).filter(|f| f.len() == idx.number_of_shards() as usize).map(|f| (n.clone(), f.clone()))
+                    })
+                    .collect()
+            };
             let snapshot = Snapshot {
                 name: snap.clone(),
                 uuid: uuid.clone(),
@@ -758,13 +975,14 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 metadata: metadata.clone(),
                 state: "SUCCESS".into(),
                 start_ms: now,
-                end_ms: now,
+                end_ms: crate::time::now_millis().max(now),
                 total_shards: shards,
                 successful_shards: shards,
                 feature_states: feature_out,
                 index_meta: names.iter().map(|n| (n.clone(), st.metadata.indices[n].to_json())).collect(),
                 data_stream_meta: data_streams.iter().filter_map(|d| st.metadata.data_streams.get(d).map(|ds| (d.clone(), ds.to_stored()))).collect(),
                 global: include_global_state.then(|| global_state(&st.metadata)),
+                shard_files,
             };
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_else(|| RepositoryData { uuid: random_uuid(), ..Default::default() });
             data.generation += 1;
@@ -773,10 +991,17 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             st.metadata.repository_data.insert(key, Arc::new(data));
             Ok(snapshot)
         };
+    // Planned against the current state, the snapshot shows as running until it is recorded.
+    let (planned, running) = {
+        let st = ctx.state();
+        let planned = build.clone()(&mut (*st).clone())?;
+        let running = ctx.cluster.snapshot_data.start_running(&repo, &planned, &st)?;
+        (planned, running)
+    };
     let snapshot = match ctx.cluster.engine.snapshot_storage() {
         Some(store) => {
             let _taking = ctx.cluster.snapshot_data.taking(&snap_uuid);
-            match create_durable(ctx, &*store, &snap_uuid, &repo, &snap_name, build).await {
+            match create_durable(ctx, &*store, &snap_uuid, &repo, &snap_name, &planned, &running.entry, &files, build).await {
                 Ok(snapshot) => {
                     // Copies of indices deleted while they were being captured go now; the sweep
                     // also catches what a crash left behind.
@@ -795,11 +1020,25 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
         }
         None => {
-            let snapshot = ctx.cluster.update(build).await?;
-            capture_shards(ctx, &snapshot)?;
+            let location = ctx.state().metadata.repositories.get(&repo).map(|r| r.location_key()).unwrap_or_default();
+            let recorded = match capture_shards(ctx, &snap_uuid, &location, &planned.indices, Some(&running.entry), &files) {
+                Ok(()) => ctx.cluster.update(build).await,
+                Err(e) => Err(e),
+            };
+            let snapshot = match recorded {
+                Ok(s) => s,
+                Err(e) => {
+                    ctx.cluster.snapshot_data.forget(&snap_uuid);
+                    return Err(e);
+                }
+            };
+            // Indices created since the plan: captured late (their files aren't recorded).
+            let late: Vec<String> = snapshot.indices.iter().filter(|n| !planned.indices.contains(n)).cloned().collect();
+            capture_shards(ctx, &snap_uuid, &location, &late, None, &files)?;
             snapshot
         }
     };
+    drop(running);
     if !wait {
         return Reply::ok(obj! { "accepted" => true });
     }
@@ -846,20 +1085,29 @@ pub fn get(ctx: &Ctx) -> EsResult<Reply> {
     let size = ctx.int_param("size", -1)?;
     let offset = ctx.int_param("offset", 0)?;
     let mut found: Vec<(String, Arc<Snapshot>)> = Vec::new();
+    let current = snaps.iter().any(|s| s == "_current");
     for r in &repos {
         let data = st.metadata.repository_data.get(&st.metadata.repositories[r].location_key()).cloned().unwrap_or_default();
         let all = snaps.is_empty() || snaps.iter().any(|s| s == "_all" || s == "*");
+        let selected = |name: &str| {
+            all || snaps.iter().any(|p| (p.contains('*') && glob_match(p, name)) || p == name)
+                && !snaps.iter().any(|p| p.strip_prefix('-').is_some_and(|x| glob_match(x, name)))
+        };
         for s in &data.snapshots {
-            let selected = all
-                || snaps.iter().any(|p| (p.contains('*') && glob_match(p, &s.name)) || *p == s.name)
-                    && !snaps.iter().any(|p| p.strip_prefix('-').is_some_and(|x| glob_match(x, &s.name)));
-            if selected {
+            if selected(&s.name) {
                 found.push((r.clone(), s.clone()));
+            }
+        }
+        // Running snapshots: by name like the others, and every one with `_current`.
+        let running = ctx.cluster.snapshot_data.running_in(r, Some(&data));
+        for run in &running {
+            if current || selected(&run.snapshot.name) {
+                found.push((r.clone(), Arc::new(run.info())));
             }
         }
         if !all && !ignore_unavailable {
             for p in snaps.iter().filter(|p| !p.contains('*') && !p.starts_with('-') && *p != "_current") {
-                if data.find(p).is_none() {
+                if data.find(p).is_none() && !running.iter().any(|run| run.snapshot.name == *p) {
                     return Err(snapshot_missing(r, p));
                 }
             }
@@ -945,53 +1193,183 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Reply::acknowledged()
 }
 
-fn file_stats(shards: i64) -> Value {
-    obj! { "file_count" => shards, "size_in_bytes" => shards * SHARD_BYTES }
+/// `SnapshotStats`: file counts and sizes summed over shards, and a time span.
+#[derive(Clone, Copy, Debug, Default)]
+struct StatusStats {
+    incremental: (u64, u64),
+    processed: (u64, u64),
+    total: (u64, u64),
+    start_ms: i64,
+    time_ms: i64,
 }
 
-fn status_stats(shards: i64, start: i64, time: i64) -> Value {
-    obj! { "incremental" => file_stats(shards), "total" => file_stats(shards), "start_time_in_millis" => start, "time_in_millis" => time }
+impl StatusStats {
+    /// A shard's stats. A finished shard processed everything it added.
+    fn of(f: &ShardFiles) -> StatusStats {
+        let incremental = (f.incremental_file_count, f.incremental_size_in_bytes);
+        StatusStats { incremental, processed: incremental, total: (f.file_count, f.size_in_bytes), start_ms: f.start_ms, time_ms: f.time_ms }
+    }
+
+    /// `SnapshotStats.add`: sums the files; with `timestamps`, widens the span to cover `o`'s.
+    fn add(&mut self, o: &StatusStats, timestamps: bool) {
+        let sum = |a: &mut (u64, u64), b: (u64, u64)| {
+            a.0 += b.0;
+            a.1 += b.1;
+        };
+        sum(&mut self.incremental, o.incremental);
+        sum(&mut self.processed, o.processed);
+        sum(&mut self.total, o.total);
+        if self.start_ms == 0 {
+            (self.start_ms, self.time_ms) = (o.start_ms, o.time_ms);
+        } else if timestamps {
+            let end = (self.start_ms + self.time_ms).max(o.start_ms + o.time_ms);
+            self.start_ms = self.start_ms.min(o.start_ms);
+            self.time_ms = end - self.start_ms;
+        }
+    }
+
+    /// `SnapshotStats.toXContent`: `processed` only while it differs from `incremental`.
+    fn to_value(self) -> Value {
+        let files = |(count, bytes): (u64, u64)| obj! { "file_count" => count as i64, "size_in_bytes" => bytes as i64 };
+        let mut m = Map::new();
+        m.insert("incremental".into(), files(self.incremental));
+        if self.processed.0 != self.incremental.0 {
+            m.insert("processed".into(), files(self.processed));
+        }
+        m.insert("total".into(), files(self.total));
+        m.insert("start_time_in_millis".into(), self.start_ms.into());
+        m.insert("time_in_millis".into(), self.time_ms.into());
+        Value::Obj(m)
+    }
 }
 
-fn shards_stats(n: i64) -> Value {
-    obj! { "initializing" => 0, "started" => 0, "finalizing" => 0, "done" => n, "failed" => 0, "total" => n }
+/// One shard in `_status` (`SnapshotIndexShardStatus`): its stage, stats and, while its
+/// snapshot runs, the node taking it.
+struct ShardStatus {
+    stage: &'static str,
+    stats: StatusStats,
+    on_node: bool,
 }
 
-/// `GET _snapshot[/{repository}[/{snapshot}]]/_status`: no snapshot is ever running, so
-/// without a snapshot name the list is empty.
+/// `SnapshotShardsStats`: shards by stage.
+fn shards_stats<'a>(shards: impl Iterator<Item = &'a ShardStatus>) -> Value {
+    let mut n = [0i64; 5];
+    for s in shards {
+        let i = match s.stage {
+            "INIT" => 0,
+            "STARTED" => 1,
+            "FINALIZE" => 2,
+            "DONE" => 3,
+            _ => 4,
+        };
+        n[i] += 1;
+    }
+    obj! { "initializing" => n[0], "started" => n[1], "finalizing" => n[2], "done" => n[3], "failed" => n[4], "total" => n.iter().sum::<i64>() }
+}
+
+/// `SnapshotStatus.toXContentChunked` over `(index, shards)`: the snapshot's stats span
+/// `start_ms` for `time_ms`, each index's the span of its shards.
+#[allow(clippy::too_many_arguments)]
+fn snapshot_status(ctx: &Ctx, repo: &str, s: &Snapshot, state: &str, indices: &[(String, Vec<ShardStatus>)], start_ms: i64, time_ms: i64) -> Value {
+    let mut total = StatusStats { start_ms, time_ms, ..StatusStats::default() };
+    let mut out = Map::new();
+    for (name, shards) in indices {
+        let mut stats = StatusStats::default();
+        let mut by_shard = Map::new();
+        for (n, sh) in shards.iter().enumerate() {
+            total.add(&sh.stats, start_ms == 0);
+            stats.add(&sh.stats, true);
+            let mut e = Map::new();
+            e.insert("stage".into(), sh.stage.into());
+            e.insert("stats".into(), sh.stats.to_value());
+            if sh.on_node {
+                e.insert("node".into(), ctx.cluster.node.id.clone().into());
+            }
+            by_shard.insert(n.to_string(), Value::Obj(e));
+        }
+        out.insert(name.clone(), obj! { "shards_stats" => shards_stats(shards.iter()), "stats" => stats.to_value(), "shards" => Value::Obj(by_shard) });
+    }
+    let mut v = obj! {
+        "snapshot" => s.name.clone(), "repository" => repo, "uuid" => s.uuid.clone(), "state" => state,
+        "include_global_state" => s.include_global_state,
+        "shards_stats" => shards_stats(indices.iter().flat_map(|(_, v)| v.iter())),
+        "stats" => total.to_value(),
+        "indices" => Value::Obj(crate::json::java_hash_map_expected(out)),
+    };
+    if ctx.human {
+        crate::units::humanize(&mut v);
+    }
+    v
+}
+
+/// A running snapshot's status (state `STARTED`, timed up to now).
+fn running_status(ctx: &Ctx, r: &Running) -> Value {
+    let indices: Vec<(String, Vec<ShardStatus>)> = r
+        .shards
+        .lock()
+        .iter()
+        .map(|(name, _, runs)| {
+            let shards = runs
+                .iter()
+                .map(|run| match *run {
+                    ShardRun::Queued => ShardStatus { stage: "INIT", stats: StatusStats::default(), on_node: true },
+                    ShardRun::Started { start_ms } => ShardStatus { stage: "STARTED", stats: StatusStats { start_ms, ..StatusStats::default() }, on_node: true },
+                    ShardRun::Done(f) => ShardStatus { stage: "DONE", stats: StatusStats::of(&f), on_node: true },
+                })
+                .collect();
+            (name.clone(), shards)
+        })
+        .collect();
+    let start = r.snapshot.start_ms;
+    snapshot_status(ctx, &r.repo, &r.snapshot, "STARTED", &indices, start, (crate::time::now_millis() - start).max(0))
+}
+
+/// A recorded snapshot's status, from the files it recorded.
+fn recorded_status(ctx: &Ctx, repo: &str, s: &Snapshot) -> Value {
+    let indices: Vec<(String, Vec<ShardStatus>)> = s
+        .index_meta
+        .iter()
+        .map(|(name, meta)| (name.clone(), s.files(name, stored_shards(meta)).iter().map(|f| ShardStatus { stage: "DONE", stats: StatusStats::of(f), on_node: false }).collect()))
+        .collect();
+    let state = if s.state == "FAILED" { "FAILED" } else { "SUCCESS" };
+    snapshot_status(ctx, repo, s, state, &indices, s.start_ms, (s.end_ms - s.start_ms).max(0))
+}
+
+/// `GET _snapshot[/{repository}[/{snapshot}]]/_status`: without snapshot names, the running
+/// snapshots (of the repository, or all); with names, those running and then the recorded
+/// ones.
 pub fn status(ctx: &Ctx) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let st = ctx.state();
-    let Some(repo) = ctx.path_param("repository") else { return Reply::ok(obj! { "snapshots" => Value::Arr(Vec::new()) }) };
-    let Some(r) = st.metadata.repositories.get(repo) else { return Err(repository_missing(repo)) };
-    let Some(snaps) = ctx.list_param("snapshot") else { return Reply::ok(obj! { "snapshots" => Value::Arr(Vec::new()) }) };
+    let data_of = |repo: &str| st.metadata.repositories.get(repo).and_then(|r| st.metadata.repository_data.get(&r.location_key()));
+    let snaps = ctx.list_param("snapshot").unwrap_or_default();
+    let Some(repo) = ctx.path_param("repository").filter(|r| *r != "_all") else {
+        let running: Vec<Arc<Running>> = ctx.cluster.snapshot_data.running.lock().clone();
+        let out = running.iter().filter(|r| !data_of(&r.repo).is_some_and(|d| d.snapshots.iter().any(|s| s.uuid == r.snapshot.uuid))).map(|r| running_status(ctx, r)).collect();
+        return Reply::ok(obj! { "snapshots" => Value::Arr(out) });
+    };
+    let data = data_of(repo).cloned().unwrap_or_default();
+    let running = ctx.cluster.snapshot_data.running_in(repo, Some(&data));
+    if snaps.is_empty() {
+        return Reply::ok(obj! { "snapshots" => Value::Arr(running.iter().map(|r| running_status(ctx, r)).collect()) });
+    }
+    let current: Vec<&Arc<Running>> = running.iter().filter(|r| snaps.contains(&r.snapshot.name)).collect();
+    let mut out: Vec<Value> = current.iter().map(|r| running_status(ctx, r)).collect();
+    if !st.metadata.repositories.contains_key(repo) {
+        return Err(repository_missing(repo));
+    }
     let ignore_unavailable = ctx.bool_param("ignore_unavailable", false)?;
-    let data = st.metadata.repository_data.get(&r.location_key()).cloned().unwrap_or_default();
-    let mut out = Vec::new();
     for name in &snaps {
+        if current.iter().any(|r| r.snapshot.name == *name) {
+            continue;
+        }
         let Some(s) = data.find(name) else {
             if ignore_unavailable {
                 continue;
             }
             return Err(snapshot_missing(repo, name));
         };
-        let time = (s.end_ms - s.start_ms).max(0);
-        let mut indices = Map::new();
-        for (idx, meta) in &s.index_meta {
-            let n = meta.get("settings").and_then(|st| st.get("index.number_of_shards")).and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(1);
-            let mut shards = Map::new();
-            for i in 0..n {
-                shards.insert(i.to_string(), obj! { "stage" => "DONE", "stats" => status_stats(1, s.start_ms, time) });
-            }
-            indices.insert(idx.clone(), obj! { "shards_stats" => shards_stats(n), "stats" => status_stats(n, s.start_ms, time), "shards" => Value::Obj(shards) });
-        }
-        out.push(obj! {
-            "snapshot" => s.name.clone(), "repository" => repo, "uuid" => s.uuid.clone(), "state" => s.state.clone(),
-            "include_global_state" => s.include_global_state,
-            "shards_stats" => shards_stats(s.total_shards),
-            "stats" => status_stats(s.total_shards, s.start_ms, time),
-            "indices" => Value::Obj(indices),
-        });
+        out.push(recorded_status(ctx, repo, s));
     }
     Reply::ok(obj! { "snapshots" => Value::Arr(out) })
 }
@@ -1027,6 +1405,7 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let doomed_uuid = target_uuid.clone();
     let saving_ref = &saving;
+    let snapshot_data = &ctx.cluster.snapshot_data;
     let cloned = ctx
         .cluster
         .update(move |st| {
@@ -1035,8 +1414,13 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
             let Some(src) = data.find(&source).cloned() else { return Err(snapshot_missing(&repo, &source)) };
             if data.find(&target).is_some() {
-                return Err(EsError::new(400, "invalid_snapshot_name_exception", format!(
+                return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(
                     "[{repo}:{target}] Invalid snapshot name [{target}], snapshot with the same name already exists"
+                )));
+            }
+            if !snapshot_data.running_in(&repo, None).iter().all(|r| r.snapshot.name != target) {
+                return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(
+                    "[{repo}:{target}] Invalid snapshot name [{target}], snapshot with the same name is already in-progress"
                 )));
             }
             let indices: Vec<String> = src.indices.iter().filter(|i| patterns.iter().any(|p| glob_match(p, i))).cloned().collect();
@@ -1045,13 +1429,23 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 .filter_map(|i| src.index_meta.get(i))
                 .map(|m| m.get("settings").and_then(|s| s.get("index.number_of_shards")).and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(1))
                 .sum();
+            // A clone references its source's files and adds none, all at once.
+            let shard_files = indices
+                .iter()
+                .filter_map(|i| src.shard_files.get(i).map(|f| (i, f)))
+                .map(|(i, f)| {
+                    let reused = |f: &ShardFiles| ShardFiles { incremental_file_count: 0, incremental_size_in_bytes: 0, start_ms: now, time_ms: 0, ..*f };
+                    (i.clone(), f.iter().map(reused).collect())
+                })
+                .collect();
             let cloned = Snapshot {
                 name: target.clone(),
                 uuid: target_uuid,
+                shard_files,
+                end_ms: crate::time::now_millis().max(now),
                 index_meta: src.index_meta.iter().filter(|(k, _)| indices.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
                 indices,
                 start_ms: now,
-                end_ms: now,
                 total_shards: shards,
                 successful_shards: shards,
                 ..(*src).clone()
@@ -1124,125 +1518,139 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let now = ctx.now_ms;
     // Until the documents are copied, the snapshot can't be deleted.
     let _restoring = ctx.cluster.snapshot_data.restoring(&repo, &snap);
-    let (restored, shards, copies) = ctx
-        .cluster
-        .update(move |st| {
-            let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
-            let data = st.metadata.repository_data.get(&r.location_key()).cloned().unwrap_or_default();
-            let Some(s) = data.find(&snap).cloned() else { return Err(snapshot_missing(&repo, &snap)) };
-            // Which indices: patterns over the snapshot's (data streams restore their backing indices).
-            let mut selected: Vec<String> = Vec::new();
-            if patterns.is_empty() || patterns.iter().any(|p| p == "_all" || p == "*") {
-                selected = s.indices.iter().filter(|i| s.index_meta.get(*i).and_then(|m| m.get("system")).and_then(Value::as_bool) != Some(true)).cloned().collect();
-            } else {
-                for p in &patterns {
-                    if let Some(ex) = p.strip_prefix('-') {
-                        selected.retain(|i| !glob_match(ex, i));
-                        continue;
-                    }
-                    let ds_backing: Vec<String> = s
-                        .data_stream_meta
-                        .get(p)
-                        .and_then(|d| d.get("indices"))
-                        .and_then(Value::as_array)
-                        .map(|a| a.iter().map(Value::to_es_string).collect())
-                        .unwrap_or_default();
-                    let hits: Vec<String> = s.indices.iter().filter(|i| glob_match(p, i) || ds_backing.contains(i)).cloned().collect();
-                    if hits.is_empty() && !p.contains('*') && !ignore_unavailable {
-                        return Err(EsError::new(500, "snapshot_restore_exception", format!(
-                            "[{repo}:{snap}/{}] index [{p}] not found",
-                            s.uuid
-                        )));
-                    }
-                    for h in hits {
-                        if !selected.contains(&h) {
-                            selected.push(h);
-                        }
+    let plan = move |st: &mut ClusterState| {
+        let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
+        let data = st.metadata.repository_data.get(&r.location_key()).cloned().unwrap_or_default();
+        let Some(s) = data.find(&snap).cloned() else { return Err(snapshot_missing(&repo, &snap)) };
+        // Which indices: patterns over the snapshot's (data streams restore their backing indices).
+        let mut selected: Vec<String> = Vec::new();
+        if patterns.is_empty() || patterns.iter().any(|p| p == "_all" || p == "*") {
+            selected = s.indices.iter().filter(|i| s.index_meta.get(*i).and_then(|m| m.get("system")).and_then(Value::as_bool) != Some(true)).cloned().collect();
+        } else {
+            for p in &patterns {
+                if let Some(ex) = p.strip_prefix('-') {
+                    selected.retain(|i| !glob_match(ex, i));
+                    continue;
+                }
+                let ds_backing: Vec<String> = s
+                    .data_stream_meta
+                    .get(p)
+                    .and_then(|d| d.get("indices"))
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().map(Value::to_es_string).collect())
+                    .unwrap_or_default();
+                let hits: Vec<String> = s.indices.iter().filter(|i| glob_match(p, i) || ds_backing.contains(i)).cloned().collect();
+                if hits.is_empty() && !p.contains('*') && !ignore_unavailable {
+                    return Err(EsError::new(500, "snapshot_restore_exception", format!(
+                        "[{repo}:{snap}/{}] index [{p}] not found",
+                        s.uuid
+                    )));
+                }
+                for h in hits {
+                    if !selected.contains(&h) {
+                        selected.push(h);
                     }
                 }
             }
-            let mut restored = Vec::new();
-            // (restored index, its name and uuid in the snapshot): whose documents it gets back.
-            let mut copies: Vec<(String, String, String)> = Vec::new();
-            let mut total_shards = 0i64;
-            for name in &selected {
-                let Some(stored) = s.index_meta.get(name) else { continue };
-                let target = match &rename {
-                    Some((re, rep)) => re.replace_all(name, rep.as_str()).into_owned(),
-                    None => name.clone(),
-                };
-                let mut idx = IndexMeta::from_json_in(&target, stored, st.dialect)?;
-                if let Some(existing) = st.metadata.indices.get(&target) {
-                    if !existing.is_closed() {
-                        return Err(EsError::new(500, "snapshot_restore_exception", format!(
-                            "[{repo}:{snap}/{}] cannot restore index [{target}] because an open index with same name already exists in the cluster. Either close or delete the existing index or restore the index under a different name by providing a rename pattern and replacement name",
-                            s.uuid
-                        )));
-                    }
-                    if existing.number_of_shards() != idx.number_of_shards() {
-                        return Err(EsError::new(500, "snapshot_restore_exception", format!(
-                            "[{repo}:{snap}/{}] cannot restore index [{target}] with [{}] shards from a snapshot of index [{name}] with [{}] shards",
-                            s.uuid,
-                            existing.number_of_shards(),
-                            idx.number_of_shards()
-                        )));
-                    }
+        }
+        let mut restored = Vec::new();
+        // (restored index, its name and uuid in the snapshot): whose documents it gets back.
+        let mut copies: Vec<(String, String, String)> = Vec::new();
+        let mut total_shards = 0i64;
+        for name in &selected {
+            let Some(stored) = s.index_meta.get(name) else { continue };
+            let target = match &rename {
+                Some((re, rep)) => re.replace_all(name, rep.as_str()).into_owned(),
+                None => name.clone(),
+            };
+            let mut idx = IndexMeta::from_json_in(&target, stored, st.dialect)?;
+            if let Some(existing) = st.metadata.indices.get(&target) {
+                if !existing.is_closed() {
+                    return Err(EsError::new(500, "snapshot_restore_exception", format!(
+                        "[{repo}:{snap}/{}] cannot restore index [{target}] because an open index with same name already exists in the cluster. Either close or delete the existing index or restore the index under a different name by providing a rename pattern and replacement name",
+                        s.uuid
+                    )));
                 }
-                let source_uuid = std::mem::take(&mut idx.uuid);
-                let uuid = random_uuid();
-                idx.name = target.clone();
-                idx.uuid = uuid.clone();
-                idx.state = IndexState::Open;
-                idx.settings.set("index.uuid", uuid);
-                idx.settings.remove("index.verified_before_close");
-                for k in &ignore_settings {
-                    idx.settings.remove(k);
-                }
-                idx.settings.merge(&index_settings);
-                if !include_aliases {
-                    idx.aliases.clear();
-                }
-                idx.version += 1;
-                let mut rs = Map::new();
-                rs.insert("repository".into(), repo.clone().into());
-                rs.insert("snapshot".into(), snap.clone().into());
-                rs.insert("version".into(), crate::version::ES_VERSION.into());
-                rs.insert("index".into(), name.clone().into());
-                rs.insert("restoreUUID".into(), random_uuid().into());
-                idx.recovery_source = Some(Arc::new(rs));
-                total_shards += idx.number_of_shards() as i64;
-                st.metadata.indices.insert(target.clone(), Arc::new(idx));
-                copies.push((target.clone(), name.clone(), source_uuid));
-                restored.push(target);
-            }
-            // Data streams whose backing indices all came back (under their own names).
-            for (ds_name, stored) in &s.data_stream_meta {
-                if rename.is_none()
-                    && let Ok(ds) = crate::meta::data_streams::DataStream::from_stored(ds_name, stored)
-                    && !ds.indices.is_empty()
-                    && ds.indices.iter().all(|i| restored.contains(i))
-                {
-                    st.metadata.data_streams.insert(ds_name.clone(), Arc::new(ds));
+                if existing.number_of_shards() != idx.number_of_shards() {
+                    return Err(EsError::new(500, "snapshot_restore_exception", format!(
+                        "[{repo}:{snap}/{}] cannot restore index [{target}] with [{}] shards from a snapshot of index [{name}] with [{}] shards",
+                        s.uuid,
+                        existing.number_of_shards(),
+                        idx.number_of_shards()
+                    )));
                 }
             }
-            if include_global_state && let Some(g) = &s.global {
-                restore_global(&mut st.metadata, g)?;
+            let source_uuid = std::mem::take(&mut idx.uuid);
+            let uuid = random_uuid();
+            idx.name = target.clone();
+            idx.uuid = uuid.clone();
+            idx.state = IndexState::Open;
+            idx.settings.set("index.uuid", uuid);
+            idx.settings.remove("index.verified_before_close");
+            for k in &ignore_settings {
+                idx.settings.remove(k);
             }
-            st.check_unique_names()?;
-            Ok((restored, total_shards, (s.uuid.clone(), copies)))
-        })
-        .await?;
+            idx.settings.merge(&index_settings);
+            if !include_aliases {
+                idx.aliases.clear();
+            }
+            idx.version += 1;
+            let mut rs = Map::new();
+            rs.insert("repository".into(), repo.clone().into());
+            rs.insert("snapshot".into(), snap.clone().into());
+            rs.insert("version".into(), crate::version::ES_VERSION.into());
+            rs.insert("index".into(), name.clone().into());
+            rs.insert("restoreUUID".into(), random_uuid().into());
+            idx.recovery_source = Some(Arc::new(rs));
+            total_shards += idx.number_of_shards() as i64;
+            st.metadata.indices.insert(target.clone(), Arc::new(idx));
+            copies.push((target.clone(), name.clone(), source_uuid));
+            restored.push(target);
+        }
+        // Data streams whose backing indices all came back (under their own names).
+        for (ds_name, stored) in &s.data_stream_meta {
+            if rename.is_none()
+                && let Ok(ds) = crate::meta::data_streams::DataStream::from_stored(ds_name, stored)
+                && !ds.indices.is_empty()
+                && ds.indices.iter().all(|i| restored.contains(i))
+            {
+                st.metadata.data_streams.insert(ds_name.clone(), Arc::new(ds));
+            }
+        }
+        if include_global_state && let Some(g) = &s.global {
+            restore_global(&mut st.metadata, g)?;
+        }
+        st.check_unique_names()?;
+        Ok((restored, total_shards, (s.uuid.clone(), copies)))
+    };
     let _ = now;
+    // Durable shard contents are read before any index is created: a snapshot whose contents
+    // are missing fails without leaving empty indices behind.
+    let durable = ctx.cluster.engine.snapshot_storage();
+    let mut loaded = std::collections::HashMap::new();
+    if let Some(store) = &durable {
+        let (_, _, (snapshot_uuid, copies)) = plan.clone()(&mut (*ctx.state()).clone())?;
+        for (_, source, source_uuid) in &copies {
+            if ctx.cluster.snapshot_data.get(&snapshot_uuid, source).is_some() || loaded.contains_key(source_uuid) {
+                continue;
+            }
+            let Some(shards) = shards_in_snapshot(ctx, &snapshot_uuid, source) else { continue };
+            loaded.insert(source_uuid.clone(), store.load(&snapshot_uuid, source_uuid, shards).await?);
+        }
+    }
+    let (restored, shards, copies) = ctx.cluster.update(plan).await?;
     // The shard contents (when this process took the snapshot).
     let (snapshot_uuid, copies) = copies;
     let st = ctx.state();
-    let durable = ctx.cluster.engine.snapshot_storage();
     for (target, source, source_uuid) in &copies {
         let Some(idx) = st.metadata.indices.get(target) else { continue };
         if let Some(data) = ctx.cluster.snapshot_data.get(&snapshot_uuid, source) {
             crate::write::copy_docs(ctx.cluster, &data, idx)?;
         } else if let Some(store) = &durable {
-            let shards = store.load(&snapshot_uuid, source_uuid, idx.number_of_shards()).await?;
+            let shards = match loaded.remove(source_uuid) {
+                Some(shards) => shards,
+                None => store.load(&snapshot_uuid, source_uuid, idx.number_of_shards()).await?,
+            };
             let searchers = ctx.cluster.engine.snapshot_searchers(ctx.cluster, &st, idx, shards)?;
             crate::write::copy_docs(ctx.cluster, &searchers, idx)?;
         }
@@ -1258,6 +1666,12 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
             "shards" => obj! { "total" => shards, "failed" => 0, "successful" => shards },
         }
     })
+}
+
+/// The shard count snapshot `uuid` stored for index `name`.
+fn shards_in_snapshot(ctx: &Ctx, uuid: &str, name: &str) -> Option<u32> {
+    let st = ctx.state();
+    st.metadata.repository_data.values().flat_map(|d| d.snapshots.iter()).find(|s| s.uuid == uuid).and_then(|s| s.index_meta.get(name)).map(|m| stored_shards(m) as u32)
 }
 
 /// Restores the global state of a snapshot over the cluster's.
@@ -1307,40 +1721,76 @@ pub fn repository_rows(st: &ClusterState) -> Vec<(String, String)> {
 }
 
 /// Snapshots of the `_cat/snapshots` repositories, oldest first.
-pub fn snapshot_rows(st: &ClusterState, repos: &[String]) -> EsResult<Vec<(String, Arc<Snapshot>)>> {
+pub fn snapshot_rows(st: &ClusterState, running: &SnapshotData, repos: &[String]) -> EsResult<Vec<(String, Arc<Snapshot>)>> {
     let names = match_repositories(&st.metadata, repos)?;
     let mut out = Vec::new();
     for r in names {
-        if let Some(d) = st.metadata.repository_data.get(&st.metadata.repositories[&r].location_key()) {
+        let data = st.metadata.repository_data.get(&st.metadata.repositories[&r].location_key());
+        if let Some(d) = data {
             out.extend(d.snapshots.iter().map(|s| (r.clone(), s.clone())));
         }
+        out.extend(running.running_in(&r, data.map(|d| &**d)).iter().map(|run| (r.clone(), Arc::new(run.info()))));
     }
     out.sort_by(|(ra, a), (rb, b)| a.start_ms.cmp(&b.start_ms).then_with(|| a.name.cmp(&b.name)).then_with(|| ra.cmp(rb)));
     Ok(out)
 }
 
-/// `_cluster/stats` `snapshots.repositories`: nothing is ever in progress.
-pub fn stats_repositories(st: &ClusterState, now_ms: i64) -> Value {
+/// `_cluster/stats` `snapshots.repositories`: the snapshots running in each repository, their
+/// shards by `SnapshotsInProgress.ShardState` (a shard being or waiting to be captured is
+/// `INIT`, a captured one `SUCCESS`) and when the oldest started (now when none runs).
+pub fn stats_repositories(st: &ClusterState, data: &SnapshotData, now_ms: i64) -> Value {
     let mut out = Map::new();
     for (name, r) in &st.metadata.repositories {
+        let running = data.running_in(name, st.metadata.repository_data.get(&r.location_key()).map(|d| &**d));
+        let (mut init, mut done) = (0i64, 0i64);
+        for run in &running {
+            for (_, _, shards) in run.shards.lock().iter() {
+                for s in shards {
+                    match s {
+                        ShardRun::Done(_) => done += 1,
+                        _ => init += 1,
+                    }
+                }
+            }
+        }
         let states: Map = ["INIT", "SUCCESS", "FAILED", "ABORTED", "MISSING", "WAITING", "QUEUED", "PAUSED_FOR_NODE_REMOVAL"]
             .iter()
-            .map(|s| (s.to_string(), Value::from(0)))
+            .map(|s| {
+                let n = match *s {
+                    "INIT" => init,
+                    "SUCCESS" => done,
+                    _ => 0,
+                };
+                (s.to_string(), Value::from(n))
+            })
             .collect();
+        let oldest = running.iter().map(|r| r.snapshot.start_ms).min().unwrap_or(now_ms);
         out.insert(
             name.clone(),
             obj! {
                 "type" => r.ty.clone(),
                 "current_counts" => obj! {
-                    "snapshots" => 0, "clones" => 0, "finalizations" => 0, "deletions" => 0, "snapshot_deletions" => 0, "active_deletions" => 0,
-                    "shards" => obj! { "total" => 0, "complete" => 0, "incomplete" => 0, "states" => Value::Obj(states) },
+                    "snapshots" => running.len() as i64, "clones" => 0, "finalizations" => 0, "deletions" => 0, "snapshot_deletions" => 0, "active_deletions" => 0,
+                    "shards" => obj! { "total" => init + done, "complete" => done, "incomplete" => init, "states" => Value::Obj(states) },
                 },
-                "oldest_start_time" => date(now_ms),
-                "oldest_start_time_millis" => now_ms,
+                "oldest_start_time" => date(oldest),
+                "oldest_start_time_millis" => oldest,
             },
         );
     }
     Value::Obj(out)
+}
+
+/// `_cluster/stats` `snapshots.current_counts` (`ClusterSnapshotStats`): running snapshots and
+/// their shards not captured yet.
+pub fn current_counts(st: &ClusterState, data: &SnapshotData) -> Value {
+    let running: Vec<Arc<Running>> = data.running.lock().clone();
+    let recorded = |r: &Running| {
+        st.metadata.repositories.get(&r.repo).and_then(|repo| st.metadata.repository_data.get(&repo.location_key())).is_some_and(|d| d.snapshots.iter().any(|s| s.uuid == r.snapshot.uuid))
+    };
+    let running: Vec<&Arc<Running>> = running.iter().filter(|r| !recorded(r)).collect();
+    let incomplete: usize = running.iter().map(|r| r.shards.lock().iter().flat_map(|(_, _, v)| v.iter()).filter(|s| !matches!(s, ShardRun::Done(_))).count()).sum();
+    obj! { "snapshots" => running.len(), "shard_snapshots" => incomplete, "snapshot_deletions" => 0, "concurrent_operations" => running.len(), "cleanups" => 0 }
 }
 
 /// `_cluster/stats` `repositories`: counts by type.

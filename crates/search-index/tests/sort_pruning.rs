@@ -624,12 +624,14 @@ fn keyword_sorts_with_missing_values_match_brute_force() {
             // Each segment draws from its own subset of the alphabet (or none at all).
             let subset: Vec<&str> = ALPHABET.iter().copied().filter(|_| rng.gen_bool(0.4)).collect();
             let missing = if subset.is_empty() { 1.0 } else { rng.gen_range(0.0..0.6) };
+            // Single-valued segments read ordinals through the block-decoded fast path.
+            let most = if rng.gen_bool(0.5) { 2 } else { 3 };
             for _ in 0..rng.gen_range(5..120) {
                 let id = format!("d{i}");
                 i += 1;
                 let mut vals = Vec::new();
                 if !rng.gen_bool(missing) {
-                    for _ in 0..rng.gen_range(1..3) {
+                    for _ in 0..rng.gen_range(1..most) {
                         vals.push(subset[rng.gen_range(0..subset.len())].to_string());
                     }
                 }
@@ -712,6 +714,99 @@ fn keyword_sorts_with_missing_values_match_brute_force() {
             let mut c = TopFieldCollector::new(keys.clone(), k, threshold, false).with_searcher(&s).with_after(after.clone(), Some(*ad));
             s.search(&q, &mut c).unwrap();
             assert_eq!(got(c.top_docs()), want, "after #{at} {after:?}: {what}");
+        }
+    }
+}
+
+/// Sorts on one single-valued field (numeric, sorted-numeric, sorted and sorted-set doc
+/// values, which read values block by block and compare them with the queue's worst entry
+/// directly) with `_first`, `_last` and custom missing values, checked against a brute-force
+/// model, also when the worst queued hit is missing its value.
+#[test]
+fn single_valued_sorts_match_brute_force() {
+    use std::cmp::Ordering;
+    const NUMERIC: u32 = 40;
+    const SNUM: u32 = 41;
+    const SORTED: u32 = 42;
+    const SSET: u32 = 43;
+    let schema = Schema::new()
+        .with_field(FieldSchema::new(NUMERIC, "numeric").with_doc_values(DocValuesType::Numeric))
+        .unwrap()
+        .with_field(FieldSchema::new(SNUM, "snum").with_doc_values(DocValuesType::SortedNumeric))
+        .unwrap()
+        .with_field(FieldSchema::new(SORTED, "sorted").with_doc_values(DocValuesType::Sorted))
+        .unwrap()
+        .with_field(FieldSchema::new(SSET, "sset").with_doc_values(DocValuesType::SortedSet))
+        .unwrap();
+    let term = |v: i64| format!("k{v:02}").into_bytes();
+    for seed in 0..6u64 {
+        let mut rng = common::rng(seed * 13 + 3);
+        let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema.clone(), Vec::new()).unwrap();
+        let mut model: Vec<Option<i64>> = Vec::new();
+        for _ in 0..rng.gen_range(1..6) {
+            // Each segment has its own value range and share of docs without a value (all, at
+            // times).
+            let lo = rng.gen_range(0..20i64);
+            let hi = lo + rng.gen_range(1..12);
+            let missing = [0.0, 0.3, 0.8, 1.0][rng.gen_range(0..4)];
+            for _ in 0..rng.gen_range(5..150) {
+                let id = format!("d{}", model.len());
+                let v = (!rng.gen_bool(missing)).then(|| rng.gen_range(lo..hi));
+                let mut d = IndexableDoc::new(id.into_bytes());
+                if let Some(v) = v {
+                    d = d
+                        .doc_value(NUMERIC, DocValue::Numeric(v))
+                        .doc_value(SNUM, DocValue::SortedNumeric(v))
+                        .doc_value(SORTED, DocValue::Sorted(term(v).into()))
+                        .doc_value(SSET, DocValue::SortedSet(term(v).into()));
+                }
+                shard.index(IndexOp::new(d)).unwrap();
+                model.push(v);
+            }
+            shard.refresh().unwrap();
+        }
+        let s = shard.searcher();
+        let ids = common::ids(&s);
+        let q: QueryRef = Arc::new(MatchAllQuery);
+        for round in 0..60 {
+            let (field, kind) = [(NUMERIC, SortType::Long), (SNUM, SortType::Long), (SORTED, SortType::Keyword), (SSET, SortType::Keyword)][rng.gen_range(0..4)];
+            let reverse = rng.gen_bool(0.5);
+            // A custom value between or beside the indexed ones (odd: never indexed as a term).
+            let custom = rng.gen_range(-1..33i64);
+            let missing = match rng.gen_range(0..3) {
+                0 => Missing::First,
+                1 => Missing::Last,
+                _ if kind == SortType::Keyword => Missing::Value(SortValue::Bytes(format!("k{custom:02}x").into_bytes())),
+                _ => Missing::Value(SortValue::Long(custom)),
+            };
+            let first = matches!(missing, Missing::First);
+            // Keys as comparable numbers: a custom keyword `k<c>x` sorts just after `k<c>`.
+            let key = |v: Option<i64>| -> Option<(i64, u8)> {
+                match (v, &missing) {
+                    (Some(v), _) => Some((v, 0)),
+                    (None, Missing::Value(_)) => Some((custom, u8::from(kind == SortType::Keyword))),
+                    _ => None,
+                }
+            };
+            let mut exp: Vec<(u32, Option<(i64, u8)>)> = ids.iter().map(|(g, id)| (*g, key(model[id[1..].parse::<usize>().unwrap()]))).collect();
+            exp.sort_by(|a, b| {
+                let o = match (a.1, b.1) {
+                    (None, None) => Ordering::Equal,
+                    (None, _) => if first { Ordering::Less } else { Ordering::Greater },
+                    (_, None) => if first { Ordering::Greater } else { Ordering::Less },
+                    (Some(x), Some(y)) => if reverse { y.cmp(&x) } else { x.cmp(&y) },
+                };
+                o.then(a.0.cmp(&b.0))
+            });
+            let k = [1usize, 2, 7, 30][rng.gen_range(0..4)];
+            let want: Vec<u32> = exp.iter().take(k).map(|e| e.0).collect();
+            for threshold in [0u64, u64::MAX] {
+                let keys = vec![SortKey::Field(FieldSort { field, kind, reverse, missing: missing.clone(), mode: SortMode::Min, nested: None })];
+                let mut c = TopFieldCollector::new(keys.clone(), k, threshold, false).with_searcher(&s);
+                s.search(&q, &mut c).unwrap();
+                let got: Vec<u32> = c.top_docs().hits.iter().map(|h| h.doc).collect();
+                assert_eq!(got, want, "seed {seed} round {round}: k={k} threshold={threshold} keys={keys:?}");
+            }
         }
     }
 }

@@ -138,6 +138,16 @@ impl ApiSpec {
     /// Loads every `*.json` file of a directory (recursively).
     pub fn load_dir(dir: &Path) -> anyhow::Result<ApiSpec> {
         let mut spec = ApiSpec::default();
+        spec.add_dir(dir)?;
+        Ok(spec)
+    }
+
+    /// Adds the specs of a directory tree (recursively); an API defined again replaces the earlier
+    /// definition. Like the Java runner, which loads every `rest-api-spec/api` directory on its
+    /// classpath, a module's own specs (`license.get_feature_usage`, `scripts_painless_context`)
+    /// come on top of the main ones this way.
+    pub fn add_dir(&mut self, dir: &Path) -> anyhow::Result<()> {
+        let mut files = 0;
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
             for entry in std::fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {
@@ -146,14 +156,15 @@ impl ApiSpec {
                     stack.push(path);
                 } else if path.extension().is_some_and(|e| e == "json") {
                     let bytes = std::fs::read(&path)?;
-                    spec.add_file(&path, &bytes).with_context(|| format!("parsing {}", path.display()))?;
+                    self.add_file(&path, &bytes).with_context(|| format!("parsing {}", path.display()))?;
+                    files += 1;
                 }
             }
         }
-        if spec.apis.is_empty() {
+        if files == 0 {
             bail!("no API specs found in {}", dir.display());
         }
-        Ok(spec)
+        Ok(())
     }
 
     /// Adds one spec file (`_common.json` or `<api>.json`).
@@ -514,5 +525,27 @@ mod tests {
         let mut out = String::new();
         encode_query_component("a b,c=d&ü*", &mut out);
         assert_eq!(out, "a+b%2Cc%3Dd%26%C3%BC*");
+    }
+
+    /// A module's own spec directory adds its APIs to the main one's (and an empty directory is
+    /// an error, so a wrong path doesn't silently drop every API it should have added).
+    #[test]
+    fn spec_directories_merge() {
+        let main = tempfile::tempdir().unwrap();
+        let module = tempfile::tempdir().unwrap();
+        std::fs::write(main.path().join("_common.json"), br#"{"params":{"pretty":{}}}"#).unwrap();
+        std::fs::write(main.path().join("search.json"), br#"{"search":{"url":{"paths":[{"path":"/_search","methods":["GET"]}]}}}"#).unwrap();
+        std::fs::write(
+            module.path().join("license.get_feature_usage.json"),
+            br#"{"license.get_feature_usage":{"url":{"paths":[{"path":"/_license/feature_usage","methods":["GET"]}]}}}"#,
+        )
+        .unwrap();
+        let mut spec = ApiSpec::load_dir(main.path()).unwrap();
+        assert!(spec.api("license.get_feature_usage").is_none());
+        spec.add_dir(module.path()).unwrap();
+        assert!(spec.api("search").is_some());
+        assert!(spec.api("license.get_feature_usage").is_some());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(spec.add_dir(empty.path()).is_err());
     }
 }

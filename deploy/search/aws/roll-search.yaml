@@ -65,6 +65,7 @@ Parameters:
     Type: Number
     Default: 8
     MinValue: 1
+    MaxValue: 100
   OnDemandNodes:
     Type: Number
     Default: 1
@@ -189,7 +190,7 @@ Conditions:
   UseFargate: !Equals [!Ref NodeCompute, fargate]
   UseExpress: !Not [!Equals [!Ref ExpressZoneId, ""]]
   UseRds: !Equals [!Ref DatabaseMode, rds]
-  ScaleToZero: !Equals [!Ref MinNodes, 0]
+  ScaleToZero: !Equals [!Ref MinNodes, "0"]
   UseNodeTls: !Equals [!Ref NodeTls, "true"]
   UseNlbFrontTls: !And [!Condition UseNlb, !Equals [!Ref FrontTls, "true"]]
   UseLambdaFrontTls: !And [!Condition UseLambda, !Equals [!Ref FrontTls, "true"]]
@@ -478,13 +479,16 @@ Resources:
             #!/bin/bash
             set -euo pipefail
             # The data volume, mounted where the node task binds /data. Nitro instances name it
-            # nvme<N>n1 (amazon-ec2-utils links /dev/xvdb to it); otherwise take the blank disk
-            # (no partitions, no signature, not mounted). Without it the instance never joins
-            # the cluster, rather than run a node whose cache fills the root filesystem.
+            # nvme<N>n1 (amazon-ec2-utils links /dev/xvdb to it); otherwise take the blank EBS
+            # disk (no partitions, no signature, not mounted; instance store NVMe disks of `d`
+            # types are blank too, and never taken). Without it the instance powers off before
+            # the ECS agent starts (it runs after cloud-final), so the Auto Scaling group
+            # replaces it, rather than run a node whose cache fills the root filesystem.
             dev=""
             for _ in $(seq 1 120); do
               if [ -b /dev/xvdb ]; then dev=$(readlink -f /dev/xvdb); break; fi
               for d in $(lsblk -dnpo NAME,TYPE | awk '$2 == "disk" { print $1 }'); do
+                case "$(lsblk -dno MODEL "$d")" in *"Instance Storage"*) continue ;; esac
                 if [ "$(lsblk -nro NAME "$d" | wc -l)" = 1 ] && [ -z "$(lsblk -dnro MOUNTPOINT "$d")" ] && ! blkid -p "$d" >/dev/null 2>&1; then
                   dev=$d
                   break
@@ -493,7 +497,7 @@ Resources:
               [ -n "$dev" ] && break
               sleep 1
             done
-            [ -n "$dev" ] || { echo "roll search: no data volume" >&2; exit 1; }
+            [ -n "$dev" ] || { echo "roll search: no data volume; powering off" >&2; poweroff; exit 1; }
             blkid "$dev" >/dev/null || mkfs.xfs -q "$dev"
             mkdir -p /var/lib/roll-search
             echo "UUID=$(blkid -s UUID -o value "$dev") /var/lib/roll-search xfs noatime,nofail 0 2" >> /etc/fstab
@@ -511,9 +515,14 @@ Resources:
     Properties:
       VPCZoneIdentifier: [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]
       MinSize: "0"
-      MaxSize: !Ref MaxNodes
-      # ECS managed scaling sets the desired count; instances running nodes are protected from
-      # scale-in until ECS has moved their tasks.
+      # ECS managed scaling sets the desired count (one instance per node task, distinctInstance)
+      # and NodeScaling caps the tasks at MaxNodes, so this is no cost limit. It must leave room
+      # for a deploy: MaximumPercent 200 starts each new node on an instance of its own before
+      # the old one stops, up to 2 × MaxNodes instances. A MaxSize of MaxNodes would leave the
+      # new tasks unplaceable at full size (a fleet with MaxNodes 1 at every deploy), and the
+      # circuit breaker would roll the deploy back.
+      MaxSize: "200"
+      # Instances running nodes are protected from scale-in until ECS has moved their tasks.
       NewInstancesProtectedFromScaleIn: true
       # Replace Spot instances at elevated risk of interruption before AWS takes them.
       CapacityRebalance: true
@@ -743,7 +752,8 @@ Resources:
       AlarmDescription: roll search nodes are mostly idle and there is more than one
       EvaluationPeriods: 15
       DatapointsToAlarm: 15
-      Threshold: 1
+      # The 0/1 expression breaches by +0.5: inside the step's [0, ∞).
+      Threshold: 0.5
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref ScaleInPolicy]
@@ -785,8 +795,13 @@ Resources:
       ScalingTargetId: !Ref NodeScaling
       StepScalingPolicyConfiguration:
         AdjustmentType: ExactCapacity
-        # The alarm breaches at exactly its threshold (the 0/1 expression is 1, ≥ 1), so the
-        # step must cover [0, ∞): an upper bound of 0 would match nothing and never act.
+        # The alarm stays in ALARM through the drain and the metric lag after the stop, and an
+        # alarm in ALARM re-runs its policy every minute: this keeps it from stopping the node a
+        # wake starts meanwhile (tests/search/aws/model.py).
+        Cooldown: 600
+        # The 0/1 expression breaches its 0.5 threshold by +0.5, inside [0, ∞) whichever bound
+        # AWS counts as inclusive. An upper bound of 0 would cover only breaches below the
+        # threshold, which this alarm never has, so it would never act.
         StepAdjustments: [{ MetricIntervalLowerBound: 0, ScalingAdjustment: 0 }]
   IdleAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -795,7 +810,7 @@ Resources:
       AlarmDescription: roll search nodes are running and have had no requests
       EvaluationPeriods: !Ref IdleMinutesToZero
       DatapointsToAlarm: !Ref IdleMinutesToZero
-      Threshold: 1
+      Threshold: 0.5
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref ToZeroPolicy]
@@ -1019,8 +1034,9 @@ Resources:
           ROLL_SEARCH_LAMBDA_UPSTREAM: !If [UseLambdaFrontTls, !Sub "https://${FrontDoor.DNSName}:9200", !Sub "http://${FrontDoor.DNSName}:9200"]
           ROLL_SEARCH_LAMBDA_API_UPSTREAM: !If [UseLambdaFrontTls, !Sub "https://${FrontDoor.DNSName}:7070", !Sub "http://${FrontDoor.DNSName}:7070"]
           # Resolved at deploy time into the function's configuration (no NAT, so the function
-          # can't reach Secrets Manager itself); readable by whoever may read that.
-          ROLL_SEARCH_LAMBDA_TLS_SEED: !If [UseLambdaFrontTls, !Sub "{{resolve:secretsmanager:${ProxyTlsSeed}:SecretString}}", !Ref AWS::NoValue]
+          # can't reach Secrets Manager itself); readable by whoever may read that. The short
+          # form (the whole secret string) is the one LocalStack resolves too.
+          ROLL_SEARCH_LAMBDA_TLS_SEED: !If [UseLambdaFrontTls, !Sub "{{resolve:secretsmanager:${ProxyTlsSeed}}}", !Ref AWS::NoValue]
   ProxyUrl:
     Type: AWS::Lambda::Url
     Condition: UseLambda

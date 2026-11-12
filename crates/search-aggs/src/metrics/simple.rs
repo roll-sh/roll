@@ -136,7 +136,11 @@ pub fn create(def: &AggDef, spec: &SimpleSpec, ctx: &mut BindCtx<'_>) -> Result<
         sqs: Vec::new(),
         sq_comps: Vec::new(),
         allocated: 0,
-        whole_segments: ctx.whole_segments() && matches!(spec.kind, SimpleKind::Min | SimpleKind::Max | SimpleKind::ValueCount),
+        whole_segments: match spec.kind {
+            SimpleKind::Min | SimpleKind::Max => ctx.whole_segments(),
+            SimpleKind::ValueCount => ctx.whole_segments_unless_terminating(),
+            _ => false,
+        },
         segment_done: false,
         batch: Default::default(),
         dbuf: Vec::new(),

@@ -331,6 +331,15 @@ fn rollover_response(old: &str, new: &str, rolled: bool, dry_run: bool, lazy: bo
     }
 }
 
+/// The rollover a lazily rolled-over data stream (`rollover_on_write`) does on its next write;
+/// a no-op once another write did it.
+pub fn rollover_on_write(st: &mut ClusterState, data_stream: &str, now_ms: i64) -> EsResult<()> {
+    if !st.metadata.data_streams.get(data_stream).is_some_and(|d| d.rollover_on_write) {
+        return Ok(());
+    }
+    apply(st, data_stream, None, CreateRequest::default(), now_ms).map(|_| ())
+}
+
 /// Rolls `target` over in `st` (no condition checks); returns the new index name.
 fn apply(st: &mut ClusterState, target: &str, new_index: Option<&str>, create: CreateRequest, now_ms: i64) -> EsResult<(String, String)> {
     let req = Request { conditions: Vec::new(), has_create_parts: false, create: CreateRequest::default() };

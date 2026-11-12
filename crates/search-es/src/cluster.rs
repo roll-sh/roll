@@ -158,12 +158,16 @@ pub struct Cluster {
     pub xpack: crate::xpack::Runtime,
     /// The circuit breakers (`indices.breaker.*`).
     pub breakers: crate::breaker::Breakers,
+    /// The request thread pools (`search`, `write`, `get`, `analyze`): admission and stats.
+    pub thread_pools: crate::thread_pool::ThreadPools,
     /// Shard contents of the snapshots this process took.
     pub snapshot_data: crate::api::snapshots::SnapshotData,
     /// Cross-cluster search usage (`_cluster/stats` `ccs`).
     pub ccs: crate::remote::CcsStats,
     /// The k-NN plugin's counters and graph-cache ledger (opensearch dialect).
     pub knn: std::sync::Arc<crate::opensearch::knn_api::KnnRuntime>,
+    /// The OpenSearch job scheduler (Index State Management jobs; idle without jobs).
+    pub jobs: crate::opensearch::jobs::Jobs,
     /// The cluster's own handle, once its owner allowed background work
     /// ([`Cluster::enable_background_tasks`]).
     background: std::sync::OnceLock<std::sync::Weak<Cluster>>,
@@ -230,7 +234,7 @@ impl ShardOps {
 #[derive(Clone, Debug)]
 pub struct TaskInfo {
     pub id: u64,
-    pub action: String,
+    pub action: std::borrow::Cow<'static, str>,
     pub description: String,
     pub start_ms: i64,
     pub started: std::time::Instant,
@@ -241,6 +245,43 @@ pub struct TaskInfo {
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     /// A running by-query task's rate and progress (`BulkByScrollTask`).
     pub live: Option<Arc<crate::api::by_query::Live>>,
+    /// Builds the description when a listing asks for it (Elasticsearch's description
+    /// `Supplier`): a search renders its request only if someone looks. Overrides
+    /// `description`.
+    pub describe: Option<Describe>,
+}
+
+/// A task description rendered on demand ([`TaskInfo::describe`]).
+#[derive(Clone)]
+pub struct Describe(pub Arc<dyn Fn(&Cluster) -> String + Send + Sync>);
+
+impl std::fmt::Debug for Describe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Describe(..)")
+    }
+}
+
+impl TaskInfo {
+    /// The task's description as `_tasks?detailed` shows it.
+    pub fn description_in(&self, cluster: &Cluster) -> String {
+        match &self.describe {
+            Some(d) => (d.0)(cluster),
+            None => self.description.clone(),
+        }
+    }
+}
+
+/// What [`TaskRegistry::start`] registers.
+pub struct NewTask {
+    pub action: std::borrow::Cow<'static, str>,
+    pub description: String,
+    pub describe: Option<Describe>,
+    pub parent: Option<u64>,
+    pub headers: Vec<(String, String)>,
+    pub cancellable: bool,
+    /// The cancellation flag to share (a search's [`search_index::search::SearchControl`]
+    /// flag, or a parent's, whose cancellation bans its children); a new one when `None`.
+    pub cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// The tasks running on the node for this cluster. Ids increase from 1 like Elasticsearch's;
@@ -254,6 +295,9 @@ pub struct TaskRegistry {
     results: parking_lot::Mutex<std::collections::BTreeMap<u64, StoredTask>>,
     /// Woken whenever a task ends (`wait_for_completion` on the task APIs).
     ended: tokio::sync::Notify,
+    /// Callers in [`TaskRegistry::wait_until`]: ending a task wakes `ended` only when there
+    /// are any (a search ends several tasks).
+    waiters: std::sync::atomic::AtomicUsize,
 }
 
 /// A finished task's record: the task as it ran and its response or failure.
@@ -275,8 +319,7 @@ pub struct TaskGuard<'a> {
 
 impl Drop for TaskGuard<'_> {
     fn drop(&mut self) {
-        self.registry.running.lock().remove(&self.id);
-        self.registry.ended.notify_waiters();
+        self.registry.end(self.id);
     }
 }
 
@@ -292,21 +335,78 @@ impl TaskGuard<'_> {
 
 impl TaskRegistry {
     pub fn register(&self, action: &str, description: &str, parent: Option<u64>, headers: Vec<(String, String)>) -> TaskGuard<'_> {
+        self.start(NewTask { action: action.to_string().into(), description: description.to_string(), describe: None, parent, headers, cancellable: true, cancelled: None })
+    }
+
+    /// Registers a task; it runs until the guard drops.
+    pub fn start(&self, t: NewTask) -> TaskGuard<'_> {
+        let id = self.start_detached(t);
+        TaskGuard { registry: self, id }
+    }
+
+    /// [`TaskRegistry::start`] without a guard: the caller ends it with [`TaskRegistry::end`]
+    /// (guards that must not borrow the registry).
+    pub fn start_detached(&self, t: NewTask) -> u64 {
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let info = TaskInfo {
             id,
-            action: action.to_string(),
-            description: description.to_string(),
+            action: t.action,
+            description: t.description,
             start_ms: crate::time::now_millis(),
             started: std::time::Instant::now(),
-            cancellable: true,
-            parent,
-            headers,
-            cancelled: Default::default(),
+            cancellable: t.cancellable,
+            parent: t.parent,
+            headers: t.headers,
+            cancelled: t.cancelled.unwrap_or_default(),
             live: None,
+            describe: t.describe,
         };
         self.running.lock().insert(id, info);
-        TaskGuard { registry: self, id }
+        id
+    }
+
+    /// Ends a task started with [`TaskRegistry::start_detached`].
+    pub fn end(&self, id: u64) {
+        self.running.lock().remove(&id);
+        self.notify_ended();
+    }
+
+    fn notify_ended(&self) {
+        // A waiter counts itself before it checks the registry, so it either sees this task
+        // gone or is counted here.
+        if self.waiters.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            self.ended.notify_waiters();
+        }
+    }
+
+    /// Ends several tasks at once.
+    pub fn end_all(&self, ids: &[u64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut running = self.running.lock();
+        for id in ids {
+            running.remove(id);
+        }
+        drop(running);
+        self.notify_ended();
+    }
+
+    /// Whether any task runs.
+    pub fn is_empty(&self) -> bool {
+        self.running.lock().is_empty()
+    }
+
+    /// Cancels every cancellable task (a node shutting down); returns how many it cancelled.
+    pub fn cancel_all(&self) -> usize {
+        let g = self.running.lock();
+        let mut n = 0;
+        for t in g.values().filter(|t| t.cancellable) {
+            if !t.cancelled.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Attaches a by-query task's live state.
@@ -324,6 +424,14 @@ impl TaskRegistry {
     /// Waits until `done()` holds, re-checking whenever a task ends, at most `timeout`.
     /// Returns whether it held.
     pub async fn wait_until(&self, timeout: std::time::Duration, mut done: impl FnMut() -> bool) -> bool {
+        struct Waiting<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        self.waiters.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _waiting = Waiting(&self.waiters);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let ended = self.ended.notified();
@@ -414,6 +522,7 @@ impl Cluster {
             crate::meta::stack_templates::install_missing(&mut state.metadata, crate::time::now_millis());
         }
         let (changes, _) = tokio::sync::watch::channel(state.version);
+        let thread_pools = crate::thread_pool::ThreadPools::new(&config);
         // Runtime-field grok runs inside Painless, which reads the static node setting from here.
         if config.node_setting("runtime_fields.grok.watchdog.max_execution_time").is_some() {
             let ms = config
@@ -450,9 +559,11 @@ impl Cluster {
             ingest: Default::default(),
             xpack: Default::default(),
             breakers: Default::default(),
+            thread_pools,
             snapshot_data: Default::default(),
             ccs: Default::default(),
             knn: Default::default(),
+            jobs: Default::default(),
             background: Default::default(),
         })
     }
@@ -462,6 +573,10 @@ impl Cluster {
     /// end before the response is sent.
     pub fn enable_background_tasks(self: &Arc<Self>) {
         let _ = self.background.set(Arc::downgrade(self));
+        // Index State Management jobs due while the cluster was unloaded run now.
+        if self.dialect == Dialect::OpenSearch {
+            self.jobs.kick(self);
+        }
     }
 
     /// A strong handle for background work, when enabled.
@@ -564,8 +679,12 @@ impl Cluster {
             None => EsError::internal(format!("failed to persist cluster state: {e}")),
         })?;
         let version = next.version;
+        let opensearch = next.dialect == Dialect::OpenSearch;
         *self.state.write() = Arc::new(next);
         self.changes.send_replace(version);
+        if opensearch {
+            self.jobs.kick(self);
+        }
         Ok(r)
     }
 }

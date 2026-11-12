@@ -191,11 +191,13 @@ pub fn lex(src: &str) -> EsResult<Vec<Token>> {
             continue;
         }
         if c == b'?' {
-            let mut j = i + 1;
+            // `??name`: a parameter whose value is an identifier (kept with its `?`).
+            let from = if b.get(i + 1) == Some(&b'?') { i + 1 } else { i };
+            let mut j = from + 1;
             while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
                 j += 1;
             }
-            out.push(Token { tok: Tok::Param(src[i + 1..j].to_string()), start, end: j });
+            out.push(Token { tok: Tok::Param(src[from + (from == i) as usize..j].to_string()), start, end: j });
             i = j;
             continue;
         }
@@ -339,6 +341,27 @@ pub enum Cmd {
     Sample(f64),
     /// `LOOKUP JOIN index ON field, ...`.
     LookupJoin { index: String, index_at: usize, on: Vec<(String, usize)> },
+    /// `TS index`: a time series source; its first `STATS` aggregates per time series (and
+    /// time bucket) first, then across series.
+    Ts { sources: Vec<String>, metadata: Vec<String>, at: usize },
+    /// `FORK (commands) (commands) ...`: each branch runs over the input, tagged `_fork`.
+    Fork { branches: Vec<Vec<Cmd>>, at: usize },
+    /// A source that is the union of whole queries: `FROM` with subqueries (`FROM a, (FROM b
+    /// | ...)`) or over ES|QL views. `at`: the `FROM`.
+    Union { branches: Vec<Branch>, at: usize },
+}
+
+/// One input of a [`Cmd::Union`].
+#[derive(Clone, Debug)]
+pub struct Branch {
+    /// Its commands, a source command first; spans point into `src`.
+    pub cmds: Vec<Cmd>,
+    /// The text the spans point into (the query's, or a view's).
+    pub src: std::sync::Arc<str>,
+    /// The view it expands, if any.
+    pub view: Option<String>,
+    /// Where the subquery starts in `src` (`(` of a subquery).
+    pub at: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -440,7 +463,6 @@ struct P<'a> {
     i: usize,
     params: &'a [V],
     named: &'a [(String, V)],
-    next_param: usize,
 }
 
 fn kw(t: &Tok, k: &str) -> bool {
@@ -513,6 +535,20 @@ impl<'a> P<'a> {
                 self.bump();
                 Ok((s, t.start))
             }
+            // A value parameter where a name goes names that column (null: the empty name).
+            Tok::Param(ref p) if !p.is_empty() => {
+                let v = match p.parse::<usize>() {
+                    Ok(n) => n.checked_sub(1).and_then(|i| self.params.get(i)).cloned(),
+                    Err(_) => self.named.iter().find(|(k, _)| k == p).map(|(_, v)| v.clone()),
+                };
+                match v {
+                    Some(v) => {
+                        self.bump();
+                        Ok((if v.is_null() { String::new() } else { v.to_text() }, t.start))
+                    }
+                    None => Err(self.mismatch("{UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}")),
+                }
+            }
             _ => Err(self.mismatch("{UNQUOTED_IDENTIFIER, QUOTED_IDENTIFIER}")),
         }
     }
@@ -529,6 +565,30 @@ impl<'a> P<'a> {
         Ok((name, at))
     }
 
+    /// A processing command (one that may follow `|`).
+    fn processing(&mut self) -> EsResult<Cmd> {
+        let t = self.peek().clone();
+        if !matches!(&t.tok, Tok::Ident(_)) || matches!(&t.tok, Tok::Ident(k) if matches!(k.to_ascii_uppercase().as_str(), "FROM" | "ROW" | "SHOW")) {
+            return Err(parse_error(self.src, t.start, &format!("mismatched input '{}' expecting {PROCESSING}", self.token_text(&t))));
+        }
+        self.command()
+    }
+
+    /// The query inside a `FROM` subquery, after its `(`, up to and including its `)`.
+    fn subquery(&mut self) -> EsResult<Vec<Cmd>> {
+        let first = self.command()?;
+        if !matches!(first, Cmd::From { .. } | Cmd::Ts { .. } | Cmd::Row(_) | Cmd::Show(_) | Cmd::Union { .. }) {
+            return Err(parse_error(self.src, 0, "mismatched input expecting {'from', 'row', 'show'}"));
+        }
+        let mut cmds = vec![first];
+        while matches!(self.peek().tok, Tok::Pipe) {
+            self.bump();
+            cmds.push(self.processing()?);
+        }
+        self.expect_op(")")?;
+        Ok(cmds)
+    }
+
     fn command(&mut self) -> EsResult<Cmd> {
         let t = self.peek().clone();
         let Tok::Ident(name) = &t.tok else {
@@ -537,9 +597,18 @@ impl<'a> P<'a> {
         let up = name.to_ascii_uppercase();
         self.bump();
         Ok(match up.as_str() {
-            "FROM" => {
+            "FROM" | "TS" => {
                 let mut sources = Vec::new();
+                let mut subqueries: Vec<(Vec<Cmd>, usize)> = Vec::new();
                 loop {
+                    if self.is_op("(") {
+                        let open = self.bump().start;
+                        subqueries.push((self.subquery()?, open));
+                        if !self.eat_op(",") {
+                            break;
+                        }
+                        continue;
+                    }
                     let t = self.bump();
                     match t.tok {
                         Tok::Ident(s) | Tok::Quoted(s) | Tok::Str(s) => {
@@ -573,7 +642,41 @@ impl<'a> P<'a> {
                         }
                     }
                 }
-                Cmd::From { sources, metadata, at: t.start }
+                if up == "TS" {
+                    Cmd::Ts { sources, metadata, at: t.start }
+                } else if subqueries.is_empty() {
+                    Cmd::From { sources, metadata, at: t.start }
+                } else {
+                    let text: std::sync::Arc<str> = self.src.into();
+                    let mut branches = Vec::new();
+                    if !sources.is_empty() {
+                        branches.push(Branch { cmds: vec![Cmd::From { sources, metadata, at: t.start }], src: text.clone(), view: None, at: t.start });
+                    }
+                    for (cmds, at) in subqueries {
+                        branches.push(Branch { cmds, src: text.clone(), view: None, at });
+                    }
+                    Cmd::Union { branches, at: t.start }
+                }
+            }
+            "FORK" => {
+                let mut branches = Vec::new();
+                while self.is_op("(") {
+                    self.bump();
+                    let mut cmds = vec![self.processing()?];
+                    while matches!(self.peek().tok, Tok::Pipe) {
+                        self.bump();
+                        cmds.push(self.processing()?);
+                    }
+                    self.expect_op(")")?;
+                    branches.push(cmds);
+                }
+                if branches.is_empty() {
+                    return Err(self.mismatch("'('"));
+                }
+                if branches.len() > 8 {
+                    return Err(parse_error(self.src, t.start, "Fork supports up to 8 branches"));
+                }
+                Cmd::Fork { branches, at: t.start }
             }
             "ROW" => Cmd::Row(self.named_list()?),
             "SHOW" => Cmd::Show(self.ident()?.0.to_ascii_uppercase()),
@@ -749,7 +852,11 @@ impl<'a> P<'a> {
                         return Err(parse_error(
                             self.src,
                             t.start,
-                            &format!("value of [{}] must be a non negative integer, found value [{}] type [{ty}]", &self.src[t.start..e.end], other.to_text()),
+                            &format!(
+                                "value of [{}] must be a non negative integer, found value [{}] type [{ty}]",
+                                &self.src[t.start..e.end],
+                                if matches!(n.tok, Tok::Param(_)) { self.src[e.start..e.end].to_string() } else { other.to_text() }
+                            ),
                         ));
                     }
                 }
@@ -760,7 +867,7 @@ impl<'a> P<'a> {
                     let t = self.peek().clone();
                     if self.eat_op("*") {
                         pats.push(("*".to_string(), t.start));
-                    } else if matches!(t.tok, Tok::Ident(_) | Tok::Quoted(_)) {
+                    } else if matches!(t.tok, Tok::Ident(_) | Tok::Quoted(_) | Tok::Param(_)) {
                         pats.push(self.qualified()?);
                     } else {
                         return Err(self.mismatch(ID_PATTERN));
@@ -774,7 +881,7 @@ impl<'a> P<'a> {
             "RENAME" => {
                 let mut list = Vec::new();
                 loop {
-                    if !matches!(self.peek().tok, Tok::Ident(_) | Tok::Quoted(_)) {
+                    if !matches!(self.peek().tok, Tok::Ident(_) | Tok::Quoted(_) | Tok::Param(_)) {
                         return Err(self.mismatch(ID_PATTERN));
                     }
                     let (a, at) = self.qualified()?;
@@ -932,10 +1039,63 @@ impl<'a> P<'a> {
         };
         if self.is_kw("LIKE") || self.is_kw("RLIKE") {
             let rlike = self.is_kw("RLIKE");
+            let op = if rlike { "RLIKE" } else { "LIKE" };
             self.bump();
-            let t = self.bump();
-            let Tok::Str(p) = t.tok else { return Err(parse_error(self.src, t.start, &format!("mismatched input '{}' expecting QUOTED_STRING", self.token_text(&t)))) };
-            return Ok(Expr { kind: ExprKind::Like(Box::new(l), p, rlike, neg), start, end: t.end });
+            // One pattern, or a list of them (any may match).
+            let list = self.eat_op("(");
+            let mut pats = Vec::new();
+            loop {
+                let t = self.bump();
+                let p = match t.tok {
+                    Tok::Str(p) => p,
+                    Tok::Param(ref name) if !name.is_empty() => {
+                        let v = match name.parse::<usize>() {
+                            Ok(n) => n.checked_sub(1).and_then(|i| self.params.get(i)).cloned(),
+                            Err(_) => self.named.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()),
+                        };
+                        match v {
+                            Some(V::Str(p)) => p,
+                            Some(other) => {
+                                let ty = match other {
+                                    V::Null => "null",
+                                    V::Int(_) => "integer",
+                                    V::Long(_) => "long",
+                                    V::Double(_) => "double",
+                                    V::Bool(_) => "boolean",
+                                    _ => "keyword",
+                                };
+                                return Err(parse_error(self.src, start, &format!("Invalid pattern parameter type for {op} [{}]: expected string, found {ty}", &self.src[t.start..t.end])));
+                            }
+                            None => return Err(parse_error(self.src, t.start, &format!("Unknown query parameter [{name}]"))),
+                        }
+                    }
+                    _ => return Err(parse_error(self.src, t.start, &format!("mismatched input '{}' expecting QUOTED_STRING", self.token_text(&t)))),
+                };
+                pats.push((p, t.end));
+                if !list || !self.eat_op(",") {
+                    break;
+                }
+            }
+            let mut end = pats.last().map_or(start, |(_, e)| *e);
+            if list {
+                end = self.peek().end;
+                self.expect_op(")")?;
+            }
+            let mut it = pats.into_iter();
+            let (p, _) = it.next().expect("one pattern");
+            let mut e = Expr { kind: ExprKind::Like(Box::new(l.clone()), p, rlike, false), start, end };
+            for (p, _) in it {
+                let next = Expr { kind: ExprKind::Like(Box::new(l.clone()), p, rlike, false), start, end };
+                e = Expr { kind: ExprKind::Bin(BinOp::Or, Box::new(e), Box::new(next)), start, end };
+            }
+            if neg {
+                if let ExprKind::Like(_, _, _, n) = &mut e.kind {
+                    *n = true;
+                } else {
+                    e = Expr { kind: ExprKind::Not(Box::new(e)), start, end };
+                }
+            }
+            return Ok(e);
         }
         if self.eat_kw("IN") {
             self.expect_op("(")?;
@@ -1028,7 +1188,18 @@ impl<'a> P<'a> {
         while self.eat_op("::") {
             let (ty, _) = self.ident()?;
             let end = self.toks[self.i - 1].end;
-            e = Expr { kind: ExprKind::Cast(Box::new(e), ty.to_ascii_lowercase()), start, end };
+            let ty = ty.to_ascii_lowercase();
+            if ty == "text" {
+                return Err(parse_error(self.src, start, "Unsupported conversion to type [TEXT]"));
+            }
+            // A string cast to a temporal amount is that span (`"3 days"::date_period`).
+            if let (ExprKind::Lit(V::Str(text)), "date_period" | "time_duration") = (&e.kind, ty.as_str())
+                && let Some(span) = span_text(text)
+            {
+                e = Expr { kind: ExprKind::Span(span), start, end };
+                continue;
+            }
+            e = Expr { kind: ExprKind::Cast(Box::new(e), ty), start, end };
         }
         Ok(e)
     }
@@ -1100,20 +1271,26 @@ impl<'a> P<'a> {
             }
             Tok::Param(name) => {
                 self.bump();
+                // `parse_with` numbered every anonymous `?` it could resolve.
                 let v = if name.is_empty() {
-                    let v = self.params.get(self.next_param).cloned();
-                    self.next_param += 1;
-                    v
+                    return Err(parse_error(self.src, t.start, &format!("Not enough actual parameters {}", self.params.len())));
                 } else if let Ok(n) = name.parse::<usize>() {
-                    self.params.get(n.saturating_sub(1)).cloned()
-                } else {
-                    self.named.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
-                };
-                let Some(v) = v else {
-                    if name.is_empty() {
-                        return Err(parse_error(self.src, t.start, &format!("Not enough actual parameters {}", self.params.len())));
+                    match n.checked_sub(1).and_then(|i| self.params.get(i)) {
+                        Some(v) => v.clone(),
+                        None => {
+                            let hint = match self.params.len() {
+                                0 => String::new(),
+                                1 => ", did you mean position 1?".into(),
+                                k => format!(", did you mean any position between 1 and {k}?"),
+                            };
+                            return Err(parse_error(self.src, t.start, &format!("No parameter is defined for position {n}{hint}")));
+                        }
                     }
-                    return Err(parse_error(self.src, t.start, &format!("Unknown query parameter [{name}]")));
+                } else {
+                    match self.named.iter().find(|(k, _)| k == name) {
+                        Some((_, v)) => v.clone(),
+                        None => return Err(parse_error(self.src, t.start, &format!("Unknown query parameter [{name}]"))),
+                    }
                 };
                 Ok(lit(v))
             }
@@ -1186,10 +1363,75 @@ fn expr_name(src: &str, e: &Expr) -> String {
     src[e.start..e.end].to_string()
 }
 
+/// A request parameter: a value, or (`{"identifier": ...}`, `{"pattern": ...}`, `??name`) a
+/// name standing in for a column or a name pattern.
+#[derive(Clone, Debug)]
+pub enum Param {
+    Value(V),
+    Identifier(String),
+    Pattern(String),
+}
+
+/// The normalized text of a time span written as a string (`"3 days"`), if it is one.
+pub fn span_text(s: &str) -> Option<String> {
+    let t = s.trim();
+    let split = t.find(|c: char| !c.is_ascii_digit())?;
+    let (n, unit) = t.split_at(split);
+    let unit = unit.trim();
+    let n: i64 = n.parse().ok()?;
+    super::value::time_unit(unit)?;
+    Some(format!("{n} {}", unit.to_ascii_lowercase()))
+}
+
 /// Parses a query (`params`: positional `?` / `?1` values, `named`: `?name` values).
 pub fn parse(src: &str, params: &[V], named: &[(String, V)]) -> EsResult<Query> {
-    let toks = lex(src)?;
-    let mut p = P { src, toks, i: 0, params, named, next_param: 0 };
+    let all: Vec<(Option<String>, Param)> = params.iter().map(|v| (None, Param::Value(v.clone()))).chain(named.iter().map(|(k, v)| (Some(k.clone()), Param::Value(v.clone())))).collect();
+    parse_with(src, &all)
+}
+
+/// Parses a query whose parameters are in request order, each optionally named: `?` takes
+/// the next one, `?N` the N-th, `?name` the one of that name (Elasticsearch numbers named
+/// parameters too). Identifier and pattern parameters become the names they hold.
+pub fn parse_with(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
+    let mut toks = lex(src)?;
+    let mut next = 0usize;
+    let mut positional: Vec<V> = Vec::with_capacity(all.len());
+    for (_, p) in all {
+        positional.push(match p {
+            Param::Value(v) => v.clone(),
+            _ => V::Null,
+        });
+    }
+    let named_values: Vec<(String, V)> = all.iter().filter_map(|(k, p)| Some((k.clone()?, if let Param::Value(v) = p { v.clone() } else { V::Null }))).collect();
+    for t in toks.iter_mut() {
+        let Tok::Param(name) = &t.tok else { continue };
+        let double = src.as_bytes().get(t.start + 1) == Some(&b'?');
+        let (idx, label) = if name.is_empty() {
+            next += 1;
+            (Some(next - 1), (next).to_string())
+        } else if let Ok(n) = name.parse::<usize>() {
+            (n.checked_sub(1), name.clone())
+        } else {
+            (all.iter().position(|(k, _)| k.as_deref() == Some(name.as_str())), name.clone())
+        };
+        let Some(entry) = idx.and_then(|i| all.get(i)) else {
+            // Left for the parser, which reports the missing parameter.
+            if name.is_empty() {
+                t.tok = Tok::Param(String::new());
+            }
+            continue;
+        };
+        match &entry.1 {
+            Param::Identifier(id) => t.tok = Tok::Quoted(id.clone()),
+            Param::Pattern(pat) => t.tok = Tok::Ident(pat.clone()),
+            Param::Value(V::Str(id)) if double => t.tok = Tok::Quoted(id.clone()),
+            Param::Value(_) => t.tok = Tok::Param(label),
+        }
+    }
+    let named = named_values;
+    let params = &positional[..];
+    let named = &named[..];
+    let mut p = P { src, toks, i: 0, params, named };
     let mut settings = Settings::default();
     // Settings are validated once the whole query parses (syntax errors come first).
     let mut sets: Vec<(usize, String, SetValue)> = Vec::new();
@@ -1234,7 +1476,7 @@ pub fn parse(src: &str, params: &[V], named: &[(String, V)]) -> EsResult<Query> 
         return Err(parse_error(src, t.start, &format!("extraneous input '<EOF>' expecting {SOURCE}")));
     }
     let mut cmds = vec![p.command()?];
-    if !matches!(cmds[0], Cmd::From { .. } | Cmd::Row(_) | Cmd::Show(_)) {
+    if !matches!(cmds[0], Cmd::From { .. } | Cmd::Ts { .. } | Cmd::Row(_) | Cmd::Show(_) | Cmd::Union { .. }) {
         return Err(parse_error(src, 0, "mismatched input expecting {'from', 'row', 'show'}"));
     }
     loop {
@@ -1242,11 +1484,7 @@ pub fn parse(src: &str, params: &[V], named: &[(String, V)]) -> EsResult<Query> 
             Tok::Eof => break,
             Tok::Pipe => {
                 p.bump();
-                let t = p.peek().clone();
-                if !matches!(&t.tok, Tok::Ident(_)) || matches!(&t.tok, Tok::Ident(k) if matches!(k.to_ascii_uppercase().as_str(), "FROM" | "ROW" | "SHOW")) {
-                    return Err(parse_error(src, t.start, &format!("mismatched input '{}' expecting {PROCESSING}", p.token_text(&t))));
-                }
-                cmds.push(p.command()?);
+                cmds.push(p.processing()?);
             }
             // A `;` after an expression: ANTLR's expectations there.
             Tok::Op(";") if matches!(cmds.last(), Some(Cmd::Row(_) | Cmd::Eval(_))) => {

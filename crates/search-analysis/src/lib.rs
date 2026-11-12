@@ -55,6 +55,22 @@ pub use error::{AnalysisError, is_java_exception};
 pub use token::Token;
 pub use tokenizer::thai::{ThaiDictionary, set_thai_dictionary};
 
+/// Lucene's `HTMLStripCharFilter` (no escaped tags) over a whole string, as Elasticsearch's
+/// `html_strip` ingest processor applies it. One scanner per thread is reused.
+pub fn strip_html(input: &str) -> String {
+    use stream::CharFilter;
+    thread_local! {
+        static STRIP: std::cell::RefCell<charfilter::html_strip::HtmlStrip> = std::cell::RefCell::new(charfilter::html_strip::HtmlStrip::new(&[]));
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut map = stream::OffsetMap::default();
+    STRIP.with(|h| {
+        // The scanner never fails without escaped tags or replacement groups.
+        let _ = h.borrow_mut().filter(input, &mut out, &mut map);
+    });
+    out
+}
+
 /// Builds the process-wide tables components otherwise build on first use, so a server can pay
 /// for them at startup (on a background thread) instead of in the first request that needs
 /// them: the scanners of `uax_url_email` (a few hundred milliseconds: its URL grammar has

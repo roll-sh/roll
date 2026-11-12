@@ -79,7 +79,13 @@ impl std::fmt::Display for JsonError {
 /// Parses the first JSON value in `input`; anything after it is ignored, as in Elasticsearch.
 /// Empty (or whitespace-only) input yields `Ok(None)`.
 pub fn parse(input: &[u8]) -> Result<Option<Value>, JsonError> {
-    let mut p = Parser { s: input, pos: 0, line: 1, row_start: 0, depth: 0 };
+    parse_with(input, false)
+}
+
+/// [`parse`], optionally accepting duplicate keys (the last value wins, in the first key's
+/// place: Jackson's `allowDuplicateKeys`, as the `json` ingest processor offers it).
+pub fn parse_with(input: &[u8], allow_duplicates: bool) -> Result<Option<Value>, JsonError> {
+    let mut p = Parser { s: input, pos: 0, line: 1, row_start: 0, depth: 0, allow_duplicates };
     p.skip_ws_or_eof()?;
     if p.pos >= p.s.len() {
         return Ok(None);
@@ -124,6 +130,7 @@ struct Parser<'a> {
     line: usize,
     row_start: usize,
     depth: usize,
+    allow_duplicates: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -609,7 +616,7 @@ impl<'a> Parser<'a> {
             _ => return Err(self.unexpected("was expecting double-quote to start field name")),
         }
         let key = self.string(true)?;
-        if map.contains_key(&key) {
+        if !self.allow_duplicates && map.contains_key(&key) {
             return Err(self.err_here(format!("Duplicate field '{key}'")));
         }
         self.skip_ws_or_eof()?;

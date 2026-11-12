@@ -282,6 +282,10 @@ fn api_capabilities(api: routes::Api) -> &'static [&'static str] {
         IndicesPutDataLifecycle => &["dlm.downsampling_method", "dlm.frozen_after"],
         IndicesModifyDataStream => &["data_streams.modify.delete_index"],
         EsqlQuery | EsqlAsyncQuery => crate::xpack::esql::CAPABILITIES,
+        EsqlGetView => &["view_index_abstraction"],
+        EsqlPutView => &["view_index_abstraction", "views_put_serverless_scope"],
+        EsqlPutDataSource | EsqlGetDataSource | EsqlDeleteDataSource | EsqlDeleteDataset => &["data_sources", "data_sources_serverless_scope"],
+        EsqlPutDataset | EsqlGetDataset => &["data_sources", "dataset_declared_schema", "data_sources_serverless_scope"],
         _ => &[],
     }
 }
@@ -297,7 +301,7 @@ pub fn capabilities(ctx: &Ctx) -> EsResult<Reply> {
         && let Routed::Found(r) = routes::route(m, path)
     {
         api = Some(r.api);
-        supported = implemented(r.api);
+        supported = implemented(r.api) && !(crate::xpack::esql::datasources::is_federation_api(r.api) && !crate::xpack::esql::datasources::enabled(ctx.cluster));
         // Most Elasticsearch handlers don't declare `supportedQueryParameters()` (null), and
         // then any parameter list counts as supported; only these declare theirs.
         let declares_params = matches!(
@@ -320,7 +324,10 @@ pub fn capabilities(ctx: &Ctx) -> EsResult<Reply> {
     }
     if let Some(caps) = ctx.query("capabilities") {
         for c in caps.split(',').filter(|c| !c.is_empty()) {
-            supported &= api.is_some_and(|a| api_capabilities(a).contains(&c));
+            supported &= api.is_some_and(|a| match a {
+                routes::Api::EsqlQuery | routes::Api::EsqlAsyncQuery => crate::xpack::esql::capabilities::supported(c),
+                _ => api_capabilities(a).contains(&c),
+            });
         }
     }
     Reply::ok(obj! {

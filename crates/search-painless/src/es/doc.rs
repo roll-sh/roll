@@ -612,7 +612,17 @@ fn f_dollar(vm: &mut Vm, a: &mut [Value]) -> VR {
             Some(r) => es_value(EsObj::RankVectors(Some(r.clone()))),
             None => a[1].clone(),
         },
-        _ => f.vals.first().cloned().unwrap_or_else(|| a[1].clone()),
+        // `$` is a dynamic `field(name).get(default)`: the typed `get` converts a numeric
+        // default to the field's element type (`FloatDocValuesField.get(float)`, …).
+        kind => f.vals.first().cloned().unwrap_or_else(|| {
+            let d = &a[1];
+            let num = matches!(d, Value::Byte(_) | Value::Short(_) | Value::Char(_) | Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Double(_));
+            match kind {
+                Some(DocKind::Float | DocKind::HalfFloat) if num => Value::Float(crate::lib_lang::double(d) as f32),
+                Some(DocKind::Double | DocKind::ScaledFloat) if num => Value::Double(crate::lib_lang::double(d)),
+                _ => d.clone(),
+            }
+        }),
     })
 }
 

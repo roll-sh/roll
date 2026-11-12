@@ -60,22 +60,29 @@ impl Weight for DisMaxWeight {
         let mut max = 0f64;
         let mut other = 0f64;
         let mut subs = Vec::new();
+        // Lucene's `DisjunctionMaxWeight.explain` lists the clauses' explanations when none
+        // matches.
+        let mut no_match = Vec::new();
         for w in &self.weights {
             let e = w.explain(seg, doc)?;
-            if e.is_match() {
-                matched = true;
-                let s = e.value.as_f64();
-                subs.push(e);
-                if s >= max {
-                    other += max;
-                    max = s;
-                } else {
-                    other += s;
+            if !e.is_match() {
+                if !matched {
+                    no_match.push(e);
                 }
+                continue;
+            }
+            matched = true;
+            let s = e.value.as_f64();
+            subs.push(e);
+            if s >= max {
+                other += max;
+                max = s;
+            } else {
+                other += s;
             }
         }
         if !matched {
-            return Ok(Explanation::no_match("No matching clause", vec![]));
+            return Ok(Explanation::no_match("No matching clause", no_match));
         }
         let score = (max + other * self.tie as f64) as f32;
         let desc = if self.tie == 0.0 {

@@ -136,7 +136,7 @@ pub fn execute(ctx: &Ctx) -> EsResult<Reply> {
             let Some(f) = rt.get(&format!("{ty}_field")).cloned() else { return Reply::ok(obj! { "result" => Value::Arr(Vec::new()) }) };
             let mut ev = super::runtime::Evaluator::new(&ctx.cluster.scripts, &st, &table, 0, &idx.name, f.clone())?;
             ev.cancellable = false;
-            let vals = ev.leaf(&seg)?.values(local)?;
+            let vals = ev.leaf(&seg)?.emitted_values(local)?;
             Reply::ok(obj! { "result" => Value::Arr(super::runtime::render(&f, &vals, None)?) })
         }
     }

@@ -465,6 +465,12 @@ async fn documents() {
     assert_eq!(idx[0]["deleted_docs"], 0, "{idx}");
     assert!(idx[0]["size_bytes"].as_i64().unwrap() > 0, "{idx}");
     assert_eq!(idx[0]["size_bytes"], idx[0]["primary_size_bytes"], "{idx}");
+    // A loaded cluster shows its live counts before metering has refreshed the catalog.
+    let shown = e.get("/v1/search/clusters/docs").await;
+    assert_eq!((shown["docs"].as_i64(), shown["indices"].as_i64()), (Some(3), Some(1)), "{shown}");
+    let listed = e.get("/v1/search/clusters").await;
+    let listed = listed.as_array().unwrap().iter().find(|c| c["name"] == "docs").unwrap().clone();
+    assert_eq!((listed["docs"].as_i64(), listed["indices"].as_i64()), (Some(3), Some(1)), "{listed}");
     // Metering sees the documents: the cluster's figures, and a resident size above the base.
     e.control.sample().await.unwrap();
     let shown = e.get("/v1/search/clusters/docs").await;
@@ -556,6 +562,55 @@ async fn documents_survive_unload_and_branch() {
     }
     let r = e.http.get(format!("{es}/notes/_count")).basic_auth(&user, Some(&pw)).send().await.unwrap();
     assert_eq!(r.json::<Value>().await.unwrap()["count"], 2);
+    control.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(restarted_home);
+}
+
+/// A cluster with `idle_timeout_s` 0 is up from the moment it exists, when the setting
+/// changes to 0, and after a node starts: never asleep until its first request.
+#[tokio::test]
+async fn always_on_clusters_load_without_a_request() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "always", "idle_timeout_s": 0})).await;
+    let (user, pw) = creds(&c);
+    assert_eq!(e.control.node.loaded(), ["always"]);
+    assert_eq!(e.get("/v1/search/clusters/always").await["status"]["state"], "loaded");
+    let listed = e.get("/v1/search/clusters").await;
+    assert_eq!(listed[0]["status"]["state"], "loaded", "{listed}");
+    // A cluster that may sleep is created asleep, and loads once it may not.
+    e.post("/v1/search/clusters", json!({"name": "sometimes"})).await;
+    assert_eq!(e.get("/v1/search/clusters/sometimes").await["status"]["state"], "asleep");
+    let (s, v) = e.call(reqwest::Method::PATCH, "/v1/search/clusters/sometimes", Some(json!({"idle_timeout_s": 0}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(e.get("/v1/search/clusters/sometimes").await["status"]["state"], "loaded");
+    // An explicit unload still puts it to sleep.
+    assert!(e.post("/v1/search/clusters/sometimes/unload", json!({})).await["unloaded"].as_bool().unwrap());
+    assert_eq!(e.get("/v1/search/clusters/sometimes").await["status"]["state"], "asleep");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/kept/_doc/1?refresh=true", Some(json!({"n": 1}))).await;
+    assert_eq!(s, 201, "{v}");
+    e.control.shutdown().await.unwrap();
+    // A node that starts on the same catalog loads both again on its own.
+    let mut cfg = e.cfg.clone();
+    cfg.home = e.home.with_extension("restarted");
+    std::fs::create_dir_all(&cfg.home).unwrap();
+    for f in ["search.db", "search.db-wal", "search.db-shm"] {
+        let _ = std::fs::copy(e.home.join(f), cfg.home.join(f));
+    }
+    let restarted_home = cfg.home.clone();
+    let control = Control::new(cfg, e.objects.clone()).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut loaded = control.node.loaded();
+        loaded.sort();
+        if loaded == ["always", "sometimes"] {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{loaded:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let l = control.node.get_loaded("always").unwrap();
+    assert_eq!(l.cluster.state().metadata.indices.len(), 1, "loaded with its data");
+    drop(l);
     control.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(restarted_home);
 }

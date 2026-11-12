@@ -25,6 +25,7 @@
 //! skip it, so requests without credentials cost one header lookup. API keys are limited by
 //! their owner's roles at creation (`limited_by`), as in Elasticsearch.
 
+pub mod actions;
 pub mod api_keys;
 pub mod privileges;
 pub mod query;
@@ -289,7 +290,8 @@ impl Effective {
     }
 }
 
-/// Role descriptors by name: native roles, then the reserved ones.
+/// Role descriptors by name, as `GET _security/role` shows them: native roles, then the reserved
+/// ones (file-realm roles are not listed, as in Elasticsearch).
 pub fn role_descriptor(st: &crate::meta::ClusterState, name: &str) -> Option<Value> {
     if let Some(r) = st.metadata.xpack.get(users::ROLES, name) {
         return Some(r.clone());
@@ -297,8 +299,45 @@ pub fn role_descriptor(st: &crate::meta::ClusterState, name: &str) -> Option<Val
     users::reserved_roles().get(name).cloned()
 }
 
-fn permissions_of_roles(st: &crate::meta::ClusterState, roles: &[String]) -> Vec<Permission> {
-    roles.iter().filter_map(|r| role_descriptor(st, r)).map(|d| Permission::of_descriptor(&d)).collect()
+/// The file realm's roles (`roles.yml`), from the node setting `roll.security.file_roles`: the
+/// path of a JSON object of role descriptors by name (the test clusters' roles files, converted
+/// from YAML). Parsed once per loaded cluster; an unreadable file means no file roles.
+pub type FileRoles = std::sync::Arc<std::collections::BTreeMap<String, Value>>;
+
+pub fn file_roles(cluster: &Cluster) -> FileRoles {
+    cluster
+        .xpack
+        .file_roles
+        .get_or_init(|| {
+            let roles = cluster
+                .config
+                .node_setting("roll.security.file_roles")
+                .and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| crate::json::parse(&bytes).ok().flatten())
+                .and_then(|v| match v {
+                    Value::Obj(m) => Some(m.into_iter().collect()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            std::sync::Arc::new(roles)
+        })
+        .clone()
+}
+
+/// The descriptor a role name resolves to when authorizing, in Elasticsearch's
+/// `CompositeRolesStore` order: reserved roles, then file roles, then native roles.
+pub fn resolve_role(file: &FileRoles, st: &crate::meta::ClusterState, name: &str) -> Option<Value> {
+    if let Some(r) = users::reserved_roles().get(name) {
+        return Some(r.clone());
+    }
+    if let Some(r) = file.get(name) {
+        return Some(r.clone());
+    }
+    st.metadata.xpack.get(users::ROLES, name).cloned()
+}
+
+fn permissions_of_roles(file: &FileRoles, st: &crate::meta::ClusterState, roles: &[String]) -> Vec<Permission> {
+    roles.iter().filter_map(|r| resolve_role(file, st, r)).map(|d| Permission::of_descriptor(&d)).collect()
 }
 
 fn permissions_of_descriptors(d: &Value) -> Vec<Permission> {
@@ -306,7 +345,7 @@ fn permissions_of_descriptors(d: &Value) -> Vec<Permission> {
 }
 
 /// The effective permissions of a principal.
-pub fn effective(st: &crate::meta::ClusterState, p: &Principal) -> Effective {
+pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal) -> Effective {
     match &p.kind {
         AuthKind::ApiKey(a) => {
             let (role_descriptors, limited_by) = (&a.role_descriptors, &a.limited_by);
@@ -321,49 +360,118 @@ pub fn effective(st: &crate::meta::ClusterState, p: &Principal) -> Effective {
             let d = tokens::service_account_descriptor(&p.username).unwrap_or(Value::Null);
             Effective { own: vec![Permission::of_descriptor(&d)], limited_by: None }
         }
-        _ => Effective { own: permissions_of_roles(st, &p.roles), limited_by: None },
+        _ => Effective { own: permissions_of_roles(file, st, &p.roles), limited_by: None },
     }
 }
 
-/// Checks the request's action against its principal's roles.
-pub fn authorize(ctx: &Ctx) -> EsResult<()> {
-    let Some(p) = ctx.principal.get() else { return Ok(()) };
+/// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
+/// may read (`IndicesAndAliasesResolver`) instead of failing on the others.
+const NARROWED: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search"];
+
+/// Checks the request's action against its principal's roles. `Ok(Some(index))` asks the
+/// caller to run the request on `index` instead: its wildcards expanded to authorized indices.
+pub fn authorize(ctx: &Ctx) -> EsResult<Option<String>> {
+    let Some(p) = ctx.principal.get() else { return Ok(None) };
     if p.is_superuser() {
-        return Ok(());
+        return Ok(None);
     }
     let (scope, action) = privileges::action_of(ctx.api.name());
     let st = ctx.state();
-    let eff = effective(&st, p);
+    let eff = effective(&file_roles(ctx.cluster), &st, p);
     match scope {
-        Scope::Any => Ok(()),
+        Scope::Any => Ok(None),
         Scope::Cluster => {
             if eff.allows_cluster(&action) {
-                return Ok(());
+                return Ok(None);
             }
             // Users may manage their own API keys and change their own password.
             if action.starts_with("cluster:admin/xpack/security/api_key/") && eff.has_cluster_privilege("manage_own_api_key") {
-                return Ok(());
+                return Ok(None);
             }
             Err(denied(p, &action, None))
         }
+        Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
         Scope::Index => {
             let targets = request_indices(ctx);
             let denied_on: Vec<String> = targets.into_iter().filter(|i| !eff.allows_index(&action, i)).collect();
-            if denied_on.is_empty() { Ok(()) } else { Err(denied(p, &action, Some(&denied_on))) }
+            if denied_on.is_empty() { Ok(None) } else { Err(denied(p, &action, Some(&denied_on))) }
         }
     }
 }
 
-/// Elasticsearch's 403 for an action the principal's roles don't grant.
-fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
-    let who = match &p.kind {
+/// Wildcards (and no index at all) expand to the matching indices the principal may access;
+/// names given explicitly must be authorized. `-*` (no index) when nothing is left, as
+/// Elasticsearch's resolver does.
+fn narrow(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str) -> EsResult<Option<String>> {
+    let mut exprs = crate::api::index_expressions(ctx);
+    let wildcard = |e: &str| e.contains('*') || e == "_all";
+    if !exprs.is_empty() && !exprs.iter().any(|e| wildcard(e)) {
+        let denied_on: Vec<String> = request_indices(ctx).into_iter().filter(|i| !eff.allows_index(action, i)).collect();
+        return if denied_on.is_empty() { Ok(None) } else { Err(denied(p, action, Some(&denied_on))) };
+    }
+    if exprs.is_empty() {
+        exprs.push("*".into());
+    }
+    let st = ctx.state();
+    let opts = ctx.indices_options(crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN).unwrap_or(crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN);
+    let mut out: Vec<String> = Vec::new();
+    let mut denied_on = Vec::new();
+    for e in &exprs {
+        if e.starts_with('-') {
+            continue;
+        }
+        if wildcard(e) {
+            let mut list = vec![e.clone()];
+            list.extend(exprs.iter().filter(|x| x.starts_with('-')).cloned());
+            for n in crate::meta::resolve::resolve(&st, &list, &opts, ctx.now_ms).unwrap_or_default() {
+                if eff.allows_index(action, &n) && !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        } else if eff.allows_index(action, e) {
+            out.push(e.clone());
+        } else {
+            denied_on.push(e.clone());
+        }
+    }
+    if !denied_on.is_empty() {
+        return Err(denied(p, action, Some(&denied_on)));
+    }
+    Ok(Some(if out.is_empty() { "-*".to_string() } else { out.join(",") }))
+}
+
+/// The `indices:admin/aliases` check of an alias the request creates on `indices` for its
+/// principal (a search application's alias): the indices first, then the alias name.
+pub fn check_alias_privileges(ctx: &Ctx, indices: &[String], alias: &str) -> EsResult<()> {
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    const ACTION: &str = "indices:admin/aliases";
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    let denied_on: Vec<String> = indices.iter().filter(|i| !eff.allows_index(ACTION, i)).cloned().collect();
+    if !denied_on.is_empty() {
+        return Err(denied(p, ACTION, Some(&denied_on)));
+    }
+    if !eff.allows_index(ACTION, alias) {
+        let by = privileges::granted_by(ACTION, false).join(",");
+        return Err(EsError::security(403, format!("action [{ACTION}] is unauthorized for {}, this action is granted by the index privileges [{by}]", who(p))));
+    }
+    Ok(())
+}
+
+/// Who a 403 names: the user and its roles, or the API key.
+fn who(p: &Principal) -> String {
+    match &p.kind {
         AuthKind::ApiKey(a) => format!("API key id [{}] of user [{}]", a.id, p.username),
         _ => {
             let mut roles = p.roles.clone();
             roles.sort();
             format!("user [{}] with effective roles [{}]", p.username, roles.join(","))
         }
-    };
+    }
+}
+
+/// Elasticsearch's 403 for an action the principal's roles don't grant.
+fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
+    let who = who(p);
     let on = indices.map(|i| format!(" on indices [{}]", i.join(","))).unwrap_or_default();
     let by = privileges::granted_by(action, indices.is_none());
     let grant = if by.is_empty() {
@@ -382,6 +490,10 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     let api = ctx.api.name();
     if matches!(api, "bulk" | "mget" | "msearch" | "msearch_template") {
         exprs.extend(body_indices(ctx));
+    }
+    // A search application is authorized as an index of its name.
+    if api == "search_application.search" {
+        exprs.extend(ctx.path_param("name").map(str::to_string));
     }
     if exprs.is_empty() {
         return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();

@@ -31,8 +31,9 @@ pub enum Error {
     /// The search ran out of time; collected hits so far are valid (`timed_out: true`).
     #[error("time exceeded")]
     TimeExceeded,
-    /// The search was cancelled by its caller.
-    #[error("task cancelled")]
+    /// The search was cancelled by its caller (`TaskCancelledException`: only a cancel through
+    /// the task API leaves anyone to read the reason).
+    #[error("task cancelled [by user request]")]
     Cancelled,
     /// The shard was closed.
     #[error("shard is closed")]

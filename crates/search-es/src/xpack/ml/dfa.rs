@@ -15,56 +15,353 @@ fn no_dfa(id: &str) -> EsError {
     EsError::resource_not_found(format!("No known data frame analytics with id [{id}]"))
 }
 
+// --- configuration parsing ---------------------------------------------------------------------
+//
+// `DataFrameAnalyticsConfig`'s parsers: each analysis fills in Elasticsearch's defaults in its
+// `toXContent` field order, and range checks fail the way its constructors do (a
+// `status_exception` inside "Failed to build [analysis] after last required field arrived",
+// inside the config's "failed to parse field [analysis]").
+
+/// `ObjectParser.declareDouble` / `declareInt` / `declareLong` (numbers and numeric strings).
+fn number(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// Where the parser stands once the value at `path` is read (its end).
+fn end_of(ctx: &Ctx, path: &[crate::json::locate::Seg<'_>]) -> (usize, usize) {
+    ctx.raw_json().and_then(|s| crate::json::locate::value_end(s, path)).unwrap_or((1, 1))
+}
+
+/// The config's error for a failure inside its `field` object.
+fn in_field(ctx: &Ctx, field: &'static str, cause: EsError) -> EsError {
+    use crate::json::locate::Seg;
+    let (l, c) = end_of(ctx, &[Seg::Key(field)]);
+    EsError::x_content_parse(l, c, format!("[data_frame_analytics_config] failed to parse field [{field}]")).caused_by(cause)
+}
+
+fn built(name: &str, cause: EsError) -> EsError {
+    EsError::x_content_parse_bare(format!("Failed to build [{name}] after last required field arrived")).caused_by(cause)
+}
+
+fn bad(msg: impl Into<String>) -> EsError {
+    EsError::status(400, msg)
+}
+
+/// `BoostedTreeParams` (shared by regression and classification), in output order.
+const TREE_PARAMS: [&str; 12] = [
+    "alpha", "lambda", "gamma", "eta", "eta_growth_rate_per_tree", "max_trees", "feature_bag_fraction", "num_top_feature_importance_values",
+    "soft_tree_depth_limit", "soft_tree_depth_tolerance", "downsample_factor", "max_optimization_rounds_per_hyperparameter",
+];
+
+/// Checks and orders the boosted tree parameters of `m` (`maximum_number_trees` is the old
+/// name of `max_trees`).
+fn tree_params(m: &Map) -> EsResult<Map> {
+    let get = |k: &str| -> Option<f64> {
+        let v = if k == "max_trees" { m.get(k).or_else(|| m.get("maximum_number_trees")) } else { m.get(k) };
+        v.and_then(number)
+    };
+    let checks: [(&str, fn(f64) -> bool, &str); 12] = [
+        ("lambda", |v| v < 0.0, "must be a non-negative double"),
+        ("gamma", |v| v < 0.0, "must be a non-negative double"),
+        ("eta", |v| !(0.001..=1.0).contains(&v), "must be a double in [0.001, 1]"),
+        ("max_trees", |v| v <= 0.0 || v > 2000.0, "must be an integer in [1, 2000]"),
+        ("feature_bag_fraction", |v| v <= 0.0 || v > 1.0, "must be a double in (0, 1]"),
+        ("num_top_feature_importance_values", |v| v < 0.0, "must be a non-negative integer"),
+        ("alpha", |v| v < 0.0, "must be a non-negative double"),
+        ("eta_growth_rate_per_tree", |v| !(0.5..=2.0).contains(&v), "must be a double in [0.5, 2.0]"),
+        ("soft_tree_depth_limit", |v| v < 0.0, "must be a non-negative double"),
+        ("soft_tree_depth_tolerance", |v| v < 0.01, "must be a double greater than or equal to 0.01"),
+        ("downsample_factor", |v| v <= 0.0 || v > 1.0, "must be a double in (0, 1]"),
+        ("max_optimization_rounds_per_hyperparameter", |v| !(0.0..=20.0).contains(&v), "must be an integer in [0, 20]"),
+    ];
+    for (k, invalid, msg) in checks {
+        if get(k).is_some_and(invalid) {
+            return Err(bad(format!("[{k}] {msg}")));
+        }
+    }
+    let ints = ["max_trees", "num_top_feature_importance_values", "max_optimization_rounds_per_hyperparameter"];
+    let mut out = Map::new();
+    for k in TREE_PARAMS {
+        if let Some(v) = get(k) {
+            out.insert(k.into(), if ints.contains(&k) { Value::from(v as i64) } else { Value::from(v) });
+        }
+    }
+    Ok(out)
+}
+
+/// One analysis (`outlier_detection`, `regression`, `classification`) with its defaults.
+fn parse_analysis(ctx: &Ctx, kind: &str, cfg: &Value) -> EsResult<Value> {
+    use crate::json::locate::Seg;
+    let Value::Obj(m) = cfg else { return Err(EsError::parse(format!("[{kind}] must be an object"))) };
+    let fields: &[&str] = match kind {
+        "outlier_detection" => &["n_neighbors", "method", "feature_influence_threshold", "compute_feature_influence", "outlier_fraction", "standardization_enabled"],
+        "regression" => &["dependent_variable", "prediction_field_name", "training_percent", "randomize_seed", "loss_function", "loss_function_parameter", "feature_processors", "early_stopping_enabled"],
+        "classification" => &["dependent_variable", "prediction_field_name", "class_assignment_objective", "num_top_classes", "training_percent", "randomize_seed", "feature_processors", "early_stopping_enabled"],
+        other => return Err(EsError::new(400, "named_object_not_found_exception", format!("[1:1] unknown field [{other}]"))),
+    };
+    if let Some(k) = m.keys().find(|k| !fields.contains(&k.as_str()) && !TREE_PARAMS.contains(&k.as_str()) && k.as_str() != "maximum_number_trees") {
+        let (l, c) = ctx.raw_json().and_then(|s| crate::json::locate::locate(s, &[Seg::Key("analysis"), Seg::Key(kind), Seg::Key(k)], crate::json::locate::Target::Name)).unwrap_or((1, 1));
+        return Err(EsError::x_content_parse(l, c, format!("[{kind}] unknown field [{k}]")));
+    }
+    let mut out = Map::new();
+    if kind == "outlier_detection" {
+        if let Some(n) = m.get("n_neighbors").and_then(number) {
+            if n <= 0.0 {
+                return Err(bad("[n_neighbors] must be a positive integer"));
+            }
+            out.insert("n_neighbors".into(), (n as i64).into());
+        }
+        if let Some(v) = m.get("method") {
+            let s = v.to_es_string().to_lowercase();
+            if !["lof", "ldof", "distance_kth_nn", "distance_knn"].contains(&s.as_str()) {
+                return Err(EsError::illegal_argument(format!("No enum constant org.elasticsearch.xpack.core.ml.dataframe.analyses.OutlierDetection.Method.{}", s.to_uppercase())));
+            }
+            out.insert("method".into(), s.into());
+        }
+        for k in ["feature_influence_threshold", "outlier_fraction"] {
+            if let Some(v) = m.get(k).and_then(number)
+                && !(0.0..=1.0).contains(&v)
+            {
+                return Err(bad(format!("[{k}] must be in [0, 1]")));
+            }
+        }
+        if let Some(v) = m.get("feature_influence_threshold").and_then(number) {
+            out.insert("feature_influence_threshold".into(), v.into());
+        }
+        out.insert("compute_feature_influence".into(), m.get("compute_feature_influence").cloned().unwrap_or(Value::Bool(true)));
+        out.insert("outlier_fraction".into(), m.get("outlier_fraction").and_then(number).map_or(Value::from(0.05), Value::from));
+        out.insert("standardization_enabled".into(), m.get("standardization_enabled").cloned().unwrap_or(Value::Bool(true)));
+        return Ok(Value::Obj(out));
+    }
+    let Some(dep) = m.get("dependent_variable").map(Value::to_es_string) else { return Err(EsError::illegal_argument("Required [dependent_variable]")) };
+    let wrap = |e: EsError| built(kind, e);
+    let trees = tree_params(m).map_err(wrap)?;
+    if kind == "classification"
+        && let Some(n) = m.get("num_top_classes").and_then(number)
+        && !(-1.0..=1000.0).contains(&n)
+    {
+        return Err(wrap(bad("[num_top_classes] must be an integer in [0, 1000] or a special value -1")));
+    }
+    let training = m.get("training_percent").and_then(number);
+    if training.is_some_and(|t| t <= 0.0 || t > 100.0) {
+        return Err(wrap(bad("[training_percent] must be a positive double in (0, 100]")));
+    }
+    if kind == "regression"
+        && m.get("loss_function_parameter").and_then(number).is_some_and(|p| p <= 0.0)
+    {
+        return Err(wrap(bad("[loss_function_parameter] must be a positive double")));
+    }
+    out.insert("dependent_variable".into(), dep.clone().into());
+    out.extend(trees);
+    let seed = m.get("randomize_seed").and_then(number).map_or_else(|| rand::random::<i64>(), |s| s as i64);
+    let prediction = m.get("prediction_field_name").map(Value::to_es_string).unwrap_or_else(|| format!("{dep}_prediction"));
+    if kind == "classification" {
+        out.insert("class_assignment_objective".into(), m.get("class_assignment_objective").map(|v| v.to_es_string().to_lowercase()).unwrap_or_else(|| "maximize_minimum_recall".into()).into());
+        out.insert("num_top_classes".into(), m.get("num_top_classes").and_then(number).map_or(2, |n| n as i64).into());
+        out.insert("prediction_field_name".into(), prediction.into());
+        out.insert("training_percent".into(), training.unwrap_or(100.0).into());
+        out.insert("randomize_seed".into(), seed.into());
+    } else {
+        out.insert("prediction_field_name".into(), prediction.into());
+        out.insert("training_percent".into(), training.unwrap_or(100.0).into());
+        out.insert("randomize_seed".into(), seed.into());
+        out.insert("loss_function".into(), m.get("loss_function").map(|v| v.to_es_string().to_lowercase()).unwrap_or_else(|| "mse".into()).into());
+        if let Some(p) = m.get("loss_function_parameter").and_then(number) {
+            out.insert("loss_function_parameter".into(), p.into());
+        }
+    }
+    if let Some(fp) = m.get("feature_processors").filter(|v| v.as_array().is_some_and(|a| !a.is_empty())) {
+        out.insert("feature_processors".into(), fp.clone());
+    }
+    out.insert("early_stopping_enabled".into(), m.get("early_stopping_enabled").cloned().unwrap_or(Value::Bool(true)));
+    Ok(Value::Obj(out))
+}
+
+/// `DataFrameAnalyticsSource`: `index` (one or more non-empty names), `query`, `_source`,
+/// `runtime_mappings`.
+fn parse_source(v: &Value) -> EsResult<Map> {
+    let Value::Obj(m) = v else { return Err(EsError::illegal_argument("[source] must be an object")) };
+    let index: Vec<Value> = match m.get("index") {
+        None => return Err(EsError::illegal_argument("Required [index]")),
+        Some(Value::Arr(a)) => a.clone(),
+        Some(other) => vec![other.clone()],
+    };
+    if index.is_empty() {
+        return Err(built("data_frame_analytics_source", EsError::illegal_argument("source.index must specify at least one index")));
+    }
+    if index.iter().any(|i| i.as_str().is_none_or(str::is_empty)) {
+        return Err(built("data_frame_analytics_source", EsError::illegal_argument("source.index must contain non-null and non-empty strings")));
+    }
+    let mut out = Map::new();
+    out.insert("index".into(), Value::Arr(index));
+    out.insert("query".into(), m.get("query").cloned().unwrap_or_else(|| obj! { "match_all" => obj! {} }));
+    for k in ["_source", "runtime_mappings"] {
+        if let Some(v) = m.get(k) {
+            out.insert(k.into(), v.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// `DataFrameAnalyticsDest`: a non-empty `index` and `results_field` (`ml`).
+fn parse_dest(v: &Value) -> EsResult<Map> {
+    let Value::Obj(m) = v else { return Err(EsError::illegal_argument("[dest] must be an object")) };
+    let Some(index) = m.get("index").map(Value::to_es_string) else { return Err(EsError::illegal_argument("Required [index]")) };
+    if index.is_empty() {
+        return Err(built("data_frame_analytics_dest", EsError::illegal_argument("[index] must be non-empty")));
+    }
+    Ok([("index".to_string(), Value::from(index)), ("results_field".to_string(), m.get("results_field").cloned().unwrap_or_else(|| Value::from("ml")))].into_iter().collect())
+}
+
+/// `PutDataFrameAnalyticsAction.Request.validate`: the destination's name, and analyzed
+/// fields the source's `_source` filter drops.
+fn validate_request(src: &Map, dest: &Map, analyzed: Option<&Value>) -> EsResult<()> {
+    let mut errors = Vec::new();
+    let index = dest.get("index").map(Value::to_es_string).unwrap_or_default();
+    if let Some(p) = crate::meta::names::name_problem(&index) {
+        errors.push(format!("Invalid index name [{index}], {p}"));
+    } else if index.to_lowercase() != index {
+        errors.push(format!("Destination index [{index}] must be lowercase"));
+    }
+    let list = |v: Option<&Value>| -> Vec<String> {
+        match v {
+            Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+            Some(Value::Str(s)) => vec![s.clone()],
+            _ => Vec::new(),
+        }
+    };
+    let includes = match analyzed {
+        Some(Value::Obj(a)) => list(a.get("includes")),
+        Some(other @ (Value::Arr(_) | Value::Str(_))) => list(Some(other)),
+        _ => Vec::new(),
+    };
+    if let Some(Value::Obj(s)) = src.get("_source") {
+        let (inc, exc) = (list(s.get("includes")), list(s.get("excludes")));
+        for f in &includes {
+            let kept = (inc.is_empty() || inc.iter().any(|p| crate::xcontent::filter::glob_match(p, f))) && !exc.iter().any(|p| crate::xcontent::filter::glob_match(p, f));
+            if !kept {
+                errors.push(format!("field [{f}] is included in [analyzed_fields] but not in [source._source]"));
+            }
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(EsError::action_request_validation(&errors)) }
+}
+
+/// `SourceDestValidator` against the cluster: concrete source indices exist, no remote
+/// source, and the destination (its write index) is not one of the sources.
+fn validate_source_dest(st: &crate::meta::ClusterState, src: &Map, dest: &Map, now: i64) -> EsResult<()> {
+    let sources: Vec<String> = src.get("index").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
+    let fail = |m: String| {
+        let e = EsError::new(400, "validation_exception", format!("Validation Failed: 1: {m};"));
+        Err(e)
+    };
+    if sources.iter().any(|s| s.contains(':')) {
+        return fail("remote source and cross-project indices are not supported".into());
+    }
+    let opts = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
+    let mut resolved = Vec::new();
+    for s in &sources {
+        if !s.contains('*') && crate::meta::resolve::resolve(st, std::slice::from_ref(s), &crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN, now).is_err() {
+            return fail(format!("no such index [{s}]"));
+        }
+        resolved.extend(crate::meta::resolve::resolve(st, std::slice::from_ref(s), &opts, now).unwrap_or_default());
+    }
+    let dest_name = dest.get("index").map(Value::to_es_string).unwrap_or_default();
+    let holders: Vec<&String> = st.metadata.indices.values().filter(|i| i.aliases.contains_key(&dest_name)).map(|i| &i.name).collect();
+    let write = if st.metadata.indices.contains_key(&dest_name) {
+        Some(dest_name.clone())
+    } else if holders.len() == 1 {
+        Some(holders[0].clone())
+    } else if holders.len() > 1 {
+        let w = st.metadata.indices.values().find(|i| i.aliases.get(&dest_name).is_some_and(|a| a.is_write_index == Some(true))).map(|i| i.name.clone());
+        if w.is_none() {
+            return fail(format!("no write index is defined for alias [{dest_name}]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index"));
+        }
+        w
+    } else {
+        None
+    };
+    if let Some(w) = write
+        && resolved.contains(&w)
+    {
+        return fail(format!("Destination index [{w}] is included in source expression [{}]", sources.join(",")));
+    }
+    Ok(())
+}
+
 pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     if !valid_id(&id) {
         return Err(invalid_id("id", &id));
     }
     let body = ctx.body_map()?.unwrap_or_default();
-    let Some(source) = body.get("source") else { return Err(EsError::action_request_validation(&["[source] must not be null.".into()])) };
-    let Some(dest) = body.get("dest") else { return Err(EsError::action_request_validation(&["[dest] must not be null.".into()])) };
-    let Some(Value::Obj(analysis)) = body.get("analysis") else { return Err(EsError::action_request_validation(&["[analysis] must not be null.".into()])) };
-    let mut src = Map::new();
-    src.insert(
-        "index".into(),
-        match source.get("index") {
-            Some(Value::Str(s)) => crate::arr![s.clone()],
-            Some(v) => v.clone(),
-            None => Value::Arr(Vec::new()),
-        },
-    );
-    src.insert("query".into(), source.get("query").cloned().unwrap_or_else(|| obj! { "match_all" => obj! {} }));
-    for k in ["_source", "runtime_mappings"] {
-        if let Some(v) = source.get(k) {
-            src.insert(k.into(), v.clone());
-        }
+    // DataFrameAnalyticsConfig's strict parser (create_time, version and headers are rejected).
+    const FIELDS: &[&str] = &["id", "description", "source", "dest", "analysis", "analyzed_fields", "model_memory_limit", "allow_lazy_start", "max_num_threads", "_meta"];
+    if let Some(k) = body.keys().find(|k| !FIELDS.contains(&k.as_str())) {
+        return Err(crate::xpack::unknown_field(ctx, "data_frame_analytics_config", k));
     }
-    let mut an = Map::new();
-    for (kind, cfg) in analysis {
-        let mut c = cfg.as_object().cloned().unwrap_or_default();
-        if kind == "outlier_detection" {
-            c.entry("compute_feature_influence".to_string()).or_insert(Value::Bool(true));
-            c.entry("outlier_fraction".to_string()).or_insert(Value::from(0.05));
-            c.entry("standardization_enabled".to_string()).or_insert(Value::Bool(true));
-        }
-        an.insert(kind.clone(), Value::Obj(c));
+    if let Some(b) = body.get("id").map(Value::to_es_string)
+        && b != id
+    {
+        return Err(EsError::illegal_argument(format!("Inconsistent id; '{b}' specified in the body differs from '{id}' specified as a URL argument")));
     }
+    let src = match body.get("source") {
+        Some(v) => parse_source(v).map_err(|e| in_field(ctx, "source", e))?,
+        None => return Err(EsError::action_request_validation(&["[source] must not be null.".into()])),
+    };
+    let dest = match body.get("dest") {
+        Some(v) => parse_dest(v).map_err(|e| in_field(ctx, "dest", e))?,
+        None => return Err(EsError::action_request_validation(&["[dest] must not be null.".into()])),
+    };
+    let an = match body.get("analysis") {
+        Some(Value::Obj(a)) if a.is_empty() => {
+            let (l, c) = end_of(ctx, &[crate::json::locate::Seg::Key("analysis")]);
+            let cause = EsError::new(400, "parsing_exception", "Failed to parse object: expecting token of type [FIELD_NAME] but found [END_OBJECT]").with_meta("line", l).with_meta("col", c);
+            return Err(in_field(ctx, "analysis", cause));
+        }
+        Some(Value::Obj(a)) => {
+            let mut an = Map::new();
+            for (kind, cfg) in a {
+                an.insert(kind.clone(), parse_analysis(ctx, kind, cfg).map_err(|e| in_field(ctx, "analysis", e))?);
+            }
+            an
+        }
+        _ => return Err(EsError::action_request_validation(&["[analysis] must not be null.".into()])),
+    };
+    validate_request(&src, &dest, body.get("analyzed_fields"))?;
+    validate_source_dest(&ctx.state(), &src, &dest, ctx.now_ms)?;
     let mut m = Map::new();
+    // `DataFrameAnalyticsConfig.toXContent` order; the creator's roles as `authorization`.
     m.insert("id".into(), id.clone().into());
+    m.insert("create_time".into(), ctx.now_ms.into());
+    m.insert("version".into(), CONFIG_VERSION.into());
+    let roles = crate::xpack::security::principal(ctx).roles.clone();
+    m.insert("authorization".into(), obj! { "roles" => Value::Arr(roles.into_iter().map(Value::from).collect()) });
     if let Some(d) = body.get("description") {
         m.insert("description".into(), d.clone());
     }
     m.insert("source".into(), Value::Obj(src));
-    m.insert("dest".into(), obj! { "index" => dest.get("index").cloned().unwrap_or(Value::Null), "results_field" => dest.get("results_field").cloned().unwrap_or(Value::from("ml")) });
+    m.insert("dest".into(), Value::Obj(dest));
     m.insert("analysis".into(), Value::Obj(an));
     if let Some(a) = body.get("analyzed_fields") {
-        m.insert("analyzed_fields".into(), a.clone());
+        // A `FetchSourceContext`: includes and excludes, lists either way.
+        let list = |v: Option<&Value>| match v {
+            Some(Value::Arr(a)) => Value::Arr(a.clone()),
+            Some(Value::Str(s)) => crate::arr![s.clone()],
+            _ => Value::Arr(Vec::new()),
+        };
+        let (inc, exc) = match a {
+            Value::Obj(o) => (list(o.get("includes")), list(o.get("excludes"))),
+            other => (list(Some(other)), Value::Arr(Vec::new())),
+        };
+        m.insert("analyzed_fields".into(), obj! { "includes" => inc, "excludes" => exc });
     }
     m.insert("model_memory_limit".into(), body.get("model_memory_limit").cloned().unwrap_or(Value::from("1gb")));
-    m.insert("create_time".into(), ctx.now_ms.into());
-    m.insert("version".into(), CONFIG_VERSION.into());
     m.insert("allow_lazy_start".into(), body.get("allow_lazy_start").cloned().unwrap_or(Value::Bool(false)));
     m.insert("max_num_threads".into(), body.get("max_num_threads").cloned().unwrap_or(Value::from(1)));
+    if let Some(meta) = body.get("_meta") {
+        m.insert("_meta".into(), meta.clone());
+    }
     let v = Value::Obj(m);
     let out = v.clone();
     let now = ctx.now_ms;
@@ -82,7 +379,20 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub fn get(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let list = expand(&st, DFAS, ctx.path_param("id"), ctx.bool_param("allow_no_match", true)?, no_dfa)?;
-    let v: Vec<Value> = list.iter().map(|(_, d)| public(d)).collect();
+    // `exclude_generated` drops what Elasticsearch generated (for exporting a config).
+    let export = ctx.bool_param("exclude_generated", false)?;
+    let v: Vec<Value> = list
+        .iter()
+        .map(|(_, d)| match public(d) {
+            Value::Obj(mut m) if export => {
+                for k in ["create_time", "version", "authorization"] {
+                    m.shift_remove(k);
+                }
+                Value::Obj(m)
+            }
+            other => other,
+        })
+        .collect();
     Reply::ok(obj! { "count" => v.len(), "data_frame_analytics" => Value::Arr(v) })
 }
 

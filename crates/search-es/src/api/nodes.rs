@@ -301,8 +301,10 @@ fn header(ctx: &Ctx, selected: bool) -> Map {
 
 fn thread_pool_info(ctx: &Ctx, m: &NodeMetrics) -> Value {
     let mut tp = Map::new();
-    for p in super::cat::thread_pools_for(ctx.cluster.dialect, m.processors) {
-        let v = if p.fixed {
+    for (p, _) in super::cat::live_thread_pools(ctx.cluster, m.processors) {
+        let v = if p.fixed && !p.keep_alive.is_empty() {
+            obj! { "type" => "fixed", "size" => p.size, "keep_alive" => p.keep_alive, "queue_size" => p.queue_size }
+        } else if p.fixed {
             obj! { "type" => if p.resizable { "resizable" } else { "fixed" }, "size" => p.size, "queue_size" => p.queue_size }
         } else {
             obj! { "type" => "scaling", "core" => p.core, "max" => p.size, "keep_alive" => p.keep_alive, "queue_size" => -1 }
@@ -589,8 +591,11 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
         }
         if want("thread_pool") {
             let mut tp = Map::new();
-            for p in super::cat::thread_pools_for(ctx.cluster.dialect, m.processors) {
-                let mut s = obj! { "threads" => 0, "queue" => 0, "active" => 0, "rejected" => 0, "largest" => 0, "completed" => 0 };
+            for (p, st) in super::cat::live_thread_pools(ctx.cluster, m.processors) {
+                let mut s = obj! {
+                    "threads" => st.threads as i64, "queue" => st.queue as i64, "active" => st.active as i64,
+                    "rejected" => st.rejected as i64, "largest" => st.largest as i64, "completed" => st.completed as i64,
+                };
                 if p.resizable && let Some(o) = s.as_object_mut() {
                     o.insert("total_wait_time_in_nanos".into(), 0.into());
                 }
@@ -655,10 +660,7 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
             n.insert("script".into(), obj! { "compilations" => 0, "cache_evictions" => 0, "compilation_limit_triggered" => 0 });
         }
         if want("ingest") {
-            n.insert(
-                "ingest".into(),
-                obj! { "total" => obj! { "count" => 0, "time_in_millis" => 0, "current" => 0, "failed" => 0 }, "pipelines" => obj! {} },
-            );
+            n.insert("ingest".into(), crate::ingest::pipeline::stats_value(ctx.cluster));
         }
         if want("indexing_pressure") {
             n.insert("indexing_pressure".into(), indexing_pressure(m.heap_max / 10));
@@ -723,20 +725,41 @@ pub fn breakers(m: &NodeMetrics) -> Vec<(&'static str, i64, f64)> {
     ]
 }
 
-/// [`breakers`] with the `request` breaker's live numbers: its limit from
-/// `indices.breaker.request.limit`, what it holds and how often it tripped
-/// (name, limit, overhead, estimated, tripped).
+/// [`breakers`] with live numbers (name, limit, overhead, estimated, tripped): the `request`
+/// breaker's limit from `indices.breaker.request.limit`, what it holds and how often it
+/// tripped; `inflight_requests` and `parent` likewise ([`crate::breaker`]). Elasticsearch 9.5.5
+/// lists them as fielddata, request, inflight_requests, model_inference, eql_sequence, parent.
 pub fn breaker_stats(cluster: &Cluster, st: &crate::meta::ClusterState, m: &NodeMetrics) -> Vec<(&'static str, i64, f64, i64, i64)> {
-    breakers(m)
+    let ((in_flight, in_flight_tripped), (parent, parent_tripped)) = cluster.breakers.in_flight_stats();
+    let limit = |key: &str, default: &str| {
+        let v = st.metadata.cluster_setting(key).unwrap_or(default);
+        match crate::breaker::memory_size(v, m.heap_max).or_else(|| crate::breaker::memory_size(default, m.heap_max)) {
+            Some(u64::MAX) | None => -1,
+            Some(b) => b.min(i64::MAX as u64) as i64,
+        }
+    };
+    let mut out: Vec<(&'static str, i64, f64, i64, i64)> = breakers(m)
         .into_iter()
-        .map(|(name, limit, overhead)| {
-            if name != "request" {
-                return (name, limit, overhead, 0, 0);
+        .map(|(name, limit_default, overhead)| match name {
+            "request" => {
+                let b = cluster.breakers.request(cluster, st);
+                (name, b.limit().min(i64::MAX as u64) as i64, overhead, b.used() as i64, b.tripped() as i64)
             }
-            let b = cluster.breakers.request(cluster, st);
-            (name, b.limit().min(i64::MAX as u64) as i64, overhead, b.used() as i64, b.tripped() as i64)
+            "inflight_requests" => (name, limit("network.breaker.inflight_requests.limit", "100%"), overhead, in_flight, in_flight_tripped),
+            "parent" => (name, limit("indices.breaker.total.limit", "95%"), overhead, parent, parent_tripped),
+            _ => (name, limit_default, overhead, 0, 0),
         })
-        .collect()
+        .collect();
+    if cluster.dialect == crate::cluster::Dialect::Elasticsearch {
+        // x-pack's breakers, and Elasticsearch's order.
+        let half = m.heap_max / 2;
+        let parent = out.pop();
+        out.swap(0, 1);
+        out.push(("model_inference", half, 1.0, 0, 0));
+        out.push(("eql_sequence", half, 1.0, 0, 0));
+        out.extend(parent);
+    }
+    out
 }
 
 /// `indexing_pressure` with every counter at zero.
@@ -903,6 +926,7 @@ const MODULES: &[Module] = &[
     Module { name: "constant-keyword", description: "Module for the constant-keyword field type, which is a specialization of keyword for the case when all documents have the same value.", classname: "org.elasticsearch.xpack.constantkeyword.ConstantKeywordMapperPlugin", extended_plugins: &["x-pack-core", "lang-painless"] },
     Module { name: "data-streams", description: "Elasticsearch Expanded Pack Plugin - Data Streams", classname: "org.elasticsearch.datastreams.DataStreamsPlugin", extended_plugins: &[] },
     Module { name: "ingest-common", description: "Module for ingest processors that do not require additional security permissions or have large dependencies and resources", classname: "org.elasticsearch.ingest.common.IngestCommonPlugin", extended_plugins: &["lang-painless"] },
+    Module { name: "lang-expression", description: "Lucene expressions integration for Elasticsearch", classname: "org.elasticsearch.script.expression.ExpressionPlugin", extended_plugins: &[] },
     Module { name: "lang-mustache", description: "Mustache scripting integration for Elasticsearch", classname: "org.elasticsearch.script.mustache.MustachePlugin", extended_plugins: &[] },
     Module { name: "lang-painless", description: "An easy, safe and fast scripting language for Elasticsearch", classname: "org.elasticsearch.painless.PainlessPlugin", extended_plugins: &[] },
     Module { name: "mapper-extras", description: "Adds advanced field mappers", classname: "org.elasticsearch.index.mapper.extras.MapperExtrasPlugin", extended_plugins: &[] },
@@ -911,7 +935,9 @@ const MODULES: &[Module] = &[
     Module { name: "reindex", description: "The Reindex module adds APIs to reindex from one index to another or update documents in place.", classname: "org.elasticsearch.reindex.ReindexPlugin", extended_plugins: &[] },
     Module { name: "rest-root", description: "Adds HEAD and GET / endpoint to Elasticsearch", classname: "org.elasticsearch.rest.root.MainRestPlugin", extended_plugins: &[] },
     Module { name: "runtime-fields-common", description: "Module for runtime fields features and extensions that have large dependencies", classname: "org.elasticsearch.runtimefields.RuntimeFieldsCommonPlugin", extended_plugins: &["lang-painless"] },
+    Module { name: "transport-netty4", description: "Netty 4 based transport implementation", classname: "org.elasticsearch.transport.netty4.Netty4Plugin", extended_plugins: &[] },
     Module { name: "unsigned-long", description: "Module for the unsigned long field type", classname: "org.elasticsearch.xpack.unsignedlong.UnsignedLongMapperPlugin", extended_plugins: &["x-pack-core", "lang-painless"] },
+    Module { name: "user-agent", description: "A utility for extraction of information from user agent header values", classname: "org.elasticsearch.useragent.UserAgentPlugin", extended_plugins: &[] },
     Module { name: "wildcard", description: "A plugin for a keyword field type with efficient wildcard search", classname: "org.elasticsearch.xpack.wildcard.Wildcard", extended_plugins: &["x-pack-core", "lang-painless"] },
     Module { name: "x-pack-async", description: "A module which handles common async operations", classname: "org.elasticsearch.xpack.async.AsyncResultsIndexPlugin", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-async-search", description: "A module which allows to track the progress of a search asynchronously.", classname: "org.elasticsearch.xpack.search.AsyncSearch", extended_plugins: &["x-pack-core"] },

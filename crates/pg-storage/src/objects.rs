@@ -24,8 +24,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub enum StorageConfig {
     /// A directory on this machine (zero-setup development).
     Local(PathBuf),
-    /// S3 or an S3-compatible endpoint (MinIO, R2, …). Credentials come from the usual AWS env vars
-    /// or the instance role.
+    /// S3 or an S3-compatible endpoint (MinIO, R2, …). Credentials come from the usual AWS env vars,
+    /// a web identity, the container credentials endpoint (task role; see
+    /// [`crate::container_credentials`]) or the instance role, in the AWS SDKs' order.
     S3 { bucket: String, region: Option<String>, endpoint: Option<String>, prefix: Option<String> },
 }
 
@@ -57,6 +58,9 @@ impl Objects {
                 }
                 if let Some(e) = endpoint {
                     b = b.with_endpoint(e).with_allow_http(e.starts_with("http://"));
+                }
+                if let Some(c) = crate::container_credentials::ContainerCredentials::from_env()? {
+                    b = b.with_credentials(Arc::new(c));
                 }
                 let s3 = b.build()?;
                 let description = match prefix {

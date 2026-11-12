@@ -104,10 +104,8 @@ fn pinned(organic: QueryRef, pins: &[Option<String>]) -> EsResult<QueryRef> {
         let score = f32::from_bits(boost_num);
         boost_num -= 1;
         if let Some(id) = pin {
-            pinned.push(arc(search_index::query::BoostQuery::new(
-                arc(ConstantScoreQuery::new(arc(TermQuery::new(search_index::schema::ID_FIELD, id.as_bytes().to_vec())))),
-                score,
-            )));
+            // `ConstantScoreQuery(TermInSetQuery(_id, id))`, printed with the Uid-encoded id.
+            pinned.push(arc(search_index::query::BoostQuery::new(arc(ConstantScoreQuery::new(super::ids::ids(std::slice::from_ref(id)))), score)));
         }
     }
     let pins: QueryRef = arc(search_index::query::DisMaxQuery::new(pinned, 0.0));
@@ -830,6 +828,10 @@ fn span_node(ctx: &QueryCtx, q: &Query) -> EsResult<Option<search_index::query::
             if clauses.is_empty() {
                 return Ok(None);
             }
+            // `SpanOrQuery.addClause`, as the clauses are added.
+            if clauses.iter().any(|c| c.field() != clauses[0].field()) {
+                return Err(EsError::illegal_argument("Clauses must have same field."));
+            }
             SpanNode::Or(clauses)
         }
         Query::SpanFirst(f) => {
@@ -838,14 +840,25 @@ fn span_node(ctx: &QueryCtx, q: &Query) -> EsResult<Option<search_index::query::
         }
         Query::SpanNot(n) => {
             let (Some(i), Some(e)) = (span_node(ctx, &n.include)?, span_node(ctx, &n.exclude)?) else { return Ok(None) };
+            // `SpanNotQuery`'s constructor.
+            if i.field() != e.field() {
+                return Err(EsError::illegal_argument("Clauses must have same field."));
+            }
             SpanNode::Not { include: Box::new(i), exclude: Box::new(e), pre: n.pre.max(0) as u32, post: n.post.max(0) as u32 }
         }
         Query::SpanContaining(c) => {
             let (Some(b), Some(l)) = (span_node(ctx, &c.big)?, span_node(ctx, &c.little)?) else { return Ok(None) };
+            // `SpanContainQuery`'s constructor.
+            if b.field() != l.field() {
+                return Err(EsError::illegal_argument("big and little not same field"));
+            }
             SpanNode::Containing { big: Box::new(b), little: Box::new(l) }
         }
         Query::SpanWithin(c) => {
             let (Some(b), Some(l)) = (span_node(ctx, &c.big)?, span_node(ctx, &c.little)?) else { return Ok(None) };
+            if b.field() != l.field() {
+                return Err(EsError::illegal_argument("big and little not same field"));
+            }
             SpanNode::Within { big: Box::new(b), little: Box::new(l) }
         }
         Query::SpanFieldMasking(m) => {
@@ -1084,11 +1097,15 @@ pub fn source_confirmed(ctx: &QueryCtx, f: &FieldInfo, q: QueryRef) -> QueryRef 
     super::geo::source_confirmed(ctx, f, q)
 }
 
-struct SortLeaf(super::scripts::Leaf);
+struct SortLeaf(super::scripts::Leaf, f64);
 
 impl search_index::collector::top_field::LeafSortScript for SortLeaf {
+    fn set_score(&mut self, score: f32) {
+        self.1 = score as f64;
+    }
+
     fn number(&mut self, doc: u32) -> search_index::Result<f64> {
-        self.0.run_f64(doc, 0.0).map_err(|e| {
+        self.0.run_f64(doc, self.1).map_err(|e| {
             let e = crate::scripting::script_error(e);
             let reason = format!("{}{}", e.reason(), super::scripts::park_script_error(e.clone()));
             search_index::Error::Es { kind: std::borrow::Cow::Borrowed("script_exception"), reason, status: e.status }
@@ -1102,7 +1119,11 @@ impl search_index::collector::top_field::SortScript for SortPainless {
     fn leaf(&self, seg: &search_index::SegmentContext) -> search_index::Result<Box<dyn search_index::collector::top_field::LeafSortScript>> {
         let host = self.0.host(seg);
         let leaf = super::scripts::Leaf::from_bound(&self.0.bound, host).ok_or_else(|| search_index::Error::illegal("not painless"))?;
-        Ok(Box::new(SortLeaf(leaf)))
+        Ok(Box::new(SortLeaf(leaf, 0.0)))
+    }
+
+    fn needs_score(&self) -> bool {
+        self.0.bound.painless().is_some_and(|s| s.needs_score())
     }
 }
 

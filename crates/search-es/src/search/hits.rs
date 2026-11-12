@@ -531,20 +531,25 @@ pub fn render_doc_stored(
         }
     }
     let fs = wants_source(o);
-    // The stored bytes as they are, when nothing reads or changes them (`SourceView` would
-    // return them unchanged): no filtering, `fields`, vectors or forced synthetic source.
+    // The stored bytes, as they are or filtered straight from the text, when nothing else
+    // reads or changes them (`SourceView` would only filter them): no `fields`, vectors or
+    // forced synthetic source.
+    let filter = fs.filter();
     let raw_source = if o.raw_source
         && fs.fetch
         && o.fields.is_empty()
-        && fs.filter().is_none()
         && !table.has_vectors
         && let Some(idx) = idx
         && !(o.force_synthetic && crate::engine::synthetic::source_mode(idx) == crate::engine::synthetic::SourceMode::Stored)
         && let Some(bytes) = crate::fetch::source_bytes(stored)
-        && let Some(end) = crate::json::raw::single_object_end(bytes)
-        && let Ok(text) = std::str::from_utf8(&bytes[..end])
     {
-        Some(crate::json::raw::raw(text))
+        match &filter {
+            None => crate::json::raw::single_object_end(bytes).and_then(|end| std::str::from_utf8(&bytes[..end]).ok()).map(crate::json::raw::raw),
+            Some(f) => {
+                let mut out = crate::json::raw::buffer(bytes.len() / 2);
+                f.filter_bytes(bytes, &mut out).then(|| crate::json::raw::from_buffer(out))
+            }
+        }
     } else {
         None
     };
@@ -562,7 +567,7 @@ pub fn render_doc_stored(
     if fs.fetch && source.is_some() {
         // Only `fields` reads the source again; otherwise it moves into the hit uncopied.
         let owned = |source: &mut Option<Value>| if o.fields.is_empty() { source.take().unwrap_or_default() } else { source.clone().unwrap_or_default() };
-        let v = match (idx, fs.filter(), &source) {
+        let v = match (idx, &filter, &source) {
             (Some(idx), _, _) => {
                 // `fields` naming a mapped field reads the source as a map first.
                 let parsed = (!fs.includes.is_empty() || !fs.excludes.is_empty()) && o.fields.iter().any(|f| !f.field.starts_with('_') && !table.matching(&f.field).is_empty());

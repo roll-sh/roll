@@ -28,13 +28,13 @@ fn task_value_at(ctx: &Ctx, t: &TaskInfo, detailed: bool, running_nanos: i64) ->
     m.insert("node".into(), Value::from(node.id.clone()));
     m.insert("id".into(), Value::from(t.id));
     m.insert("type".into(), "transport".into());
-    m.insert("action".into(), Value::from(t.action.clone()));
+    m.insert("action".into(), Value::from(t.action.to_string()));
     // A running by-query task reports its progress (`BulkByScrollTask.Status`).
     if detailed && let Some(live) = &t.live {
         m.insert("status".into(), live.status_value());
     }
     if detailed {
-        m.insert("description".into(), Value::from(t.description.clone()));
+        m.insert("description".into(), Value::from(t.description_in(ctx.cluster)));
     }
     m.insert("start_time_in_millis".into(), Value::from(t.start_ms));
     m.insert("running_time_in_nanos".into(), Value::from(running_nanos));
@@ -221,9 +221,11 @@ pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
         let (node, n) = parse_task_id(raw)?;
         let task = if node == node_id { ctx.cluster.tasks.get(n) } else { None };
         return match task {
+            Some(t) if !t.cancellable => Reply::ok(failure(&node, EsError::illegal_argument(format!("task [{raw}] doesn't support cancellation")))),
             Some(t) => {
                 t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
-                Reply::ok(obj! { "nodes" => obj! {} })
+                // The cancelled task as it now stands (`CancelTasksResponse`).
+                Reply::ok(by_node(ctx, &[t], false))
             }
             None => Reply::ok(failure(&node, EsError::resource_not_found(format!("task [{raw}] is not found")))),
         };
@@ -236,10 +238,12 @@ pub fn cancel(ctx: &Ctx) -> EsResult<Reply> {
     if matched.iter().any(|t| t.id == me.id) {
         return Reply::ok(failure(&node_id, EsError::new(400, "task_cancelled_exception", "task cancelled [by user request]")));
     }
+    // Only cancellable tasks are cancelled and listed.
+    let matched: Vec<TaskInfo> = matched.into_iter().filter(|t| t.cancellable).collect();
     for t in &matched {
         t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    Reply::ok(obj! { "nodes" => obj! {} })
+    Reply::ok(by_node(ctx, &matched, false))
 }
 
 /// A finished task as `GET _tasks/<id>` (and the `.tasks` index) shows it (`TaskResult`).
