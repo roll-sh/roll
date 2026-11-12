@@ -510,10 +510,8 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. **The rest of a cold start**: with the CPU boost in, what's left is dockerd starting the
-   container on its network (≈250 ms here; the network, `--init` and the log driver each
-   measured within noise by `scripts/bench-apps-coldstart.sh`). Snapshot restore (CRIU, or
-   Firecracker on the fleet) is the next step for it.
+2. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
+    `code-preview/tests/fargate.rs`.
 3. **Notifications.** A failed deploy and a crash loop reach people: for a repo service as
    deployment events through roll code's one delivery queue (webhooks, review apps), and to chat
    through chat ops; designed with the other branches, not a second webhook system. (Done:
@@ -521,9 +519,11 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    `?q=`, `roll logs --grep … --since 2h`, the Logs tab's Search 7 days.)
 4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL: as roll secrets links per
    environment (their providers), not more apps link kinds.
-5. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
-    `code-preview/tests/fargate.rs`.
-6. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
+5. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
     node; pending claims expire.
+6. **The rest of a cold start**: with the CPU boost in, what's left is dockerd starting the
+   container on its network (≈250 ms here; the network, `--init` and the log driver each
+   measured within noise by `scripts/bench-apps-coldstart.sh`). Snapshot restore (CRIU, or
+   Firecracker on the fleet) is the next step for it.
 7. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
 8. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
