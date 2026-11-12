@@ -1004,6 +1004,53 @@ impl Control {
         Ok((resp.status, ct, resp.body))
     }
 
+    /// A new API key of cluster `id` (the cluster's own `_security/api_key`), for a client that
+    /// mustn't share the cluster's password: `api_key` is `base64(<key id>@<cluster>:<key>)`,
+    /// sent as `Authorization: ApiKey …`, and works on any host (the `@<cluster>` names the
+    /// cluster). The key is in this answer only. `expires_in_s`: it stops working after that.
+    pub async fn create_key(&self, id: &str, name: &str, expires_in_s: Option<i64>) -> Result<Value> {
+        let c = self.get(id).await?;
+        if name.trim().is_empty() || name.len() > 1024 {
+            return Err(ControlError::Invalid("name: 1 to 1024 characters".into()));
+        }
+        let mut body = json!({ "name": name });
+        if let Some(s) = expires_in_s {
+            if s <= 0 {
+                return Err(ControlError::Invalid("expires_in_s must be positive".into()));
+            }
+            body["expiration"] = json!(format!("{s}s"));
+        }
+        let resp = self.call(&c, EsRequest::json("POST", "/_security/api_key", serde_json::to_vec(&body).unwrap_or_default())).await;
+        let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
+        if resp.status != 200 {
+            return Err(ControlError::Internal(anyhow::anyhow!("creating an API key of cluster {} failed ({}): {v}", c.name, resp.status)));
+        }
+        let (Some(key_id), Some(key)) = (v["id"].as_str(), v["api_key"].as_str()) else {
+            return Err(ControlError::Internal(anyhow::anyhow!("the cluster answered without a key: {v}")));
+        };
+        let api_key = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{key}", c.name));
+        let mut out = json!({ "id": key_id, "name": name, "api_key": api_key, "url": connection_of(&self.cfg, &c.name)["url"] });
+        if let Some(ms) = v["expiration"].as_i64() {
+            out["expires_at"] = json!(ms / 1000);
+        }
+        Ok(out)
+    }
+
+    /// Revokes API key `key_id` of cluster `id` (`NotFound` when it doesn't exist or was
+    /// revoked already).
+    pub async fn delete_key(&self, id: &str, key_id: &str) -> Result<()> {
+        let c = self.get(id).await?;
+        let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
+        let resp = self.call(&c, EsRequest::json("DELETE", "/_security/api_key", body)).await;
+        let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
+        let revoked = v["invalidated_api_keys"].as_array().is_some_and(|a| a.iter().any(|k| k.as_str() == Some(key_id)));
+        match (resp.status, revoked) {
+            (200, true) => Ok(()),
+            (200 | 404, false) => Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name))),
+            (s, _) => Err(ControlError::Internal(anyhow::anyhow!("revoking an API key of cluster {} failed ({s}): {v}", c.name))),
+        }
+    }
+
     /// The cluster's indices (`_cat/indices`): health, status, docs, size. Wakes the cluster.
     pub async fn indices(&self, id: &str) -> Result<Vec<Value>> {
         let c = self.get(id).await?;

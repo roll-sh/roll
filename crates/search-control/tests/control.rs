@@ -555,6 +555,33 @@ async fn per_index_routes() {
     assert_eq!(s, 200);
 }
 
+/// API keys a client gets instead of the cluster's password (roll secrets' managed links):
+/// they search, and stop working once revoked; the password is untouched.
+#[tokio::test]
+async fn api_keys() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "keys"})).await;
+    let (user, pw) = creds(&c);
+    let (s, _) = e.es(&user, &pw, reqwest::Method::PUT, "/notes/_doc/1?refresh=true", Some(json!({"t": "x"}))).await;
+    assert_eq!(s, 201);
+    let k = e.post("/v1/search/clusters/keys/keys", json!({"name": "roll secrets prod ES_KEY", "expires_in_s": 3600})).await;
+    assert!(k["expires_at"].as_i64().is_some(), "{k}");
+    let header = format!("ApiKey {}", k["api_key"].as_str().unwrap());
+    let search = |h: String| {
+        let url = format!("{}/notes/_count", e.es);
+        let http = e.http.clone();
+        async move { http.get(url).header("Authorization", h).send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(search(header.clone()).await, 200);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/keys/keys/{}", k["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    assert_eq!(search(header).await, 401);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/keys/keys/{}", k["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 404);
+    // The cluster's own password still works.
+    assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/notes/_count", None).await.0, 200);
+}
+
 #[tokio::test]
 async fn documents_survive_unload_and_branch() {
     let e = env().await;

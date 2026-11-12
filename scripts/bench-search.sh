@@ -277,23 +277,33 @@ case ${1:-} in
     ;;
   footprint)
     start_es
+    start_os
     start_roll --idle-unload-ms 2000
     sleep 2
-    echo "| measure | roll | Elasticsearch $ES_VERSION |"
-    echo "|---|---:|---:|"
-    echo "| RSS, idle node (MiB) | $(($(rss_kib "$ROLL_NAME") / 1024)) | $(($(rss_kib "$ES_NAME") / 1024)) |"
-    python3 scripts/bench-search.py --target "roll=http://127.0.0.1:$ROLL_PORT" \
-      --target "es=http://127.0.0.1:$ES_PORT" --rounds 1 --only bulk,match --reps 50 --keep >/dev/null
-    for u in "http://127.0.0.1:$ROLL_PORT" "http://127.0.0.1:$ES_PORT"; do
+    # The other targets: name, port, container (OpenSearch unless BENCH_OS=0).
+    mapfile -t rest < <(others)
+    hdr="| measure | roll |" sep="|---|---:|"
+    for o in "${rest[@]}"; do read -r n _ _ <<<"$o"; hdr+=" $n |"; sep+="---:|"; done
+    echo "$hdr"; echo "$sep"
+    row() { # label roll-value then one value per other target from the function $2
+      local line="| $1 | $2 |" o n p c
+      shift 2
+      for o in "${rest[@]}"; do read -r n p c <<<"$o"; line+=" $("$@" "$n" "$p" "$c") |"; done
+      echo "$line"
+    }
+    rss_mib() { echo $(($(rss_kib "$3") / 1024)); }
+    row "RSS, idle node (MiB)" "$(($(rss_kib "$ROLL_NAME") / 1024))" rss_mib
+    targets=(--target "roll=http://127.0.0.1:$ROLL_PORT")
+    for o in "${rest[@]}"; do read -r n p _ <<<"$o"; targets+=(--target "$n=http://127.0.0.1:$p"); done
+    python3 scripts/bench-search.py "${targets[@]}" --rounds 1 --only bulk,match --reps 50 --keep >/dev/null
+    for u in "http://127.0.0.1:$ROLL_PORT" $(for o in "${rest[@]}"; do read -r _ p _ <<<"$o"; echo "http://127.0.0.1:$p"; done); do
       curl -sf -XPOST "$u/perf-bench/_forcemerge?max_num_segments=1" >/dev/null
       curl -sf -XPOST "$u/perf-bench/_flush" >/dev/null
     done
-    echo "| RSS, one loaded 50k-doc index (MiB) | $(($(rss_kib "$ROLL_NAME") / 1024)) | $(($(rss_kib "$ES_NAME") / 1024)) |"
+    row "RSS, one loaded 50k-doc index (MiB)" "$(($(rss_kib "$ROLL_NAME") / 1024))" rss_mib
     store() { curl -sf "$1/_cat/indices/perf-bench?h=store.size&bytes=b" | tr -d ' \n'; }
-    rs=$(store "http://127.0.0.1:$ROLL_PORT")
-    es=$(store "http://127.0.0.1:$ES_PORT")
-    echo "| store bytes per document (force-merged) | $((rs / 50000)) | $((es / 50000)) |"
-    echo "| data directory bytes per document (incl. WAL, metadata) | $(($(du -sb "$OUT/roll-data" | cut -f1) / 50000)) | - |"
+    store_per_doc() { echo $(($(store "http://127.0.0.1:$2") / 50000)); }
+    row "store bytes per document (force-merged)" "$(($(store "http://127.0.0.1:$ROLL_PORT") / 50000))" store_per_doc
     # roll: unload after 2 s idle, then time the first request (the wake) and the second.
     q='{"query":{"match":{"body":"w7"}}}'
     wakes=() hots=()
@@ -309,15 +319,19 @@ case ${1:-} in
     done
     rss_unloaded=$(($(rss_kib "$ROLL_NAME") / 1024))
     med() { printf '%s\n' "$@" | sort -n | sed -n "$((($# + 1) / 2))p"; }
-    # Elasticsearch has no unload: its cold start is a node start (JVM, cluster state, shard
-    # recovery) until the first search answers.
-    docker_ restart -t 30 "$ES_NAME" >/dev/null
-    t0=$(date +%s%N)
-    wait_http "http://127.0.0.1:$ES_PORT/perf-bench/_search?q=body:w7" 300
-    es_cold=$((($(date +%s%N) - t0) / 1000000))
-    echo "| cold start to first search hit (ms) | $(($(med "${wakes[@]}") / 1000)).$(printf '%03d' $(($(med "${wakes[@]}") % 1000))) (wake after unload; warm $(($(med "${hots[@]}") / 1000)).$(printf '%03d' $(($(med "${hots[@]}") % 1000)))) | $es_cold (node restart) |"
-    echo "| RSS after idle unload (MiB) | $rss_unloaded | - |"
-    curl -sf -XDELETE "http://127.0.0.1:$ES_PORT/perf-bench" >/dev/null || true
+    # Elasticsearch and OpenSearch have no unload: their cold start is a node start (JVM,
+    # cluster state, shard recovery) until the first search answers.
+    restart_ms() {
+      docker_ restart -t 30 "$3" >/dev/null
+      local t0
+      t0=$(date +%s%N)
+      wait_http "http://127.0.0.1:$2/perf-bench/_search?q=body:w7" 300
+      echo "$((($(date +%s%N) - t0) / 1000000)) (node restart)"
+    }
+    wake="$(($(med "${wakes[@]}") / 1000)).$(printf '%03d' $(($(med "${wakes[@]}") % 1000))) (wake after unload; warm $(($(med "${hots[@]}") / 1000)).$(printf '%03d' $(($(med "${hots[@]}") % 1000))))"
+    row "cold start to first search hit (ms)" "$wake" restart_ms
+    echo "| RSS after idle unload (MiB) | $rss_unloaded |"
+    for o in "${rest[@]}"; do read -r _ p _ <<<"$o"; curl -sf -XDELETE "http://127.0.0.1:$p/perf-bench" >/dev/null || true; done
     ;;
   *)
     sed -n '2,25p' "$0"

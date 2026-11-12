@@ -54,6 +54,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
+        .route("/v1/search/clusters/{id}/keys", post(create_key))
+        .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(index_search))
@@ -414,6 +416,21 @@ macro_rules! doc_route {
 doc_route!(doc_get, "GET", EsBody::None);
 doc_route!(doc_put, "PUT", EsBody::Json);
 doc_route!(doc_delete, "DELETE", EsBody::None);
+
+#[derive(Deserialize)]
+struct NewKey {
+    name: String,
+    expires_in_s: Option<i64>,
+}
+
+async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<NewKey>) -> ApiResult<Value> {
+    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s).await?))
+}
+
+async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
+    c.delete_key(&id, &key).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 #[derive(Deserialize)]
 struct UsageQuery {
