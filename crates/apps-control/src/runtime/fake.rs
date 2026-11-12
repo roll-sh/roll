@@ -252,6 +252,27 @@ impl Runtime for Fake {
     fn reach(&self, url: &str) -> String {
         url.to_string()
     }
+
+    /// A shell that says which instance it's in, then echoes what it's sent.
+    async fn shell(&self, name: &str, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
+        anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
+        let (ours, theirs) = tokio::io::duplex(64 << 10);
+        let banner = format!("fake shell in {name} ({cols}x{rows})\r\n");
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut r, mut w) = tokio::io::split(theirs);
+            if w.write_all(banner.as_bytes()).await.is_err() {
+                return;
+            }
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = r.read(&mut buf).await {
+                if n == 0 || w.write_all(&buf[..n]).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(super::Shell { id: format!("exec-{name}"), io: Box::new(ours) })
+    }
 }
 
 #[async_trait]

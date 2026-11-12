@@ -94,6 +94,24 @@ pub trait Runtime: Send + Sync {
     async fn remove_volume(&self, name: &str);
     /// A URL to a roll database as instances reach it.
     fn reach(&self, url: &str) -> String;
+    /// An interactive shell in a running instance (`bash`, else `sh`) on a terminal of
+    /// `cols`×`rows`: what's written is typed, what's read is the screen.
+    async fn shell(&self, _name: &str, _cols: u16, _rows: u16) -> anyhow::Result<Shell> {
+        anyhow::bail!("this runtime has no shells")
+    }
+    async fn resize_shell(&self, _shell: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// A shell's terminal stream.
+pub trait ShellStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellStream for T {}
+
+pub struct Shell {
+    /// What [`Runtime::resize_shell`] takes.
+    pub id: String,
+    pub io: Box<dyn ShellStream>,
 }
 
 /// One build: a tree with its Dockerfile, made into an image.

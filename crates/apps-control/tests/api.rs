@@ -487,3 +487,28 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert_eq!(w.fake.instances(&id).len(), instances, "no job's container is left");
     assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 3);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shell_wakes_the_service_and_carries_the_terminal_both_ways() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, w.api.clone()).into_future());
+    let url = format!("ws://{addr}/v1/apps/services/{id}/environments/production/shell?cols=100&rows=30");
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let first = ws.next().await.unwrap().unwrap().into_data();
+    let banner = String::from_utf8_lossy(&first).to_string();
+    assert!(banner.contains("fake shell in roll-apps-") && banner.contains("(100x30)"), "{banner}");
+    // Asleep before: the shell woke it, and keeps it up while open.
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    assert_eq!(env["state"], "running", "{env}");
+    ws.send(Message::Text(r#"{"resize":[120,40]}"#.into())).await.unwrap();
+    ws.send(Message::Binary(b"ls -la\r".to_vec().into())).await.unwrap();
+    let echoed = ws.next().await.unwrap().unwrap().into_data();
+    assert_eq!(&echoed[..], b"ls -la\r");
+    ws.close(None).await.unwrap();
+}

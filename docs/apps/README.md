@@ -135,6 +135,11 @@ every deployment is immutable with instant rollback.
   log of its own (followed over SSE, kept like build logs); it ends at its exit, `timeout_s` or a
   cancel, and its container goes. `roll apps run` exits with the command's exit code. A node
   that takes the service over marks jobs a lost node was running as failed.
+- **A shell** (`GET …/shell`, a WebSocket; `roll apps ssh`), as `railway ssh` and
+  `fly ssh console`: `bash` (else `sh`) in a running instance through a TTY exec over the Engine
+  API, the terminal raw on the CLI's side and resized with the window. A web service asleep is
+  woken and held awake while the shell is open; a worker's running instance is used; a cron
+  service has none (a job does that). It needs Docker on a local socket.
 - **Watch paths** (monorepos; `build.watch`, `[app] watch`, the settings page): a push deploys a
   repo service only when a path that differs between what the environment runs and the pushed
   commit matches one of its patterns (gitignore-style from the repo's root, roll code's
@@ -430,8 +435,9 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 A review on 2026-11-12 against feature/roll-secrets (#20), feature/roll-mcp (#19),
 feature/roll-previews and feature/roll-search found these. Ours are in `## Next`; theirs:
 
-- **roll-mcp**: `POST …/jobs` and `…/jobs/{job}/cancel` run code with the environment's
-  variables, so they're `deploy` (production) like deploys; the other `…/jobs` routes are reads.
+- **roll-mcp**: `POST …/jobs`, `…/jobs/{job}/cancel` and `GET …/shell` run code with the
+  environment's variables, so they're `deploy` (production) like deploys (the shell is a `GET`:
+  classify it by path, not method); the other `…/jobs` routes are reads.
   The catalogue misses `GET /v1/apps`, `POST /v1/apps/plan` and
   `GET /v1/apps/projects/{project}/services`; `…/wake` and `…/domains/{host}/verify` are reads
   and `DELETE …/links/{kind}/{ref}` is a write (http-api.md). Creating a service with a repo or
@@ -466,10 +472,13 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    (`AppSecrets`, sketched by the secrets thread) resolves as `app:<service>` and fails a deploy
    on unresolved problems; `dynamic` links are refused for services (a container woken days later
    never resolves again); `needs_deploy` compares roll secrets' environment digest instead of
-   resolving values on every dashboard read.
-2. **A shell in it.** `roll apps ssh`: an interactive shell in a running instance (Engine API exec
-   with a TTY over a WebSocket, routed to the owner), and jobs in the dashboard (run a
-   command, its output, history).
+   resolving values on every dashboard read. The calls (feature/roll-secrets 745b207b7):
+   `Secrets::values(project, env, "/", true, Some("app:<svc>"), &Caller::consumer(…))` (fail on an
+   error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
+   override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
+   nothing).
+2. **Jobs and the shell in the dashboard**: run a command, its output and history; a terminal
+   (xterm.js) on the shell route.
 3. **First run and the dashboard.** GitHub repos inline in New service; type, variables and
    links before the first deploy; new environment and its branch from the switcher; cron runs
    and next run; deploy messages for `roll up` from git; a build/deploy step summary; metrics

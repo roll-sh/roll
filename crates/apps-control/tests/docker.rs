@@ -112,6 +112,24 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(job_status["status"], "succeeded", "{job_status}");
+    // A shell in the running instance (a TTY exec over the Engine API), over a WebSocket.
+    {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, api.clone()).into_future());
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/apps/services/{id}/environments/production/shell?cols=120&rows=40")).await.unwrap();
+        ws.send(Message::Binary(b"echo \"[$GREETING]\"; exit\r".to_vec().into())).await.unwrap();
+        let mut screen = Vec::new();
+        while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            screen.extend_from_slice(&m.into_data());
+            if screen.windows(5).any(|w| w == b"[hej]") {
+                break;
+            }
+        }
+        assert!(screen.windows(5).any(|w| w == b"[hej]"), "{}", String::from_utf8_lossy(&screen));
+    }
     let (_, env) = call(&api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
     let live = apps.live(&id, "production");

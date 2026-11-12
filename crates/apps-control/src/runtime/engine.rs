@@ -109,6 +109,42 @@ impl Engine {
         Ok(serde_json::from_slice::<Created>(&body)?.id)
     }
 
+    /// An exec of `cmd` with a TTY in a running container, its terminal stream (Docker hijacks
+    /// the connection: `Upgrade: tcp`), and the exec's id for [`Engine::resize`].
+    pub async fn exec_tty(&self, name: &str, cmd: &[&str], env: &[&str], cols: u16, rows: u16) -> anyhow::Result<(String, hyper::upgrade::Upgraded)> {
+        #[derive(Deserialize)]
+        struct Created {
+            #[serde(rename = "Id")]
+            id: String,
+        }
+        let config = serde_json::json!({ "AttachStdin": true, "AttachStdout": true, "AttachStderr": true, "Tty": true, "Cmd": cmd, "Env": env, "ConsoleSize": [rows, cols] });
+        let (_, body) = self.call_within(Method::POST, &Self::container(name, "exec"), Some(Bytes::from(serde_json::to_vec(&config)?)), Some(QUICK)).await?;
+        let id = serde_json::from_slice::<Created>(&body)?.id;
+        let stream = UnixStream::connect(&self.socket).await.with_context(|| format!("connecting to {}", self.socket.display()))?;
+        let (mut tx, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        tokio::spawn(conn.with_upgrades());
+        let start = serde_json::json!({ "Detach": false, "Tty": true, "ConsoleSize": [rows, cols] });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/exec/{}/start", utf8_percent_encode(&id, NAME)))
+            .header("host", "docker")
+            .header("content-type", "application/json")
+            .header("connection", "Upgrade")
+            .header("upgrade", "tcp")
+            .body(Full::new(Bytes::from(serde_json::to_vec(&start)?)))?;
+        let res = tx.send_request(req).await?;
+        if res.status() != StatusCode::SWITCHING_PROTOCOLS {
+            let status = res.status();
+            let body = Limited::new(res.into_body(), ANSWER_MAX).collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            bail!("starting the shell: {status} {}", String::from_utf8_lossy(&body).trim());
+        }
+        Ok((id, hyper::upgrade::on(res).await?))
+    }
+
+    pub async fn resize(&self, exec: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.call(Method::POST, &format!("/exec/{}/resize?h={rows}&w={cols}", utf8_percent_encode(exec, NAME))).await.map(|_| ())
+    }
+
     /// Start it; already running is fine (304).
     pub async fn start(&self, name: &str) -> anyhow::Result<()> {
         self.call(Method::POST, &Self::container(name, "start")).await.map(|_| ())

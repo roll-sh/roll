@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod model;
 pub mod public;
 pub mod runtime;
+pub mod shell;
 pub mod store;
 
 use integrations::{Resolver, Resources, SecretSource, Sources};

@@ -346,6 +346,21 @@ impl Runtime for Docker {
     fn reach(&self, url: &str) -> String {
         for_container(url)
     }
+
+    async fn shell(&self, name: &str, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
+        let Some(engine) = &self.engine else { bail!("a shell needs Docker on a local socket") };
+        // bash when the image has it, else sh; a login shell, so the image's profile applies.
+        let cmd = ["sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi"];
+        let (id, io) = engine.exec_tty(name, &cmd, &["TERM=xterm-256color"], cols, rows).await?;
+        Ok(super::Shell { id, io: Box::new(hyper_util::rt::TokioIo::new(io)) })
+    }
+
+    async fn resize_shell(&self, shell: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        match &self.engine {
+            Some(e) => e.resize(shell, cols, rows).await,
+            None => Ok(()),
+        }
+    }
 }
 
 /// Capabilities Docker grants by default that no app here needs: raw sockets (spoofing on the

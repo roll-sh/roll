@@ -165,6 +165,15 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// A shell in a running instance (a web service asleep is woken and kept up while it's
+    /// open); leave with `exit` or Ctrl-D.
+    Ssh {
+        #[command(flatten)]
+        target: Target,
+        /// The instance (default: one that's running, or a woken one).
+        #[arg(long)]
+        instance: Option<String>,
+    },
     /// Run a one-off command in a fresh container of the live deployment, with its variables
     /// and on its network (no port, no volume): `roll apps run -- npx prisma db seed`. Its output
     /// streams here; the CLI exits with the command's exit code.
@@ -382,6 +391,117 @@ fn secret_env_file(name: &str) -> bool {
         Some("") => true,
         Some(rest) => rest.starts_with('.') && ![".example", ".sample", ".template"].contains(&rest),
         None => false,
+    }
+}
+
+/// A shell over `…/shell`: the terminal raw, keystrokes and the screen copied both ways, the
+/// window's size sent when it changes.
+async fn ssh(api: &Api, env: &str, instance: Option<&str>) -> anyhow::Result<()> {
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message, client::IntoClientRequest};
+    let (cols, rows) = term::size().unwrap_or((80, 24));
+    let mut path = format!("{env}/shell?cols={cols}&rows={rows}");
+    if let Some(i) = instance {
+        path.push_str(&format!("&instance={}", enc(i)));
+    }
+    let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
+    let mut req = format!("{base}{path}").into_client_request()?;
+    if let Some(k) = &api.key {
+        req.headers_mut().insert("authorization", format!("Bearer {k}").parse()?);
+    }
+    for (k, v) in &api.headers {
+        req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
+    }
+    let (ws, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| match e {
+        WsError::Http(r) => anyhow::anyhow!("{}: {}", r.status(), String::from_utf8_lossy(r.body().as_deref().unwrap_or_default())),
+        e => anyhow::anyhow!("can't reach {}: {e}", api.base),
+    })?;
+    let (mut tx, mut rx) = ws.split();
+    // Keystrokes on a task of their own: a read cancelled by the select below would lose them.
+    let (keys_tx, mut keys) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stdin.read(&mut buf).await {
+            if n == 0 || keys_tx.send(buf[..n].to_vec()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let _raw = term::Raw::enter();
+    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut stdout = tokio::io::stdout();
+    loop {
+        tokio::select! {
+            k = keys.recv() => match k {
+                Some(b) => tx.send(Message::Binary(b.into())).await?,
+                None => break,
+            },
+            m = rx.next() => match m {
+                Some(Ok(Message::Binary(b))) => {
+                    stdout.write_all(&b).await?;
+                    stdout.flush().await?;
+                }
+                Some(Ok(Message::Text(t))) => {
+                    stdout.write_all(t.as_bytes()).await?;
+                    stdout.flush().await?;
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            _ = winch.recv() => {
+                if let Some((c, r)) = term::size() {
+                    tx.send(Message::Text(format!("{{\"resize\":[{c},{r}]}}").into())).await?;
+                }
+            }
+        }
+    }
+    let _ = tx.close().await;
+    Ok(())
+}
+
+/// The local terminal: its size, and raw mode for as long as a guard lives.
+mod term {
+    /// Columns and rows of the terminal on stdout.
+    pub fn size() -> Option<(u16, u16)> {
+        let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: TIOCGWINSZ writes one winsize into the struct we pass.
+        let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0;
+        (ok && ws.ws_col > 0).then_some((ws.ws_col, ws.ws_row))
+    }
+
+    /// Raw mode on stdin (keys go through as typed, Ctrl-C included) until dropped; nothing when
+    /// stdin isn't a terminal.
+    pub struct Raw(Option<libc::termios>);
+
+    impl Raw {
+        pub fn enter() -> Raw {
+            // SAFETY: isatty reads a descriptor; tcgetattr fills the termios we own;
+            // cfmakeraw and tcsetattr take it by pointer.
+            unsafe {
+                if libc::isatty(libc::STDIN_FILENO) != 1 {
+                    return Raw(None);
+                }
+                let mut t: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
+                    return Raw(None);
+                }
+                let was = t;
+                libc::cfmakeraw(&mut t);
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+                Raw(Some(was))
+            }
+        }
+    }
+
+    impl Drop for Raw {
+        fn drop(&mut self) {
+            if let Some(t) = &self.0 {
+                // SAFETY: restores the termios read in `enter` on the same descriptor.
+                unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, t) };
+            }
+        }
     }
 }
 
@@ -685,6 +805,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Ssh { target, instance } => {
+            let svc = service(api, &target).await?;
+            return ssh(api, &env_path(&svc, &target.env), instance.as_deref()).await;
         }
         AppsCmd::Run { target, timeout, command } => {
             let svc = service(api, &target).await?;

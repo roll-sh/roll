@@ -75,6 +75,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
+        .route(&format!("{env}/shell"), get(shell))
         .route(&format!("{env}/jobs"), get(jobs).post(start_job))
         .route(&format!("{env}/jobs/{{job}}"), get(get_job))
         .route(&format!("{env}/jobs/{{job}}/logs"), get(job_logs))
@@ -422,6 +423,20 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
 async fn usage(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     apps.environment(&id, &env).await?;
     ok(apps.usage(&id, Some(&env), w.days.unwrap_or(30)).await?)
+}
+
+#[derive(Deserialize)]
+struct ShellQuery {
+    instance: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+/// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
+async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
+    let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
+    Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, cols, rows)).into_response())
 }
 
 async fn jobs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
