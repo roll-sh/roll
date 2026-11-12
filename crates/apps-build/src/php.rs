@@ -123,7 +123,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
     let assets = node::assets(tree, &mut notes)?;
     let image = format!("php:{}-cli", version.minor());
     let render = Box::new(move |c: &Commands<'_>| {
-        let mut df = Df::with_assets(assets.as_deref());
+        let mut df = Df::with_assets(assets.as_ref(), c);
         df.from(&image, Some("base"));
         if !extensions.is_empty() {
             df.line("COPY --from=mlocati/php-extension-installer:2 /usr/bin/install-php-extensions /usr/local/bin/");

@@ -137,6 +137,7 @@ impl Build {
             install: self.install.clone(),
             build: self.build.clone(),
             start: self.start.clone(),
+            build_env: Vec::new(),
         }
     }
 }

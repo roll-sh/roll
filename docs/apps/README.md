@@ -92,6 +92,15 @@ every deployment is immutable with instant rollback.
   at most 4 KiB read without trusting a header's size, PAX refused) and deletes it once its build
   ends; a sweep removes those of deployments that never built. A build root or Dockerfile is
   reached only through real directories, never a symlink in the tree.
+- **Variables in builds**: every install and build step sees the environment's variables
+  (`NEXT_PUBLIC_*`, `VITE_*`, a Prisma `DATABASE_URL`, an `NPM_TOKEN`), as Railway's builds do.
+  They're BuildKit secrets mounted as environment variables (`RUN --mount=type=secret,id=K,env=K`),
+  so no value is in a layer, the image's history or the build cache's keys; BuildKit masks them
+  in the build log. Each stage declares `ARG ROLL_BUILD_ENV`, a hash of the values, so a changed
+  value rebuilds what read it and an unchanged set keeps the cache (`ROLL_DEPLOYMENT` and `PORT`
+  stay out). A tree's own Dockerfile gets them as secrets and as build arguments (`ARG NAME`),
+  values always through the docker CLI's environment, never argv. Names the CLI reads itself
+  (`DOCKER_*`, `BUILDKIT_*`, `PATH`, proxies) aren't passed, and the log says so.
 - **Public images** skip the build: the deployment pins the image's digest at deploy time, so a
   moving tag never changes a running deployment.
 - Build logs stream line by line to the dashboard and `roll deploy` as they're written
@@ -425,8 +434,7 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    per-environment secrets links (a prefixed link points staging at production today);
    `…/variables/values` returns only service-owned values; `SecretSource` takes the service and
    folder; dynamic credentials are refused or the container is remade on wake.
-2. **Builds people need.** Build-time variables (`ARG` for `NEXT_PUBLIC_*`, `VITE_*`, Prisma's
-   `DATABASE_URL`); a pre-deploy (release) command that gates the switch, for migrations;
+2. **Builds people need.** A pre-deploy (release) command that gates the switch, for migrations;
    `roll.toml` `[app]` actually read (this doc promises it); watch paths for monorepos.
 3. **Run things in it.** `roll run` (one-off container with the service's image and variables) and
    `roll ssh` / exec into an instance, with the API routes under the service.

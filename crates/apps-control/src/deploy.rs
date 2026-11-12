@@ -8,7 +8,7 @@
 use crate::live::Template;
 use crate::logs::{LogSink, Stream};
 use crate::model::*;
-use crate::runtime::{BuildJob, InstanceSpec};
+use crate::runtime::{BuildJob, InstanceSpec, docker_reads};
 use crate::store::{EnvRow, NewDeployment, ServiceRow};
 use crate::{Apps, Error, Result, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
@@ -425,7 +425,31 @@ impl Apps {
             Some(r) => crate::model::in_tree(&tree, "the root directory", r, true)?,
             None => tree.clone(),
         };
-        let overrides = svc.build.overrides();
+        // The variables the build's steps see: the environment's, as its instances will.
+        let (sid, e) = (svc.id.clone(), d.environment.clone());
+        let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
+        let mut build_env = self.resolve_vars(svc, &env_row, &d.id).await?.vars;
+        let skipped: Vec<String> = build_env.iter().filter(|(k, _)| docker_reads(k)).map(|(k, _)| k.clone()).collect();
+        if !skipped.is_empty() {
+            log.line(format!("not passed to the build (the docker CLI reads them itself): {}", skipped.join(", ")));
+        }
+        build_env.retain(|(k, _)| !docker_reads(k));
+        // Per deployment (the cache would never hit) or only for the running app.
+        build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
+        build_env.sort();
+        let env_hash = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            for (k, v) in &build_env {
+                h.update(k.as_bytes());
+                h.update([0]);
+                h.update(v.as_bytes());
+                h.update([0]);
+            }
+            h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        let mut overrides = svc.build.overrides();
+        overrides.build_env = build_env.iter().map(|(k, _)| k.clone()).collect();
         let ctx = context.clone();
         let plan = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(ctx), &overrides)).await?.map_err(|e| anyhow::anyhow!("{e}"))?;
         for n in &plan.notes {
@@ -462,6 +486,9 @@ impl Apps {
             cpu: 2.0,
             memory_mb: 4096,
             timeout: self.cfg.build_timeout,
+            own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
+            env: build_env,
+            env_hash,
         };
         log.line(format!("building with {}", self.deps.builder.name()));
         let image = self.deps.builder.build(&job, log, cancel).await?;

@@ -87,7 +87,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         Tool::Gradle => "/root/.gradle",
     };
     let render = Box::new(move |c: &Commands<'_>| {
-        let mut df = Df::new();
+        let mut df = Df::new(c);
         df.from(&image, Some("build"));
         df.line("WORKDIR /src");
         if tool == Tool::Gradle {

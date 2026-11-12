@@ -135,7 +135,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         notes.push(format!("{b} runs on {RUNTIME}"));
     }
     let render = Box::new(move |c: &Commands<'_>| {
-        let mut df = Df::new();
+        let mut df = Df::new(c);
         df.from(&format!("rust:{image_tag}-{BUILD}"), Some("build"));
         if openssl {
             df.run(&[], &apt(&["pkg-config", "libssl-dev"]));

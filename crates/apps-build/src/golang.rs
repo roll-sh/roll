@@ -98,7 +98,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         .collect();
     let language_version = Some(go.clone());
     let render = Box::new(move |c: &Commands<'_>| {
-        let mut df = Df::new();
+        let mut df = Df::new(c);
         df.from(&format!("golang:{go}"), Some("build"));
         df.line("WORKDIR /src");
         df.env(&[("CGO_ENABLED", "0")]);

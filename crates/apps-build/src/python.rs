@@ -225,7 +225,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
     let assets = node::assets(tree, &mut notes)?;
     let image = format!("python:{}-slim", version.minor());
     let render = Box::new(move |c: &Commands<'_>| {
-        let mut df = Df::with_assets(assets.as_deref());
+        let mut df = Df::with_assets(assets.as_ref(), c);
         df.from(&image, Some("build"));
         df.env(&[
             ("PYTHONDONTWRITEBYTECODE", "1"),

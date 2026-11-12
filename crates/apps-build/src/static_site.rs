@@ -32,7 +32,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         }
     }];
     let render = Box::new(move |c: &crate::Commands<'_>| {
-        let mut df = Df::new();
+        let mut df = Df::new(c);
         df.from(IMAGE, None);
         if c.install.is_some() || c.build.is_some() {
             // The build steps run in the same small image: there's no toolchain to leave behind.

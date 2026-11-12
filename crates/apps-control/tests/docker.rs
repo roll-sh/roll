@@ -72,9 +72,12 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
 
-    let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "run": {"memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
+    let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "build": {"build": "test \"$GREETING\" = hej"}, "run": {"memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
+    // The build step sees the environment's variables (a BuildKit secret): it fails without.
+    let (st, v) = call(&api, "PATCH", &format!("/v1/apps/services/{id}/environments/production/variables"), Some(json!({"set": {"GREETING": "hej"}})), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     let tree = tempfile::tempdir().unwrap();
     std::fs::write(tree.path().join("index.html"), "<!doctype html><h1>roll apps</h1>").unwrap();
     let mut bundle = Vec::new();

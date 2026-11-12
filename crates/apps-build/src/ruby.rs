@@ -103,7 +103,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         if locked {
             env.push(("BUNDLE_DEPLOYMENT", "1"));
         }
-        let mut df = Df::with_assets(assets.as_deref());
+        let mut df = Df::with_assets(assets.as_ref(), c);
         df.from(&image, Some("build"));
         df.run(&[], &apt(&build_packages));
         df.line("WORKDIR /app");

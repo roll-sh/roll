@@ -49,6 +49,12 @@ pub struct Overrides {
     pub install: Option<String>,
     pub build: Option<String>,
     pub start: Option<String>,
+    /// Names of the variables the build sees (the service's, at deploy time): each install and
+    /// build step mounts them as BuildKit secrets, so they're in its environment but never in a
+    /// layer, the image's history or the cache's keys. `ROLL_BUILD_ENV` (a hash of the values)
+    /// is the stage's build argument, so a changed value rebuilds what read it.
+    #[serde(skip)]
+    pub build_env: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -151,6 +157,7 @@ impl Overrides {
             install: clean(&self.install),
             build: clean(&self.build),
             start: clean(&self.start),
+            build_env: self.build_env.clone(),
         }
     }
 }
@@ -162,6 +169,8 @@ pub(crate) struct Commands<'a> {
     pub start: Option<&'a str>,
     /// The install was set in the service, so it may read any file: copy the whole source first.
     pub custom_install: bool,
+    /// [`Overrides::build_env`].
+    pub env: &'a [String],
 }
 
 type Render = Box<dyn FnOnce(&Commands<'_>) -> String>;
@@ -196,6 +205,7 @@ impl Draft {
             build: build.as_deref(),
             start: start.as_deref(),
             custom_install: o.install.is_some(),
+            env: &o.build_env,
         });
         Plan {
             provider: self.provider,

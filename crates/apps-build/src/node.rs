@@ -218,7 +218,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
     let install = Some(node.install());
     let version = node.version.to_string();
     let render = Box::new(move |c: &crate::Commands<'_>| {
-        let mut df = Df::new();
+        let mut df = Df::new(c);
         node.base(&mut df, "base");
         df.from("base", Some("build"));
         node.source(&mut df, c);
@@ -266,7 +266,25 @@ fn package(tree: &dyn Tree) -> Result<Option<Value>, Error> {
 
 /// A Node build that only makes assets for another language's app (Laravel's Vite, Rails'
 /// jsbundling): the stage `assets`, with the tree at `/app` after `build`, without node_modules.
-pub(crate) fn assets(tree: &dyn Tree, notes: &mut Vec<String>) -> Result<Option<String>, Error> {
+pub(crate) struct Assets {
+    node: Setup,
+    build: String,
+}
+
+impl Assets {
+    /// The stage's text, after the syntax line of the Dockerfile it goes in.
+    pub(crate) fn render(&self, c: &crate::Commands<'_>) -> String {
+        let mut df = Df::new(c);
+        self.node.base(&mut df, "assets-base");
+        df.from("assets-base", Some("assets"));
+        df.line("COPY . .");
+        df.run(&self.node.caches(), &self.node.install());
+        df.run(&[], &format!("{} && rm -rf node_modules", self.build));
+        df.finish().trim_start_matches("# syntax=docker/dockerfile:1\n").to_string()
+    }
+}
+
+pub(crate) fn assets(tree: &dyn Tree, notes: &mut Vec<String>) -> Result<Option<Assets>, Error> {
     let Some(pkg) = package(tree)? else {
         return Ok(None);
     };
@@ -282,17 +300,7 @@ pub(crate) fn assets(tree: &dyn Tree, notes: &mut Vec<String>) -> Result<Option<
         "package.json has a build script: the assets build with {build} in Node {}",
         node.version
     ));
-    let mut df = Df::new();
-    node.base(&mut df, "assets-base");
-    df.from("assets-base", Some("assets"));
-    df.line("COPY . .");
-    df.run(&node.caches(), &node.install());
-    df.run(&[], &format!("{build} && rm -rf node_modules"));
-    let text = df.finish();
-    Ok(Some(
-        text.trim_start_matches("# syntax=docker/dockerfile:1\n")
-            .to_string(),
-    ))
+    Ok(Some(Assets { node, build }))
 }
 
 enum Framework {
@@ -378,7 +386,7 @@ fn static_build_draft(
     let version = node.version.to_string();
     let install = Some(node.install());
     let render = Box::new(move |c: &crate::Commands<'_>| {
-        let mut df = Df::new();
+        let mut df = Df::new(c);
         node.base(&mut df, "base");
         df.from("base", Some("build"));
         node.source(&mut df, c);

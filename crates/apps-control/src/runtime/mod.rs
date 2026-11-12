@@ -109,6 +109,25 @@ pub struct BuildJob {
     pub cpu: f64,
     pub memory_mb: u32,
     pub timeout: Duration,
+    /// The environment's variables, for the build's steps: secrets in a generated Dockerfile,
+    /// build arguments and secrets for the tree's own. Never in argv, a layer or a log.
+    pub env: Vec<(String, String)>,
+    /// A hash of `env` (`ROLL_BUILD_ENV`): a changed value rebuilds the steps that read it.
+    pub env_hash: String,
+    /// The tree's own Dockerfile (it reads variables with `ARG`), not a generated one.
+    pub own_dockerfile: bool,
+}
+
+impl std::fmt::Debug for BuildJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildJob").field("tag", &self.tag).field("env", &self.env.iter().map(|(k, _)| k).collect::<Vec<_>>()).finish_non_exhaustive()
+    }
+}
+
+/// Names the `docker` CLI reads itself: as a build's variables they'd change how the CLI runs.
+pub fn docker_reads(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    ["DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_"].iter().any(|p| n.starts_with(p)) || ["PATH", "HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"].contains(&n.as_str())
 }
 
 #[async_trait]

@@ -446,11 +446,25 @@ impl Builder for DockerBuilder {
             }
         };
         let dockerfile = job.context.join(&job.dockerfile);
-        let mut child = Command::new("docker")
-            .env("DOCKER_BUILDKIT", "1")
+        let mut cmd = Command::new("docker");
+        cmd.env("DOCKER_BUILDKIT", "1")
             .args(["build", "--progress", "plain", "--file"])
             .arg(&dockerfile)
             .args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)])
+            // Links (a database) are reached the way instances reach them.
+            .args(["--add-host", "host.docker.internal:host-gateway"]);
+        // Values travel in the CLI's environment, never argv: `--secret id=K,env=K` and
+        // `--build-arg K` (no `=`) read them from there.
+        for (k, v) in &job.env {
+            cmd.env(k, v).arg("--secret").arg(format!("id={k},env={k}"));
+            if job.own_dockerfile {
+                cmd.arg("--build-arg").arg(k);
+            }
+        }
+        if !job.env.is_empty() && !job.own_dockerfile {
+            cmd.arg("--build-arg").arg(format!("ROLL_BUILD_ENV={}", job.env_hash));
+        }
+        let mut child = cmd
             .arg(&job.context)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

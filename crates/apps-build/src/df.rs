@@ -7,21 +7,24 @@ pub(crate) struct Df {
     text: String,
     /// How the build stage gets the source: the context, or a stage that built assets in it.
     copy_source: &'static str,
+    /// Variables install and build steps see ([`crate::Overrides::build_env`]).
+    env: Vec<String>,
 }
 
 impl Df {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(c: &Commands) -> Self {
         Df {
             text: String::from("# syntax=docker/dockerfile:1\n"),
             copy_source: "COPY . .",
+            env: c.env.to_vec(),
         }
     }
 
     /// Starts with the `assets` stage (`node::assets`), and takes the source from it.
-    pub(crate) fn with_assets(assets: Option<&str>) -> Self {
-        let mut df = Df::new();
-        if let Some(stage) = assets {
-            df.text.push_str(stage);
+    pub(crate) fn with_assets(assets: Option<&crate::node::Assets>, c: &Commands) -> Self {
+        let mut df = Df::new(c);
+        if let Some(a) = assets {
+            df.text.push_str(&a.render(c));
             df.copy_source = "COPY --from=assets /app ./";
         }
         df
@@ -37,6 +40,9 @@ impl Df {
         match stage {
             Some(stage) => self.line(&format!("FROM {image} AS {stage}")),
             None => self.line(&format!("FROM {image}")),
+        }
+        if !self.env.is_empty() {
+            self.line("ARG ROLL_BUILD_ENV");
         }
     }
 
@@ -56,10 +62,13 @@ impl Df {
     /// `RUN cmd` with a BuildKit cache mount on each of `caches`. A command over several lines
     /// (an override) goes in the exec form, so its newlines stay the shell's.
     pub(crate) fn run(&mut self, caches: &[&str], cmd: &str) {
-        let mounts: String = caches
+        let mut mounts: String = caches
             .iter()
             .map(|c| format!("--mount=type=cache,target={c} "))
             .collect();
+        for k in &self.env {
+            mounts.push_str(&format!("--mount=type=secret,id={k},env={k} "));
+        }
         if cmd.contains('\n') || cmd.trim_end().ends_with('\\') {
             self.line(&format!("RUN {mounts}[\"/bin/sh\", \"-c\", {}]", json(cmd)));
         } else {
