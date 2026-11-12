@@ -1,5 +1,6 @@
-import { Bot, Lock, Moon, Plus, Search, Settings } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Bot, Eye, Lock, Moon, Plus, Search, Settings } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link } from "@/components/link";
 import type { ResourceKind, WorkspaceProject } from "@/lib/workspace-api";
 import {
   CREATABLE,
@@ -22,12 +23,18 @@ import { ProjectAgents, threadsOf, useAgents } from "./agents";
 import { KindTile } from "./kind";
 import { ProjectIcon } from "./project-icon";
 import { ProjectSettings } from "./project-settings";
+import { PreviewsOverlay } from "./previews-overlay";
 
 const btn =
   "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3";
 
-/** `/dashboard/projects/$id`: the project's resources on a canvas. */
-export function ProjectPage({ id }: { id: string }) {
+export type ProjectTab = "canvas" | "previews";
+
+/**
+ * `/dashboard/projects/$id`: the project's resources on a canvas, or (`children`, the route's
+ * outlet) another of its views under the same header.
+ */
+export function ProjectPage({ id, tab = "canvas", children }: { id: string; tab?: ProjectTab; children?: ReactNode }) {
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === id);
   if (!project)
@@ -38,10 +45,14 @@ export function ProjectPage({ id }: { id: string }) {
         </div>
       </AppShell>
     );
-  return <Project key={project.id} ws={ws} project={project} />;
+  return (
+    <Project key={project.id} ws={ws} project={project} tab={tab}>
+      {children}
+    </Project>
+  );
 }
 
-function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProject }) {
+function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: WorkspaceProject; tab: ProjectTab; children?: ReactNode }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +64,8 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
   const live = agents ? threadsOf(agents, repos).filter((t) => t.status !== "idle").length : 0;
   // Open while the project has a repository its agents can work in; the toggle decides after that.
   const [agentsOpen, setAgentsOpen] = useState(repos.size > 0);
+  const [overlay, setOverlay] = useState(false);
+  const canvas = tab === "canvas";
 
   useEffect(() => setSelected(null), [project.id]);
 
@@ -117,23 +130,48 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
               </button>
             </span>
           )}
+          <nav aria-label="Project views" className="flex h-7 items-center rounded-md border border-line-2 bg-canvas p-0.5">
+            {(["canvas", "previews"] as const).map((t) => (
+              <Link
+                key={t}
+                href={`/dashboard/projects/${encodeURIComponent(project.id)}${t === "canvas" ? "" : "/previews"}`}
+                aria-current={tab === t ? "page" : undefined}
+                className={`flex h-full items-center rounded-[5px] px-2 text-[12px] font-medium transition-colors ${tab === t ? "bg-panel-3 text-fg" : "text-muted hover:text-fg"}`}
+              >
+                {t === "canvas" ? "Canvas" : "Previews"}
+              </Link>
+            ))}
+          </nav>
+          {canvas && (
+            <button className={`${btn} ${overlay ? "border-line-3 bg-white/[0.06]" : ""}`} onClick={() => setOverlay((o) => !o)} aria-pressed={overlay} title="Each preview's branches beside their parents">
+              <Eye className="size-3.5" />
+              <span className="max-md:hidden">Previews</span>
+            </button>
+          )}
           <button className={`${btn} ${agentsOpen ? "border-line-3 bg-white/[0.06]" : ""}`} onClick={() => setAgentsOpen((o) => !o)} aria-pressed={agentsOpen} title="This project's agents">
             <Bot className="size-3.5" />
-            Agents
+            <span className="max-md:hidden">Agents</span>
             {live > 0 && <span className="pulse-dot size-1.5 rounded-full bg-accent" aria-label={`${live} working`} />}
           </button>
-          <button className={btn} onClick={() => setAdding((a) => !a)} aria-expanded={adding}>
-            <Plus className="size-3.5" />
-            Add
-          </button>
+          {canvas && (
+            <button className={btn} onClick={() => setAdding((a) => !a)} aria-expanded={adding}>
+              <Plus className="size-3.5" />
+              Add
+            </button>
+          )}
           <button onClick={() => setSettings(true)} aria-label="Project settings" title="Project settings" className="grid size-7 place-items-center rounded-md text-muted hover:bg-white/[0.05] hover:text-fg">
             <Settings className="size-4" />
           </button>
         </>
       }
     >
-      <div className="absolute inset-x-0 top-0 bottom-7">
-        <Board
+      <div className="absolute inset-x-0 top-0 bottom-7 overflow-clip">
+        {!canvas && (
+          <div className={`absolute inset-y-0 right-0 left-0 transition-[left] duration-300 ease-drawer motion-reduce:transition-none ${agentsOpen ? "md:left-[272px]" : ""}`}>
+            {children}
+          </div>
+        )}
+        {canvas && <Board
           shift={agentsOpen ? 272 : 0}
           cards={cards}
           selected={selected}
@@ -145,10 +183,12 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
             if (c.type === "staged") workspace.updateStaged(project.id, c.key, { x, y });
             else workspace.place(project.id, c.view.kind, c.view.ref, x, y).catch(fail);
           }}
-        />
-        {cards.length === 0 && ws.status === "ready" && <Empty name={project.name} kinds={CREATABLE.filter((k) => ws.kinds.has(k))} onPick={stage} />}
+        >
+          {overlay && <PreviewsOverlay projectId={project.id} placed={project.resources} />}
+        </Board>}
+        {canvas && cards.length === 0 && ws.status === "ready" && <Empty name={project.name} kinds={CREATABLE.filter((k) => ws.kinds.has(k))} onPick={stage} />}
         <ProjectAgents open={agentsOpen} repos={repos} onClose={() => setAgentsOpen(false)} />
-        <AddMenu open={adding} ws={ws} onClose={() => setAdding(false)} onNew={stage} onAttach={attach} />
+        <AddMenu open={canvas && adding} ws={ws} onClose={() => setAdding(false)} onNew={stage} onAttach={attach} />
         {error && (
           <button
             onClick={() => setError(null)}
@@ -157,7 +197,7 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
             {error}
           </button>
         )}
-        <Inspector open={!!current} onClose={() => setSelected(null)}>
+        <Inspector open={canvas && !!current} onClose={() => setSelected(null)}>
           {current?.type === "placed" ? (
             <ResourceSheet
               key={current.key}
