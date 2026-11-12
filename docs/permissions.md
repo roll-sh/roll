@@ -104,13 +104,22 @@ the usual combinations, so this stays explicit without being tedious.
 | `deploy` | change production | land a change on a default branch, deploy, roll back or promote to production, bypass a merge queue |
 | `admin` | manage access and settings | IAM users and policies, API keys, stream ACLs, owner settings, webhooks, tokens (product `access`) |
 
-A route whose effect depends on its body is classified from the body. The only ones are:
+A route whose effect depends on its body is classified from the body. Comments are stripped
+first, so they can't hide what runs, and anything that makes or changes credentials or privileges
+(`CREATE ROLE`, `GRANT`, `SUPERUSER`, …) is `admin`. The routes are:
 
-- Postgres SQL: `{"read_only": true}` is `read`, and the SQL runs in a read-only transaction, so a
-  write fails in Postgres. Anything else is `write`.
-- Redis commands: read-only commands (by the command table's flags) are `read`, `FLUSHDB` and
-  `FLUSHALL` are `delete`, the rest `write`.
+- Postgres SQL: `{"read_only": true}` is `read`, and the SQL runs as a role made for that one query
+  that holds only `pg_read_all_data`, so Postgres refuses its writes whatever the SQL says (on a
+  branch's primary; a read replica refuses read-only SQL). Anything else is `write`.
+- Redis commands: commands that only read are `read`; `FLUSHDB`, `FLUSHALL` and scripts (`EVAL`,
+  `FCALL`, `FUNCTION`, `SCRIPT`) are `delete`; `ACL`, `CONFIG` and the like are `admin`; the rest
+  `write`.
 - NoSQL CQL: `SELECT` is `read`, `DROP` and `TRUNCATE` are `delete`, the rest `write`.
+- Storage IAM: `Get…`, `List…`, `Simulate…` are `read`, the rest `admin`.
+- Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
+  threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
+  thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
+  projects, the machine's settings, and any type it doesn't know `admin`.
 
 Routes not in the catalogue are the operator's alone. A product that adds a route gets nothing
 for scoped tokens until its row exists, and `crates/rolld/tests/auth.rs` fails until every route
@@ -137,11 +146,16 @@ and **environment** where the product says (a secrets environment, an app enviro
   its id, a Postgres endpoint under its project, and a code change, thread or work item under its
   repo (`owner/name`).
 
+Moving a resource into or out of a workspace project changes which tokens reach it, so the
+workspace's membership routes (`PUT`/`DELETE …/projects/{id}/resources/{kind}/{ref}`) need
+`write` on the project **and** `admin`, allowed outright, on the resource where it is now.
+
 Routes that aren't about one resource:
 
-- **Lists** (`GET /v1/projects`) need the action on the product; a rule that names resources
-  filters the answer to the items it matches. A token for one project sees only that project's
-  databases.
+- **Lists** (`GET /v1/projects`) need the action on the product. Unless a rule allows the action
+  outright on every resource, the answer is filtered to the items allowed outright: a token for
+  one project sees only that project's databases, and items that would only `ask` are left out
+  (a list is never held for a person).
 - **Creates** (`POST /v1/projects`) need the action on the product with `"*"` or a `{project}`
   selector. With a `{project}` selector the request must name the project (`X-Roll-Project:
   prj_…`); the new resource is put in it, in the same request, before the answer returns. A token
@@ -208,8 +222,10 @@ again there, which is cheap (one indexed read). One forwarded over a signed inte
 gate (the tasks leader) was decided by the node that forwarded it, and the leader takes it as the
 operator's.
 
-On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token still pass, but a
-request **with** a scoped token is evaluated: a token's limits hold wherever it's used.
+On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token still pass, and a
+request **with** a scoped token is still evaluated. That keeps a well-behaved client to its rules,
+but it contains nothing: whatever holds the token can drop it and act as the operator. Scoped
+tokens protect a daemon that requires `ROLL_ADMIN_TOKEN`; the dashboard says so on an open one.
 
 ## Approvals
 
@@ -230,6 +246,8 @@ type Approval = {
 };
 ```
 
+- An approval is bound to the method, path and body, to what the request is about, and to the
+  headers that change it (`X-Roll-Account`, `X-Roll-Project`, `X-Roll-User`, `X-Roll-Agent`).
 - The request waits up to 55 seconds for a decision. Approved, it runs exactly as sent and its answer
   is the request's answer. Denied, it gets `403 {"code": "denied"}`.
 - Still pending after the wait, it gets `403 {"code": "approval_pending", "approval": "apr_…",
@@ -275,8 +293,12 @@ type AuditEvent = {
 ## Managing grants
 
 - The operator manages grants. A grant may too when it has `admin` on product `access`, and then
-  only grants whose rules it covers itself: it can never make a token more powerful than it is, nor
-  one that outlives it. This is the same check the OAuth consent screen uses.
+  only grants it covers entirely, before and after a change: rules within its own, an expiry no
+  later than its own, and (when it has an IP allowlist) addresses within its own. It can never make
+  a token more powerful than it is, one that outlives it, or one usable from elsewhere, and never
+  changes its own addresses.
+- A grant reviews and comments in roll code only as itself (`token:<name>`): the gate drops
+  `X-Roll-User` and sets `X-Roll-Agent`.
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
@@ -309,6 +331,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?}`: narrow or widen (within the caller's own) |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | `?state=pending` |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | |

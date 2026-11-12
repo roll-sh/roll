@@ -145,7 +145,14 @@ async fn handle(State(m): State<Mcp>, ext: Extensions, headers: HeaderMap, body:
     if !has_requests {
         return StatusCode::ACCEPTED.into_response();
     }
-    let ip = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
+    // The client's address as the gate sees it (behind roll's edge, the forwarded one): tool
+    // calls carry it, for IP allowlists and the audit log.
+    let trust = m.config.access.as_ref().is_some_and(|a| a.config.trust_forwarded_for);
+    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).and_then(|v| v.trim().parse().ok());
+    let ip = match (trust, forwarded) {
+        (true, Some(ip)) => Some(ip),
+        _ => ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip()),
+    };
     let ctx = Arc::new(Ctx { m, headers, principal, ip });
     if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {

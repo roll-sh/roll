@@ -49,6 +49,8 @@ fn postgres() -> Router {
         .route("/v1/endpoints/{id}/query", post(|body: String| async move { axum::Json(json!({ "ran": body })) }))
         .route("/v1/queues/overview", get(|| async { "{}" }))
         .route("/v1/unclassified", get(|| async { "{}" }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
 }
 
 impl Daemon {
@@ -114,8 +116,8 @@ fn ids(list: &Value) -> Vec<&str> {
 
 /// A token sees and does exactly what its rules allow: lists filtered to its project, credentials
 /// hidden without `reveal`, other actions and products refused, routes nobody classified the
-/// operator's, the wrong address refused, read-only SQL decided by its body, and a revoked token
-/// dead on its next request.
+/// operator's, the wrong address refused, read-only SQL decided by its body, a rotated token's old
+/// secret and a revoked token dead on their next request.
 #[tokio::test]
 async fn a_scoped_token_does_only_what_its_rules_say() {
     let d = Daemon::new(50);
@@ -153,6 +155,23 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let (fenced, _) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ip_allow": ["10.0.0.0/8"] })).await;
     assert_eq!(d.call(&fenced, Method::GET, "/v1/projects", None).await.1["code"], "ip_not_allowed");
 
+    // Secrets are per project and environment: a rule for the project's development environment
+    // reaches those and only those, names but not values.
+    let (secrets, _) = d
+        .token(json!([{ "product": "secrets", "resources": [{ "project": project.id }], "environments": ["development"], "actions": { "read": "allow" } }]), json!({}))
+        .await;
+    let at = |env: &str, rest: &str| format!("/v1/secrets/projects/{}/environments/{env}/{rest}", project.id);
+    assert_eq!(d.call(&secrets, Method::GET, &at("development", "secrets"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&secrets, Method::GET, &at("production", "secrets"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&secrets, Method::GET, &at("development", "values"), None).await.0, StatusCode::FORBIDDEN);
+
+    // Rotated: the old secret is dead at once, the new one has the same rules.
+    let (s, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), None).await;
+    assert_eq!(s, StatusCode::OK, "{rotated}");
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    let token = rotated["token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+
     // Revoked: dead on the next request; the audit log has every decision.
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
@@ -161,6 +180,42 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let decisions: Vec<_> = log.as_array().unwrap().iter().map(|e| e["decision"].as_str().unwrap()).collect();
     assert!(decisions.contains(&"allow") && decisions.contains(&"deny"), "{log}");
     assert!(log.as_array().unwrap().iter().all(|e| e["route"].as_str().unwrap().starts_with('/')), "routes, not paths: {log}");
+}
+
+/// The ways around a token's rules stay shut: pulling another resource into its project, a list
+/// with an `ask` rule beside a narrower `allow`, and an approval reused with different headers.
+#[tokio::test]
+async fn escalation_paths_are_shut() {
+    let d = Daemon::new(50);
+    let a = d.workspace.create("a", "", None).unwrap();
+    d.workspace.place(&a.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
+    // "This project only": write everything in project a, including the workspace's own routes.
+    let (scoped, _) = d.token(json!([{ "product": "*", "resources": [{ "project": a.id }], "actions": { "read": "allow", "write": "allow" } }]), json!({})).await;
+    let pull = format!("/v1/workspace/projects/{}/resources/postgres/pb", a.id);
+    assert_eq!(d.call(&scoped, Method::PUT, &pull, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::FORBIDDEN, "pulled pb into its project");
+    assert_eq!(d.workspace.project_of("postgres", "pb").unwrap(), None);
+    // With admin on Postgres everywhere it may move it.
+    let (admin, _) = d
+        .token(json!([{ "product": "*", "resources": [{ "project": a.id }], "actions": { "write": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "admin": "allow" } }]), json!({}))
+        .await;
+    assert_eq!(d.call(&admin, Method::PUT, &pull, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::OK);
+    d.workspace.remove(&a.id, roll_workspace::Kind::Postgres, "pb").unwrap();
+
+    // A narrower allow doesn't turn an ask for every project into a free full list.
+    let (mixed, _) = d
+        .token(json!([{ "product": "postgres", "resources": [{ "project": a.id }], "actions": { "read": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "read": "ask" } }]), json!({}))
+        .await;
+    let (s, list) = d.call(&mixed, Method::GET, "/v1/projects", None).await;
+    assert_eq!((s, ids(&list)), (StatusCode::OK, vec!["pa"]));
+
+    // An approval runs the request it was asked for, not the same path with other headers.
+    let (asker, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }]), json!({})).await;
+    let (_, pending) = d.call(&asker, Method::DELETE, "/v1/projects/pa", None).await;
+    let id = pending["approval"].as_str().unwrap().to_string();
+    d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await;
+    let other = d.send(&asker, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &id), ("x-roll-project", &a.id)]).await;
+    assert_eq!(other.1["code"], "approval_mismatch");
+    assert_eq!(d.send(&asker, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &id)]).await.0, StatusCode::OK);
 }
 
 /// An `ask` action waits for a person: approved, the request runs as sent (once); denied, it's

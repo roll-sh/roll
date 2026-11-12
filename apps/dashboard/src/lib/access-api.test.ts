@@ -22,6 +22,7 @@ describe("access", () => {
     expect(parseAuthorize({ client_id: "c", redirect_uri: "r", response_type: "code", code_challenge: "x", code_challenge_method: "plain" })).toHaveProperty("error");
     expect(presetFor("read-only", presets)?.id).toBe("read-only");
     expect(presetFor(undefined, presets)?.id).toBe("agent");
+    expect(presetFor("full", [...presets, { id: "full", name: "Full", description: "", rules: [] }])?.id).toBe("agent");
     expect(presetRules(presets[2], "prj_a")[0].resources).toEqual([{ project: "prj_a" }]);
     expect(presetRules(presets[2])[0].resources).toBe("*");
     expect(denyRedirect("http://127.0.0.1:5000/cb?x=1", "s")).toBe("http://127.0.0.1:5000/cb?x=1&error=access_denied&error_description=The+user+denied+the+request&state=s");

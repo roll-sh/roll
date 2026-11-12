@@ -134,8 +134,13 @@ fn describe(t: &Target) -> Option<String> {
 /// Whether a list needs filtering: some rule about the product names resources, environments or
 /// paths (a rule for every resource needs none).
 fn narrowed(scope: &Scope, product: &str, action: Action) -> bool {
+    // A list answers at once: any rule about it that's narrower than every resource, or that
+    // asks, means each item is checked, and only the ones allowed outright stay.
+    let wide_allow = |r: &roll_auth::scope::Rule| {
+        r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && r.actions.get(&action) == Some(&roll_auth::scope::Effect::Allow)
+    };
     let matching: Vec<_> = scope.0.iter().filter(|r| (r.product == "*" || r.product == product) && r.actions.contains_key(&action)).collect();
-    !matching.iter().any(|r| r.resources == Resources::All && r.environments.is_none() && r.paths.is_none())
+    !matching.iter().any(|r| wide_allow(r))
 }
 
 struct Ctx {
@@ -242,7 +247,17 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
     let action = row.action(&ctx.method, &params, json_body.as_ref());
-    let outcome = if matches!(row.target, Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    let mut outcome = if matches!(row.target, Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    // Putting a resource in a workspace project (or taking it out) changes which tokens reach it:
+    // it also needs `admin` on that resource, where it is now, allowed outright.
+    if let Some((product, r#ref)) = catalog::placement(row, &params) {
+        let (a, product2, r2) = (access.clone(), product, r#ref.clone());
+        let moved = tokio::task::spawn_blocking(move || a.resource(product2, product2, &r2)).await.ok();
+        let ok = moved.is_some_and(|m| scope.outcome(&Target::One(m), Action::Admin) == Outcome::Allow);
+        if !ok {
+            outcome = Outcome::Deny;
+        }
+    }
     let resource = describe(&target);
     let mut approval_used: Option<String> = None;
     match outcome {
@@ -264,7 +279,20 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 }
             }
             let bytes = buffered.clone().unwrap_or_default();
-            let request_hash = hash(&format!("{}\n{}\n{}", ctx.method, original.path_and_query().map_or("", |p| p.as_str()), hex::encode(sha2_of(&bytes))));
+            // Bound to everything that decides what the request does: the method, path and body,
+            // what it's about, and the headers that change it (account, project, reviewer).
+            let bound: Vec<String> = ["x-roll-account", "x-roll-project", "x-roll-user", "x-roll-agent"]
+                .iter()
+                .map(|h| format!("{h}={}", parts.headers.get(*h).and_then(|v| v.to_str().ok()).unwrap_or("")))
+                .collect();
+            let request_hash = hash(&format!(
+                "{}\n{}\n{}\n{:?}\n{}",
+                ctx.method,
+                original.path_and_query().map_or("", |p| p.as_str()),
+                hex::encode(sha2_of(&bytes)),
+                target,
+                bound.join("\n")
+            ));
             let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
@@ -273,7 +301,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
         Outcome::Allow => {}
     }
-    // Allowed: on as the operator's, narrowed, with the grant for products and the audit.
+    // Allowed: on as the operator's, narrowed, with the grant for products and the audit. A grant
+    // reviews and comments only as itself (roll code takes these headers from the operator).
+    parts.headers.remove("x-roll-user");
+    if let Ok(v) = axum::http::HeaderValue::from_str(&reviewer_name(&ctx.grant)) {
+        parts.headers.insert("x-roll-agent", v);
+    }
     parts.extensions.insert(roll_auth::Operator);
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
@@ -301,6 +334,13 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     };
     ctx.audit(Some(row), Some(action), resource, if approval_used.is_some() { "ask" } else { "allow" }, approval_used.as_deref(), resp.status());
     resp
+}
+
+/// The name a grant reviews and comments as in roll code: `token:<its name>` (roll code's agent
+/// name rules: 1-100 of `[A-Za-z0-9._@/:+-]`).
+fn reviewer_name(g: &Grant) -> String {
+    let name: String = g.name.chars().map(|c| if c.is_ascii_alphanumeric() || "._@/+-".contains(c) { c } else { '-' }).take(90).collect();
+    format!("token:{name}")
 }
 
 fn sha2_of(b: &[u8]) -> [u8; 32] {
@@ -448,6 +488,10 @@ async fn post_process(
         let r = blocking(move || a.resolvers.workspace.as_ref().ok_or_else(|| Error::Internal("no workspace".into()))?.place(&project, kind, &id)).await;
         if let Err(e) = r {
             tracing::warn!(error = %e, "putting a new resource in its project");
+            // Made, but out of the token's reach: say so rather than leave it a mystery.
+            if let Some(o) = v.as_object_mut() {
+                o.insert("workspace_error".into(), Value::String(format!("created, but not put in the workspace project: {e}")));
+            }
         }
     }
     if filter_list && let Tgt::List { items, id_field } = row.target {
@@ -456,7 +500,7 @@ async fn post_process(
             let keep = |item: &Value| {
                 let Some(id) = item.get(id_field).and_then(Value::as_str) else { return false };
                 let r = if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, product, id) };
-                s.outcome(&Target::One(r), action) != Outcome::Deny
+                s.outcome(&Target::One(r), action) == Outcome::Allow
             };
             let filter = |list: &mut Vec<Value>| list.retain(&keep);
             match (items, &mut v) {

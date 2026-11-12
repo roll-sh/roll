@@ -197,6 +197,30 @@ pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
     by_path(method, path)
 }
 
+/// A workspace membership change (`PUT`/`DELETE …/projects/{id}/resources/{kind}/{ref}`): the
+/// product and id of the resource being moved, which the evaluator also checks.
+pub fn placement(row: &Row, params: &[(String, String)]) -> Option<(&'static str, String)> {
+    if row.route != "/v1/workspace/projects/{id}/resources/{kind}/{ref}" {
+        return None;
+    }
+    let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let product = match get("kind")?.as_str() {
+        "postgres" => "postgres",
+        "redis" => "redis",
+        "stream" => "streams",
+        "bucket" => "storage",
+        "nosql" => "nosql",
+        "repo" => "code",
+        "queue" => "queues",
+        "tasks" => "tasks",
+        "search" => "search",
+        "service" => "apps",
+        // An unknown kind: the workspace refuses it anyway; check it as the workspace's own.
+        _ => "workspace",
+    };
+    Some((product, get("ref")?))
+}
+
 /// Products mounted with `nest_service`: axum gives their requests no matched route.
 pub const NESTS: &[&str] = &["/v1/storage"];
 
@@ -324,9 +348,69 @@ pub fn view(r: &Row) -> RowView {
 
 // ── body-decided actions ──
 
-/// Postgres SQL: `read_only: true` reads (and runs in a read-only transaction); the rest writes.
+/// Statement text without comments (`--`, `//` and `/* */`), so a comment can't hide what runs.
+fn uncommented(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('\'', _) | ('"', _) => {
+                quote = Some(c);
+                out.push(c);
+            }
+            ('-', Some('-')) | ('/', Some('/')) => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        break;
+                    }
+                }
+                out.push(' ');
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Statements that make or change database credentials and privileges: `admin`, whatever else
+/// the body does (a login made in SQL would outlive the token and skip `reveal`).
+fn grants_access(text: &str) -> bool {
+    let t = uncommented(text).to_ascii_lowercase();
+    let words: Vec<&str> = t.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').filter(|w| !w.is_empty()).collect();
+    words.windows(2).any(|w| matches!(w[0], "create" | "alter" | "drop") && matches!(w[1], "role" | "user"))
+        || words.iter().any(|w| matches!(*w, "grant" | "revoke" | "superuser"))
+}
+
+/// Postgres SQL: `read_only: true` reads (Postgres enforces it: the SQL runs as a role that can
+/// only read); anything else writes, and SQL that touches roles or privileges is `admin`.
 fn sql_action(b: &Value) -> Action {
-    if b.get("read_only").and_then(Value::as_bool) == Some(true) { Action::Read } else { Action::Write }
+    let sql = b.get("sql").and_then(Value::as_str).unwrap_or("");
+    if b.get("read_only").and_then(Value::as_bool) == Some(true) {
+        Action::Read
+    } else if grants_access(sql) {
+        Action::Admin
+    } else {
+        Action::Write
+    }
 }
 
 /// Redis: commands that only read are `read`, flushes `delete`, the rest `write`.
@@ -339,7 +423,9 @@ fn redis_action(b: &Value) -> Action {
     };
     let first = cmd.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
     match first.as_str() {
-        "FLUSHDB" | "FLUSHALL" => Action::Delete,
+        // A script can run anything, flushes included: the strongest a command can be.
+        "FLUSHDB" | "FLUSHALL" | "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" | "FCALL" | "FCALL_RO" | "FUNCTION" | "SCRIPT" => Action::Delete,
+        "ACL" | "CONFIG" | "AUTH" | "HELLO" | "MIGRATE" | "MODULE" | "DEBUG" | "SHUTDOWN" | "REPLICAOF" | "SLAVEOF" => Action::Admin,
         "GET" | "MGET" | "STRLEN" | "GETRANGE" | "EXISTS" | "TYPE" | "TTL" | "PTTL" | "EXPIRETIME" | "KEYS" | "SCAN" | "DBSIZE" | "HGET" | "HMGET" | "HGETALL"
         | "HKEYS" | "HVALS" | "HLEN" | "HEXISTS" | "HSCAN" | "HSTRLEN" | "LRANGE" | "LLEN" | "LINDEX" | "LPOS" | "SMEMBERS" | "SISMEMBER" | "SMISMEMBER"
         | "SCARD" | "SSCAN" | "SRANDMEMBER" | "SINTER" | "SUNION" | "SDIFF" | "ZRANGE" | "ZRANGEBYSCORE" | "ZREVRANGE" | "ZREVRANGEBYSCORE" | "ZSCORE"
@@ -354,14 +440,19 @@ fn redis_action(b: &Value) -> Action {
 /// CQL: `SELECT` (and `DESCRIBE`, `USE`) read, `DROP` and `TRUNCATE` delete, the rest write. A
 /// body with several statements is the strongest of them.
 fn cql_action(b: &Value) -> Action {
-    let text = b.get("query").or_else(|| b.get("cql")).or_else(|| b.get("statement")).and_then(Value::as_str).unwrap_or("");
+    let raw = b.get("query").or_else(|| b.get("cql")).or_else(|| b.get("statement")).and_then(Value::as_str).unwrap_or("");
+    if grants_access(raw) {
+        return Action::Admin;
+    }
+    let text = uncommented(raw);
     let mut out = Action::Read;
     let mut any = false;
     for stmt in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         any = true;
         let first = stmt.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
         let a = match first.as_str() {
-            "SELECT" | "DESCRIBE" | "DESC" | "USE" | "LIST" => Action::Read,
+            "SELECT" | "DESCRIBE" | "DESC" | "USE" => Action::Read,
+            "LIST" => Action::Admin,
             "DROP" | "TRUNCATE" => Action::Delete,
             _ => Action::Write,
         };
@@ -370,13 +461,25 @@ fn cql_action(b: &Value) -> Action {
     if any { out } else { Action::Write }
 }
 
-/// Agents' machine commands: answering an agent's approval is `admin` (it would let an agent
-/// approve itself), publishing with `land` ships to the default branch (`deploy`), the rest write.
+/// Agents' machine commands, by what they can do on the machine (`policy::agent_may`'s tiers):
+/// reading a thread's diff or files is `read`; working threads is `write`; publishing with `land`
+/// ships (`deploy`); deleting a thread `delete`; and a shell, writing files, rolling back, raising a
+/// thread's runtime or interaction mode, answering an agent's approval (it would approve itself),
+/// endpoints, the gateway, projects and the machine's settings are `admin`. Unknown types too.
 fn agent_command_action(b: &Value) -> Action {
-    match b.get("type").and_then(Value::as_str) {
-        Some("request.respond") => Action::Admin,
-        Some("thread.publish") if b.get("land").and_then(Value::as_bool) == Some(true) => Action::Deploy,
-        _ => Action::Write,
+    let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
+    let raises = b.get("runtime_mode").is_some_and(|m| !m.is_null()) || b.get("interaction_mode").is_some_and(|m| !m.is_null());
+    match kind {
+        "diff.get" | "git.status" | "fs.read" | "terminal.scrollback" => Action::Read,
+        "fs.list" if b.get("project").is_some_and(|p| !p.is_null()) => Action::Read,
+        "thread.publish" if b.get("land").and_then(Value::as_bool) == Some(true) => Action::Deploy,
+        "thread.delete" => Action::Delete,
+        "thread.create" if b.get("runtime_mode").and_then(Value::as_str) == Some("full_access") => Action::Admin,
+        "thread.configure" if raises => Action::Admin,
+        "thread.create" | "thread.configure" | "thread.fork" | "thread.archive" | "thread.unarchive" | "thread.settle" | "thread.unsettle" | "thread.snooze"
+        | "thread.unsnooze" | "thread.visit" | "thread.auto_settle" | "thread.publish" | "message.send" | "message.unqueue" | "message.edit" | "message.reorder"
+        | "message.promote" | "run.interrupt" => Action::Write,
+        _ => Action::Admin,
     }
 }
 
@@ -407,6 +510,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/tokens/{id}", "access", R, Tgt::Product),
     row("PATCH", "/v1/access/tokens/{id}", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}", "access", ADMIN, Tgt::Product),
+    row("POST", "/v1/access/tokens/{id}/rotate", "access", ADMIN, Tgt::Product),
     row("GET", "/v1/access/approvals", "access", R, Tgt::Product),
     // A grant waits on its own approvals (the handler checks it's its own, or access read).
     row("GET", "/v1/access/approvals/{id}", "access", R, Tgt::AnyGrant),
@@ -429,18 +533,18 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/health", "postgres", R, Tgt::AnyGrant),
     row("GET", "/v1/projects", "postgres", R, list("id")).reveals(PG_SECRETS),
     row("POST", "/v1/projects", "postgres", W, create("postgres", "id")).reveals(PG_SECRETS),
-    row("GET", "/v1/projects/{id}", "postgres", R, one(PG, "project")).reveals(PG_SECRETS),
-    row("PATCH", "/v1/projects/{id}", "postgres", W, one(PG, "project")).reveals(PG_SECRETS),
-    row("DELETE", "/v1/projects/{id}", "postgres", D, one(PG, "project")),
-    row("POST", "/v1/projects/{id}/branches", "postgres", W, one(PG, "project")).reveals(PG_SECRETS),
-    row("DELETE", "/v1/projects/{id}/branches/{branch}", "postgres", D, one(PG, "project")),
-    row("GET", "/v1/projects/{id}/branches/{branch}/history", "postgres", R, one(PG, "project")),
+    row("GET", "/v1/projects/{id}", "postgres", R, one(PG, "postgres-project")).reveals(PG_SECRETS),
+    row("PATCH", "/v1/projects/{id}", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),
+    row("DELETE", "/v1/projects/{id}", "postgres", D, one(PG, "postgres-project")),
+    row("POST", "/v1/projects/{id}/branches", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),
+    row("DELETE", "/v1/projects/{id}/branches/{branch}", "postgres", D, one(PG, "postgres-project")),
+    row("GET", "/v1/projects/{id}/branches/{branch}/history", "postgres", R, one(PG, "postgres-project")),
     // Rewinds the branch in place (the old state is kept as a branch, but clients see it gone).
-    row("POST", "/v1/projects/{id}/branches/{branch}/restore", "postgres", D, one(PG, "project")),
-    row("POST", "/v1/projects/{id}/branches/{branch}/backup", "postgres", W, one(PG, "project")),
-    row("POST", "/v1/projects/{id}/branches/{branch}/evict", "postgres", W, one(PG, "project")),
-    row("POST", "/v1/projects/{id}/branches/{branch}/replicas", "postgres", W, one(PG, "project")).reveals(PG_SECRETS),
-    row("GET", "/v1/projects/{id}/usage", "postgres", R, one(PG, "project")),
+    row("POST", "/v1/projects/{id}/branches/{branch}/restore", "postgres", D, one(PG, "postgres-project")),
+    row("POST", "/v1/projects/{id}/branches/{branch}/backup", "postgres", W, one(PG, "postgres-project")),
+    row("POST", "/v1/projects/{id}/branches/{branch}/evict", "postgres", W, one(PG, "postgres-project")),
+    row("POST", "/v1/projects/{id}/branches/{branch}/replicas", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),
+    row("GET", "/v1/projects/{id}/usage", "postgres", R, one(PG, "postgres-project")),
     row("GET", "/v1/endpoints/{id}", "postgres", R, one(PG, "endpoint")).reveals(PG_SECRETS),
     row("PATCH", "/v1/endpoints/{id}", "postgres", W, one(PG, "endpoint")),
     row("DELETE", "/v1/endpoints/{id}", "postgres", D, one(PG, "endpoint")),
@@ -777,6 +881,18 @@ mod tests {
         assert_eq!(redis_action(&serde_json::json!({ "command": ["set", "k", "v"] })), Action::Write);
         assert_eq!(cql_action(&serde_json::json!({ "query": "SELECT * FROM t; DROP TABLE t" })), Action::Delete);
         assert_eq!(cql_action(&serde_json::json!({ "query": "" })), Action::Write);
+        // Comments can't hide what runs; scripts and credentials are the strongest.
+        assert_eq!(cql_action(&serde_json::json!({ "query": "/* x */ DROP TABLE t" })), Action::Delete);
+        assert_eq!(cql_action(&serde_json::json!({ "query": "-- hi\nTRUNCATE t" })), Action::Delete);
+        assert_eq!(cql_action(&serde_json::json!({ "query": "SELECT '--' FROM t" })), Action::Read);
+        assert_eq!(cql_action(&serde_json::json!({ "query": "CREATE ROLE x WITH SUPERUSER = true AND LOGIN = true" })), Action::Admin);
+        assert_eq!(redis_action(&serde_json::json!({ "command": ["EVAL", "return redis.call('FLUSHALL')", "0"] })), Action::Delete);
+        assert_eq!(sql_action(&serde_json::json!({ "sql": "CREATE ROLE x LOGIN SUPERUSER PASSWORD 'p'" })), Action::Admin);
+        assert_eq!(sql_action(&serde_json::json!({ "sql": "insert into grants_log values (1)" })), Action::Write);
+        assert_eq!(agent_command_action(&serde_json::json!({ "type": "terminal.open" })), Action::Admin);
+        assert_eq!(agent_command_action(&serde_json::json!({ "type": "thread.configure", "runtime_mode": "full_access" })), Action::Admin);
+        assert_eq!(agent_command_action(&serde_json::json!({ "type": "message.send" })), Action::Write);
+        assert_eq!(agent_command_action(&serde_json::json!({ "type": "something.new" })), Action::Admin);
         let mut routes: Vec<_> = ROWS.iter().map(|r| (r.method, r.route)).collect();
         let n = routes.len();
         routes.sort();

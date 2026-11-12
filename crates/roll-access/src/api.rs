@@ -23,6 +23,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/catalog", get(catalog_view))
         .route("/v1/access/tokens", get(list).post(create))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
+        .route("/v1/access/tokens/{id}/rotate", post(rotate))
         .route("/v1/access/approvals", get(approvals))
         .route("/v1/access/approvals/{id}", get(approval))
         .route("/v1/access/approvals/{id}/approve", post(approve))
@@ -129,7 +130,7 @@ async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate:
     let by = match who(&a, &ext)? {
         Who::Operator => "operator".to_string(),
         Who::Grant(g) => {
-            check_within(&a, &g, &new.rules, new.expires_at).await?;
+            check_within(&a, &g, &new.rules, new.expires_at, &new.ip_allow).await?;
             g.id.to_string()
         }
     };
@@ -137,8 +138,9 @@ async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate:
     Ok((StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response())
 }
 
-/// A grant may hand out only what it has, for no longer than it lives.
-async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, rules: &Scope, expires_at: Option<i64>) -> crate::Result<()> {
+/// A grant may hand out only what it has: rules it covers, for no longer than it lives, from no
+/// more addresses than it may be used from.
+async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, rules: &Scope, expires_at: Option<i64>, ip_allow: &[String]) -> crate::Result<()> {
     if !crate::may_grant(Some(g), rules) {
         return Err(Error::Forbidden("a token can only make tokens it covers: every rule must be within one of its own".into()));
     }
@@ -149,7 +151,23 @@ async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, rules: &Scope, expi
     {
         return Err(Error::Forbidden("a token can't make one that outlives it: set expires_at on or before its own".into()));
     }
+    if !maker.ip_allow.is_empty() {
+        let mine = crate::store::parse_ip_allow(&maker.ip_allow)?;
+        let theirs = crate::store::parse_ip_allow(ip_allow)?;
+        let inside = !theirs.is_empty() && theirs.iter().all(|t| mine.iter().any(|m| m.contains(t)));
+        if !inside {
+            return Err(Error::Forbidden(format!("a token limited to {} can only make tokens limited within those addresses", maker.ip_allow.join(", "))));
+        }
+    }
     Ok(())
+}
+
+/// The target as `g` may touch it: itself (not its addresses), or a token it covers entirely.
+async fn may_touch(a: &Arc<Access>, g: &roll_auth::Grant, target: &crate::store::Grant) -> crate::Result<()> {
+    if *g.id == *target.id {
+        return Ok(());
+    }
+    check_within(a, g, &target.rules, target.expires_at, &target.ip_allow).await
 }
 
 async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
@@ -157,9 +175,16 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     if let Who::Grant(g) = who(&a, &ext)? {
         let (target_id, a2) = (id.clone(), a.clone());
         let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
-        let rules = change.rules.clone().unwrap_or(target.rules);
+        // What the token is now, and what it would become, must both be within the caller's; a
+        // token never widens its own addresses.
+        may_touch(&a, &g, &target).await?;
+        if *g.id == *target.id && change.ip_allow.as_ref().is_some_and(|ip| *ip != target.ip_allow) {
+            return Err(Error::Forbidden("a token can't change the addresses it may be used from".into()));
+        }
+        let rules = change.rules.clone().unwrap_or(target.rules.clone());
         let expires = change.expires_at.unwrap_or(target.expires_at);
-        check_within(&a, &g, &rules, expires).await?;
+        let ips = change.ip_allow.clone().unwrap_or(target.ip_allow.clone());
+        check_within(&a, &g, &rules, expires, &ips).await?;
     }
     Ok(Json(json!(blocking(a, move |a| a.store.update(&id, &change)).await?)))
 }
@@ -169,11 +194,20 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
         let (target_id, a2) = (id.clone(), a.clone());
         let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
         // A grant revokes itself, or tokens it covers.
-        if *g.id != *target.id {
-            check_within(&a, &g, &target.rules, target.expires_at).await?;
-        }
+        may_touch(&a, &g, &target).await?;
     }
     Ok(Json(json!(blocking(a, move |a| a.store.revoke(&id)).await?)))
+}
+
+/// A new secret, the same rules: shown once. A grant may rotate itself, or tokens it covers.
+async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    if let Who::Grant(g) = who(&a, &ext)? {
+        let (target_id, a2) = (id.clone(), a.clone());
+        let target = blocking(a2, move |a| a.store.get(&target_id)).await?;
+        may_touch(&a, &g, &target).await?;
+    }
+    let (grant, token) = blocking(a, move |a| a.store.rotate(&id)).await?;
+    Ok(Json(json!({ "grant": grant, "token": token })))
 }
 
 #[derive(Deserialize)]

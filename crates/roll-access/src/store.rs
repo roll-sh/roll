@@ -462,6 +462,26 @@ impl Store {
         self.get(id)
     }
 
+    /// A new secret for a token, the same rules (the old secret stops working at once). OAuth
+    /// connections rotate through their refresh tokens instead.
+    pub fn rotate(&self, id: &str) -> Result<(Grant, String)> {
+        let grant = self.get(id)?;
+        if grant.kind() != GrantKind::Token {
+            return Err(Error::Conflict("an OAuth connection rotates its own tokens: revoke it and connect again".into()));
+        }
+        if !grant.live(code_sql::now_ms()) {
+            return Err(Error::Conflict("the token is revoked or expired".into()));
+        }
+        let token = new_secret(TOKEN_PREFIX);
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [id])?;
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'token', NULL, ?)", params![hash(&token), id, now])?;
+            Ok::<_, Error>(())
+        })?;
+        Ok((self.get(id)?, token))
+    }
+
     /// The grant was used now, from `ip`: written at most once a minute per grant per node.
     pub fn touch(&self, id: &str, ip: Option<&str>) {
         let now = code_sql::now_ms();
@@ -523,7 +543,7 @@ impl Store {
             .db
             .read(|c| c.query_row(&format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE id = ?"), [id], approval_row).optional())?
             .ok_or_else(|| Error::NotFound(format!("no approval {id}")))?;
-        if a.state == "pending" && a.expires_at <= code_sql::now_ms() {
+        if matches!(a.state.as_str(), "pending" | "approved") && a.expires_at <= code_sql::now_ms() {
             a.state = "expired".into();
         }
         Ok(a)
@@ -556,10 +576,11 @@ impl Store {
     pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>) -> Result<Approval> {
         let now = code_sql::now_ms();
         let state = if approve { "approved" } else { "denied" };
+        // An approved request may run within the next ten minutes, once.
         let n = self.db.write(|c| {
             c.execute(
-                "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?, reason = ? WHERE id = ? AND state = 'pending' AND expires_at > ?",
-                params![state, now, by, reason, id, now],
+                "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ? AND state = 'pending' AND expires_at > ?",
+                params![state, now, by, reason, now + APPROVAL_TTL_MS, id, now],
             )
         })?;
         self.db.notify_after_commit(crate::APPROVALS_CHANNEL);
@@ -574,8 +595,8 @@ impl Store {
     pub fn consume(&self, id: &str, grant_id: &str, request_hash: &str) -> Result<bool> {
         let n = self.db.write(|c| {
             c.execute(
-                "UPDATE approvals SET state = 'used' WHERE id = ? AND grant_id = ? AND request_hash = ? AND state = 'approved'",
-                params![id, grant_id, request_hash],
+                "UPDATE approvals SET state = 'used' WHERE id = ? AND grant_id = ? AND request_hash = ? AND state = 'approved' AND expires_at > ?",
+                params![id, grant_id, request_hash, code_sql::now_ms()],
             )
         })?;
         Ok(n == 1)

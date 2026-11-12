@@ -24,9 +24,17 @@ import { AccessShell, relative, usePoll } from "./shell";
 /** `/dashboard/access`: how to connect a client, and every token and connection with what it may do. */
 export function AccessOverview() {
   const { data: grants, error, refresh } = usePoll(() => accessApi.tokens(), 10_000);
+  const { data: me } = usePoll(() => accessApi.me(), 60_000);
   return (
     <AccessShell tab="overview">
       <div className="space-y-6">
+        {me?.locked === false && (
+          <p className="rounded-lg border border-line bg-panel px-4 py-3 text-[13px] text-muted">
+            This daemon is open (no <code className="font-mono">ROLL_ADMIN_TOKEN</code>): tokens keep well-behaved clients to their
+            rules, but anything on this machine can call the API as the operator. Set <code className="font-mono">ROLL_ADMIN_TOKEN</code>{" "}
+            for tokens to protect anything.
+          </p>
+        )}
         <ConnectPanel />
         <ErrorNote error={error} />
         {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}

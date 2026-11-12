@@ -350,9 +350,15 @@ export function parseAuthorize(search: Record<string, unknown>): AuthorizeReques
   return r;
 }
 
-/** The preset a client's `scope` asks for (the first known one), else the agent preset. */
+/** Presets a client's `scope` never preselects: the person picks them on purpose. */
+const NEVER_PRESELECTED = new Set(["full"]);
+
+/**
+ * The preset a client's `scope` asks for (the first known one), else the agent preset. A client
+ * can't preselect full access: anyone can register a client, so what it asks for is a hint.
+ */
 export function presetFor(scope: string | undefined, presets: Preset[]): Preset | undefined {
-  const asked = (scope ?? "").split(/\s+/).filter(Boolean);
+  const asked = (scope ?? "").split(/\s+/).filter((s) => s && !NEVER_PRESELECTED.has(s));
   return presets.find((p) => asked.includes(p.id)) ?? presets.find((p) => p.id === "agent") ?? presets[0];
 }
 

@@ -22,6 +22,10 @@ pub enum Token {
     Show { id: String },
     /// Revoke a token or connection: every request with it fails from now on.
     Revoke { id: String },
+    /// A new secret for a token, with the same rules; the old one stops working at once.
+    Rotate { id: String },
+    /// Change a token: its name, expiry, addresses, or (with --preset/--allow/--ask) its rules.
+    Edit(Box<Edit>),
     /// Who the token you're using is (`ROLL_TOKEN` or `ROLL_ADMIN_TOKEN`).
     Whoami,
     /// The products, actions and presets the builder offers.
@@ -32,6 +36,19 @@ pub enum Token {
 pub struct Create {
     /// A name you'll recognise it by ("ci", "cursor on my laptop").
     name: String,
+    #[command(flatten)]
+    rules: RuleArgs,
+    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
+    #[arg(long, default_value = "30d")]
+    expires: String,
+    /// Addresses it may be used from (CIDRs), repeatable.
+    #[arg(long = "ip", value_delimiter = ',')]
+    ip_allow: Vec<String>,
+}
+
+/// What a token may do, as flags (`create` and `edit`).
+#[derive(Args)]
+pub struct RuleArgs {
     /// Start from a preset: read-only, agent, project, development, previews, full.
     #[arg(long)]
     preset: Option<String>,
@@ -53,12 +70,29 @@ pub struct Create {
     /// Actions that wait for your approval each time.
     #[arg(long, value_delimiter = ',')]
     ask: Vec<String>,
-    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
-    #[arg(long, default_value = "30d")]
-    expires: String,
-    /// Addresses it may be used from (CIDRs), repeatable.
+}
+
+impl RuleArgs {
+    fn given(&self) -> bool {
+        self.preset.is_some() || !self.allow.is_empty() || !self.ask.is_empty()
+    }
+}
+
+#[derive(Args)]
+pub struct Edit {
+    id: String,
+    /// A new name.
+    #[arg(long)]
+    name: Option<String>,
+    /// New rules, built as `create` builds them (replaces every rule).
+    #[command(flatten)]
+    rules: RuleArgs,
+    /// A new lifetime from now: 30d, 12h, 90m, or never.
+    #[arg(long)]
+    expires: Option<String>,
+    /// New addresses it may be used from (replaces the list; `--ip none` clears it).
     #[arg(long = "ip", value_delimiter = ',')]
-    ip_allow: Vec<String>,
+    ip_allow: Option<Vec<String>>,
 }
 
 #[derive(Subcommand)]
@@ -129,7 +163,7 @@ fn expiry(s: &str) -> anyhow::Result<Option<i64>> {
 }
 
 /// The rules a `create` asks for: the preset's (its "project" filled in), then a rule of its own.
-async fn rules(api: &Api, c: &Create) -> anyhow::Result<Value> {
+async fn rules(api: &Api, c: &RuleArgs) -> anyhow::Result<Value> {
     let mut rules = Vec::new();
     let selectors = || {
         let mut sel: Vec<Value> = c.project.iter().map(|p| json!({ "project": p })).collect();
@@ -231,7 +265,7 @@ pub fn date(ms: i64) -> String {
 pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
-            let body = json!({ "name": c.name, "rules": rules(api, &c).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow });
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow });
             let made = api.post("/v1/access/tokens", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -269,6 +303,40 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("{}", serde_json::to_string_pretty(&g)?);
             } else {
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
+            }
+        }
+        Token::Rotate { id } => {
+            let made = api.post(&format!("/v1/access/tokens/{id}/rotate"), json!({})).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&made)?);
+                return Ok(());
+            }
+            println!("{}", s(&made["token"]));
+            eprintln!("The old secret stopped working. Copy this one now: it isn't shown again.");
+        }
+        Token::Edit(e) => {
+            let mut patch = serde_json::Map::new();
+            if let Some(n) = &e.name {
+                patch.insert("name".into(), json!(n));
+            }
+            if e.rules.given() {
+                patch.insert("rules".into(), rules(api, &e.rules).await?);
+            }
+            if let Some(x) = &e.expires {
+                patch.insert("expires_at".into(), json!(expiry(x)?));
+            }
+            if let Some(ips) = &e.ip_allow {
+                let ips: Vec<&String> = ips.iter().filter(|i| i.as_str() != "none").collect();
+                patch.insert("ip_allow".into(), json!(ips));
+            }
+            if patch.is_empty() {
+                bail!("nothing to change: --name, --expires, --ip, or new rules (--preset, --allow, --ask)");
+            }
+            let g = api.call(reqwest::Method::PATCH, &format!("/v1/access/tokens/{}", e.id), Some(Value::Object(patch))).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&g)?);
+            } else {
+                print_grant(&g);
             }
         }
         Token::Whoami => {

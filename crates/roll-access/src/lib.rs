@@ -206,11 +206,9 @@ impl Access {
     pub fn resource(&self, product: &str, kind: &str, id: &str) -> Resource {
         let resolved = self.resolvers.resolve(kind, id);
         let id = resolved.as_ref().map_or_else(|| id.to_string(), |r| r.id.clone());
-        let project = match product {
-            // A workspace project is in itself.
-            "workspace" => Some(id.clone()),
-            _ => catalog::workspace_kind(product).and_then(|wk| self.resolvers.project_of(wk, &id)),
-        };
+        // A workspace project (kind `project`) is in itself, and so is what a product keeps per
+        // workspace project (secrets' environments, previews' settings): their routes name it.
+        let project = if kind == "project" { Some(id.clone()) } else { catalog::workspace_kind(product).and_then(|wk| self.resolvers.project_of(wk, &id)) };
         Resource { product: product.into(), id: Some(id), project, environment: resolved.and_then(|r| r.environment), path: None }
     }
 }
