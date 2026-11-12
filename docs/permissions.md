@@ -6,13 +6,15 @@ An agent, a CI job or an MCP client then holds exactly that much power. The same
 HTTP API, through the `roll` CLI and through the [MCP server](mcp.md). Scopes are enforced by the
 API, once, in front of every route, so no surface can do more than another.
 
-- Code: `crates/roll-access` (the store, the catalogue, the evaluator, `/v1/access`, OAuth, the
-  MCP server), wired in by `crates/rolld/src/access.rs` and called from `crates/roll-auth`'s gate.
+- Code: `crates/roll-auth` (the scope model, `roll_auth::scope`, and the gate),
+  `crates/roll-access` (the store, the catalogue, the evaluator, `/v1/access`, OAuth), wired in by
+  `crates/rolld/src/access.rs`. The MCP server is `crates/roll-mcp` ([mcp.md](mcp.md)).
 - Client: `apps/dashboard/src/lib/access-api.ts`. Change it and the [HTTP API](#http-api) together.
 - Dashboard: `/dashboard/access` ("MCP & access") and the consent screen at `/oauth/authorize`.
 - CLI: `roll token …` and `roll mcp …`.
-- Tests: `crates/roll-access/tests/` (the evaluator, the store, approvals, OAuth, the MCP server)
-  and `crates/rolld/tests/auth.rs` (every route is classified, on a real daemon).
+- Tests: `crates/roll-access/tests/access.rs` (scoped tokens, ask, tokens making tokens, OAuth end
+  to end), `crates/roll-mcp/tests/mcp.rs`, and `crates/rolld/tests/auth.rs` (every route a real
+  daemon serves is classified, and a full token works where the operator's does).
 
 ## What good products do, and what roll takes from them
 
@@ -73,6 +75,7 @@ type Rule = {
   product: Product | "*";
   resources: "*" | Selector[];      // "*": every resource, including ones made later
   environments?: string[];          // only resources in these environments
+  paths?: string[];                 // only resources under these paths (secrets' folders)
   actions: Partial<Record<Action, "allow" | "ask">>;
 };
 
@@ -126,7 +129,13 @@ and **environment** where the product says (a secrets environment, an app enviro
   resource out of the project takes it out of the token's reach at once.
 - `{id}` matches one resource.
 - `environments` narrows a rule to resources whose environment the product knows and is in the
-  list. A resource without a known environment never matches such a rule.
+  list. A resource without a known environment never matches such a rule. Secrets and apps carry
+  the environment in their paths (`…/environments/{env}/…`); previews' resources are in `preview`.
+- `paths` narrows a rule to resources with a path under one of these (`/api` covers `/api/db`, not
+  `/apix`). Secrets' folders come from `?path=` (`/` without it).
+- Ids are canonical: a Redis database, NoSQL database or stream named by its name is checked under
+  its id, a Postgres endpoint under its project, and a code change, thread or work item under its
+  repo (`owner/name`).
 
 Routes that aren't about one resource:
 
@@ -139,19 +148,35 @@ Routes that aren't about one resource:
   for one project can make databases only in that project.
 - **Product-wide** routes (settings, usage of the whole product) need a rule with `"*"`.
 
+### Credentials in answers
+
+Many answers carry credentials besides what they're about: every Postgres project view has
+connection strings with the password, Redis and NoSQL views have passwords and tokens, bucket views
+have webhook secrets. Such rows name their credential fields, and unless the grant may `reveal` on
+that resource, the gate replaces them in the answer before it leaves: a URL keeps everything but its
+password (`postgres://roll:redacted@host/main`), anything else becomes `"[redacted]"`. A token that
+may create a database without `reveal` gets the new database, not its password. `ask` for `reveal`
+counts as not allowed here: an answer is never held for a person.
+
+### Storage accounts
+
+Storage acts in the account a request names (`X-Roll-Account` or `?account=`), and bucket names
+repeat across accounts. A request naming an account is about storage as a whole: only a rule for
+every storage resource covers it.
+
 ### Presets
 
-The builder starts from a preset and the user narrows or widens it.
+The builder starts from a preset and the user narrows or widens it (`GET /v1/access/catalog` has
+them; `project` means the workspace project the user picks).
 
 | preset | rules |
 | --- | --- |
-| Read only | every product, `*`, `read` |
-| This project only | every product, `{project}`, `read` `write`; `delete` `deploy` ask |
-| Dev environment only | every product, `{project}`, environments `development`: `read` `write` `delete`; `reveal` ask |
-| Previews only | every product, `*`, environments `preview`: `read` `write` `delete` |
-| Coding agent | `code` and `agents` `*`: `read` `write`; `deploy` ask; `postgres` `*`: `read`, `write` ask |
-| Full access, ask for destructive | every product, `*`: `read` `write` `admin`; `delete` `reveal` `deploy` ask |
-| Full access | every product, `*`, every action (expiry still applies) |
+| Read only | every product, `*`: `read` |
+| Agent, asks before destructive (the consent screen's default) | every product, `*`: `read` `write`; `delete` `reveal` `deploy` ask |
+| This project only | every product, the project: `read` `write`; `delete` `reveal` `deploy` ask |
+| Dev environment only | every product, the project, environments `development`: `read` `write` `delete`; `reveal` ask |
+| Previews only | every product, `*`, environments `preview`: `read` `write` `delete`; `reveal` ask |
+| Full access | every product, `*`: every action (expiry still applies) |
 
 ## Evaluation
 
@@ -163,8 +188,11 @@ One function, `roll_access::evaluate`, in front of every route rolld serves. On 
 2. **The grant.** It must not be revoked or expired. The client's address must be in `ip_allow`
    when that's set (the peer address, or the edge's forwarded address when rolld is behind the
    edge).
-3. **The route.** The matched route pattern and method find the catalogue row: the product, the
-   action (from the body where it depends on it), and how to find the resource. No row: 403.
+3. **The route.** The matched route pattern and method find the catalogue row: an exact row (one
+   naming the method beats `*`), else the longest prefix row. Routes that are a product's own
+   router in disguise (tasks' `{*rest}`, storage's `nest_service`) are matched by the request's
+   real path. The row gives the product, the action (from the body where it depends on it), and
+   how to find the resource. No row: 403 `operator_only`.
 4. **The rules.** Collect the rules whose product and resources match. The action's outcome is the
    most permissive among them (`allow` beats `ask`); no rule with the action means 403.
 5. **Ask** pauses the request for a person ([below](#approvals)).
@@ -175,8 +203,10 @@ One function, `roll_access::evaluate`, in front of every route rolld serves. On 
 The decision is the same wherever the request comes from: the HTTP API, the CLI, or an MCP tool
 (whose call is one request through the same router, with the same token).
 
-A request through one node and forwarded to another is evaluated again there, which is cheap
-(one indexed read) and needs no trust between the hops.
+A request forwarded to another node through the API (roll code's repo owners) is evaluated
+again there, which is cheap (one indexed read). One forwarded over a signed internal hop after the
+gate (the tasks leader) was decided by the node that forwarded it, and the leader takes it as the
+operator's.
 
 On an open daemon (loopback, no `ROLL_ADMIN_TOKEN`), requests without a token still pass, but a
 request **with** a scoped token is evaluated: a token's limits hold wherever it's used.
@@ -224,7 +254,7 @@ type AuditEvent = {
   grant_id: string | null; grant_name: string | null; // null: the operator
   source: "api" | "mcp";
   tool: string | null;
-  method: string; route: string;      // the route pattern, never the path with ids? see below
+  method: string; route: string;      // the route pattern, never the path
   product: Product | null; action: Action | null; resource: string | null;
   decision: "allow" | "deny" | "ask";
   approval: string | null;
@@ -279,19 +309,36 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?}`: narrow or widen (within the caller's own) |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
-| `POST /v1/access/check` | any grant | `{method, path, body?}` → the decision the evaluator would make, without running it |
 | `GET /v1/access/approvals` | access read | `?state=pending` |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&before=&limit=` |
-| `GET /v1/access/oauth/clients` | access read | registered MCP clients |
+| `GET /v1/access/oauth/clients` | access read | MCP clients with a live connection |
+| `GET /v1/access/oauth/clients/{id}` | access read | a registered client (the consent screen shows it) |
 | `POST /v1/access/oauth/authorize` | operator | the consent screen's answer: `{client_id, redirect_uri, code_challenge, state, resource, name, rules, expires_at?}` → `{redirect}` |
 
 OAuth's public endpoints (discovery, registration, token, revocation) are in [mcp.md](mcp.md#authorization).
 
-## Next
+## Classification
 
-Ranked; the top item is what's being worked on.
+Every route rolld serves is in the catalogue, or deliberately left to its own credentials. At
+startup rolld logs each route with its access and its classification
+(`RUST_LOG=rolld::auth=debug`: `route=/v1/projects scoped=postgres access=operator`), and
+`crates/rolld/tests/auth.rs` fails on any route that no grant could be classified for, outside
+this list:
 
-1. Build `crates/roll-access`: store, catalogue, evaluator; wire it into the gate.
+| routes | why |
+| --- | --- |
+| `/t/…`, `/_roll/tenants` | hosted tasks tenants: their own API keys and the tasks token |
+| `/kafka/v3` | Confluent REST: stream API keys |
+| `/git` | git smart HTTP: roll code tokens |
+| `/internal/…` | signed hops between nodes |
+| `/v1/code/chat`, `/v1/code/github`, `/v1/code/linear` | platforms' signed webhooks and install flows |
+| `/v1/code/agents/connect`, `/v1/code/agents/login` | machines' relay link and device login |
+| `/v1/code/agents/shares/{id}`, `/v1/code/names` | public pages |
+| `/v1/code/review-apps` | review apps' own tokens |
+| `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
+| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize` | the operator decides |
+
+The rest of the work list is in [mcp.md](mcp.md#next).

@@ -489,27 +489,64 @@ impl Control {
 
     // ── SQL console ──
 
-    /// Run SQL on an endpoint (dashboard SQL editor). Wakes the compute if needed.
-    pub async fn query(self: &Arc<Self>, endpoint_id: &str, sql: &str) -> Result<Vec<QueryResult>> {
+    /// Run SQL on an endpoint (dashboard SQL editor, MCP). Wakes the compute if needed.
+    ///
+    /// `read_only`: the SQL runs as a login role made for this one query, holding nothing but
+    /// `pg_read_all_data` (and `default_transaction_read_only`), dropped with anything it made
+    /// when the query ends. Postgres itself refuses its writes, whatever the SQL does (`SET`,
+    /// `COMMIT; …`, procedures). A standby is read-only already: it runs as is there.
+    pub async fn query(self: &Arc<Self>, endpoint_id: &str, sql: &str, read_only: bool) -> Result<Vec<QueryResult>> {
         let ep = self.endpoint_or_404(endpoint_id)?;
         let project = self.project_or_404(&ep.project_id)?;
         let addr = self.ensure_running(endpoint_id).await?;
-        let conn_str = format!(
-            "host={} port={} user=roll password={} dbname=main connect_timeout=10 application_name=roll-console",
-            addr.ip(),
-            addr.port(),
-            project.password
-        );
-        let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
-            .await
-            .map_err(|e| ControlError::Internal(e.into()))?;
+        let conn = |user: &str, password: &str| {
+            format!("host={} port={} user={user} password={password} dbname=main connect_timeout=10 application_name=roll-console", addr.ip(), addr.port())
+        };
+        let connect = |info: String| async move {
+            let (client, connection) = tokio_postgres::connect(&info, tokio_postgres::NoTls).await.map_err(|e| ControlError::Internal(e.into()))?;
+            Ok::<_, ControlError>((client, tokio::spawn(connection)))
+        };
         self.connection_opened(endpoint_id);
-        let handle = tokio::spawn(connection);
-        let messages = client.simple_query(sql).await;
-        drop(client);
-        let _ = handle.await;
+        let out = async {
+            let (admin, admin_conn) = connect(conn("roll", &project.password)).await?;
+            let as_owner = !read_only || admin.query_one("SELECT pg_is_in_recovery()", &[]).await.map(|r| r.get::<_, bool>(0)).unwrap_or(false);
+            if as_owner {
+                let messages = admin.simple_query(sql).await;
+                drop(admin);
+                let _ = admin_conn.await;
+                return messages.map_err(|e| ControlError::Invalid(pg_error_text(&e)));
+            }
+            let role = format!("roll_ro_{}", crate::ids::random_string(16));
+            let password = crate::ids::random_string(32);
+            admin
+                .batch_execute(&format!(
+                    "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 \
+                     PASSWORD '{password}' VALID UNTIL '{until}' IN ROLE pg_read_all_data; \
+                     ALTER ROLE {role} SET default_transaction_read_only = on",
+                    until = chrono_like_in(600)
+                ))
+                .await
+                .map_err(|e| ControlError::Internal(anyhow::anyhow!("making the read-only role: {}", pg_error_text(&e))))?;
+            let messages = match connect(conn(&role, &password)).await {
+                Ok((reader, reader_conn)) => {
+                    let m = reader.simple_query(sql).await;
+                    drop(reader);
+                    let _ = reader_conn.await;
+                    m.map_err(|e| ControlError::Invalid(pg_error_text(&e)))
+                }
+                Err(e) => Err(e),
+            };
+            // Whatever the role made (a temporary table goes with its session) goes with it.
+            if let Err(e) = admin.batch_execute(&format!("DROP OWNED BY {role}; DROP ROLE {role}")).await {
+                tracing::warn!(role, error = %pg_error_text(&e), "dropping a read-only query role");
+            }
+            drop(admin);
+            let _ = admin_conn.await;
+            messages
+        }
+        .await;
         self.connection_closed(endpoint_id);
-        let messages = messages.map_err(|e| ControlError::Invalid(pg_error_text(&e)))?;
+        let messages = out?;
 
         let mut results = Vec::new();
         let mut current = QueryResult::default();
@@ -545,6 +582,23 @@ impl Control {
         }
         let _ = self.store.touch_endpoint(endpoint);
     }
+}
+
+/// `secs` from now as a Postgres timestamp literal in UTC (`2026-11-12 19:05:30+00`).
+fn chrono_like_in(secs: u64) -> String {
+    let unix = (std::time::SystemTime::now() + std::time::Duration::from_secs(secs)).duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let (days, rem) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}+00", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 fn pg_error_text(e: &tokio_postgres::Error) -> String {

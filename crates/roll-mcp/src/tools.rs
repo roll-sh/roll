@@ -471,5 +471,9 @@ mod tests {
         assert_eq!(r.uri, "/v1/storage/buckets/a%20b/upload?key=x%2Fy.txt");
         assert!(matches!(r.body, Built::Raw(ref b, _) if b == b"hi"));
         assert!(all()[0].request(&json!({ "nope": 1 })).is_err());
+        // docs/mcp.md lists every tool.
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp.md")).unwrap();
+        let missing: Vec<_> = all().iter().filter(|t| !doc.contains(&format!("| `{}` |", t.name))).map(|t| t.name).collect();
+        assert!(missing.is_empty(), "docs/mcp.md doesn't list {missing:?}");
     }
 }
