@@ -8,6 +8,7 @@
 //! keeps it created.
 
 pub mod docker;
+pub mod engine;
 pub mod fake;
 
 use crate::logs::LogSink;

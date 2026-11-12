@@ -124,7 +124,8 @@ fn express_on_npm_with_a_start_script() {
     );
     assert_eq!(p.install, s("npm ci"));
     assert_eq!(p.build, None);
-    assert_eq!(p.start, s("npm run start"));
+    // A plain `node …` start script runs without npm in front of it.
+    assert_eq!(p.start, s("node server.js"));
     has(
         &p,
         &[
@@ -134,6 +135,15 @@ fn express_on_npm_with_a_start_script() {
         ],
     );
     assert!(!p.dockerfile.contains("corepack"));
+
+    // A prestart hook, or a script that needs a shell, keeps npm running it.
+    for pkg in [
+        r#"{"scripts": {"prestart": "node migrate.js", "start": "node server.js"}, "dependencies": {"express": "^5"}}"#,
+        r#"{"scripts": {"start": "node server.js && echo done"}, "dependencies": {"express": "^5"}}"#,
+    ] {
+        let p = detect(&[("package.json", pkg), ("package-lock.json", "{}"), ("server.js", "")]);
+        assert_eq!(p.start, s("npm run start"), "{pkg}");
+    }
 }
 
 #[test]
@@ -537,7 +547,7 @@ fn overrides_replace_the_detected_commands() {
         start: s("  "),
         ..Default::default()
     };
-    assert_eq!(plan(&tree(&files), &o).unwrap().start, s("npm run start"));
+    assert_eq!(plan(&tree(&files), &o).unwrap().start, s("node server.js"));
 }
 
 #[cfg(unix)]

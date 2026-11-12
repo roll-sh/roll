@@ -524,8 +524,9 @@ impl EnvLive {
     /// The reaper, about once a second: meter what runs, suspend and stop what's idle, keep
     /// `min_instances` up, scale down what's no longer needed, restart crashed workers.
     pub async fn tick(self: &Arc<Self>) {
-        let Some(tpl) = self.template() else { return };
-        let run = tpl.run.clone();
+        if self.template().is_none() {
+            return;
+        }
         let now = Instant::now();
         let elapsed = {
             let mut last = self.last_tick.lock();
@@ -554,7 +555,10 @@ impl EnvLive {
             self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
         }
         let _g = self.wake.lock().await;
-        match run.kind {
+        // Read again under the lock: a teardown (`shutdown`) or a new deployment may have
+        // happened while this tick waited, and the floor must not make instances for either.
+        let Some(tpl) = self.template() else { return };
+        match tpl.run.kind {
             RunType::Cron => {}
             RunType::Worker => self.keep_workers(&tpl).await,
             RunType::Web => self.reap_web(&tpl).await,

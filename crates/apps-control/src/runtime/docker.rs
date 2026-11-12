@@ -8,7 +8,11 @@
 //!   answers in milliseconds.
 //! - CPU and memory come straight from the container's cgroup (`cpu.stat`, `memory.current`),
 //!   which costs a file read, not a `docker stats` call.
+//! - A wake's calls (start, unpause, logs, inspect, wait, stop) go straight to the daemon's socket
+//!   ([`Engine`]) when it's local: no `docker` process per call. Everything made at deploy time
+//!   (pull, create, build, networks) stays on the CLI.
 
+use super::engine::Engine;
 use super::{BuildJob, Builder, InstanceSpec, LABEL, Runtime, Usage, free_port};
 use crate::logs::{LogSink, Stream, pump};
 use anyhow::{Context, bail};
@@ -44,11 +48,13 @@ pub struct Docker {
     known: Mutex<Known>,
     /// Where env files are written for the moment of a create.
     scratch: PathBuf,
+    /// The daemon's socket, when it's on this host.
+    engine: Option<Engine>,
 }
 
 impl Docker {
     pub fn new(scratch: PathBuf) -> Docker {
-        Docker { known: Mutex::new(Known::default()), scratch }
+        Docker { known: Mutex::new(Known::default()), scratch, engine: Engine::local() }
     }
 
     async fn id_and_port(&self, name: &str) -> anyhow::Result<(String, Option<u16>)> {
@@ -56,6 +62,11 @@ impl Docker {
             return Ok(k);
         }
         // Made by an earlier process of this node: ask docker.
+        if let Some(e) = &self.engine {
+            let i = e.inspect(name).await?;
+            self.known.lock().containers.insert(name.to_string(), (i.id.clone(), i.host_port));
+            return Ok((i.id, i.host_port));
+        }
         let id = docker(&["inspect", "-f", "{{.Id}}", name]).await?;
         let ports = docker(&["inspect", "-f", "{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}", name]).await?;
         let port = ports.split_whitespace().next().and_then(|p| p.parse().ok());
@@ -188,7 +199,22 @@ impl Runtime for Docker {
     }
 
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>> {
-        let since = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now = chrono::Utc::now();
+        let (o, e) = (log.stream(Stream::Stdout), log.stream(Stream::Stderr));
+        if let Some(engine) = &self.engine {
+            engine.start(name).await?;
+            let (_, port) = self.id_and_port(name).await?;
+            // Follow its output until it stops (the logs request ends with the container).
+            let (engine, name) = (engine.clone(), name.to_string());
+            tokio::spawn(async move {
+                let since = (now.timestamp(), now.timestamp_subsec_nanos());
+                if let Err(err) = engine.follow(&name, since, o.writer(), e.writer()).await {
+                    tracing::debug!(%name, "following logs: {err:#}");
+                }
+            });
+            return Ok(port.map(|p| SocketAddr::from(([127, 0, 0, 1], p))));
+        }
+        let since = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         docker(&["start", name]).await?;
         let (_, port) = self.id_and_port(name).await?;
         // Follow its output until it stops (`docker logs -f` ends with the container).
@@ -202,7 +228,6 @@ impl Runtime for Docker {
         {
             let out = child.stdout.take().expect("piped");
             let err = child.stderr.take().expect("piped");
-            let (o, e) = (log.stream(Stream::Stdout), log.stream(Stream::Stderr));
             tokio::spawn(async move {
                 let a = tokio::spawn(pump(out, o));
                 let b = tokio::spawn(pump(err, e));
@@ -214,17 +239,27 @@ impl Runtime for Docker {
     }
 
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {
-        docker(&["pause", name]).await.map(|_| ())
+        match &self.engine {
+            Some(e) => e.pause(name).await,
+            None => docker(&["pause", name]).await.map(|_| ()),
+        }
     }
 
     async fn resume(&self, name: &str) -> anyhow::Result<()> {
-        docker(&["unpause", name]).await.map(|_| ())
+        match &self.engine {
+            Some(e) => e.unpause(name).await,
+            None => docker(&["unpause", name]).await.map(|_| ()),
+        }
     }
 
     async fn stop(&self, name: &str, grace: Duration) -> anyhow::Result<()> {
         // A paused container must thaw before it can take SIGTERM.
-        let _ = docker(&["unpause", name]).await;
-        docker(&["stop", "-t", &grace.as_secs().max(1).to_string(), name]).await.map(|_| ())
+        let _ = self.resume(name).await;
+        let secs = grace.as_secs().max(1);
+        match &self.engine {
+            Some(e) => e.stop(name, secs).await,
+            None => docker(&["stop", "-t", &secs.to_string(), name]).await.map(|_| ()),
+        }
     }
 
     async fn remove(&self, name: &str) {
@@ -233,11 +268,17 @@ impl Runtime for Docker {
     }
 
     async fn wait(&self, name: &str) -> anyhow::Result<i32> {
+        if let Some(e) = &self.engine {
+            return e.wait(name).await;
+        }
         let code = docker(&["wait", name]).await?;
         Ok(code.trim().parse().unwrap_or(-1))
     }
 
     async fn running(&self, name: &str) -> bool {
+        if let Some(e) = &self.engine {
+            return e.inspect(name).await.is_ok_and(|i| i.running);
+        }
         docker(&["inspect", "-f", "{{.State.Running}}", name]).await.is_ok_and(|s| s == "true")
     }
 

@@ -306,6 +306,7 @@ fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain
         r.get(2)?,
         Domain {
             hostname: r.get(0)?,
+            record: "none",
             kind: if kind == "roll" { DomainKind::Roll } else { DomainKind::Custom },
             status: DomainStatus::parse(&r.get::<_, String>(4)?),
             target: String::new(),
@@ -702,7 +703,7 @@ impl Store {
             )?;
             Ok(())
         })?;
-        Ok(Domain { hostname: host.into(), kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, created_at: now })
+        Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, created_at: now })
     }
 
     pub fn set_domain_status(&self, host: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {

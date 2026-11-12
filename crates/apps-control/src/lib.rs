@@ -703,9 +703,11 @@ impl Apps {
         let target = self.target(&row.slug);
         for d in &mut custom {
             d.target = target.clone();
+            d.record = record_for(&d.hostname);
         }
         let own = Domain {
             hostname: format!("{}.{}", row.slug, self.cfg.domain),
+            record: "none",
             kind: DomainKind::Roll,
             status: DomainStatus::Active,
             target: String::new(),
@@ -726,6 +728,7 @@ impl Apps {
         let (sid, e, h) = (service.to_string(), env.to_string(), host.clone());
         let mut d = self.db(move |s| s.add_domain(&sid, &e, &h)).await?;
         d.target = self.target(&row.slug);
+        d.record = record_for(&d.hostname);
         Ok(d)
     }
 
@@ -743,8 +746,8 @@ impl Apps {
         };
         let _ = (s, en);
         let target = self.target(&row.slug);
-        let cname_ok = self.deps.resolver.cname(&h).await.iter().any(|c| *c == target);
-        let txt_ok = self.deps.resolver.txt(&format!("_roll-challenge.{h}")).await.iter().any(|t| *t == d.token);
+        let cname_ok = self.deps.resolver.cname(&h).await.contains(&target);
+        let txt_ok = self.deps.resolver.txt(&format!("_roll-challenge.{h}")).await.contains(&d.token);
         let (status, error) = if cname_ok || txt_ok {
             (DomainStatus::Active, None)
         } else {
@@ -755,6 +758,7 @@ impl Apps {
         d.status = status;
         d.error = error;
         d.target = target;
+        d.record = record_for(&d.hostname);
         Ok(d)
     }
 
@@ -871,6 +875,15 @@ impl ResolvedVars {
     fn vars_for_hash(&self) -> Vec<(String, String)> {
         self.vars.iter().filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT")).cloned().collect()
     }
+}
+
+/// An apex (`example.com`, `example.co.uk`) can't hold a CNAME: it proves itself with the TXT
+/// challenge. Anything deeper is a CNAME.
+fn record_for(host: &str) -> &'static str {
+    let labels = host.split('.').count();
+    let second_level = ["co", "com", "org", "net", "ac", "gov", "edu"];
+    let apex = labels == 2 || (labels == 3 && second_level.contains(&host.split('.').nth(1).unwrap_or("")));
+    if apex { "txt" } else { "cname" }
 }
 
 pub fn volume_name(service: &str, env: &str) -> String {

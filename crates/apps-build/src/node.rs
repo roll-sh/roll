@@ -168,7 +168,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         }) => {
             notes.push(format!("{} in dependencies: {label}", dep_of(name)));
             let start = match (start_script, default) {
-                (Some(_), _) => Some(node.pm.start_script()),
+                (Some(script), _) => Some(node.pm.start(script, &pkg)),
                 (None, Some(cmd)) => Some(cmd),
                 (None, None) => entry(tree, &pkg),
             };
@@ -188,7 +188,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         }
         None => {
             let start = match start_script {
-                Some(_) => Some(node.pm.start_script()),
+                Some(script) => Some(node.pm.start(script, &pkg)),
                 None => entry(tree, &pkg),
             };
             if start.is_none() && build.is_some() && o.start.is_none() {
@@ -203,6 +203,9 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         }
     };
     match (&start, start_script) {
+        (Some(s), Some(script)) if s == script => {
+            notes.push(format!("a start script that runs node directly: {s}"))
+        }
         (Some(s), Some(_)) if s == &node.pm.start_script() => {
             notes.push(format!("a start script: {s}"))
         }
@@ -424,8 +427,22 @@ impl Pm {
         format!("{} run {script}", self.name())
     }
 
-    /// How the runtime runs the start script. npm runs any package manager's scripts the same
-    /// way and ships in the image, so pnpm and yarn needn't be downloaded at a cold start.
+    /// How the runtime runs a start script. A plain `node …` runs as itself: no package manager
+    /// process in front of it at every cold start, and signals go straight to node. Not when a
+    /// `prestart`/`poststart` hook would be skipped, under Bun (its image may have no node) or
+    /// Yarn Berry (Plug'n'Play needs yarn's loader), or when the script needs a shell.
+    fn start(self, script: &str, pkg: &Value) -> String {
+        let plain = |t: &str| t.bytes().all(|b| b.is_ascii_alphanumeric() || b"_./=@:-".contains(&b));
+        let hooks = ["prestart", "poststart"].iter().any(|h| pkg["scripts"].get(h).is_some());
+        let direct = matches!(self, Pm::Npm | Pm::Pnpm | Pm::Yarn { berry: false })
+            && !hooks
+            && script.split_whitespace().next() == Some("node")
+            && script.split_whitespace().all(plain);
+        if direct { script.split_whitespace().collect::<Vec<_>>().join(" ") } else { self.start_script() }
+    }
+
+    /// The package manager running the start script. npm runs any package manager's scripts the
+    /// same way and ships in the image, so pnpm and yarn needn't be downloaded at a cold start.
     fn start_script(self) -> String {
         match self {
             Pm::Yarn { berry: true } => "yarn run start".into(),

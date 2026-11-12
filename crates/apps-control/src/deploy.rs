@@ -98,10 +98,10 @@ impl Apps {
         if message.chars().count() > 500 {
             message = message.chars().take(500).collect();
         }
-        if let Some(up) = &upload {
-            if up.len() > self.cfg.upload_max {
-                return Err(Error::TooLarge(format!("an upload is at most {} MiB", self.cfg.upload_max >> 20)));
-            }
+        if let Some(up) = &upload
+            && up.len() > self.cfg.upload_max
+        {
+            return Err(Error::TooLarge(format!("an upload is at most {} MiB", self.cfg.upload_max >> 20)));
         }
         let upload_key = upload.as_ref().map(|_| format!("apps/uploads/{}.tgz", random(16)));
         if let (Some(key), Some(bytes)) = (&upload_key, upload) {

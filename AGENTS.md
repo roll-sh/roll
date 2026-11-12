@@ -277,6 +277,27 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
   with every product's own API in `lib/workspace-resources.ts`, and holds it in `lib/workspace-store.ts`
   for the sidebar, Home and `/dashboard/projects/$id`. A new resource kind needs its row in all three.
+- **Apps (roll apps: hosting the user's own code; docs/apps/README.md):**
+  - `crates/apps-build` detects how to build a tree and writes the Dockerfile (reads files only);
+    `crates/apps-control` is the store, the deploy queue, the runtimes (`runtime/`: Docker, a fake
+    for tests), the waking proxy (`public.rs`, `live.rs`) and `/v1/apps`; rolld wires it in
+    `crates/rolld/src/apps.rs`. `docs/apps/http-api.md` is the contract with
+    `apps/dashboard/src/lib/apps-api.ts` and `roll-cli/src/apps.rs`: change them together.
+  - A service is the workspace resource kind `service`; its owner is the holder of
+    `apps:service:<id>`, and every `/v1/apps/services/{id}/…` route runs there (`Cluster::dispatch`).
+    Put the service id, and the environment where an action targets one, in the path: the
+    permissions catalogue (feature/roll-mcp) classifies routes by pattern, and production deploys
+    are `deploy`, not `write`. Don't add token or scope checks in roll apps.
+  - Deployments are immutable: a rollback deploys an old image again, never rebuilds. An
+    environment's active deployment moves only through `Store::switch_active` (a compare-and-swap).
+  - Customer code never runs on a fleet node: instances and builds go through the `Runtime` and
+    `Builder` traits. Everything made is named `roll-apps-…` and labelled `sh.roll.apps=<service>`.
+    Variables are sealed at rest, go to containers through an env file (never argv), and are
+    returned in the clear only by `…/variables/values`.
+  - An idle service costs nothing: only running instances are metered. Keep cold starts measured
+    (`pnpm test:apps --docker` prints them; the numbers live in docs/apps/README.md, "Measured").
+  - After touching anything apps-related, run `pnpm test:apps` (`--docker` for real Docker). New
+    tests go in `apps-control/tests/api.rs` (in process, fake runtime) or `tests/docker.rs`.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and

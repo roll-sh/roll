@@ -25,6 +25,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan` | read |
 | `GET /v1/apps/services?project=` | | `Service[]` | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | write |
+| `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
+| `POST /v1/apps/projects/{project}/services` | `NewService` (`project` may be left out) | 201 `Service` | write |
 | `GET /v1/apps/services/{id}` | | `Service` | read |
 | `PATCH /v1/apps/services/{id}` | `ServicePatch` | `Service` | write |
 | `DELETE /v1/apps/services/{id}` | | 204 | delete |
@@ -56,6 +58,15 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
 | `DELETE /v1/apps/services/{id}/environments/{env}/domains/{host}` | | 204 | delete |
+
+- Creating a service makes its `production` environment, places its card on the project's canvas
+  (at `x`, `y`, or the first free spot when both are left out or 0), and, for a repo or an image,
+  queues the first deploy at once. An upload service waits for `roll up`.
+- In `PATCH` bodies (`build`, `run`) a field set to `null` goes back to its default; fields left
+  out stay.
+- `…/deploys/{dep}/logs?follow=1` ends when the deployment is done (at once for one that is).
+- `…/usage` counts whole UTC days (`day` is days since 1970-01-01), today included, days without
+  use as zeros.
 
 Statuses: 400 a bad body, name, env or query; 404 no such service, environment, deployment or
 domain; 409 a name or hostname that's taken, a rollback to a deployment with no image, a cancel
@@ -128,8 +139,9 @@ type EnvironmentSummary = {
 
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
-type NewService = { project: string; name: string; source: Source; build?: Partial<Build>; run?: Partial<Run>; x?: number; y?: number };
-type ServicePatch = { name?: string; source?: Source; build?: Partial<Build>; run?: Partial<Run> };
+type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
+type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; x?: number; y?: number };
+type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
 type EnvironmentPut = { branch?: string | null; ephemeral?: boolean };
 
@@ -183,6 +195,7 @@ type Plan = {
   notes: string[];           // why: "found pnpm-lock.yaml", "next build → .next"
 };
 
+/** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */
 type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql"; ref: string; prefix: string; vars: string[] };
 
 type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" }[] };
@@ -210,6 +223,8 @@ type CronRun = { id: string; deployment: string; status: "running" | "succeeded"
 type Domain = {
   hostname: string;
   kind: "roll" | "custom";
+  /** What the DNS needs: a CNAME to `target` (a subdomain), or the TXT challenge (an apex). */
+  record: "cname" | "txt" | "none";
   status: "pending" | "issuing" | "active" | "failed";
   /** What the user puts in DNS: a CNAME to `target`, or (apex) a TXT `_roll-challenge.<host>` with `token`. */
   target: string;

@@ -90,8 +90,10 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                         </tr>
                       </thead>
                       <tbody>
-                        <Record type="CNAME" name={d.hostname} value={d.target} copied={copied} copy={copy} />
-                        {d.token && <Record type="TXT" name={`_roll-challenge.${d.hostname}`} value={d.token} copied={copied} copy={copy} />}
+                        {d.record !== "txt" && <Record type="CNAME" name={d.hostname} value={d.target} copied={copied} copy={copy} />}
+                        {d.record !== "cname" && d.token && (
+                          <Record type="TXT" name={`_roll-challenge.${d.hostname}`} value={d.token} copied={copied} copy={copy} />
+                        )}
                       </tbody>
                     </table>
                   </div>

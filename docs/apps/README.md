@@ -297,32 +297,72 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
 
 ## Measured
 
-Cold starts and idle cost are measured by `crates/apps-control/tests/docker.rs` (real Docker,
-`pnpm test:apps --docker`) and recorded here; the numbers are from ai-server (36 cores, Docker
-29, overlayfs, load around 25 from other work).
+On ai-server (36 cores, Docker 29, overlayfs, load around 25–30 from other work), 2026-11-12.
+`crates/apps-control/tests/docker.rs` (`pnpm test:apps --docker`) prints the first three; the Node
+row is `roll up` of a two-file Node app against a real rolld, timed with curl over Tailscale.
 
-| path | what it measures | result |
+| path | what | median |
 | --- | --- | --- |
-| resume from suspended | first byte after `docker unpause` | see "Measured results" below |
-| cold start from stopped | first byte after `docker start` of a created container | see below |
-| first deploy | image build → first byte | see below |
+| warm | a request to a running instance through the proxy | 1 ms |
+| resume from suspended | unpause → first byte | 13 ms |
+| cold start from stopped (busybox static site) | start → first byte | 270 ms |
+| cold start from stopped (Node 22, `npm run start`, before the two changes below) | the same, Node booting | 665 ms |
+| first deploy, static site | upload → build (base image pulled) → health check → live | 12.5 s |
+| first deploy, Node | `roll up` → build (`node:22-slim` pulled) → health check → live | 11.1 s |
 
-### Measured results
+- A wake talks to dockerd's socket (`runtime/engine.rs`), not the `docker` CLI. Four alternating
+  pairs of the Docker test at load 35–38, CLI against socket, medians per run: cold start
+  296/293/299/325 ms against 270/263/270/285 ms (all four pairs won, about 9%); resume
+  48/41/45/45 ms against 14/13/16/13 ms (3.3×). What's left of a cold start is dockerd starting
+  the container and the app's own boot.
+- A start script that is just `node …` now runs without npm in front of it (apps-build,
+  `Pm::start`). The Node row above predates both changes and hasn't been measured again.
+- Idle cost: a service asleep (stopped) meters nothing: no CPU-seconds, no GB-seconds, $0.00.
+  The only idle cost is the image on disk (roll's, not the user's). Suspended instances keep their
+  memory on the host (roll's cost, not billed) for `sleep_after` (10 minutes by default).
 
-Filled in from the test runs as they happen (`tests/docker.rs` prints them).
+## Builds in detail (apps-build)
+
+- Node yields to another language: a tree with a Gemfile, composer.json, requirements.txt,
+  pyproject.toml, manage.py, go.mod, Cargo.toml, pom.xml or build.gradle isn't a Node app even
+  with a package.json; a package.json with a `build` script there adds a Node `assets` stage.
+- Manifests are copied before the source, so dependency installs are a cached layer, except when
+  the install may read other files (workspaces, install scripts, `patches/`, `-r`/`-e` lines,
+  gemspecs, Composer path repositories) or `install` is overridden.
+- Framework entries run directly (Nuxt `node .output/server/index.mjs`, Nest `node dist/main`,
+  SvelteKit adapter-node `node build`, Astro's node adapter); Next and Remix use the start script.
+  Static builds (Vite, CRA, Gatsby, Astro without an adapter, adapter-static) are provider
+  `static` on busybox httpd (no SPA fallback yet).
+- Go runs on distroless static (no shell); Rust builds on `rust:<v>-slim-bookworm` so the binary
+  runs on `debian:bookworm-slim`; Java runs the built jar on a JRE image; Python installs into
+  `/opt/venv`; PHP serves `php -S` with `PHP_CLI_SERVER_WORKERS=4`.
+- Every generated start command takes `$PORT` (default 8080); only a tree's own Dockerfile sets
+  another port, through its last `EXPOSE`.
 
 ## Not done yet
 
-See `## Next` at the end.
+- Not run on the fleet: the Fargate runtime and the CodeBuild builder are designed above, not
+  built. The edge routes `*.up.<site domain>` and unknown hosts (custom domains) to roll apps.
+- Custom domains are verified (CNAME or TXT) and routed; their TLS is the edge's job and isn't
+  issued yet (Cloudflare for SaaS on the fleet, ACME HTTP-01 self-hosted).
+- Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
+- roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
+- Private networking is a Docker network per project and environment; it isn't reachable from
+  the host's own roll databases on hosts whose firewall drops container-to-host traffic.
 
 ## Next
 
 Ranked; the top item is what's being worked on.
 
-1. Build the core: `apps-build` detection, `apps-control` store, deploy queue, Docker runtime,
-   waking proxy, `/v1/apps`; rolld wiring.
-2. CLI: `roll up`, `roll deploy`, `roll logs`, `roll domains`.
-3. Dashboard: service cards on the project canvas, the service page.
+1. Measure the Node cold start again (`roll up` of the two-file app against a real rolld) now
+   that wakes skip the CLI and npm; then see what dockerd's own ~250 ms start is made of
+   (network attach, `--init`, the log driver).
+2. Review pass against Railway/Render/Fly: UX gaps (new environment from the switcher, deploy
+   messages for `roll up` from git, an SPA fallback for static sites), security (hostile uploads,
+   header spoofing, SSRF in DoH), and lean tests; then open the PR to main with screenshots.
+3. Links for buckets, streams, queues and NoSQL; the roll secrets `SecretSource` once
+   feature/roll-secrets lands.
 4. Fargate runtime and CodeBuild builder against fakes, like `code-preview/tests/fargate.rs`.
-5. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-6. EFS volumes and Cloud Map private DNS on the fleet.
+5. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one node.
+6. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+7. EFS volumes and Cloud Map private DNS on the fleet.

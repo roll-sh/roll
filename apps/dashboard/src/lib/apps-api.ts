@@ -116,6 +116,8 @@ export interface Instance {
 export interface Domain {
   hostname: string;
   kind: "roll" | "custom";
+  /** The record a custom domain needs: a CNAME (a subdomain) or the TXT challenge (an apex). */
+  record: "cname" | "txt" | "none";
   status: "pending" | "issuing" | "active" | "failed";
   target: string;
   token: string;

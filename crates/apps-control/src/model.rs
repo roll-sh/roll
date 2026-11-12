@@ -496,6 +496,9 @@ impl DomainStatus {
 pub struct Domain {
     pub hostname: String,
     pub kind: DomainKind,
+    /// The DNS record a custom domain needs: `cname` (a subdomain), `txt` (an apex, whose
+    /// provider flattens a CNAME or ALIAS there, proves itself with the TXT challenge), `none`.
+    pub record: &'static str,
     pub status: DomainStatus,
     pub target: String,
     pub token: String,
