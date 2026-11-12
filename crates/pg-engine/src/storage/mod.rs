@@ -1097,9 +1097,20 @@ impl Store {
             if self.durable.load(Ordering::Acquire) >= ts {
                 break;
             }
-            let (file, upto) = {
-                let c = self.commit.lock();
-                (c.wal.handle(), self.assigned.load(Ordering::Acquire))
+            // (Every record appended so far written in one write, under the commit lock as
+            // the commits appending them are: the file's writes go in commit order.)
+            let written = {
+                let mut c = self.commit.lock();
+                c.wal.flush().map(|_| (c.wal.handle(), self.assigned.load(Ordering::Acquire)))
+            };
+            let (file, upto) = match written {
+                Ok(w) => w,
+                Err(e) => {
+                    self.closed.store(true, Ordering::Release);
+                    drop(_g);
+                    self.wake_durable();
+                    return Err(e);
+                }
             };
             if let Err(e) = file.sync_data() {
                 // The commits are in the memtable already and can't be taken back: the
@@ -1169,7 +1180,8 @@ impl Store {
                 return Ok(self.visible_ts());
             }
             ts = self.assigned.load(Ordering::Acquire) + 1;
-            c.wal.append(ts, &writes)?;
+            // (Written by the fsync that makes it durable: `wait_durable`.)
+            c.wal.append(ts, &writes);
             self.assigned.store(ts, Ordering::Release);
             self.sync_assigned.store(ts, Ordering::Release);
             ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
@@ -1223,7 +1235,8 @@ impl Store {
                 return Ok(self.visible_ts());
             }
             ts = self.assigned.load(Ordering::Acquire) + 1;
-            c.wal.append(ts, &writes)?;
+            // (Visible before its fsync: written now, with any group commits' before it.)
+            c.wal.append_now(ts, &writes)?;
             self.assigned.store(ts, Ordering::Release);
             before = self.sync_assigned.load(Ordering::Acquire);
             let view = self.view.load();
@@ -1321,7 +1334,7 @@ impl Store {
                 after(ts);
                 rotate = false;
             } else {
-                c.wal.append(ts, &writes)?;
+                c.wal.append_now(ts, &writes)?;
                 if self.opts.sync {
                     // (Also makes every group commit appended before this one durable.)
                     c.wal.sync()?;
@@ -1701,6 +1714,8 @@ impl Store {
         // fsync of the old file get it now).
         if self.opts.sync {
             c.wal.sync()?;
+        } else {
+            c.wal.flush()?;
         }
         self.made_durable(self.assigned.load(Ordering::Acquire));
         c.wal = new_wal;

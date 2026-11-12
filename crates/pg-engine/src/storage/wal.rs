@@ -19,8 +19,13 @@ pub struct WalWriter {
     file: std::sync::Arc<DFile>,
     pub seq: u64,
     pub max_ts: u64,
+    /// The records' end, those still in `buf` included.
     pub bytes: u64,
+    /// Records appended and not written to the file yet (`flush`): group commits' wait for
+    /// the fsync that covers them, which writes them all with one write.
     buf: Vec<u8>,
+    /// Where `buf` goes in the file.
+    written: u64,
     /// The file is zero-filled up to here, ahead of the records (0: not at all).
     zeroed: u64,
     /// Zero-fill this much at a time (0: never, records extend the file).
@@ -52,13 +57,15 @@ impl WalWriter {
             max_ts: 0,
             bytes,
             buf: Vec::with_capacity(4096),
+            written: bytes,
             zeroed: bytes,
             prealloc,
         })
     }
 
-    pub fn append(&mut self, ts: u64, entries: &[Entry]) -> Result<()> {
-        self.buf.clear();
+    /// Append commit `ts`'s record, in memory: `flush` writes it (`sync` too).
+    pub fn append(&mut self, ts: u64, entries: &[Entry]) {
+        let at = self.buf.len();
         self.buf.extend_from_slice(&[0u8; 8]);
         self.buf.extend_from_slice(&ts.to_le_bytes());
         put_varint(&mut self.buf, entries.len() as u64);
@@ -73,11 +80,34 @@ impl WalWriter {
                 None => put_varint(&mut self.buf, 0),
             }
         }
-        let len = (self.buf.len() - 8) as u32;
-        let crc = crc32fast::hash(&self.buf[8..]);
-        self.buf[0..4].copy_from_slice(&len.to_le_bytes());
-        self.buf[4..8].copy_from_slice(&crc.to_le_bytes());
-        let end = self.bytes + self.buf.len() as u64;
+        let len = (self.buf.len() - at - 8) as u32;
+        let crc = crc32fast::hash(&self.buf[at + 8..]);
+        self.buf[at..at + 4].copy_from_slice(&len.to_le_bytes());
+        self.buf[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
+        self.bytes = self.written + self.buf.len() as u64;
+        self.max_ts = self.max_ts.max(ts);
+    }
+
+    /// `append`, written now (with the records appended before it). On an error it is taken
+    /// back: the commit fails.
+    pub fn append_now(&mut self, ts: u64, entries: &[Entry]) -> Result<()> {
+        let (len, bytes, max_ts) = (self.buf.len(), self.bytes, self.max_ts);
+        self.append(ts, entries);
+        if let Err(e) = self.flush() {
+            self.buf.truncate(len);
+            (self.bytes, self.max_ts) = (bytes, max_ts);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Write the records appended since the last write, in one write. On an error they stay
+    /// to be written again.
+    pub fn flush(&mut self) -> Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let end = self.written + self.buf.len() as u64;
         if self.prealloc > 0 && end > self.zeroed {
             // (A zero record length ends replay: the zeroes past the last record are no
             // records.)
@@ -86,18 +116,24 @@ impl WalWriter {
             self.file.write_all_at(&zeros, self.zeroed)?;
             self.zeroed = to;
         }
-        self.file.write_all_at(&self.buf, self.bytes)?;
-        self.bytes = end;
-        self.max_ts = self.max_ts.max(ts);
+        self.file.write_all_at(&self.buf, self.written)?;
+        self.written = end;
+        self.buf.clear();
+        // (A burst's buffer isn't kept for good.)
+        if self.buf.capacity() > 1 << 20 {
+            self.buf.shrink_to(4096);
+        }
         Ok(())
     }
 
+    /// Write and fsync every record appended.
     pub fn sync(&mut self) -> Result<()> {
+        self.flush()?;
         self.file.sync_data()?;
         Ok(())
     }
 
-    /// The file, to fsync without holding the writer (group commit).
+    /// The file, to fsync without holding the writer (group commit): `flush` first.
     pub fn handle(&self) -> std::sync::Arc<DFile> {
         self.file.clone()
     }
