@@ -2763,6 +2763,20 @@ impl Session {
         result_formats: Vec<i16>,
         trailing: bool,
     ) -> Result<()> {
+        let params: smallvec::SmallVec<[Option<&[u8]>; 8]> = params.iter().map(|p| p.as_deref()).collect();
+        self.bind_message_in(portal, stmt, &params, formats, result_formats, trailing)
+    }
+
+    /// `bind_message` with the parameters borrowed (a Bind message's, read in place).
+    pub fn bind_message_in(
+        &mut self,
+        portal: &str,
+        stmt: &str,
+        params: &[Option<&[u8]>],
+        formats: &[i16],
+        result_formats: Vec<i16>,
+        trailing: bool,
+    ) -> Result<()> {
         self.waits_armed = false;
         let r = crate::stack::grow(|| self.bind_inner(portal, stmt, params, formats, result_formats, trailing));
         if r.is_err() {
@@ -2775,7 +2789,7 @@ impl Session {
         &mut self,
         portal: &str,
         stmt: &str,
-        params: Vec<Option<Vec<u8>>>,
+        params: &[Option<&[u8]>],
         formats: &[i16],
         result_formats: Vec<i16>,
         trailing: bool,
@@ -2851,7 +2865,7 @@ impl Session {
             let plans = p.plans.lock();
             (!plans.param_oids.is_empty()).then(|| plans.param_oids.clone())
         };
-        for (i, raw) in params.into_iter().enumerate() {
+        for (i, &raw) in params.iter().enumerate() {
             let f = match formats.len() {
                 0 => 0,
                 1 => formats[0],

@@ -2915,23 +2915,21 @@ fn parse_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
 }
 
 fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
+    // (The names, formats and parameters read in place from the message's body: an
+    // allocation each was a third of a prepared statement's.)
     let mut b = Body::new(body);
-    let portal = b.cstr()?.to_string();
-    let stmt = b.cstr()?.to_string();
+    let portal = b.cstr()?;
+    let stmt = b.cstr()?;
     let nf = b.i16()? as u16 as usize;
-    let mut formats = Vec::with_capacity(nf);
+    let mut formats: smallvec::SmallVec<[i16; 8]> = smallvec::SmallVec::with_capacity(nf);
     for _ in 0..nf {
         formats.push(b.i16()?);
     }
     let np = b.i16()? as u16 as usize;
-    let mut params = Vec::with_capacity(np);
+    let mut params: smallvec::SmallVec<[Option<&[u8]>; 8]> = smallvec::SmallVec::with_capacity(np);
     for _ in 0..np {
         let len = b.i32()?;
-        params.push(if len < 0 {
-            None
-        } else {
-            Some(b.bytes(len as usize)?.to_vec())
-        });
+        params.push(if len < 0 { None } else { Some(b.bytes(len as usize)?) });
     }
     let nr = b.i16()? as u16 as usize;
     let mut result_formats = Vec::with_capacity(nr);
@@ -2940,10 +2938,10 @@ fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     }
     let start = std::time::Instant::now();
     // (What's left over fails the Bind after its parameters are read: `trailing`.)
-    s.bind_message(&portal, &stmt, params, &formats, result_formats, b.end().is_err())?;
+    s.bind_message_in(portal, stmt, &params, &formats, result_formats, b.end().is_err())?;
     // exec_bind_message's duration line (with the parameters, as errdetail_params).
     if let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), false) {
-        if with_stmt && let Some((what, detail, p)) = s.portal_log(&portal) {
+        if with_stmt && let Some((what, detail, p)) = s.portal_log(portal) {
             s.log_message(&format!("duration: {ms} ms  bind {what}: {}", p.sql), detail.as_deref());
         } else {
             s.log_message(&format!("duration: {ms} ms"), None);
