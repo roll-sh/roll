@@ -29,7 +29,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
     Router::new()
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
-        .route(P, get(overview))
+        .route(P, get(overview).patch(project_settings))
         .route(&format!("{P}/grid"), get(grid))
         .route(&format!("{P}/compare"), get(compare))
         .route(&format!("{P}/environments"), get(environments).post(create_environment).delete(delete_by_label))
@@ -44,6 +44,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{K}/versions"), get(versions))
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
+        .route(&format!("{K}/purge"), post(purge))
         .route(&format!("{E}/values"), get(values))
         .route(&format!("{E}/digest"), get(digest))
         .route(&format!("{E}/insights"), get(insights))
@@ -172,10 +173,39 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
     let v = blocking(s, move |s| {
         let envs = s.environments(&project, &c)?;
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
-        Ok(json!({ "project": project, "environments": envs, "previews": previews }))
+        let history_days = s.history_days(&project)?;
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days }))
     })
     .await?;
     Ok(ok(v))
+}
+
+/// `{history_days}`: how long old values are kept (`null`: for good).
+async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
+    let days = match o.remove("history_days") {
+        Some(serde_json::Value::Null) => None,
+        Some(v) => Some(v.as_i64().ok_or_else(|| Error::BadRequest("history_days is a number of days or null".into()))?),
+        None => return Err(Error::BadRequest("nothing to change: history_days".into())),
+    };
+    if let Some(k) = o.keys().next() {
+        return Err(Error::BadRequest(format!("unknown field {k}")));
+    }
+    let d = blocking(s, move |s| s.set_history_days(&project, days, &c)).await?;
+    Ok(ok(json!({ "history_days": d })))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PurgeBody {
+    #[serde(default)]
+    before_version: Option<i64>,
+}
+
+async fn purge(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let p: PurgeBody = if b.is_empty() { PurgeBody::default() } else { body(&b)? };
+    let n = blocking(s, move |s| s.purge(&project, &env, &path_of(&q), &key, p.before_version, &c)).await?;
+    Ok(ok(json!({ "purged": n })))
 }
 
 async fn grid(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Q) -> crate::Result<Response> {

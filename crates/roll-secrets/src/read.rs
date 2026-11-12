@@ -166,6 +166,8 @@ pub struct Version {
     pub link: Option<Link>,
     pub at: i64,
     pub by: String,
+    /// Its value was purged (it can't be revealed or rolled back to).
+    pub purged: bool,
 }
 
 /// Whether entries of another environment's folder may show through an import or a base.
@@ -385,7 +387,7 @@ impl Secrets {
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let v = c.query(
-                "SELECT version, seq, op, what, fp, comment, tags, link, at, by FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? ORDER BY seq DESC LIMIT 500",
+                "SELECT version, seq, op, what, fp, comment, tags, link, at, by, purged_at IS NOT NULL FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? ORDER BY seq DESC LIMIT 500",
                 [&env.id, &path, key, &owner],
                 |r| {
                     Ok(Version {
@@ -399,6 +401,7 @@ impl Secrets {
                         link: r.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()),
                         at: r.get(8)?,
                         by: r.get(9)?,
+                        purged: r.get::<_, i64>(10)? != 0,
                     })
                 },
             )?;
@@ -431,7 +434,7 @@ impl Secrets {
                 let l: Link = serde_json::from_str(&l).map_err(|_| Error::Internal("a stored link isn't JSON".into()))?;
                 Value::new(format!("(linked: {} {} {})", l.kind, l.r#ref, l.field))
             }
-            (None, None) => return Err(Error::NotFound(format!("version {version} of {key} is a deletion"))),
+            (None, None) => return Err(Error::NotFound(format!("version {version} of {key} is a deletion, or its value was purged"))),
         };
         self.audit_now(project, caller, "secrets.reveal", Some(slug), Some(&path), &[key.to_string()], &format!("revealed version {version} of {key}"));
         Ok(v)

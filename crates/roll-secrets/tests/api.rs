@@ -222,11 +222,24 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     let r = api.ok(Method::POST, "/environments/production/rollback", Some(json!({ "to": seq }))).await;
     assert_eq!(r["change"]["kind"], "rollback");
     assert_eq!(api.values("production", "/").await["values"], json!({ "A": "10", "B": "2" }));
-    // Deleted and restored, a key keeps one history.
+        // Deleted and restored, a key keeps one history.
     let versions = api.ok(Method::GET, "/environments/production/secrets/A/versions", None).await;
     assert_eq!(versions[0]["version"], 4);
     let changes = api.ok(Method::GET, "/environments/production/changes", None).await;
     assert_eq!(changes.as_array().unwrap().len(), 4);
+    // After a leak: older values are purged for good; history keeps the rows, a rollback says so.
+    let p = api.ok(Method::POST, "/environments/production/secrets/A/purge", None).await;
+    assert_eq!(p["purged"], 2);
+    let (s, _) = api.call(Method::GET, "/environments/production/secrets/A/versions/1/value", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let r = api.ok(Method::POST, "/environments/production/rollback", Some(json!({ "to": 1 }))).await;
+    assert_eq!(r["warnings"], json!(["A's value at #1 was purged: it stays as it is now"]));
+    // A retention purges only what's older than it, never a value in use.
+    api.ok(Method::PATCH, "", Some(json!({ "history_days": 1 }))).await;
+    let sec = api.secrets.clone();
+    tokio::task::spawn_blocking(move || sec.sweep().unwrap()).await.unwrap();
+    assert_eq!(api.values("production", "/").await["values"]["A"], "10");
+    assert_eq!(api.ok(Method::GET, "", None).await["history_days"], 1);
 }
 
 #[tokio::test]

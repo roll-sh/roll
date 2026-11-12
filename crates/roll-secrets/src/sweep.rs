@@ -318,6 +318,7 @@ impl Secrets {
             }
         }
         self.expire_shares()?;
+        self.sweep_retention()?;
         let (synced, failed) = self.sweep_syncs()?;
         out.synced += synced;
         out.failed += failed;

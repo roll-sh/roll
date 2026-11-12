@@ -22,6 +22,7 @@ pub mod links;
 pub mod names;
 mod read;
 pub mod refs;
+mod purge;
 mod requests;
 mod required;
 mod shares;
@@ -319,6 +320,9 @@ impl Secrets {
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
         db.add_column("environments", "max_age_days", "INTEGER")?;
+        // Purge and retention (purge.rs): a purged version's time, a project's retention.
+        db.add_column("versions", "purged_at", "INTEGER")?;
+        db.add_column("projects", "history_days", "INTEGER")?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
     }
 

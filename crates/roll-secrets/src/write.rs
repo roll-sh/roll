@@ -637,7 +637,9 @@ impl Secrets {
             caller.need(Action::Admin, &Scope::env(project, slug))?;
         }
         let dek = self.project(project)?;
+        let mut purged: Vec<String> = vec![];
         let (target, items) = self.db.read(|c| {
+            purged.clear();
             let env = envs::by_slug(c, project, slug)?;
             let target = match (r.to, r.at) {
                 (Some(s), None) => s,
@@ -656,6 +658,11 @@ impl Secrets {
             for v in &state {
                 let same = now.iter().any(|n| n.0 == v.path && n.1 == v.key && n.2 == v.owner && n.3 == v.fp && n.4 == v.comment && n.5 == v.tags && n.6 == v.link);
                 if same {
+                    continue;
+                }
+                // A purged value can't come back: the key stays as it is, and the answer says so.
+                if v.purged && v.value.is_none() {
+                    purged.push(v.key.clone());
                     continue;
                 }
                 let link: Option<Link> = v.link.as_deref().and_then(|l| serde_json::from_str(l).ok());
@@ -683,7 +690,8 @@ impl Secrets {
         })?;
         let message = r.message.unwrap_or_else(|| format!("rolled back to #{target}"));
         names::message(&message)?;
-        let res = self.commit(project, slug, items, "rollback", &message, None, r.bypass, caller)?;
+        let mut res = self.commit(project, slug, items, "rollback", &message, None, r.bypass, caller)?;
+        res.warnings.extend(purged.iter().map(|k| format!("{k}'s value at #{target} was purged: it stays as it is now")));
         if r.bypass {
             self.audit_now(project, caller, "approval.bypass", Some(slug), None, &[], &format!("rolled back to #{target} without approval"));
         }
@@ -827,12 +835,13 @@ pub(crate) struct StateRow {
     pub tags: String,
     pub link: Option<String>,
     pub at: i64,
+    pub purged: bool,
 }
 
 /// Every key of an environment as it was after change `seq`.
 pub(crate) fn state_at(c: &Conn<'_>, env_id: &str, seq: i64) -> Result<Vec<StateRow>> {
     let rows = c.query(
-        "SELECT v.secret_id, v.version, v.op, v.path, v.key, v.owner, v.value, v.fp, v.comment, v.tags, v.link, v.at FROM versions v
+        "SELECT v.secret_id, v.version, v.op, v.path, v.key, v.owner, v.value, v.fp, v.comment, v.tags, v.link, v.at, v.purged_at IS NOT NULL FROM versions v
          JOIN (SELECT path, key, owner, MAX(seq) AS top FROM versions WHERE env_id = ? AND seq <= ? GROUP BY path, key, owner) t
            ON t.path = v.path AND t.key = v.key AND t.owner = v.owner AND v.seq = t.top
          WHERE v.env_id = ? ORDER BY v.path, v.key",
@@ -851,6 +860,7 @@ pub(crate) fn state_at(c: &Conn<'_>, env_id: &str, seq: i64) -> Result<Vec<State
                 tags: r.get(9)?,
                 link: r.get(10)?,
                 at: r.get(11)?,
+                purged: r.get::<_, i64>(12)? != 0,
             }))
         },
     )?;

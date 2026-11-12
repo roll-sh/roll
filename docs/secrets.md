@@ -195,6 +195,17 @@ new version of its secret, and a delete makes a tombstone version, so history is
 - **Snapshot.** `GET …/changes/{seq}` with `?state=1` lists every key as it was after that change
   (metadata and fingerprints).
 
+### Purge and retention
+
+After a leak and a rotation, the old value shouldn't stay readable in history.
+`POST …/secrets/{key}/purge?path= {before_version?}` (`admin`) drops the stored ciphertext of the
+key's older versions (default: all but the current one), which nothing can decrypt again. The
+history rows stay, marked `purged`, so history still says what changed and when. Revealing a purged
+version answers 404. A rollback that would need a purged value leaves that key as it is and says so
+in its `warnings`. A project can also keep old values for a while only
+(`PATCH /v1/secrets/projects/{project} {history_days}`, 1–3650, `null` for good): the sweeper purges
+versions older than that, never a secret's current version.
+
 ### References
 
 A value can include other values:
@@ -682,7 +693,8 @@ isn't in the workspace is 404.
 | Route | Body | Answer |
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
-| `GET` | | `{project, environments: Environment[], previews: number}` |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
+| `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -705,6 +717,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions?path=&type=` | | `Version[]` newest first |
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
+| `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
@@ -788,7 +801,7 @@ type Item = { key: string; path: string; type: "shared" | "personal"; what: stri
 type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: "write" | "rollback" | "promote" | "rotate" | "request" | "rename" };
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
-type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
+type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
@@ -862,13 +875,9 @@ Ranked:
    #21 merges second; the adapter is in the apps thread).
 2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
-3. **Purge and retention of old values**: after a leak and a rotation, `POST …/secrets/{key}/purge
-   {before_version}` destroys the stored ciphertext of older versions (their history rows stay,
-   marked purged, so rollback says what it can't restore), audited; and an optional per-project
-   `history_days` after which old versions' values are purged by the sweeper. In progress.
-4. **A TypeScript client** (`packages/secrets`): `resolve` for services (with the sealed box opened
+3. **A TypeScript client** (`packages/secrets`): `resolve` for services (with the sealed box opened
    in process), `values`, `digest`-based watching; documented in the getting-started guide.
-5. **JSON import** (`{"KEY": "value"}` and arrays of `{key, value}`), and notes on moving from
+4. **JSON import** (`{"KEY": "value"}` and arrays of `{key, value}`), and notes on moving from
    Infisical, Doppler and Vercel (their CLIs export `.env` or JSON).
-6. **Approval notifications**: when a change request opens on a protected environment, its
+5. **Approval notifications**: when a change request opens on a protected environment, its
    approvers hear about it (a `notify` sync on the environment, or roll's chat ops).
