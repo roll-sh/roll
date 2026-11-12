@@ -86,7 +86,22 @@ impl SyncTarget for FakeSync {
     }
 }
 
+/// Audit deliveries, kept instead of sent.
+#[derive(Default)]
+struct Sent(Mutex<Vec<Value>>);
+
+impl roll_secrets::Deliver for Sent {
+    fn check(&self, url: &str) -> roll_secrets::Result<()> {
+        if url.starts_with("https://") { Ok(()) } else { Err(roll_secrets::Error::BadRequest("url is a public https:// URL".into())) }
+    }
+    fn post(&self, _: &str, _: &str, _: &Secret, body: &Value) -> roll_secrets::Result<()> {
+        self.0.lock().unwrap().push(body.clone());
+        Ok(())
+    }
+}
+
 struct Api {
+    sent: Arc<Sent>,
     router: Router,
     secrets: Arc<Secrets>,
     fake: Arc<Fake>,
@@ -107,10 +122,11 @@ impl Api {
         let sync = Arc::new(FakeSync::default());
         let mut syncs = Syncs::default();
         syncs.register(sync.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None };
+        let sent = Arc::new(Sent::default());
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()) };
         let secrets = Arc::new(Secrets::new(db, ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { router, secrets, fake, sync, project: String::new(), _dir: dir };
+        let mut api = Api { sent, router, secrets, fake, sync, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -565,4 +581,33 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     assert_eq!(audit[0]["keys"], json!(["DB_URL", "STRIPE_KEY"]));
     assert_eq!(audit.as_array().unwrap().len(), 2);
     assert!(!audit.to_string().contains("sk_live_123") && !audit.to_string().contains("postgres://"));
+}
+
+#[tokio::test]
+async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
+    let api = Api::new().await;
+    api.set("production", "BEFORE", "x-secret-before").await;
+    let (s, _) = api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "http://10.0.0.1/hook" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let sink = api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "https://siem.example/roll" }))).await;
+    assert!(sink["secret"].as_str().unwrap().starts_with("whsec_"));
+    // From now on: rows after the sink was made, once each, in order.
+    api.set("production", "STRIPE_KEY", "sk_live_never_sent").await;
+    api.values("production", "/").await;
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || {
+        s.sweep().unwrap();
+        s.sweep().unwrap();
+    })
+    .await
+    .unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one batch, not delivered twice");
+    let actions: Vec<&str> = sent[0]["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export"]);
+    assert!(!serde_json::to_string(&sent).unwrap().contains("sk_live_never_sent"));
+
+    let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
+    let csv = csv.as_str().unwrap();
+    assert!(csv.starts_with("id,at,actor,action,") && csv.contains("\"secrets.export\"") && !csv.contains("sk_live"));
 }

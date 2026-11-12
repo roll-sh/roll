@@ -61,6 +61,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
         open: true,
         trust_forwarded_for: false,
         web_url: None,
+        deliver: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -10,7 +10,7 @@ use super::Api;
 use axum::http::Method;
 use code_github::GitHub;
 use roll_secrets::syncs::{Push, Resources, SyncField, SyncTarget, Syncs};
-use roll_secrets::{Error, Result};
+use roll_secrets::{Error, Result, Value};
 use serde_json::{Value as Json, json};
 use std::sync::Arc;
 use std::time::Duration;
@@ -196,14 +196,20 @@ impl Hooks {
         Ok(u)
     }
 
-    /// POST `body`, signed with the sync's secret. Any 2xx is success; the answer is read up to
-    /// [`ANSWER_MAX`] and dropped.
+    /// POST `body`, signed with the sync's secret.
     fn post(&self, url: &url::Url, p: &Push<'_>, body: &Json) -> Result<()> {
+        let secret = p.secret.ok_or_else(|| Error::Internal("a signed sync has no secret".into()))?;
+        self.post_signed(url, ("x-roll-sync", p.sync), secret, body)
+    }
+
+    /// POST `body` with `X-Roll-Timestamp` and `X-Roll-Signature: sha256=HMAC(secret, "ts.body")`,
+    /// and `who` as a header naming the sender. Any 2xx is success; the answer is read up to
+    /// [`ANSWER_MAX`] and dropped.
+    fn post_signed(&self, url: &url::Url, who: (&str, &str), secret: &Value, body: &Json) -> Result<()> {
         use hmac::Mac as _;
         let host = url.host_str().unwrap_or_default().to_string();
         let body = serde_json::to_vec(body).expect("JSON");
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
-        let secret = p.secret.ok_or_else(|| Error::Internal("a signed sync has no secret".into()))?;
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.expose().as_bytes()).expect("any key length");
         mac.update(ts.as_bytes());
         mac.update(b".");
@@ -214,7 +220,7 @@ impl Hooks {
                 .client
                 .post(url.clone())
                 .header("content-type", "application/json")
-                .header("x-roll-sync", p.sync)
+                .header(who.0, who.1)
                 .header("x-roll-timestamp", &ts)
                 .header("x-roll-signature", format!("sha256={sig}"))
                 .body(body)
@@ -235,6 +241,26 @@ impl Hooks {
             }
             Ok(())
         })
+    }
+}
+
+/// Audit sinks' deliveries (roll_secrets::sinks): the same client, signature and guards.
+pub struct AuditDeliver(Hooks);
+
+impl AuditDeliver {
+    pub fn new(allow_private: bool) -> AuditDeliver {
+        AuditDeliver(Hooks::new(allow_private))
+    }
+}
+
+impl roll_secrets::Deliver for AuditDeliver {
+    fn check(&self, url: &str) -> Result<()> {
+        self.0.url(url).map(|_| ())
+    }
+
+    fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()> {
+        let u = self.0.url(url)?;
+        self.0.post_signed(&u, ("x-roll-sink", id), secret, body)
     }
 }
 

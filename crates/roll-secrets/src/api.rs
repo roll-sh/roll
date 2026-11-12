@@ -65,6 +65,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/tokens"), get(tokens).post(create_token))
         .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
         .route(&format!("{P}/audit"), get(audit))
+        .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
+        .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -578,7 +580,34 @@ async fn open_share(State(s): S, Path(id): Path<String>, parts: Parts) -> crate:
 }
 
 async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::AuditFilter>) -> crate::Result<Response> {
-    Ok(ok(blocking(s, move |s| s.audit(&project, q, &c)).await?))
+    let format = q.format.clone();
+    let rows = blocking(s, move |s| s.audit(&project, q, &c)).await?;
+    Ok(match format.as_deref() {
+        None => ok(rows),
+        Some("csv") => ([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], crate::sinks::csv(&rows)).into_response(),
+        Some("jsonl") => {
+            let lines: String = rows.iter().map(|r| serde_json::to_string(r).expect("JSON") + "\n").collect();
+            ([(header::CONTENT_TYPE, "application/x-ndjson")], lines).into_response()
+        }
+        Some(f) => return Err(Error::BadRequest(format!("format is csv or jsonl, not {f}"))),
+    })
+}
+
+async fn sinks(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.sinks(&project, &c)).await?))
+}
+
+async fn create_sink(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewSink = body(&b)?;
+    let (sink, secret) = blocking(s, move |s| s.create_sink(&project, n, &c)).await?;
+    let mut v = serde_json::to_value(&sink).expect("JSON");
+    v["secret"] = json!(secret);
+    Ok(secret_response(created(v)))
+}
+
+async fn delete_sink(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_sink(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

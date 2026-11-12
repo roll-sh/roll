@@ -30,7 +30,11 @@ pub struct AuditFilter {
     pub actor: Option<String>,
     pub action: Option<String>,
     pub before: Option<i64>,
+    /// Rows at or after this time (unix ms).
+    pub since: Option<i64>,
     pub limit: Option<i64>,
+    /// `csv` or `jsonl`: an export (up to 10,000 rows) instead of JSON.
+    pub format: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -60,7 +64,7 @@ impl Secrets {
             caller.need(Action::Read, &Scope::env(project, e))?;
         }
         self.project(project)?;
-        let limit = f.limit.unwrap_or(100).clamp(1, 1000);
+        let limit = f.limit.unwrap_or(if f.format.is_some() { 10_000 } else { 100 }).clamp(1, 10_000);
         // Conditions only for the filters given: Postgres can't type `? IS NULL` parameters.
         let mut sql = String::from("SELECT id, at, actor, action, env, path, keys, summary, ip FROM audit WHERE project_id = ? AND id < ?");
         let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Text(project.into()), code_sql::Value::Int(f.before.unwrap_or(i64::MAX))];
@@ -74,6 +78,10 @@ impl Secrets {
         cond(" AND actor = ?", f.actor.clone());
         cond(" AND action LIKE ?", f.action.as_ref().map(|a| format!("{a}%")));
         cond(" AND keys LIKE ?", f.key.as_ref().map(|k| format!("%\"{k}\"%")));
+        if let Some(since) = f.since {
+            sql.push_str(" AND at >= ?");
+            args.push(code_sql::Value::Int(since));
+        }
         sql.push_str(" ORDER BY id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
         let rows = self.db.read(|c| {

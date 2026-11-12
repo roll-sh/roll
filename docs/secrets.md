@@ -564,6 +564,17 @@ Listing metadata isn't audited. Revealing, exporting, resolving and every write 
 `GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
 days.
 
+- **Export**: `GET …/audit?format=csv` or `format=jsonl` (with the same filters, `since` too)
+  answers up to 10,000 rows as a file.
+- **Streaming to a SIEM**: an audit sink (`POST …/audit/sinks {url, from_start?}`, `admin`) is a
+  public HTTPS URL that receives the project's new rows in order, in batches of up to 200:
+  `{sink, project, events: AuditEntry[]}`, signed like syncs (`X-Roll-Sink`, `X-Roll-Timestamp`,
+  `X-Roll-Signature: sha256=HMAC(secret, "ts.body")`; the `whsec_…` secret is shown once and kept
+  sealed). Each sink keeps a cursor; the sweeper claims a sink in a write before delivering, so no
+  two nodes send one batch, and a failed batch is sent again 5 minutes later. Deliveries go through
+  the same `PublicOnly` client as syncs. At most 10 sinks a project.
+
+
 ## HTTP API
 
 Bodies are JSON and every error is `{"error": string, "code"?: string}`. Paths below are under
@@ -621,7 +632,7 @@ isn't in the workspace is 404.
 | `GET /tokens` | | `Token[]` |
 | `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
 | `DELETE /tokens/{id}` | | 204 |
-| `GET /audit?env=&key=&actor=&action=&before=&limit=` | | `AuditEntry[]` newest first |
+| `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format` |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -633,6 +644,9 @@ isn't in the workspace is 404.
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
+| `GET /audit/sinks` | | `Sink[]` (`admin`) |
+| `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
+| `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 
 - 400: a bad slug, path, key, value, body or query.
@@ -680,6 +694,7 @@ type Version = { version: number; seq: number; op: "set" | "delete"; what: strin
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Required = { key: string; path: string; comment: string };
+type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
@@ -746,12 +761,10 @@ Ranked:
    (whichever of #20 and #21 merges second; the adapter is in the apps thread).
 2. **Editing in the dashboard**: `${` autocompletes references (environments, folders, keys), and
    a version's history shows the old and new value side by side on reveal.
-3. **Audit streaming and export**: a CSV/JSON export of the audit log, and a sync-like sink that
-   streams audit rows (no values) to a SIEM URL.
-4. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
+3. **A getting-started guide** at the top of this doc (projects, `roll secrets setup`, `roll run`,
    links, previews), for users rather than implementers.
-5. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
+4. **Bulk actions in the dashboard**: select keys to delete, promote, tag or move to a folder in one
    change.
-6. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
+5. **More sync targets**: Vercel (project env vars), AWS Parameter Store and Secrets Manager,
    Cloudflare Workers; the platform's token is a reference to a secret of the same project,
    resolved at push time, never stored in the sync.

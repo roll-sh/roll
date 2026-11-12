@@ -24,6 +24,7 @@ pub mod refs;
 mod requests;
 mod required;
 mod shares;
+pub mod sinks;
 mod sweep;
 pub mod syncs;
 mod tokens;
@@ -41,6 +42,7 @@ pub use requests::{Request, RequestValue, Review, Verdict};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};
+pub use sinks::{Deliver, NewSink, Sink};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
 pub use tokens::{NewToken, Token};
 pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
@@ -266,6 +268,8 @@ pub struct Options {
     pub links: Links,
     /// The kinds of outside platforms syncs push to (docs/secrets.md, "Syncs").
     pub syncs: Syncs,
+    /// Posts audit rows to sinks (docs/secrets.md, "Audit log"); `None`: no streaming.
+    pub deliver: Option<std::sync::Arc<dyn sinks::Deliver>>,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -284,6 +288,7 @@ pub struct Secrets {
     workspace: Arc<roll_workspace::Workspace>,
     links: Links,
     syncs: Syncs,
+    deliver: Option<Arc<dyn sinks::Deliver>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -308,10 +313,11 @@ impl Secrets {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(shares::SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
+        db.ensure_schema(sinks::SCHEMA)?;
         // The references in a value (`staging.DB_URL`), so listings decrypt nothing; NULL for rows
         // written before it, which are decrypted to find them.
         db.add_column("secrets", "refs", "TEXT")?;
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
     }
 
     pub fn links(&self) -> &Links {
@@ -377,7 +383,7 @@ impl Secrets {
         self.revoke_leases_where("project_id = ?", project);
         let managed = self.managed_where("project_id = ?", project);
         let done = self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs"] {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;
