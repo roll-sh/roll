@@ -488,6 +488,7 @@ async fn run() -> anyhow::Result<()> {
         storage: storage_svc.as_ref().map(|s| s.s3_router()),
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
+        apps: apps.as_ref().map(|a| a.public_router()),
         auth: &auth,
     };
     // Connections other nodes splice here, on every cluster node (the edge or not).

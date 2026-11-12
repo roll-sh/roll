@@ -10,11 +10,14 @@ import {
   monthOf,
   projectMonth,
   resourceKey,
+  service as serviceView,
   suggestName,
   usd,
   type ResourceView,
 } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/workspace-store";
+import { useProjectServices } from "../apps/live";
+import { NewServiceSheet } from "../apps/new-service";
 import { AppShell } from "../app-shell";
 import { Board, type Card } from "./board";
 import { Inspector, ResourceSheet, StagedSheet } from "./inspector";
@@ -46,11 +49,14 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState(false);
+  /** Where a new service's card goes while its sheet is open. */
+  const [newService, setNewService] = useState<{ x: number; y: number } | null>(null);
+  const live = useProjectServices(project.id, ws.kinds.has("service"));
   const staged = ws.staged[project.id] ?? [];
   const busy = staged.some((s) => s.phase === "creating");
   const repos = useMemo(() => new Set(project.resources.filter((r) => r.kind === "repo").map((r) => r.ref)), [project.resources]);
   const agents = useAgents();
-  const live = agents ? threadsOf(agents, repos).filter((t) => t.status !== "idle").length : 0;
+  const working = agents ? threadsOf(agents, repos).filter((t) => t.status !== "idle").length : 0;
   // Open while the project has a repository its agents can work in; the toggle decides after that.
   const [agentsOpen, setAgentsOpen] = useState(repos.size > 0);
 
@@ -70,6 +76,13 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
 
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
   const stage = (kind: ResourceKind) => {
+    if (kind === "service") {
+      // A service needs a source before it can be anything: its own sheet, made at once.
+      setAdding(false);
+      setSelected(null);
+      setNewService(freeSpot([...cards, ...staged]));
+      return;
+    }
     const taken = new Set([...ws.inventory.values()].map((v) => v.name).concat(staged.map((s) => s.name)));
     const s = workspace.stage(project.id, kind, suggestName(kind, project.name, taken));
     setAdding(false);
@@ -120,7 +133,7 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
           <button className={`${btn} ${agentsOpen ? "border-line-3 bg-white/[0.06]" : ""}`} onClick={() => setAgentsOpen((o) => !o)} aria-pressed={agentsOpen} title="This project's agents">
             <Bot className="size-3.5" />
             Agents
-            {live > 0 && <span className="pulse-dot size-1.5 rounded-full bg-accent" aria-label={`${live} working`} />}
+            {working > 0 && <span className="pulse-dot size-1.5 rounded-full bg-accent" aria-label={`${working} working`} />}
           </button>
           <button className={btn} onClick={() => setAdding((a) => !a)} aria-expanded={adding}>
             <Plus className="size-3.5" />
@@ -139,6 +152,7 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
           selected={selected}
           onSelect={(k) => {
             setSelected(k);
+            if (k) setNewService(null);
             setAdding(false);
           }}
           onMove={(c, x, y) => {
@@ -157,8 +171,26 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
             {error}
           </button>
         )}
-        <Inspector open={!!current} onClose={() => setSelected(null)}>
-          {current?.type === "placed" ? (
+        <Inspector
+          open={!!current || !!newService}
+          onClose={() => {
+            setSelected(null);
+            setNewService(null);
+          }}
+        >
+          {newService && !current ? (
+            <NewServiceSheet
+              project={project}
+              spot={newService}
+              onClose={() => setNewService(null)}
+              onCreated={(s) => {
+                workspace.added(project.id, serviceView(s), newService.x, newService.y);
+                setNewService(null);
+                setSelected(resourceKey({ kind: "service", ref: s.id }));
+                live.refresh();
+              }}
+            />
+          ) : current?.type === "placed" ? (
             <ResourceSheet
               key={current.key}
               view={current.view}
@@ -212,7 +244,7 @@ function Empty({ name, kinds, onPick }: { name: string; kinds: ResourceKind[]; o
     <div className="pointer-events-none absolute inset-0 grid place-items-center p-4">
       <div className="rise pointer-events-auto w-full max-w-[460px] text-center">
         <h2 className="text-[18px] font-semibold tracking-[-0.045em]">What should {name} run?</h2>
-        <p className="mt-1 text-[12.5px] text-muted">Add a database or storage. Everything in a project scales to zero when it's idle.</p>
+        <p className="mt-1 text-[12.5px] text-muted">Deploy your code, add a database or storage. Everything in a project scales to zero when it's idle.</p>
         <div className="mt-5 grid grid-cols-2 gap-2 text-left sm:grid-cols-3">
           {kinds.map((k) => (
             <button

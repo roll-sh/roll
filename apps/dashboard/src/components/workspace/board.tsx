@@ -15,6 +15,7 @@ const DOT: Record<string, string> = {
   idle: "bg-subtle",
   starting: "bg-accent animate-pulse motion-reduce:animate-none",
   missing: "bg-danger",
+  failed: "bg-danger",
 };
 
 /**
@@ -142,7 +143,10 @@ function Node({ card, selected, onSelect, onMove }: { card: Card; selected: bool
           ) : (
             <>
               <i className={`size-1.5 shrink-0 rounded-full ${DOT[view!.state]}`} />
-              <span className="truncate">{view!.stateLabel}</span>
+              <span className="truncate">
+                {view!.stateLabel}
+                {view!.note && <span className="font-mono text-[10.5px] text-subtle"> · {view!.note}</span>}
+              </span>
               <span className="ml-auto font-mono text-[10.5px] text-subtle">{view!.meta}</span>
             </>
           )}

@@ -161,6 +161,32 @@ export const workspace = {
     }
   },
 
+  /** A resource its product made and placed itself (a service: rolld puts its card where it was asked). */
+  added(projectId: string, view: ResourceView, x: number, y: number) {
+    const k = resourceKey(view);
+    set({ inventory: new Map(state.inventory).set(k, view) });
+    withProject(projectId, (p) => ({
+      ...p,
+      resources: [...p.resources.filter((r) => resourceKey(r) !== k), { kind: view.kind, ref: view.ref, x, y, added_at: Date.now() }],
+    }));
+    if (!state.spend.has(k)) void loadSpend();
+  },
+  /** Fresher views of some resources (a service's state, polled while the canvas shows it). */
+  refreshViews(views: ResourceView[]) {
+    const changed = views.filter((v) => JSON.stringify(state.inventory.get(resourceKey(v))) !== JSON.stringify(v));
+    if (!changed.length) return;
+    const inventory = new Map(state.inventory);
+    for (const v of changed) inventory.set(resourceKey(v), v);
+    set({ inventory });
+  },
+  /** A resource its product deleted (and took off its canvas). */
+  forget(kind: ResourceKind, ref: string) {
+    const k = resourceKey({ kind, ref });
+    const inventory = new Map(state.inventory);
+    inventory.delete(k);
+    set({ inventory, projects: state.projects.map((p) => ({ ...p, resources: p.resources.filter((r) => resourceKey(r) !== k) })) });
+  },
+
   /** A new resource on the canvas, made only on Deploy. */
   stage(projectId: string, kind: ResourceKind, name: string): Staged {
     const p = state.projects.find((q) => q.id === projectId);

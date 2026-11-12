@@ -137,6 +137,9 @@ impl Runtime for Docker {
             "no-new-privileges".into(),
             "--restart".into(),
             "no".into(),
+            // A tiny init as PID 1: signals reach the app (a stop takes milliseconds, not the
+            // grace period) and zombies are reaped.
+            "--init".into(),
             "--add-host".into(),
             "host.docker.internal:host-gateway".into(),
             "--log-driver".into(),

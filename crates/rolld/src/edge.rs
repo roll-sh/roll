@@ -228,6 +228,8 @@ pub struct Products<'a> {
     pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
     pub queues: Option<&'a crate::queues::Queues>,
+    /// roll apps' public traffic (services' hostnames and custom domains).
+    pub apps: Option<axum::Router>,
     /// The operator-token gate: the Kafka HTTP and tasks hosts carry control-plane routes too.
     pub auth: &'a crate::auth::Auth,
 }
@@ -550,6 +552,7 @@ struct HttpRoutes {
     alternator: Option<axum::Router>,
     /// Queues: web-STOMP, web-MQTT and the HTTP messaging API, on their own listeners.
     mq: Option<(Upstream, Upstream, Upstream)>,
+    apps: Option<axum::Router>,
 }
 
 impl HttpRoutes {
@@ -573,6 +576,7 @@ impl HttpRoutes {
             s3: p.storage.clone().map(logged),
             alternator: p.nosql.map(|n| logged(n.alternator_router())),
             mq,
+            apps: p.apps.clone().map(logged),
         })
     }
 }
@@ -603,8 +607,11 @@ impl Routes for HttpRoutes {
                 },
                 None => Target::NotFound,
             },
+            // roll apps: services' hostnames, and any other name (a custom domain, which the apps
+            // router knows or answers 404 for).
+            Host::App(_) | Host::Unknown => router(&self.apps),
             // Public buckets and sites come through the CDN Worker, not straight here.
-            Host::Pg(_) | Host::Site(_) | Host::Origin | Host::Unknown => Target::NotFound,
+            Host::Pg(_) | Host::Site(_) | Host::Origin => Target::NotFound,
         }
     }
 }
@@ -621,7 +628,7 @@ mod tests {
     async fn every_cluster_node_takes_spliced_connections() {
         let args = crate::Args::parse_from(["rolld"]);
         let auth = crate::auth::Auth::new(&args).unwrap();
-        let products = Products { api: axum::Router::new(), pg: None, redis: None, streams: None, tasks: None, storage: None, nosql: None, queues: None, auth: &auth };
+        let products = Products { api: axum::Router::new(), pg: None, redis: None, streams: None, tasks: None, storage: None, nosql: None, queues: None, apps: None, auth: &auth };
         let cfg = |id: &str| roll_cluster::ClusterConfig::for_tests(id, "http://127.0.0.1:9", b"splice test cluster secret".to_vec());
         let alone = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), cfg("alone")).unwrap();
         assert!(splice_routes(&alone, &products).unwrap().is_none());

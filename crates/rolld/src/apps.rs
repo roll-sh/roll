@@ -20,20 +20,20 @@ use tracing::{info, warn};
 #[derive(Args, Clone, Debug)]
 pub struct AppsArgs {
     /// Where services' hostnames (`<slug>.<ROLL_APPS_DOMAIN>`) and custom domains are served.
-    #[arg(long = "apps-listen", env = "ROLL_APPS_LISTEN", default_value = "127.0.0.1:7080")]
+    #[arg(id = "apps_listen", long = "apps-listen", env = "ROLL_APPS_LISTEN", default_value = "127.0.0.1:7080")]
     pub listen: SocketAddr,
     /// Generated hostnames are `<slug>.<this>` (`up.roll.site` behind the edge).
-    #[arg(long = "apps-domain", env = "ROLL_APPS_DOMAIN")]
+    #[arg(id = "apps_domain", long = "apps-domain", env = "ROLL_APPS_DOMAIN")]
     pub domain: Option<String>,
     /// Give each environment a port of its own from this range (`58100-58199`), for machines
     /// without wildcard DNS. One node only.
-    #[arg(long = "apps-ports", env = "ROLL_APPS_PORTS")]
+    #[arg(id = "apps_ports", long = "apps-ports", env = "ROLL_APPS_PORTS")]
     pub ports: Option<String>,
     /// Where those ports listen (default: the apps listener's address).
-    #[arg(long = "apps-ports-host", env = "ROLL_APPS_PORTS_HOST")]
+    #[arg(id = "apps_ports_host", long = "apps-ports-host", env = "ROLL_APPS_PORTS_HOST")]
     pub ports_host: Option<std::net::IpAddr>,
     /// DNS over HTTPS, for checking custom domains.
-    #[arg(long = "apps-doh", env = "ROLL_APPS_DOH", default_value = "https://cloudflare-dns.com/dns-query")]
+    #[arg(id = "apps_doh", long = "apps-doh", env = "ROLL_APPS_DOH", default_value = "https://cloudflare-dns.com/dns-query")]
     pub doh: String,
 }
 
@@ -267,6 +267,11 @@ pub async fn start(
 impl AppsNode {
     pub fn router(&self) -> axum::Router {
         apps_control::api::router(self.apps.clone())
+    }
+
+    /// Services' hostnames and custom domains, for the edge's HTTPS listener.
+    pub fn public_router(&self) -> axum::Router {
+        apps_control::public::router(self.apps.clone())
     }
 
     /// The apps listener, and each environment's own port as environments appear.

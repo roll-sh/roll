@@ -1,0 +1,89 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { followLog, type LogLine } from "@/lib/apps-api";
+import { LogBar, LogView } from "./shared";
+
+const MAX_LINES = 5000;
+
+/** The environment's runtime log, live: every instance's stdout and stderr, filterable, pausable. */
+export function RuntimeLogs({ service, env }: { service: string; env: string }) {
+  const [lines, setLines] = useState<LogLine[]>([]);
+  const [open, setOpen] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [instance, setInstance] = useState("");
+  // Lines keep arriving while paused; the view shows them on resume.
+  const buffer = useRef<LogLine[]>([]);
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+
+  useEffect(() => {
+    buffer.current = [];
+    setLines([]);
+    let pending = false;
+    const flush = () => {
+      pending = false;
+      if (!pausedRef.current) setLines(buffer.current.slice());
+    };
+    const stop = followLog(
+      { runtime: { service, env } },
+      {
+        tail: 500,
+        onOpen: setOpen,
+        onReset: () => {
+          buffer.current = [];
+          flush();
+        },
+        onLine: (l) => {
+          buffer.current.push(l);
+          if (buffer.current.length > MAX_LINES) buffer.current.splice(0, buffer.current.length - MAX_LINES);
+          // One render per frame however fast the lines come.
+          if (!pending) {
+            pending = true;
+            requestAnimationFrame(flush);
+          }
+        },
+      },
+    );
+    return stop;
+  }, [service, env]);
+
+  useEffect(() => {
+    if (!paused) setLines(buffer.current.slice());
+  }, [paused]);
+
+  const instances = useMemo(() => [...new Set(lines.map((l) => l.instance).filter((i): i is string => !!i))], [lines]);
+  const shown = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return lines.filter((l) => (!instance || l.instance === instance) && (!q || l.text.toLowerCase().includes(q)));
+  }, [lines, filter, instance]);
+
+  return (
+    <div>
+      <LogBar
+        filter={filter}
+        onFilter={setFilter}
+        paused={paused}
+        onPause={setPaused}
+        live={open}
+        extra={
+          instances.length > 1 && (
+            <select value={instance} onChange={(e) => setInstance(e.target.value)} className="h-8 rounded-lg border border-line bg-panel px-2 font-mono text-[12px] outline-none" aria-label="Instance">
+              <option value="">every instance</option>
+              {instances.map((i) => (
+                <option key={i} value={i}>
+                  {i}
+                </option>
+              ))}
+            </select>
+          )
+        }
+      />
+      <LogView
+        lines={shown}
+        columns
+        className="h-[min(560px,65svh)]"
+        empty={lines.length ? "Nothing matches the filter." : open ? "No output yet. A service that's asleep logs again when a request wakes it." : <span className="shimmer">Connecting…</span>}
+      />
+    </div>
+  );
+}
