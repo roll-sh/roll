@@ -403,7 +403,10 @@ imports and base), `exposed` (a protected value also in an unprotected environme
 `expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
-decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
+decrypted. Only what the caller may read is listed, and `weak` only where it may reveal. In the
+dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
+made in the browser) and an expired or expiring key's new date, each one change, or a change
+request where the environment is protected.
 
 Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
 so roll-access lets a token limited to some environments or folders call them (they're marked
@@ -1375,10 +1378,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Fix from Health**: a weak key's row gets "New value" (generated in the browser, a change
-   request where protected), an expired or expiring one a new date, a missing one "Add", without
-   leaving the view.
-2. **CI recipes**: one GitHub Actions job in the docs that logs in with its OIDC token (no stored
+1. **CI recipes**: one GitHub Actions job in the docs that logs in with its OIDC token (no stored
    secret), runs `roll secrets check`, `scan` and `health`, then `roll run` for the tests.
 
 Waiting on other pull requests:
