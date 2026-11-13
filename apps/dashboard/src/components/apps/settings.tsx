@@ -32,6 +32,7 @@ interface Form {
   start: string;
   preDeploy: string;
   schedule: string;
+  timezone: string;
   timeout: string;
   min: string;
   max: string;
@@ -79,6 +80,7 @@ export function formOf(s: Service): Form {
     start: str(s.run.start),
     preDeploy: str(s.run.pre_deploy),
     schedule: str(s.run.schedule),
+    timezone: str(s.run.timezone),
     timeout: str(s.run.timeout_s),
     min: str(s.run.min_instances),
     max: str(s.run.max_instances),
@@ -138,6 +140,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.start !== before.start) run.start = text(f.start);
   if (f.preDeploy !== before.preDeploy) run.pre_deploy = text(f.preDeploy);
   if (f.schedule !== before.schedule) run.schedule = text(f.schedule);
+  if (f.timezone !== before.timezone) run.timezone = text(f.timezone);
   if (f.timeout !== before.timeout) run.timeout_s = num(f.timeout);
   if (f.min !== before.min) run.min_instances = num(f.min);
   if (f.max !== before.max) run.max_instances = num(f.max);
@@ -307,8 +310,11 @@ export function SettingsTab({
           )}
           {form.type === "cron" && (
             <>
-              <Field label="Schedule" hint="five fields, UTC">
+              <Field label="Schedule" hint="five fields, in its time zone">
                 {t("schedule", "*/15 * * * *")}
+              </Field>
+              <Field label="Time zone" hint="IANA, its daylight saving kept; empty: UTC">
+                {t("timezone", "Europe/Budapest")}
               </Field>
               <Field label="Timeout (s)" hint="a run's limit">
                 {t("timeout", "3600")}

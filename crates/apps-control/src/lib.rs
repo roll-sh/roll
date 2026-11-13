@@ -735,7 +735,7 @@ impl Apps {
         let svc = self.db(move |s| s.service(&sid)).await?;
         let svc = svc.for_env(&r).unwrap_or(svc);
         let next_run_at = match (&svc.run.schedule, &r.active) {
-            (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched).ok().and_then(|s| s.next_after(code_sql::now_ms())),
+            (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched, svc.run.timezone.as_deref()).ok().and_then(|s| s.next_after(code_sql::now_ms())),
             _ => None,
         };
         let needs_deploy = match &r.active {

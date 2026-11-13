@@ -50,6 +50,8 @@ export interface Run {
   /** Once per deploy before the switch (a migration); a non-zero exit fails the deploy. */
   pre_deploy?: string;
   schedule?: string;
+  /** The zone a cron schedule's fields are in (IANA); UTC when unset. */
+  timezone?: string;
   timeout_s?: number;
   min_instances: number;
   max_instances: number;

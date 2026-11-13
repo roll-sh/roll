@@ -165,9 +165,12 @@ pub enum AppsCmd {
         /// The port the app listens on.
         #[arg(long)]
         port: Option<u16>,
-        /// A cron service's schedule (five fields, UTC).
+        /// A cron service's schedule (five fields, in `--timezone`, else UTC).
         #[arg(long)]
         schedule: Option<String>,
+        /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`); `UTC` for UTC.
+        #[arg(long)]
+        timezone: Option<String>,
     },
     /// Change run settings: `roll apps set --min 1 --max 5 --cpu 1 --memory 1024`.
     Set {
@@ -192,6 +195,9 @@ pub enum AppsCmd {
         health: Option<String>,
         #[arg(long)]
         schedule: Option<String>,
+        /// The zone a cron schedule's fields are in (IANA: `Europe/Budapest`).
+        #[arg(long)]
+        timezone: Option<String>,
         /// `web`, `worker` or `cron`.
         #[arg(long = "type", value_name = "TYPE")]
         kind: Option<String>,
@@ -1594,7 +1600,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Create { name, project, repo, root, image, kind, port, schedule } => {
+        AppsCmd::Create { name, project, repo, root, image, kind, port, schedule, timezone } => {
             let source = match (repo, image) {
                 (Some(r), None) => json!({ "kind": "repo", "repo": r, "root": root }),
                 (None, Some(i)) => json!({ "kind": "image", "image": i }),
@@ -1608,6 +1614,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if let Some(p) = port {
                 run.insert("port".into(), p.into());
             }
+            if let Some(tz) = timezone {
+                run.insert("timezone".into(), tz.into());
+            }
             if let Some(sch) = schedule {
                 run.insert("schedule".into(), sch.into());
             }
@@ -1619,7 +1628,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -1675,6 +1684,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("pre_deploy", pre_deploy.map(Value::from)),
                 ("health_path", health.map(Value::from)),
                 ("schedule", schedule.map(Value::from)),
+                ("timezone", timezone.map(Value::from)),
                 ("type", kind.map(Value::from)),
                 ("concurrency", concurrency.map(Value::from)),
                 ("suspend_after_s", suspend_after.map(Value::from)),

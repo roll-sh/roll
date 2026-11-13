@@ -356,6 +356,9 @@ pub struct Run {
     pub pre_deploy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
+    /// The zone a cron schedule's fields are in (IANA, `Europe/Budapest`); UTC when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
     pub min_instances: u32,
@@ -483,6 +486,7 @@ impl Default for Run {
             start: None,
             pre_deploy: None,
             schedule: None,
+            timezone: None,
             timeout_s: None,
             min_instances: 0,
             max_instances: 3,
@@ -599,7 +603,7 @@ impl Run {
         match self.kind {
             RunType::Cron => {
                 let Some(s) = &self.schedule else { return bad("schedule is required for a cron service") };
-                crate::cron::Schedule::parse(s)?;
+                crate::cron::Schedule::parse(s, self.timezone.as_deref())?;
                 if self.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                     return bad("timeout_s is 1–86400");
                 }
@@ -607,11 +611,13 @@ impl Run {
             }
             RunType::Worker => {
                 self.schedule = None;
+                self.timezone = None;
                 self.min_instances = self.min_instances.max(1);
                 self.max_instances = self.max_instances.max(self.min_instances);
             }
             RunType::Web => {
                 self.schedule = None;
+                self.timezone = None;
                 // A request's time to its answer (Cloud Run's request timeout, at most an hour).
                 if self.timeout_s.is_some_and(|t| !(1..=3600).contains(&t)) {
                     return bad("timeout_s is 1–3600 for a web service (the time a request has to its answer)");

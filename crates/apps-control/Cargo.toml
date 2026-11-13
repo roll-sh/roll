@@ -36,6 +36,7 @@ hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", 
 parking_lot.workspace = true
 percent-encoding.workspace = true
 ipnet.workspace = true
+chrono-tz.workspace = true
 pg-storage.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 roll-cluster.workspace = true
