@@ -279,8 +279,12 @@ export interface Blocker {
     | "review_pending"
     | "review_required"
     | "secret_leak"
+    | "secret_missing"
     | (string & {});
   message: string;
+  /** `secret_leak`, `secret_missing`: the roll secrets key, and the environments it's about. */
+  key?: string;
+  environments?: string[];
 }
 
 export type EntryState = "waiting" | "testing" | "bisecting" | "landing" | "ejected" | "landed";

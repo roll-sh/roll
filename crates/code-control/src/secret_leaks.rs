@@ -179,7 +179,7 @@ impl Code {
         }
         by_key
             .into_iter()
-            .map(|(key, envs)| Blocker::new("secret_leak", format!("adds the value of {key} ({}): rotate it and remove it from the change", envs.join(", "))))
+            .map(|(key, envs)| Blocker::secret("secret_leak", format!("adds the value of {key} ({}): rotate it and remove it from the change", envs.join(", ")), key, envs.iter().map(|e| e.to_string()).collect()))
             .collect()
     }
 
@@ -191,7 +191,7 @@ impl Code {
         }
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
         let Some((_, missing)) = self.env_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
-        missing.iter().map(|(key, envs)| Blocker::new("secret_missing", format!("reads {key}, which {} doesn't set in roll secrets", envs.join(", ")))).collect()
+        missing.iter().map(|(key, envs)| Blocker::secret("secret_missing", format!("reads {key}, which {} doesn't set in roll secrets", envs.join(", ")), key, envs.clone())).collect()
     }
 
     /// Scan the default branch's head (see the module doc). Text files up to 1 MiB, lines up to

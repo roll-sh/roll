@@ -700,7 +700,9 @@ standard environment of the repository's project doesn't define (set in any fold
 root through an import or its base) becomes a `secret_missing` notice on the change: "reads
 SENTRY_DSN, which production doesn't set in roll secrets". A notice never blocks a landing, since
 a variable can come from elsewhere: it's there so the key is added before the code that needs it
-ships.
+ships. Both a `secret_leak` blocker and a `secret_missing` notice carry the `key` and its
+`environments`, and the change page links straight to that key in the project that has the repo
+on its canvas ("Rotate STRIPE_KEY in roll secrets", "Add SENTRY_DSN in roll secrets").
 
 #### Before a commit: `roll secrets scan`
 
@@ -1488,10 +1490,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Fix from the change**: a change's `secret_leak` blocker and `secret_missing` notice carry the
-   key and environments, and the change page links straight to that key in the project's secrets
-   (rotate it, or add it).
-2. **`roll secrets doctor`**: one command that checks a machine's setup (the token and who it is,
+1. **`roll secrets doctor`**: one command that checks a machine's setup (the token and who it is,
    the directory's project and environment, the folder's `.env.example`, staged files for values).
 
 Waiting on other pull requests:
