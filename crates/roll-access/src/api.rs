@@ -481,11 +481,13 @@ async fn policy(State(a): S) -> crate::Result<Json<Value>> {
 
 async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "set roll's token policy")?;
-    if p.max_days == Some(0) {
-        return Err(Error::BadRequest("max_days is at least 1 (or null for no limit)".into()));
+    if p.max_days == Some(0) || p.max_idle_days == Some(0) {
+        return Err(Error::BadRequest("max_days and max_idle_days are at least 1 (or null for no limit)".into()));
     }
     let v = json!(p);
-    blocking(a, move |a| a.store.set_setting("policy", &v)).await?;
+    blocking(a.clone(), move |a| a.store.set_setting("policy", &v)).await?;
+    // This node sees it at once; the others within seconds.
+    let _ = blocking(a, |a| Ok(a.policy())).await;
     Ok(Json(json!(p)))
 }
 
