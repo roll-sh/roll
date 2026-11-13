@@ -12,6 +12,7 @@ pub mod cluster;
 pub mod db;
 pub mod ext;
 pub mod git;
+pub mod leaks;
 pub mod github;
 pub mod mcp;
 pub mod model;
@@ -455,6 +456,8 @@ pub struct Code {
     pub(crate) relay_api: Arc<std::sync::OnceLock<axum::Router>>,
     /// Where presses on access approval cards go (rolld: roll's access service).
     pub(crate) access_decider: std::sync::OnceLock<chatops::access::AccessDecider>,
+    /// Where leaked roll tokens go (rolld: roll's access service), once set.
+    pub(crate) leak_handler: std::sync::OnceLock<leaks::LeakHandler>,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -534,6 +537,7 @@ impl Code {
             landing_changes: Cache::new(65_536),
             relay_api: Default::default(),
             access_decider: Default::default(),
+            leak_handler: Default::default(),
             languages: Cache::new(1024),
             contributors: Cache::new(1024),
             last_changes: Cache::new(4096),

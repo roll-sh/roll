@@ -26,6 +26,7 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/access/oauth/register", access: Access::Public("OAuth dynamic client registration (public clients, PKCE)") },
     Rule { route: "/v1/access/oauth/token", access: Access::Public("OAuth token endpoint: codes and refresh tokens are the credentials") },
     Rule { route: "/v1/access/oauth/revoke", access: Access::Public("OAuth token revocation") },
+    Rule { route: "/v1/access/leaks/github", access: Access::Public("GitHub's secret scanning reports: GitHub's signature is the credential") },
     // roll's MCP server answers 401 itself, naming the OAuth metadata; grants are decided by the
     // evaluator before it, and each tool call goes through the gate again.
     Rule { route: "/v1/mcp", access: Access::Product("MCP: 401 with OAuth discovery without a token") },

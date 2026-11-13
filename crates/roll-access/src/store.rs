@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS grants (
     revoked_at INTEGER,
     client_id TEXT,
     rate_per_minute INTEGER,
-    user_id TEXT
+    user_id TEXT,
+    revoked_why TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -137,6 +138,9 @@ pub struct Grant {
     /// A signed-in user's own token (`usr_…`): it acts as them. `None`: the operator's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Why roll revoked it ("found in acme/site: .env"), when roll did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_why: Option<String>,
 }
 
 impl Grant {
@@ -284,9 +288,9 @@ pub struct Store {
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
-/// A grant's columns, as `grant_row` reads them (19 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (20 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
@@ -318,6 +322,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         client,
         rate_per_minute: r.get::<_, Option<i64>>(17)?.and_then(|n| u32::try_from(n).ok()),
         user: r.get(18)?,
+        revoked_why: r.get(19)?,
     })
 }
 
@@ -421,6 +426,10 @@ impl Store {
         if !db.has_column("grants", "user_id")? {
             db.add_column("grants", "user_id", "TEXT")?;
         }
+        // Why it was revoked, when roll did it (a leaked secret).
+        if !db.has_column("grants", "revoked_why")? {
+            db.add_column("grants", "revoked_why", "TEXT")?;
+        }
         Ok(Store { db, touched: Default::default() })
     }
 
@@ -509,7 +518,7 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(19)?, r.get::<_, Option<i64>>(20)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(20)?, r.get::<_, Option<i64>>(21)?)),
             )
             .optional()
         })?;
@@ -569,6 +578,22 @@ impl Store {
             Ok(())
         })?;
         self.get(id)
+    }
+
+    /// A leaked secret: the grant it opens, revoked (every secret of it), with why. `None` when
+    /// it opens nothing live (already revoked, expired, never ours).
+    pub fn revoke_leaked(&self, secret: &str, why: &str) -> Result<Option<Grant>> {
+        let h = hash(secret);
+        let now = code_sql::now_ms();
+        let why: String = why.chars().take(300).collect();
+        let id = self.db.write(|c| {
+            let id: Option<String> = c.query_row("SELECT grant_id FROM grant_secrets WHERE hash = ? AND (expires_at IS NULL OR expires_at > ?)", params![h, now], |r| r.get(0)).optional()?;
+            let Some(id) = id else { return Ok::<_, Error>(None) };
+            let n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, why, id])?;
+            c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [&id])?;
+            Ok((n == 1).then_some(id))
+        })?;
+        id.map(|id| self.get(&id)).transpose()
     }
 
     /// A new secret for a token, the same rules (the old secret stops working at once). OAuth

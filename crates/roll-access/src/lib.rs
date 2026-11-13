@@ -13,6 +13,7 @@
 pub mod api;
 pub mod catalog;
 pub mod evaluate;
+pub mod leaks;
 pub mod oauth;
 pub mod rate;
 pub mod sinks;
@@ -80,9 +81,64 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", random(16))
 }
 
-/// A secret: `prefix` and 40 random characters of lowercase base32 (200 bits).
+/// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
+/// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
+/// as GitHub's tokens carry a CRC32).
 pub fn new_secret(prefix: &str) -> String {
-    format!("{prefix}{}", random(40))
+    let body = format!("{prefix}{}", random(34));
+    let sum = checksum(&body);
+    format!("{body}{sum}")
+}
+
+/// The last 6 characters a secret ends with: CRC-32 of everything before, as base32 (30 bits).
+fn checksum(body: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let c = crc32fast::hash(body.as_bytes()) >> 2;
+    (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect()
+}
+
+/// Whether `s` is shaped like a roll grant secret (`rlt_`, `rlo_`, `rlf_`) whose checksum holds:
+/// what scanners look for. Secrets made before checksums don't pass, but still work.
+pub fn checksum_ok(s: &str) -> bool {
+    let Some(rest) = ["rlt_", "rlo_", "rlf_"].iter().find_map(|p| s.strip_prefix(p)) else { return false };
+    rest.len() == 40 && rest.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) && checksum(&s[..s.len() - 6]) == s[s.len() - 6..]
+}
+
+/// Every roll grant secret in `text` whose checksum holds (in a pushed file, a paste, a log).
+pub fn find_secrets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in ["rlt_", "rlo_", "rlf_"] {
+        let mut from = 0;
+        while let Some(i) = text[from..].find(p) {
+            let start = from + i;
+            let end = start + p.len() + 40;
+            if let Some(candidate) = text.get(start..end)
+                && checksum_ok(candidate)
+                && text[end..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric())
+            {
+                out.push(candidate.to_string());
+            }
+            from = start + p.len();
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(test)]
+mod secret_tests {
+    #[test]
+    fn secrets_carry_a_checksum_scanners_can_check() {
+        let t = super::new_secret("rlt_");
+        assert_eq!(t.len(), 44);
+        assert!(super::checksum_ok(&t));
+        let mut wrong = t.clone();
+        wrong.replace_range(10..11, if &t[10..11] == "a" { "b" } else { "a" });
+        assert!(!super::checksum_ok(&wrong), "one character off fails");
+        let text = format!("export ROLL_TOKEN={t}\nnot a token: rlt_{}\n{wrong}", "a".repeat(40));
+        assert_eq!(super::find_secrets(&text), vec![t]);
+    }
 }
 
 fn random(n: usize) -> String {
@@ -116,6 +172,8 @@ pub struct Config {
     /// Fetch MCP clients' metadata documents from private addresses and over http (local
     /// development and tests only; `ROLL_ACCESS_METADATA_ALLOW_PRIVATE`).
     pub metadata_allow_private: bool,
+    /// Where GitHub's secret scanning keys are fetched from (tests point it elsewhere).
+    pub github_keys_url: String,
 }
 
 impl Default for Config {
@@ -128,6 +186,7 @@ impl Default for Config {
             trust_forwarded_for: false,
             approval_wait: std::time::Duration::from_secs(55),
             metadata_allow_private: false,
+            github_keys_url: leaks::GITHUB_KEYS.into(),
         }
     }
 }
@@ -215,6 +274,8 @@ pub struct Access {
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
     /// Users as they are now, for their own tokens (rolld: roll-accounts' sessions).
     pub people: std::sync::OnceLock<Arc<dyn roll_auth::Sessions>>,
+    /// GitHub's secret scanning keys, cached.
+    pub(crate) github_keys: leaks::GithubKeys,
 }
 
 /// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
@@ -227,7 +288,7 @@ impl Access {
             code_sql::Target::Sqlite(path) => code_sql::Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
             code_sql::Target::Postgres { url, schema } => code_sql::Db::connect(url, schema, pg)?,
         };
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), github_keys: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -250,6 +311,39 @@ impl Access {
 }
 
 impl Access {
+    /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
+    /// secret scanning): each live grant they open is revoked at once, with why, and logged.
+    /// Returns the grants revoked.
+    pub fn revoke_leaked(&self, secrets: &[String], found_at: &str) -> Result<Vec<store::Grant>> {
+        let mut out = Vec::new();
+        for s in secrets.iter().filter(|s| checksum_ok(s)) {
+            if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
+                tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
+                self.store.audit(&store::AuditEvent {
+                    id: new_id("aud"),
+                    at: code_sql::now_ms(),
+                    grant_id: Some(g.id.clone()),
+                    grant_name: Some(g.name.clone()),
+                    source: "leak".into(),
+                    tool: None,
+                    method: "-".into(),
+                    route: "leaked".into(),
+                    product: Some("access".into()),
+                    action: Some("admin".into()),
+                    resource: Some(found_at.chars().take(300).collect()),
+                    decision: "revoke".into(),
+                    approval: None,
+                    status: 200,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                });
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
     /// Where approvals are posted (`notify.chat`: `{install, channel}`), if anywhere.
     fn chat_target(&self) -> Option<(String, String)> {
         let n = self.store.setting("notify").ok()??;

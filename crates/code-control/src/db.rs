@@ -432,6 +432,7 @@ impl Db {
             crate::review::store::SCHEMA,
             crate::ai::store::SCHEMA,
             crate::webhooks::SCHEMA,
+            crate::leaks::SCHEMA,
             crate::broken::SCHEMA,
             crate::mcp::SCHEMA,
             crate::agents::SCHEMA,

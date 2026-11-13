@@ -202,6 +202,22 @@ pub fn chat(access: &Arc<Access>, code: &Arc<code_control::Code>) {
     }));
 }
 
+/// Leaked tokens: roll code reads what lands for roll grant secrets, and each live one is
+/// revoked (docs/permissions.md, "Leaked tokens").
+pub fn leaks(access: &Arc<Access>, code: &Arc<code_control::Code>) {
+    let a = access.clone();
+    code.on_leaked_secrets(Arc::new(move |text: String, at: String| {
+        let found = roll_access::find_secrets(&text);
+        if found.is_empty() {
+            return 0;
+        }
+        a.revoke_leaked(&found, &at).map(|g| g.len()).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "revoking leaked tokens");
+            0
+        })
+    }));
+}
+
 struct ChatCards {
     code: Arc<code_control::Code>,
     web: String,

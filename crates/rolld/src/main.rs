@@ -471,6 +471,8 @@ async fn run() -> anyhow::Result<()> {
     // Approvals can be posted to a Slack channel through roll code's chat ops.
     if let Some(c) = &code {
         access::chat(&access, &c.code);
+        // Tokens that land in a repo are revoked.
+        access::leaks(&access, &c.code);
     }
     // roll's MCP server: each tool call is a request through the gated API.
     let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
