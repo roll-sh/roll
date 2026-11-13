@@ -790,6 +790,7 @@ async fn a_users_token_acts_as_them() {
     let (_, pending) = d.call(&token, Method::DELETE, &path, None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(d.as_user("usr_bob", Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{apr}"), None).await.0, StatusCode::NOT_FOUND, "nor takes back hers");
     assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
     assert!(d.send(&token, Method::DELETE, &path, None, &[("x-roll-approval", &apr)]).await.0.is_success());
 

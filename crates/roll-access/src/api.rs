@@ -391,7 +391,8 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
 /// Take back what an approval allowed a token for a while. The operator decides approvals, so
 /// the operator takes them back.
 async fn forget(State(a): S, ext: Extensions, Path((id, approval)): Path<(String, String)>) -> crate::Result<Json<Value>> {
-    operator_only(&a, &ext, "take back an approval")?;
+    // Whoever may decide the approval takes it back: the operator, or a person for their own token.
+    may_decide(&a, &ext, &approval).await?;
     Ok(Json(json!(blocking(a, move |a| a.store.forget(&id, &approval)).await?)))
 }
 
