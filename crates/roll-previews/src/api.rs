@@ -278,10 +278,22 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
         Some("phone") => true,
         Some(v) => return Err(Error::BadRequest(format!("view: desktop or phone, not {v:?}"))),
     };
-    let png = blocking(e, move |e| match (phone, previous) {
-        (true, p) => e.store.phone_screenshot(&id, p),
-        (false, true) => e.store.previous_screenshot(&id),
-        (false, false) => Ok(e.store.screenshot(&id)?.map(|(_, png)| png)),
+    let base = q.get("base").is_some_and(|v| v == "1" || v == "true");
+    let png = blocking(e, move |e| {
+        // `base=1`: the default branch's preview's, the one this was compared with.
+        let id = if base {
+            match e.store.base_change(&id)? {
+                Some((base_id, ..)) => base_id,
+                None => return Ok(None),
+            }
+        } else {
+            id
+        };
+        match (phone, previous) {
+            (true, p) => e.store.phone_screenshot(&id, p),
+            (false, true) => e.store.previous_screenshot(&id),
+            (false, false) => Ok(e.store.screenshot(&id)?.map(|(_, png)| png)),
+        }
     })
     .await?;
     match png.filter(|png| !png.is_empty()) {

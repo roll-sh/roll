@@ -351,6 +351,18 @@ fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
     format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.\n\n", t(s.load_ms), t(s.ttfb_ms))
 }
 
+/// The comment's line on how much the page differs from the default branch's preview.
+fn base_line(b: &crate::model::PreviewBaseChange) -> String {
+    let branch: String = b.branch.chars().filter(|c| c.is_ascii_alphanumeric() || "-_./".contains(*c)).take(60).collect();
+    let pct = |p: f64| if p <= 0.0 { "the same".to_string() } else { format!("{:.1}%", p.max(0.1)) };
+    let phone = b.phone_percent.map(|p| format!(", at a phone's width {}", pct(p))).unwrap_or_default();
+    if b.percent <= 0.0 {
+        format!("Against `{branch}`, the page looks the same{phone}.\n\n")
+    } else {
+        format!("Against `{branch}`, the page differs by {}{phone}.\n\n", pct(b.percent))
+    }
+}
+
 /// The comment's line on how much the page changed since the screenshot at an earlier head.
 fn visual_line(v: &crate::model::PreviewVisualChange) -> String {
     let since: String = v.since.strip_prefix("cs_").unwrap_or(&v.since).chars().filter(|c| c.is_ascii_alphanumeric()).take(10).collect();
@@ -440,6 +452,9 @@ fn preview_comment(c: &Change) -> String {
             if let Some(line) = e.page_speed.as_ref().map(speed_line) {
                 out.push_str(&line);
             }
+            if let Some(line) = e.base_change.as_ref().map(base_line) {
+                out.push_str(&line);
+            }
             if let Some(line) = e.visual_change.as_ref().map(visual_line) {
                 out.push_str(&line);
             }
@@ -504,6 +519,7 @@ mod preview_tests {
             page_speed: None,
             page_health: None,
             page_a11y: None,
+            base_change: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -535,5 +551,7 @@ mod preview_tests {
         let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
         assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0) };
+        assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
     }
 }

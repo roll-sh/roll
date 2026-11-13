@@ -356,6 +356,8 @@ export interface PreviewEnvironment {
   page_speed?: { ttfb_ms: number; fcp_ms: number | null; load_ms: number; bytes: number; before_load_ms: number | null };
   /** What went wrong while that page loaded (the page's own words). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null };
+  /** How much its page differs from the project's preview of the default branch. */
+  base_change?: { branch: string; percent: number; phone_percent: number | null };
   /** What a screen reader can't name on that page. */
   page_a11y?: { issues: { kind: "images" | "fields" | "buttons" | "links"; count: number; first: string | null }[]; lang: boolean; title: boolean };
 }

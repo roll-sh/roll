@@ -165,6 +165,10 @@ pub trait Source: Send + Sync {
     async fn paths_between(&self, _repo: &str, _from: &str, _to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
+    /// `repo`'s default branch (`None`: not known).
+    async fn default_branch(&self, _repo: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
     /// The feedback left on the change's preview pages (its feedback reviews, not dismissed),
     /// oldest first.
     async fn feedback(&self, _change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {

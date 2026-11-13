@@ -314,6 +314,16 @@ pub struct PreviewEnvironment {
     /// What a screen reader can't name on that page, and what the document misses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_a11y: Option<PreviewPageA11y>,
+    /// How much its page differs from the project's preview of the default branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_change: Option<PreviewBaseChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewBaseChange {
+    pub branch: String,
+    pub percent: f64,
+    pub phone_percent: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

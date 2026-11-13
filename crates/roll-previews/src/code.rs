@@ -115,6 +115,7 @@ impl CodeSource {
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
                 expires_at: p.goes_at,
+                base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent }),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone() }).collect(),
                     lang: a.lang,
@@ -219,6 +220,10 @@ impl Source for CodeSource {
         let r = self.repo(repo)?;
         let (Some(a), Some(b)) = (self.code.store.resolve(&r.id, from)?, self.code.store.resolve(&r.id, to)?) else { return Ok(None) };
         Ok(Some(self.code.store.compare(&r.id, &a, &b)?.into_iter().map(|d| d.path.as_str().to_string()).collect()))
+    }
+
+    async fn default_branch(&self, repo: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.repo(repo).ok().map(|r| r.default_branch))
     }
 
     async fn feedback(&self, change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {

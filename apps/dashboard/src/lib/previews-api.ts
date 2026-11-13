@@ -79,6 +79,8 @@ export interface Preview {
   goes_at?: number | null;
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
+  /** How much its page differs from the project's preview of the default branch. */
+  base_change?: { branch: string; percent: number; phone_percent: number | null } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
   /** How fast its first page loaded at this head (timed with the screenshot), and at the one before. */
@@ -227,9 +229,9 @@ function query(params: Record<string, string | number | undefined>) {
 
 /** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
  * revoke it when done. */
-/** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width. */
-export async function screenshotUrl(id: string, previous = false, phone = false): Promise<string> {
-  const q = [previous ? "previous=1" : "", phone ? "view=phone" : ""].filter(Boolean).join("&");
+/** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's. */
+export async function screenshotUrl(id: string, previous = false, phone = false, base = false): Promise<string> {
+  const q = [previous ? "previous=1" : "", phone ? "view=phone" : "", base ? "base=1" : ""].filter(Boolean).join("&");
   const res = await fetch(`${ROLL_API}${one(id)}/screenshot${q ? `?${q}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
   onApiStatus(res.status);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());

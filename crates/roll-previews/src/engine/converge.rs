@@ -509,6 +509,9 @@ impl Engine {
         match self.apps.screenshot(&r.id, &first.name).await {
             Ok(Some(shot)) => {
                 let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok() && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok();
+                if kept && r.change_id.is_some() {
+                    self.compare_with_default_branch(r).await;
+                }
                 if kept {
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }
@@ -523,6 +526,17 @@ impl Engine {
                 let _ = self.store.set_screenshot_tried(&r.id, r.build());
                 false
             }
+        }
+    }
+
+    /// A change's screenshot against the project's preview of its repo's default branch, when it
+    /// has one with a screenshot (best effort).
+    async fn compare_with_default_branch(&self, r: &Row) {
+        let Ok(Some(default)) = self.source.default_branch(&r.repo).await else { return };
+        let Ok(rows) = self.store.rows(Some(&r.project_id)) else { return };
+        let Some(base) = rows.into_iter().find(|x| x.change_id.is_none() && x.desired == Desired::Active && x.repo == r.repo && x.branch.as_deref() == Some(default.as_str())) else { return };
+        if let Err(e) = self.store.compare_with_base(&r.id, &base.id, &default) {
+            warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's");
         }
     }
 

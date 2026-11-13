@@ -214,6 +214,9 @@ pub struct Preview {
     pub visual_change: Option<VisualChange>,
     /// It also has a phone-width screenshot (`GET …/screenshot?view=phone`).
     pub phone_screenshot: bool,
+    /// How much its page differs from the project's preview of the default branch (`GET
+    /// …/screenshot?base=1` is that one's), when the project has one.
+    pub base_change: Option<BaseChange>,
     /// How fast the first service's page loaded at this head, and at the head before.
     pub page_speed: Option<PageSpeedView>,
     /// What went wrong while that page loaded (at the latest screenshot's head).
@@ -385,6 +388,14 @@ pub struct VisualChange {
     /// The share of pixels that changed, in percent (two decimals).
     pub percent: f64,
     /// The same at a phone's width, when both screenshots had one.
+    pub phone_percent: Option<f64>,
+}
+
+/// How much a change's page differs from the default branch's (Chromatic's baseline).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BaseChange {
+    pub branch: String,
+    pub percent: f64,
     pub phone_percent: Option<f64>,
 }
 

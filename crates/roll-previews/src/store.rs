@@ -377,7 +377,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -1014,6 +1014,39 @@ impl Store {
         Ok(row.and_then(|(h, bp)| Some((h?, bp?))))
     }
 
+    /// Compare preview `id`'s latest screenshots (desktop, phone) with preview `base`'s, the
+    /// project's preview of `branch` (the default branch: Chromatic's baseline), and keep how much
+    /// differs. Nothing kept when either has none.
+    pub fn compare_with_base(&self, id: &str, base: &str, branch: &str) -> Result<()> {
+        use base64::Engine as _;
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let pngs = |p: &str| -> Result<Option<(String, Option<String>)>> {
+            Ok(self.db.read(|c| c.query_row("SELECT png, phone_png FROM screenshots WHERE preview_id = ?", [p], |r| Ok((r.get(0)?, r.get(1)?))).optional())?)
+        };
+        let (Some((ours, ours_phone)), Some((theirs, theirs_phone))) = (pngs(id)?, pngs(base)?) else { return Ok(()) };
+        let bp = |a: Option<&String>, b: Option<&String>| -> Option<i64> {
+            let (a, b) = (b64e.decode(a?).ok()?, b64e.decode(b?).ok()?);
+            crate::visual::changed(&b, &a).map(|f| (f * 10_000.0).round() as i64)
+        };
+        let (change, phone) = (bp(Some(&ours), Some(&theirs)), bp(ours_phone.as_ref(), theirs_phone.as_ref()));
+        self.db.write(|c| {
+            c.execute(
+                "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, id],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// How much the page differs from the default branch's preview (its branch, basis points
+    /// at both widths), and that preview.
+    pub fn base_change(&self, id: &str) -> Result<Option<(String, String, i64, Option<i64>)>> {
+        let row: Option<(Option<String>, Option<String>, Option<i64>, Option<i64>)> = self
+            .db
+            .read(|c| c.query_row("SELECT base_preview, base_branch, base_change_bp, base_phone_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
+        Ok(row.and_then(|(p, b, bp, phone)| Some((p?, b?, bp?, phone))))
+    }
+
     /// The phone-width screenshot (`previous`: the one before it), if one was taken.
     pub fn phone_screenshot(&self, id: &str, previous: bool) -> Result<Option<Vec<u8>>> {
         use base64::Engine as _;
@@ -1319,6 +1352,7 @@ impl Store {
         let phone_percent = self.phone_change(&r.id)?.map(|bp| bp as f64 / 100.0);
         let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
+        let base_change = self.base_change(&r.id)?.map(|(_, branch, bp, phone)| crate::BaseChange { branch, percent: bp as f64 / 100.0, phone_percent: phone.map(|p| p as f64 / 100.0) });
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;
         let page_a11y = self.page_a11y(&r.id)?;
@@ -1365,6 +1399,7 @@ impl Store {
             screenshot_at,
             visual_change,
             phone_screenshot,
+            base_change,
             page_speed,
             page_health,
             page_a11y,
@@ -1450,6 +1485,12 @@ mod tests {
         // The phone-width one too, with its own change.
         assert_eq!(store.phone_change(id).unwrap(), Some(5000));
         assert_eq!(store.phone_screenshot(id, true).unwrap(), Some(png(0)));
+        // Against the default branch's preview: its own share, at both widths.
+        let (main, _) = store.create(&New { change_id: None, branch: Some("main".into()), key: "main".into(), ..new("chg_main") }).unwrap();
+        assert!(store.compare_with_base(id, &main.id, "main").is_ok() && store.base_change(id).unwrap().is_none(), "no screenshot there yet");
+        store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
+        store.compare_with_base(id, &main.id, "main").unwrap();
+        assert_eq!(store.base_change(id).unwrap(), Some((main.id.clone(), "main".to_string(), 2000, Some(5000))));
         // Taken again at the same head: what came before stays.
         store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100)), Some(&png(5))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));

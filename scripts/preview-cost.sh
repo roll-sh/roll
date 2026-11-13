@@ -217,6 +217,8 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true}}' >/dev/null
+# A preview of the default branch, the baseline a change's screenshots are compared with.
+MAINPV=$(api POST /v1/previews "{\"project\":\"$PRJ\",\"repo\":\"acme/web\",\"branch\":\"main\"}" | jq_ "d['id']")
 for _ in $(seq 1 120); do
   [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
   sleep 0.5
@@ -371,6 +373,20 @@ A11Y=$(api GET "/v1/previews/$PV" | jq_ "('lang %s, title %s, %d issue kinds' % 
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?previous=1")" = image/png ] || { echo "the screenshot before should be there"; exit 1; }
 # And at a phone's width, with its own change.
 [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('phone_screenshot')")" = True ] || { echo "a phone-width screenshot should be taken too"; exit 1; }
+# Against the default branch's preview (Chromatic's baseline).
+BASE=""
+for _ in $(seq 1 120); do
+  BASE=$(api GET "/v1/previews/$PV" | jq_ "('%s%% against %s' % (d['base_change']['percent'], d['base_change']['branch'])) if d.get('base_change') else ''")
+  [ -n "$BASE" ] && break
+  sleep 0.5
+done
+[ -n "$BASE" ] || { echo "the change's page should be compared with main's preview: $(api GET "/v1/previews/$MAINPV" | jq_ "{k: d.get(k) for k in ('state', 'screenshot_at', 'branch')}")"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?base=1")" = image/png ] || { echo "main's screenshot should be there to compare"; exit 1; }
+api DELETE "/v1/previews/$MAINPV" >/dev/null
+for _ in $(seq 1 120); do
+  [ "$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)")" = 1 ] && break
+  sleep 0.5
+done
 PHONE=$(curl -sS "http://$API/v1/previews/$PV/screenshot?view=phone" | python3 -c "import sys, struct; b=sys.stdin.buffer.read(); print(f'{struct.unpack(\">I\", b[16:20])[0]} px wide, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')")
 case "$PHONE" in "780 px wide, PNG") ;; *) echo "the phone-width screenshot should be 390 px at twice the density: $PHONE"; exit 1;; esac
 
@@ -430,6 +446,7 @@ cat <<EOF
 | What went wrong while the page loaded (a push whose page logs an error) | $HEALTH |
 | The page's change since the push before (screenshots) | $VISUAL |
 | The phone-width screenshot | $PHONE |
+| The change's page against main's preview | $BASE |
 | Accessibility of the test page (it has no lang and no title) | $A11Y |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
