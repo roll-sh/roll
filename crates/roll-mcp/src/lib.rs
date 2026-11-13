@@ -336,6 +336,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": [] })),
             "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
+            "completion/complete" => rpc_result(id, complete(ctx, &params).await),
             "prompts/get" => match prompts::get(params.get("name").and_then(Value::as_str).unwrap_or(""), params.get("arguments").unwrap_or(&Value::Null), &tool_names(ctx)) {
                 Ok(v) => rpc_result(id, v),
                 Err(e) => rpc_error(id, -32602, e),
@@ -345,6 +346,29 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         responses.push(resp);
     }
     responses
+}
+
+/// `completion/complete` for a prompt's argument: the values a list tool answers this connection
+/// (through the gate, as any call), matching what's typed. Nothing for what has no source or a
+/// tool the connection lacks: a suggestion never reaches past a call it could make.
+async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Value {
+    let empty = json!({ "completion": { "values": [], "hasMore": false } });
+    if params["ref"]["type"] != "ref/prompt" {
+        return empty;
+    }
+    let (prompt, arg) = (params["ref"]["name"].as_str().unwrap_or(""), params["argument"]["name"].as_str().unwrap_or(""));
+    let typed: String = params["argument"]["value"].as_str().unwrap_or("").chars().take(200).collect();
+    let Some(src) = prompts::source(prompt, arg) else { return empty };
+    if !tool_names(ctx).iter().any(|t| t == src.tool) || !prompts::offered_to(prompt, &tool_names(ctx)) {
+        return empty;
+    }
+    let others = params["context"]["arguments"].clone();
+    let Some(answer) = call(ctx, src.tool, (src.args)(&others)).await else { return empty };
+    if answer["isError"] == true {
+        return empty;
+    }
+    let (values, more) = prompts::values(&answer["structuredContent"], src.fields, &typed);
+    json!({ "completion": { "values": values, "hasMore": more } })
 }
 
 /// The names of the tools this connection is offered (what prompts may use).
@@ -377,7 +401,7 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
     };
     json!({
         "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false } },
+        "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} },
         "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION") },
         "instructions": format!(
             "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \

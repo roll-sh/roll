@@ -96,6 +96,51 @@ const PROMPTS: &[Prompt] = &[
     },
 ];
 
+/// Where an argument's completions come from: a list tool the connection must have (read through
+/// the gate as any call), its arguments from the prompt's others, and the fields of each item that
+/// are values to offer.
+pub struct Source {
+    pub tool: &'static str,
+    pub args: fn(&Value) -> Value,
+    pub fields: &'static [&'static str],
+}
+
+/// The completion source for argument `arg` of prompt `prompt`, when it has one.
+pub fn source(prompt: &str, arg: &str) -> Option<Source> {
+    PROMPTS.iter().find(|p| p.name == prompt)?.args.iter().find(|a| a.name == arg)?;
+    match arg {
+        "project" => Some(Source { tool: "workspace_list_projects", args: |_| json!({}), fields: &["id", "name"] }),
+        "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id", "name"] }),
+        "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
+        _ => None,
+    }
+}
+
+/// The values to offer from a list tool's answer: each item's `fields`, those starting with what's
+/// typed (case-insensitive), at most 100 (MCP's cap), and whether there were more.
+pub fn values(answer: &Value, fields: &[&str], typed: &str) -> (Vec<String>, bool) {
+    let items: Vec<&Value> = match answer {
+        Value::Array(a) => a.iter().collect(),
+        Value::Object(o) => o.values().filter_map(Value::as_array).flatten().collect(),
+        _ => Vec::new(),
+    };
+    let typed = typed.to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        for f in fields {
+            if let Some(v) = item.get(*f).and_then(Value::as_str)
+                && v.to_lowercase().starts_with(&typed)
+                && !out.iter().any(|o| o == v)
+            {
+                out.push(clean(Some(&Value::String(v.to_string()))));
+            }
+        }
+    }
+    let more = out.len() > 100;
+    out.truncate(100);
+    (out, more)
+}
+
 /// An argument as a prompt shows it: one line of printable text, at most 200 characters.
 fn clean(v: Option<&Value>) -> String {
     let s = v.and_then(Value::as_str).unwrap_or("");
@@ -104,6 +149,11 @@ fn clean(v: Option<&Value>) -> String {
 
 fn offered<'a>(tools: &'a [String]) -> impl Iterator<Item = &'static Prompt> + 'a {
     PROMPTS.iter().filter(move |p| p.needs.iter().all(|n| tools.iter().any(|t| t == n)))
+}
+
+/// Whether prompt `name` is offered to a connection with `tools`.
+pub fn offered_to(name: &str, tools: &[String]) -> bool {
+    offered(tools).any(|p| p.name == name)
 }
 
 /// `prompts/list`, for a connection with `tools`.
