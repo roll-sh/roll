@@ -199,23 +199,25 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
 1. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** (docs/benchmarks/search.md, round 7):
-   footprint and micro suite done; Rally http_logs and geonames done for all three targets
-   (geonames: roll loses only `field_value_script_score` and `decay_geo_gauss_script_score`),
-   nyc_taxis done for roll and Elasticsearch (OpenSearch queued), so to finish. Fixed since the
-   nyc_taxis race: date histograms count from the points tree (20-40x), `auto_date_histogram`
-   about 2x, constant-score queries collect in blocks. Next: `distance_amount_agg` (a histogram
-   with a `stats` sub-aggregation, 1.9x behind), the two Painless script scores, nyc_taxis
-   indexing, then a full rerun of every track with variance. Settle one allocator policy:
-   rolld's (purge delay 0, collect on park) against search-dev's purge governor, by a matched
-   benchmark.
+   footprint, micro suite and Rally http_logs, geonames and nyc_taxis are done for all three
+   targets, plus a roll rerun after the aggregation work. roll now wins or ties nearly every
+   task. Still behind the best of the two: nyc_taxis `autohisto_agg` (39.6 ms against ES 32.2
+   and OpenSearch 13.0) and `distance_amount_agg` (98 against ES 86); http_logs `hourly_agg`
+   (32.9 against OpenSearch 14.0; 7 ms locally on the same data, so find what Rally's index has
+   that the local load doesn't, likely segment count) and `terms_enum` (1.14 against 0.57);
+   geonames `decay_geo_gauss_script_score` (78 against ES 71). Then: `so`, a full rerun of every
+   track with variance, and one allocator policy (rolld's against search-dev's purge governor,
+   by a matched benchmark).
 2. **Fleet under load**: `rolld/tests/search_cluster_e2e.rs` (two real `rolld` processes,
    Postgres leases, MinIO; `ROLL_E2E=1`) passes: writes through both nodes, a SIGTERM handover,
    a restart, and a SIGKILL of the owner under a running writer (every acknowledged write
    replayed from S3 on the new owner). Next: the edge's hostnames in the same run, and search in
    `deploy/cloud`'s fleet test (`rolld/tests/fleet_e2e.rs`).
 3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`, `logsdb`,
-   runtime fields, `otel-data`, transforms, ES|QL, watcher, downsampling. KQL is done (34 of 34);
-   its parse-error wording is still to be checked against the reference once Rally frees it.
+   runtime fields (a delegate is on `runtime-fields-common`), `otel-data`, transforms, ES|QL,
+   watcher, downsampling. KQL is done (34 of 34); check its parse-error wording against the
+   reference. In the opensearch dialect, count `auto_date_histogram` from the points tree as
+   OpenSearch does (`filter_rewrite`'s replay already picks OpenSearch's rounding).
 4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
    checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
 5. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
