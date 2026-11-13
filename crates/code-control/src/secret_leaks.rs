@@ -185,13 +185,16 @@ impl Code {
 
     /// One `secret_missing` notice per environment variable `c` starts reading that a roll secrets
     /// environment lacks (from what [`prepare_leaks`](Self::prepare_leaks) last found).
+    /// Only on a change of the repo's own (`trusted`) in a repo that isn't public, and naming the
+    /// key only: which environments lack it would tell anyone who can read the change, guessing
+    /// names in a diff, what roll secrets holds.
     pub(crate) fn env_notices(&self, r: &RepoRow, c: &Change) -> Vec<Blocker> {
-        if matches!(c.state, ChangeState::Landed | ChangeState::Closed) || self.secret_env.get().is_none() {
+        if matches!(c.state, ChangeState::Landed | ChangeState::Closed) || self.secret_env.get().is_none() || !c.trusted || r.visibility == crate::model::Visibility::Public {
             return Vec::new();
         }
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
         let Some((_, missing)) = self.env_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
-        missing.iter().map(|(key, envs)| Blocker::secret("secret_missing", format!("reads {key}, which {} doesn't set in roll secrets", envs.join(", ")), key, envs.clone())).collect()
+        missing.iter().map(|(key, _)| Blocker::secret("secret_missing", format!("reads {key}, which isn't set in every roll secrets environment"), key, Vec::new())).collect()
     }
 
     /// Scan the default branch's head (see the module doc). Text files up to 1 MiB, lines up to

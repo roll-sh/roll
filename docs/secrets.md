@@ -333,7 +333,8 @@ and messages (`apps/dashboard/src/lib/secrets-required.ts`).
 
 ### Owners
 
-A required key can name its `owner` (`roll secrets required add STRIPE_KEY --owner @payments`, the
+A required key can name its `owner` (a plain name: letters, digits, spaces and `@._-/`, since it goes
+into chat notices; `roll secrets required add STRIPE_KEY --owner @payments`, the
 Environments view's Owner field): the person or team who supplies it. Health's findings about that
 key carry it (`owner`, "ask @payments" in the view), and so does the daily notice, so whoever sees
 an expired or missing key knows who decides its new value. The key's rule in its own folder
@@ -716,10 +717,13 @@ their usual spellings (`process.env.X`, `process.env["X"]`, `import.meta.env.X`,
 names, and not the ones platforms set themselves such as `PATH`, `PORT` or `GITHUB_*`). Each one a
 standard environment of the repository's project doesn't define (set in any folder, or reaching its
 root through an import or its base) becomes a `secret_missing` notice on the change: "reads
-SENTRY_DSN, which production doesn't set in roll secrets". A notice never blocks a landing, since
+SENTRY_DSN, which isn't set in every roll secrets environment". It names the key only, never the
+environments, and only on a change of the repo's own (`trusted`) in a repo that isn't public: whoever
+can read a change could otherwise guess names in a diff to learn what roll secrets holds. A notice
+never blocks a landing, since
 a variable can come from elsewhere: it's there so the key is added before the code that needs it
-ships. Both a `secret_leak` blocker and a `secret_missing` notice carry the `key` and its
-`environments`, and the change page links straight to that key in the project that has the repo
+ships. Both carry the `key` (a `secret_leak` blocker its `environments` too, which its author could only
+know by holding the value), and the change page links straight to that key in the project that has the repo
 on its canvas ("Rotate STRIPE_KEY in roll secrets", "Add SENTRY_DSN in roll secrets").
 
 #### Before a commit: `roll secrets scan`
@@ -1264,7 +1268,8 @@ days.
   two nodes send one batch, and a failed batch is sent again 5 minutes later. Deliveries go through
   the same `PublicOnly` client as syncs. At most 10 sinks a project.
 - **Into a roll bucket**: a sink whose URL is `bucket:<name>`, a bucket on the project's own canvas
-  (any other is refused), writes each batch as an object `roll-secrets/audit/<sink>/<delivery>.json`
+  (any other is refused, and a bucket moved off the canvas later gets nothing more: it's checked at
+every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<delivery>.json`
   there, through roll storage in process: a compliance archive with the bucket's own lifecycle,
   versioning and Object Lock. A retried batch is the same delivery, so it writes the same object
   again, never a second one.

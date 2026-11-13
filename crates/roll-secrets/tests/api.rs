@@ -774,7 +774,19 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let p = api.project.clone();
     api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/audit-archive"), Some(json!({ "x": 0, "y": 0 }))).await;
-    assert_eq!(api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "bucket:audit-archive" }))).await["url"], "bucket:audit-archive");
+    let bucket = api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "bucket:audit-archive" }))).await;
+    assert_eq!(bucket["url"], "bucket:audit-archive");
+    // Taken off the canvas later, it gets nothing more: checked at every delivery.
+    api.ok(Method::DELETE, &format!("/v1/workspace/projects/{p}/resources/bucket/audit-archive"), None).await;
+    api.set("production", "AFTER", "x").await;
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+    let before = api.sent.0.lock().unwrap().len();
+    let sw = api.secrets.clone();
+    tokio::task::spawn_blocking(move || sw.sweep().unwrap()).await.unwrap();
+    let sinks = api.ok(Method::GET, "/audit/sinks", None).await;
+    let b = sinks.as_array().unwrap().iter().find(|x| x["id"] == bucket["id"]).unwrap();
+    assert_eq!((b["status"].as_str(), b["error"].as_str().is_some_and(|e| e.contains("isn't on this project's canvas"))), (Some("error"), true), "{b}");
+    assert_eq!(api.sent.0.lock().unwrap().iter().skip(before).filter(|x| x["sink"] == bucket["id"]).count(), 0);
 
     let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
     let csv = csv.as_str().unwrap();

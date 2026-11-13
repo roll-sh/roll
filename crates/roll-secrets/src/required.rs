@@ -145,8 +145,9 @@ impl Secrets {
             r.path = names::path(&r.path)?;
             names::comment(&r.comment)?;
             r.owner = r.owner.take().map(|o| o.trim().to_string()).filter(|o| !o.is_empty());
-            if r.owner.as_ref().is_some_and(|o| o.chars().count() > 64 || o.chars().any(char::is_control)) {
-                return Err(Error::BadRequest(format!("{}: an owner is a name of at most 64 characters", r.key)));
+            // A plain name: it goes into chat notices, so no markup (`<!channel>`, links).
+            if r.owner.as_ref().is_some_and(|o| o.chars().count() > 64 || !o.chars().all(|c| c.is_alphanumeric() || " @._-/".contains(c))) {
+                return Err(Error::BadRequest(format!("{}: an owner is a name of at most 64 letters, digits, spaces and @._-/", r.key)));
             }
             if let Some(p) = &r.pattern {
                 if p.is_empty() || p.len() > PATTERN_MAX {

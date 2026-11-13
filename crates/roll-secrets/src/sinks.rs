@@ -206,7 +206,11 @@ impl Secrets {
                 continue;
             }
             let last = rows.last().map(|r| r.id).unwrap_or(cursor);
-            let sent = self.project(&project).and_then(|dek| dek.open(&sink_aad(&project, &id), &sealed).map_err(Error::from)).and_then(|secret| {
+            // A bucket must still be on the project's canvas: one moved to another project, or
+            // removed, gets nothing more.
+            let gone = url.strip_prefix(BUCKET).is_some_and(|b| !self.members(&project).map(|m| m.contains(&("bucket".to_string(), b.to_string()))).unwrap_or(false));
+            let sent = if gone { Err(Error::BadRequest(format!("{url} isn't on this project's canvas any more"))) } else { Ok(()) };
+            let sent = sent.and_then(|_| self.project(&project)).and_then(|dek| dek.open(&sink_aad(&project, &id), &sealed).map_err(Error::from)).and_then(|secret| {
                 let body = json!({ "sink": id, "project": project, "events": rows });
                 deliver.post(&url, &id, &secret, &body)
             });
