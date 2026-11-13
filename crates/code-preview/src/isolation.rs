@@ -115,4 +115,10 @@ pub trait Isolation: Send + Sync {
     fn reach(&self, url: &str) -> String;
     /// Drop a job cache ([`Job::cache`]); nothing where caches aren't kept.
     async fn drop_cache(&self, _name: &str) {}
+    /// A running job's output as it comes, after its last `tail` lines: `None` where it can't be
+    /// followed (the caller reads [`Isolation::logs_tail`] again instead). Dropping the receiver
+    /// stops following.
+    async fn follow(&self, _name: &str, _tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+        None
+    }
 }

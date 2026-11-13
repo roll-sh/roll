@@ -3,7 +3,7 @@
  * of a workspace project per change, with a branch of every data resource. Change both together.
  */
 
-import { call } from "./roll-api";
+import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 
 export const PREVIEW_STATES = ["queued", "awaiting_approval", "creating", "ready", "sleeping", "updating", "failed", "deleting"] as const;
 export type PreviewState = (typeof PREVIEW_STATES)[number];
@@ -189,6 +189,45 @@ export const previewsApi = {
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),
   deleteBypass: (projectId: string) => call<void>("DELETE", `${project(projectId)}/bypass`),
 };
+
+/** Server-sent events in `text` (after `rest`, what was left of the last chunk): the complete
+ * events, and what's left over. */
+export function parseSse(rest: string, text: string): { events: { event: string; data: string }[]; rest: string } {
+  const all = (rest + text).replace(/\r\n?/g, "\n");
+  const blocks = all.split("\n\n");
+  const left = blocks.pop() ?? "";
+  const events = blocks.flatMap((b) => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of b.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    }
+    return data.length ? [{ event, data: data.join("\n") }] : [];
+  });
+  return { events, rest: left };
+}
+
+/** A service's last `lines`, then its output as it comes (`…/logs?follow=1`, read with the
+ * operator's headers, which EventSource can't send). Resolves when the stream ends or `signal`
+ * aborts it. */
+export async function followLogs(id: string, service: string, lines: number, onLine: (l: string) => void, signal: AbortSignal): Promise<void> {
+  const res = await fetch(`${ROLL_API}${one(id)}/logs${query({ service, lines, follow: 1 })}`, { headers: apiHeaders(), cache: "no-store", signal });
+  onApiStatus(res.status);
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let rest = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    const parsed = parseSse(rest, value);
+    rest = parsed.rest;
+    for (const e of parsed.events) if (e.event === "message") onLine(e.data);
+  }
+}
 
 /** A resource as the reset body and the settings name it. */
 export const resourceId = (r: Pick<PreviewResource, "kind" | "parent">) => `${r.kind}:${r.parent}`;

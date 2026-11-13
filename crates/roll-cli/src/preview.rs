@@ -226,24 +226,25 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 path.push_str(&format!("&service={svc}"));
             }
             if follow {
-                // The tail again every 2 s; print what's new since the last read (the lines
-                // after the last one seen).
-                let mut seen: Vec<String> = Vec::new();
-                loop {
-                    let v = api.get(&path).await?;
-                    let now: Vec<String> = v["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(str::to_string)).collect();
-                    let start = match seen.last() {
-                        Some(last) => now.iter().rposition(|l| l == last).map_or(0, |i| i + 1),
-                        None => 0,
-                    };
-                    for l in &now[start..] {
-                        println!("{l}");
+                // Server-sent events: `event: service` first, then a `data:` line per log line.
+                let mut res = api.open_stream(&format!("{path}&follow=1")).await?;
+                let (mut buf, mut event) = (Vec::<u8>::new(), String::new());
+                while let Some(chunk) = res.chunk().await? {
+                    buf.extend_from_slice(&chunk);
+                    while let Some(i) = buf.iter().position(|&b| b == b'\n') {
+                        let line = String::from_utf8_lossy(&buf[..i]).trim_end_matches('\r').to_string();
+                        buf.drain(..=i);
+                        if let Some(name) = line.strip_prefix("event:") {
+                            event = name.trim().to_string();
+                        } else if let Some(data) = line.strip_prefix("data:") {
+                            let data = data.strip_prefix(' ').unwrap_or(data);
+                            if event == "service" { eprintln!("following {data} (ctrl-c to stop)") } else { println!("{data}") }
+                        } else if line.is_empty() {
+                            event.clear();
+                        }
                     }
-                    if !now.is_empty() {
-                        seen = now;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
+                return Ok(());
             }
             let v = api.get(&path).await?;
             if !as_json {

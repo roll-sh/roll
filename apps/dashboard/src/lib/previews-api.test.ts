@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { previewsApi } from "./previews-api";
+import { parseSse, previewsApi } from "./previews-api";
 import { ROLL_API } from "./roll-api";
 
 /** A fetch that answers from a table (`METHOD /path?query`) and records what it was asked. */
@@ -69,5 +69,18 @@ describe("previews api", () => {
     });
     await expect(previewsApi.putSettings("prj_1", { sleep_after_s: 5 })).rejects.toThrow("sleep_after_s: 60 to 604800");
     await expect(previewsApi.create("prj_1", "acme/web", { branch: "x" })).rejects.toThrow("max_previews (10) is reached");
+  });
+});
+
+describe("following logs", () => {
+  it("reads server-sent events split anywhere across chunks", () => {
+    const a = parseSse("", "event: service\ndata: web\n\ndata: listening on 8000\n\nda");
+    expect(a.events).toEqual([
+      { event: "service", data: "web" },
+      { event: "message", data: "listening on 8000" },
+    ]);
+    const b = parseSse(a.rest, "ta: GET /\r\n\r\n: keep-alive\n\n");
+    expect(b.events).toEqual([{ event: "message", data: "GET /" }]);
+    expect(b.rest).toBe("");
   });
 });

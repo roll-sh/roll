@@ -190,6 +190,29 @@ struct Api {
 }
 
 impl Api {
+    /// A GET whose body is read as it comes (server-sent events): the response, once its
+    /// status is a success.
+    async fn open_stream(&self, path: &str) -> anyhow::Result<reqwest::Response> {
+        let mut req = self.http.get(format!("{}{path}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            match value["error"].as_str() {
+                Some(e) => bail!("{e}"),
+                None => bail!("{status}"),
+            }
+        }
+        Ok(res)
+    }
+
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
         if let Some(k) = &self.key {

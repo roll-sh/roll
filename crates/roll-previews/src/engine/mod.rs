@@ -224,11 +224,12 @@ impl Engine {
 
 
 /// What a service is deployed with, as a digest (FNV-1a: change detection, not a secret).
-fn config_fingerprint(vars: &[(String, String)], private: bool) -> String {
+fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>) -> String {
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for (k, v) in sorted {
+    let bypass = ("\0bypass".to_string(), bypass.unwrap_or_default().to_string());
+    for (k, v) in sorted.into_iter().chain([&bypass]) {
         for b in k.bytes().chain([0]).chain(v.bytes()).chain([0]) {
             h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
         }

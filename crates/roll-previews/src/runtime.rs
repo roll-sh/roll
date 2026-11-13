@@ -580,6 +580,11 @@ impl Apps for Runtime {
         self.iso.logs_tail(&container_name(&host), lines.clamp(1, 2000)).await.lines().map(str::to_string).collect()
     }
 
+    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+        let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
+        self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
+    }
+
     async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         use code_preview::runner::Outcome;
         let docker = self.iso.name() == "docker";

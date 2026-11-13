@@ -176,4 +176,57 @@ impl Engine {
         };
         Ok((svc.name.clone(), self.apps.logs(id, &svc.name, lines).await))
     }
+
+    /// A service's last `lines` and then its output as it comes. Where the product can't follow,
+    /// its tail is read every [`FOLLOW_POLL`] and what's new passed on. Ends when the receiver is
+    /// dropped (or the service's output does).
+    pub async fn follow(self: &Arc<Self>, id: &str, service: Option<&str>, lines: usize) -> Result<(String, tokio::sync::mpsc::Receiver<String>)> {
+        let (name, _) = self.logs(id, service, 1).await?;
+        if let Some(rx) = self.apps.follow(id, &name, lines).await {
+            return Ok((name, rx));
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let (me, id, svc) = (self.clone(), id.to_string(), name.clone());
+        tokio::spawn(async move {
+            let mut seen: Vec<String> = Vec::new();
+            loop {
+                let now = me.apps.logs(&id, &svc, lines).await;
+                for l in &now[overlap(&seen, &now)..] {
+                    if tx.send(l.clone()).await.is_err() {
+                        return;
+                    }
+                }
+                seen = now;
+                tokio::select! {
+                    _ = tokio::time::sleep(FOLLOW_POLL) => {}
+                    _ = tx.closed() => return,
+                }
+            }
+        });
+        Ok((name, rx))
+    }
+}
+
+/// How often a service that can't be followed has its tail read again.
+pub const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How many of `now`'s first lines `before` already ended with: the longest suffix of `before`
+/// that's a prefix of `now`.
+pub fn overlap(before: &[String], now: &[String]) -> usize {
+    (0..=before.len().min(now.len())).rev().find(|&k| before[before.len() - k..] == now[..k]).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A followed log that's polled passes each line on once: what's new after the lines it
+    /// already saw, everything when the tail moved past them.
+    #[test]
+    fn a_polled_log_passes_on_only_new_lines() {
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::overlap(&[], &v(&["a", "b"])), 0);
+        assert_eq!(super::overlap(&v(&["a", "b"]), &v(&["a", "b"])), 2, "nothing new");
+        assert_eq!(super::overlap(&v(&["a", "b", "c"]), &v(&["b", "c", "d"])), 2, "the tail scrolled by one");
+        assert_eq!(super::overlap(&v(&["x", "x"]), &v(&["x", "x", "x"])), 2, "repeated lines aren't swallowed");
+        assert_eq!(super::overlap(&v(&["a"]), &v(&["q", "r"])), 0, "moved past everything seen");
+    }
 }

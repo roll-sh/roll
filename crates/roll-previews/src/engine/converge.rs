@@ -220,9 +220,9 @@ impl Engine {
         }
         let urls = self.resource_env(&r.id).await?;
         let branches = self.branch_vars(&r.id).await?;
-        let access_token = match self.store.access(&r.id)? {
-            Some(crate::store::Access { token: t, required: true, .. }) if !t.is_empty() => Some(t),
-            _ => None,
+        let (access_token, bypass) = match self.store.access(&r.id)? {
+            Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
+            _ => (None, None),
         };
         let mut vars: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for (k, v) in urls {
@@ -289,7 +289,7 @@ impl Engine {
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; its access): the runtime restarts it on its
             // next request, roll apps redeploys it.
-            let fingerprint = config_fingerprint(&vars, access_token.is_some());
+            let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref());
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved {
                 let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
@@ -307,6 +307,7 @@ impl Engine {
                     vars: vars.clone(),
                     branches: branches.clone(),
                     access_token: access_token.clone(),
+                    bypass_sha256: bypass.clone(),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {

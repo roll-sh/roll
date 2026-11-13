@@ -165,12 +165,27 @@ async fn reset(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result
 struct LogsQuery {
     service: Option<String>,
     lines: Option<usize>,
+    /// `1` or `true`: keep the response open and send lines as they come (server-sent events).
+    follow: Option<String>,
 }
 
-async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>) -> crate::Result<Json<Value>> {
+/// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
+/// one event per line as it comes, with keep-alives.
+async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>) -> crate::Result<Response> {
     check_id(&id)?;
-    let (service, lines) = e.logs(&id, q.service.as_deref(), q.lines.unwrap_or(200).clamp(1, 2000)).await?;
-    Ok(Json(json!({ "service": service, "lines": lines })))
+    let lines = q.lines.unwrap_or(200).clamp(1, 2000);
+    if !matches!(q.follow.as_deref(), Some("1" | "true" | "yes")) {
+        let (service, lines) = e.logs(&id, q.service.as_deref(), lines).await?;
+        return Ok(Json(json!({ "service": service, "lines": lines })).into_response());
+    }
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let (service, rx) = e.follow(&id, q.service.as_deref(), lines).await?;
+    let first = futures::stream::once(async move { Ok::<_, std::convert::Infallible>(Event::default().event("service").data(service)) });
+    let rest = futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|l| (Ok(Event::default().data(l.replace(['\r', '\n'], ""))), rx)) });
+    let mut r = Sse::new(futures::StreamExt::chain(first, rest)).keep_alive(KeepAlive::default()).into_response();
+    // Proxies pass it on as it comes.
+    r.headers_mut().insert("x-accel-buffering", axum::http::HeaderValue::from_static("no"));
+    Ok(r)
 }
 
 async fn activity(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
@@ -200,11 +215,7 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
         let s = e.store.put_settings(&project, &s)?;
         // Every preview of the project converges on the new rules (modes, masks, variables,
         // access): nothing waits for its next push.
-        for r in e.store.rows(Some(&project))? {
-            if r.desired == crate::Desired::Active {
-                e.store.update(&r.id, |row| row.next_at = 0)?;
-            }
-        }
+        reconverge(e, &project)?;
         Ok(s)
     })
     .await?;
@@ -225,24 +236,39 @@ async fn bypass(AxState(e): S, Path(project): Path<String>) -> crate::Result<Jso
 
 /// A new bypass secret (the old one stops working): the only time it's shown.
 async fn rotate_bypass(AxState(e): S, Path(project): Path<String>) -> crate::Result<Response> {
-    let v = blocking(e, move |e| {
+    let v = blocking(e.clone(), move |e| {
         e.workspace_project(&project)?;
         let (secret, at) = e.store.rotate_bypass(&project)?;
+        // Services that check access themselves (roll apps) get the new secret's hash.
+        reconverge(e, &project)?;
         Ok(json!({ "enabled": true, "created_at": at, "header": crate::runtime::BYPASS_HEADER, "secret": secret }))
     })
     .await?;
+    e.kick();
     let mut r = (StatusCode::CREATED, Json(v)).into_response();
     r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
     Ok(r)
 }
 
 async fn delete_bypass(AxState(e): S, Path(project): Path<String>) -> crate::Result<StatusCode> {
-    blocking(e, move |e| {
+    blocking(e.clone(), move |e| {
         e.workspace_project(&project)?;
-        e.store.delete_bypass(&project)
+        e.store.delete_bypass(&project)?;
+        reconverge(e, &project)
     })
     .await?;
+    e.kick();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ask every live preview of `project` to converge again.
+fn reconverge(e: &Engine, project: &str) -> crate::Result<()> {
+    for r in e.store.rows(Some(project))? {
+        if r.desired == crate::Desired::Active {
+            e.store.update(&r.id, |row| row.next_at = 0)?;
+        }
+    }
+    Ok(())
 }
 
 async fn usage(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json<Value>> {

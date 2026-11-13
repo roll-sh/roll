@@ -150,6 +150,14 @@ BODY=$(curl -sS -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --
 T3=$(now_ms)
 echo "$BODY" | grep -q "preview of change 1" || { echo "unexpected body: $BODY"; tail -30 "$HOME_DIR/rolld.log"; exit 1; }
 T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T5=$(now_ms)
+# Logs are pushed: a request made while following shows up on the stream.
+FOLLOW="$HOME_DIR/follow.txt"
+curl -sN --max-time 6 "http://$API/v1/previews/$PV/logs?follow=1&lines=1" >"$FOLLOW" &
+FPID=$!
+sleep 2
+curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/pushed-log-line"
+wait "$FPID" || true
+grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { echo "the followed log should carry the request:"; cat "$FOLLOW"; exit 1; }
 # CI's way in: the project's bypass secret in a header (no cookie); a wrong one is refused.
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: $BYPASS" "http://$API/")" = 200 ] || { echo "the bypass secret should open the preview"; exit 1; }

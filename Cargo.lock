@@ -6403,6 +6403,7 @@ dependencies = [
  "code-control",
  "code-preview",
  "code-sql",
+ "futures",
  "getrandom 0.4.3",
  "hex",
  "hyper 1.12.0",

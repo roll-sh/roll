@@ -347,8 +347,9 @@ logged and read again on the next converge; it never fails the preview.
               ROLL_PREVIEW_BYPASS: ${{ secrets.ROLL_PREVIEW_BYPASS }}
     ```
 
-    Services on roll apps check their own gate, which takes only the link's token today (see
-    `## Next`).
+    Services on roll apps get the secret's SHA-256 with the link's token (`access: {token,
+    bypass_sha256}`); their proxy checks it the same way. Rotating or removing the secret makes
+    every preview of the project converge again, so they get the new one.
   - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
     roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
     else 401 without waking anything.
@@ -475,6 +476,7 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
+| `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s and only new lines are sent. Runs on the preview's holder; the stream ends when the client goes |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
@@ -587,21 +589,18 @@ Ranked by what a person notices first. Done so far:
   GitHub deployment can open private previews.
 - a `release` step at each new head (migrations) and the schema changes it left, on the
   preview, the pull request comment, the dashboard and the CLI (measured against real Postgres).
+- live logs pushed (server-sent events) to the dashboard's sheet and `roll preview logs -f`.
+- the bypass on roll apps' gate too (`bypass_sha256`, feature/roll-apps 31ddb210d).
 
-1. **The bypass on roll apps' gate**: `pv-…` environments take the secret's SHA-256 next to the
-   link token (`access: {token, bypass_sha256}`), once roll apps accepts the field (asked).
-2. **Live logs pushed, not polled**: a streamed `…/logs?follow=1` the dashboard can read with
-   its token (fetch streaming); `roll preview logs -f` and the dashboard re-read every 2–3 s
-   today.
-3. **A cost alert outside the dashboard**: tell the project's owners (repo webhook, chat) when its
+1. **A cost alert outside the dashboard**: tell the project's owners (repo webhook, chat) when its
    previews pass 80% of `max_usd_month`; the Previews tab shows it today.
-4. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+2. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page through the bypass, and the comment shows it (Vercel does). Store it in
    roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
    ai-server's firewall) to verify.
-5. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

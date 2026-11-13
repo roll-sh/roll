@@ -111,6 +111,57 @@ pub async fn logs_tail(name: &str, lines: usize) -> String {
     }
 }
 
+/// The longest line `follow` passes on; the rest of a longer one is dropped.
+const FOLLOW_LINE_MAX: usize = 16 << 10;
+
+/// `docker logs -f` of a container, stdout and stderr, as lines (each at most
+/// [`FOLLOW_LINE_MAX`]). The process goes when the receiver is dropped or the container ends.
+pub fn follow(name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    let mut child = Command::new("docker")
+        .args(["logs", "--follow", "--tail", &tail.to_string(), name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let (out, err) = (child.stdout.take()?, child.stderr.take()?);
+    tokio::spawn(lines_to(out, tx.clone()));
+    tokio::spawn(lines_to(err, tx.clone()));
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = child.wait() => {}
+            _ = tx.closed() => { let _ = child.kill().await; }
+        }
+    });
+    Some(rx)
+}
+
+/// Lines from `r` into `tx`, a long line cut at [`FOLLOW_LINE_MAX`], until either end goes.
+async fn lines_to(mut r: impl AsyncRead + Unpin, tx: tokio::sync::mpsc::Sender<String>) {
+    let (mut buf, mut line) = ([0u8; 8192], Vec::new());
+    loop {
+        let n = match r.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' {
+                if tx.send(String::from_utf8_lossy(&line).trim_end_matches('\r').to_string()).await.is_err() {
+                    return;
+                }
+                line.clear();
+            } else if line.len() < FOLLOW_LINE_MAX {
+                line.push(b);
+            }
+        }
+    }
+    if !line.is_empty() {
+        let _ = tx.send(String::from_utf8_lossy(&line).into_owned()).await;
+    }
+}
+
 /// Container-side resource limits: memory without swap, CPUs, and a process cap.
 pub fn limits(memory_mb: u32, cpus: f64) -> Vec<String> {
     let mem = format!("{memory_mb}m");
@@ -245,6 +296,10 @@ impl Isolation for Docker {
 
     async fn logs_tail(&self, name: &str, lines: usize) -> String {
         logs_tail(name, lines).await
+    }
+
+    async fn follow(&self, name: &str, tail: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+        follow(name, tail)
     }
 
     async fn remove(&self, name: &str) {

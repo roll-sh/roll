@@ -78,7 +78,10 @@ impl roll_previews::ports::Apps for RollApps {
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((t.preview.clone(), t.service.clone()), id.clone());
         let path = Self::env_path(&id, &t.environment);
         // Private like the preview (link access): roll apps' proxy checks the same token.
-        let access = t.access_token.as_ref().map(|token| json!({ "token": token }));
+        let access = t.access_token.as_ref().map(|token| match &t.bypass_sha256 {
+            Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
+            None => json!({ "token": token }),
+        });
         self.api.call(Method::PUT, &path, Some(json!({ "branch": null, "ephemeral": true, "access": access }))).await?;
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
@@ -200,6 +203,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
         if self.apps.find(preview, service).await.is_some() { self.apps.logs(preview, service, lines).await } else { self.runtime.logs(preview, service, lines).await }
+    }
+
+    async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+        if self.apps.find(preview, service).await.is_some() { None } else { self.runtime.follow(preview, service, lines).await }
     }
 
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {

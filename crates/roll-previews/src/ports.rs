@@ -173,6 +173,9 @@ pub struct Target {
     /// The preview's access token when its project's previews are private (`access: "link"`):
     /// a backend that serves the service itself (roll apps) checks it like the runtime does.
     pub access_token: Option<String>,
+    /// With `access_token`: the project's bypass secret's SHA-256 (hex), which opens it for
+    /// automation too (`x-roll-preview-bypass`).
+    pub bypass_sha256: Option<String>,
 }
 
 /// A branched resource's kind and parent, and its own variables (unprefixed).
@@ -227,6 +230,11 @@ pub trait Apps: Send + Sync {
     /// service until it succeeds, so nothing is left running).
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()>;
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String>;
+    /// The service's output as it comes, after its last `lines`: `None` where it can't be
+    /// followed (the engine reads `logs` again every few seconds instead).
+    async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
+        None
+    }
     /// Run a project's seed command to its end: `Ok((exit code, the output's tail))`.
     async fn seed(&self, _job: &SeedJob) -> anyhow::Result<(i32, String)> {
         anyhow::bail!("this server can't run seed commands")

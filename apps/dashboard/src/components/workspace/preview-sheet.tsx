@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { openUrl, previewsApi, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
+import { followLogs, openUrl, previewsApi, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
@@ -304,32 +304,50 @@ function ActivityList({ id, updated }: { id: string; updated: number }) {
   );
 }
 
+/** Lines a followed log keeps. */
+const LOG_KEEP = 2000;
+
 function Logs({ preview: p }: { preview: Preview }) {
   const [service, setService] = useState(p.services[0]?.name ?? "");
   const [lines, setLines] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [n, setN] = useState(0);
+  // A running service's log follows as it comes (pushed); any other is read once.
+  const running = p.services.some((x) => x.name === service && x.state === "running");
   useEffect(() => {
     if (!service) return;
     let live = true;
     setError(null);
-    previewsApi.logs(p.id, { service, lines: 300 }).then(
-      (l) => live && setLines(l.lines),
-      (e) => live && setError(errorText(e)),
+    if (!running) {
+      previewsApi.logs(p.id, { service, lines: 300 }).then(
+        (l) => live && setLines(l.lines),
+        (e) => live && setError(errorText(e)),
+      );
+      return () => {
+        live = false;
+      };
+    }
+    const abort = new AbortController();
+    let got: string[] = [];
+    setLines(null);
+    followLogs(
+      p.id,
+      service,
+      300,
+      (l) => {
+        got = [...got.slice(-(LOG_KEEP - 1)), l];
+        if (live) setLines(got);
+      },
+      abort.signal,
+    ).then(
+      () => live && setLines(got),
+      (e) => live && !abort.signal.aborted && setError(errorText(e)),
     );
     return () => {
       live = false;
+      abort.abort();
     };
-  }, [p.id, service, n]);
-  // Follow a running service's log while the page is in view.
-  const running = p.services.some((x) => x.name === service && x.state === "running");
-  useEffect(() => {
-    if (!running) return;
-    const t = setInterval(() => {
-      if (document.visibilityState === "visible") setN((x) => x + 1);
-    }, 3000);
-    return () => clearInterval(t);
-  }, [running]);
+  }, [p.id, service, running, n]);
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no logs.</p>;
   return (
     <>

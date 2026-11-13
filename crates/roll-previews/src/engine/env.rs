@@ -82,6 +82,7 @@ impl EnvSource for Engine {
             vars: Vec::new(),
             branches: Vec::new(),
             access_token: None,
+            bypass_sha256: None,
         };
         Ok((t, env))
     }
