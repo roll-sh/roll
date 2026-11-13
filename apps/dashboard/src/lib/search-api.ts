@@ -143,6 +143,32 @@ export interface SearchUsage {
   };
 }
 
+/** What an API key may do: `data` is an app's role (every index, templates, pipelines and
+ * lifecycle policies, no security); `admin` is everything the cluster's own user may do. */
+export type KeyAccess = "data" | "admin";
+
+/** A new API key (`POST …/keys`): `api_key` goes in `Authorization: ApiKey …`, shown once. */
+export interface NewSearchKey {
+  id: string;
+  name: string;
+  api_key: string;
+  url: string;
+  expires_at?: number;
+}
+
+/** A key as the cluster lists it (`GET /_security/api_key`). */
+export interface SearchKeyInfo {
+  id: string;
+  name: string | null;
+  creation: number;
+  expiration?: number;
+  invalidated: boolean;
+  role_descriptors?: Record<string, unknown>;
+}
+
+/** The role `access: "data"` keys carry (search-control's `link_role`). */
+export const DATA_ROLE = "roll_link";
+
 const cl = (id: string) => `/v1/search/clusters/${encodeURIComponent(id)}`;
 
 export const searchApi = {
@@ -161,6 +187,9 @@ export const searchApi = {
   request: (id: string, method: string, path: string, body?: unknown) =>
     call<ConsoleResponse>("POST", `${cl(id)}/request`, { method, path, body }),
   usage: (id: string, days = 30) => call<SearchUsage>("GET", `${cl(id)}/usage?days=${days}`),
+  createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
+    call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
+  revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
 };
 
 /** An Elasticsearch error body's reason (`error.reason`, or the first root cause's). */

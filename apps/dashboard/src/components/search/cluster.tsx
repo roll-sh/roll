@@ -20,6 +20,7 @@ import { AppShell } from "../app-shell";
 import { formatTime, fromLocalInput, now, POLL_MS, Segmented, toLocalInput } from "../redis/shared";
 import { ago, btn, Confirm, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, Panel, primary, Stats, useCopy } from "../ui";
 import { AnalyzeTab } from "./analyze";
+import { ApiKeys } from "./api-keys";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
@@ -817,6 +818,8 @@ function SettingsTab({
           </div>
         </form>
       </Panel>
+
+      <ApiKeys cluster={cluster} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Password">

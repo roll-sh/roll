@@ -241,9 +241,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
-4. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
-   (#18) seeing only the clusters and indices their access allows; checked against Elastic
-   Cloud's and OpenSearch Dashboards' consoles.
+4. **Dashboard polish**: the index browser and console are on the per-index routes, and a
+   cluster's Settings has an API keys panel (create with data or admin access and an expiry,
+   shown once; list on request, so it doesn't wake the cluster; revoke, naming keys apps and roll
+   secrets made). Left: signed-in users (#18) seeing only the clusters and indices their access
+   allows; checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
 5. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
    as loaded time are visible in usage.
 6. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
