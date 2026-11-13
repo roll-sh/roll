@@ -345,11 +345,13 @@ async fn every_control_plane_route_needs_the_operator_token() {
     // A route under a prefix row takes the prefix's action by method, whatever it answers: each was
     // looked at, and a new one is (a GET that answers values is reveal; the env of a preview was
     // read until it was).
+    // A public route (anyone may call it without a token) isn't a grant's to classify.
+    let public: Vec<String> = routes.iter().filter(|(h, _, a)| h == "api" && a.starts_with("public:")).map(|(_, r, _)| r.clone()).collect();
     let mut unreviewed: Vec<String> = scoped
         .lock()
         .unwrap()
         .iter()
-        .filter(|(h, r, _)| h == "api" && roll_access::catalog::by_prefix_only(r) && !roll_access::catalog::prefix_reviewed(r))
+        .filter(|(h, r, _)| h == "api" && !public.contains(r) && roll_access::catalog::by_prefix_only(r) && !roll_access::catalog::prefix_reviewed(r))
         .map(|(_, r, _)| r.clone())
         .collect();
     unreviewed.sort();

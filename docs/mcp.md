@@ -349,6 +349,7 @@ previews are listed once those products are on.
 | `secrets_list_aws_roles` | A project's registered AWS roles for dynamic AWS keys (registering is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/aws-roles` |
 | `secrets_list_outside_databases` | Postgres servers roll doesn't run whose roles a project rotates (never the admin URL; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/outside-databases` |
 | `secrets_list_aws_users` | A project's AWS IAM users whose keys roll rotates (never a key; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/aws-users` |
+| `secrets_list_cloud_accounts` | A project's GCP and Azure accounts for dynamic credentials (no secrets; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/cloud-accounts` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
 | `secrets_find` | Where a key is set across the projects you may read. | `GET /v1/secrets/search` |
@@ -427,10 +428,11 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); the audit log as CSV (the audit
-page, `roll mcp audit --format csv`; formula-safe cells); what an agent sees, on the token page
-(`GET /v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and what the list
-costs an agent's context); completions named as such in the audit log
+revoked as leaked, about to expire; only their own, never a secret); the prefix check skips public
+routes (no grant classifies what anyone may call); `secrets_list_cloud_accounts` (secrets #43); the
+audit log as CSV (the audit page, `roll mcp audit --format csv`; formula-safe cells); what an agent
+sees, on the token page (`GET /v1/access/tokens/{id}/tools`: the tools and prompts a token is
+offered and what the list costs an agent's context); completions named as such in the audit log
 (`completion/complete:<tool>`); a connection's tool names worked out once per request; every open
 sibling's head passes the route check with #25 (apps-next's rollback to the last deploy,
 previews-next's share revoke, search's index refresh and settings reviewed: 178 in all);
