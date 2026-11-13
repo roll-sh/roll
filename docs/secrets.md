@@ -1519,6 +1519,11 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Import a whole project at once**: `--map dev=development,stg=staging,prd=production` with
+   `--from` imports each source (Doppler config, Vault path, Infisical environment) into its roll
+   environment, one change each, and reports each.
+2. **The import dialog shows the `--from` commands**: a browser can't call another manager's API,
+   so the dashboard's import says how from the terminal.
 
 Waiting on other pull requests:
 
