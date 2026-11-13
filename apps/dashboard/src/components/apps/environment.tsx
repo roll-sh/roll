@@ -30,6 +30,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [link, setLink] = useState<string | null>(null);
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState(env.maintenance?.message ?? "");
   const { copied, copy } = useCopy();
   const repo = service.source.kind === "repo";
   const busy = runner.busy !== null;
@@ -93,6 +94,30 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             </div>
             <button className={btn} disabled={busy} aria-pressed={!!env.follow_tag} onClick={() => runner.run("follow", () => appsApi.putEnvironment(service.id, env.name, { follow_tag: !env.follow_tag }))}>
               {env.follow_tag ? "Stop following" : "Follow the tag"}
+            </button>
+          </div>
+        )}
+
+        {service.run.type === "web" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-medium">Maintenance</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.maintenance
+                  ? `Visitors get roll's maintenance page${env.maintenance.message ? " with your note" : ""}; nothing wakes. Deployment URLs still answer.`
+                  : "Serving. In maintenance its public names answer a maintenance page instead, and nothing wakes."}
+              </p>
+              {!env.maintenance && (
+                <input value={notice} onChange={(e) => setNotice(e.target.value.slice(0, 500))} placeholder="What visitors read (optional)" className={`${input} mt-2 w-full text-[12px]`} aria-label="Maintenance note" />
+              )}
+            </div>
+            <button
+              className={env.maintenance ? primary : btn}
+              disabled={busy}
+              aria-pressed={!!env.maintenance}
+              onClick={() => runner.run("maintenance", () => appsApi.putEnvironment(service.id, env.name, { maintenance: env.maintenance ? false : { message: notice.trim() || null } }))}
+            >
+              {env.maintenance ? "End maintenance" : "Start maintenance"}
             </button>
           </div>
         )}

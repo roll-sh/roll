@@ -189,6 +189,9 @@ type Run = {
    *  404s like an unknown address, at once); the private `<svc>.<env>.internal` still answers.
    *  Default true. Environment.url is null while it's false. */
   public?: boolean;
+  /** A replaced or scaled-in instance's time to finish: its requests in flight, then SIGTERM,
+   *  SIGKILL when it's up (Render's maxShutdownDelaySeconds). 1–300; unset (or null) 30. */
+  drain_s?: number;
 };
 
 type Service = {
@@ -241,6 +244,10 @@ type EnvironmentPut = {
    *  before `</body>`, served from the preview's host), sending notes to the preview in roll's
    *  dashboard. 400 on another environment. */
   feedback?: boolean;
+  /** Maintenance: `true` or `{message?}` (text, at most 500 characters) and its public names
+   *  answer roll's 503 page (Retry-After 30) with the message, waking nothing; a deployment's own
+   *  URL still answers. `false` or null serves again. */
+  maintenance?: boolean | { message?: string | null } | null;
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -263,6 +270,7 @@ type Environment = EnvironmentSummary & {
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
+  maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks

@@ -58,6 +58,8 @@ export interface Run {
   memory_mb: number;
   health_path?: string;
   health_timeout_s: number;
+  /** A replaced instance's time to finish: its requests, then SIGTERM, SIGKILL when it's up (1–300; unset 30). */
+  drain_s?: number;
   suspend_after_s: number;
   sleep_after_s: number;
   volume?: { mount: string; size_gb: number };
@@ -165,6 +167,8 @@ export interface EnvironmentPut {
   wait_for_ci?: boolean;
   /** Deploy when the image's tag moves (an image service with a tag). */
   follow_tag?: boolean;
+  /** Maintenance: its public names answer roll's page with the message; false ends it. */
+  maintenance?: boolean | { message?: string | null };
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -228,6 +232,8 @@ export interface Environment extends EnvironmentSummary {
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
   waiting_for_ci?: string | null;
+  /** In maintenance: what visitors read (null: roll's words). Null: serving. */
+  maintenance?: { message: string | null } | null;
   created_at: number;
 }
 

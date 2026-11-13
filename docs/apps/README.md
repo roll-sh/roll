@@ -833,6 +833,21 @@ A start command set in the service, a site over 512 MiB or 100,000 files, or a r
 can't export (the fleet's CodeBuild builder, until its first run) means a container serves it,
 as before. A service's sites are deleted with its images.
 
+## Maintenance and draining
+
+An environment in maintenance (Render's maintenance mode; Settings' "Maintenance", `roll apps
+env --maintenance [NOTE]`, `--serve` to end it) answers its public names with roll's 503 page,
+the note as text (never markup), `Retry-After: 30`, and wakes nothing, so a sleeping service
+costs nothing meanwhile. A deployment's own URL still answers, to try a fix first; the private
+network is untouched. The setting is kept with the environment's live state on its owner, read
+from the store once, so a request pays nothing for it.
+
+`run.drain_s` (1–300, Render's `maxShutdownDelaySeconds`; `roll apps set --drain`) is how long
+an instance being replaced (a deploy, a promoted or aborted canary) or scaled in gets: its
+requests in flight finish, then SIGTERM, and SIGKILL when the time is up (a second after SIGTERM
+at least). Unset, 30 s. Each instance has its own window, so a slow one doesn't use up
+another's.
+
 ## Private services
 
 `run.public: false` (Settings' "Reachable", `roll apps set --public false`) takes a web service
@@ -1150,8 +1165,9 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   adds `LinkKind::Search` (`ALL`, `as_str`, `parse`) and, in rolld's `RollResources`, `link` as
   `search_control::Control::mint_link(ref, service)` into `Minted { vars, kept }` and `unlink`
   as `revoke_link(ref, kept)`. The key is data-only (no security privileges), its variables
-  `ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY`; an OpenSearch cluster refuses for now (a 400,
-  never the cluster's password) until its dialect has a security API.
+  `ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY` (kept `key:<id>`); an OpenSearch cluster's is an
+  internal user with a data-only role, `OPENSEARCH_URL` (kept `osuser:<name>`; revoking removes
+  the user and its role). The glue injects whatever variables `mint_link` returns.
 - **Conflicts with apps**: previews merges cleanly. With main (and #24), six files from apps
   merging feature/accounts rather than main's squash of #18 (`AGENTS.md`, `rolld/src/{auth,
   cluster,main}.rs`, `tests/auth.rs`, `docs/workspace.md`): take apps' side, keeping one early
@@ -1175,37 +1191,35 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
-   page (Render's `maxShutdownDelaySeconds` and `maintenanceMode`).
-2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-3. **Region**: the region shown on the overview and each environment, defaulting to the project's
+2. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
-    origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-11. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+   origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
+10. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-13. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).
+11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+12. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).

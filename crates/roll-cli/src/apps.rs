@@ -233,6 +233,10 @@ pub enum AppsCmd {
         /// Public URLs (`true`), or only the project's private network (`false`).
         #[arg(long)]
         public: Option<bool>,
+        /// A replaced instance's time to finish (its requests, then SIGTERM), 1–300 seconds;
+        /// `0` goes back to 30.
+        #[arg(long, value_name = "SECONDS")]
+        drain: Option<u32>,
     },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
@@ -472,6 +476,13 @@ pub enum AppsCmd {
         /// Anyone with its URL gets in again.
         #[arg(long)]
         open: bool,
+        /// Maintenance: its public names answer roll's page (with this note, if given) and
+        /// nothing wakes.
+        #[arg(long, value_name = "NOTE", num_args = 0..=1, default_missing_value = "", conflicts_with = "serve")]
+        maintenance: Option<String>,
+        /// End maintenance.
+        #[arg(long)]
+        serve: bool,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -1597,7 +1608,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -1662,6 +1673,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("rollout", rollout),
                 ("h2c", h2c.map(Value::from)),
                 ("public", public.map(Value::from)),
+                ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),
@@ -2056,7 +2068,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2073,6 +2085,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));
+            }
+            if let Some(note) = maintenance {
+                body.insert("maintenance".into(), json!({ "message": Some(note).filter(|n| !n.is_empty()) }));
+            } else if serve {
+                body.insert("maintenance".into(), json!(false));
             }
             // A new access token, made here: only its link shows it, once.
             let token = private.then(new_token);

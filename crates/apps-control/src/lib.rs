@@ -755,6 +755,7 @@ impl Apps {
             hook: r.hook_hash.is_some(),
             follow_tag: r.follow_tag,
             feedback: r.feedback,
+            maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
@@ -767,7 +768,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -865,6 +866,29 @@ impl Apps {
                 self.db(move |s| s.set_feedback(&sid, &e, on)).await?;
             }
             Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
+        }
+        // Maintenance: true or {message?} turns it on, false or null off.
+        let maintenance: Option<Option<String>> = match o.get("maintenance") {
+            None => None,
+            Some(Value::Null | Value::Bool(false)) => Some(None),
+            Some(Value::Bool(true)) => Some(Some(String::new())),
+            Some(Value::Object(m)) => {
+                if let Some(k) = m.keys().find(|k| k.as_str() != "message") {
+                    return Err(Error::BadRequest(format!("maintenance.{k} isn't a field")));
+                }
+                match m.get("message") {
+                    None | Some(Value::Null) => Some(Some(String::new())),
+                    Some(Value::String(t)) if t.chars().count() <= 500 => Some(Some(t.trim().to_string())),
+                    Some(_) => return Err(Error::BadRequest("maintenance.message is at most 500 characters".into())),
+                }
+            }
+            Some(_) => return Err(Error::BadRequest("maintenance is true, {message?} or false".into())),
+        };
+        if let Some(m) = maintenance {
+            let (sid, e, mm) = (service.to_string(), env.to_string(), m.clone());
+            self.db(move |s| s.set_maintenance(&sid, &e, mm.as_deref())).await?;
+            self.live(service, env).set_maintenance(m);
+            self.changed(service);
         }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}
@@ -1486,6 +1510,18 @@ impl Apps {
             return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep)));
         }
         self.active_domain(&host).await.map(|(s, e, _)| (s, e, None))
+    }
+
+    /// The environment's maintenance message, if it's in maintenance (empty: the default): the
+    /// live state's copy, read from the store the first time.
+    pub(crate) async fn maintenance(self: &Arc<Self>, live: &EnvLive) -> Option<String> {
+        if let Some(m) = live.maintenance() {
+            return m;
+        }
+        let (sid, e) = (live.service.clone(), live.env.clone());
+        let m = self.db(move |s| s.environment(&sid, &e)).await.ok()?.maintenance;
+        live.set_maintenance(m.clone());
+        m
     }
 
     /// Where a preview's feedback goes (the preview in roll's dashboard), for a visitor who came

@@ -61,7 +61,12 @@ const HORIZON: &str = include_str!("../assets/horizon.svg");
 /// What a visitor sees when roll answers instead of the app: the mark, a title and a line, dark
 /// or light as their system is. A 503 (waking, restarting, busy) looks again by itself.
 fn page(status: StatusCode, title: &str, text: &str) -> Response {
-    let refresh = if status == StatusCode::SERVICE_UNAVAILABLE { "<meta http-equiv=refresh content=5>" } else { "" };
+    page_retrying(status, title, text, 5)
+}
+
+/// [`page`], a 503 looking again after `retry` seconds.
+fn page_retrying(status: StatusCode, title: &str, text: &str, retry: u32) -> Response {
+    let refresh = if status == StatusCode::SERVICE_UNAVAILABLE { format!("<meta http-equiv=refresh content={retry}>") } else { String::new() };
     let html = format!(
         "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">{refresh}<title>{title}</title>\
          <style>:root{{color-scheme:dark light;--bg:#000;--fg:#ededed;--muted:#a1a1a1;--accent:#4c8dff}}\
@@ -72,10 +77,32 @@ fn page(status: StatusCode, title: &str, text: &str) -> Response {
          <main>{HORIZON}<h1>{title}</h1><p>{text}</p></main>"
     );
     let mut r = (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
-    if status == StatusCode::SERVICE_UNAVAILABLE {
-        r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    if status == StatusCode::SERVICE_UNAVAILABLE
+        && let Ok(v) = HeaderValue::from_str(&retry.to_string())
+    {
+        r.headers_mut().insert(header::RETRY_AFTER, v);
     }
     r
+}
+
+/// An environment in maintenance: its message as text (never markup), looking again every
+/// half minute.
+fn maintenance_page(message: &str) -> Response {
+    let text = if message.is_empty() { "This service is down for maintenance. It'll be back soon.".to_string() } else { escape(message) };
+    page_retrying(StatusCode::SERVICE_UNAVAILABLE, "Down for maintenance", &text, 30)
+}
+
+fn escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&#39;".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// The stored form of an environment's access token: its SHA-256, hex. The token itself is only
@@ -372,6 +399,13 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         Ok(l) => l,
         Err(e) => return page(StatusCode::NOT_FOUND, "Not deployed", &e.to_string()),
     };
+    // In maintenance: roll's page, nothing woken. A deployment's own URL still answers (a fix
+    // can be tried before maintenance ends).
+    if deployment.is_none()
+        && let Some(m) = apps.maintenance(&live).await
+    {
+        return maintenance_page(&m);
+    }
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);

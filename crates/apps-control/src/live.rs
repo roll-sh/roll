@@ -265,6 +265,8 @@ pub struct EnvLive {
     pub ticking: std::sync::atomic::AtomicBool,
     /// A private caller's wake is under way (the next look waits for it).
     answering: std::sync::atomic::AtomicBool,
+    /// Its maintenance message as last read (outer None: not read yet).
+    maintenance: Mutex<Option<Option<String>>>,
     last_tick: Mutex<Option<Instant>>,
     last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -306,6 +308,7 @@ impl EnvLive {
             over_since: Mutex::new(None),
             ticking: std::sync::atomic::AtomicBool::new(false),
             answering: std::sync::atomic::AtomicBool::new(false),
+            maintenance: Mutex::new(None),
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
@@ -695,6 +698,15 @@ impl EnvLive {
         Ok(l)
     }
 
+    /// Its maintenance message, when known (`Some(None)`: serving).
+    pub fn maintenance(&self) -> Option<Option<String>> {
+        self.maintenance.lock().clone()
+    }
+
+    pub fn set_maintenance(&self, m: Option<String>) {
+        *self.maintenance.lock() = Some(m);
+    }
+
     /// Private callers ([`crate::runtime::Callers`]), which rolld never sees: a sleeping instance
     /// someone waits at wakes (a frozen one resumes; a stopped one starts, and its waker hands
     /// it the caller), and with `running` a running one with connections from the project's
@@ -967,23 +979,30 @@ impl EnvLive {
                 self.insts.lock().push(i);
             }
         }
-        self.drain(old);
+        self.drain(old, self.drain_of(&tpl.run));
     }
 
-    /// Instances out of rotation finish their requests (up to `drain`), then go.
-    fn drain(&self, old: Vec<Arc<Inst>>) {
-        let runtime = self.runtime.clone();
-        let drain = self.cfg.drain;
-        tokio::spawn(async move {
-            let until = Instant::now() + drain;
-            for i in old {
+    /// How long an instance being replaced gets: `run.drain_s`, else the node's default.
+    fn drain_of(&self, run: &Run) -> Duration {
+        run.drain_s.map_or(self.cfg.drain, |s| Duration::from_secs(s as u64))
+    }
+
+    /// Instances out of rotation finish their requests, then get SIGTERM, and SIGKILL once
+    /// `window` is up (a second after SIGTERM at least). Each on its own: one slow to finish
+    /// doesn't use up another's time.
+    fn drain(&self, old: Vec<Arc<Inst>>, window: Duration) {
+        for i in old {
+            let runtime = self.runtime.clone();
+            tokio::spawn(async move {
+                let until = Instant::now() + window;
                 while i.in_flight() > 0 && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                let _ = runtime.stop(&i.name, Duration::from_secs(10)).await;
+                let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+                let _ = runtime.stop(&i.name, grace).await;
                 runtime.remove(&i.name).await;
-            }
-        });
+            });
+        }
     }
 
     /// A gradual rollout begins: the new deployment's healthy instances join the active one's,
@@ -1019,7 +1038,7 @@ impl EnvLive {
             old
         };
         self.served.lock().clear();
-        self.drain(old);
+        self.drain(old, self.drain_of(&tpl.run));
     }
 
     /// The canary is rolled back: every request goes to the active deployment again, and the
@@ -1034,7 +1053,7 @@ impl EnvLive {
             gone
         };
         self.served.lock().clear();
-        self.drain(gone);
+        self.drain(gone, self.drain_of(&tpl.run));
     }
 
     /// Set the active deployment without starting anything (a new owner taking the service).
@@ -1444,7 +1463,7 @@ impl EnvLive {
             self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
             *self.fewer_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
-            let (runtime, name, grace) = (self.runtime.clone(), i.name.clone(), self.cfg.drain);
+            let (runtime, name, grace) = (self.runtime.clone(), i.name.clone(), self.drain_of(run));
             tokio::spawn(async move {
                 let _ = runtime.stop(&name, grace).await;
                 runtime.remove(&name).await;

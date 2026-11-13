@@ -1923,3 +1923,52 @@ async fn a_wildcard_domain_serves_the_names_under_it() {
     assert!(me(visit(&w, "api.example.com", "/").await).contains(&api["id"].as_str().unwrap()[4..]));
 }
 
+
+/// In maintenance an environment's public names answer roll's page with the message (as text)
+/// and nothing wakes; a deployment's own URL still answers, and turning it off serves again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn maintenance_answers_roll_page_and_wakes_nothing() {
+    let w = world().await;
+    let (svc, d) = image_service(&w, "shop", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"maintenance": {"message": "<b>Back at 5</b>"}}))).await;
+    assert_eq!((st, &env["maintenance"]), (StatusCode::OK, &json!({"message": "<b>Back at 5</b>"})), "{env}");
+    let starts = Fake::count(&w.fake.counts.starts);
+    let resp = w.public.clone().oneshot(Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!((resp.status(), resp.headers()["retry-after"].to_str().unwrap()), (StatusCode::SERVICE_UNAVAILABLE, "30"));
+    let page = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(page.contains("&lt;b&gt;Back at 5&lt;/b&gt;") && !page.contains("<b>Back"), "the message is text: {page}");
+    assert_eq!(Fake::count(&w.fake.counts.starts), starts, "nothing woke");
+    let own = format!("{}--{h}", d["id"].as_str().unwrap().trim_start_matches("dep_"));
+    assert_eq!(visit(&w, &own, "/").await.0, StatusCode::OK, "a deployment's own URL answers");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"maintenance": {"message": "x".repeat(501)}}))).await.0, StatusCode::BAD_REQUEST);
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({"maintenance": false}))).await;
+    assert_eq!(env["maintenance"], Value::Null);
+    assert_eq!(visit(&w, &h, "/").await.0, StatusCode::OK);
+}
+
+/// `run.drain_s`: a request still in flight to the deployment being replaced gets to finish
+/// (the world's own drain is 50 ms).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replaced_instance_finishes_its_requests_within_drain_s() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "slow", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "drain_s": 5} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"drain_s": 0}}))).await.0, StatusCode::BAD_REQUEST);
+    let h = host(&svc["environments"][0]["url"]);
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    // Awake, then a request in flight while a redeploy replaces it.
+    visit(&w, &h, "/").await;
+    let slow = tokio::spawn({
+        let (public, h) = (w.public.clone(), h.clone());
+        async move { public.oneshot(Request::builder().uri("/sleep/1500").header("host", h).body(Body::empty()).unwrap()).await.unwrap().status() }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    assert_eq!(slow.await.unwrap(), StatusCode::OK, "it finished on the old instance");
+}

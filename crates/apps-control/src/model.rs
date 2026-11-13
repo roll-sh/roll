@@ -387,6 +387,11 @@ pub struct Run {
     /// private services.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub public: bool,
+    /// How long an instance being replaced or scaled in gets: its requests in flight finish,
+    /// then SIGTERM, and SIGKILL when it's up (Render's `maxShutdownDelaySeconds`). 1–300;
+    /// unset, 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_s: Option<u32>,
 }
 
 fn yes() -> bool {
@@ -489,6 +494,7 @@ impl Default for Run {
             h2c: false,
             scale: None,
             public: true,
+            drain_s: None,
         }
     }
 }
@@ -541,6 +547,9 @@ impl Run {
         }
         if !(1..=900).contains(&self.health_timeout_s) {
             return bad("health_timeout_s is 1–900");
+        }
+        if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
+            return bad("drain_s is 1–300");
         }
         if self.port == Some(0) {
             return bad("port is 1–65535");
@@ -716,6 +725,9 @@ pub struct Environment {
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
+    /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
+    /// message, and nothing wakes. Null: serving.
+    pub maintenance: Option<Maintenance>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -724,6 +736,12 @@ pub struct Environment {
     /// The push waiting for its checks, if one is.
     pub waiting_for_ci: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Maintenance {
+    /// What visitors read; null: roll's own words.
+    pub message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
