@@ -224,6 +224,9 @@ impl Engine {
 
 
 /// What a service is deployed with, as a digest (FNV-1a: change detection, not a secret).
+/// The shares of `max_usd_month` (percent) a project is told about, once a month each.
+const BUDGET_LEVELS: [u32; 2] = [80, 100];
+
 fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>) -> String {
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();

@@ -143,6 +143,9 @@ pub trait Source: Send + Sync {
     async fn report(&self, preview: &Preview, settings: &crate::Settings);
     /// The preview is gone.
     async fn forget(&self, preview: &Preview);
+    /// The project's previews passed `alert.percent` of their monthly budget: tell the people
+    /// who follow its repos (roll code: a `preview` webhook event with `budget`).
+    async fn budget(&self, _repos: &[String], _alert: &BudgetAlert) {}
     /// A receiver that fires when roll code changed something (a nudge to converge sooner).
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>>;
 }
@@ -180,6 +183,17 @@ pub struct Target {
 
 /// A branched resource's kind and parent, and its own variables (unprefixed).
 pub type BranchVars = (Kind, String, Vec<(String, String)>);
+
+/// A project's previews passed a share of `max_usd_month` (docs/previews.md, "Cost").
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct BudgetAlert {
+    pub project: String,
+    pub project_name: String,
+    /// 80, then 100.
+    pub percent: u32,
+    pub spent_usd_month: f64,
+    pub max_usd_month: f64,
+}
 
 /// A seed run: the project's command, on the preview's tree, with its variables. (No `Debug`:
 /// `env` holds passwords.)

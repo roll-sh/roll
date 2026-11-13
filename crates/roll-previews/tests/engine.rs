@@ -209,6 +209,11 @@ async fn previews_wait_once_the_month_s_budget_is_spent() {
     let second = e.engine.store.row_by_change("chg_2").unwrap().unwrap();
     assert_eq!(second.state, State::Queued, "a new preview waits once the budget is spent");
     assert!(e.engine.store.activity(&second.id).unwrap().iter().any(|a| a.message.contains("max_usd_month")));
+    // The project's repos hear about it once, at the highest share passed (100%), not every pass.
+    e.engine.pass().await.unwrap();
+    let sent = e.code.budgets.lock().clone();
+    assert_eq!(sent.iter().map(|(_, a)| a.percent).collect::<Vec<_>>(), [100], "{sent:?}");
+    assert!(sent[0].0.contains(&"acme/web".to_string()) && sent[0].1.max_usd_month == 0.015, "{sent:?}");
 }
 
 #[tokio::test]

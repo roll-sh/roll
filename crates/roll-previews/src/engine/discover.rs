@@ -4,6 +4,34 @@ use super::*;
 
 impl Engine {
     /// The previews a project should have, from its repos' open changes and its rules.
+    /// Once a month per level: tell the project's repos its previews passed 80% (then 100%) of
+    /// `max_usd_month`.
+    async fn budget_alert(&self, project: &roll_workspace::Project, repos: &[String], s: &Settings, spent: f64, month: i64) {
+        if s.max_usd_month <= 0.0 {
+            return;
+        }
+        let Some(&level) = BUDGET_LEVELS.iter().rev().find(|&&l| spent >= s.max_usd_month * l as f64 / 100.0) else { return };
+        if self.store.alerted(&project.id, month).ok().flatten().is_some_and(|sent| sent >= level as i64) {
+            return;
+        }
+        let alert = crate::ports::BudgetAlert {
+            project: project.id.clone(),
+            project_name: project.name.clone(),
+            percent: level,
+            spent_usd_month: (spent * 100.0).round() / 100.0,
+            max_usd_month: s.max_usd_month,
+        };
+        self.source.budget(repos, &alert).await;
+        let msg = format!("the project's previews passed {level}% of the month's budget (${:.2} of ${:.2})", alert.spent_usd_month, s.max_usd_month);
+        info!(project = %project.id, "{msg}");
+        for r in self.store.rows(Some(&project.id)).unwrap_or_default().iter().filter(|r| r.desired == Desired::Active) {
+            let _ = self.store.log(&r.id, &msg);
+        }
+        if let Err(e) = self.store.set_alerted(&project.id, month, level as i64) {
+            warn!(project = %project.id, error = %e, "previews: recording a budget alert");
+        }
+    }
+
     pub(super) async fn discover(&self, project_id: &str, s: &Settings) -> anyhow::Result<()> {
         let project = match self.workspace.get(project_id) {
             Ok(p) => p,
@@ -182,6 +210,7 @@ impl Engine {
         let month = crate::store::month_start(self.store.now_ms()?);
         let spent: f64 = self.store.spent(project_id, month)? + rows.iter().filter_map(|r| self.store.view(r.clone()).ok()).map(|p| p.cost.month_to_date_usd).sum::<f64>();
         let over_budget = s.max_usd_month > 0.0 && spent >= s.max_usd_month;
+        self.budget_alert(&project, &repos, s, spent, month).await;
         if over_budget {
             free = 0;
         }

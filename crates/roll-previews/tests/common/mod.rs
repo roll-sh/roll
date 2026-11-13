@@ -18,6 +18,8 @@ pub struct FakeCode {
     pub heads: Mutex<HashMap<String, String>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
+    /// Budget alerts sent: (the repos told, the alert).
+    pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
 }
 
 impl FakeCode {
@@ -54,6 +56,9 @@ impl Source for FakeCode {
     }
     async fn forget(&self, p: &Preview) {
         self.forgotten.lock().push(p.id.clone());
+    }
+    async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) {
+        self.budgets.lock().push((repos.to_vec(), alert.clone()));
     }
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
         None

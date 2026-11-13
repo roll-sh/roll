@@ -200,6 +200,15 @@ impl Source for CodeSource {
         }
     }
 
+    async fn budget(&self, repos: &[String], alert: &crate::ports::BudgetAlert) {
+        let web = self.code.config.web_url.trim_end_matches('/');
+        let dashboard = (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{}/previews", alert.project));
+        for full in repos {
+            let Ok(repo) = self.repo(full) else { continue };
+            self.code.emit(&repo.id, "preview", serde_json::json!({ "change": null, "preview": null, "budget": alert, "dashboard_url": dashboard }));
+        }
+    }
+
     async fn forget(&self, p: &Preview) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.

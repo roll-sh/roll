@@ -92,7 +92,11 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - `max_usd_month` (no cap by default) is the project's monthly budget for previews. Once what
     they've cost this month reaches it, new previews wait as `queued` (saying why), and the
     running ones carry on. Previews deleted this month still count (`spend`, a per-project,
-    per-month ledger).
+    per-month ledger). When the month's cost passes 80% and then 100% of it, each of the
+    project's repos gets a `preview` event (webhooks and the event stream) with
+    `{change: null, preview: null, budget: {project, project_name, percent, spent_usd_month,
+    max_usd_month}, dashboard_url}`, once per level per month. It's recorded after it's queued, so a
+    crash repeats one rather than losing it, and every live preview's activity says so.
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches own. A preview
     over the cap goes to sleep with `error`, and resetting it brings it back under.
 
@@ -591,16 +595,16 @@ Ranked by what a person notices first. Done so far:
   preview, the pull request comment, the dashboard and the CLI (measured against real Postgres).
 - live logs pushed (server-sent events) to the dashboard's sheet and `roll preview logs -f`.
 - the bypass on roll apps' gate too (`bypass_sha256`, feature/roll-apps 31ddb210d).
+- a budget alert to the project's repos (webhooks, the event stream) at 80% and 100% of
+  `max_usd_month`, once a month each.
 
-1. **A cost alert outside the dashboard**: tell the project's owners (repo webhook, chat) when its
-   previews pass 80% of `max_usd_month`; the Previews tab shows it today.
-2. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+1. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page through the bypass, and the comment shows it (Vercel does). Store it in
    roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
    ai-server's firewall) to verify.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

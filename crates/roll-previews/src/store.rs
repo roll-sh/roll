@@ -90,6 +90,13 @@ CREATE TABLE IF NOT EXISTS activity (
     message TEXT NOT NULL,
     PRIMARY KEY (preview_id, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS alerts (
+    project_id TEXT NOT NULL,
+    month INTEGER NOT NULL,
+    level INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, month, level)
+);
 CREATE TABLE IF NOT EXISTS bypass (
     project_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
@@ -368,6 +375,21 @@ impl Store {
         })
     }
 
+    /// The highest budget alert level (percent) sent for `project` this `month`, if any.
+    pub fn alerted(&self, project: &str, month: i64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT MAX(level) FROM alerts WHERE project_id = ? AND month = ?", params![project, month], |r| r.get(0)))?)
+    }
+
+    /// Record that the alert at `level` went out (after it did: a crash repeats one, never loses
+    /// one).
+    pub fn set_alerted(&self, project: &str, month: i64, level: i64) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute("INSERT INTO alerts (project_id, month, level, at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", params![project, month, level, now])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// A service's deploy fingerprint (what it was deployed with: variables, access).
     pub fn service_config(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT config FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
@@ -398,6 +420,7 @@ impl Store {
         self.db.write(|c| {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM alerts WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
     }
