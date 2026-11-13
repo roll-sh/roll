@@ -1375,6 +1375,11 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Fix from Health**: a weak key's row gets "New value" (generated in the browser, a change
+   request where protected), an expired or expiring one a new date, a missing one "Add", without
+   leaving the view.
+2. **CI recipes**: one GitHub Actions job in the docs that logs in with its OIDC token (no stored
+   secret), runs `roll secrets check`, `scan` and `health`, then `roll run` for the tests.
 
 Waiting on other pull requests:
 
