@@ -81,6 +81,8 @@ export interface Preview {
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
   base_change?: { branch: string; percent: number; phone_percent: number | null } | null;
+  /** The project's other pages (`github.pages`) at the latest screenshot. */
+  pages?: PageCheck[];
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
   /** How fast its first page loaded at this head (timed with the screenshot), and at the one before. */
@@ -123,6 +125,16 @@ export interface PreviewShare {
   created_by: string;
   created_at: number;
   revoked: boolean;
+}
+
+/** Another page of the first service: errors while it loaded, its change since the screenshot at
+ * `since`, and how much it differs from the default branch's preview. */
+export interface PageCheck {
+  path: string;
+  errors: number;
+  since: string | null;
+  percent: number | null;
+  base_percent: number | null;
 }
 
 /** A page's load, as the browser that took its screenshot timed it. */
@@ -171,7 +183,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** A feedback button on its pages for people who came in through roll (link access). */
@@ -229,9 +241,9 @@ function query(params: Record<string, string | number | undefined>) {
 
 /** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
  * revoke it when done. */
-/** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's. */
-export async function screenshotUrl(id: string, previous = false, phone = false, base = false): Promise<string> {
-  const q = [previous ? "previous=1" : "", phone ? "view=phone" : "", base ? "base=1" : ""].filter(Boolean).join("&");
+/** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's; `page`: another of the project's pages. */
+export async function screenshotUrl(id: string, previous = false, phone = false, base = false, page?: string): Promise<string> {
+  const q = [previous ? "previous=1" : "", phone ? "view=phone" : "", base ? "base=1" : "", page ? `page=${encodeURIComponent(page)}` : ""].filter(Boolean).join("&");
   const res = await fetch(`${ROLL_API}${one(id)}/screenshot${q ? `?${q}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
   onApiStatus(res.status);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());

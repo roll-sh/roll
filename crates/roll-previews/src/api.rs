@@ -279,6 +279,13 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
         Some(v) => return Err(Error::BadRequest(format!("view: desktop or phone, not {v:?}"))),
     };
     let base = q.get("base").is_some_and(|v| v == "1" || v == "true");
+    // `page=/pricing`: another of the project's pages (`github.pages`), at the desktop width.
+    let page = q.get("page").cloned();
+    if let Some(p) = &page
+        && (!crate::settings::page_path_ok(p) || phone)
+    {
+        return Err(Error::BadRequest("page: a path from github.pages (desktop only)".into()));
+    }
     let png = blocking(e, move |e| {
         // `base=1`: the default branch's preview's, the one this was compared with.
         let id = if base {
@@ -289,6 +296,9 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
         } else {
             id
         };
+        if let Some(path) = &page {
+            return e.store.page_screenshot(&id, path, previous);
+        }
         match (phone, previous) {
             (true, p) => e.store.phone_screenshot(&id, p),
             (false, true) => e.store.previous_screenshot(&id),

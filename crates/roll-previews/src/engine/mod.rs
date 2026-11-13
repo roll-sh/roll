@@ -115,6 +115,9 @@ pub struct Engine {
     usage_read: Mutex<HashMap<String, i64>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
+    /// Screenshots that failed once at a head (preview, head): tried again once, since the service
+    /// may have been stopped or redeployed underneath, before the head is given up on.
+    shots_failed: Mutex<std::collections::HashSet<(String, String)>>,
     /// One screenshot at a time.
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
@@ -177,6 +180,7 @@ impl Engine {
             secrets_told: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
+            shots_failed: Mutex::new(std::collections::HashSet::new()),
             shooting: Arc::new(tokio::sync::Semaphore::new(1)),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),

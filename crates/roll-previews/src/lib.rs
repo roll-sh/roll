@@ -217,6 +217,8 @@ pub struct Preview {
     /// How much its page differs from the project's preview of the default branch (`GET
     /// …/screenshot?base=1` is that one's), when the project has one.
     pub base_change: Option<BaseChange>,
+    /// The project's other pages (`github.pages`) at the latest screenshot.
+    pub pages: Vec<PageCheck>,
     /// How fast the first service's page loaded at this head, and at the head before.
     pub page_speed: Option<PageSpeedView>,
     /// What went wrong while that page loaded (at the latest screenshot's head).
@@ -389,6 +391,17 @@ pub struct VisualChange {
     pub percent: f64,
     /// The same at a phone's width, when both screenshots had one.
     pub phone_percent: Option<f64>,
+}
+
+/// Another page of the first service (`github.pages`): what went wrong while it loaded, how much
+/// it changed since the screenshot at `since`, and how much it differs from the baseline's.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PageCheck {
+    pub path: String,
+    pub errors: u32,
+    pub since: Option<String>,
+    pub percent: Option<f64>,
+    pub base_percent: Option<f64>,
 }
 
 /// How much a change's page differs from the default branch's (Chromatic's baseline).

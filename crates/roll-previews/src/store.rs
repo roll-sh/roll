@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS screenshots (
     at INTEGER NOT NULL,
     tried TEXT
 );
+CREATE TABLE IF NOT EXISTS page_shots (
+    preview_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    head TEXT NOT NULL,
+    png TEXT NOT NULL,
+    prev_head TEXT,
+    prev_png TEXT,
+    change_bp INTEGER,
+    errors INTEGER NOT NULL DEFAULT 0,
+    base_bp INTEGER,
+    PRIMARY KEY (preview_id, path)
+);
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
@@ -643,7 +655,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1037,11 +1049,19 @@ impl Store {
             crate::visual::changed(&b, &a).map(|f| (f * 10_000.0).round() as i64)
         };
         let (change, phone) = (bp(Some(&ours), Some(&theirs)), bp(ours_phone.as_ref(), theirs_phone.as_ref()));
+        // The other pages, each against the baseline's page at the same path.
+        let pages = |p: &str| -> Result<Vec<(String, String)>> { Ok(self.db.read(|c| c.query("SELECT path, png FROM page_shots WHERE preview_id = ?", [p], |r| Ok((r.get(0)?, r.get(1)?))))?) };
+        let theirs_pages = pages(base)?;
+        let page_bps: Vec<(String, Option<i64>)> =
+            pages(id)?.into_iter().map(|(path, png)| { let other = theirs_pages.iter().find(|(p, _)| *p == path).map(|(_, b)| b); (path, bp(Some(&png), other)) }).collect();
         self.db.write(|c| {
             c.execute(
                 "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ? WHERE preview_id = ?",
                 params![base, branch, change, phone, id],
             )?;
+            for (path, bp) in &page_bps {
+                c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
+            }
             Ok::<_, Error>(())
         })
     }
@@ -1054,6 +1074,68 @@ impl Store {
             .db
             .read(|c| c.query_row("SELECT base_preview, base_branch, base_change_bp, base_phone_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
         Ok(row.and_then(|(p, b, bp, phone)| Some(BaseRow { preview: p?, branch: b?, change_bp: bp?, phone_bp: phone })))
+    }
+
+    /// Keep the other pages a screenshot at `head` took (`github.pages`), each with the one it
+    /// replaces at another head and how much changed; pages no longer in `wanted` go.
+    pub fn set_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot], wanted: &[String]) -> Result<()> {
+        use base64::Engine as _;
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let mut rows = Vec::new();
+        for p in pages {
+            let before: Option<(String, String)> = self.db.read(|c| c.query_row("SELECT head, png FROM page_shots WHERE preview_id = ? AND path = ?", [id, &p.path], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+            let before = before.filter(|(h, _)| h != head);
+            let change_bp = before.as_ref().and_then(|(_, old)| crate::visual::changed(&b64e.decode(old).ok()?, &p.png)).map(|f| (f * 10_000.0).round() as i64);
+            rows.push((p.path.clone(), b64e.encode(&p.png), p.errors as i64, before, change_bp));
+        }
+        self.db.write(|c| {
+            for (path, png, errors, before, change_bp) in &rows {
+                match before {
+                    Some((prev_head, prev_png)) => c.execute(
+                        "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, prev_head = excluded.prev_head, prev_png = excluded.prev_png, \
+                         change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL",
+                        params![id, path, head, png, prev_head, prev_png, change_bp, errors],
+                    )?,
+                    None => c.execute(
+                        "INSERT INTO page_shots (preview_id, path, head, png, errors) VALUES (?, ?, ?, ?, ?) \
+                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL",
+                        params![id, path, head, png, errors],
+                    )?,
+                };
+            }
+            let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+            for gone in paths.iter().filter(|p| !wanted.contains(p)) {
+                c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The other pages' screenshots, by path: how each changed and compares with the baseline's.
+    pub fn page_checks(&self, id: &str) -> Result<Vec<crate::PageCheck>> {
+        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>);
+        let rows: Vec<Raw> = self.db.read(|c| {
+            c.query("SELECT path, errors, prev_head, change_bp, base_bp FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(path, errors, since, change, base)| crate::PageCheck {
+                path,
+                errors: errors as u32,
+                since: since.filter(|_| change.is_some()),
+                percent: change.map(|bp| bp as f64 / 100.0),
+                base_percent: base.map(|bp| bp as f64 / 100.0),
+            })
+            .collect())
+    }
+
+    /// Another page's screenshot (`previous`: the one before it).
+    pub fn page_screenshot(&self, id: &str, path: &str, previous: bool) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let col = if previous { "prev_png" } else { "png" };
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row(&format!("SELECT {col} FROM page_shots WHERE preview_id = ? AND path = ?"), [id, path], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
     }
 
     /// The phone-width screenshot (`previous`: the one before it), if one was taken.
@@ -1361,6 +1443,7 @@ impl Store {
         let phone_percent = self.phone_change(&r.id)?.map(|bp| bp as f64 / 100.0);
         let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
+        let pages = self.page_checks(&r.id)?;
         let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange { branch: b.branch, percent: b.change_bp as f64 / 100.0, phone_percent: b.phone_bp.map(|p| p as f64 / 100.0) });
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;
@@ -1409,6 +1492,7 @@ impl Store {
             visual_change,
             phone_screenshot,
             base_change,
+            pages,
             page_speed,
             page_health,
             page_a11y,

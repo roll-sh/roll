@@ -317,6 +317,18 @@ pub struct PreviewEnvironment {
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
+    /// The project's other pages (`github.pages`): errors, change since the push before, and
+    /// against the default branch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<PreviewPageCheck>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageCheck {
+    pub path: String,
+    pub errors: u32,
+    pub percent: Option<f64>,
+    pub base_percent: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

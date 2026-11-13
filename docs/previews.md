@@ -655,7 +655,7 @@ and admins see every project.
 | `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
-| `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none) |
+| `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages` |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
@@ -721,7 +721,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean };   // all true but screenshot
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[] };   // all true but screenshot; pages: []
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
@@ -777,6 +777,12 @@ type Settings = {
     The same session then takes the page at a phone's width (390 × 844 at twice the density,
     `GET …/screenshot?view=phone`, the sheet's Desktop/Phone), with its own change since the push
     before ("At a phone's width: 3.4%" in the comment), as Percy and Chromatic check widths.
+    Then it takes the project's other pages (`github.pages`, up to 5 paths on the service's own
+    origin, as Percy's snapshot list), at the desktop width: each is kept with the one before it
+    and how much it changed, compared with the baseline's page at the same path, and counts what
+    went wrong while it loaded (`pages` on the preview, `GET …/screenshot?page=/pricing`, a page
+    switcher on the sheet, "2 more pages, most changed /pricing by 40.0%" in the comment's
+    checks). A path no longer listed is dropped at the next screenshot.
     The same session checks what a screen reader can't name (images without alt text, form
     fields without a label, buttons and links with no name) and whether the document has a
     language and a title (`page_a11y`, counts and the first one's markup, bounded; "**Accessibility:**
@@ -898,6 +904,9 @@ Ranked by what a person notices first. Done so far:
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
+- screenshots of the project's other pages (`github.pages`), each compared like the first;
+- a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
+  public or private restarting nothing on roll's runtime;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
 - expiring share links for people outside the team (revocable, shown once);
 - page speed per push (timed with the screenshot, compared with the push before);
@@ -933,24 +942,20 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Screenshots of several pages** (Percy's snapshot list): only the first service's `/` is
-   taken, so a change that breaks `/pricing` shows nothing. A `github.pages` list (a few paths,
-   bounded) taken in the same browser session, each with its change since the push before and
-   against main, the worst one in the comment's summary.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

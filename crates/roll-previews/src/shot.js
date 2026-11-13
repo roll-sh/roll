@@ -110,6 +110,23 @@ const A11Y = `JSON.stringify((() => {
     const phone = await send("Page.captureScreenshot", { format: "png" }, sessionId);
     fs.writeFileSync(process.env.OUT + ".phone.png", Buffer.from(phone.data, "base64"));
   } catch {}
+  // The project's other pages ($PAGES, paths roll checked), at the desktop width, each to
+  // $OUT.<n>.png, and what went wrong while each loaded to $OUT.pages.json. Best effort too.
+  const pages = [];
+  try {
+    await send("Emulation.clearDeviceMetricsOverride", {}, sessionId);
+    for (const [n, path] of JSON.parse(process.env.PAGES || "[]").slice(0, 5).entries()) {
+      const before = errors.length + failed.length;
+      const done = once("Page.loadEventFired");
+      await send("Page.navigate", { url: new URL(path, process.env.URL).href }, sessionId);
+      await Promise.race([done, sleep(10000)]);
+      await sleep(300);
+      const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
+      fs.writeFileSync(`${process.env.OUT}.${n}.png`, Buffer.from(shot.data, "base64"));
+      pages.push({ path, errors: errors.length + failed.length - before });
+    }
+  } catch {}
+  fs.writeFileSync(process.env.OUT + ".pages.json", JSON.stringify(pages));
   chrome.kill();
   process.exit(0);
 })().catch((e) => {

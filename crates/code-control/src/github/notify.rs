@@ -382,12 +382,50 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
         details.push_str(&visual_line(v));
     }
+    if !e.pages.is_empty() {
+        let mut part = plural(e.pages.len() as u64, "more page", "more pages");
+        let worst = e.pages.iter().filter(|p| p.percent.is_some_and(|x| x > 0.0)).max_by(|a, b| a.percent.partial_cmp(&b.percent).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some(w) = worst {
+            part.push_str(&format!(", most changed {} by {}", page_path(&w.path), pct(w.percent.unwrap_or(0.0))));
+        }
+        let errors: u64 = e.pages.iter().map(|p| p.errors as u64).sum();
+        if errors > 0 {
+            part.push_str(&format!(", {} on them", plural(errors, "error", "errors")));
+        }
+        summary.push(part);
+        let base = e.base_change.as_ref().map(|b| branch_name(&b.branch)).unwrap_or_else(|| "the default branch".into());
+        for p in &e.pages {
+            let mut said = Vec::new();
+            match p.percent {
+                Some(x) if x > 0.0 => said.push(format!("changed {} since the push before", pct(x))),
+                Some(_) => said.push("unchanged since the push before".into()),
+                None => {}
+            }
+            match p.base_percent {
+                Some(x) if x > 0.0 => said.push(format!("differs from `{base}` by {}", pct(x))),
+                Some(_) => said.push(format!("the same as `{base}`")),
+                None => {}
+            }
+            if p.errors > 0 {
+                said.push(plural(p.errors as u64, "error while it loaded", "errors while it loaded"));
+            }
+            if said.is_empty() {
+                said.push("taken".into());
+            }
+            details.push_str(&format!("`{}`: {}.\n\n", page_path(&p.path), said.join(", ")));
+        }
+    }
     if let Some(s) = &e.page_speed {
         let t = if s.load_ms < 1000 { format!("{} ms", s.load_ms) } else { format!("{:.1} s", s.load_ms as f64 / 1000.0) };
         summary.push(format!("loads in {t}"));
         details.push_str(&speed_line(s));
     }
     (!summary.is_empty()).then(|| format!("<details><summary>Page checks: {}</summary>\n\n{details}</details>\n\n", summary.join(" · ")))
+}
+
+/// A page's path as the comment may show it (no markup; the project's own setting, checked).
+fn page_path(p: &str) -> String {
+    p.chars().filter(|c| c.is_ascii_alphanumeric() || "-._~/%?=:@!$+,;".contains(*c)).take(100).collect()
 }
 
 /// A branch's name as the comment may show it (no markup).
@@ -552,6 +590,7 @@ mod preview_tests {
             page_health: None,
             page_a11y: None,
             base_change: None,
+            pages: Vec::new(),
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -593,5 +632,10 @@ mod preview_tests {
             comment.starts_with("<details><summary>Page checks: 2 errors, 1 failed request · 5 accessibility problems · differs from mainx by 8.0% · changed 12.3% since the push before · loads in 1.2 s</summary>\n\n**While its first page loaded:**"),
             "{comment}"
         );
+        let page = |path: &str, percent, base_percent, errors| crate::model::PreviewPageCheck { path: path.into(), errors, percent, base_percent };
+        e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
+        let comment = page_checks(&e).unwrap();
+        assert!(comment.contains(" · 2 more pages, most changed /pricing by 40.0%, 1 error on them · "), "{comment}");
+        assert!(comment.contains("`/pricing`: changed 40.0% since the push before, differs from `mainx` by 2.0%, 1 error while it loaded.\n\n`/about`: unchanged since the push before."), "{comment}");
     }
 }

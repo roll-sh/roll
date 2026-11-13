@@ -125,6 +125,17 @@ pub struct GithubRule {
     /// branch, sleeps between screenshots and holds no slot.
     #[serde(default = "yes")]
     pub baseline: bool,
+    /// More of the first service's pages to take with `/` (Percy's snapshot list): paths, at most
+    /// [`MAX_PAGES`], each compared with its own screenshot before and with the baseline's.
+    #[serde(default)]
+    pub pages: Vec<String>,
+}
+
+pub const MAX_PAGES: usize = 5;
+
+/// Whether `p` is a page path the screenshot may visit: absolute, on the service's own origin.
+pub fn page_path_ok(p: &str) -> bool {
+    p.starts_with('/') && !p.starts_with("//") && p.len() <= 200 && p.bytes().all(|b| b.is_ascii_graphic() && !b"\\#\"'<>`".contains(&b))
 }
 
 fn yes() -> bool {
@@ -170,7 +181,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new() }
     }
 }
 
@@ -297,6 +308,10 @@ impl Settings {
                 return bad(format!("env: {k} is over 32 KiB"));
             }
         }
+        let pages = &self.github.pages;
+        if pages.len() > MAX_PAGES || pages.iter().any(|p| !page_path_ok(p) || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {
+            return bad(format!("github.pages: at most {MAX_PAGES} different paths besides /, each starting with / (up to 200 characters, no #, quotes or spaces)"));
+        }
         Ok(())
     }
 
@@ -357,6 +372,9 @@ mod tests {
         assert_eq!(r.mode_of(Kind::Bucket, "b"), Some(Mode::Branch));
         // Structure-only where a kind can't do it: refused, never a silent full copy.
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
+        for pages in [json!(["//evil.example/"]), json!(["pricing"]), json!(["/a\"b"]), json!(["/a", "/a"]), json!(["/1", "/2", "/3", "/4", "/5", "/6"])] {
+            assert!(Settings::default().patched(&json!({ "github": { "pages": pages } })).is_err(), "{pages}");
+        }
         let schema = Settings::default().patched(&json!({ "data": "schema" })).unwrap();
         assert_eq!(schema.mode_of(Kind::Redis, "rdb_1"), None);
         assert_eq!(schema.mode_of(Kind::Postgres, "prj_1"), Some(Mode::Schema));

@@ -116,6 +116,11 @@ impl CodeSource {
                 schema_changes: p.schema_changes.clone(),
                 expires_at: p.goes_at,
                 base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent }),
+                pages: p
+                    .pages
+                    .iter()
+                    .map(|x| code_control::model::PreviewPageCheck { path: x.path.clone(), errors: x.errors, percent: x.percent, base_percent: x.base_percent })
+                    .collect(),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone() }).collect(),
                     lang: a.lang,

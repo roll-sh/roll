@@ -348,11 +348,12 @@ impl Engine {
             let memory_mb = if on_apps { self.apps.memory_mb(&r.id, &spec.name).await.unwrap_or(spec.memory_mb) } else { spec.memory_mb };
             let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url(h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
-            // a reset's new URLs, changed overrides; its access): the runtime restarts it on its
-            // next request, roll apps redeploys it.
-            // The bypass only matters to a backend that checks access itself (roll apps): the
-            // runtime's gate reads it on each request, so a rotation restarts nothing there.
-            let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref().filter(|_| on_apps), trusted);
+            // a reset's new URLs, changed overrides; on roll apps its access): the runtime
+            // restarts it on its next request, roll apps redeploys it.
+            // Access and the bypass only matter to a backend that checks access itself (roll
+            // apps): the runtime's gate reads them on each request, so turning a project public or
+            // private, or a rotation, restarts nothing there (nor cuts a screenshot short).
+            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted);
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
@@ -506,15 +507,19 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        match self.apps.screenshot(&r.id, &first.name).await {
+        let pages = self.store.settings(&r.project_id).map(|s| s.github.pages).unwrap_or_default();
+        match self.apps.screenshot(&r.id, &first.name, &pages).await {
             Ok(Some(shot)) => {
-                let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok() && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok();
+                let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
+                    && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok()
+                    && self.store.set_page_shots(&r.id, r.build(), &shot.pages, &pages).is_ok();
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
                 } else if kept {
                     self.compare_waiting(r).await;
                 }
                 if kept {
+                    self.shots_failed.lock().retain(|(p, _)| *p != r.id);
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }
                 kept
@@ -524,8 +529,14 @@ impl Engine {
                 false
             }
             Err(e) => {
-                let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}: {e:#}", first.name));
-                let _ = self.store.set_screenshot_tried(&r.id, r.build());
+                let first_try = self.shots_failed.lock().insert((r.id.clone(), r.build().to_string()));
+                let again = if first_try { " (trying again)" } else { "" };
+                let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}{again}: {e:#}", first.name));
+                if first_try {
+                    self.shots_wanted.lock().insert(r.id.clone());
+                } else {
+                    let _ = self.store.set_screenshot_tried(&r.id, r.build());
+                }
                 false
             }
         }

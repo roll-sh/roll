@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -229,7 +229,7 @@ export function PreviewSheet({
               </>
             )}
 
-            {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} /> : null}
+            {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} base={p.base_change} pages={p.pages} /> : null}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
               <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">
                 {p.page_health.errors > 0 && (
@@ -550,16 +550,25 @@ function useVisible() {
 function Screenshot({
   id,
   at,
-  change,
-  phone: hasPhone,
-  base: baseChange,
+  change: changeFirst,
+  phone: hasPhoneFirst,
+  base: baseFirst,
+  pages = [],
 }: {
   id: string;
   at: number;
   change?: { since: string; percent: number; phone_percent?: number | null } | null;
   phone?: boolean;
   base?: { branch: string; percent: number; phone_percent: number | null } | null;
+  pages?: PageCheck[];
 }) {
+  // Which page: the first (`/`) or another of the project's (desktop only).
+  const [path, setPath] = useState("/");
+  const other = pages.find((x) => x.path === path);
+  const hasPhone = !other && hasPhoneFirst;
+  const change = other ? (other.since && other.percent != null ? { since: other.since, percent: other.percent } : null) : changeFirst;
+  const baseChange = baseFirst && other ? (other.base_percent != null ? { branch: baseFirst.branch, percent: other.base_percent, phone_percent: null } : null) : baseFirst;
+  const page = other?.path;
   // Main: the default branch's preview's screenshot, the one this differs from.
   const [main, setMain] = useState(false);
   const [src, setSrc] = useState<string | null>(null);
@@ -569,7 +578,7 @@ function Screenshot({
   useEffect(() => {
     let url: string | null = null;
     let live = true;
-    screenshotUrl(id, before && !main, phone, main).then(
+    screenshotUrl(id, before && !main, phone, main, page).then(
       (u) => {
         url = u;
         if (live) setSrc(u);
@@ -581,8 +590,8 @@ function Screenshot({
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id, at, before, phone, main]);
-  if (!src) return null;
+  }, [id, at, before, phone, main, page]);
+  if (!src && path === "/") return null;
   const since = change?.since.replace(/^cs_/, "").slice(0, 10);
   return (
     <>
@@ -604,6 +613,31 @@ function Screenshot({
           </button>
         )}
       </Label>
+      {pages.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1" role="group" aria-label="Page">
+          {["/", ...pages.map((x) => x.path)].map((x) => (
+            <button
+              key={x}
+              type="button"
+              onClick={() => {
+                setPath(x);
+                setPhone(false);
+                setBefore(false);
+                setMain(false);
+              }}
+              aria-pressed={path === x}
+              className={`h-6 max-w-40 truncate rounded-md border px-1.5 font-mono text-[11px] transition-colors ${path === x ? "border-line-2 bg-panel text-fg" : "border-transparent text-muted hover:text-fg"}`}
+            >
+              {x}
+            </button>
+          ))}
+        </div>
+      )}
+      {other && other.errors > 0 && (
+        <p className="mb-1 text-[11.5px] text-danger">
+          {other.errors} {other.errors === 1 ? "error" : "errors"} while it loaded.
+        </p>
+      )}
       {baseChange && (
         <p className="mb-1 text-[11.5px] text-subtle">
           {main
@@ -624,13 +658,17 @@ function Screenshot({
           })()}
         </p>
       )}
-      <a href={src} target="_blank" rel="noreferrer" title="Open it full size">
-        <img
-          src={src}
-          alt={phone ? "The first service's page at a phone's width" : "The first service's page"}
-          className={`max-h-56 rounded-lg border border-line-2 object-cover object-top ${phone ? "mx-auto w-28" : "w-full"}`}
-        />
-      </a>
+      {src ? (
+        <a href={src} target="_blank" rel="noreferrer" title="Open it full size">
+          <img
+            src={src}
+            alt={other ? `The first service's ${other.path}` : phone ? "The first service's page at a phone's width" : "The first service's page"}
+            className={`max-h-56 rounded-lg border border-line-2 object-cover object-top ${phone && !other ? "mx-auto w-28" : "w-full"}`}
+          />
+        </a>
+      ) : (
+        <p className="text-[11.5px] text-muted">No screenshot of {path} yet.</p>
+      )}
     </>
   );
 }

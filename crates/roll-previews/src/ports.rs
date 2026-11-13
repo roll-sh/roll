@@ -141,6 +141,16 @@ pub struct Shot {
     pub a11y: Option<crate::PageA11y>,
     /// The same page at a phone's width, when the backend took one.
     pub phone: Option<Vec<u8>>,
+    /// The project's other pages (`github.pages`) the backend took, in the same session.
+    pub pages: Vec<PageShot>,
+}
+
+/// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
+#[derive(Clone, Debug)]
+pub struct PageShot {
+    pub path: String,
+    pub png: Vec<u8>,
+    pub errors: u32,
 }
 
 /// roll code, as previews read it and report to it.
@@ -320,7 +330,7 @@ pub trait Apps: Send + Sync {
     async fn probe(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         Ok(None)
     }
-    async fn screenshot(&self, _preview: &str, _service: &str) -> anyhow::Result<Option<Shot>> {
+    async fn screenshot(&self, _preview: &str, _service: &str, _pages: &[String]) -> anyhow::Result<Option<Shot>> {
         Ok(None)
     }
     /// What it's doing on this node (`None`: never started here).

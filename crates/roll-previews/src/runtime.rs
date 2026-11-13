@@ -858,7 +858,7 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
-    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<crate::ports::Shot>> {
+    async fn screenshot(&self, preview: &str, service: &str, pages: &[String]) -> anyhow::Result<Option<crate::ports::Shot>> {
         use base64::Engine as _;
         if self.iso.name() != "docker" {
             return Ok(None);
@@ -891,32 +891,38 @@ impl Apps for Runtime {
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
         args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
+        let pages: Vec<&String> = pages.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_PAGES).collect();
+        args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
-        // phone-width PNG (if it took one) on the third.
+        // phone-width PNG (if it took one) on the third, then the other pages: what each said,
+        // and their PNGs a line each.
         args.extend([
             self.cfg.screenshot_image.clone(),
             "sh".into(),
             "-c".into(),
             format!(
-                "{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true)",
+                "{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
+                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done",
                 self.cfg.screenshot_command
             ),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = match tokio::time::timeout(Duration::from_secs(90), code_preview::docker::docker(&argv)).await {
+        let within = Duration::from_secs(90 + 12 * pages.len() as u64);
+        let out = match tokio::time::timeout(within, code_preview::docker::docker(&argv)).await {
             Ok(r) => r?,
             Err(_) => {
                 code_preview::docker::remove(&shot).await;
-                anyhow::bail!("the screenshot took over 90 s");
+                anyhow::bail!("the screenshot took over {} s", within.as_secs());
             }
         };
-        let mut lines = out.splitn(3, '\n');
+        let mut lines = out.split('\n');
         let (b64, speed, phone) = (lines.next().unwrap_or(""), lines.next().unwrap_or(""), lines.next().unwrap_or(""));
+        let said = lines.next().unwrap_or("");
         let b64e = base64::engine::general_purpose::STANDARD;
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
-        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), phone }))
+        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), phone, pages: page_shots(&pages, said, lines) }))
     }
 
     async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
@@ -949,6 +955,27 @@ impl Apps for Runtime {
             Phase::Failed(_) => ServiceState::Failed,
         })
     }
+}
+
+/// The other pages a screenshot run took: what it said about each (`[{path, errors}]`, in order)
+/// and their PNGs, one line each. Only paths that were asked for, each once.
+fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate::ports::PageShot> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Said {
+        path: String,
+        #[serde(default)]
+        errors: u32,
+    }
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let mut out: Vec<crate::ports::PageShot> = Vec::new();
+    for (s, b64) in said.into_iter().zip(pngs).take(asked.len()) {
+        let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { continue };
+        if png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX && asked.iter().any(|a| **a == s.path) && !out.iter().any(|p| p.path == s.path) {
+            out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000) });
+        }
+    }
+    out
 }
 
 /// Middleware for the API listener: requests for a preview service's host go to it, the rest
