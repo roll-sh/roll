@@ -1,0 +1,2534 @@
+{
+  "description" : "OpenSearch 3.9.0 dialect differences: num_reduce_phases, the can-match pre-filter, sliced scrolls over shards, match_all's approximation in validate, docvalue_fields per format, an empty index's translog, terms lookups fetched once, unified matched_fields, BM25 (Lucene's plain BM25Similarity by default, LegacyBM25 on request), and aggregation profile debug maps (filter rewrite counts, terms and cardinality collectors).",
+  "dialect" : "opensearch",
+  "steps" : [
+    {
+      "req" : "PUT /esm-red",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 5,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "str" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-red"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-red/_bulk?refresh=true",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"str\": \"abc\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"str\": \"abc\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"str\": \"bcd\"}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took",
+        "_seq_no",
+        "_shards"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 629,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-red",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-red",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-red",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-red/_search?batched_reduce_size=2",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "str"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 483,
+        "timed_out" : false,
+        "terminated_early" : true,
+        "num_reduce_phases" : 4,
+        "_shards" : {
+          "total" : 5,
+          "successful" : 5,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "t" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "abc",
+                "doc_count" : 2
+              },
+              {
+                "key" : "bcd",
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-red/_search?batched_reduce_size=2",
+      "body" : {
+        "size" : 0
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 5,
+          "successful" : 5,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-red/_search?batched_reduce_size=2&scroll=1m",
+      "body" : {
+        "size" : 1,
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "mask" : [
+        "took",
+        "_scroll_id",
+        "hits.hits"
+      ],
+      "status" : 200,
+      "response" : {
+        "_scroll_id" : "FGluY2x1ZGVfY29udGV4dF91dWlkDnF1ZXJ5VGhlbkZldGNoBRZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAAJoWTUZ1bW5MazJSMkdVLXU2MDVZOG1BURZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAAJkWTUZ1bW5MazJSMkdVLXU2MDVZOG1BURZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAAJsWTUZ1bW5MazJSMkdVLXU2MDVZOG1BURZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAAJwWTUZ1bW5MazJSMkdVLXU2MDVZOG1BURZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAAJ0WTUZ1bW5MazJSMkdVLXU2MDVZOG1BUQEBB2VzbS1yZWQ=",
+        "took" : 178,
+        "timed_out" : false,
+        "num_reduce_phases" : 4,
+        "_shards" : {
+          "total" : 5,
+          "successful" : 5,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "esm-red",
+              "_id" : "3",
+              "_score" : null,
+              "_source" : {
+                "str" : "bcd"
+              },
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_search/scroll/_all",
+      "mask" : [
+        "num_freed"
+      ],
+      "status" : 200,
+      "response" : {
+        "succeeded" : true,
+        "num_freed" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-red/_search?batched_reduce_size=4",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "str"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 240,
+        "timed_out" : false,
+        "terminated_early" : true,
+        "num_reduce_phases" : 2,
+        "_shards" : {
+          "total" : 5,
+          "successful" : 5,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "t" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "abc",
+                "doc_count" : 2
+              },
+              {
+                "key" : "bcd",
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-red/_validate/query?explain=true",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-red",
+            "valid" : true,
+            "explanation" : "ApproximateScoreQuery(originalQuery=*:*, approximationQuery=Approximate(*:*))"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-tl",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 2
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-tl"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-tl/_stats/translog?filter_path=indices.*.primaries.translog.size_in_bytes,indices.*.primaries.translog.uncommitted_size_in_bytes,_all.total.translog.size_in_bytes",
+      "status" : 200,
+      "response" : {
+        "_all" : {
+          "total" : {
+            "translog" : {
+              "size_in_bytes" : 110
+            }
+          }
+        },
+        "indices" : {
+          "esm-tl" : {
+            "primaries" : {
+              "translog" : {
+                "size_in_bytes" : 110,
+                "uncommitted_size_in_bytes" : 110
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-pf1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "created_at" : {
+              "type" : "date",
+              "format" : "strict_date"
+            },
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-pf1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-pf1/_doc/1?refresh=true",
+      "body" : {
+        "created_at" : "2016-01-01",
+        "k" : "x"
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-pf1",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-pf2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "created_at" : {
+              "type" : "date",
+              "format" : "strict_date"
+            },
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-pf2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-pf2/_doc/2?refresh=true",
+      "body" : {
+        "created_at" : "2017-01-01",
+        "k" : "x"
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-pf2",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-pf3",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "created_at" : {
+              "type" : "date",
+              "format" : "strict_date"
+            },
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-pf3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-pf3/_doc/3?refresh=true",
+      "body" : {
+        "created_at" : "2018-01-01",
+        "k" : "x"
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-pf3",
+        "_id" : "3",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-pf*/_search?pre_filter_shard_size=1",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "range" : {
+            "created_at" : {
+              "gte" : "2016-02-01",
+              "lt" : "2018-02-01"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 37,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 1,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-pf*/_search?pre_filter_shard_size=1",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "range" : {
+            "created_at" : {
+              "gte" : "2019-02-01",
+              "lt" : "2020-02-01"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 2,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-pf*/_search?pre_filter_shard_size=1",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "bool" : {
+            "filter" : [
+              {
+                "term" : {
+                  "k" : "x"
+                }
+              },
+              {
+                "range" : {
+                  "created_at" : {
+                    "gte" : "2016-02-01"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 63,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 1,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-pf*/_search?pre_filter_shard_size=1",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "term" : {
+            "nope" : "x"
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 2,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-pf*/_search?pre_filter_shard_size=1",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "term" : {
+            "_index" : "esm-pf2"
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 2,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-pf*/_search?pre_filter_shard_size=1",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "range" : {
+            "created_at" : {
+              "gte" : "2016-02-01",
+              "lt" : "2018-02-01"
+            }
+          }
+        },
+        "aggs" : {
+          "g" : {
+            "global" : { }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 52,
+        "timed_out" : false,
+        "terminated_early" : true,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "g" : {
+            "doc_count" : 3
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-pf*/_search",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "range" : {
+            "created_at" : {
+              "gte" : "2016-02-01",
+              "lt" : "2018-02-01"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-slice",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 5,
+          "number_of_routing_shards" : 5
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-slice"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-slice/_bulk?refresh=true",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"foo\": 1}\n{\"index\": {\"_id\": \"2\"}}\n{\"foo\": 2}\n{\"index\": {\"_id\": \"3\"}}\n{\"foo\": 3}\n{\"index\": {\"_id\": \"4\"}}\n{\"foo\": 4}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took",
+        "_seq_no",
+        "_shards"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2466,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-slice",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-slice",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-slice",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-slice",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-slice/_search?scroll=1m&sort=foo&rest_total_hits_as_int=true",
+      "body" : {
+        "slice" : {
+          "id" : 0,
+          "max" : 2
+        },
+        "query" : {
+          "match_all" : { }
+        }
+      },
+      "mask" : [
+        "took",
+        "_scroll_id"
+      ],
+      "status" : 200,
+      "response" : {
+        "_scroll_id" : "FGluY2x1ZGVfY29udGV4dF91dWlkDnF1ZXJ5VGhlbkZldGNoAxZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAALEWTUZ1bW5MazJSMkdVLXU2MDVZOG1BURZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAALIWTUZ1bW5MazJSMkdVLXU2MDVZOG1BURZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAALMWTUZ1bW5MazJSMkdVLXU2MDVZOG1BUQEBCWVzbS1zbGljZQ==",
+        "took" : 163,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 3,
+          "successful" : 3,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : 3,
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "esm-slice",
+              "_id" : "2",
+              "_score" : null,
+              "_source" : {
+                "foo" : 2
+              },
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_index" : "esm-slice",
+              "_id" : "3",
+              "_score" : null,
+              "_source" : {
+                "foo" : 3
+              },
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "_index" : "esm-slice",
+              "_id" : "4",
+              "_score" : null,
+              "_source" : {
+                "foo" : 4
+              },
+              "sort" : [
+                4
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-slice/_search?scroll=1m&sort=foo&rest_total_hits_as_int=true",
+      "body" : {
+        "slice" : {
+          "id" : 1,
+          "max" : 2
+        },
+        "query" : {
+          "match_all" : { }
+        }
+      },
+      "mask" : [
+        "took",
+        "_scroll_id"
+      ],
+      "status" : 200,
+      "response" : {
+        "_scroll_id" : "FGluY2x1ZGVfY29udGV4dF91dWlkDnF1ZXJ5VGhlbkZldGNoAhZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAALQWTUZ1bW5MazJSMkdVLXU2MDVZOG1BURZiamRHdGkwbFE4ZWdVeldaSy12SXlBAAAAAAAAALUWTUZ1bW5MazJSMkdVLXU2MDVZOG1BUQEBCWVzbS1zbGljZQ==",
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : 1,
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "esm-slice",
+              "_id" : "1",
+              "_score" : null,
+              "_source" : {
+                "foo" : 1
+              },
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_search/scroll/_all",
+      "mask" : [
+        "num_freed"
+      ],
+      "status" : 200,
+      "response" : {
+        "succeeded" : true,
+        "num_freed" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "date" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-dv"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-dv/_doc/1?refresh=true",
+      "body" : {
+        "date" : "2018-10-29T12:12:12.987Z"
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-dv",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-dv/_search",
+      "body" : {
+        "docvalue_fields" : [
+          {
+            "field" : "date",
+            "format" : "strict_date_optional_time"
+          },
+          {
+            "field" : "date",
+            "format" : "epoch_millis"
+          },
+          "date"
+        ],
+        "_source" : false
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 66,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-dv",
+              "_id" : "1",
+              "_score" : 1.0,
+              "fields" : {
+                "date" : [
+                  "2018-10-29T12:12:12.987Z",
+                  "1540815132987",
+                  "2018-10-29T12:12:12.987Z"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-look",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-look"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-look/_doc/1?refresh=true",
+      "body" : {
+        "followers" : [
+          "1",
+          "3"
+        ]
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-look",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-users",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 5
+        },
+        "mappings" : {
+          "properties" : {
+            "user" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-users"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-users/_bulk?refresh=true",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"user\": \"1\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"user\": \"2\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"user\": \"3\"}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took",
+        "_seq_no",
+        "_shards"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 245,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-users",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-users",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-users",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-users/_search?size=0",
+      "body" : {
+        "query" : {
+          "terms" : {
+            "user" : {
+              "index" : "esm-look",
+              "id" : "1",
+              "path" : "followers"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 128,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 5,
+          "successful" : 5,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-look/_stats/get?filter_path=indices.*.total.get.total,indices.*.total.get.exists_total",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-look" : {
+            "total" : {
+              "get" : {
+                "total" : 1,
+                "exists_total" : 1
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-hl",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text",
+              "analyzer" : "stop",
+              "fields" : {
+                "plain" : {
+                  "type" : "text",
+                  "analyzer" : "standard"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-hl"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-hl/_doc/1?refresh=true",
+      "body" : {
+        "t" : "What jumps over the lazy dog?"
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-hl",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-hl/_search",
+      "body" : {
+        "query" : {
+          "multi_match" : {
+            "query" : "the dog",
+            "fields" : [
+              "t",
+              "t.plain"
+            ]
+          }
+        },
+        "highlight" : {
+          "type" : "unified",
+          "fields" : {
+            "t" : {
+              "matched_fields" : [
+                "t.plain"
+              ]
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "_score",
+        "max_score"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 473,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.26152915,
+          "hits" : [
+            {
+              "_index" : "esm-hl",
+              "_id" : "1",
+              "_score" : 0.26152915,
+              "_source" : {
+                "t" : "What jumps over the lazy dog?"
+              },
+              "highlight" : {
+                "t" : [
+                  "What jumps over <em>the</em> lazy <em>dog</em>?"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-prof",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0,
+          "refresh_interval" : -1
+        },
+        "mappings" : {
+          "properties" : {
+            "date" : {
+              "type" : "date"
+            },
+            "str" : {
+              "type" : "keyword"
+            },
+            "number" : {
+              "type" : "integer"
+            },
+            "double" : {
+              "type" : "double"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-prof"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_bulk?refresh=true",
+      "raw" : "{\"index\": {}}\n{\"date\": \"2016-01-01\", \"str\": \"sheep\", \"number\": 1, \"double\": 42}\n{\"index\": {}}\n{\"date\": \"2016-01-02\", \"str\": \"sheep\", \"number\": 3, \"double\": 100}\n{\"index\": {}}\n{\"date\": \"2016-02-01\", \"str\": \"cow\", \"number\": 1, \"double\": 50}\n{\"index\": {}}\n{\"date\": \"2016-03-01\", \"str\": \"pig\", \"number\": 1}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took",
+        "_seq_no",
+        "_shards",
+        "_id"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 348,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-prof",
+              "_id" : "tRHsZ6EBwkoT56zym8yG",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-prof",
+              "_id" : "thHsZ6EBwkoT56zym8yG",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-prof",
+              "_id" : "txHsZ6EBwkoT56zym8yG",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-prof",
+              "_id" : "uBHsZ6EBwkoT56zym8yG",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "h" : {
+            "date_histogram" : {
+              "field" : "date",
+              "calendar_interval" : "month"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "DateHistogramAggregator",
+                  "description" : "h",
+                  "debug" : {
+                    "optimized_segments" : 1,
+                    "total_buckets" : 3,
+                    "single_valued_collectors_used" : 0,
+                    "unoptimized_segments" : 0,
+                    "multi_valued_collectors_used" : 0,
+                    "skip_list_collectors_used" : 0,
+                    "inner_visited" : 0,
+                    "no_op_collectors_used" : 0,
+                    "leaf_visited" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "h" : {
+            "date_histogram" : {
+              "field" : "date",
+              "calendar_interval" : "month"
+            },
+            "aggs" : {
+              "m" : {
+                "max" : {
+                  "field" : "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "DateHistogramAggregator",
+                  "description" : "h",
+                  "debug" : {
+                    "total_buckets" : 3,
+                    "single_valued_collectors_used" : 1,
+                    "multi_valued_collectors_used" : 0,
+                    "skip_list_collectors_used" : 0,
+                    "no_op_collectors_used" : 0
+                  },
+                  "children" : [
+                    {
+                      "type" : "MaxAggregator"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "r" : {
+            "range" : {
+              "field" : "double",
+              "ranges" : [
+                {
+                  "to" : 50
+                },
+                {
+                  "from" : 50,
+                  "to" : 150
+                },
+                {
+                  "from" : 150
+                }
+              ]
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "RangeAggregator",
+                  "description" : "r",
+                  "debug" : {
+                    "optimized_segments" : 1,
+                    "unoptimized_segments" : 0,
+                    "inner_visited" : 0,
+                    "leaf_visited" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "c" : {
+            "composite" : {
+              "sources" : [
+                {
+                  "d" : {
+                    "date_histogram" : {
+                      "field" : "date",
+                      "calendar_interval" : "1d",
+                      "format" : "strict_date"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "CompositeAggregator",
+                  "description" : "c",
+                  "debug" : {
+                    "optimized_segments" : 1,
+                    "unoptimized_segments" : 0,
+                    "inner_visited" : 0,
+                    "leaf_visited" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "a" : {
+            "auto_date_histogram" : {
+              "field" : "date",
+              "buckets" : 2
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "AutoDateHistogramAggregator.FromSingle",
+                  "description" : "a",
+                  "debug" : {
+                    "skiplist_collectors_used" : 0,
+                    "optimized_segments" : 1,
+                    "surviving_buckets" : 3,
+                    "unoptimized_segments" : 0,
+                    "inner_visited" : 0,
+                    "leaf_visited" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "card" : {
+            "cardinality" : {
+              "field" : "str"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "CardinalityAggregator",
+                  "description" : "card",
+                  "debug" : {
+                    "ordinals_collectors_used" : 0,
+                    "ordinals_collectors_overhead_too_high" : 0,
+                    "string_hashing_collectors_used" : 0,
+                    "dynamic_pruned_segments" : 1,
+                    "numeric_collectors_used" : 0,
+                    "empty_collectors_used" : 0,
+                    "hybrid_collectors_used" : 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "cn" : {
+            "cardinality" : {
+              "field" : "number"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "CardinalityAggregator",
+                  "description" : "cn",
+                  "debug" : {
+                    "ordinals_collectors_used" : 0,
+                    "ordinals_collectors_overhead_too_high" : 0,
+                    "string_hashing_collectors_used" : 0,
+                    "dynamic_pruned_segments" : 0,
+                    "numeric_collectors_used" : 1,
+                    "empty_collectors_used" : 0,
+                    "hybrid_collectors_used" : 0
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "str",
+              "collect_mode" : "breadth_first",
+              "execution_hint" : "global_ordinals"
+            },
+            "aggs" : {
+              "m" : {
+                "max" : {
+                  "field" : "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "GlobalOrdinalsStringTermsAggregator",
+                  "description" : "t",
+                  "debug" : {
+                    "segments_with_multi_valued_ords" : 0,
+                    "collection_strategy" : "dense",
+                    "segments_with_single_valued_ords" : 1,
+                    "deferred_aggregators" : [
+                      "m"
+                    ],
+                    "result_selection_strategy" : "select_all",
+                    "result_strategy" : "terms",
+                    "has_filter" : false
+                  },
+                  "children" : [
+                    {
+                      "type" : "MaxAggregator"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "str",
+              "execution_hint" : "global_ordinals"
+            },
+            "aggs" : {
+              "m" : {
+                "max" : {
+                  "field" : "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "GlobalOrdinalsStringTermsAggregator",
+                  "description" : "t",
+                  "debug" : {
+                    "segments_with_multi_valued_ords" : 0,
+                    "collection_strategy" : "remap",
+                    "segments_with_single_valued_ords" : 1,
+                    "total_buckets" : 3,
+                    "result_selection_strategy" : "select_all",
+                    "result_strategy" : "terms",
+                    "has_filter" : false
+                  },
+                  "children" : [
+                    {
+                      "type" : "MaxAggregator"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "query" : {
+          "range" : {
+            "date" : {
+              "gte" : "2016-01-02",
+              "lt" : "2016-03-01"
+            }
+          }
+        },
+        "aggs" : {
+          "h" : {
+            "date_histogram" : {
+              "field" : "date",
+              "calendar_interval" : "month"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "DateHistogramAggregator",
+                  "description" : "h",
+                  "debug" : {
+                    "optimized_segments" : 1,
+                    "total_buckets" : 2,
+                    "single_valued_collectors_used" : 0,
+                    "unoptimized_segments" : 0,
+                    "multi_valued_collectors_used" : 0,
+                    "skip_list_collectors_used" : 0,
+                    "inner_visited" : 0,
+                    "no_op_collectors_used" : 0,
+                    "leaf_visited" : 0
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-prof/_search?filter_path=profile.shards.aggregations.type,profile.shards.aggregations.description,profile.shards.aggregations.debug,profile.shards.aggregations.children.type,profile.shards.aggregations.children.debug",
+      "body" : {
+        "size" : 0,
+        "profile" : true,
+        "query" : {
+          "term" : {
+            "str" : "sheep"
+          }
+        },
+        "aggs" : {
+          "h" : {
+            "date_histogram" : {
+              "field" : "date",
+              "calendar_interval" : "month"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "profile" : {
+          "shards" : [
+            {
+              "aggregations" : [
+                {
+                  "type" : "DateHistogramAggregator",
+                  "description" : "h",
+                  "debug" : {
+                    "total_buckets" : 1,
+                    "single_valued_collectors_used" : 1,
+                    "multi_valued_collectors_used" : 0,
+                    "skip_list_collectors_used" : 0,
+                    "no_op_collectors_used" : 0
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-sim",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "index.similarity.legacy.type" : "LegacyBM25",
+          "index.similarity.my.type" : "BM25",
+          "index.similarity.my.k1" : 1.5
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text"
+            },
+            "b" : {
+              "type" : "text",
+              "similarity" : "BM25"
+            },
+            "l" : {
+              "type" : "text",
+              "similarity" : "legacy"
+            },
+            "m" : {
+              "type" : "text",
+              "similarity" : "my"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-sim"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-sim/_doc/1?refresh=true",
+      "body" : {
+        "t" : "hello world",
+        "b" : "hello world",
+        "l" : "hello world",
+        "m" : "hello there world"
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-sim",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-sim/_doc/2?refresh=true",
+      "body" : {
+        "t" : "hello hello again friend",
+        "b" : "x",
+        "l" : "x",
+        "m" : "x"
+      },
+      "mask" : [
+        "_seq_no",
+        "_primary_term",
+        "_shards"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-sim",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-sim/_search?filter_path=hits.hits._id,hits.hits._score,hits.max_score",
+      "body" : {
+        "query" : {
+          "match" : {
+            "t" : "hello"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "max_score" : 0.104183756,
+          "hits" : [
+            {
+              "_id" : "2",
+              "_score" : 0.104183756
+            },
+            {
+              "_id" : "1",
+              "_score" : 0.09595872
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-sim/_search?filter_path=hits.hits._id,hits.hits._score,hits.max_score",
+      "body" : {
+        "query" : {
+          "match" : {
+            "b" : "hello"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "max_score" : 0.2772589,
+          "hits" : [
+            {
+              "_id" : "1",
+              "_score" : 0.2772589
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-sim/_search?filter_path=hits.hits._id,hits.hits._score,hits.max_score",
+      "body" : {
+        "query" : {
+          "match" : {
+            "l" : "hello"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "max_score" : 0.60996956,
+          "hits" : [
+            {
+              "_id" : "1",
+              "_score" : 0.60996956
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-sim/_search?filter_path=hits.hits._id,hits.hits._score,hits.max_score",
+      "body" : {
+        "query" : {
+          "match" : {
+            "m" : "hello"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "max_score" : 0.22633377,
+          "hits" : [
+            {
+              "_id" : "1",
+              "_score" : 0.22633377
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-sim/_search?explain=true&filter_path=hits.hits._explanation",
+      "body" : {
+        "query" : {
+          "term" : {
+            "t" : "world"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_explanation" : {
+                "value" : 0.3648143,
+                "description" : "weight(t:world in 0) [PerFieldSimilarity], result of:",
+                "details" : [
+                  {
+                    "value" : 0.3648143,
+                    "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                    "details" : [
+                      {
+                        "value" : 0.6931472,
+                        "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                        "details" : [
+                          {
+                            "value" : 1,
+                            "description" : "n, number of documents containing term",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 2,
+                            "description" : "N, total number of documents with field",
+                            "details" : [ ]
+                          }
+                        ]
+                      },
+                      {
+                        "value" : 0.5263158,
+                        "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                        "details" : [
+                          {
+                            "value" : 1.0,
+                            "description" : "freq, occurrences of term within document",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 1.2,
+                            "description" : "k1, term saturation parameter",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 0.75,
+                            "description" : "b, length normalization parameter",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 2.0,
+                            "description" : "dl, length of field",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 3.0,
+                            "description" : "avgdl, average length of field",
+                            "details" : [ ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-sim/_search?explain=true&filter_path=hits.hits._explanation",
+      "body" : {
+        "query" : {
+          "term" : {
+            "l" : "world"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_explanation" : {
+                "value" : 0.60996956,
+                "description" : "weight(l:world in 0) [PerFieldSimilarity], result of:",
+                "details" : [
+                  {
+                    "value" : 0.60996956,
+                    "description" : "score(freq=1.0), computed as boost * idf * tf from:",
+                    "details" : [
+                      {
+                        "value" : 2.2,
+                        "description" : "boost",
+                        "details" : [ ]
+                      },
+                      {
+                        "value" : 0.6931472,
+                        "description" : "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                        "details" : [
+                          {
+                            "value" : 1,
+                            "description" : "n, number of documents containing term",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 2,
+                            "description" : "N, total number of documents with field",
+                            "details" : [ ]
+                          }
+                        ]
+                      },
+                      {
+                        "value" : 0.40000004,
+                        "description" : "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                        "details" : [
+                          {
+                            "value" : 1.0,
+                            "description" : "freq, occurrences of term within document",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 1.2,
+                            "description" : "k1, term saturation parameter",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 0.75,
+                            "description" : "b, length normalization parameter",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 2.0,
+                            "description" : "dl, length of field",
+                            "details" : [ ]
+                          },
+                          {
+                            "value" : 1.5,
+                            "description" : "avgdl, average length of field",
+                            "details" : [ ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

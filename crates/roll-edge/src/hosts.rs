@@ -35,6 +35,8 @@ pub enum Host {
     Nosql(String),
     /// `<id>.mq.<region>.roll.sh`
     Mq(String),
+    /// `<cluster>.search.<region>.roll.sh`: a search cluster's Elasticsearch REST API.
+    Search(String),
     /// `tasks.<region>.roll.sh`
     Tasks,
     /// `origin.<region>.roll.sh`: the region's NLB itself.
@@ -45,23 +47,25 @@ pub enum Host {
     Preview(String),
     /// `<bucket>.roll.site`: a public bucket or site (served by the CDN Worker).
     Site(String),
+    /// `<slug>.up.roll.site`: a roll apps service's environment (docs/apps/README.md).
+    App(String),
     Unknown,
 }
 
 /// The tenant products, by the label in their hostnames.
-pub const TENANT_PRODUCTS: &[&str] = &["pg", "redis", "kafka", "nosql", "mq"];
+pub const TENANT_PRODUCTS: &[&str] = &["pg", "redis", "kafka", "nosql", "mq", "search"];
 
 impl Host {
     /// Whether Cloudflare proxies this hostname (so `CF-Connecting-IP` from a Cloudflare address
     /// is the client).
     pub fn proxied(&self) -> bool {
-        matches!(self, Host::Dashboard | Host::Api | Host::Preview(_) | Host::Site(_))
+        matches!(self, Host::Dashboard | Host::Api | Host::Preview(_) | Host::Site(_) | Host::App(_))
     }
 
     /// The tenant a tenant hostname names.
     pub fn tenant(&self) -> Option<&str> {
         match self {
-            Host::Pg(t) | Host::Redis(t) | Host::Kafka(t) | Host::Nosql(t) | Host::Mq(t) => Some(t),
+            Host::Pg(t) | Host::Redis(t) | Host::Kafka(t) | Host::Nosql(t) | Host::Mq(t) | Host::Search(t) => Some(t),
             _ => None,
         }
     }
@@ -132,6 +136,7 @@ impl Hostnames {
                         (Some(id), "kafka") => Host::Kafka(id),
                         (Some(id), "nosql") => Host::Nosql(id),
                         (Some(id), "mq") => Host::Mq(id),
+                        (Some(id), "search") => Host::Search(id),
                         _ => Host::Unknown,
                     },
                     None => Host::Unknown,
@@ -148,6 +153,9 @@ impl Hostnames {
                     Some(bucket) => Host::S3 { bucket: Some(bucket.to_string()) },
                     None => Host::Unknown,
                 };
+            }
+            if let Some(slug) = sub.strip_suffix(".up") {
+                return label(slug).map_or(Host::Unknown, Host::App);
             }
             return match label(sub) {
                 Some(l) if l.starts_with("chg-") => Host::Preview(l),
@@ -166,7 +174,7 @@ impl Hostnames {
         let mut product = vec![d.clone(), format!("api.{d}"), format!("git.{d}"), self.product_domain("tasks")];
         product.extend(TENANT_PRODUCTS.iter().map(|p| format!("*.{}", self.product_domain(p))));
         let s3 = self.s3_domain();
-        let site = vec![format!("*.{}", self.site_domain), s3.clone(), format!("*.{s3}")];
+        let site = vec![format!("*.{}", self.site_domain), s3.clone(), format!("*.{s3}"), format!("*.up.{}", self.site_domain)];
         vec![CertSet { name: "product".into(), names: product }, CertSet { name: "site".into(), names: site }]
     }
 
@@ -201,12 +209,15 @@ mod tests {
             ("k1.kafka.us-east-1.roll.sh", Host::Kafka("k1".into())),
             ("n1.nosql.us-east-1.roll.sh", Host::Nosql("n1".into())),
             ("q1.mq.us-east-1.roll.sh", Host::Mq("q1".into())),
+            ("shop.search.us-east-1.roll.sh", Host::Search("shop".into())),
             ("tasks.us-east-1.roll.sh", Host::Tasks),
             ("origin.us-east-1.roll.sh", Host::Origin),
             ("s3.us-east-1.roll.site", Host::S3 { bucket: None }),
             ("my.bucket.s3.us-east-1.roll.site", Host::S3 { bucket: Some("my.bucket".into()) }),
             ("chg-abc.roll.site", Host::Preview("chg-abc".into())),
             ("photos.roll.site", Host::Site("photos".into())),
+            ("web-acme.up.roll.site", Host::App("web-acme".into())),
+            ("a.b.up.roll.site", Host::Unknown),
             // Region-less endpoints, other regions, and names that aren't in the table.
             ("ep1.pg.roll.sh", Host::Unknown),
             ("tasks.roll.sh", Host::Unknown),
@@ -222,7 +233,7 @@ mod tests {
             assert_eq!(h.classify(host), want, "{host}");
         }
         let names = h.all_cert_names();
-        for n in ["roll.sh", "api.roll.sh", "git.roll.sh", "tasks.us-east-1.roll.sh", "*.pg.us-east-1.roll.sh", "*.nosql.us-east-1.roll.sh", "*.mq.us-east-1.roll.sh", "*.roll.site", "s3.us-east-1.roll.site", "*.s3.us-east-1.roll.site"] {
+        for n in ["roll.sh", "api.roll.sh", "git.roll.sh", "tasks.us-east-1.roll.sh", "*.pg.us-east-1.roll.sh", "*.nosql.us-east-1.roll.sh", "*.mq.us-east-1.roll.sh", "*.search.us-east-1.roll.sh", "*.roll.site", "s3.us-east-1.roll.site", "*.s3.us-east-1.roll.site"] {
             assert!(names.contains(&n.to_string()), "{n}");
         }
         assert_eq!(h.tenant("kafka", "k1"), "k1.kafka.us-east-1.roll.sh");

@@ -53,7 +53,7 @@ fn loopback_args(api: u16) -> Vec<String> {
     for flag in [
         "--proxy", "--redis", "--redis-http", "--kafka", "--s3", "--storage-api",
         "--queues-amqp", "--queues-management", "--queues-stomp", "--queues-web-stomp", "--queues-mqtt", "--queues-web-mqtt", "--queues-stream", "--queues-http",
-        "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator",
+        "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator", "--search-http",
     ] {
         args.extend([flag.to_string(), format!("127.0.0.1:{}", free_port())]);
     }
@@ -308,6 +308,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/code/mcp", "roll code's own MCP server: grants use /v1/mcp"),
         ("/v1/code/review-apps", "review apps: their own tokens"),
         ("/v1/code/names", "public name lookups"),
+        ("/v1/apps/hooks", "deploy hooks: the secret in the URL"),
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),
         ("/v1/secrets/shares/{id}", "a one-time share: the link's key is the credential"),
         ("/v1/secrets/login", "workload identities: the workload's OIDC token is the credential"),

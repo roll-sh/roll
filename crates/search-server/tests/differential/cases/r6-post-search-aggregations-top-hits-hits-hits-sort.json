@@ -1,0 +1,153 @@
+{
+ "found": {
+  "case": 59,
+  "case_seed": 119000416,
+  "seed": 119
+ },
+ "signature": "POST _search .aggregations.top_hits.hits.hits[].sort[]",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "ulong0": {
+       "type": "unsigned_long"
+      }
+     }
+    },
+    "settings": {
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m6-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m6-a"
+  },
+  {
+   "body": {
+    "vec0": [
+     1.96,
+     1.35,
+     2.18
+    ]
+   },
+   "es": {
+    "body": {
+     "_id": "38",
+     "_index": "diff-m6-a",
+     "_primary_term": 1,
+     "_seq_no": 0,
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 2
+     },
+     "_version": 1,
+     "forced_refresh": true,
+     "result": "created"
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 201
+   },
+   "method": "PUT",
+   "path": "/diff-m6-a/_doc/38?refresh=true"
+  },
+  {
+   "body": {
+    "aggs": {
+     "top_hits_12": {
+      "top_hits": {
+       "sort": [
+        {
+         "ulong0": {}
+        }
+       ]
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "aggregations": {
+      "top_hits_12": {
+       "hits": {
+        "hits": [
+         {
+          "_id": "38",
+          "_index": "diff-m6-a",
+          "_score": null,
+          "_source": {
+           "vec0": [
+            1.96,
+            1.35,
+            2.18
+           ]
+          },
+          "sort": [
+           9223372036854775807
+          ]
+         }
+        ],
+        "max_score": null,
+        "total": {
+         "relation": "eq",
+         "value": 1
+        }
+       }
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "38",
+        "_index": "diff-m6-a",
+        "_score": 1.0,
+        "_source": {
+         "vec0": [
+          1.96,
+          1.35,
+          2.18
+         ]
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m6-a/_search"
+  }
+ ]
+}

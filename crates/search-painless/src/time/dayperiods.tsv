@@ -1,0 +1,1422 @@
+# Day period names ('B', 'BBBB', 'BBBBB') captured from Elasticsearch 9.5.5's JDK (tests/fixtures/capture_dates.py):
+# P id, then per style 26 names at 00:00, 00:01, 01:00 ... 11:00, 12:00, 12:01, 13:00 ... 23:00; L locale -> P id
+P	0	AM*13|PM*13	AM*13|PM*13	AM*13|PM*13
+P	1	Uhr vörmiddaachs*13|Uhr nommendaachs*13	Uhr vörmiddaachs*13|Uhr nommendaachs*13	v.M.*13|n.M.*13
+P	2	поноћ*1|ноћу*6|ујутру*6|подне*1|по подне*6|увече*3|ноћу*3	поноћ*1|ноћу*6|ујутру*6|подне*1|по подне*6|увече*3|ноћу*3	поноћ*1|ноћу*6|ујутру*6|подне*1|по подне*6|увече*3|ноћу*3
+P	3	minuit*1|du matin*12|midi*1|de l’après-midi*6|du soir*6	minuit*1|du matin*12|midi*1|de l’après-midi*6|du soir*6	minuit*1|matin*4|mat.*8|midi*1|ap.m.*6|soir*6
+P	4	hengihengi*13|efiafi*13	hengihengi*13|efiafi*13	HH*13|EA*13
+P	5	iđitbeaivet*13|eahketbeaivet*13	iđitbeaivet*13|eahketbeaivet*13	i.b.*13|e.b.*13
+P	6	𑄢𑄬𑄖𑄴*5|𑄛𑄧𑄖𑄳𑄠𑄃𑄟𑄧𑄣𑄳𑄠𑄬*2|𑄝𑄬𑄚𑄳𑄠𑄬*6|𑄘𑄨𑄝𑄪𑄎𑄳𑄠*5|𑄝𑄬𑄣𑄳𑄠𑄬*2|𑄥𑄎𑄧𑄚𑄳𑄠*2|𑄢𑄬𑄖𑄴*4	𑄢𑄬𑄖𑄴*5|𑄛𑄧𑄖𑄳𑄠𑄃𑄟𑄧𑄣𑄳𑄠𑄬*2|𑄝𑄬𑄚𑄳𑄠𑄬*6|𑄘𑄨𑄝𑄪𑄎𑄳𑄠*5|𑄝𑄬𑄣𑄳𑄠𑄬*2|𑄥𑄎𑄧𑄚𑄳𑄠*2|𑄢𑄬𑄖𑄴*4	𑄢𑄬𑄖𑄴*5|𑄛𑄧𑄖𑄳𑄠𑄃𑄟𑄧𑄣𑄳𑄠𑄬*2|𑄝𑄬𑄚𑄳𑄠𑄬*6|𑄘𑄨𑄝𑄪𑄎𑄳𑄠*5|𑄝𑄬𑄣𑄳𑄠𑄬*2|𑄥𑄎𑄧𑄚𑄳𑄠*2|𑄢𑄬𑄖𑄴*4
+P	7	kuty-si*1|kurã ge*6|kusãg ki*6|kurã-kuju*1|rãkãnh kỹ*7|kuty kỹ*5	kuty-si*1|kurã ge*6|kusãg ki*6|kurã-kuju*1|rãkãnh kỹ*7|kuty kỹ*5	kuty-si*1|kurã ge*6|kusãg ki*6|kurã-kuju*1|rãkãnh kỹ*7|kuty kỹ*5
+P	8	min.*1|matin*4|mat.*8|midi*1|ap.m.*6|soir*6	min.*1|matin*4|mat.*8|midi*1|ap.m.*6|soir*6	min.*1|matin*4|mat.*8|midi*1|ap.m.*6|soir*6
+P	9	subaka*13|kikiiɗe*13	subaka*13|kikiiɗe*13	subaka*13|kikiiɗe*13
+P	10	في المساء*2|ليلاً*2|في الصباح*3|صباحًا*6|ظهرًا*2|بعد الظهر*5|مساءً*6	في المساء*2|ليلاً*2|في الصباح*3|صباحًا*6|ظهرًا*2|بعد الظهر*5|مساءً*6	منتصف الليل*2|ليلاً*2|فجرًا*3|صباحًا*6|ظهرًا*2|بعد الظهر*5|مساءً*6
+P	11	सबेरे*13|सांम*13	सबेरे*13|सांम*13	AM*13|PM*13
+P	12	Taparachu*13|Ebongi*13	Taparachu*13|Ebongi*13	Taparachu*13|Ebongi*13
+P	13	ночі*5|ранку*8|дня*7|вечора*6	ночі*5|ранку*8|дня*7|вечора*6	ночі*5|ранку*8|дня*7|вечора*6
+P	14	午夜*1|凌晨*5|清晨*3|上午*4|中午*2|下午*6|晚上*5	午夜*1|凌晨*5|清晨*3|上午*4|中午*2|下午*6|晚上*5	午夜*1|凌晨*5|早上*3|上午*4|中午*2|下午*6|晚上*5
+P	15	Àárọ̀*13|Ọ̀sán*13	Àárọ̀*13|Ọ̀sán*13	Àárọ̀*13|Ọ̀sán*13
+P	16	मध्यरात*1|रात*4|बिहान*8|मध्यान्ह*1|अपरान्ह*4|साँझ*3|बेलुकी*3|रात*2	मध्यरात*1|रात*4|बिहान*8|मध्यान्ह*1|अपरान्ह*4|साँझ*3|बेलुकी*3|रात*2	मध्यरात*1|रात*4|बिहान*8|मध्यान्ह*1|अपरान्ह*4|साँझ*3|बेलुकी*3|रात*2
+P	17	de la madrugada*7|de la mañana*6|del mediodía*1|de la tarde*8|de la noche*4	de la madrugada*7|de la mañana*6|del mediodía*1|de la tarde*8|de la noche*4	de la madrugada*7|de la mañana*6|del mediodía*1|de la tarde*8|de la noche*4
+P	18	Ĩyakwakya*13|Ĩyawĩoo*13	Ĩyakwakya*13|Ĩyawĩoo*13	Ĩyakwakya*13|Ĩyawĩoo*13
+P	19	BN*13|PN*13	BN*13|PN*13	bn*13|pn*13
+P	20	LEEBI*13|SHWANE*13	LEEBI*13|SHWANE*13	AM*13|PM*13
+P	21	a.*13|p.*13	a.*13|p.*13	a.*13|p.*13
+P	22	полночь*1|ночи*4|утра*8|полдень*1|дня*6|вечера*4|ночи*2	полночь*1|ночи*4|утра*8|полдень*1|дня*6|вечера*4|ночи*2	полн.*1|ночи*4|утра*8|полд.*1|дня*6|веч.*4|ночи*2
+P	23	yarim tun*1|kechasi*6|ertalab*5|kunduzi*1|tush payti*1|kunduzi*6|kechqurun*4|kechasi*2	yarim tun*1|kechasi*6|ertalab*5|kunduzi*1|tush payti*1|kunduzi*6|kechqurun*4|kechasi*2	yarim tun*1|kechasi*6|ertalab*5|kunduzi*1|tush payti*1|kunduzi*6|kechqurun*4|kechasi*2
+P	24	भ्यागा*13|दपेहरा/संजा*13	भ्यागा*13|दपेहरा/संजा*13	भ्यागा*13|दपेहरा/संजा*13
+P	25	dopołdnja*13|wótpołdnja*13	dopołdnja*13|wótpołdnja*13	dop.*13|wótp.*13
+P	26	Safiya*13|Yamma*13	Safiya*13|Yamma*13	SF*13|YM*13
+P	27	tengah malam*2|pagi*11|tengah hari*3|petang*5|malam*5	tengah malam*2|pagi*11|tengah hari*3|petang*5|malam*5	pagi*13|tengah hari*3|petang*5|malam*5
+P	28	AM*13|PM*13	AM*13|PM*13	a*13|p*13
+P	29	aadhi raat*1|raat*4|subah*8|Madhyanh*1|dopahar*4|shaam*4|raat*4	aadhi raat*1|raat*4|subah*8|Madhyanh*1|dopahar*4|shaam*4|raat*4	mi*1|raat*4|subah*8|n*1|dopahar*4|shaam*4|raat*4
+P	30	tifawt*13|tadggʷat*13	tifawt*13|tadggʷat*13	tifawt*13|tadggʷat*13
+P	31	Munkyo*13|Eigulo*13	Munkyo*13|Eigulo*13	Munkyo*13|Eigulo*13
+P	32	mitjanit*1|matinada*6|matí*6|migdia*2|tarda*6|vespre*2|nit*3	mitjanit*1|matinada*6|matí*6|migdia*2|tarda*6|vespre*2|nit*3	mitjanit*1|matinada*6|matí*6|migdia*2|tarda*6|vespre*2|nit*3
+P	33	Subbaahi*13|Zaarikay b*13	Subbaahi*13|Zaarikay b*13	Subbaahi*13|Zaarikay b*13
+P	34	ఎ ఎమ్*13|పి ఎమ్*13	ఎ ఎమ్*13|పి ఎమ్*13	ఎ*13|పి*13
+P	35	ⵜⵉⴼⴰⵡⵜ*13|ⵜⴰⴷⴳⴳⵯⴰⵜ*13	ⵜⵉⴼⴰⵡⵜ*13|ⵜⴰⴷⴳⴳⵯⴰⵜ*13	ⵜⵉⴼⴰⵡⵜ*13|ⵜⴰⴷⴳⴳⵯⴰⵜ*13
+P	36	ip.*13|ep.*13	ip.*13|ep.*13	ip.*13|ep.*13
+P	37	ᱥᱮᱛᱟᱜ*13|ᱧᱤᱫᱟᱹ*13	ᱥᱮᱛᱟᱜ*13|ᱧᱤᱫᱟᱹ*13	AM*13|PM*13
+P	38	午夜*1|凌晨*5|清晨*3|朝早*4|中午*2|下晝*6|夜晚*5	午夜*1|凌晨*5|清晨*3|朝早*4|中午*2|下晝*6|夜晚*5	午夜*1|凌晨*5|清晨*3|朝早*4|中午*2|下晝*6|夜晚*5
+P	39	ponoć*1|po noći*4|ujutro*8|podne*1|poslijepodne*6|navečer*3|po noći*3	ponoć*1|po noći*4|ujutro*8|podne*1|poslijepodne*6|navečer*3|po noći*3	ponoć*1|po noći*4|ujutro*8|podne*1|poslijepodne*6|navečer*3|po noći*3
+P	40	WD*13|WB*13	WD*13|WB*13	WD*13|WB*13
+P	41	သန်းခေါင်ယံ*1|နံနက်*12|မွန်းတည့်*1|နေ့လယ်*4|ညနေ*3|ည*5	သန်းခေါင်ယံ*1|နံနက်*12|မွန်းတည့်*1|နေ့လယ်*4|ညနေ*3|ည*5	သန်းခေါင်ယံ*1|နံနက်*12|မွန်းတည့်*1|နေ့လယ်*4|ညနေ*3|ည*5
+P	42	midnight*1|in the morning*12|noon*1|in the afternoon*6|in the evening*3|at night*3	midnight*1|in the morning*12|noon*1|in the afternoon*6|in the evening*3|at night*3	mi*1|in the morning*12|n*1|in the afternoon*6|in the evening*3|at night*3
+P	43	mezzanotte*1|di notte*6|di mattina*6|mezzogiorno*1|del pomeriggio*6|di sera*6	mezzanotte*1|di notte*6|di mattina*6|mezzogiorno*1|del pomeriggio*6|di sera*6	mezzanotte*1|di notte*6|di mattina*6|mezzogiorno*1|di pomeriggio*6|di sera*6
+P	44	АМ*13|ПМ*13	АМ*13|ПМ*13	а*13|п*13
+P	45	atm*13|ptm*13	atm*13|ptm*13	a*13|p*13
+P	46	上午*13|下午*13	上午*13|下午*13	上午*13|下午*13
+P	47	真夜中*1|夜中*4|朝*8|正午*1|昼*4|夕方*3|夜*4|夜中*1	真夜中*1|夜中*4|朝*8|正午*1|昼*4|夕方*3|夜*4|夜中*1	真夜中*1|夜中*4|朝*8|正午*1|昼*4|夕方*3|夜*4|夜中*1
+P	48	እኩለ ሌሊት*1|በሌሊት*6|ጥዋት*6|ቀትር*1|ከሰዓት*6|በምሽት*6	እኩለ ሌሊት*1|በሌሊት*6|ጥዋት*6|ቀትር*1|ከሰዓት*6|በምሽት*6	እኩለ ሌሊት*1|በሌሊት*6|ጥዋት*6|ቀ*1|ከሰዓት*6|በምሽት*6
+P	49	ntɔ́ngɔ́*13|mpókwa*13	ntɔ́ngɔ́*13|mpókwa*13	ntɔ́ngɔ́*13|mpókwa*13
+P	50	A.M.*13|G.M.*13	A.M.*13|G.M.*13	am*13|gm*13
+P	51	o północy*1|w nocy*6|rano*4|przed południem*2|w południe*1|po południu*6|wieczorem*3|w nocy*3	o północy*1|w nocy*6|rano*4|przed południem*2|w południe*1|po południu*6|wieczorem*3|w nocy*3	o półn.*1|w nocy*6|rano*4|przed poł.*2|w poł.*1|po poł.*6|wiecz.*3|w nocy*3
+P	52	vaasisu*13|makaaripi*13	vaasisu*13|makaaripi*13	AM*13|PM*13
+P	53	miezul nopții*1|noaptea*5|dimineața*7|amiază*1|după-amiaza*6|seara*4|noaptea*2	miezul nopții*1|noaptea*5|dimineața*7|amiază*1|după-amiaza*6|seara*4|noaptea*2	miezul nopții*1|noapte*5|dimineață*7|amiază*1|după-amiază*6|seară*4|noapte*2
+P	54	pusnaktī*1|naktī*6|no rīta*6|pusdienlaikā*1|pēcpusdienā*6|vakarā*5|naktī*1	pusnaktī*1|naktī*6|no rīta*6|pusdienlaikā*1|pēcpusdienā*6|vakarā*5|naktī*1	pusnaktī*1|naktī*6|no rīta*6|pusd.*1|pēcpusd.*6|vakarā*5|naktī*1
+P	55	am*13|pm*13	am*13|pm*13	a*13|p*13
+P	56	RW*13|TŊ*13	RW*13|TŊ*13	RW*13|TŊ*13
+P	57	ᏌᎾᎴ*13|ᎢᎦ*1|ᏒᎯᏱᎢᏗᏢ*12	ᏌᎾᎴ*13|ᎢᎦ*1|ᏒᎯᏱᎢᏗᏢ*12	ᏌᎾᎴ*13|Ꭲ*1|Ꮢ*12
+P	58	AM*13|PM*13	AM*13|PM*13	am*13|pm*13
+P	59	آدھی رات*1|رات میں*4|صبح میں*8|دوپہر میں*5|سہ پہر*2|شام میں*2|رات میں*4	آدھی رات*1|رات میں*4|صبح میں*8|دوپہر میں*5|سہ پہر*2|شام میں*2|رات میں*4	نصف شب*1|رات*4|صبح*8|دوپہر*5|سہ پہر*2|شام*2|رات*4
+P	60	मध्यानरात*1|राती*4|सकाळीं*8|दनपारां*5|सांजे*4|राती*4	मध्यानरात*1|राती*4|सकाळीं*8|दनपारां*5|सांजे*4|राती*4	मध्यान*1|रात*4|सकाळ*8|दनपार*5|सांज*4|रात*4
+P	61	اے ایم*13|پی ایم*13	اے ایم*13|پی ایم*13	a*13|p*13
+P	62	Lwamilawu*13|Pashamihe*13	Lwamilawu*13|Pashamihe*13	Lwamilawu*13|Pashamihe*13
+P	63	կեսգիշերին*1|գիշերվա*6|առավոտյան*6|կեսօրին*1|ցերեկվա*6|երեկոյան*6	կեսգիշերին*1|գիշերվա*6|առավոտյան*6|կեսօրին*1|ցերեկվա*6|երեկոյան*6	կգ․*1|գշր*6|առվ*6|կօ․*1|ցրկ*6|երկ*6
+P	64	Ɛnkakɛnyá*13|Ɛndámâ*13	Ɛnkakɛnyá*13|Ɛndámâ*13	Ɛnkakɛnyá*13|Ɛndámâ*13
+P	65	Fọ mọ́nin*13|Fọ ívnin*13	Fọ mọ́nin*13|Fọ ívnin*13	FM*13|FI*13
+P	66	поноћ*1|ноћу*6|ујутру*6|подне*1|по подне*6|увече*3|ноћу*3	поноћ*1|ноћу*6|ујутру*6|подне*1|по подне*6|увече*3|ноћу*3	поноћ*1|ноћу*6|ујутро*6|подне*1|по подне*6|увече*3|ноћу*3
+P	67	ب.ن*13|د.ن*13	ب.ن*13|د.ن*13	ب.ن*13|د.ن*13
+P	68	자정*1|밤*3|아침*3|오전*6|정오*1|오후*6|저녁*3|밤*3	자정*1|밤*3|아침*3|오전*6|정오*1|오후*6|저녁*3|밤*3	자정*1|밤*3|아침*3|오전*6|정오*1|오후*6|저녁*3|밤*3
+P	69	meia-noite*1|da madrugada*6|da manhã*6|meio-dia*1|da tarde*7|da noite*5	meia-noite*1|da madrugada*6|da manhã*6|meio-dia*1|da tarde*7|da noite*5	meia-noite*1|madrugada*6|manhã*6|meio-dia*1|tarde*7|noite*5
+P	70	a.g*13|a.k*13	a.g*13|a.k*13	a.g*13|a.k*13
+P	71	Mitternacht*1|znacht*5|am Morge*7|zmittag*3|am Namittag*4|zaabig*6	Mitternacht*1|znacht*5|am Morge*7|zmittag*3|am Namittag*4|zaabig*6	Mitternacht*1|znacht*5|am Morge*7|zmittag*3|am Namittag*4|zaabig*6
+P	72	modhyanrat*1|rati*4|sokallim*8|donparam*5|sanje*4|rati*4	modhyanrat*1|rati*4|sokallim*8|donparam*5|sanje*4|rati*4	md*1|rt*4|sk*8|dp*5|sj*4|rt*4
+P	73	la miezul nopții*1|noaptea*5|dimineața*7|la amiază*1|după-amiaza*6|seara*4|noaptea*2	la miezul nopții*1|noaptea*5|dimineața*7|la amiază*1|după-amiaza*6|seara*4|noaptea*2	miezul nopții*1|noaptea*5|dimineața*7|amiază*1|după-amiaza*6|seara*4|noaptea*2
+P	74	पूर्वाह्न*13|अपराह्न*13	पूर्वाह्न*13|अपराह्न*13	AM*13|PM*13
+P	75	ǁgoagas*13|ǃuias*13	ǁgoagas*13|ǃuias*13	ǁgoagas*13|ǃuias*13
+P	76	vidurnaktis*1|naktis*6|rytas*6|perpiet*1|popietė*6|vakaras*6	vidurnaktis*1|naktis*6|rytas*6|perpiet*1|popietė*6|vakaras*6	vidurnaktis*1|naktis*6|rytas*6|perpiet*1|popietė*6|vakaras*6
+P	77	do połedniŏ*13|po połedniu*13	do połedniŏ*13|po połedniu*13	do połedniŏ*13|po połedniu*13
+P	78	mbaꞌmbaꞌ*13|ŋka mbɔ́t nji*13	mbaꞌmbaꞌ*13|ŋka mbɔ́t nji*13	mbaꞌmbaꞌ*13|ŋka mbɔ́t nji*13
+P	79	a.m.*13|p.m.*13	a.m.*13|p.m.*13	a.m.*13|p.m.*13
+P	80	Adduha*13|Aluula*13	Adduha*13|Aluula*13	Adduha*13|Aluula*13
+P	81	Mambia*13|Mog*13	Mambia*13|Mog*13	Ma*13|Mo*13
+P	82	སྔ་དྲོ་*13|ཕྱི་དྲོ་*13	སྔ་དྲོ་*13|ཕྱི་དྲོ་*13	སྔ་དྲོ་*13|ཕྱི་དྲོ་*13
+P	83	pi open suno*13|pi pini suno*13	pi open suno*13|pi pini suno*13	AM*13|PM*13
+P	84	في المساء*2|ل*2|فجرًا*3|ص*6|ظهرًا*2|بعد الظهر*5|مساءً*6	في المساء*2|ل*2|فجرًا*3|ص*6|ظهرًا*2|بعد الظهر*5|مساءً*6	في المساء*2|ل*2|فجرًا*3|ص*6|ظهرًا*2|بعد الظهر*5|مساءً*6
+P	85	pamilau*13|pamunyi*13	pamilau*13|pamunyi*13	pamilau*13|pamunyi*13
+P	86	meia-noite*1|da madrugada*6|da manhã*6|meio-dia*1|da tarde*7|da noite*5	meia-noite*1|da madrugada*6|da manhã*6|meio-dia*1|da tarde*7|da noite*5	meia-noite*1|da madrugada*6|da manhã*6|meio-dia*1|da tarde*7|da noite*5
+P	87	miðnætti*1|að nóttu*6|að morgni*6|hádegi*1|síðdegis*6|að kvöldi*6	miðnætti*1|að nóttu*6|að morgni*6|hádegi*1|síðdegis*6|að kvöldi*6	mn.*1|n.*6|mrg.*6|h.*1|sd.*6|kv.*6
+P	88	n tufat*13|n tmeddit*13	n tufat*13|n tmeddit*13	n tufat*13|n tmeddit*13
+P	89	Sub*13|Ngo*13	Sub*13|Ngo*13	Sub*13|Ngo*13
+P	90	Hoseng*13|Thapama*13	Hoseng*13|Thapama*13	AM*13|PM*13
+P	91	canol nos*1|y bore*12|canol dydd*1|y prynhawn*6|yr hwyr*6	canol nos*1|y bore*12|canol dydd*1|y prynhawn*6|yr hwyr*6	canol nos*1|yn y bore*12|canol dydd*1|yn y prynhawn*6|min nos*6
+P	92	*26	*26	*26
+P	93	ਅੱਧੀ ਰਾਤ*1|ਰਾਤੀਂ*4|ਸਵੇਰੇ*8|ਦੁਪਹਿਰੇ*5|ਸ਼ਾਮੀਂ*5|ਰਾਤੀਂ*3	ਅੱਧੀ ਰਾਤ*1|ਰਾਤੀਂ*4|ਸਵੇਰੇ*8|ਦੁਪਹਿਰੇ*5|ਸ਼ਾਮੀਂ*5|ਰਾਤੀਂ*3	ਅੱਧੀ ਰਾਤ*1|ਰਾਤੀਂ*4|ਸਵੇਰੇ*8|ਦੁਪਹਿਰੇ*5|ਸ਼ਾਮੀਂ*5|ਰਾਤੀਂ*3
+P	94	܏ܩܛ‌*13|܏ܒܛ‌*13	܏ܩܛ‌*13|܏ܒܛ‌*13	܏ܩ‌*13|܏ܒ‌*13
+P	95	m*13|f*13	m*13|f*13	m*13|f*13
+P	96	utuko*13|kyiukonyi*13	utuko*13|kyiukonyi*13	utuko*13|kyiukonyi*13
+P	97	TOO*13|MUU*13	TOO*13|MUU*13	TOO*13|MUU*13
+P	98	поноћ*1|ноћу*6|јутро*6|подне*1|по под.*6|вече*3|ноћу*3	поноћ*1|ноћу*6|јутро*6|подне*1|по под.*6|вече*3|ноћу*3	поноћ*1|ноћ*6|јутро*6|подне*1|по под.*6|вече*3|ноћ*3
+P	99	keskööl*1|öösel*5|hommikul*7|keskpäeval*1|pärastlõunal*6|õhtul*5|öösel*1	keskööl*1|öösel*5|hommikul*7|keskpäeval*1|pärastlõunal*6|õhtul*5|öösel*1	keskööl*1|öösel*5|hommikul*7|keskpäeval*1|pärastlõunal*6|õhtul*5|öösel*1
+P	100	פֿאַרמיטאָג*13|נאָכמיטאָג*13	פֿאַרמיטאָג*13|נאָכמיטאָג*13	פֿאַרמיטאָג*13|נאָכמיטאָג*13
+P	101	o polnoci*1|v noci*4|ráno*5|dopoludnia*3|napoludnie*1|popoludní*6|večer*4|v noci*2	o polnoci*1|v noci*4|ráno*5|dopoludnia*3|napoludnie*1|popoludní*6|večer*4|v noci*2	o poln.*1|v n.*4|ráno*5|dop.*3|nap.*1|pop.*6|več.*4|v n.*2
+P	102	တွၼ်ႈၸဝ်ႉ*13|တွၼ်ႈလႃႈ*13	တွၼ်ႈၸဝ်ႉ*13|တွၼ်ႈလႃႈ*13	ၸ.*13|လ.*13
+P	103	zã*5|fɔŋli*1|ŋdi*7|ŋdɔ*3|ɣetrɔ*4|fiẽ*3|zã*3	zã*5|fɔŋli*1|ŋdi*7|ŋdɔ*3|ɣetrɔ*4|fiẽ*3|zã*3	zã*5|fɔŋli*1|ŋdi*7|ŋdɔ*3|ɣetrɔ*4|fiẽ*3|zã*3
+P	104	ꎸꄑ*13|ꁯꋒ*13	ꎸꄑ*13|ꁯꋒ*13	ꎸꄑ*13|ꁯꋒ*13
+P	105	སྔ་ཆ་*13|ཕྱི་ཆ་*13	སྔ་ཆ་*13|ཕྱི་ཆ་*13	སྔ་ཆ་*13|ཕྱི་ཆ་*13
+P	106	éjfél*1|éjjel*4|hajnal*2|reggel*3|délelőtt*3|dél*1|délután*6|este*3|éjjel*3	éjfél*1|éjjel*4|hajnal*2|reggel*3|délelőtt*3|dél*1|délután*6|este*3|éjjel*3	éjfél*1|éjjel*4|hajnal*2|reggel*3|de.*3|dél*1|délután*6|este*3|éjjel*3
+P	107	kang’ama*13|kingoto*13	kang’ama*13|kingoto*13	kang’ama*13|kingoto*13
+P	108	OD*13|OT*13	OD*13|OT*13	OD*13|OT*13
+P	109	ТО*13|ТК*13	ТО*13|ТК*13	ТО*13|ТК*13
+P	110	kíkíríg*13|ngəgógəle*13	kíkíríg*13|ngəgógəle*13	kíkíríg*13|ngəgógəle*13
+P	111	ቅ.ቀ.*13|ድ.ቀ.*13	ቅ.ቀ.*13|ድ.ቀ.*13	ቅ.ቀ.*13|ድ.ቀ.*13
+P	112	το βράδυ*5|το πρωί*8|το μεσημέρι*6|το απόγευμα*3|το βράδυ*4	το βράδυ*5|το πρωί*8|το μεσημέρι*6|το απόγευμα*3|το βράδυ*4	βράδυ*5|πρωί*8|μεσημ.*6|απόγ.*3|βράδυ*4
+P	113	রাত্রিবেলায়*5|ভোরবেলায়*2|সকালবেলায়*6|দুপুরবেলায়*5|বিকাল*2|সন্ধ্যাবেলায়*2|রাত্রিবেলায়*4	রাত্রিবেলায়*5|ভোরবেলায়*2|সকালবেলায়*6|দুপুরবেলায়*5|বিকাল*2|সন্ধ্যাবেলায়*2|রাত্রিবেলায়*4	রাত্রি*5|ভোর*2|সকাল*6|দুপুর*5|বিকাল*2|সন্ধ্যা*2|রাত্রি*4
+P	114	к. у.*13|к. х.*13	к. у.*13|к. х.*13	к. у.*13|к. х.*13
+P	115	ت د*13|ت ك*13	ت د*13|ت ك*13	ت د*13|ت ك*13
+P	116	midnatt*1|på natten*6|på morgenen*4|på formiddagen*2|på ettermiddagen*7|på kvelden*6	midnatt*1|på natten*6|på morgenen*4|på formiddagen*2|på ettermiddagen*7|på kvelden*6	mn.*1|nt.*6|mg.*4|fm.*2|em.*7|kv.*6
+P	117	am*13|pm*13	am*13|pm*13	am*13|pm*13
+P	118	saa sita za usiku*1|usiku*4|alfajiri*3|asubuhi*5|saa sita za mchana*1|mchana*4|jioni*3|usiku*5	saa sita za usiku*1|usiku*4|alfajiri*3|asubuhi*5|saa sita za mchana*1|mchana*4|jioni*3|usiku*5	usiku*5|alfajiri*3|asubuhi*5|mchana*5|jioni*3|usiku*5
+P	119	फुं*13|बेलासे*13	फुं*13|बेलासे*13	फुं*13|बे*13
+P	120	ӕмбисбоны размӕ*13|ӕмбисбоны фӕстӕ*13	ӕмбисбоны размӕ*13|ӕмбисбоны фӕстӕ*13	AM*13|PM*13
+P	121	түн жарымы*1|түнгі*6|таңғы*6|түскі*1|түстен кейінгі*6|кешкі*3|түнгі*3	түн жарымы*1|түнгі*6|таңғы*6|түскі*1|түстен кейінгі*6|кешкі*3|түнгі*3	түнгі*7|таңғы*6|түскі*1|түстен кейінгі*6|кешкі*3|түнгі*3
+P	122	gajanɩ*5|asʊbaa*3|gajaka*5|gɩshilikɔnɔ*5|gɩteŋshile*4|gɩjibɔŋɔ*4	gajanɩ*5|asʊbaa*3|gajaka*5|gɩshilikɔnɔ*5|gɩteŋshile*4|gɩjibɔŋɔ*4	gjn*5|asb*3|gjk*5|gshk*5|gtsh*4|gjb*4
+P	123	opolnoči*1|ponoči*6|zjutraj*4|dopoldan*2|opoldne*1|popoldan*6|zvečer*4|ponoči*2	opolnoči*1|ponoči*6|zjutraj*4|dopoldan*2|opoldne*1|popoldan*6|zvečer*4|ponoči*2	24.00*1|po*6|zj*4|d*2|12.00*1|p*6|zv*4|po*2
+P	124	ᐁᒼ*13|ᐲᒼ*13	ᐁᒼ*13|ᐲᒼ*13	ᐊᒼ*13|ᐲᒼ*13
+P	125	អធ្រាត្រ*1|នៅពេល​ព្រឹក*12|ថ្ងៃត្រង់*1|នៅពេលរសៀល*6|នៅពេល​ល្ងាច*3|នៅពេល​យប់*3	អធ្រាត្រ*1|នៅពេល​ព្រឹក*12|ថ្ងៃត្រង់*1|នៅពេលរសៀល*6|នៅពេល​ល្ងាច*3|នៅពេល​យប់*3	អធ្រាត្រ*1|នៅពេល​ព្រឹក*12|ថ្ងៃត្រង់*1|នៅពេលរសៀល*6|នៅពេល​ល្ងាច*3|នៅពេល​យប់*3
+P	126	AN*13|ANW*13	AN*13|ANW*13	an*13|anw*13
+P	127	सुबुह जा*13|शाम जा*13	सुबुह जा*13|शाम जा*13	AM*13|PM*13
+P	128	Luma lwa K*13|luma lwa p*13	Luma lwa K*13|luma lwa p*13	Luma lwa K*13|luma lwa p*13
+P	129	шөнө дунд*1|шөнө*6|өглөө*6|үд дунд*1|өдөр*6|орой*3|шөнө*3	шөнө дунд*1|шөнө*6|өглөө*6|үд дунд*1|өдөр*6|орой*3|шөнө*3	шөнө дунд*1|шөнө*6|өглөө*6|үд дунд*1|өдөр*6|орой*3|шөнө*3
+P	130	middernacht*1|’s nachts*6|’s ochtends*6|’s middags*7|’s avonds*6	middernacht*1|’s nachts*6|’s ochtends*6|’s middags*7|’s avonds*6	middernacht*1|’s nachts*6|’s ochtends*6|’s middags*7|’s avonds*6
+P	131	ए एम*13|पी एम*13	ए एम*13|पी एम*13	ए एम*13|पी एम*13
+P	132	ponoć*1|noću*4|ujutro*8|podne*1|poslije podne*6|navečer*3|noću*3	ponoć*1|noću*4|ujutro*8|podne*1|poslije podne*6|navečer*3|noću*3	ponoć*1|noću*4|ujutro*8|podne*1|popodne*6|navečer*3|noću*3
+P	133	icheheavo*13|ichamthi*13	icheheavo*13|ichamthi*13	icheheavo*13|ichamthi*13
+P	134	kiɛmɛ́ɛm*13|kisɛ́ndɛ*13	kiɛmɛ́ɛm*13|kisɛ́ndɛ*13	kiɛmɛ́ɛm*13|kisɛ́ndɛ*13
+P	135	𞤀𞤎*13|𞤇𞤎*13	𞤀𞤎*13|𞤇𞤎*13	𞤢*13|𞤩*13
+P	136	de la mañana*13|de la tarde*13	de la mañana*13|de la tarde*13	a*13|p*13
+P	137	maná*13|kugú*13	maná*13|kugú*13	maná*13|kugú*13
+P	138	midnatt*1|på natta*6|på morgonen*4|på formiddagen*2|på ettermiddagen*7|på kvelden*6	midnatt*1|på natta*6|på morgonen*4|på formiddagen*2|på ettermiddagen*7|på kvelden*6	mn.*1|nt.*6|mg.*4|fm.*2|em.*7|kv.*6
+P	139	ante midí*13|pos midí*13	ante midí*13|pos midí*13	a.m.*13|p.m.*13
+P	140	půlnoc*1|v noci*4|ráno*5|dopoledne*3|poledne*1|odpoledne*6|večer*4|v noci*2	půlnoc*1|v noci*4|ráno*5|dopoledne*3|poledne*1|odpoledne*6|večer*4|v noci*2	půl.*1|n.*4|r.*5|d.*3|pol.*1|o.*6|v.*4|n.*2
+P	141	dopołdnja*13|popołdnju*13	dopołdnja*13|popołdnju*13	dop.*13|pop.*13
+P	142	RŨ*13|ŨG*13	RŨ*13|ŨG*13	RŨ*13|ŨG*13
+P	143	del matin*13|de sira*13	del matin*13|de sira*13	AM*13|PM*13
+P	144	Zdat azal*13|Ḍeffir aza*13	Zdat azal*13|Ḍeffir aza*13	Zdat azal*13|Ḍeffir aza*13
+P	145	mbaʼámbaʼ*13|ncwònzém*13	mbaʼámbaʼ*13|ncwònzém*13	mbaʼámbaʼ*13|ncwònzém*13
+P	146	ߛ*13|ߥ*13	ߛ*13|ߥ*13	ߛ*13|ߥ*13
+P	147	midnight*1|in the morning*12|midday*1|in the afternoon*6|in the evening*3|at night*3	midnight*1|in the morning*12|midday*1|in the afternoon*6|in the evening*3|at night*3	midnight*1|in the morning*12|midday*1|in the afternoon*6|in the evening*3|at night*3
+P	148	түн ортосу*1|түн ичинде*6|эртең менен*6|чак түш*1|түштөн кийин*6|кечинде*3|түн ичинде*3	түн ортосу*1|түн ичинде*6|эртең менен*6|чак түш*1|түштөн кийин*6|кечинде*3|түн ичинде*3	түн орт*1|түн*6|эртң мн*6|чт*1|түшт кйн*6|кечк*3|түн*3
+P	149	भोर*13|सांझ*13	भोर*13|सांझ*13	भोर*13|सांझ*13
+P	150	midnight*1|in the morning*12|noon*1|in the afternoon*6|in the evening*3|at night*3	midnight*1|in the morning*12|noon*1|in the afternoon*6|in the evening*3|at night*3	mid*1|mor*12|n*1|aft*6|eve*3|night*3
+P	151	sárúwá*13|cɛɛ́nko*13	sárúwá*13|cɛɛ́nko*13	sárúwá*13|cɛɛ́nko*13
+P	152	Tesiran*13|Teipa*13	Tesiran*13|Teipa*13	Tesiran*13|Teipa*13
+P	153	صبح، منجهند*13|منجهند، شام*13	صبح، منجهند*13|منجهند، شام*13	صبح*13|شام*13
+P	154	полноќ*1|ноќе*4|наутро*6|претпладне*2|напладне*1|попладне*6|навечер*6	полноќ*1|ноќе*4|наутро*6|претпладне*2|напладне*1|попладне*6|навечер*6	полн.*1|ноќе*4|наутро*6|претпл.*2|напл.*1|попл.*6|навечер*6
+P	155	r.n.*13|i.n.*13	r.n.*13|i.n.*13	r.n.*13|i.n.*13
+P	156	günortadan öň*13|günortadan soň*13	günortadan öň*13|günortadan soň*13	öň*13|soň*13
+P	157	Kiroko*13|Hwaĩ-inĩ*13	Kiroko*13|Hwaĩ-inĩ*13	Kiroko*13|Hwaĩ-inĩ*13
+P	158	මැදියම*1|මැදියමට පසු*1|පාන්දර*5|උදේ*6|මධ්‍යාහ්නය*1|දවල්*2|හවස*4|රෑ*6	මැදියම*1|මැදියමට පසු*1|පාන්දර*5|උදේ*6|මධ්‍යාහ්නය*1|දවල්*2|හවස*4|රෑ*6	මැ*2|පා*5|උ*6|ම*1|ද*2|හ*4|රෑ*6
+P	159	поноћ*1|ноћу*6|јутро*6|подне*1|по под.*6|увече*3|ноћу*3	поноћ*1|ноћу*6|јутро*6|подне*1|по под.*6|увече*3|ноћу*3	поноћ*1|ноћ*6|јутро*6|подне*1|по под.*6|вече*3|ноћ*3
+P	160	e mesnatës*1|e natës*4|e mëngjesit*5|e paradites*3|e mesditës*1|e pasdites*6|e mbrëmjes*6	e mesnatës*1|e natës*4|e mëngjesit*5|e paradites*3|e mesditës*1|e pasdites*6|e mbrëmjes*6	e mesnatës*1|e natës*4|e mëngjesit*5|e paradites*3|e mesditës*1|e pasdites*6|e mbrëmjes*6
+P	161	gece yarısı*1|gece*6|sabah*5|öğleden önce*1|öğle*1|öğleden sonra*6|akşamüstü*1|akşam*2|gece*3	gece yarısı*1|gece*6|sabah*5|öğleden önce*1|öğle*1|öğleden sonra*6|akşamüstü*1|akşam*2|gece*3	gece*7|sabah*5|öğleden önce*1|ö*1|öğleden sonra*6|akşamüstü*1|akşam*2|gece*3
+P	162	gecəyarı*1|gecə*4|sübh*2|səhər*6|günorta*1|gündüz*5|axşamüstü*2|axşam*5	gecəyarı*1|gecə*4|sübh*2|səhər*6|günorta*1|gündüz*5|axşamüstü*2|axşam*5	gecəyarı*1|gecə*4|sübh*2|səhər*6|g*1|gündüz*5|axşamüstü*2|axşam*5
+P	163	karoon*13|kooskoliny*13	karoon*13|kooskoliny*13	krn*13|koosk*13
+P	164	შუაღამეს*1|ღამით*5|დილით*7|შუადღეს*1|ნაშუადღევს*6|საღამოს*3|ღამით*3	შუაღამეს*1|ღამით*5|დილით*7|შუადღეს*1|ნაშუადღევს*6|საღამოს*3|ღამით*3	შუაღამეს*1|ღამ.*5|დილ.*7|შუადღ.*1|ნაშუადღ.*6|საღ.*3|ღამ.*3
+P	165	అర్ధరాత్రి*1|రాత్రి*6|ఉదయం*6|మధ్యాహ్నం*7|సాయంత్రం*3|రాత్రి*3	అర్ధరాత్రి*1|రాత్రి*6|ఉదయం*6|మధ్యాహ్నం*7|సాయంత్రం*3|రాత్రి*3	అర్ధరాత్రి*1|రాత్రి*6|ఉదయం*6|మధ్యాహ్నం*7|సాయంత్రం*3|రాత్రి*3
+P	166	полунощ*1|през нощта*4|сутринта*7|на обяд*4|следобед*4|вечерта*4|през нощта*2	полунощ*1|през нощта*4|сутринта*7|на обяд*4|следобед*4|вечерта*4|през нощта*2	полунощ*1|през нощта*4|сутринта*7|на обяд*4|следобед*4|вечерта*4|през нощта*2
+P	167	N’ụtụtụ*13|N’abali*13	N’ụtụtụ*13|N’abali*13	N’ụtụtụ*13|N’abalị*13
+P	168	上昼*13|下昼*13	上昼*13|下昼*13	上昼*13|下昼*13
+P	169	KI*13|UT*13	KI*13|UT*13	KI*13|UT*13
+P	170	midnatt*1|på natten*5|på morgonen*5|på förmiddagen*2|på eftermiddagen*7|på kvällen*6	midnatt*1|på natten*5|på morgonen*5|på förmiddagen*2|på eftermiddagen*7|på kvällen*6	midn.*1|på natten*5|på morg.*5|på förm.*2|på efterm.*7|på kvällen*6
+P	171	Z.MU.*13|Z.MW.*13	Z.MU.*13|Z.MW.*13	Z.MU.*13|Z.MW.*13
+P	172	Dinda*13|Dilolo*13	Dinda*13|Dilolo*13	Dinda*13|Dilolo*13
+P	173	entathakusa*7|ekuseni*4|emini*4|ntambama*6|ebusuku*5	entathakusa*7|ekuseni*4|emini*4|ntambama*6|ebusuku*5	entathakusa*7|ekuseni*4|emini*4|ntambama*6|ebusuku*5
+P	174	അർദ്ധരാത്രി*1|രാത്രി*3|പുലർച്ചെ*3|രാവിലെ*6|ഉച്ച*1|ഉച്ചയ്ക്ക്*2|ഉച്ചതിരിഞ്ഞ്*1|വൈകുന്നേരം*3|സന്ധ്യ*1|രാത്രി*5	അർദ്ധരാത്രി*1|രാത്രി*3|പുലർച്ചെ*3|രാവിലെ*6|ഉച്ച*1|ഉച്ചയ്ക്ക്*2|ഉച്ചതിരിഞ്ഞ്*1|വൈകുന്നേരം*3|സന്ധ്യ*1|രാത്രി*5	അ*1|രാത്രി*3|പുലർച്ചെ*3|രാവിലെ*6|ഉച്ച*1|ഉച്ചയ്ക്ക്*2|ഉച്ചതിരിഞ്ഞ്*1|വൈകുന്നേരം*3|സന്ധ്യ*1|രാത്രി*5
+P	175	middernag*1|die nag*5|die oggend*7|die middag*7|die aand*6	middernag*1|die nag*5|die oggend*7|die middag*7|die aand*6	mn*1|in die nag*5|die oggend*7|in die middag*7|in die aand*6
+P	176	I bikɛ̂glà*13|I ɓugajɔp*13	I bikɛ̂glà*13|I ɓugajɔp*13	I bikɛ̂glà*13|I ɓugajɔp*13
+P	177	ЭИ*13|ЭК*13	ЭИ*13|ЭК*13	ЭИ*13|ЭК*13
+P	178	ಮಧ್ಯ ರಾತ್ರಿ*1|ರಾತ್ರಿ*6|ಬೆಳಗ್ಗೆ*6|ಮಧ್ಯಾಹ್ನ*7|ಸಂಜೆ*3|ರಾತ್ರಿ*3	ಮಧ್ಯ ರಾತ್ರಿ*1|ರಾತ್ರಿ*6|ಬೆಳಗ್ಗೆ*6|ಮಧ್ಯಾಹ್ನ*7|ಸಂಜೆ*3|ರಾತ್ರಿ*3	ಮಧ್ಯರಾತ್ರಿ*1|ರಾತ್ರಿ*6|ಬೆಳಗ್ಗೆ*6|ಮಧ್ಯಾಹ್ನ*7|ಸಂಜೆ*3|ರಾತ್ರಿ*3
+P	179	GH*13|GD*13	GH*13|GD*13	h*13|d*13
+P	180	ଏ ଏମ*13|ପି ଏମ*13	ଏ ଏମ*13|ପି ଏମ*13	ଏ*13|ପି*13
+P	181	idiɓa*13|ebyámu*13	idiɓa*13|ebyámu*13	idiɓa*13|ebyámu*13
+P	182	hatinggabi*1|ng umaga*6|madaling-araw*6|tanghaling-tapat*1|ng hapon*4|ng gabi*8	hatinggabi*1|ng umaga*6|madaling-araw*6|tanghaling-tapat*1|ng hapon*4|ng gabi*8	hatinggabi*1|ng umaga*6|madaling-araw*6|tanghaling-tapat*1|ng hapon*4|ng gabi*8
+P	183	nửa đêm*1|đêm*4|sáng*8|trưa*1|chiều*6|tối*3|đêm*3	nửa đêm*1|đêm*4|sáng*8|trưa*1|chiều*6|tối*3|đêm*3	nửa đêm*1|đêm*4|sáng*8|tr*1|chiều*6|tối*3|đêm*3
+P	184	เที่ยงคืน*1|กลางคืน*6|ในตอนเช้า*6|เที่ยง*1|ในตอนบ่าย*1|บ่าย*3|ในตอนเย็น*2|ค่ำ*3|กลางคืน*3	เที่ยงคืน*1|กลางคืน*6|ในตอนเช้า*6|เที่ยง*1|ในตอนบ่าย*1|บ่าย*3|ในตอนเย็น*2|ค่ำ*3|กลางคืน*3	เที่ยงคืน*1|กลางคืน*6|เช้า*6|เที่ยง*2|บ่าย*3|เย็น*2|ค่ำ*3|กลางคืน*3
+P	185	পূৰ্বাহ্ন*13|অপৰাহ্ন*13	পূৰ্বাহ্ন*13|অপৰাহ্ন*13	পূৰ্বাহ্ন*13|অপৰাহ্ন*13
+P	186	wichishu*13|mchochil’l*13	wichishu*13|mchochil’l*13	wichishu*13|mchochil’l*13
+P	187	এ এম*13|পি এম*13	এ এম*13|পি এম*13	নুমাং*13|PM*13
+P	188	Mitternacht*1|nachts*5|morgens*5|vormittags*2|mittags*2|nachmittags*5|abends*6	Mitternacht*1|nachts*5|morgens*5|vormittags*2|mittags*2|nachmittags*5|abends*6	Mitternacht*1|nachts*5|morgens*5|vorm.*2|mittags*2|nachm.*5|abends*6
+P	189	da noite*1|da madrugada*6|da mañá*6|do mediodía*2|da tarde*8|da noite*3	da noite*1|da madrugada*6|da mañá*6|do mediodía*2|da tarde*8|da noite*3	da noite*1|da madrugada*6|da mañá*6|do mediodía*2|da tarde*8|da noite*3
+P	190	நள்ளிரவு*1|இரவு*3|அதிகாலை*2|காலை*7|நண்பகல்*1|மதியம்*2|பிற்பகல்*2|மாலை*2|அந்தி மாலை*3|இரவு*3	நள்ளிரவு*1|இரவு*3|அதிகாலை*2|காலை*7|நண்பகல்*1|மதியம்*2|பிற்பகல்*2|மாலை*2|அந்தி மாலை*3|இரவு*3	நள்.*1|இர.*3|காலை*2|கா.*7|நண்.*1|மதி.*2|பிற்.*2|மா.*2|அந்தி மா.*3|இர.*3
+P	191	तडके*13|सांझ*13	तडके*13|सांझ*13	AM*13|PM*13
+P	192	pituna pyterupé*1|pitunaeté ramẽ*6|kuêma ramẽ*6|iandé-ara-pyturepé*1|karuka ramẽ*7|pituna ramẽ*5	pituna pyterupé*1|pitunaeté ramẽ*6|kuêma ramẽ*6|iandé-ara-pyturepé*1|karuka ramẽ*7|pituna ramẽ*5	pituna pyterupé*1|pitunaeté ramẽ*6|kuêma ramẽ*6|iandé-ara-pyturepé*1|karuka ramẽ*7|pituna ramẽ*5
+P	193	comme*13|lilli*13	comme*13|lilli*13	comme*13|lilli*13
+P	194	midnat*1|om natten*5|om morgenen*5|om formiddagen*2|om eftermiddagen*7|om aftenen*6	midnat*1|om natten*5|om morgenen*5|om formiddagen*2|om eftermiddagen*7|om aftenen*6	midnat*1|om natten*5|om morgenen*5|om formiddagen*2|om eftermiddagen*7|om aftenen*6
+P	195	uluchelo*13|akasuba*13	uluchelo*13|akasuba*13	uluchelo*13|akasuba*13
+P	196	gauerdia*1|goizaldeko*6|goizeko*6|eguerdiko*3|arratsaldeko*5|iluntzeko*2|gaueko*3	gauerdia*1|goizaldeko*6|goizeko*6|eguerdiko*3|arratsaldeko*5|iluntzeko*2|gaueko*3	gauerd.*1|goizald.*6|goizeko*6|eguerd.*3|arrats.*5|iluntz.*2|gaueko*3
+P	197	نیمه‌شب*2|بامداد*3|صبح*8|بعدازظهر*2|عصر*6|شب*5	نیمه‌شب*2|بامداد*3|صبح*8|بعدازظهر*2|عصر*6|شب*5	نیمه‌شب*2|بامداد*3|صبح*8|ظهر*2|عصر*6|شب*5
+P	198	прије подне*13|послије подне*13	прије подне*13|послије подне*13	пре подне*13|поподне*13
+P	199	keskiyöllä*1|yöllä*5|aamulla*5|aamupäivällä*2|keskipäivällä*1|iltapäivällä*6|illalla*5|yöllä*1	keskiyöllä*1|yöllä*5|aamulla*5|aamupäivällä*2|keskipäivällä*1|iltapäivällä*6|illalla*5|yöllä*1	ky.*1|yöllä*5|aamulla*5|ap.*2|kp.*1|ip.*6|illalla*5|yöllä*1
+P	200	prije podne*13|po podne*13	prije podne*13|po podne*13	prije podne*13|po podne*13
+P	201	भोर*13|सांझ*13	भोर*13|सांझ*13	AM*13|PM*13
+P	202	મધ્યરાત્રિ*1|રાત્રે*4|સવારે*8|બપોરે*5|સાંજે*4|રાત્રે*4	મધ્યરાત્રિ*1|રાત્રે*4|સવારે*8|બપોરે*5|સાંજે*4|રાત્રે*4	મ.રાત્રિ*1|રાત્રે*4|સવારે*8|બપોરે*5|સાંજે*4|રાત્રે*4
+P	203	חצות*1|בלילה*3|לפנות בוקר*3|בבוקר*6|בצהריים*5|אחר הצהריים*2|בערב*4|בלילה*2	חצות*1|בלילה*3|לפנות בוקר*3|בבוקר*6|בצהריים*5|אחר הצהריים*2|בערב*4|בלילה*2	חצות*1|בלילה*3|לפנות בוקר*3|בבוקר*6|בצהריים*5|אחה״צ*2|בערב*4|בלילה*2
+P	204	मध्यरात्रि*1|रात*4|सुबह*8|दोपहर*5|शाम*4|रात*4	मध्यरात्रि*1|रात*4|सुबह*8|दोपहर*5|शाम*4|रात*4	मध्यरात्रि*1|रात*4|सुबह*8|दोपहर*5|शाम*4|रात*4
+P	205	minuit*1|de la nuit*4|du matin*8|midi*1|de l’après-midi*6|du soir*6	minuit*1|de la nuit*4|du matin*8|midi*1|de l’après-midi*6|du soir*6	minuit*1|matin*4|mat.*8|midi*1|ap.m.*6|soir*6
+P	206	tengah malam*1|pagi*10|siang*2|tengah hari*1|siang*3|sore*3|malam*6	tengah malam*1|pagi*10|siang*2|tengah hari*1|siang*3|sore*3|malam*6	tengah malam*1|pagi*10|siang*2|tengah hari*1|siang*3|sore*3|malam*6
+P	207	ທ່ຽງຄືນ*1|ຕອນກາງຄືນ*5|ຕອນເຊົ້າ*7|ຕອນທ່ຽງ*1|ຕອນບ່າຍ*4|ຕອນແລງ*4|ຕອນກາງຄືນ*4	ທ່ຽງຄືນ*1|ຕອນກາງຄືນ*5|ຕອນເຊົ້າ*7|ຕອນທ່ຽງ*1|ຕອນບ່າຍ*4|ຕອນແລງ*4|ຕອນກາງຄືນ*4	ທ່ຽງຄືນ*1|ກາງຄືນ*5|ຕອນເຊົ້າ*7|ຕອນທ່ຽງ*5|ຕອນແລງ*4|ກາງຄືນ*4
+P	208	सवेर*13|दपैहर बाद*13	सवेर*13|दपैहर बाद*13	सवेर*13|स’ञ*13
+P	209	Isuk*13|Wengi*13	Isuk*13|Wengi*13	Isuk*13|Wengi*13
+P	210	moies*13|nomëttes*13	moies*13|nomëttes*13	mo.*13|nomë.*13
+P	211	ये एम*13|पी एम*13	ये एम*13|पी एम*13	AM*13|PM*13
+P	212	makeo*13|nyiaghuo*13	makeo*13|nyiaghuo*13	makeo*13|nyiaghuo*13
+P	213	غ.م.*13|غ.و.*13	غ.م.*13|غ.و.*13	غ.م.*13|غ.و.*13
+P	214	madrugada*7|mañana*6|mediodía*1|tarde*8|noche*4	madrugada*7|mañana*6|mediodía*1|tarde*8|noche*4	madrugada*7|mañana*6|mediodía*1|tarde*8|noche*4
+P	215	ND*13|LK*13	ND*13|LK*13	ND*13|LK*13
+P	216	de la madrugada*7|de la mañana*6|del mediodía*1|de la tarde*8|de la noche*4	de la madrugada*7|de la mañana*6|del mediodía*1|de la tarde*8|de la noche*4	día*7|mañana*6|mediodía*1|tarde*8|noche*4
+P	217	मध्यरात्र*1|रात्र*4|पहाट*2|सकाळ*6|मध्यान्ह*1|दुपार*4|संध्याकाळ*5|रात्र*3	मध्यरात्र*1|रात्र*4|पहाट*2|सकाळ*6|मध्यान्ह*1|दुपार*4|संध्याकाळ*5|रात्र*3	म.रा.*1|रा*4|प*2|स*6|दु*5|सं*5|रा*3
+P	218	de la mañana*13|m.*1|de la tarde*8|de la noche*4	de la mañana*13|m.*1|de la tarde*8|de la noche*4	de la mañana*13|m.*1|de la tarde*8|de la noche*4
+P	219	Àárɔ̀*13|Ɔ̀sán*13	Àárɔ̀*13|Ɔ̀sán*13	Àárɔ̀*13|Ɔ̀sán*13
+P	220	banhaet*13|banringzgvaq*13	banhaet*13|banringzgvaq*13	AM*13|PM*13
+P	221	min.*1|du mat.*12|midi*1|de l’ap.m.*6|du soir*6	min.*1|du mat.*12|midi*1|de l’ap.m.*6|du soir*6	min.*1|du mat.*12|midi*1|de l’ap.m.*6|du soir*6
+P	222	نیمه‌شب*2|بامداد*3|صبح*8|ظهر*2|بعدازچاشت*6|شب*5	نیمه‌شب*2|بامداد*3|صبح*8|ظهر*2|بعدازچاشت*6|شب*5	نیمه‌شب*2|بامداد*3|صبح*8|ظهر*2|بعدازچاشت*6|شب*5
+P	223	minuit*1|du mat.*12|midi*1|après-midi*6|du soir*6	minuit*1|du mat.*12|midi*1|après-midi*6|du soir*6	minuit*1|mat.*12|midi*1|après-midi*6|du soir*6
+P	224	minuit*1|du matin*12|midi*1|de l’après-midi*6|du soir*6	minuit*1|du matin*12|midi*1|de l’après-midi*6|du soir*6	min.*1|matin*4|mat.*8|midi*1|ap.m.*6|soir*6
+P	225	Muhi*13|Chilo*13	Muhi*13|Chilo*13	Muhi*13|Chilo*13
+P	226	چۈشتىن بۇرۇن*13|چۈشتىن كېيىن*13	چۈشتىن بۇرۇن*13|چۈشتىن كېيىن*13	ب*13|ك*13
+P	227	AM*13|PM*13	AM*13|PM*13	m.*13|b.*13
+P	228	রাত্রি*5|ভোরবেলায়*2|সকালবেলায়*6|দুপুরবেলায়*5|বিকাল*2|সন্ধ্যাবেলায়*2|রাত্রি*4	রাত্রি*5|ভোরবেলায়*2|সকালবেলায়*6|দুপুরবেলায়*5|বিকাল*2|সন্ধ্যাবেলায়*2|রাত্রি*4	রাত্রি*5|ভোর*2|সকাল*6|দুপুর*5|বিকাল*2|সন্ধ্যা*2|রাত্রি*4
+P	229	ib*13|eb*13	ib*13|eb*13	i*13|e*13
+P	230	de la madrugada*7|de la mañana*6|mediodía*1|de la tarde*8|de la noche*4	de la madrugada*7|de la mañana*6|mediodía*1|de la tarde*8|de la noche*4	de la madrugada*7|de la mañana*6|mediodía*1|de la tarde*8|de la noche*4
+L		0
+L	ksh	1
+L	sr_ME	2
+L	fr_SY	3
+L	fr_TD	3
+L	fr_TG	3
+L	to_TO_#Latn	4
+L	se_SE	5
+L	ccp	6
+L	kgp_BR_#Latn	7
+L	fr_SN	8
+L	ff_MR_#Latn	9
+L	ar_BH	10
+L	raj	11
+L	teo	12
+L	uk_UA_#Cyrl	13
+L	zh_CN	14
+L	fr_RW	3
+L	ff_NG_#Latn	9
+L	yo_NG_#Latn	15
+L	ne_NP_#Deva	16
+L	ff_NE_#Latn	9
+L	es_419	17
+L	fr_SC	3
+L	kam_KE_#Latn	18
+L	ku_IQ_#Latn	19
+L	gaa_GH	20
+L	ar_AE	10
+L	fur_IT	21
+L	ru_UA	22
+L	ru_RU_#Cyrl	22
+L	uz_UZ	23
+L	xnr	24
+L	dsb_DE_#Latn	25
+L	ha_NE	26
+L	ms_BN	27
+L	ceb	28
+L	ha_NG	26
+L	hi__#Latn	29
+L	uz__#Latn	23
+L	shi_MA_#Latn	30
+L	xog	31
+L	ca_ES_#Latn	32
+L	twq_NE_#Latn	33
+L	kxv__#Telu	34
+L	shi_MA_#Tfng	35
+L	ar_DJ	10
+L	mzn	0
+L	smn_FI_#Latn	36
+L	sat__#Olck	37
+L	yue_MO_#Hant	38
+L	fr_TN	3
+L	ff_LR_#Latn	9
+L	bs_BA	39
+L	om_ET_#Latn	40
+L	my_MM	41
+L	en_150	42
+L	cgg	0
+L	it_IT_#Latn	43
+L	az__#Cyrl	44
+L	eo_001	45
+L	zh_HK	46
+L	bm_ML_#Latn	0
+L	ja_JP	47
+L	vai__#Vaii	0
+L	am_ET_#Ethi	48
+L	ln_CD_#Latn	49
+L	br_FR_#Latn	50
+L	pl_PL_#Latn	51
+L	zgh_MA_#Tfng	35
+L	rw_RW_#Latn	0
+L	vmw	52
+L	ro_MD	53
+L	dje_NE_#Latn	33
+L	fo_FO_#Latn	0
+L	lv_LV	54
+L	kxv	55
+L	sms_FI_#Latn	0
+L	nus_SS	56
+L	ar_DZ	10
+L	fr_WF	3
+L	chr	57
+L	be__TARASK	58
+L	xnr_IN	24
+L	ar_ER	10
+L	ur_IN	59
+L	zh_CN_#Latn	0
+L	ar_EH	10
+L	kok_IN_#Deva	60
+L	fr_VU	3
+L	shi__#Tfng	35
+L	ar_EG	10
+L	ks_IN	61
+L	sbp_TZ	62
+L	hy_AM	63
+L	mas_KE	64
+L	sr_RS	2
+L	fr_YT	3
+L	nyn_UG_#Latn	0
+L	pcm	65
+L	nso_ZA_#Latn	28
+L	ce_RU_#Cyrl	0
+L	sr_BA_#Cyrl	66
+L	kok_IN	60
+L	ckb	67
+L	ko_CN	68
+L	vmw_MZ	52
+L	ln_AO	49
+L	pt_AO	69
+L	sat_IN	37
+L	agq	70
+L	gsw	71
+L	kok__#Latn	72
+L	ro_RO	73
+L	ku_SY_#Latn	19
+L	sa_IN_#Deva	74
+L	vec_IT	0
+L	ar_JO	10
+L	naq	75
+L	pa__#Arab	0
+L	fy_NL_#Latn	0
+L	lt_LT	76
+L	szl_PL	77
+L	ca_AD	32
+L	ne_IN	16
+L	jgo_CM_#Latn	78
+L	ar_IQ	10
+L	sbp_TZ_#Latn	62
+L	ar_IL	10
+L	vai_LR_#Vaii	0
+L	pt_CV	69
+L	qu_BO	79
+L	khq_ML	80
+L	ar_LB	10
+L	guz	81
+L	ln_CD	49
+L	bo_CN_#Tibt	82
+L	tok	83
+L	ksh_DE_#Latn	1
+L	ar_LY	84
+L	ln_CG	49
+L	ff_CM_#Latn	9
+L	bez_TZ_#Latn	85
+L	bo_CN	82
+L	haw_US_#Latn	0
+L	ln_CF	49
+L	ku_TR	19
+L	sms_FI	0
+L	be_BY_#Cyrl	58
+L	pt_CH	69
+L	pt_BR	86
+L	is_IS_#Latn	87
+L	kxv__#Latn	55
+L	zh_MO	46
+L	naq_NA	75
+L	ceb_PH_#Latn	28
+L	ur_PK	59
+L	ar_KW	10
+L	ms_ID	27
+L	kab_DZ	88
+L	ku_TR_#Latn	19
+L	wo_SN_#Latn	89
+L	nds	0
+L	st_ZA	90
+L	qu_PE_#Latn	79
+L	ar_KM	10
+L	lg_UG	0
+L	cy_GB_#Latn	91
+L	lij_IT_#Latn	92
+L	pa__#Guru	93
+L	ca_FR	32
+L	syr_IQ_#Syrc	94
+L	gd_GB_#Latn	95
+L	ff_GN	9
+L	ne_NP	16
+L	vun	96
+L	kxv_IN	55
+L	lag	97
+L	pis	0
+L	sr_ME_#Cyrl	98
+L	et_EE	99
+L	tg_TJ_#Cyrl	0
+L	teo_UG	12
+L	ca_ES	32
+L	yi_UA	100
+L	sk_SK_#Latn	101
+L	ar_MA	10
+L	shn_MM_#Mymr	102
+L	ee_GH	103
+L	rwk_TZ	96
+L	nso_ZA	28
+L	gaa_GH_#Latn	20
+L	ii_CN	104
+L	dz_BT_#Tibt	105
+L	ar_MR	10
+L	pt_GW	69
+L	hu_HU_#Latn	106
+L	rof	107
+L	luo_KE	108
+L	uz_UZ_#Cyrl	109
+L	ewo_CM_#Latn	110
+L	ti_ET	111
+L	el_GR_#Grek	112
+L	ff_GW_#Latn	9
+L	su_ID_#Latn	0
+L	bn_BD_#Beng	113
+L	ti_ER	111
+L	cv_RU	114
+L	ar_PS	10
+L	ff_GM_#Latn	9
+L	pt_GQ	69
+L	kk__#Arab	115
+L	zh_SG_#Hans	14
+L	ff_GN_#Latn	9
+L	no_NO_#Latn	116
+L	ff_GH_#Latn	9
+L	ann	0
+L	ms_MY	27
+L	fy_NL	0
+L	ar_OM	10
+L	xh_ZA_#Latn	0
+L	ar_001	10
+L	kea_CV_#Latn	117
+L	sw_CD	118
+L	brx_IN_#Deva	119
+L	os_GE	120
+L	qu_EC	79
+L	kk_CN	121
+L	ko_KR	68
+L	blo_BJ	122
+L	ko_KP	68
+L	ewo	110
+L	sl_SI_#Latn	123
+L	vun_TZ_#Latn	96
+L	frr_DE_#Latn	0
+L	ur_PK_#Arab	59
+L	to_TO	4
+L	csw	124
+L	ckb_IR	67
+L	ckb_IQ	67
+L	seh_MZ	0
+L	zh_TW	46
+L	ce_RU	0
+L	km_KH	125
+L	ar_SA	84
+L	pms	0
+L	bo_IN	82
+L	mdf_RU	0
+L	ak_GH_#Latn	126
+L	twq_NE	33
+L	scn_IT_#Latn	92
+L	sd_IN_#Deva	127
+L	dav_KE_#Latn	128
+L	ca_IT	32
+L	mn_MN_#Cyrl	129
+L	gsw_LI	71
+L	zh_TW_#Hant	46
+L	ar_QA	10
+L	lag_TZ_#Latn	97
+L	xh_ZA	0
+L	ti_ET_#Ethi	111
+L	wae_CH	0
+L	zh_SG	14
+L	ar_TN	10
+L	nl_AW	130
+L	bal_PK_#Latn	117
+L	ms_SG	27
+L	kxv_IN_#Deva	131
+L	ar_TD	10
+L	twq	33
+L	sl_SI	123
+L	hr_HR_#Latn	132
+L	ro_RO_#Latn	73
+L	ar_SO	10
+L	kl_GL_#Latn	0
+L	gv_IM	79
+L	raj_IN_#Deva	11
+L	asa	133
+L	ha_NG_#Latn	26
+L	ar_SD	10
+L	yav	134
+L	mi_NZ_#Latn	0
+L	naq_NA_#Latn	75
+L	ar_SY	10
+L	ar_SS	10
+L	ff__#Adlm	135
+L	nl_CW	130
+L	ast	136
+L	en_BE	42
+L	pt_MZ	69
+L	en_BB	42
+L	sw_KE	118
+L	nmg	137
+L	no_NO_NY	138
+L	lij	92
+L	ie_EE	139
+L	cs_CZ_#Latn	140
+L	tyv	0
+L	gsw_CH_#Latn	71
+L	en_BW	42
+L	pt_MO	69
+L	en_BS	42
+L	hsb_DE	141
+L	ksh_DE	1
+L	ks_IN_#Arab	61
+L	mer_KE	142
+L	en_BM	42
+L	lmo_IT	143
+L	tok_001_#Latn	83
+L	en_BI	42
+L	haw	0
+L	en_AG	42
+L	en_AE	42
+L	tzm	144
+L	nnh	145
+L	sn_ZW_#Latn	28
+L	nqo_GN	146
+L	nl_BE	130
+L	en_AU	147
+L	nmg_CM	137
+L	en_AT	42
+L	en_AS	42
+L	pt_LU	69
+L	uz__#Arab	0
+L	nl_BQ	130
+L	en_AI	42
+L	lrc_IR_#Arab	0
+L	zh_MY_#Hant	46
+L	en_DG	42
+L	ky_KG_#Cyrl	148
+L	en_DE	42
+L	rwk	96
+L	sr_RS_#Latn	0
+L	su_ID	0
+L	rof_TZ_#Latn	107
+L	en_CZ	42
+L	ar_YE	10
+L	jgo	78
+L	lkt	0
+L	zh_MO_#Hant	46
+L	wae	0
+L	en_DM	42
+L	tok_001	83
+L	en_DK	42
+L	it_CH	43
+L	en_CH	42
+L	pa_IN	93
+L	en_CC	42
+L	mai_IN_#Deva	149
+L	en_CA	150
+L	kea_CV	117
+L	sr_RS_#Cyrl	2
+L	hu_HU	106
+L	pt_BR_#Latn	86
+L	sn_ZW	28
+L	en_BZ	42
+L	en_CY	42
+L	ksf_CM	151
+L	en_CX	42
+L	su__#Latn	0
+L	gsw_FR	71
+L	en_CM	42
+L	kk_KZ	121
+L	en_CK	42
+L	saq_KE	152
+L	en_FK	42
+L	en_FJ	42
+L	sd_IN	153
+L	en_FI	42
+L	bm_ML	0
+L	mk_MK_#Cyrl	154
+L	ga_GB	155
+L	tk_TM	156
+L	ki_KE	157
+L	oc_FR_#Latn	0
+L	kok_IN_#Latn	72
+L	nqo	146
+L	lmo	143
+L	os_RU	120
+L	szl_PL_#Latn	77
+L	tyv_RU_#Cyrl	0
+L	en_FR	42
+L	dav_KE	128
+L	en_FM	42
+L	fo_DK	0
+L	or_IN_#Orya	0
+L	dje_NE	33
+L	en_EE	42
+L	si_LK_#Sinh	158
+L	qu_PE	79
+L	agq_CM	70
+L	ff_SN	9
+L	sr__#Latn	0
+L	en_ES	42
+L	sr_XK_#Cyrl	159
+L	om_ET	40
+L	en_ER	42
+L	az_AZ_#Cyrl	44
+L	pt_PT	69
+L	sq_AL	160
+L	ast_ES	136
+L	ee_TG	103
+L	tr_CY	161
+L	luy_KE	79
+L	bs__#Latn	39
+L	az_AZ_#Latn	162
+L	en_HK	42
+L	ff_SL_#Latn	9
+L	ses_ML	80
+L	ff_SN_#Latn	9
+L	ga_IE	155
+L	dz_BT	105
+L	pt_TL	69
+L	nso	28
+L	nus_SS_#Latn	56
+L	cgg_UG_#Latn	0
+L	pt_ST	69
+L	gsw_CH	71
+L	kln_KE	163
+L	nnh_CM	145
+L	ka_GE_#Geor	164
+L	en_HU	42
+L	te_IN	165
+L	en_GM	42
+L	fo_FO	0
+L	saq_KE_#Latn	152
+L	bg_BG	166
+L	en_GI	42
+L	en_GH	42
+L	ig_NG	167
+L	en_GG	42
+L	en_GE	42
+L	en_GD	42
+L	teo_KE	12
+L	rm_CH_#Latn	28
+L	yue_CN_#Hans	168
+L	en_GB	42
+L	ebu_KE	169
+L	el_CY	112
+L	en_GY	42
+L	en_GU	42
+L	en_GS	42
+L	yi_UA_#Hebr	100
+L	sv_SE_#Latn	170
+L	rn_BI_#Latn	171
+L	en_JP	42
+L	jmc	96
+L	en_JM	42
+L	ebu_KE_#Latn	169
+L	ckb_IQ_#Arab	67
+L	sr_XK_#Latn	0
+L	vai_LR	0
+L	en_JE	42
+L	om_KE	40
+L	nus	56
+L	mk_MK	154
+L	smn_FI	36
+L	fr_FR_#Latn	3
+L	nyn_UG	0
+L	hi_IN_#Latn	29
+L	dav	128
+L	lu_CD	172
+L	pa_PK	93
+L	teo_UG_#Latn	12
+L	ceb_PH	28
+L	zu_ZA	173
+L	ml_IN_#Mlym	174
+L	lrc	0
+L	af_ZA_#Latn	175
+L	en_IO	42
+L	lrc_IR	0
+L	en_IN	42
+L	lrc_IQ	0
+L	en_IM	42
+L	en_IL	42
+L	bas_CM_#Latn	176
+L	pms_IT_#Latn	0
+L	it_IT	43
+L	zh_HK_#Hant	46
+L	en_IE	42
+L	sah_RU_#Cyrl	177
+L	en_ID	42
+L	ca_ES_VALENCIA	32
+L	nn_NO	138
+L	rn_BI	171
+L	kn_IN_#Knda	178
+L	luo_KE_#Latn	108
+L	en_IT	42
+L	sw_UG	118
+L	en_LR	42
+L	mgo_CM_#Latn	0
+L	kw_GB_#Latn	79
+L	shi_MA	35
+L	khq_ML_#Latn	80
+L	nl_NL	130
+L	en_LC	42
+L	so_DJ	179
+L	sah	177
+L	sw_TZ	118
+L	sw_TZ_#Latn	118
+L	en_LV	42
+L	en_LT	42
+L	en_LS	42
+L	saq	152
+L	en_KN	42
+L	st_ZA_#Latn	90
+L	pcm_NG_#Latn	65
+L	eo_001_#Latn	45
+L	sat	37
+L	kxv__#Orya	180
+L	en_KI	42
+L	dyo_SN	0
+L	en_KE	42
+L	ia_001	0
+L	dua_CM	181
+L	kgp_BR	7
+L	bal__#Latn	117
+L	be_BY	58
+L	en_KY	42
+L	mg_MG_#Latn	0
+L	mer_KE_#Latn	142
+L	el_GR	112
+L	cy_GB	91
+L	sbp	62
+L	nyn	0
+L	en_NR	42
+L	en_NO	42
+L	luo	108
+L	fil	182
+L	en_NL	42
+L	lu_CD_#Latn	172
+L	mfe_MU_#Latn	0
+L	vi_VN_#Latn	183
+L	en_NG	42
+L	jmc_TZ	96
+L	en_NF	42
+L	sd__#Arab	153
+L	luy	79
+L	th_TH_TH_#u-nu-thai	184
+L	bas	176
+L	en_NZ	42
+L	scn	92
+L	tg_TJ	0
+L	en_NU	42
+L	en_MS	42
+L	en_MP	42
+L	en_MO	42
+L	af	175
+L	ak	126
+L	yue_CN	38
+L	en_MH	42
+L	am	48
+L	en_MG	42
+L	xog_UG	31
+L	ar	10
+L	as	185
+L	en_NA	42
+L	mgh_MZ_#Latn	186
+L	az	162
+L	sd_PK	153
+L	en_MY	42
+L	en_MW	42
+L	en_MV	42
+L	mni_IN	187
+L	so_ET	179
+L	en_MU	42
+L	ba	0
+L	en_MT	42
+L	en_PT	42
+L	be	58
+L	ki_KE_#Latn	157
+L	en_PR	42
+L	bg	166
+L	bua_RU_#Cyrl	0
+L	en_PN	42
+L	sq_MK	160
+L	en_PL	42
+L	en_PK	42
+L	bm	0
+L	bn	113
+L	bo	82
+L	en_PH	42
+L	en_PG	42
+L	br	50
+L	ff_SL_#Adlm	135
+L	bs	39
+L	ff_SN_#Adlm	135
+L	kxv_IN_#Orya	180
+L	seh	0
+L	de_AT	188
+L	haw_US	0
+L	mi_NZ	0
+L	ca	32
+L	en_PW	42
+L	ses	80
+L	ks__#Arab	61
+L	ce	0
+L	gl_ES	189
+L	ta_IN	190
+L	cs	140
+L	bgc_IN_#Deva	191
+L	yrl	192
+L	mua_CM_#Latn	193
+L	cv	114
+L	lv_LV_#Latn	54
+L	rof_TZ	107
+L	cy	91
+L	tn_BW	28
+L	da	194
+L	en_RW	42
+L	de	188
+L	te_IN_#Telu	165
+L	ksf_CM_#Latn	151
+L	so_KE	179
+L	nds_DE	0
+L	ka_GE	164
+L	mg_MG	0
+L	ff_LR_#Adlm	135
+L	de_CH	188
+L	en_RO	42
+L	bem	195
+L	en_SI	42
+L	nl_SX	130
+L	en_SH	42
+L	en_SG	42
+L	en_SE	42
+L	ccp_IN	6
+L	en_SD	42
+L	ia_001_#Latn	0
+L	en_SC	42
+L	bez	85
+L	dz	105
+L	en_SB	42
+L	ta_LK	190
+L	vi_VN	183
+L	dje	33
+L	ee	103
+L	el	112
+L	en	42
+L	bem_ZM	195
+L	de_BE	188
+L	bua_RU	0
+L	eo	45
+L	es	17
+L	nl_SR	130
+L	et	99
+L	eu	196
+L	ff__#Latn	9
+L	shi	35
+L	af_NA	175
+L	hsb	141
+L	shn	102
+L	asa_TZ	133
+L	jgo_CM	78
+L	kxv__#Deva	131
+L	fa	197
+L	yrl_VE	192
+L	ann_NG_#Latn	0
+L	sat_IN_#Olck	37
+L	bs__#Cyrl	198
+L	bgc	191
+L	syr_SY	94
+L	en_TZ	42
+L	ff	9
+L	dsb_DE	25
+L	fi	199
+L	en_TV	42
+L	en_TT	42
+L	zh__#Latn	0
+L	yue	38
+L	cs_CZ	140
+L	fo	0
+L	bez_TZ	85
+L	en_TO	42
+L	sr_BA_#Latn	200
+L	fr	3
+L	pl_PL	51
+L	en_TK	42
+L	mas_KE_#Latn	64
+L	fy	0
+L	en_UG	42
+L	brx_IN	119
+L	es_ES_#Latn	17
+L	kk_KZ_#Cyrl	121
+L	en_UA	42
+L	ga	155
+L	agq_CM_#Latn	70
+L	gd	95
+L	tzm_MA	144
+L	xog_UG_#Latn	31
+L	en_SX	42
+L	ff_MR_#Adlm	135
+L	gl	189
+L	en_SS	42
+L	bho	201
+L	fi_FI	199
+L	yrl_BR_#Latn	192
+L	de_DE	188
+L	en_SL	42
+L	en_SK	42
+L	gu	202
+L	ta_MY	190
+L	gv	79
+L	ff_NG_#Adlm	135
+L	dua_CM_#Latn	181
+L	ee_GH_#Latn	103
+L	raj_IN	11
+L	it_SM	43
+L	tt_RU	0
+L	ff_NE_#Adlm	135
+L	en_TC	42
+L	ha	26
+L	as_IN	185
+L	he	203
+L	en_SZ	42
+L	hi	204
+L	uz_UZ_#Latn	23
+L	mzn_IR_#Arab	0
+L	en_VU	42
+L	uz_AF_#Arab	0
+L	hsb_DE_#Latn	141
+L	hr	132
+L	csw_CA	124
+L	ht	205
+L	hu	106
+L	hy	63
+L	csw_CA_#Cans	124
+L	ia	0
+L	id	206
+L	ie	139
+L	ig	167
+L	sah_RU	177
+L	wae_CH_#Latn	0
+L	ii	104
+L	sr_ME_#Latn	200
+L	nmg_CM_#Latn	137
+L	lo_LA_#Laoo	207
+L	frr	0
+L	it_VA	43
+L	en_US	42
+L	km_KH_#Khmr	125
+L	is	87
+L	en_001	42
+L	luy_KE_#Latn	79
+L	it	43
+L	en_UM	42
+L	os_GE_#Cyrl	120
+L	br_FR	50
+L	en_VI	42
+L	en_VG	42
+L	ja	47
+L	vai_LR_#Latn	0
+L	en_VC	42
+L	doi	208
+L	mdf_RU_#Cyrl	0
+L	de_IT	188
+L	kok__#Deva	60
+L	tr_TR	161
+L	jv	209
+L	lb_LU	210
+L	ks__#Deva	211
+L	sd__#Deva	127
+L	es_BR	17
+L	ksb_TZ_#Latn	212
+L	yue_HK	38
+L	es_BO	17
+L	mai	149
+L	smn	36
+L	ka	164
+L	sms	0
+L	bg_BG_#Cyrl	166
+L	ps_AF	213
+L	ki	157
+L	mas	64
+L	kk	121
+L	kl	0
+L	km	125
+L	kn	178
+L	ko	68
+L	blo	122
+L	ks	61
+L	en_WS	42
+L	ku	19
+L	kw	79
+L	ky	148
+L	zu_ZA_#Latn	173
+L	es_AR	214
+L	eu_ES	196
+L	so_SO_#Latn	179
+L	lb	210
+L	ar_EG_#Arab	10
+L	lg	0
+L	nqo_GN_#Nkoo	146
+L	fur	21
+L	sg_CF	215
+L	ln	49
+L	rwk_TZ_#Latn	96
+L	lo	207
+L	lag_TZ	97
+L	seh_MZ_#Latn	0
+L	lt	76
+L	en_ZW	42
+L	lu	172
+L	lv	54
+L	xnr_IN_#Deva	24
+L	so_SO	179
+L	yav_CM	134
+L	asa_TZ_#Latn	133
+L	nds_DE_#Latn	0
+L	es_CU	17
+L	de_LI	188
+L	dyo_SN_#Latn	0
+L	oc_FR	0
+L	lb_LU_#Latn	210
+L	es_DO	216
+L	guz_KE_#Latn	81
+L	mg	0
+L	mi	0
+L	mk	154
+L	ml	174
+L	bn_BD	113
+L	mn	129
+L	ht_HT_#Latn	205
+L	mr	217
+L	ms	27
+L	mt	58
+L	es_BZ	17
+L	my	41
+L	mdf	0
+L	chr_US	57
+L	oc_ES	0
+L	dsb	25
+L	es_CR	17
+L	en_ZM	42
+L	nb	116
+L	es_CO	218
+L	nd	0
+L	ta_SG	190
+L	ne	16
+L	es_CL	17
+L	mr_IN	217
+L	mt_MT	58
+L	uz_AF	23
+L	nl	130
+L	en_ZA	42
+L	nn	138
+L	no	116
+L	ja_JP_#Jpan	47
+L	lmo_IT_#Latn	143
+L	hy_AM_#Armn	63
+L	nds_NL	0
+L	pis_SB_#Latn	0
+L	fi_FI_#Latn	199
+L	ga_IE_#Latn	155
+L	ja_JP_JP_#u-ca-japanese	47
+L	kab	88
+L	oc	0
+L	kam	18
+L	hi_IN	204
+L	tzm_MA_#Latn	144
+L	mer	142
+L	om	40
+L	or	0
+L	es_EC	17
+L	ms_MY_#Latn	27
+L	de_LU	188
+L	sq_XK	160
+L	os	120
+L	es_EA	17
+L	yo_BJ	219
+L	kln_KE_#Latn	163
+L	za_CN	220
+L	da_DK	194
+L	nd_ZW_#Latn	0
+L	sv_AX	170
+L	mfe	0
+L	pa_IN_#Guru	93
+L	ru_BY	22
+L	dua	181
+L	pa	93
+L	ccp_BD	6
+L	es_ES	17
+L	frr_DE	0
+L	mt_MT_#Latn	58
+L	am_ET	48
+L	nn_NO_#Latn	138
+L	kn_IN	178
+L	pl	51
+L	fr_CG	3
+L	fr_CH	221
+L	blo_BJ_#Latn	122
+L	fr_CI	3
+L	ps	213
+L	pt	86
+L	kkj_CM_#Latn	0
+L	fr_CM	3
+L	az__#Latn	162
+L	sg_CF_#Latn	215
+L	mas_TZ	64
+L	lo_LA	207
+L	mgh_MZ	186
+L	da_GL	194
+L	kk_CN_#Arab	115
+L	tyv_RU	0
+L	fa_AF	222
+L	fil_PH	182
+L	mgh	186
+L	mgo	0
+L	lkt_US	0
+L	ksb_TZ	212
+L	fr_CA	223
+L	es_HN	17
+L	fr_CD	224
+L	fr_CF	3
+L	az_AZ	162
+L	fr_BF	3
+L	ku__#Latn	19
+L	af_ZA	175
+L	fr_BI	3
+L	fr_BJ	3
+L	qu	79
+L	fr_BL	3
+L	brx	119
+L	kde	225
+L	kl_GL	0
+L	es_GT	17
+L	es_GQ	17
+L	kk__#Cyrl	121
+L	rm	28
+L	rn	171
+L	ro	73
+L	fr_BE	3
+L	ru	22
+L	guz_KE	81
+L	ff_BF_#Adlm	135
+L	rw	0
+L	nb_NO	116
+L	kea	117
+L	gd_GB	95
+L	pcm_NG	65
+L	ug_CN	226
+L	sa	74
+L	sv_FI	170
+L	gl_ES_#Latn	189
+L	sc	227
+L	nl_NL_#Latn	130
+L	sd	153
+L	fr_DZ	3
+L	se	5
+L	gv_IM_#Latn	79
+L	sg	215
+L	si	158
+L	sk	101
+L	sl	123
+L	bho_IN	201
+L	lij_IT	92
+L	sn	28
+L	so	179
+L	sq	160
+L	sr	2
+L	bn_IN	228
+L	si_LK	158
+L	st	90
+L	fr_DJ	3
+L	su	0
+L	sv	170
+L	sw	118
+L	es_IC	17
+L	shn_TH	102
+L	ta	190
+L	bs_BA_#Cyrl	198
+L	bua	0
+L	te	165
+L	tg	0
+L	th	184
+L	ti	111
+L	vmw_MZ_#Latn	52
+L	tk	156
+L	el__POLYTON	112
+L	syr_IQ	94
+L	tn	28
+L	dyo	0
+L	to	4
+L	or_IN	0
+L	tr	161
+L	en_US_POSIX	42
+L	tt	0
+L	zh_MY_#Hans	14
+L	fr_GN	3
+L	tk_TM_#Latn	156
+L	fr_GP	3
+L	sk_SK	101
+L	fr_GQ	3
+L	lkt_US_#Latn	0
+L	ks_IN_#Deva	211
+L	ps_AF_#Arab	213
+L	ug	226
+L	ig_NG_#Latn	167
+L	zh_MO_#Hans	14
+L	kgp	7
+L	uk	13
+L	fr_GA	3
+L	fr_GF	3
+L	shn_MM	102
+L	ur	59
+L	se_FI	229
+L	gu_IN	202
+L	eu_ES_#Latn	196
+L	uz	23
+L	ak_GH	126
+L	he_IL_#Hebr	203
+L	fr_FR	3
+L	as_IN_#Beng	185
+L	vi	183
+L	zh__#Hant	46
+L	khq	80
+L	zh__#Hans	14
+L	kab_DZ_#Latn	88
+L	mfe_MU	0
+L	sr__#Cyrl	2
+L	ff_BF_#Latn	9
+L	yrl_CO	192
+L	bem_ZM_#Latn	195
+L	gaa	20
+L	es_NI	17
+L	ru_KZ	22
+L	syr	94
+L	ann_NG	0
+L	he_IL	203
+L	bho_IN_#Deva	201
+L	fur_IT_#Latn	21
+L	my_MM_#Mymr	41
+L	lt_LT_#Latn	76
+L	wo	89
+L	zgh	35
+L	yrl_BR	192
+L	ast_ES_#Latn	136
+L	vun_TZ	96
+L	ewo_CM	110
+L	kkj_CM	0
+L	jmc_TZ_#Latn	96
+L	szl	77
+L	fr_HT	205
+L	mni	187
+L	ru_KG	22
+L	sr_BA	2
+L	bas_CM	176
+L	ba_RU	0
+L	vec_IT_#Latn	0
+L	xh	0
+L	yue__#Hant	38
+L	es_MX	17
+L	hr_BA	132
+L	et_EE_#Latn	99
+L	yue__#Hans	168
+L	hi_IN_#Deva	204
+L	pa_PK_#Arab	0
+L	wo_SN	89
+L	es_PH	17
+L	ps_PK	213
+L	kkj	0
+L	fa_IR	197
+L	tr_TR_#Latn	161
+L	es_PE	17
+L	sd_PK_#Arab	153
+L	mgo_CM	0
+L	yi	100
+L	yo	15
+L	tn_ZA	28
+L	mai_IN	149
+L	es_PY	17
+L	mni_IN_#Beng	187
+L	fr_KM	3
+L	vai	0
+L	es_PR	17
+L	za_CN_#Latn	220
+L	ff_GN_#Adlm	135
+L	ff_GM_#Adlm	135
+L	mr_IN_#Deva	217
+L	za	220
+L	ff_GH_#Adlm	135
+L	ht_HT	205
+L	yue_CN_#Hant	38
+L	kln	163
+L	ccp_BD_#Cakm	6
+L	zh	14
+L	ru_MD	22
+L	es_PA	230
+L	mn_MN	129
+L	pis_SB	0
+L	ml_IN	174
+L	nb_SJ	116
+L	ff_GW_#Adlm	135
+L	da_DK_#Latn	194
+L	sr_CS	2
+L	zu	173
+L	nd_ZW	0
+L	fr_MQ	3
+L	fr_MR	3
+L	fr_MU	3
+L	id_ID	206
+L	zgh_MA	35
+L	scn_IT	92
+L	sc_IT	227
+L	ba_RU_#Cyrl	0
+L	fr_MA	3
+L	vai__#Latn	0
+L	fr_MC	3
+L	fr_MF	3
+L	doi_IN	208
+L	jv_ID	209
+L	fr_MG	3
+L	se_NO_#Latn	5
+L	fr_ML	3
+L	ta_IN_#Taml	190
+L	kam_KE	18
+L	jv_ID_#Latn	209
+L	sc_IT_#Latn	227
+L	fr_LU	3
+L	sq_AL_#Latn	160
+L	no_NO	116
+L	mzn_IR	0
+L	kw_GB	79
+L	zh_HK_#Hans	14
+L	yo_NG	15
+L	ky_KG	148
+L	ebu	169
+L	ko_KR_#Kore	68
+L	rw_RW	0
+L	kok	60
+L	ii_CN_#Yiii	104
+L	nnh_CM_#Latn	145
+L	ug_CN_#Arab	226
+L	chr_US_#Cher	57
+L	de_DE_#Latn	188
+L	uk_UA	13
+L	vec	0
+L	mni__#Beng	187
+L	kde_TZ_#Latn	225
+L	pms_IT	0
+L	st_LS	90
+L	kde_TZ	225
+L	ie_EE_#Latn	139
+L	ff_CM_#Adlm	135
+L	cv_RU_#Cyrl	114
+L	hr_HR	132
+L	se_NO	5
+L	fil_PH_#Latn	182
+L	ha_GH	26
+L	fr_NC	3
+L	kxv_IN_#Telu	34
+L	fr_NE	3
+L	mua	193
+L	shi__#Latn	30
+L	es_SV	17
+L	sv_SE	170
+L	lg_UG_#Latn	0
+L	id_ID_#Latn	206
+L	sa_IN	74
+L	bs_BA_#Latn	39
+L	zh_CN_#Hans	14
+L	fr_RE	8
+L	yue_HK_#Hant	38
+L	rm_CH	28
+L	mua_CM	193
+L	fa_IR_#Arab	197
+L	nb_NO_#Latn	116
+L	uz__#Cyrl	109
+L	tt_RU_#Cyrl	0
+L	th_TH	184
+L	tn_ZA_#Latn	28
+L	kxv_IN_#Latn	55
+L	es_US	17
+L	is_IS	87
+L	yav_CM_#Latn	134
+L	en_US_#Latn	42
+L	th_TH_#Thai	184
+L	es_VE	17
+L	fr_PF	3
+L	ru_RU	22
+L	cgg_UG	0
+L	bgc_IN	191
+L	ses_ML_#Latn	80
+L	doi_IN_#Deva	208
+L	fr_PM	3
+L	ksb	212
+L	es_UY	17
+L	gu_IN_#Gujr	202
+L	ksf	151

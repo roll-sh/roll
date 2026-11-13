@@ -28,7 +28,7 @@ use serde_json::Value;
 /// Delivery targets for GitHub: `gh_<repo id>`.
 pub(crate) const PREFIX: &str = "gh_";
 /// Event kinds GitHub may need to hear about.
-const KINDS: [&str; 5] = ["change", "work", "check", "review", "thread"];
+const KINDS: [&str; 6] = ["change", "work", "check", "review", "thread", "preview"];
 /// The longest wait between attempts while GitHub is down: a GitHub that comes back hears
 /// everything within it.
 pub(crate) const MAX_BACKOFF_MS: u64 = 5 * 60 * 1000;
@@ -51,6 +51,8 @@ pub(crate) enum Job {
     Review { review: String },
     /// Comments (and the resolution) of a thread on a pull request's change.
     Thread { thread: String },
+    /// A pull request's preview: its comment, commit status and deployment.
+    Preview { change: String },
 }
 
 impl Job {
@@ -61,6 +63,7 @@ impl Job {
             Job::CheckRun { .. } => "check_run",
             Job::Review { .. } => "review",
             Job::Thread { .. } => "thread",
+            Job::Preview { .. } => "preview",
         }
     }
 }
@@ -115,6 +118,10 @@ fn job_for(c: &Conn<'_>, kind: &str, data: &Value) -> code_sql::Result<Option<Jo
         },
         "thread" => match (s(&data["id"]), s(&data["change"])) {
             (Some(id), Some(change)) if has_pr(c, &change)? => Some(Job::Thread { thread: id }),
+            _ => None,
+        },
+        "preview" => match s(&data["change"]) {
+            Some(change) if has_pr(c, &change)? => Some(Job::Preview { change }),
             _ => None,
         },
         _ => None,
@@ -224,6 +231,10 @@ async fn run(code: &Code, hub: &Hub, job: Job) -> crate::Result<()> {
         }
         Job::Review { review } => super::reviews::post_review(code, hub, &review).await,
         Job::Thread { thread } => super::reviews::post_thread(code, hub, &thread).await,
+        Job::Preview { change } => match code.db.change(&change)? {
+            Some(_) => super::notify::preview(code, hub, &code.change_or_404(&change)?).await,
+            None => Ok(()),
+        },
     }
 }
 

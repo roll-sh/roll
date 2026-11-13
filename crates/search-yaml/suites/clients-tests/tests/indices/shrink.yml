@@ -1,0 +1,54 @@
+---
+requires:
+  serverless: false
+  stack: true
+---
+setup:
+  - do:
+      indices.create:
+        index: shrink_source
+        body:
+          settings:
+            # ensure everything is allocated on the same data node
+            index.number_of_shards: 2
+            index.number_of_replicas: 0
+  - do:
+      index:
+        index: "shrink_source"
+        id:    "1"
+        body:  { "foo": "hello world" }
+  # make it read-only
+  - do:
+      indices.put_settings:
+        index: "shrink_source"
+        body:
+          index.blocks.write: true
+          index.number_of_replicas: 0
+---
+teardown:
+  - do:
+      indices.delete:
+        index: "shrink_source"
+        ignore: 404
+  - do:
+      indices.delete:
+        index: "shrink_target"
+        ignore: 404
+---
+'indices.shrink':
+  - do:
+      indices.shrink:
+        index: "shrink_source"
+        target: "shrink_target"
+        wait_for_active_shards: 1
+        master_timeout: 10s
+        body:
+          settings:
+            index.number_of_replicas: 0
+  - do:
+      get:
+        index: shrink_target
+        id:    "1"
+  - match: { _index:   shrink_target }
+  - match: { _id:      "1"     }
+  - match: { _source:  { foo: "hello world" } }

@@ -1,0 +1,7133 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['l']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 8.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l'].size() + (doc['l'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['i']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 7.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['i'].size() + (doc['i'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['sh']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 3.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['sh'].size() + (doc['sh'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['by']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['by'].size() + (doc['by'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['d']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.5
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['d'].size() + (doc['d'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['f']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.10000000149011612
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['f'].size() + (doc['f'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['hf']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0999755859375
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['hf'].size() + (doc['hf'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['sf']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.23
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['sf'].size() + (doc['sf'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['ul']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": -1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['ul'].size() + (doc['ul'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['ver']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['ver'].size() + (doc['ver'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['v']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+       "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+       "for (def x : doc['v']) { ",
+       "^---- HERE"
+      ],
+      "script": "double s = 0; for (def x : doc['v']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 14,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+     "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+     "for (def x : doc['v']) { ",
+     "^---- HERE"
+    ],
+    "script": "double s = 0; for (def x : doc['v']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 14,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "accessing a vector field's value through 'get' or 'value' is not supported, use 'vectorValue' or 'magnitude' instead."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['v'].size() + (doc['v'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['ip']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['ip'].size() + (doc['ip'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['bin']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['bin'].size() + (doc['bin'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['g']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['g'].size() + (doc['g'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['k']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['k'].size() + (doc['k'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['dt']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['dt'].size() + (doc['dt'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['dn']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['dn'].size() + (doc['dn'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['b']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['b'].size() + (doc['b'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['t']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "for (def x : doc['t']) { ",
+       "                 ^---- HERE"
+      ],
+      "script": "double s = 0; for (def x : doc['t']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 31,
+       "start": 14,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "for (def x : doc['t']) { ",
+     "                 ^---- HERE"
+    ],
+    "script": "double s = 0; for (def x : doc['t']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 31,
+     "start": 14,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Fielddata is disabled on [t] in [painless-docs]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [t] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['t'].size() + (doc['t'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "return doc['t'].size() + (doc['t'].isEmpty() ? 100 : 0)",
+       "           ^---- HERE"
+      ],
+      "script": "return doc['t'].size() + (doc['t'].isEmpty() ? 100 : 0)",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 55
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.TextFieldMapper$TextFieldType.fielddataBuilder(TextFieldMapper.java:1550)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.fielddata.IndexFieldDataService.getForField(IndexFieldDataService.java:92)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.SearchLookup.getForField(SearchLookup.java:160)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:156)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "return doc['t'].size() + (doc['t'].isEmpty() ? 100 : 0)",
+     "           ^---- HERE"
+    ],
+    "script": "return doc['t'].size() + (doc['t'].isEmpty() ? 100 : 0)",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 55
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Fielddata is disabled on [t] in [painless-docs]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [t] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['obj.x']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 9.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['obj.x'].size() + (doc['obj.x'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['tag']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['tag'].size() + (doc['tag'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['nope']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "for (def x : doc['nope']) { ",
+       "                 ^---- HERE"
+      ],
+      "script": "double s = 0; for (def x : doc['nope']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 31,
+       "start": 14,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "for (def x : doc['nope']) { ",
+     "                 ^---- HERE"
+    ],
+    "script": "double s = 0; for (def x : doc['nope']) { s += x instanceof Number ? x.doubleValue() : 1 } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 31,
+     "start": 14,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No field found for [nope] in mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['nope'].size() + (doc['nope'].isEmpty() ? 100 : 0)",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "return doc['nope'].size() + (doc['nope'].isEmpty() ? 100 : 0)",
+       "           ^---- HERE"
+      ],
+      "script": "return doc['nope'].size() + (doc['nope'].isEmpty() ? 100 : 0)",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 61
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "return doc['nope'].size() + (doc['nope'].isEmpty() ? 100 : 0)",
+     "           ^---- HERE"
+    ],
+    "script": "return doc['nope'].size() + (doc['nope'].isEmpty() ? 100 : 0)",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 61
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No field found for [nope] in mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['l']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 8.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['l']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 8.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['l']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 8.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['l']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (String x : doc['l']) { ",
+       "^---- HERE"
+      ],
+      "script": "String s = ''; for (String x : doc['l']) { s += x } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 15,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (String x : doc['l']) { ",
+     "^---- HERE"
+    ],
+    "script": "String s = ''; for (String x : doc['l']) { s += x } return s.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 15,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot explicitly cast def [long] to java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['l']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['d']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.5
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['d']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['d']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['d']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (String x : doc['d']) { ",
+       "^---- HERE"
+      ],
+      "script": "String s = ''; for (String x : doc['d']) { s += x } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 15,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (String x : doc['d']) { ",
+     "^---- HERE"
+    ],
+    "script": "String s = ''; for (String x : doc['d']) { s += x } return s.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 15,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot explicitly cast def [double] to java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['d']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['k']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (double x : doc['k']) { ",
+       "^---- HERE"
+      ],
+      "script": "double s = 0; for (double x : doc['k']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 14,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (double x : doc['k']) { ",
+     "^---- HERE"
+    ],
+    "script": "double s = 0; for (double x : doc['k']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 14,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.lang.String] to double"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['k']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (long x : doc['k']) { ",
+       "^---- HERE"
+      ],
+      "script": "long s = 0; for (long x : doc['k']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 12,
+       "end": 38
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (long x : doc['k']) { ",
+     "^---- HERE"
+    ],
+    "script": "long s = 0; for (long x : doc['k']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 12,
+     "end": 38
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.lang.String] to long"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['k']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (int x : doc['k']) { ",
+       "^---- HERE"
+      ],
+      "script": "int s = 0; for (int x : doc['k']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 11,
+       "end": 36
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (int x : doc['k']) { ",
+     "^---- HERE"
+    ],
+    "script": "int s = 0; for (int x : doc['k']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 11,
+     "end": 36
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.lang.String] to int"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['k']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['k']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['dt']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (double x : doc['dt']) { ",
+       "^---- HERE"
+      ],
+      "script": "double s = 0; for (double x : doc['dt']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 14,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (double x : doc['dt']) { ",
+     "^---- HERE"
+    ],
+    "script": "double s = 0; for (double x : doc['dt']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 14,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.time.ZonedDateTime] to double"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['dt']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (long x : doc['dt']) { ",
+       "^---- HERE"
+      ],
+      "script": "long s = 0; for (long x : doc['dt']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 12,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (long x : doc['dt']) { ",
+     "^---- HERE"
+    ],
+    "script": "long s = 0; for (long x : doc['dt']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 12,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.time.ZonedDateTime] to long"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['dt']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (int x : doc['dt']) { ",
+       "^---- HERE"
+      ],
+      "script": "int s = 0; for (int x : doc['dt']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 11,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (int x : doc['dt']) { ",
+     "^---- HERE"
+    ],
+    "script": "int s = 0; for (int x : doc['dt']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 11,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.time.ZonedDateTime] to int"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['dt']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (String x : doc['dt']) { ",
+       "^---- HERE"
+      ],
+      "script": "String s = ''; for (String x : doc['dt']) { s += x } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 15,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (String x : doc['dt']) { ",
+     "^---- HERE"
+    ],
+    "script": "String s = ''; for (String x : doc['dt']) { s += x } return s.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 15,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot explicitly cast def [java.time.ZonedDateTime] to java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['dt']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['b']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (double x : doc['b']) { ",
+       "^---- HERE"
+      ],
+      "script": "double s = 0; for (double x : doc['b']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 14,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (double x : doc['b']) { ",
+     "^---- HERE"
+    ],
+    "script": "double s = 0; for (double x : doc['b']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 14,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [boolean] to double"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['b']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (long x : doc['b']) { ",
+       "^---- HERE"
+      ],
+      "script": "long s = 0; for (long x : doc['b']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 12,
+       "end": 38
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (long x : doc['b']) { ",
+     "^---- HERE"
+    ],
+    "script": "long s = 0; for (long x : doc['b']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 12,
+     "end": 38
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [boolean] to long"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['b']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (int x : doc['b']) { ",
+       "^---- HERE"
+      ],
+      "script": "int s = 0; for (int x : doc['b']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 11,
+       "end": 36
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (int x : doc['b']) { ",
+     "^---- HERE"
+    ],
+    "script": "int s = 0; for (int x : doc['b']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 11,
+     "end": 36
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [boolean] to int"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['b']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (String x : doc['b']) { ",
+       "^---- HERE"
+      ],
+      "script": "String s = ''; for (String x : doc['b']) { s += x } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 15,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (String x : doc['b']) { ",
+     "^---- HERE"
+    ],
+    "script": "String s = ''; for (String x : doc['b']) { s += x } return s.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 15,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot explicitly cast def [boolean] to java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['b']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['g']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (double x : doc['g']) { ",
+       "^---- HERE"
+      ],
+      "script": "double s = 0; for (double x : doc['g']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 14,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (double x : doc['g']) { ",
+     "^---- HERE"
+    ],
+    "script": "double s = 0; for (double x : doc['g']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 14,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [org.elasticsearch.common.geo.GeoPoint] to double"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['g']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (long x : doc['g']) { ",
+       "^---- HERE"
+      ],
+      "script": "long s = 0; for (long x : doc['g']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 12,
+       "end": 38
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (long x : doc['g']) { ",
+     "^---- HERE"
+    ],
+    "script": "long s = 0; for (long x : doc['g']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 12,
+     "end": 38
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [org.elasticsearch.common.geo.GeoPoint] to long"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['g']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (int x : doc['g']) { ",
+       "^---- HERE"
+      ],
+      "script": "int s = 0; for (int x : doc['g']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 11,
+       "end": 36
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (int x : doc['g']) { ",
+     "^---- HERE"
+    ],
+    "script": "int s = 0; for (int x : doc['g']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 11,
+     "end": 36
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [org.elasticsearch.common.geo.GeoPoint] to int"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['g']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (String x : doc['g']) { ",
+       "^---- HERE"
+      ],
+      "script": "String s = ''; for (String x : doc['g']) { s += x } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 15,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (String x : doc['g']) { ",
+     "^---- HERE"
+    ],
+    "script": "String s = ''; for (String x : doc['g']) { s += x } return s.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 15,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot explicitly cast def [org.elasticsearch.common.geo.GeoPoint] to java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['g']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['v']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+       "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+       "for (double x : doc['v']) { ",
+       "^---- HERE"
+      ],
+      "script": "double s = 0; for (double x : doc['v']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 14,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+     "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+     "for (double x : doc['v']) { ",
+     "^---- HERE"
+    ],
+    "script": "double s = 0; for (double x : doc['v']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 14,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "accessing a vector field's value through 'get' or 'value' is not supported, use 'vectorValue' or 'magnitude' instead."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['v']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+       "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+       "for (long x : doc['v']) { ",
+       "^---- HERE"
+      ],
+      "script": "long s = 0; for (long x : doc['v']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 12,
+       "end": 38
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+     "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+     "for (long x : doc['v']) { ",
+     "^---- HERE"
+    ],
+    "script": "long s = 0; for (long x : doc['v']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 12,
+     "end": 38
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "accessing a vector field's value through 'get' or 'value' is not supported, use 'vectorValue' or 'magnitude' instead."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['v']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+       "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+       "for (int x : doc['v']) { ",
+       "^---- HERE"
+      ],
+      "script": "int s = 0; for (int x : doc['v']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 11,
+       "end": 36
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+     "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+     "for (int x : doc['v']) { ",
+     "^---- HERE"
+    ],
+    "script": "int s = 0; for (int x : doc['v']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 11,
+     "end": 36
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "accessing a vector field's value through 'get' or 'value' is not supported, use 'vectorValue' or 'magnitude' instead."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['v']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+       "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+       "for (String x : doc['v']) { ",
+       "^---- HERE"
+      ],
+      "script": "String s = ''; for (String x : doc['v']) { s += x } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 15,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+     "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+     "for (String x : doc['v']) { ",
+     "^---- HERE"
+    ],
+    "script": "String s = ''; for (String x : doc['v']) { s += x } return s.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 15,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "accessing a vector field's value through 'get' or 'value' is not supported, use 'vectorValue' or 'magnitude' instead."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['v']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+       "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+       "for (x in doc['v']) { ",
+       "^---- HERE"
+      ],
+      "script": "def s = 0; for (x in doc['v']) { s++ } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 11,
+       "end": 33
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:57)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.index.mapper.vectors.DenseVectorScriptDocValues.get(DenseVectorScriptDocValues.java:16)",
+     "java.base/java.util.AbstractList$Itr.next(AbstractList.java:373)",
+     "for (x in doc['v']) { ",
+     "^---- HERE"
+    ],
+    "script": "def s = 0; for (x in doc['v']) { s++ } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 11,
+     "end": 33
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": "accessing a vector field's value through 'get' or 'value' is not supported, use 'vectorValue' or 'magnitude' instead."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (double x : doc['ul']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": -1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "long s = 0; for (long x : doc['ul']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": -1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "int s = 0; for (int x : doc['ul']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": -1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = ''; for (String x : doc['ul']) { s += x } return s.length()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (String x : doc['ul']) { ",
+       "^---- HERE"
+      ],
+      "script": "String s = ''; for (String x : doc['ul']) { s += x } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 15,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (String x : doc['ul']) { ",
+     "^---- HERE"
+    ],
+    "script": "String s = ''; for (String x : doc['ul']) { s += x } return s.length()",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 15,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot explicitly cast def [long] to java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def s = 0; for (x in doc['ul']) { s++ } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (long x : doc['l']) { if (x == 3) { continue } s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 5.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (long x : doc['l']) { if (x == 3) { break } s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (long x : doc['l']) { for (long y : doc['l']) { s += x * y } } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 64.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (long x : doc['l']) { s += doc['l'].size() } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 4.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def l = doc['l']; double s = 0; for (long x : l) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 8.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (boolean x : doc['b']) { s += x ? 1 : 0 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (char x : doc['k']) { s += 1 } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "for (char x : doc['k']) { ",
+       "^---- HERE"
+      ],
+      "script": "double s = 0; for (char x : doc['k']) { s += 1 } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 14,
+       "start": 14,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "for (char x : doc['k']) { ",
+     "^---- HERE"
+    ],
+    "script": "double s = 0; for (char x : doc['k']) { s += 1 } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 14,
+     "start": 14,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot cast def [java.lang.String] to char"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (Long x : doc['l']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... ong x : doc['l']) { s += x } return s",
+       "                             ^---- HERE"
+      ],
+      "script": "double s = 0; for (Long x : doc['l']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 45,
+       "start": 20,
+       "end": 57
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... ong x : doc['l']) { s += x } return s",
+     "                             ^---- HERE"
+    ],
+    "script": "double s = 0; for (Long x : doc['l']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 45,
+     "start": 20,
+     "end": 57
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.Long] to [double]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (Integer x : doc['l']) { s += x } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... ger x : doc['l']) { s += x } return s",
+       "                             ^---- HERE"
+      ],
+      "script": "double s = 0; for (Integer x : doc['l']) { s += x } return s",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 23,
+       "end": 60
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... ger x : doc['l']) { s += x } return s",
+     "                             ^---- HERE"
+    ],
+    "script": "double s = 0; for (Integer x : doc['l']) { s += x } return s",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 23,
+     "end": 60
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.Integer] to [double]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (ZonedDateTime x : doc['dt']) { s += x.getYear() } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 2020.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['g']) { s += x.lat } return s",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 41.1199999647215
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l'].size() == 0 ? 0 : doc['l'].value",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 3.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "doc['nope'].size()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "doc['nope'].size()",
+       "    ^---- HERE"
+      ],
+      "script": "doc['nope'].size()",
+      "lang": "painless",
+      "position": {
+       "offset": 4,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "doc['nope'].size()",
+     "    ^---- HERE"
+    ],
+    "script": "doc['nope'].size()",
+    "lang": "painless",
+    "position": {
+     "offset": 4,
+     "start": 0,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No field found for [nope] in mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "doc['l'].size() > 1",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "doc['l'].size() > 1",
+       "^---- HERE"
+      ],
+      "script": "doc['l'].size() > 1",
+      "lang": "painless",
+      "position": {
+       "offset": 0,
+       "start": 0,
+       "end": 19
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "doc['l'].size() > 1",
+     "^---- HERE"
+    ],
+    "script": "doc['l'].size() > 1",
+    "lang": "painless",
+    "position": {
+     "offset": 0,
+     "start": 0,
+     "end": 19
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [boolean] to [double]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['l']) { s += 1 } return s + doc['l'].size()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['l'].isEmpty() ? 1 : 0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['d']) { s += 1 } return s + doc['d'].size()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['d'].isEmpty() ? 1 : 0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['k']) { s += 1 } return s + doc['k'].size()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['k'].isEmpty() ? 1 : 0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['dt']) { s += 1 } return s + doc['dt'].size()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 0.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['dt'].isEmpty() ? 1 : 0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": 1.0
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "double s = 0; for (def x : doc['nope']) { s += 1 } return s + doc['nope'].size()",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "for (def x : doc['nope']) { ",
+       "                 ^---- HERE"
+      ],
+      "script": "double s = 0; for (def x : doc['nope']) { s += 1 } return s + doc['nope'].size()",
+      "lang": "painless",
+      "position": {
+       "offset": 31,
+       "start": 14,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "for (def x : doc['nope']) { ",
+     "                 ^---- HERE"
+    ],
+    "script": "double s = 0; for (def x : doc['nope']) { s += 1 } return s + doc['nope'].size()",
+    "lang": "painless",
+    "position": {
+     "offset": 31,
+     "start": 14,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No field found for [nope] in mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return doc['nope'].isEmpty() ? 1 : 0",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "tag": "empty"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+       "return doc['nope'].isEmpty() ? 1 : 0",
+       "           ^---- HERE"
+      ],
+      "script": "return doc['nope'].isEmpty() ? 1 : 0",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 36
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.getFactoryForDoc(LeafDocLookup.java:135)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:171)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.search.lookup.LeafDocLookup.get(LeafDocLookup.java:31)",
+     "return doc['nope'].isEmpty() ? 1 : 0",
+     "           ^---- HERE"
+    ],
+    "script": "return doc['nope'].isEmpty() ? 1 : 0",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 36
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "No field found for [nope] in mapping"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (long v : doc['l']) emit(v * 2)",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    6,
+    10
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (def v : doc['l']) { if (doc['l'].size() > 1) emit(v) }",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... 'l'].size() > 1) emit(v) }",
+       "                             ^---- HERE"
+      ],
+      "script": "for (def v : doc['l']) { if (doc['l'].size() > 1) emit(v) }",
+      "lang": "painless",
+      "position": {
+       "offset": 58,
+       "start": 33,
+       "end": 59
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... 'l'].size() > 1) emit(v) }",
+     "                             ^---- HERE"
+    ],
+    "script": "for (def v : doc['l']) { if (doc['l'].size() > 1) emit(v) }",
+    "lang": "painless",
+    "position": {
+     "offset": 58,
+     "start": 33,
+     "end": 59
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected token ['}'] was expecting one of [{<EOF>, ';'}]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "doc['l'].size() > 1",
+    "lang": "painless"
+   },
+   "context": "filter",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": true
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "for (long v : doc['l']) { if (v == 3) return true } return false",
+    "lang": "painless"
+   },
+   "context": "filter",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {
+     "l": [
+      5,
+      3
+     ],
+     "i": 7,
+     "sh": 3,
+     "by": 2,
+     "d": 1.5,
+     "f": 0.1,
+     "hf": 0.1,
+     "sf": 1.234,
+     "ul": 18446744073709551615,
+     "ver": "1.2.3",
+     "v": [
+      1,
+      2,
+      3
+     ],
+     "ip": "10.0.0.1",
+     "bin": "aGVsbG8=",
+     "g": "41.12,-71.34",
+     "k": [
+      "b",
+      "a"
+     ],
+     "dt": "2020-01-02T03:04:05.678Z",
+     "dn": "2020-01-02T03:04:05.123456789Z",
+     "b": [
+      true,
+      false
+     ],
+     "t": "hello world",
+     "obj": {
+      "x": 9
+     },
+     "tag": "x"
+    }
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "...  if (v == 3) return true } return false",
+       "                             ^---- HERE"
+      ],
+      "script": "for (long v : doc['l']) { if (v == 3) return true } return false",
+      "lang": "painless",
+      "position": {
+       "offset": 50,
+       "start": 25,
+       "end": 64
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "...  if (v == 3) return true } return false",
+     "                             ^---- HERE"
+    ],
+    "script": "for (long v : doc['l']) { if (v == 3) return true } return false",
+    "lang": "painless",
+    "position": {
+     "offset": 50,
+     "start": 25,
+     "end": 64
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unexpected token ['}'] was expecting one of [{<EOF>, ';'}]."
+    }
+   },
+   "status": 400
+  }
+ }
+]

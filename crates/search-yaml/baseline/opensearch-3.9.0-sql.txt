@@ -1,0 +1,209 @@
+# Tests of the OpenSearch SQL plugin's YAML suite (opensearch-project/sql 3.9.0.0,
+# integ-test/src/yamlRestTest, Apache-2.0: PPL issues, ppl and api) that pass on a real
+# single-node OpenSearch 3.9.0 in Docker (security plugin off, the os-baseline settings):
+# 204 of 204. Run with the core OpenSearch API spec plus the plugin's own (ppl, ppl.explain,
+# ppl.grammar, query.settings).
+sql:api/ppl.analyze/Analyze ignored for explain api
+sql:api/ppl.analyze/Analyze returns full response for ppl query
+sql:api/ppl.analyze/Analyze returns recommendations field
+sql:api/ppl.analyze/Analyze with non-jdbc format still returns response
+sql:api/ppl.grammar/PPL grammar endpoint returns expected response shape
+sql:api/ppl.profile/Profile ignored for explain api
+sql:api/ppl.profile/Profile ignored for explain query
+sql:api/ppl.profile/Profile ignored for viz format
+sql:api/ppl.profile/Profile metrics returned for ppl query
+sql:issues/2489/Handle epoch field in string format
+sql:issues/3102/Prevent push down limit if the offset reach max_result_window
+sql:issues/3312/Push down filter with struct field
+sql:issues/3343/Handle struct field with dynamic mapping disabled
+sql:issues/3459/Access to nested field after field command
+sql:issues/3477/Handle flattened document value
+sql:issues/3570/Patterns brain aggregation mode
+sql:issues/3570/Patterns brain label mode
+sql:issues/3570/Patterns simple_pattern aggregation mode
+sql:issues/3570/Patterns simple_pattern label mode
+sql:issues/3595/Handle lookup command with query size limit is 1
+sql:issues/3607/Handle aggregation with window_size_limit is less than query.size_limit
+sql:issues/3635/Push down filter with nested field
+sql:issues/3646/Path of alias type points to nested field
+sql:issues/3655/Support match_only_text field type with Calcite disabled
+sql:issues/3655/Support match_only_text field type with Calcite enabled
+sql:issues/3810/Decimal literal should convert to double in pushdown
+sql:issues/3881/Handle sag with nullAs
+sql:issues/3922/Sort order preserved through dedup (#3922)
+sql:issues/3946/legacy division retains integer truncation
+sql:issues/3946/non-legacy division returns floating values
+sql:issues/3958/Handle sum results exceeds the max value of short
+sql:issues/3996/Fix incorrectly push down aggregate with filter
+sql:issues/4009/Fix bucket size missing
+sql:issues/4173/Handle multiple values (array) documents
+sql:issues/4201/Test aggregation by range bucket
+sql:issues/4201/Test aggregation by range bucket and time span
+sql:issues/4224/Time modifiers in Search command
+sql:issues/4272/Test validation error for count(eval) with non-boolean expression
+sql:issues/4296/Fix bucket size wrong for limit after sort
+sql:issues/4322/Fix bin with stats command exception
+sql:issues/4339/dedup struct field
+sql:issues/4340/Fix bin with grouped stats on timestamp field
+sql:issues/4342/No index found with given index pattern should throw IndexNotFoundException
+sql:issues/4356/Extracted value participate in aggregation func
+sql:issues/4356/Extracted value participate in arithmetic operator
+sql:issues/4356/Extracted value participate in comparison operator
+sql:issues/4356/Extracted value participate in condition func
+sql:issues/4356/Extracted value participate in string func
+sql:issues/4356/Safe cast keyword to int
+sql:issues/4383/Append UDT fields should merge schema successfully
+sql:issues/4391/big decimal literal
+sql:issues/4407/big decimal literal
+sql:issues/4415/big decimal literal
+sql:issues/4469/agg with script and sort on group key
+sql:issues/4481/Fix missing keywordsCanBeID
+sql:issues/4490/handle epoch_millis format field with comparison
+sql:issues/4490/handle epoch_millis format field with equal
+sql:issues/4508/comparison with regular field - eval and filter works correctly
+sql:issues/4508/eval on nested field with filter on computed field
+sql:issues/4508/eval on nested field without filter
+sql:issues/4508/filter on both nested and root level fields 
+sql:issues/4513/handle agg script push down on metadata field
+sql:issues/4513/handle filter script push down on metadata field
+sql:issues/4527/timechart with zero span should return validation error
+sql:issues/4529/Join with fields
+sql:issues/4547/Bin command spans over wide schema should succeed
+sql:issues/4547/Query with few required fields on wide schema index should succeed
+sql:issues/4550/timechart with milliseconds
+sql:issues/4550/timechart with millisecond span
+sql:issues/4550/timechart with millisecond span and per_second function
+sql:issues/4550/timechart with second span for comparison
+sql:issues/4559/Handle nested alias field referring to the outer context
+sql:issues/4563_4664/4563: Test rename then dedup
+sql:issues/4563_4664/4664: Test rename then filter
+sql:issues/4575/Access struct fields after join
+sql:issues/4580/Test span aggregation with duplicated group keys
+sql:issues/4580/Test span aggregation with field name collision - basic case
+sql:issues/4580/Test span aggregation with field name collision - multiple aggregations
+sql:issues/4580/Test span aggregation without name collision - multiple group-by
+sql:issues/4581/timechart with grouping by non-string field
+sql:issues/4582/timechart with limit should use max aggregation for OTHER category
+sql:issues/4619/dedup struct field name with dot
+sql:issues/4632/timechart count() by field should not return empty buckets
+sql:issues/4632/timechart max() by field should not return empty buckets
+sql:issues/4644/timechart with DATE_FORMAT on @timestamp
+sql:issues/4644/timechart with eval on aggregated field
+sql:issues/4644/timechart with eval on by field
+sql:issues/4644/timechart with eval on @timestamp field
+sql:issues/4659/PPL script filter works across indices with mixed text/keyword field types
+sql:issues/4659/PPL wildcard query returns all documents across indices with mixed text/keyword field types
+sql:issues/4705/Boolean bucket parser should work in non-composite aggregate
+sql:issues/4705/Data histogram bucket parser should work in non-composite aggregate
+sql:issues/4705/Date bucket parser should work in non-composite aggregate
+sql:issues/4705/Histogram bucket parser should work in non-composite aggregate
+sql:issues/4705/Integer bucket parser should work in non-composite aggregate
+sql:issues/4705/Multi-terms bucket parser should work in non-composite aggregate
+sql:issues/4705/String bucket parser should work in non-composite aggregate
+sql:issues/4726/hash join on IP type should work
+sql:issues/4740/bin with default binning (no parameters) on string field - issue 4740
+sql:issues/4740/bin with minspan using MINSPAN_BUCKET - issue 4740
+sql:issues/4740/bin with numeric field using WIDTH_BUCKET - issue 4740
+sql:issues/4740/bin with numeric span using SPAN_BUCKET - issue 4740
+sql:issues/4740/bin with start and end using RANGE_BUCKET - issue 4740
+sql:issues/4800/Chained streamstats with window should not cause NPE (#4800)
+sql:issues/4842/Filter merge with IS NOT NULL checks
+sql:issues/4842/Filter merge with multiple consecutive where clauses
+sql:issues/4842/Filter merge with range and equality checks
+sql:issues/4845/handle custom format field with pushdown
+sql:issues/4866/Patterns with specified max_sample_count should return correct result
+sql:issues/4896/Consecutive dots field name returns null for malformed field
+sql:issues/4896/Leading dot field name returns null for malformed field
+sql:issues/4896/Multiple dots field name returns null for malformed field
+sql:issues/4896/Multiple malformed fields coexist with valid fields
+sql:issues/4896/Query all documents with unusual field names succeeds
+sql:issues/4896/Single dot field name returns null for malformed field
+sql:issues/4896/Trailing dot field name returns null for malformed field
+sql:issues/4896/Valid nested field still works (issue #3477 compatibility)
+sql:issues/4949/nested agg
+sql:issues/4949/nested dedup
+sql:issues/4949/nested top
+sql:issues/5054/Fix boolean field comparison pushdown
+sql:issues/5060/Join with AD command should return Calcite error when both Calcite and V2 fail
+sql:issues/5099/Issue 5099: rename with wildcard should not apply on hidden fields
+sql:issues/5114/Issue 5114 control: order-equivalent expression remains correct
+sql:issues/5114/Issue 5114: head should be preserved for non-deterministic sort expression
+sql:issues/5114/Issue 5114: head should be preserved for non-order-equivalent deterministic sort expression
+sql:issues/5125/Issue 5125: consecutive sorts after agg should honor latest sort direction
+sql:issues/5163/Double overflow to Infinity returns null instead of crashing
+sql:issues/5164_agg/AVG of large longs does not overflow or error
+sql:issues/5164_agg/Fallback SUM of large in-range longs retains low-order precision
+sql:issues/5164_agg/Pushed SUM of large in-range longs uses native double precision
+sql:issues/5164_agg/Pushed SUM whose final value exceeds BIGINT throws error
+sql:issues/5164_agg/SUM of large longs overflowing BIGINT throws error
+sql:issues/5164_agg/SUM of longs within BIGINT range does not error
+sql:issues/5164/Integer addition overflow widens instead of wrapping
+sql:issues/5164/Integer multiplication overflow widens instead of wrapping
+sql:issues/5164/Long addition overflow throws error
+sql:issues/5164/Long multiplication overflow throws error
+sql:issues/5164/Long subtraction overflow throws error
+sql:issues/5164/Normal integer addition does not error
+sql:issues/5164/Normal long arithmetic does not error
+sql:issues/5164/Short multiplication overflow widens instead of wrapping
+sql:issues/5165/Issue 5165: NOT IN should exclude null/missing rows
+sql:issues/5167/Issue 5167: json_delete with $.key path should remove the key
+sql:issues/5167/Issue 5167: json_set with $.key path should update the value
+sql:issues/5167/Issue 5167: json_set with unprefixed path still works
+sql:issues/5169/Issue 5169: NOT LIKE should exclude null/missing field rows
+sql:issues/5172/Issue 5172: transpose with stats alias named value
+sql:issues/5172/Issue 5172: transpose with value field name collision
+sql:issues/5173/Issue 5173: double appendpipe with different aggregations should succeed
+sql:issues/5173/Issue 5173: triple appendpipe with different aggregations should succeed
+sql:issues/5174/Issue 5174: bin then chart with null values should not cause NPE
+sql:issues/5174/Issue 5174: bin then chart with single group and null values
+sql:issues/5175/Issue 5175: COALESCE(42, null) returns integer 42
+sql:issues/5175/Issue 5175: COALESCE(null, 3.14) returns double
+sql:issues/5175/Issue 5175: COALESCE(null, 42) returns integer 42
+sql:issues/5176/Issue 5176: json_extract multi-path with missing path returns array with null
+sql:issues/5176/Issue 5176: json_extract returns null for explicit JSON null value
+sql:issues/5176/Issue 5176: json_extract returns null for missing path
+sql:issues/5185/Issue 5185: eval with multiple dotted-path assignments from MAP column
+sql:issues/5185/Issue 5185: separate eval commands with dotted-path from MAP column
+sql:issues/5269/Issue 5269: PPL wildcard query across indices with boolean/text mapping conflict should not error
+sql:issues/5481/Issue 5481: timestamp range AND keyword IN pushes down and returns rows
+sql:issues/5685/dedup over a wildcard where an object-typed path holds a scalar in one index
+sql:issues/5685/dedup over a wildcard where a scalar-typed path holds an object in one index
+sql:issues/5702/PPL filter on an object subfield with mixed text/keyword types across indices
+sql:issues/5702/PPL script filter on an object subfield with mixed text/keyword types across indices
+sql:issues/5718/Issue 5718: spath output colliding with a mapped object parent shadows the whole subtree
+sql:issues/5718/Issue 5718: the stale mapped value is no longer silently reachable through the leaf
+sql:issues/5718/Issue 5718: where on the extracted value matches instead of the stale mapped value
+sql:issues/text_agg_pushdown/count(text_field) on text-only pushes down as scripted value_count
+sql:issues/text_agg_pushdown/count(text_field) on text-only returns correct count
+sql:issues/text_agg_pushdown/multi-index stats across text-only + text+keyword pushes down via _source script
+sql:issues/text_agg_pushdown/multi-index stats returns correct merged counts
+sql:issues/text_agg_pushdown/multi-index top returns correct merged counts
+sql:issues/text_agg_pushdown/stats by text field pushes down as composite terms with _source script
+sql:issues/text_agg_pushdown/stats by text field returns correct counts
+sql:issues/text_agg_pushdown/text field with .keyword sub-field pushes down using the sub-field
+sql:issues/text_agg_pushdown/top command on a text field returns correct counts
+sql:issues/text_agg_pushdown/top on text field pushes down as composite terms with _source script
+sql:ppl/error_handling/Test aggregation validation error returns 400 bad_request
+sql:ppl/error_handling/Test field not found returns 400 bad_request
+sql:ppl/error_handling/Test index not found returns 404 missing
+sql:ppl/error_handling/Test semantic error returns 400 bad_request
+sql:ppl/error_handling/Test syntax error returns 400 bad_request
+sql:ppl/index_pruning/A backfilled document stored outside its month is still returned
+sql:ppl/index_pruning/Declines to prune a data stream
+sql:ppl/index_pruning/Declines to prune an alias, so its filter still applies
+sql:ppl/index_pruning/Declines to prune when the filter has no range
+sql:ppl/index_pruning/Declines to prune when the range is not on the timestamp
+sql:ppl/index_pruning/Declines to prune when the setting is off
+sql:ppl/index_pruning/Prunes a comma separated index expression
+sql:ppl/index_pruning/Prunes across indices whose timestamp types conflict
+sql:ppl/index_pruning/Prunes an index that does not map the timestamp
+sql:ppl/index_pruning/Prunes only the head of the pattern for an open ended range
+sql:ppl/index_pruning/Prunes to both indices in range
+sql:ppl/index_pruning/Prunes to the single index in range
+sql:ppl/index_pruning/Pruning does not change the rows returned
+sql:ppl/non_scalar_coercion/cast of a multi-value field returns 400 bad_request
+sql:ppl/non_scalar_coercion/cast of an object field returns 400 bad_request
+sql:ppl/non_scalar_coercion/chart split by an object field returns 400 bad_request
+sql:ppl/non_scalar_coercion/timechart split by a multi-value field returns 400 bad_request
+sql:ppl/non_scalar_coercion/timechart split by an object field returns 400 bad_request
+sql:ppl/non_scalar_coercion/timechart split by a scalar sub-field of an object still works

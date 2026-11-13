@@ -1,0 +1,29 @@
+# Tests of Elasticsearch 9.5.5's `apm-data` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+apm-data:10_apm/Test ILM fallback component-template installation with dsl-only mode false
+apm-data:10_apm/Test apm timestamp.us coercion
+apm-data:10_apm/Test apm timestamp.us mapping
+apm-data:10_apm/Test logs-apm* template installation
+apm-data:10_apm/Test metrics-apm* template installation
+apm-data:10_apm/Test template reinstallation
+apm-data:10_apm/Test traces-apm* template installation
+apm-data:20_error_grouping/Test logs-apm.error-* error grouping
+apm-data:20_error_logs/Test logs-apm.error-* error log fields
+apm-data:20_flattened_fields/Test logs-apm.error-* flattened fields
+apm-data:20_flattened_fields/Test traces-apm-* flattened fields
+apm-data:20_logs_pipeline/Test logs-apm.app.*-* event.dataset field
+apm-data:20_logs_pipeline/Test logs-apm.error-* event.dataset field
+apm-data:20_metrics_mapping/Test metrics-apm.app-* dynamic mapping
+apm-data:20_metrics_rerouting/Test metrics-apm.internal-* data stream rerouting
+apm-data:20_object_fields/Test logs-apm.error-* unmapped object fields
+apm-data:20_object_fields/Test traces-apm-* unmapped object fields
+apm-data:20_traces_ingest/Test traces-apm-* processor.event inference
+apm-data:20_traces_ingest/Test traces-apm-* setting *.duration.us from event.duration
+apm-data:20_traces_ingest/Test traces-apm-* setting event.success_count from event.outcome
+apm-data:30_custom_pipelines/Test logs @custom ingest pipelines
+apm-data:30_custom_pipelines/Test metrics @custom ingest pipelines
+apm-data:30_custom_pipelines/Test traces @custom ingest pipelines
+apm-data:30_custom_templates/Test metrics @custom component templates
+apm-data:30_lenient_mappings/Test ignore_dynamic_beyond_limit
+apm-data:30_lenient_mappings/Test ignore_malformed

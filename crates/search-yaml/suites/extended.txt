@@ -1,0 +1,120 @@
+# The extended YAML suites: Elasticsearch 9.5.5's module and x-pack plugin suites that the
+# rest-resources zip's test/free doesn't hold, each with the cluster its Gradle build gives it.
+# Read by scripts/search-yaml-suites.sh (fetch-extended, es-extended-baseline, roll-extended).
+# Only names and settings live here; the tests are downloaded into target/search-yaml/ and never
+# committed (they are not Apache-licensed).
+#
+# Format: <suite> <profile> <source> [option...]
+#
+# source  a project directory of the v9.5.5 source tree (target/search-yaml/es-9.5.5-src), whose
+#         tests are <source>/src/yamlRestTest/resources/rest-api-spec/test; or zip:<dir>, a
+#         directory of the rest-resources zip's rest-api-spec/test. `:a,b` keeps only those
+#         subdirectories (several test classes of one project that run on different clusters);
+#         `:-a,b` keeps all but those.
+# profile how the test cluster is set up (security and license; see es_profile in the script):
+#   plain           security off, trial license (Elasticsearch's integ-test distribution clusters)
+#   basic           security off, basic license
+#   security        security on over HTTP, trial license; the runner logs in as `login`
+#   security-basic  security on, basic license
+#   plugins         plain, plus the official plugins of plugins/* installed
+# options (repeatable):
+#   setting=<key>=<value>   a node setting (also given to search-dev as -E)
+#   jvm=<-Dkey=value>       a JVM system property (Elasticsearch only)
+#   users=<u:p:roles>,...   file-realm users (roles `|`-separated); search-dev gets them as
+#                           roll.security.file_users
+#   login=<user>:<password> who the runner logs in as (security profiles; default
+#                           x_pack_rest_user:x-pack-test-password, which every cluster defines;
+#                           a user listed without roles gets the test clusters' _es_test_root)
+#   admin=<user>:<password> who cleans up between tests, when the suite's class runs its tests as
+#                           a less privileged user (ESRestTestCase.restAdminSettings)
+#   roles=<file>            a roles.yml for the file realm (source-relative)
+#   config=<dest>:<file>    a file copied into the node's config directory (source-relative, or
+#                           suites/... for one of ours in crates/search-yaml/suites/es-config:
+#                           service_tokens holds a generated token1 like XPackRestIT's)
+#   runner=<arg>            a search-yaml run argument (what the suite's Java test class adds)
+#   memory=<size> heap=<size>  container limits for this suite's cluster (default 1536m / 768m)
+#
+# Suites that share a profile and options run on the same clusters in one runner invocation.
+#
+# Not run: repository-azure / -gcs / -s3 (cloud fixtures), x-pack inference (its tests are in
+# platinum/inference; the inference-service-test plugin isn't in the release), gpu (a GPU),
+# stateless (serverless modules), multi-node and mixed-cluster qa projects, the qa projects that
+# only rerun platinum directories with other users (graph, ml, text-structure with security),
+# enrich (no tests of its own), discovery-* and store-smb plugins, x-pack/qa (multi-cluster,
+# third-party services).
+
+# modules/
+aggregations             plain     modules/aggregations
+analysis-common          plain     modules/analysis-common
+data-streams             security  modules/data-streams  jvm=-Des.queryable_built_in_roles_enabled=false
+dot-prefix-validation    security  modules/dot-prefix-validation  jvm=-Des.queryable_built_in_roles_enabled=false
+ingest-attachment        plain     modules/ingest-attachment
+ingest-common            security  modules/ingest-common  config=user-agent/test-regexes.yml:modules/ingest-common/src/yamlRestTest/resources/test-regexes.yml  config=ingest-user-agent/test-regexes-legacy.yml:modules/ingest-common/src/yamlRestTest/resources/test-regexes.yml
+ingest-ip-location       plain     modules/ingest-ip-location
+ingest-otel              plain     modules/ingest-otel
+ip-location              plain     modules/ip-location
+lang-expression          plain     modules/lang-expression
+lang-mustache            plain     modules/lang-mustache
+lang-painless            plain     modules/lang-painless
+mapper-extras            plain     modules/mapper-extras
+parent-join              plain     modules/parent-join
+percolator               plain     modules/percolator
+rank-eval                plain     modules/rank-eval
+reindex                  plain     modules/reindex
+reindex-management       plain     modules/reindex-management
+repository-url           plain     modules/repository-url
+rest-root                plain     modules/rest-root
+runtime-fields-common    plain     modules/runtime-fields-common
+streams                  plain     modules/streams
+transport-netty4         plain     modules/transport-netty4
+user-agent               plain     modules/user-agent
+
+# x-pack/plugin/*
+apm-data                 plain     x-pack/plugin/apm-data
+async-search             plain     x-pack/plugin/async-search
+autoscaling              security  x-pack/plugin/autoscaling  roles=x-pack/plugin/autoscaling/src/yamlRestTest/resources/autoscaling-roles.yml  users=autoscaling-admin:autoscaling-admin-password:superuser,autoscaling-user:autoscaling-user-password:autoscaling  login=autoscaling-user:autoscaling-user-password  admin=autoscaling-admin:autoscaling-admin-password
+ccr                      security  x-pack/plugin/ccr  users=ccr-user:ccr-user-password:superuser  login=ccr-user:ccr-user-password
+core                     security  x-pack/plugin/core  jvm=-Des.queryable_built_in_roles_enabled=false
+diskbbq                  plain     x-pack/plugin/diskbbq
+downsample               plain     x-pack/plugin/downsample/qa/rest:downsample
+downsample-with-security security  x-pack/plugin/downsample/qa/rest:downsample-with-security  users=elastic_admin:admin-password:_es_test_root  login=elastic_admin:admin-password
+ent-search               security  x-pack/plugin/ent-search  roles=x-pack/plugin/ent-search/src/yamlRestTest/resources/roles.yml  users=entsearch-superuser:entsearch-superuser-password:superuser,entsearch-admin:entsearch-admin-password:admin,entsearch-user:entsearch-user-password:user,entsearch-unprivileged:entsearch-unprivileged-password:unprivileged  login=entsearch-admin:entsearch-admin-password  admin=entsearch-superuser:entsearch-superuser-password
+eql                      basic     x-pack/plugin/eql/qa/rest
+fleet                    security-basic  x-pack/plugin/fleet  roles=x-pack/plugin/fleet/src/yamlRestTest/resources/roles.yml  users=elastic_admin:admin-password:superuser,fleet_unprivileged_secrets:password:unprivileged_secrets  login=elastic_admin:admin-password
+ilm                      plain     x-pack/plugin/ilm
+kql                      plain     x-pack/plugin/kql
+logsdb                   security  x-pack/plugin/logsdb
+mapper-constant-keyword  plain     x-pack/plugin/mapper-constant-keyword
+mapper-unsigned-long     plain     x-pack/plugin/mapper-unsigned-long
+mapper-version           plain     x-pack/plugin/mapper-version
+otel-data                plain     x-pack/plugin/otel-data
+prometheus               security  x-pack/plugin/prometheus
+rank-rrf                 plain     x-pack/plugin/rank-rrf:linear,rrf
+rank-rrf-license         basic     x-pack/plugin/rank-rrf:license
+searchable-snapshots     security  x-pack/plugin/searchable-snapshots/qa/rest  users=admin:admin-password:superuser  login=admin:admin-password  setting=xpack.searchable.snapshot.shared_cache.size=16MB  setting=xpack.searchable.snapshot.shared_cache.region_size=256KB  setting=xpack.searchable_snapshots.cache_fetch_async_thread_pool.keep_alive=0ms
+search-business-rules    basic     x-pack/plugin/search-business-rules
+slm                      security  x-pack/plugin/slm  users=test_admin:x-pack-test-password:_es_test_root  login=test_admin:x-pack-test-password
+snapshot-repo-test-kit   basic     x-pack/plugin/snapshot-repo-test-kit/qa/rest
+stack                    security  x-pack/plugin/stack  users=test_admin:x-pack-test-password:_es_test_root  login=test_admin:x-pack-test-password
+transform                security  x-pack/plugin/transform
+watcher                  plain     x-pack/plugin/watcher:mustache,painless,watcher  setting=xpack.ml.enabled=false
+watcher-security         security  x-pack/plugin/watcher:security  roles=x-pack/plugin/watcher/src/yamlRestTest/resources/roles.yml  users=test_admin:x-pack-test-password:superuser,watcher_manager:x-pack-test-password:watcher_manager,x_pack_rest_user:x-pack-test-password:watcher_manager  login=watcher_manager:x-pack-test-password  admin=test_admin:x-pack-test-password  setting=xpack.ml.enabled=false  setting=xpack.notification.email.account._email.smtp.host=host.domain  setting=xpack.notification.email.account._email.smtp.port=587  setting=xpack.notification.email.account._email.smtp.user=_user
+wildcard                 plain     x-pack/plugin/wildcard
+
+# The x-pack suites of the rest-resources zip (x-pack/plugin/src/yamlRestTest plus the plugin
+# directories it bundles, which run above with their own clusters). platinum runs on
+# XPackRestIT's cluster (ml/single-node-tests' is the same), esql on the ES|QL single-node one.
+platinum                 security  zip:test/platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher  setting=xpack.ml.enabled=true  setting=xpack.watcher.enabled=false  setting=xpack.security.audit.enabled=true  setting=xpack.searchable.snapshot.shared_cache.size=16MB  setting=xpack.searchable.snapshot.shared_cache.region_size=256KB  setting=node.name=yamlRestTest-0  config=service_tokens:suites/es-config/service_tokens  memory=4g  heap=1g
+esql                     plain     zip:test/platinum:esql  runner=--esql-not-partial  setting=esql.federation.enabled=true  config=ingest-geoip/GeoLite2-City.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-City.mmdb  config=ingest-geoip/GeoLite2-Country.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-Country.mmdb  config=ingest-geoip/GeoLite2-ASN.mmdb:test/fixtures/geoip-fixture/src/main/resources/geoip-fixture/GeoLite2-ASN.mmdb
+
+# plugins/* (installed into the image for the plugins profile)
+analysis-icu             plugins   plugins/analysis-icu
+analysis-kuromoji        plugins   plugins/analysis-kuromoji
+analysis-nori            plugins   plugins/analysis-nori
+analysis-phonetic        plugins   plugins/analysis-phonetic
+analysis-smartcn         plugins   plugins/analysis-smartcn
+analysis-stempel         plugins   plugins/analysis-stempel
+analysis-ukrainian       plugins   plugins/analysis-ukrainian
+mapper-annotated-text    plugins   plugins/mapper-annotated-text
+mapper-murmur3           plugins   plugins/mapper-murmur3
+mapper-size              plugins   plugins/mapper-size

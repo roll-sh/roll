@@ -1,0 +1,150 @@
+{
+ "found": {
+  "case": 71,
+  "case_seed": 101000374,
+  "seed": 101
+ },
+ "signature": "POST _search .error.caused_by.caused_by.reason",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dnanos0": {
+       "type": "date_nanos"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m2-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m2-a"
+  },
+  {
+   "body": {
+    "aggs": {
+     "diversified_sampler_6": {
+      "aggs": {
+       "composite_4": {
+        "composite": {
+         "sources": [
+          {
+           "k": {
+            "terms": {}
+           }
+          }
+         ]
+        }
+       }
+      },
+      "diversified_sampler": {
+       "field": "kw1",
+       "shard_size": 7
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "caused_by": {
+        "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+        "type": "illegal_argument_exception"
+       },
+       "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+       "type": "illegal_argument_exception"
+      },
+      "failed_shards": [
+       {
+        "index": "diff-m2-a",
+        "node": "GTFtKRkMSi-lm0r0R4ztbA",
+        "reason": {
+         "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+         "type": "illegal_argument_exception"
+        },
+        "shard": 0
+       }
+      ],
+      "grouped": true,
+      "phase": "query",
+      "reason": "all shards failed",
+      "root_cause": [
+       {
+        "reason": "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+        "type": "illegal_argument_exception"
+       }
+      ],
+      "type": "search_phase_execution_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m2-a/_search"
+  }
+ ]
+}

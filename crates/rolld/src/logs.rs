@@ -323,7 +323,9 @@ impl roll_edge::http::Observe for EdgeAccess {
             Host::S3 { .. } => Some("storage"),
             Host::Nosql(_) => Some("nosql"),
             Host::Mq(_) => Some("queues"),
+            Host::Search(_) => Some("search"),
             Host::Preview(_) => Some("preview"),
+            Host::App(_) => Some("apps"),
             Host::Dashboard | Host::Api | Host::Git | Host::Pg(_) | Host::Site(_) | Host::Origin | Host::Unknown => None,
         };
         let (route, product) = match (routed, by_host) {

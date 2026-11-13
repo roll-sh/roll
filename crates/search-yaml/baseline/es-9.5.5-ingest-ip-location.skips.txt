@@ -1,0 +1,14 @@
+# Environment skips of the `ingest-ip-location` extended suite: tests that fail on a private single-node
+# Elasticsearch 9.5.5 in Docker for a reason outside the server under test (scripts/search-yaml-suites.sh
+# es-extended-baseline). Format: `<glob over test ids>  # reason`; roll skips them too.
+
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test geoip processor with defaults  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test geoip processor with different database file - GeoLite2-ASN  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test geoip processor with different database file - GeoLite2-Country  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test geoip processor with fields  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test geoip processor with geopoint mapping (both missing and including location)  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test geoip processor with list  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test geoip processor with lists, first only  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/20_geoip_processor/Test simulate with Geoip Processor  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/50_ip_lookup_processor/Test ip_location processor with a config directory database  # needs the suite's GeoIP database download fixture
+ingest-ip-location:ingest_ip_location/50_ip_lookup_processor/Test ip_location processor with defaults  # needs the suite's GeoIP database download fixture

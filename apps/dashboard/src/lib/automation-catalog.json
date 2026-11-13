@@ -1202,6 +1202,27 @@
             "repo_id": "rep_0123456789abcd"
           },
           "title": "push"
+        },
+        {
+          "fields": [
+            "repo",
+            "budget.project",
+            "budget.percent"
+          ],
+          "kind": "budget",
+          "sample": {
+            "budget": {
+              "max_usd_month": 10.0,
+              "percent": 80,
+              "project": "prj_0123456789ab",
+              "project_name": "shop",
+              "spent_usd_month": 8.1
+            },
+            "dashboard_url": null,
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd"
+          },
+          "title": "budget"
         }
       ],
       "source": "code",

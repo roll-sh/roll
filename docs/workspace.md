@@ -50,9 +50,12 @@ aside, creates these and copies the rows (with their description and icon, when 
 
 - **Name**: 1–48 characters of `[a-z0-9-]`, not starting or ending with `-`. Names are unique per
   owner.
-- **Kind**: `postgres`, `redis`, `stream`, `bucket`, `nosql` or `repo`.
+- **Kind**: `postgres`, `redis`, `stream`, `bucket`, `nosql`, `search`, `queue`, `tasks`, `repo` or
+  `service` (a roll apps service, docs/apps/README.md; roll apps places a new service on its
+  project's canvas itself).
 - **Ref**: the product's own id, 1–200 characters. It is a Postgres project id, a Redis database
-  id, a stream id, a bucket name, a NoSQL database id, or `owner/name` for a repo. In a path it is
+  id, a stream id, a bucket name, a NoSQL database id, a search cluster id, a queues vhost name, a
+  tasks tenant id, `owner/name` for a repo, or a service id (`svc_…`). In a path it is
   one percent-encoded segment (`acme%2Fsite`).
 
 ## Routes

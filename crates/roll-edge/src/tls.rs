@@ -90,6 +90,9 @@ struct Inner {
 pub struct CertStore {
     inner: RwLock<Inner>,
     default_name: RwLock<Option<String>>,
+    /// The name whose certificate a server name with none of its own gets (unset: none, and the
+    /// handshake fails).
+    unknown_name: RwLock<Option<String>>,
 }
 
 impl std::fmt::Debug for CertStore {
@@ -112,9 +115,27 @@ impl CertStore {
         inner.latest = Some(cert.key.clone());
     }
 
+    /// Stop serving the certificate installed for exactly `name` (a custom domain's, when the
+    /// domain goes). Names it shares a certificate with keep it.
+    pub fn remove(&self, name: &str) {
+        let mut inner = self.inner.write().unwrap();
+        if let Some(key) = inner.by_name.remove(&name.to_ascii_lowercase())
+            && inner.latest.as_ref().is_some_and(|l| Arc::ptr_eq(l, &key))
+        {
+            inner.latest = None;
+        }
+    }
+
     /// The name whose certificate clients without SNI get.
     pub fn set_default_name(&self, name: &str) {
         *self.default_name.write().unwrap() = Some(name.to_ascii_lowercase());
+    }
+
+    /// The name whose certificate a server name without one of its own gets: behind Cloudflare
+    /// for SaaS, a custom hostname's connections from Cloudflare carry the custom hostname, and
+    /// get the fallback origin's certificate.
+    pub fn set_unknown_name(&self, name: &str) {
+        *self.unknown_name.write().unwrap() = Some(name.to_ascii_lowercase());
     }
 
     /// The certificate for `name` (`None`: no SNI).
@@ -125,7 +146,7 @@ impl CertStore {
             inner.by_name.get(&name).cloned().or_else(|| name.split_once('.').and_then(|(_, up)| inner.by_name.get(&format!("*.{up}")).cloned()))
         };
         match name {
-            Some(n) => find(n),
+            Some(n) => find(n).or_else(|| self.unknown_name.read().unwrap().as_deref().and_then(find)),
             None => self.default_name.read().unwrap().as_deref().and_then(find).or_else(|| inner.latest.clone()),
         }
     }
@@ -276,5 +297,12 @@ mod tests {
         store.set_default_name("api.roll.test");
         assert!(is(store.lookup(None), &a));
         assert!(a.covers(&["*.roll.test".into()]) && !a.covers(&["*.pg.r1.roll.test".into()]));
+        let c = self_signed(&["shop.example.com".into()]).unwrap().parse().unwrap();
+        store.install(&c);
+        assert!(is(store.lookup(Some("shop.example.com")), &c));
+        store.remove("shop.example.com");
+        assert!(store.lookup(Some("shop.example.com")).is_none(), "a removed domain's certificate isn't served");
+        store.set_unknown_name("up.roll.test");
+        assert!(is(store.lookup(Some("other.example")), &a), "an unknown name gets the fallback's");
     }
 }

@@ -1,0 +1,150 @@
+#defaults: {"doc": {"a": 1, "s": "x", "tags": ["t1", "t2"], "o": {"k": 2, "l": [1, 2]}, "n": null, "d": 1.5}, "meta": {"_index": "painless-ingest", "_id": "1"}}
+ctx.a += 1
+----
+ctx.b = ctx.a + 1; ctx.c = 'new'
+----
+ctx.tags.add('t3')
+----
+ctx.o.k *= 10
+----
+ctx.remove('a')
+----
+ctx.s = ctx.toString()
+----
+ctx.k = new ArrayList(ctx.keySet())
+----
+ctx.size = ctx.size()
+----
+ctx.c = ctx.containsKey('a') + ',' + ctx.containsKey('_index') + ',' + ctx.containsKey('_source') + ',' + ctx.containsKey('zz')
+----
+ctx._index = 'other'
+----
+ctx._index = 5
+----
+ctx._index = null
+----
+ctx._id = 'newid'
+----
+ctx._routing = 'r'
+----
+ctx._version = 5
+----
+ctx._version = 5.5
+----
+ctx._version = '5'
+----
+ctx._version = null
+----
+ctx._version_type = 'external'
+----
+ctx._version_type = 'bogus'
+----
+ctx._if_seq_no = 3
+----
+ctx._if_primary_term = 1.5
+----
+ctx._dynamic_templates = ['f': 't']
+----
+ctx._dynamic_templates = 'x'
+----
+ctx._type = 'x'
+----
+ctx.remove('_index')
+----
+ctx.remove('_version')
+----
+ctx.remove('_id')
+----
+ctx.clear()
+----
+ctx.m = metadata().getIndex() + '/' + metadata().getId() + '/' + metadata().getRouting() + '/' + metadata().getVersion() + '/' + metadata().getVersionType()
+----
+metadata().setIndex('m-index')
+----
+metadata().setVersion(7)
+----
+metadata().setVersionType('external_gte')
+----
+metadata().setRouting(null)
+----
+ctx.now = metadata().getNow() instanceof ZonedDateTime
+----
+ctx.ext = metadata().isVersionInternal()
+----
+ctx._source = ['x': 1]
+----
+ctx._source.a = 2
+----
+ctx.x = ctx._source
+----
+ctx.x = ctx._ingest
+----
+ctx.x = ctx['_ingest']
+----
+ctx.f = field('o.k').get(0)
+----
+field('o.new').set(5)
+----
+field('p.q.r').set(1)
+----
+field('tags').append('t9')
+----
+field('tags').remove(0)
+----
+ctx.dd = $('o.k', 0) + $('zz', 7)
+----
+field('a').set(null)
+----
+ctx.ex = field('a').exists() + ' ' + field('n').exists() + ' ' + field('zz').exists() + ' ' + field('o.k').exists()
+----
+ctx.sz = field('tags').size() + field('a').size() + field('zz').size()
+----
+ctx.vals = []; for (def v : field('tags')) { ctx.vals.add(v) }
+----
+field('o').deleteValue(2)
+----
+ctx.it = []; for (def e : ctx.entrySet()) { ctx.it.add(e.getKey()) }
+----
+for (def e : ctx.entrySet()) { if (e.getKey() == '_index') { e.setValue('via-entry') } }
+----
+for (def e : ctx.entrySet()) { if (e.getKey() == '_index') { e.setValue(5) } }
+----
+ctx.p = params.x
+----
+#params: {"x": [1, 2]}
+ctx.p = params.x
+----
+#params: {"x": [1, 2]}
+params.x.add(3); ctx.p = params.x
+----
+#params: {"x": 1}
+params.y = 2
+----
+ctx.c = (char) 'c'
+----
+ctx.p = /a/
+----
+ctx.big = 9007199254740993L; ctx.f = 1.1f; ctx.nan = Double.NaN
+----
+ctx.date = ZonedDateTime.parse('2020-01-01T00:00:00Z')
+----
+throw new IllegalStateException('bad')
+----
+ctx.x = ctx.s.foo()
+----
+return 1
+----
+ctx.n.x = 1
+----
+ctx._ingest = 1
+----
+ctx.list = [1, [2, 3], ['k': null]]
+----
+#doc: {"a.b": 1, "a": {"c": 2}}
+ctx.x = ctx['a.b'] + ctx.a.c + field('a.b').get(0) + field('a.c').get(0)
+----
+#doc: {}
+ctx.created = true
+----
+#meta: {"_index": "painless-ingest", "_id": "1", "_routing": "rr", "_version": 3, "_version_type": "external"}
+ctx.m = metadata().getRouting() + '/' + metadata().getVersion() + '/' + metadata().getVersionType(); ctx.s = ctx.toString()

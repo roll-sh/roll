@@ -1,8 +1,9 @@
 //! Which products this process runs (`ROLL_PRODUCTS`; docs/cloud/README.md, "Node settings").
 //!
 //! One set decides what starts: `--products` (default: every product), narrowed by the older
-//! switches, which are shorthands over it: `--no-storage`, `--no-queues` and `--no-nosql` take one
-//! product out, and `--code-only`, `--queues-only` and `--nosql-only` leave just one. A product
+//! switches, which are shorthands over it: `--no-storage`, `--no-queues`, `--no-nosql` and
+//! `--no-search` take one product out, and `--code-only`, `--queues-only`, `--nosql-only` and
+//! `--search-only` leave just one. A product
 //! that's off binds no port, starts no background work, and its HTTP routes answer 404 saying
 //! so ([`Products::off_routes`]); with Postgres off rolld never runs `docker` for computes.
 
@@ -22,10 +23,12 @@ pub enum Product {
     Nosql,
     Queues,
     Code,
+    Apps,
+    Search,
 }
 
 impl Product {
-    pub const ALL: [Product; 8] = [Product::Postgres, Product::Redis, Product::Streams, Product::Tasks, Product::Storage, Product::Nosql, Product::Queues, Product::Code];
+    pub const ALL: [Product; 10] = [Product::Postgres, Product::Redis, Product::Streams, Product::Tasks, Product::Storage, Product::Nosql, Product::Queues, Product::Code, Product::Apps, Product::Search];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -37,6 +40,8 @@ impl Product {
             Product::Nosql => "nosql",
             Product::Queues => "queues",
             Product::Code => "code",
+            Product::Apps => "apps",
+            Product::Search => "search",
         }
     }
 
@@ -52,6 +57,8 @@ impl Product {
             Product::Nosql => &["/v1/nosql", "/internal/nosql"],
             Product::Queues => &["/v1/queues"],
             Product::Code => &["/v1/code", "/git", "/internal/code"],
+            Product::Apps => &["/v1/apps"],
+            Product::Search => &["/v1/search", "/internal/search"],
         }
     }
 
@@ -76,9 +83,11 @@ pub struct Switches {
     pub no_storage: bool,
     pub no_queues: bool,
     pub no_nosql: bool,
+    pub no_search: bool,
     pub code_only: bool,
     pub queues_only: bool,
     pub nosql_only: bool,
+    pub search_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,15 +99,15 @@ impl Products {
     }
 
     pub fn resolve(s: Switches) -> anyhow::Result<Products> {
-        let only: Vec<Product> = [(s.code_only, Product::Code), (s.queues_only, Product::Queues), (s.nosql_only, Product::Nosql)].into_iter().filter(|(on, _)| *on).map(|(_, p)| p).collect();
-        anyhow::ensure!(only.len() <= 1, "--code-only, --queues-only and --nosql-only can't be combined: use ROLL_PRODUCTS={}", only.iter().map(|p| p.name()).collect::<Vec<_>>().join(","));
+        let only: Vec<Product> = [(s.code_only, Product::Code), (s.queues_only, Product::Queues), (s.nosql_only, Product::Nosql), (s.search_only, Product::Search)].into_iter().filter(|(on, _)| *on).map(|(_, p)| p).collect();
+        anyhow::ensure!(only.len() <= 1, "--code-only, --queues-only, --nosql-only and --search-only can't be combined: use ROLL_PRODUCTS={}", only.iter().map(|p| p.name()).collect::<Vec<_>>().join(","));
         let mut set = match (&s.products, only.first()) {
             (Some(_), Some(p)) => anyhow::bail!("--{p}-only and ROLL_PRODUCTS (--products) can't both be set: ROLL_PRODUCTS={p} is the same"),
             (Some(list), None) => Products::from_iter(list.iter().copied()),
             (None, Some(p)) => Products::from_iter([*p]),
             (None, None) => Products::all(),
         };
-        for (off, p) in [(s.no_storage, Product::Storage), (s.no_queues, Product::Queues), (s.no_nosql, Product::Nosql)] {
+        for (off, p) in [(s.no_storage, Product::Storage), (s.no_queues, Product::Queues), (s.no_nosql, Product::Nosql), (s.no_search, Product::Search)] {
             if off {
                 anyhow::ensure!(only.first() != Some(&p), "--{p}-only with --no-{p} leaves nothing to run");
                 set.0 &= !Self::bit(p);
@@ -174,9 +183,9 @@ mod tests {
 
     #[test]
     fn the_old_switches_are_shorthands_over_one_set() {
-        assert_eq!(resolve(Switches::default()).unwrap(), "postgres,redis,streams,tasks,storage,nosql,queues,code");
+        assert_eq!(resolve(Switches::default()).unwrap(), "postgres,redis,streams,tasks,storage,nosql,queues,code,apps,search");
         assert_eq!(resolve(Switches { products: Some(vec![Product::Code, Product::Redis]), ..Default::default() }).unwrap(), "redis,code");
-        assert_eq!(resolve(Switches { no_storage: true, no_queues: true, ..Default::default() }).unwrap(), "postgres,redis,streams,tasks,nosql,code");
+        assert_eq!(resolve(Switches { no_storage: true, no_queues: true, ..Default::default() }).unwrap(), "postgres,redis,streams,tasks,nosql,code,apps,search");
         assert_eq!(resolve(Switches { code_only: true, ..Default::default() }).unwrap(), "code");
         assert_eq!(resolve(Switches { nosql_only: true, no_queues: true, ..Default::default() }).unwrap(), "nosql");
         assert!(resolve(Switches { nosql_only: true, no_nosql: true, ..Default::default() }).is_err());
@@ -192,6 +201,7 @@ mod tests {
         assert_eq!(Product::of_route("/v1/health"), Some(Product::Postgres));
         assert_eq!(Product::of_route("/v1/healthz"), None);
         assert_eq!(Product::of_route("/kafka/v3/clusters"), Some(Product::Streams));
+        assert_eq!(Product::of_route("/v1/search/clusters/{id}"), Some(Product::Search));
         assert_eq!(Product::of_route("/v1/info"), None);
         assert_eq!(Product::of_route("/v1/workspace/projects/{id}"), None, "workspace projects are always on");
     }

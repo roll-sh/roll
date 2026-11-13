@@ -1,0 +1,401 @@
+{
+  "description" : "searchable snapshots: mount validation and errors, mounted index settings, stats and cache APIs",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-ss",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-ss"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ss/_doc/1?refresh=true",
+      "body" : {
+        "f" : "foo"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "compat-xpack-ss",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/compat-xpack-repo",
+      "body" : {
+        "type" : "fs",
+        "settings" : {
+          "location" : "compat-xpack-repo"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_snapshot/compat-xpack-repo/snap?wait_for_completion=true&filter_path=snapshot.state,snapshot.shards",
+      "body" : {
+        "indices" : "compat-xpack-ss",
+        "include_global_state" : false
+      },
+      "status" : 200,
+      "response" : {
+        "snapshot" : {
+          "state" : "SUCCESS",
+          "shards" : {
+            "total" : 1,
+            "failed" : 0,
+            "successful" : 1
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_searchable_snapshots/stats",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "No searchable snapshots indices found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "No searchable snapshots indices found"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_searchable_snapshots/cache/clear",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "No searchable snapshots indices found"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "No searchable snapshots indices found"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_snapshot/compat-xpack-repo/snap/_mount?wait_for_completion=true",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Required [index]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Required [index]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_snapshot/compat-xpack-repo/snap/_mount?wait_for_completion=true",
+      "body" : {
+        "index" : "compat-xpack-ss",
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:28] [mount_searchable_snapshot] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:28] [mount_searchable_snapshot] unknown field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_snapshot/compat-xpack-repo/snap/_mount?wait_for_completion=true&storage=bad",
+      "body" : {
+        "index" : "compat-xpack-ss"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "Failed to build [mount_searchable_snapshot] after last required field arrived"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "Failed to build [mount_searchable_snapshot] after last required field arrived",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "No enum constant org.elasticsearch.xpack.core.searchablesnapshots.MountSearchableSnapshotRequest.Storage.BAD"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_snapshot/compat-xpack-repo/nope/_mount?wait_for_completion=true",
+      "body" : {
+        "index" : "compat-xpack-ss"
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "exception",
+              "reason" : "snapshot [nope] not found in repository [compat-xpack-repo]"
+            }
+          ],
+          "type" : "exception",
+          "reason" : "snapshot [nope] not found in repository [compat-xpack-repo]"
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /_snapshot/compat-xpack-missing/snap/_mount?wait_for_completion=true",
+      "body" : {
+        "index" : "compat-xpack-ss"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "repository_missing_exception",
+              "reason" : "[compat-xpack-missing] missing"
+            }
+          ],
+          "type" : "repository_missing_exception",
+          "reason" : "[compat-xpack-missing] missing"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_snapshot/compat-xpack-repo/snap/_mount?wait_for_completion=true",
+      "body" : {
+        "index" : "compat-xpack-zzz"
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [index [compat-xpack-zzz] not found in repository [compat-xpack-repo]]",
+              "index_uuid" : "_na_",
+              "index" : "index [compat-xpack-zzz] not found in repository [compat-xpack-repo]"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [index [compat-xpack-zzz] not found in repository [compat-xpack-repo]]",
+          "index_uuid" : "_na_",
+          "index" : "index [compat-xpack-zzz] not found in repository [compat-xpack-repo]"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_snapshot/compat-xpack-repo/snap/_mount?wait_for_completion=true",
+      "body" : {
+        "index" : "compat-xpack-ss",
+        "renamed_index" : "compat-xpack-ss-m"
+      },
+      "status" : 200,
+      "response" : {
+        "snapshot" : {
+          "snapshot" : "snap",
+          "indices" : [
+            "compat-xpack-ss-m"
+          ],
+          "shards" : {
+            "total" : 1,
+            "failed" : 0,
+            "successful" : 1
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ss-m/_settings?flat_settings=true",
+      "mask" : [
+        "index.store.snapshot.index_uuid",
+        "index.store.snapshot.repository_uuid",
+        "index.store.snapshot.snapshot_uuid",
+        "index.version.created"
+      ],
+      "status" : 200,
+      "response" : {
+        "compat-xpack-ss-m" : {
+          "settings" : {
+            "index.allocation.existing_shards_allocator" : "searchable_snapshot_allocator",
+            "index.auto_expand_replicas" : "false",
+            "index.blocks.write" : "true",
+            "index.creation_date" : "1792740403940",
+            "index.number_of_replicas" : "0",
+            "index.number_of_shards" : "1",
+            "index.provided_name" : "compat-xpack-ss",
+            "index.recovery.type" : "snapshot_prewarm",
+            "index.routing.allocation.include._tier_preference" : "data_cold,data_warm,data_hot",
+            "index.shard.check_on_startup" : "false",
+            "index.store.snapshot.index_name" : "compat-xpack-ss",
+            "index.store.snapshot.index_uuid" : "gSAJYDOISMCMAs3TV-IpZw",
+            "index.store.snapshot.repository_name" : "compat-xpack-repo",
+            "index.store.snapshot.repository_uuid" : "ZCGGn8PKTtObNvFJn0F2Mg",
+            "index.store.snapshot.snapshot_name" : "snap",
+            "index.store.snapshot.snapshot_uuid" : "-JLreAu1QvK-BEIbwEZ69A",
+            "index.store.type" : "snapshot",
+            "index.uuid" : "H3R6GTfkRWCaUq5hY-e0zQ",
+            "index.version.created" : "9111000"
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-ss-m/_doc",
+      "body" : {
+        "a" : 1
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [compat-xpack-ss-m] blocked by: [FORBIDDEN/8/index write (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [compat-xpack-ss-m] blocked by: [FORBIDDEN/8/index write (api)];"
+        },
+        "status" : 403
+      }
+    },
+    {
+      "req" : "GET /_searchable_snapshots/stats?level=bad",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "level parameter must be one of [cluster] or [indices] or [shards] but was [bad]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "level parameter must be one of [cluster] or [indices] or [shards] but was [bad]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_searchable_snapshots/stats?level=cluster&filter_path=_shards",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-ss-m/_searchable_snapshots/stats?filter_path=_shards",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "POST /_searchable_snapshots/cache/clear",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "GET /_searchable_snapshots/cache/stats?filter_path=nodes.*.shared_cache.region_size_in_bytes",
+      "skip" : "keyed by the node id",
+      "status" : 200,
+      "response" : {
+        "nodes" : {
+          "L2UrqlqkTZiki1UJqdOEYw" : {
+            "shared_cache" : {
+              "region_size_in_bytes" : 16777216
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-ss-m",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-ss",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_snapshot/compat-xpack-repo/snap",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_snapshot/compat-xpack-repo",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

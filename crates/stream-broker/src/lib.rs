@@ -2,6 +2,7 @@
 //! and a connectionless HTTP data plane.
 
 pub mod auth;
+pub mod branch;
 pub mod broker;
 pub mod compaction;
 pub mod config;

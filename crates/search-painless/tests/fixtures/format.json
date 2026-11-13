@@ -1,0 +1,3156 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%s %S %10s|%-10s|%.2s', new def[] {'abc', 'abc', 'abc', 'abc', 'abc'})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "abc ABC        abc|abc       |ab"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%b %B %b %b', new def[] {true, null, 'x', false})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true FALSE true false"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%h %H', new def[] {'hello', null})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "5e918d2 NULL"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%c %C %c %c', new def[] {(char)97, (char)98, 65, 0x1F600})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "a B A 😀"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%d %5d %-5d| %05d %+d % d %,d %(d %(d', new def[] {42, 42, 42, 42, 42, 42, 1234567, -42, 42})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "42    42 42   | 00042 +42  42 1,234,567 (42) 42"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%,d %,d %,015d %+,d', new def[] {-1234567, 1234567890123L, 1234567, 1234})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1,234,567 1,234,567,890,123 0000001,234,567 +1,234"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%o %x %X %#o %#x %#X %08x %#010x', new def[] {8, 255, 255, 8, 255, 255, 255, 255})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "10 ff FF 010 0xff 0XFF 000000ff 0x000000ff"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%x %x %x %o', new def[] {-1, (byte)-1, (short)-1, -8L})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "ffffffff ff ffff 1777777777777777777770"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%d %x', new def[] {new BigInteger('-123456789012345678901234567890'), new BigInteger('255')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-123456789012345678901234567890 ff"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%f %.2f %.0f %10.3f %-10.1f| %010.2f %+.1f %(.2f %,.2f', new def[] {3.14159, 3.14159, 2.5, 3.14159, 3.14159, -3.14159, 3.0, -3.14159, 1234567.891})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "3.141590 3.14 3      3.142 3.1       | -000003.14 +3.0 (3.14) 1,234,567.89"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%.3f %.3f %.1f %.1f %.2f', new def[] {0.0005, 0.0015, 0.05, 0.15, 1.005})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.001 0.002 0.1 0.2 1.01"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%e %.2e %E %.0e %#.0e %10.2e', new def[] {12345.678, 0.000123, 12345.678, 5e10, 5e10, -1.5})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.234568e+04 1.23e-04 1.234568E+04 5e+10 5.e+10  -1.50e+00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%g %g %g %g %.3g %G %g %g', new def[] {12345.678, 0.0001234, 123456789.0, 0.0, 1234.5, 1e-10, 100000.0, 1000000.0})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "12345.7 0.000123400 1.23457e+08 0.00000 1.23e+03 1.00000E-10 100000 1.00000e+06"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%a %A %.2a %a %a', new def[] {1.0, -0.5, 0.1, Double.MIN_VALUE, 1e300})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0x1.0p0 -0X1.0P-1 0x1.9ap-4 0x0.0000000000001p-1022 0x1.7e43c8800759cp996"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%f %e %g %a', new def[] {Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NaN})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "NaN Infinity -Infinity NaN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%+f %(f % f', new def[] {Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "+Infinity (Infinity) -Infinity"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%f %.10f %e', new def[] {0.1f, 0.1f, 1.0f/3})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "0.100000 0.1000000015 3.333333e-01"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%2$s %1$s %<s %s', new def[] {'a', 'b'})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "b a a a"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%% %n %-5%|', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "% \n %    |"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%s', new def[] {[1, 2]})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 2]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%s %s', new def[] {null, ['a': 1]})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "null {a=1}"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%10.4s|', new def[] {'abcdefg'})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "      abcd|"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format(Locale.GERMANY, '%,.3f', new def[] {1234567.8915})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.234.567,892"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format(Locale.FRANCE, '%,d %.2f', new def[] {1234567, 1.5})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1 234 567 1,50"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format(Locale.ROOT, '%,d %.2f', new def[] {1234567, 1.5})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1,234,567 1.50"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tY-%<tm-%<td %<tH:%<tM:%<tS.%<tL %<tz %<tZ', new def[] {ZonedDateTime.parse('2020-01-02T03:04:05.678Z')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02 03:04:05.678 +0000 Z"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tF %<tT %<tD %<tR %<tr %<tc', new def[] {ZonedDateTime.parse('2020-01-02T15:04:05Z')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02 15:04:05 01/02/20 15:04 03:04:05 PM Thu Jan 02 15:04:05 Z 2020"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tA %<ta %<tB %<tb %<th %<tC %<ty %<tj %<te %<tk %<tl %<tI %<tp %<tN %<ts %<tQ', new def[] {ZonedDateTime.parse('2020-01-02T15:04:05.123456789Z')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Thursday Thu January Jan Jan 20 20 002 2 15 3 03 pm 123456789 1577977445 1577977445123"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tF %<tT', new def[] {1577934245000L})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2020-01-02 03:04:05"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%TA %<TB %<Tp', new def[] {ZonedDateTime.parse('2020-01-02T15:04:05Z')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "THURSDAY JANUARY PM"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tH', new def[] {LocalDate.of(2020, 1, 1)})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4649)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4416)",
+       "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3239)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%tH', new def[] {LocalDate.of(2020, 1, 1)})",
+       "                                                ^---- HERE"
+      ],
+      "script": "return String.format('%tH', new def[] {LocalDate.of(2020, 1, 1)})",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 0,
+       "end": 65
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4649)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4416)",
+     "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3239)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%tH', new def[] {LocalDate.of(2020, 1, 1)})",
+     "                                                ^---- HERE"
+    ],
+    "script": "return String.format('%tH', new def[] {LocalDate.of(2020, 1, 1)})",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 0,
+     "end": 65
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "H != java.time.LocalDate"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tF', new def[] {LocalTime.of(1, 2)})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4649)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4416)",
+       "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3239)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%tF', new def[] {LocalTime.of(1, 2)})",
+       "                                                ^---- HERE"
+      ],
+      "script": "return String.format('%tF', new def[] {LocalTime.of(1, 2)})",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 0,
+       "end": 59
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4649)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4416)",
+     "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3239)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%tF', new def[] {LocalTime.of(1, 2)})",
+     "                                                ^---- HERE"
+    ],
+    "script": "return String.format('%tF', new def[] {LocalTime.of(1, 2)})",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 0,
+     "end": 59
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "F != java.time.LocalTime"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tZ', new def[] {LocalDateTime.of(2020, 1, 1, 1, 1)})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4514)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4416)",
+       "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3239)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%tZ', new def[] {LocalDateTime.of(2020, 1, 1, 1, 1)})",
+       "                                                    ^---- HERE"
+      ],
+      "script": "return String.format('%tZ', new def[] {LocalDateTime.of(2020, 1, 1, 1, 1)})",
+      "lang": "painless",
+      "position": {
+       "offset": 52,
+       "start": 0,
+       "end": 75
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4514)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:4416)",
+     "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3239)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%tZ', new def[] {LocalDateTime.of(2020, 1, 1, 1, 1)})",
+     "                                                    ^---- HERE"
+    ],
+    "script": "return String.format('%tZ', new def[] {LocalDateTime.of(2020, 1, 1, 1, 1)})",
+    "lang": "painless",
+    "position": {
+     "offset": 52,
+     "start": 0,
+     "end": 75
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "Z != java.time.LocalDateTime"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tZ %<tz', new def[] {ZonedDateTime.parse('2020-07-02T15:04:05+02:00[Europe/Paris]')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "CEST +0200"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tc', new def[] {OffsetDateTime.parse('2020-07-02T15:04:05+02:00')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Thu Jul 02 15:04:05 +02:00 2020"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tF', new def[] {new Date(0L)})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1970-01-01"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tQ', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+       "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3242)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%tQ', new def[] {'x'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%tQ', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+     "java.base/java.util.Formatter$FormatSpecifier.printDateTime(Formatter.java:3242)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3148)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%tQ', new def[] {'x'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%tQ', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "Q != java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tq', new def[] {1L})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkDateTime(Formatter.java:3377)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3131)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%tq', new def[] {1L})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%tq', new def[] {1L})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkDateTime(Formatter.java:3377)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3131)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%tq', new def[] {1L})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%tq', new def[] {1L})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "unknown_format_conversion_exception",
+     "reason": "Conversion = 'tq'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%10tY|%-10tY|', new def[] {LocalDate.of(2020,1,1), LocalDate.of(2020,1,1)})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "      2020|2020      |"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%q', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.conversion(Formatter.java:3069)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3125)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%q', new def[] {1})",
+       "                                      ^---- HERE"
+      ],
+      "script": "return String.format('%q', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.conversion(Formatter.java:3069)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3125)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%q', new def[] {1})",
+     "                                      ^---- HERE"
+    ],
+    "script": "return String.format('%q', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "unknown_format_conversion_exception",
+     "reason": "Conversion = 'q'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%s', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.format(Formatter.java:2760)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%s', new def[] {})",
+       "                           ^---- HERE"
+      ],
+      "script": "return String.format('%s', new def[] {})",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 0,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.format(Formatter.java:2760)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%s', new def[] {})",
+     "                           ^---- HERE"
+    ],
+    "script": "return String.format('%s', new def[] {})",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 0,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "missing_format_argument_exception",
+     "reason": "Format specifier '%s'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%d', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+       "java.base/java.util.Formatter$FormatSpecifier.printInteger(Formatter.java:3200)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3155)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%d', new def[] {'x'})",
+       "                                      ^---- HERE"
+      ],
+      "script": "return String.format('%d', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+     "java.base/java.util.Formatter$FormatSpecifier.printInteger(Formatter.java:3200)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3155)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%d', new def[] {'x'})",
+     "                                      ^---- HERE"
+    ],
+    "script": "return String.format('%d', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "d != java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%-s', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3368)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%-s', new def[] {'x'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%-s', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3368)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%-s', new def[] {'x'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%-s', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "missing_format_width_exception",
+     "reason": "%-s"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%#s', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.printString(Formatter.java:3288)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3170)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%#s', new def[] {'x'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%#s', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.printString(Formatter.java:3288)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3170)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%#s', new def[] {'x'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%#s', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = s, Flags = #"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%.2d', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3398)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%.2d', new def[] {1})",
+       "                                        ^---- HERE"
+      ],
+      "script": "return String.format('%.2d', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 40,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3398)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%.2d', new def[] {1})",
+     "                                        ^---- HERE"
+    ],
+    "script": "return String.format('%.2d', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 40,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "illegal_format_precision_exception",
+     "reason": "2"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%--5d', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$Flags.parse(Formatter.java:4815)",
+       "java.base/java.util.Formatter$FormatSpecifier.flags(Formatter.java:3035)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3111)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%--5d', new def[] {1})",
+       "                                         ^---- HERE"
+      ],
+      "script": "return String.format('%--5d', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 41,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$Flags.parse(Formatter.java:4815)",
+     "java.base/java.util.Formatter$FormatSpecifier.flags(Formatter.java:3035)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3111)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%--5d', new def[] {1})",
+     "                                         ^---- HERE"
+    ],
+    "script": "return String.format('%--5d', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 41,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "duplicate_format_flags_exception",
+     "reason": "Flags = '-'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%-05d', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkNumeric(Formatter.java:3441)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3396)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%-05d', new def[] {1})",
+       "                                         ^---- HERE"
+      ],
+      "script": "return String.format('%-05d', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 41,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkNumeric(Formatter.java:3441)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3396)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%-05d', new def[] {1})",
+     "                                         ^---- HERE"
+    ],
+    "script": "return String.format('%-05d', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 41,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_format_flags_exception",
+     "reason": "Flags = '-0'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%c', new def[] {0x110000})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.printCharacter(Formatter.java:3274)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3164)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%c', new def[] {0x110000})",
+       "                                      ^---- HERE"
+      ],
+      "script": "return String.format('%c', new def[] {0x110000})",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 48
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.printCharacter(Formatter.java:3274)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3164)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%c', new def[] {0x110000})",
+     "                                      ^---- HERE"
+    ],
+    "script": "return String.format('%c', new def[] {0x110000})",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 48
+    },
+    "caused_by": {
+     "type": "illegal_format_code_point_exception",
+     "reason": "Code point = 0x110000"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%c', new def[] {-1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.printCharacter(Formatter.java:3274)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3164)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%c', new def[] {-1})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%c', new def[] {-1})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.printCharacter(Formatter.java:3274)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3164)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%c', new def[] {-1})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%c', new def[] {-1})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_format_code_point_exception",
+     "reason": "Code point = 0xffffffff"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%,x', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3405)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%,x', new def[] {1})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%,x', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3405)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%,x', new def[] {1})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%,x', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = x, Flags = ,"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%2$s', new def[] {'a'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.format(Formatter.java:2766)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%2$s', new def[] {'a'})",
+       "                                        ^---- HERE"
+      ],
+      "script": "return String.format('%2$s', new def[] {'a'})",
+      "lang": "painless",
+      "position": {
+       "offset": 40,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.format(Formatter.java:2766)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%2$s', new def[] {'a'})",
+     "                                        ^---- HERE"
+    ],
+    "script": "return String.format('%2$s', new def[] {'a'})",
+    "lang": "painless",
+    "position": {
+     "offset": 40,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "missing_format_argument_exception",
+     "reason": "Format specifier '%2$s'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%<s', new def[] {'a'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.format(Formatter.java:2753)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%<s', new def[] {'a'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%<s', new def[] {'a'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.format(Formatter.java:2753)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%<s', new def[] {'a'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%<s', new def[] {'a'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "missing_format_argument_exception",
+     "reason": "Format specifier '%<s'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%-%', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3454)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%-%', new def[] {})",
+       "                            ^---- HERE"
+      ],
+      "script": "return String.format('%-%', new def[] {})",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3454)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%-%', new def[] {})",
+     "                            ^---- HERE"
+    ],
+    "script": "return String.format('%-%', new def[] {})",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "missing_format_width_exception",
+     "reason": "%-%"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%5.2%', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3446)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%5.2%', new def[] {})",
+       "                              ^---- HERE"
+      ],
+      "script": "return String.format('%5.2%', new def[] {})",
+      "lang": "painless",
+      "position": {
+       "offset": 30,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3446)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%5.2%', new def[] {})",
+     "                              ^---- HERE"
+    ],
+    "script": "return String.format('%5.2%', new def[] {})",
+    "lang": "painless",
+    "position": {
+     "offset": 30,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "illegal_format_precision_exception",
+     "reason": "2"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%(d', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+       "java.base/java.util.Formatter$FormatSpecifier.printInteger(Formatter.java:3200)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3155)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%(d', new def[] {'x'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%(d', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+     "java.base/java.util.Formatter$FormatSpecifier.printInteger(Formatter.java:3200)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3155)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%(d', new def[] {'x'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%(d', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "d != java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%+s', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3369)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%+s', new def[] {'x'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%+s', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3369)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%+s', new def[] {'x'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%+s', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = s, Flags = +"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%0s', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3369)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%0s', new def[] {'x'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%0s', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3369)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%0s', new def[] {'x'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%0s', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = s, Flags = 0"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%-d', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkNumeric(Formatter.java:3436)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3396)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%-d', new def[] {1})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%-d', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkNumeric(Formatter.java:3436)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3396)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%-d', new def[] {1})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%-d', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "missing_format_width_exception",
+     "reason": "%-d"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.parse(Formatter.java:2800)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%', new def[] {})",
+       "                          ^---- HERE"
+      ],
+      "script": "return String.format('%', new def[] {})",
+      "lang": "painless",
+      "position": {
+       "offset": 26,
+       "start": 0,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.parse(Formatter.java:2800)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%', new def[] {})",
+     "                          ^---- HERE"
+    ],
+    "script": "return String.format('%', new def[] {})",
+    "lang": "painless",
+    "position": {
+     "offset": 26,
+     "start": 0,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "unknown_format_conversion_exception",
+     "reason": "Conversion = '%'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%5', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.parse(Formatter.java:2818)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%5', new def[] {})",
+       "                           ^---- HERE"
+      ],
+      "script": "return String.format('%5', new def[] {})",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 0,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.parse(Formatter.java:2818)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%5', new def[] {})",
+     "                           ^---- HERE"
+    ],
+    "script": "return String.format('%5', new def[] {})",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 0,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "unknown_format_conversion_exception",
+     "reason": "Conversion = '5'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%.x', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.parse(Formatter.java:2818)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%.x', new def[] {1})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%.x', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.parse(Formatter.java:2818)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%.x', new def[] {1})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%.x', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "unknown_format_conversion_exception",
+     "reason": "Conversion = '.'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%0$s', new def[] {'a'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.index(Formatter.java:3022)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3108)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%0$s', new def[] {'a'})",
+       "                                        ^---- HERE"
+      ],
+      "script": "return String.format('%0$s', new def[] {'a'})",
+      "lang": "painless",
+      "position": {
+       "offset": 40,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.index(Formatter.java:3022)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3108)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%0$s', new def[] {'a'})",
+     "                                        ^---- HERE"
+    ],
+    "script": "return String.format('%0$s', new def[] {'a'})",
+    "lang": "painless",
+    "position": {
+     "offset": 40,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_format_argument_index_exception",
+     "reason": "Illegal format argument index = 0"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%99999999999s', new def[] {'a'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.width(Formatter.java:3047)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3114)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%99999999999s', new def[] {'a'})",
+       "                                                 ^---- HERE"
+      ],
+      "script": "return String.format('%99999999999s', new def[] {'a'})",
+      "lang": "painless",
+      "position": {
+       "offset": 49,
+       "start": 0,
+       "end": 54
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.width(Formatter.java:3047)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3114)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%99999999999s', new def[] {'a'})",
+     "                                                 ^---- HERE"
+    ],
+    "script": "return String.format('%99999999999s', new def[] {'a'})",
+    "lang": "painless",
+    "position": {
+     "offset": 49,
+     "start": 0,
+     "end": 54
+    },
+    "caused_by": {
+     "type": "illegal_format_width_exception",
+     "reason": "-2147483648"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%f', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+       "java.base/java.util.Formatter$FormatSpecifier.printFloat(Formatter.java:3213)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3161)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%f', new def[] {1})",
+       "                                      ^---- HERE"
+      ],
+      "script": "return String.format('%f', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+     "java.base/java.util.Formatter$FormatSpecifier.printFloat(Formatter.java:3213)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3161)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%f', new def[] {1})",
+     "                                      ^---- HERE"
+    ],
+    "script": "return String.format('%f', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "f != java.lang.Integer"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%e', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+       "java.base/java.util.Formatter$FormatSpecifier.printFloat(Formatter.java:3213)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3161)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%e', new def[] {'x'})",
+       "                                      ^---- HERE"
+      ],
+      "script": "return String.format('%e', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+     "java.base/java.util.Formatter$FormatSpecifier.printFloat(Formatter.java:3213)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3161)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%e', new def[] {'x'})",
+     "                                      ^---- HERE"
+    ],
+    "script": "return String.format('%e', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "e != java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%#g', new def[] {1.0})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkFloat(Formatter.java:3422)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3139)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%#g', new def[] {1.0})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%#g', new def[] {1.0})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkFloat(Formatter.java:3422)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3139)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%#g', new def[] {1.0})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%#g', new def[] {1.0})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = g, Flags = #"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%+ d', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkNumeric(Formatter.java:3441)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3396)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%+ d', new def[] {1})",
+       "                                        ^---- HERE"
+      ],
+      "script": "return String.format('%+ d', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 40,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkNumeric(Formatter.java:3441)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkInteger(Formatter.java:3396)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3137)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%+ d', new def[] {1})",
+     "                                        ^---- HERE"
+    ],
+    "script": "return String.format('%+ d', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 40,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "illegal_format_flags_exception",
+     "reason": "Flags = '+ '"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%5n', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3458)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%5n', new def[] {})",
+       "                            ^---- HERE"
+      ],
+      "script": "return String.format('%5n', new def[] {})",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3458)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%5n', new def[] {})",
+     "                            ^---- HERE"
+    ],
+    "script": "return String.format('%5n', new def[] {})",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "illegal_format_width_exception",
+     "reason": "5"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%-n', new def[] {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3460)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%-n', new def[] {})",
+       "                            ^---- HERE"
+      ],
+      "script": "return String.format('%-n', new def[] {})",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkText(Formatter.java:3460)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3141)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%-n', new def[] {})",
+     "                            ^---- HERE"
+    ],
+    "script": "return String.format('%-n', new def[] {})",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "illegal_format_flags_exception",
+     "reason": "Flags = '-'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%#b', new def[] {true})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3365)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%#b', new def[] {true})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%#b', new def[] {true})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkGeneral(Formatter.java:3365)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3133)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%#b', new def[] {true})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%#b', new def[] {true})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = b, Flags = #"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%,c', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkCharacter(Formatter.java:3388)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3135)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%,c', new def[] {'x'})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%,c', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkCharacter(Formatter.java:3388)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3135)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%,c', new def[] {'x'})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%,c', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = c, Flags = ,"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%.2c', new def[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.checkCharacter(Formatter.java:3387)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3135)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%.2c', new def[] {'x'})",
+       "                                        ^---- HERE"
+      ],
+      "script": "return String.format('%.2c', new def[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 40,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.checkCharacter(Formatter.java:3387)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3135)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%.2c', new def[] {'x'})",
+     "                                        ^---- HERE"
+    ],
+    "script": "return String.format('%.2c', new def[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 40,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_format_precision_exception",
+     "reason": "2"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%1$<s', new def[] {'a'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.format(Formatter.java:2753)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%1$<s', new def[] {'a'})",
+       "                                         ^---- HERE"
+      ],
+      "script": "return String.format('%1$<s', new def[] {'a'})",
+      "lang": "painless",
+      "position": {
+       "offset": 41,
+       "start": 0,
+       "end": 46
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.format(Formatter.java:2753)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%1$<s', new def[] {'a'})",
+     "                                         ^---- HERE"
+    ],
+    "script": "return String.format('%1$<s', new def[] {'a'})",
+    "lang": "painless",
+    "position": {
+     "offset": 41,
+     "start": 0,
+     "end": 46
+    },
+    "caused_by": {
+     "type": "missing_format_argument_exception",
+     "reason": "Format specifier '%<s'"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%c', new def[] {'ab'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+       "java.base/java.util.Formatter$FormatSpecifier.printCharacter(Formatter.java:3276)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3164)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%c', new def[] {'ab'})",
+       "                                      ^---- HERE"
+      ],
+      "script": "return String.format('%c', new def[] {'ab'})",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+     "java.base/java.util.Formatter$FormatSpecifier.printCharacter(Formatter.java:3276)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3164)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%c', new def[] {'ab'})",
+     "                                      ^---- HERE"
+    ],
+    "script": "return String.format('%c', new def[] {'ab'})",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "c != java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%#e', new def[] {1.0})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1.000000e+00"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%,e', new def[] {1.0})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkFloat(Formatter.java:3420)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3139)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%,e', new def[] {1.0})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%,e', new def[] {1.0})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkFloat(Formatter.java:3420)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3139)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%,e', new def[] {1.0})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%,e', new def[] {1.0})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = e, Flags = ,"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%(a', new def[] {1.0})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+       "java.base/java.util.Formatter$FormatSpecifier.checkFloat(Formatter.java:3418)",
+       "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3139)",
+       "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+       "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+       "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+       "java.base/java.util.Formatter.format(Formatter.java:2744)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%(a', new def[] {1.0})",
+       "                                       ^---- HERE"
+      ],
+      "script": "return String.format('%(a', new def[] {1.0})",
+      "lang": "painless",
+      "position": {
+       "offset": 39,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failMismatch(Formatter.java:4658)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkBadFlags(Formatter.java:3410)",
+     "java.base/java.util.Formatter$FormatSpecifier.checkFloat(Formatter.java:3418)",
+     "java.base/java.util.Formatter$FormatSpecifier.check(Formatter.java:3139)",
+     "java.base/java.util.Formatter$FormatSpecifier.<init>(Formatter.java:3126)",
+     "java.base/java.util.Formatter$FormatSpecifierParser.parse(Formatter.java:2915)",
+     "java.base/java.util.Formatter.parse(Formatter.java:2814)",
+     "java.base/java.util.Formatter.format(Formatter.java:2744)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%(a', new def[] {1.0})",
+     "                                       ^---- HERE"
+    ],
+    "script": "return String.format('%(a', new def[] {1.0})",
+    "lang": "painless",
+    "position": {
+     "offset": 39,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "format_flags_conversion_mismatch_exception",
+     "reason": "Conversion = a, Flags = ("
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%x', new def[] {1.5})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+       "java.base/java.util.Formatter$FormatSpecifier.printInteger(Formatter.java:3200)",
+       "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3155)",
+       "java.base/java.util.Formatter.format(Formatter.java:2761)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%x', new def[] {1.5})",
+       "                                      ^---- HERE"
+      ],
+      "script": "return String.format('%x', new def[] {1.5})",
+      "lang": "painless",
+      "position": {
+       "offset": 38,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter$FormatSpecifier.failConversion(Formatter.java:4662)",
+     "java.base/java.util.Formatter$FormatSpecifier.printInteger(Formatter.java:3200)",
+     "java.base/java.util.Formatter$FormatSpecifier.print(Formatter.java:3155)",
+     "java.base/java.util.Formatter.format(Formatter.java:2761)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%x', new def[] {1.5})",
+     "                                      ^---- HERE"
+    ],
+    "script": "return String.format('%x', new def[] {1.5})",
+    "lang": "painless",
+    "position": {
+     "offset": 38,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "illegal_format_conversion_exception",
+     "reason": "x != java.lang.Double"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%tH', new def[] {null})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "null"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return String.format('%s %s', new def[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Formatter.format(Formatter.java:2760)",
+       "java.base/java.util.Formatter.format(Formatter.java:2698)",
+       "java.base/java.lang.String.format(String.java:4830)",
+       "return String.format('%s %s', new def[] {1})",
+       "                                         ^---- HERE"
+      ],
+      "script": "return String.format('%s %s', new def[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 41,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Formatter.format(Formatter.java:2760)",
+     "java.base/java.util.Formatter.format(Formatter.java:2698)",
+     "java.base/java.lang.String.format(String.java:4830)",
+     "return String.format('%s %s', new def[] {1})",
+     "                                         ^---- HERE"
+    ],
+    "script": "return String.format('%s %s', new def[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 41,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "missing_format_argument_exception",
+     "reason": "Format specifier '%s'"
+    }
+   },
+   "status": 400
+  }
+ }
+]

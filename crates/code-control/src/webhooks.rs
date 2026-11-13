@@ -2,7 +2,7 @@
 //! (docs/code/http-api.md, "Webhooks and commit statuses").
 //!
 //! - **Webhooks**: a repo's writers register URLs for events (`landed`, `change`, `review`,
-//!   `thread`, `check`, `queue`, `work`, `preview`, `push`, plus `ping`). Deliveries go through
+//!   `thread`, `check`, `queue`, `work`, `preview`, `push`, `budget`, plus `ping`). Deliveries go through
 //!   the review apps' machinery ([`crate::review::apps`]): the same signature
 //!   (`X-Roll-Signature-256` over `{timestamp}.{body}`), SSRF guard, retries with backoff,
 //!   delivery log and redelivery. An event's deliveries are queued before `emit` returns, in one
@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS commit_statuses (
 "#;
 
 /// Events a webhook can subscribe to (`ping` is always sent on request).
-pub const EVENTS: [&str; 9] = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push"];
+pub const EVENTS: [&str; 10] = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget"];
 const MAX_HOOKS_PER_REPO: usize = 20;
 const STATES: [&str; 4] = ["pending", "success", "failure", "error"];
 /// Land log rows read at a time.
@@ -809,6 +809,10 @@ impl Code {
 
     /// Queue an event's deliveries now: a read to see whether anything listens, then one write
     /// that reads the webhooks again and queues a delivery for each.
+    pub(crate) fn fan_out_event(&self, repo_id: &str, kind: &str, data: &Value) -> Result<()> {
+        self.fan_out(repo_id, kind, data)
+    }
+
     fn fan_out(&self, repo_id: &str, kind: &str, data: &Value) -> Result<()> {
         if !self.db.sql().read(|c| hooked_on(c, repo_id, kind))? {
             return Ok(());

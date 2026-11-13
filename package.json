@@ -11,6 +11,7 @@
     "test:redis": "scripts/test-redis.sh",
     "test:nosql": "scripts/test-nosql.sh",
     "test:tasks": "scripts/test-tasks.sh",
+    "test:apps": "scripts/test-apps.sh",
     "test:stream": "scripts/test-stream.sh",
     "test:queues": "scripts/test-queues.sh",
     "test:fleet": "scripts/test-fleet.sh",
@@ -19,7 +20,8 @@
     "test:storage-cdn": "scripts/test-storage-cdn.sh",
     "test:storage-js": "pnpm --filter @roll/storage test",
     "test:s3-conformance": "scripts/test-s3-conformance.sh",
-    "test:s3-conformance-localstack": "scripts/test-s3-conformance.sh --backend localstack"
+    "test:s3-conformance-localstack": "scripts/test-s3-conformance.sh --backend localstack",
+    "test:search": "scripts/test-search.sh"
   },
   "packageManager": "pnpm@12.10.1",
   "devDependencies": {

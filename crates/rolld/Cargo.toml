@@ -1,16 +1,18 @@
 [package]
 name = "rolld"
-description = "roll daemon: Postgres proxy, serverless Redis, S3-compatible storage, Kafka-compatible streams, queues broker, ScyllaDB/Cassandra-compatible nosql, control plane API and reconcilers"
+description = "roll daemon: Postgres proxy, serverless Redis, S3-compatible storage, Kafka-compatible streams, queues broker, ScyllaDB/Cassandra-compatible nosql, Elasticsearch-compatible search, control plane API and reconcilers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-base64.workspace = true
 getrandom.workspace = true
+apps-control.workspace = true
+async-trait.workspace = true
+code-store.workspace = true
+anyhow.workspace = true
+base64.workspace = true
 hmac.workspace = true
 pbkdf2.workspace = true
 sha2.workspace = true
@@ -53,16 +55,17 @@ pg-storage.workspace = true
 redis-control.workspace = true
 code-sql.workspace = true
 redis-server.workspace = true
-roll-edge.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 ring.workspace = true
 roll-auth.workspace = true
+roll-edge.workspace = true
 roll-workspace.workspace = true
 roll-secrets.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
 url.workspace = true
 roll-accounts.workspace = true
+roll-previews.workspace = true
 roll-access.workspace = true
 roll-mcp.workspace = true
 s3-api.workspace = true
@@ -70,6 +73,9 @@ s3-proto.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
+search-control.workspace = true
+search-server.workspace = true
+search-store.workspace = true
 serde_json.workspace = true
 stream-broker.workspace = true
 tasks = { workspace = true, features = ["fleet"] }
@@ -103,7 +109,8 @@ nosql-proto = { workspace = true, features = ["client"] }
 parking_lot.workspace = true
 rand.workspace = true
 rcgen.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls"] }
+rusqlite.workspace = true
 # The Google Secret Manager sync's test signs with a key made then (no key in the repo).
 rsa = { workspace = true, features = ["sha2"] }
 serde_json.workspace = true

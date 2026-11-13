@@ -1,0 +1,3514 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:w}').extract('héllo wörld')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:w}').extract('é a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{w=a}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:w}').extract('éa b')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{w=b}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{IP:client} %{WORD:method} %{URIPATHPARAM:request} %{NUMBER:bytes} %{NUMBER:duration}').extract('55.3.244.1 GET /index.html 15824 0.043')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{client=55.3.244.1, method=GET, request=/index.html, bytes=15824, duration=0.043}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{NUMBER:n:int} %{NUMBER:f:float} %{NUMBER:d:double} %{NUMBER:l:long} %{WORD:b:boolean}').extract('5 1.5 2.25 9 true')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{n=5, f=1.5, d=2.25, l=9, b=true}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:a} %{WORD:a}').extract('x y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=[x, y]}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:a}(?: %{WORD:a})?').extract('x')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=x}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:z} %{WORD:a} %{WORD:m}').extract('1 2 3')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{z=1, a=2, m=3}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{NUMBER}').extract('42')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{NUMBER:x}').extract('nope')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<named>\\\\d+)-%{WORD:w}').extract('12-ab')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{named=12, w=ab}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{COMBINEDAPACHELOG}').extract('127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /apache_pb.gif HTTP/1.0\" 200 2326 \"http://www.example.com/start.html\" \"Mozilla/4.08\"')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{clientip=127.0.0.1, ident=-, auth=frank, timestamp=10/Oct/2000:13:55:36 -0700, verb=GET, request=/apache_pb.gif, httpversion=1.0, response=200, bytes=2326, referrer=\"http://www.example.com/start.html\", agent=\"Mozilla/4.08\"}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{FOO:x}').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('%{FOO:x}').extract( ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('%{FOO:x}').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('%{FOO:x}').extract( ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('%{FOO:x}').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@3b9f9944] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [%{FOO:x}]: Unable to find pattern [FOO] in Grok's pattern dictionary",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "Unable to find pattern [FOO] in Grok's pattern dictionary"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:x').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(%{WORD:x}').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(%{WORD:x}').extrac ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(%{WORD:x}').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(%{WORD:x}').extrac ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(%{WORD:x}').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@ffe7627] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(%{WORD:x}]: end pattern with unmatched parenthesis",
+      "caused_by": {
+       "type": "syntax_exception",
+       "reason": "end pattern with unmatched parenthesis"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String p = '%{WORD:x}'; emit(String.valueOf(grok(p).extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... x}'; emit(String.valueOf(grok(p).extract('a')))",
+       "                             ^---- HERE"
+      ],
+      "script": "String p = '%{WORD:x}'; emit(String.valueOf(grok(p).extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 44,
+       "start": 19,
+       "end": 66
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... x}'; emit(String.valueOf(grok(p).extract('a')))",
+     "                             ^---- HERE"
+    ],
+    "script": "String p = '%{WORD:x}'; emit(String.valueOf(grok(p).extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 44,
+     "start": 19,
+     "end": 66
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "all arguments to [grok] must be constant but the [1] argument isn't"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{NUMBER:n:int}').extract('1.5')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+       "java.base/java.lang.Integer.parseInt(Integer.java:529)",
+       "java.base/java.lang.Integer.parseInt(Integer.java:626)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$2.lambda$nativeExtracter$0(GrokCaptureType.java:30)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+       "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+       "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+       "emit(String.valueOf(grok('%{NUMBER:n:int}').extract('1.5')))",
+       "                                           ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('%{NUMBER:n:int}').extract('1.5')))",
+      "lang": "painless",
+      "position": {
+       "offset": 43,
+       "start": 0,
+       "end": 60
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+     "java.base/java.lang.Integer.parseInt(Integer.java:529)",
+     "java.base/java.lang.Integer.parseInt(Integer.java:626)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$2.lambda$nativeExtracter$0(GrokCaptureType.java:30)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+     "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+     "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+     "emit(String.valueOf(grok('%{NUMBER:n:int}').extract('1.5')))",
+     "                                           ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('%{NUMBER:n:int}').extract('1.5')))",
+    "lang": "painless",
+    "position": {
+     "offset": 43,
+     "start": 0,
+     "end": 60
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"1.5\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{NUMBER:n:long}').extract('1.5')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+       "java.base/java.lang.Long.parseLong(Long.java:556)",
+       "java.base/java.lang.Long.parseLong(Long.java:660)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$3.lambda$nativeExtracter$0(GrokCaptureType.java:36)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+       "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+       "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+       "emit(String.valueOf(grok('%{NUMBER:n:long}').extract('1.5')))",
+       "                                            ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('%{NUMBER:n:long}').extract('1.5')))",
+      "lang": "painless",
+      "position": {
+       "offset": 44,
+       "start": 0,
+       "end": 61
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+     "java.base/java.lang.Long.parseLong(Long.java:556)",
+     "java.base/java.lang.Long.parseLong(Long.java:660)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$3.lambda$nativeExtracter$0(GrokCaptureType.java:36)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+     "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+     "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+     "emit(String.valueOf(grok('%{NUMBER:n:long}').extract('1.5')))",
+     "                                            ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('%{NUMBER:n:long}').extract('1.5')))",
+    "lang": "painless",
+    "position": {
+     "offset": 44,
+     "start": 0,
+     "end": 61
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"1.5\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<n:x:float>\\\\w+)').extract('abc')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+       "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+       "java.base/jdk.internal.math.FloatingDecimal.parseFloat(FloatingDecimal.java:73)",
+       "java.base/java.lang.Float.parseFloat(Float.java:595)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$4.lambda$nativeExtracter$0(GrokCaptureType.java:42)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+       "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+       "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+       "emit(String.valueOf(grok('(?<n:x:float>\\\\w+)').extract('abc')))",
+       "                                              ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<n:x:float>\\\\w+)').extract('abc')))",
+      "lang": "painless",
+      "position": {
+       "offset": 46,
+       "start": 0,
+       "end": 63
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+     "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+     "java.base/jdk.internal.math.FloatingDecimal.parseFloat(FloatingDecimal.java:73)",
+     "java.base/java.lang.Float.parseFloat(Float.java:595)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$4.lambda$nativeExtracter$0(GrokCaptureType.java:42)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+     "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+     "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+     "emit(String.valueOf(grok('(?<n:x:float>\\\\w+)').extract('abc')))",
+     "                                              ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<n:x:float>\\\\w+)').extract('abc')))",
+    "lang": "painless",
+    "position": {
+     "offset": 46,
+     "start": 0,
+     "end": 63
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"abc\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<n:x:double>\\\\w+)').extract('abc')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+       "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+       "java.base/jdk.internal.math.FloatingDecimal.parseDouble(FloatingDecimal.java:61)",
+       "java.base/java.lang.Double.parseDouble(Double.java:993)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$5.lambda$nativeExtracter$0(GrokCaptureType.java:48)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+       "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+       "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+       "emit(String.valueOf(grok('(?<n:x:double>\\\\w+)').extract('abc')))",
+       "                                               ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<n:x:double>\\\\w+)').extract('abc')))",
+      "lang": "painless",
+      "position": {
+       "offset": 47,
+       "start": 0,
+       "end": 64
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+     "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+     "java.base/jdk.internal.math.FloatingDecimal.parseDouble(FloatingDecimal.java:61)",
+     "java.base/java.lang.Double.parseDouble(Double.java:993)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType$5.lambda$nativeExtracter$0(GrokCaptureType.java:48)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureType.lambda$rawExtracter$0(GrokCaptureType.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.lambda$extract$1(GrokCaptureExtracter.java:79)",
+     "java.base/java.util.ArrayList.forEach(ArrayList.java:1612)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.GrokCaptureExtracter$MapExtracter.extract(GrokCaptureExtracter.java:79)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.match(Grok.java:247)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:219)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+     "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+     "emit(String.valueOf(grok('(?<n:x:double>\\\\w+)').extract('abc')))",
+     "                                               ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<n:x:double>\\\\w+)').extract('abc')))",
+    "lang": "painless",
+    "position": {
+     "offset": 47,
+     "start": 0,
+     "end": 64
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"abc\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{TIMESTAMP_ISO8601:ts}').extract('at 2021-01-02T03:04:05.678Z done')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{ts=2021-01-02T03:04:05.678Z}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{GREEDYDATA:all}').extract('')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{all=}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{SYSLOGBASE}').extract('Mar  1 12:00:00 host sshd[123]: msg')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{timestamp=Mar  1 12:00:00, logsource=host, program=sshd, pid=123}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{SHOREWALL}').extract('x')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('%{SHOREWALL}').extr ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('%{SHOREWALL}').extract('x')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('%{SHOREWALL}').extr ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('%{SHOREWALL}').extract('x')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@15cc6c4f] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [%{SHOREWALL}]: emitted warnings: [nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "emitted warnings: [nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/, nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?:((?<SYSLOGTIMESTAMP:timestamp>(?:\\b(?:[Jj]an(?:uary|uar)?|[Ff]eb(?:ruary|ruar)?|[Mm](?:a|ä)?r(?:ch|z)?|[Aa]pr(?:il)?|[Mm]a(?:y|i)?|[Jj]un(?:e|i)?|[Jj]ul(?:y|i)?|[Aa]ug(?:ust)?|[Ss]ep(?:tember)?|[Oo](?:c|k)?t(?:ober)?|[Nn]ov(?:ember)?|[Dd]e(?:c|z)(?:ember)?)\\b) +(?:(?:(?:0[1-9])|(?:[12][0-9])|(?:3[01])|[1-9])) (?:(?!<[0-9])(?:(?:2[0123]|[01]?[0-9])):(?:(?:[0-5][0-9]))(?::(?:(?:(?:[0-5]?[0-9]|60)(?:[:.,][0-9]+)?)))(?![0-9])))) ((?<WORD:nf_host>\\b\\w+\\b)) .*Shorewall:((?<WORD:nf_action1>\\b\\w+\\b))?:((?<WORD:nf_action2>\\b\\w+\\b))?.*IN=((?<USERNAME:nf_in_interface>[a-zA-Z0-9._-]+))?.*(OUT= *MAC=((?<COMMONMAC:nf_dst_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2}))):((?<COMMONMAC:nf_src_mac>(?:(?:[A-Fa-f0-9]{2}:){5}[A-Fa-f0-9]{2})))?|OUT=(?<USERNAME:nf_out_interface>[a-zA-Z0-9._-]+)).*SRC=((?<IPV4:nf_src_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*DST=((?<IPV4:nf_dst_ip>(?<![0-9])(?:(?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5])[.](?:[0-1]?[0-9]{1,2}|2[0-4][0-9]|25[0-5]))(?![0-9]))).*LEN=((?<WORD:nf_len>\\b\\w+\\b)).?*TOS=((?<WORD:nf_tos>\\b\\w+\\b)).?*PREC=((?<WORD:nf_prec>\\b\\w+\\b)).?*TTL=((?<INT:nf_ttl>(?:[+-]?(?:[0-9]+)))).?*ID=((?<INT:nf_id>(?:[+-]?(?:[0-9]+)))).?*PROTO=((?<WORD:nf_protocol>\\b\\w+\\b)).?*SPT=((?<INT:nf_src_port>(?:[+-]?(?:[0-9]+)))?.*DPT=(?<INT:nf_dst_port>(?:[+-]?(?:[0-9]+)))?.*))/]"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>a?*)').extract('aa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?<x>a?*)').extract ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<x>a?*)').extract('aa')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?<x>a?*)').extract ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<x>a?*)').extract('aa')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@ac7f71b] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?<x>a?*)]: emitted warnings: [nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?<x>a?*)/]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "emitted warnings: [nested repeat operator '?' and '*' was replaced with '*' in regular expression /(?<x>a?*)/]"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>(?:a*)*)').extract('aa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?<x>(?:a*)*)').ext ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<x>(?:a*)*)').extract('aa')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?<x>(?:a*)*)').ext ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<x>(?:a*)*)').extract('aa')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@3bdd634d] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?<x>(?:a*)*)]: emitted warnings: [regular expression has redundant nested repeat operator * /(?<x>(?:a*)*)/]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "emitted warnings: [regular expression has redundant nested repeat operator * /(?<x>(?:a*)*)/]"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>(?:a??)*)').extract('aa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?<x>(?:a??)*)').ex ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<x>(?:a??)*)').extract('aa')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?<x>(?:a??)*)').ex ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<x>(?:a??)*)').extract('aa')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@5cbc7260] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?<x>(?:a??)*)]: emitted warnings: [nested repeat operator '??' and '*' was replaced with '*?' in regular expression /(?<x>(?:a??)*)/]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "emitted warnings: [nested repeat operator '??' and '*' was replaced with '*?' in regular expression /(?<x>(?:a??)*)/]"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>(?:a+?)*)').extract('aa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=aa}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>a*+)').extract('aa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=aa}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>a{2}*)').extract('aa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=aa}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>(a*)*)').extract('aa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=aa}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\Qa.b\\\\E)').extract('a.b')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?<x>\\\\Qa.b\\\\E)').e ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<x>\\\\Qa.b\\\\E)').extract('a.b')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?<x>\\\\Qa.b\\\\E)').e ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<x>\\\\Qa.b\\\\E)').extract('a.b')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@5b9d27a5] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?<x>\\Qa.b\\E)]: emitted warnings: [Unknown escape \\E is ignored]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "emitted warnings: [Unknown escape \\E is ignored]"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\d+)').extract('x٣٤y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\Aab)').extract('ab')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=ab}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>[[:alpha:]]+)').extract('ab1é')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=ab}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\h+)').extract('xa1fz')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=a1f}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>a{)').extract('a{')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=a{}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>a{,2})').extract('aaa')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=aa}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\b\\\\w+\\\\b)').extract('ü-ab')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=ab}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?i)(?<x>[a-z]+)').extract('ABC')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=ABC}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x:int>\\\\d+)').extract('12')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{int=12}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x:y:z>\\\\d+)').extract('12')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{y=12}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<a>\\\\d)(?<a>\\\\d)').extract('12')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=[1, 2]}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\p{Alpha}+)').extract('abé')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=abé}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\x{41})').extract('A')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=A}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\u0041)').extract('A')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('a)').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('a)').extract('a')))",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('a)').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('a)').extract('a')))",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('a)').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@9695f32] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [a)]: unmatched close parenthesis",
+      "caused_by": {
+       "type": "syntax_exception",
+       "reason": "unmatched close parenthesis"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('[a').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('[a').extract('a')))",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('[a').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('[a').extract('a')))",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('[a').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@1860883] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [[a]: premature end of char-class",
+      "caused_by": {
+       "type": "syntax_exception",
+       "reason": "premature end of char-class"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<>a)').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?<>a)').extract('a ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<>a)').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?<>a)').extract('a ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<>a)').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@6fc4d28a] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?<>a)]: group name is empty",
+      "caused_by": {
+       "type": "value_exception",
+       "reason": "group name is empty"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?<x').extract('a') ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<x').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?<x').extract('a') ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<x').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@2b24a431] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?<x]: invalid group name <x>",
+      "caused_by": {
+       "type": "value_exception",
+       "reason": "invalid group name <x>"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('\\\\').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('\\\\').extract('a')))",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('\\\\').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('\\\\').extract('a')))",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('\\\\').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@6982f206] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [\\]: end pattern at escape",
+      "caused_by": {
+       "type": "syntax_exception",
+       "reason": "end pattern at escape"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('a{2,1}').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('a{2,1}').extract('a ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('a{2,1}').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('a{2,1}').extract('a ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('a{2,1}').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@3e7bec7d] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [a{2,1}]: upper is smaller than lower in repeat range",
+      "caused_by": {
+       "type": "value_exception",
+       "reason": "upper is smaller than lower in repeat range"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?z)').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?z)').extract('a') ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?z)').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?z)').extract('a') ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?z)').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@7aab1cfd] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?z)]: undefined group option",
+      "caused_by": {
+       "type": "syntax_exception",
+       "reason": "undefined group option"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>(?s)a.b)').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok('(?<x>(?s)a.b)').ext ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('(?<x>(?s)a.b)').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok('(?<x>(?s)a.b)').ext ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('(?<x>(?s)a.b)').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@4517d1ba] at compile time",
+     "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "error compiling grok pattern [(?<x>(?s)a.b)]: undefined group option",
+      "caused_by": {
+       "type": "syntax_exception",
+       "reason": "undefined group option"
+      }
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>(?m)a.b)').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "a\nb"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=a\nb}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('^(?<x>\\\\w+)$').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "ab\ncd"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=ab}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\w+)\\\\Z').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "ab\ncd\n"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=cd}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\w+)\\\\z').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "ab\ncd\n"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>a.b)').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "a\rb"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=a\rb}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>\\\\s+)').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "a b"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('(?<x>[[:space:]]+)').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "a  b"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{x=  }"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{GREEDYDATA:m}').extract(params.s)))",
+    "lang": "painless",
+    "params": {
+     "s": "line1\nline2"
+    }
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{m=line1}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:w}').extract(null)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:217)",
+       "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+       "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+       "emit(String.valueOf(grok('%{WORD:w}').extract(null)))",
+       "                                     ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('%{WORD:w}').extract(null)))",
+      "lang": "painless",
+      "position": {
+       "offset": 37,
+       "start": 0,
+       "end": 53
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.innerCaptures(Grok.java:217)",
+     "org.elasticsearch.grok@9.5.5/org.elasticsearch.grok.Grok.captures(Grok.java:200)",
+     "org.elasticsearch.runtimefields@9.5.5/org.elasticsearch.runtimefields.NamedGroupExtractor$GrokHelper$1.extract(NamedGroupExtractor.java:108)",
+     "emit(String.valueOf(grok('%{WORD:w}').extract(null)))",
+     "                                     ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('%{WORD:w}').extract(null)))",
+    "lang": "painless",
+    "position": {
+     "offset": 37,
+     "start": 0,
+     "end": 53
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot invoke \"String.getBytes(java.nio.charset.Charset)\" because \"text\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:w}').extract(5)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... rok('%{WORD:w}').extract(5)))",
+       "                             ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('%{WORD:w}').extract(5)))",
+      "lang": "painless",
+      "position": {
+       "offset": 46,
+       "start": 21,
+       "end": 50
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... rok('%{WORD:w}').extract(5)))",
+     "                             ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('%{WORD:w}').extract(5)))",
+    "lang": "painless",
+    "position": {
+     "offset": 46,
+     "start": 21,
+     "end": 50
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok(5)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok(5)))",
+       "                         ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok(5)))",
+      "lang": "painless",
+      "position": {
+       "offset": 25,
+       "start": 0,
+       "end": 29
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok(5)))",
+     "                         ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok(5)))",
+    "lang": "painless",
+    "position": {
+     "offset": 25,
+     "start": 0,
+     "end": 29
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok()))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok()))",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok()))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok()))",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok()))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unknown call [grok] with [0] arguments."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok(null)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(grok(null)))",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok(null)))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(grok(null)))",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok(null)))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "all arguments to [grok] must be constant but the [1] argument isn't"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:w}' + ' %{WORD:v}').extract('a b')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{w=a, v=b}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def g = grok('%{WORD:w}'); emit(g.extract('ab').w)",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "ab"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Map m = grok('%{WORD:w} %{NUMBER:n:int}').extract('ab 12'); emit(String.valueOf(m.n + 1))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "13"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(grok('%{WORD:w}').extract('ab').getClass()))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... %{WORD:w}').extract('ab').getClass()))",
+       "                             ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(grok('%{WORD:w}').extract('ab').getClass()))",
+      "lang": "painless",
+      "position": {
+       "offset": 51,
+       "start": 26,
+       "end": 64
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... %{WORD:w}').extract('ab').getClass()))",
+     "                             ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(grok('%{WORD:w}').extract('ab').getClass()))",
+    "lang": "painless",
+    "position": {
+     "offset": 51,
+     "start": 26,
+     "end": 64
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.util.Map, getClass/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a} %{b}').extract('x y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=x, b=y}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a} %{+a}').extract('x y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=xy}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a} %{+a}', '-').extract('x y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=x-y}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{?skip} %{b}').extract('x y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{b=y}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{*k} %{&k}').extract('key val')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{key=val}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a->} %{b}').extract('x      y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=x, b=y}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a} %{b}').extract('nospace')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a}').extract('')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{+a/2} %{+a/1}').extract('x y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=yx}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('no keys').extract('x')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(dissect('no keys').extrac ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(dissect('no keys').extract('x')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(dissect('no keys').extrac ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(dissect('no keys').extract('x')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@2eb53844] at compile time",
+     "caused_by": {
+      "type": "pattern_parse",
+      "reason": "Unable to parse pattern: no keys Reason: Unable to find any keys or delimiters."
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a} %{a}').extract('x y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=y}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('[%{ts}] %{level}: %{msg}').extract('[2021-01-01] WARN: disk 90% full')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{msg=disk 90% full, level=WARN, ts=2021-01-01}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a},%{b},%{c}').extract('1,,3')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=1, b=, c=3}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a} %{b}').extract(null)))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a}-%{b}', null).extract('x-y')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(dissect('%{a}-%{b}', null ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(dissect('%{a}-%{b}', null).extract('x-y')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(dissect('%{a}-%{b}', null ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(dissect('%{a}-%{b}', null).extract('x-y')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "all arguments to [dissect] must be constant but the [2] argument isn't"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String s = '%{WORD:w}'; emit(String.valueOf(dissect(s).extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... w}'; emit(String.valueOf(dissect(s).extract('a')))",
+       "                             ^---- HERE"
+      ],
+      "script": "String s = '%{WORD:w}'; emit(String.valueOf(dissect(s).extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 44,
+       "start": 19,
+       "end": 69
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... w}'; emit(String.valueOf(dissect(s).extract('a')))",
+     "                             ^---- HERE"
+    ],
+    "script": "String s = '%{WORD:w}'; emit(String.valueOf(dissect(s).extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 44,
+     "start": 19,
+     "end": 69
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "all arguments to [dissect] must be constant but the [1] argument isn't"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{+a/99999}').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(dissect('%{+a/99999}').ex ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(dissect('%{+a/99999}').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(dissect('%{+a/99999}').ex ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(dissect('%{+a/99999}').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@2061c7aa] at compile time",
+     "caused_by": {
+      "type": "number_format_exception",
+      "reason": "Value out of range. Value:\"99999\" Radix:10"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{*a} %{b}').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(dissect('%{*a} %{b}').ext ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(dissect('%{*a} %{b}').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(dissect('%{*a} %{b}').ext ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(dissect('%{*a} %{b}').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@7f2f1e6f] at compile time",
+     "caused_by": {
+      "type": "pattern_parse",
+      "reason": "Unable to parse pattern: %{*a} %{b} Reason: Found invalid key/reference associations: 'a' Please ensure each '*<key>' is matched with a matching '&<key>"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a/1}').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(dissect('%{a/1}').extract ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(dissect('%{a/1}').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(dissect('%{a/1}').extract ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(dissect('%{a/1}').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@58197ad8] at compile time",
+     "caused_by": {
+      "type": "key_parse",
+      "reason": "Unable to parse key: a/1 Reason: The key name could not be determined"
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{+?a}').extract('a')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "emit(String.valueOf(dissect('%{+?a}').extract ...",
+       "                    ^---- HERE"
+      ],
+      "script": "emit(String.valueOf(dissect('%{+?a}').extract('a')))",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "emit(String.valueOf(dissect('%{+?a}').extract ...",
+     "                    ^---- HERE"
+    ],
+    "script": "emit(String.valueOf(dissect('%{+?a}').extract('a')))",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "error invoking [org.elasticsearch.painless.ir.InvokeCallMemberNode@7f254d8c] at compile time",
+     "caused_by": {
+      "type": "key_parse",
+      "reason": "Unable to parse key: +?a Reason: multiple modifiers are not allowed."
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{}x%{b}').extract('axb')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{b=b}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('pre %{a}').extract('pre x')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=x}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('pre %{a}').extract('pre')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "null"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a} %{b} %{c}').extract('1 2 3 4 5')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=1, b=2, c=3 4 5}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a}  %{b}').extract('1    2')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=1, b=}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a->}  %{b}').extract('1      2')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=1, b=2}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{k1}=%{v1}&%{k2}=%{v2}').extract('a=1&b=2')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{v1=1, v2=2, k1=a, k2=b}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{+a} %{+a/3} %{+a/1}').extract('x y z')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=xzy}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{é} %{ü}').extract('ä ö')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{ü=ö, é=ä}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(String.valueOf(dissect('%{a}é%{b}').extract('xéy')))",
+    "lang": "painless"
+   },
+   "context": "keyword_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "{a=x, b=y}"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(grok('%{NUMBER:n:long}').extract('7').n)",
+    "lang": "painless"
+   },
+   "context": "long_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    7
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(grok('%{NUMBER:n:double}').extract('7.5').n)",
+    "lang": "painless"
+   },
+   "context": "double_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    7.5
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(grok('%{WORD:b:boolean}').extract('TRUE').b)",
+    "lang": "painless"
+   },
+   "context": "boolean_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    true
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(grok('%{IP:ip}').extract('from 10.1.2.3 to').ip)",
+    "lang": "painless"
+   },
+   "context": "ip_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "10.1.2.3"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "emit(parse(grok('%{TIMESTAMP_ISO8601:t}').extract('at 2021-01-02T03:04:05Z').t))",
+    "lang": "painless"
+   },
+   "context": "date_field",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": [
+    "2021-01-02T03:04:05.000Z"
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return grok('%{WORD:w}').extract('a') == null ? 0 : 1",
+    "lang": "painless"
+   },
+   "context": "score",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return grok('%{WORD:w}').extract ...",
+       "       ^---- HERE"
+      ],
+      "script": "return grok('%{WORD:w}').extract('a') == null ? 0 : 1",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return grok('%{WORD:w}').extract ...",
+     "       ^---- HERE"
+    ],
+    "script": "return grok('%{WORD:w}').extract('a') == null ? 0 : 1",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unknown call [grok] with [1] arguments."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return dissect('%{a}').extract('a')",
+    "lang": "painless"
+   },
+   "context": "painless_test",
+   "context_setup": {
+    "index": "painless-docs",
+    "document": {}
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return dissect('%{a}').extract(' ...",
+       "       ^---- HERE"
+      ],
+      "script": "return dissect('%{a}').extract('a')",
+      "lang": "painless",
+      "position": {
+       "offset": 7,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return dissect('%{a}').extract(' ...",
+     "       ^---- HERE"
+    ],
+    "script": "return dissect('%{a}').extract('a')",
+    "lang": "painless",
+    "position": {
+     "offset": 7,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unknown call [dissect] with [1] arguments."
+    }
+   },
+   "status": 400
+  }
+ }
+]
