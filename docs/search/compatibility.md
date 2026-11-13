@@ -134,8 +134,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   captured from OpenSearch 3.9.0 with job runs forced as the plugin's tests force them
   (`ism_run` steps). Not run: shrink, rollup, transform, search_only, convert_index_to_remote
   and stop_replication (their steps fail with a cause saying so), and notification
-  destinations and channels (roll has no outbound connectivity, as for Watcher webhooks: the
-  step fails with that cause). An unloaded serverless cluster runs its due jobs when it wakes.
+  destinations and channels (roll sends no notifications: the step fails with that cause). An unloaded serverless cluster runs its due jobs when it wakes.
 - OpenSearch search request extras (`os_search_ext.json`, 21 steps): `phase_took`,
   `cancel_after_time_interval`, the bundled plugins' `ext` sections (`rerank`, `ml_inference`,
   `ubi` with its response `query_id`; other names fail as OpenSearch fails them), the `template`
@@ -150,6 +149,31 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   order, missing-index resources, can-match/DFS sort failures and stats shapes;
   `os_search.json` its suggestion order, nested inner hit sources, t-digest 3.3 percentile
   ranks, significant terms background and `_msearch` header rules.
+- The Security plugin (`xpack::security::opensearch`, on roll's one security evaluator):
+  `_plugins/_security/api/internalusers`, `roles`, `rolesmapping` and `actiongroups` (GET, PUT,
+  DELETE, PATCH with JSON patches), `api/account` (GET, and PUT for one's own password),
+  `authinfo` and `health`, also under `_opendistro/_security`. Answers, validation (keys, types,
+  zxcvbn password strength with the plugin's defaults, Jackson's errors for bad nested
+  entries), static and reserved entries (the distribution's 54 roles and 26 action groups;
+  `admin` is the cluster's owner, `all_access` is mapped to its backend role; the demo users and
+  their published passwords are left out), the REST API's access rule (`all_access`,
+  `security_rest_api_access` or `restapi:admin/*`; roles granting `restapi:` permissions need the
+  plugin's super admin, which roll has none of) are pinned by `os_security_api.json` (87 steps)
+  and `os_security_auth.json` (46 steps). A user's roles are its `opendistro_security_roles` and
+  the mappings naming it or its backend roles (wildcards, `and_backend_roles`); action groups
+  expand to action patterns and `${user.name}`-style variables fill index patterns and DLS. The
+  plugin's authorization: its 403 (`no permissions for [...] and User [...]`), the composite,
+  scroll and reindex actions checked as cluster actions, no narrowing of wildcards to permitted
+  indices, `indices:admin/create` for writes that create an index, bulk items naming both
+  actions, a by-query `refresh=true` refused after its writes, a plain `Unauthorized` 401.
+  Document and field level security and masked fields (BLAKE2b with
+  `plugins.security.compliance.salt`, `::/regex/::replacement` and `::SHA-256`/`::SHA-512`
+  rules; the union over roles) by `os_security_dls.json` (16 steps). Differences: a DLS query
+  filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
+  and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
+  match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
+  plugin's) up to cost 14. Not yet: `tenants`, `nodesdn`, `allowlist`, `audit`, `securityconfig`,
+  `ssl`, `whoami`, `permissionsinfo` and the cache API.
 
 
 ## Extended suites (modules, plugins, x-pack)
@@ -227,8 +251,8 @@ the discovery/store plugins.
 | `snapshot-repo-test-kit` | `x-pack/plugin/snapshot-repo-test-kit/qa/rest` | basic | 6 | 6 | 3 | 3 | 3 |
 | `stack` | `x-pack/plugin/stack` | security | 6 | 6 | 6 | 6 | 0 |
 | `transform` | `x-pack/plugin/transform` | security | 109 | 108 | 108 | 108 | 0 |
-| `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 43 | 43 | 46 |
-| `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 0 | 0 | 9 |
+| `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
+| `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 5 | 5 | 4 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
 | `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 954 | 954 | 458 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
@@ -242,7 +266,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 4235 | 4235 | 1306 |
+| **total** | | | 6044 | 5541 | 4286 | 4286 | 1255 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -282,7 +306,8 @@ the discovery/store plugins.
 <!-- test-search: snapshot-repo-test-kit >= 3 -->
 <!-- test-search: stack >= 6 -->
 <!-- test-search: transform >= 108 -->
-<!-- test-search: watcher >= 43 -->
+<!-- test-search: watcher >= 89 -->
+<!-- test-search: watcher-security >= 5 -->
 <!-- test-search: wildcard >= 9 -->
 <!-- test-search: platinum >= 954 -->
 <!-- test-search: esql >= 544 -->
@@ -307,8 +332,12 @@ CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
 `transport-netty4` or `user-agent` module in `_nodes`; roll ignores `xpack.license.self_generated.type: basic`
 (its license is always `enterprise`), so `rank-rrf-license`'s licence errors are missing; the
 privileges of `manage_autoscaling`, `manage_search_application`, `watcher_manager` and other
-x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search`,
-`watcher-security` run as such users).
+x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search` run as such
+users). `watcher-security`'s last 4 need run-as (`es-security-runas-user`), which roll doesn't
+support, and Elasticsearch's leniency for indices a user may not read (a watch's search with
+`ignore_unavailable` skips them; roll answers 403, so the watch fails instead of finding nothing).
+The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
+`roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 
 ## Differential suite
 
@@ -1099,7 +1128,9 @@ the rest are skipped by the tests' own prerequisites.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure
-  run for real; ML jobs/datafeeds/trained models, watcher, logstash pipelines, searchable
+  and watcher run for real (watches fire on the cluster's job scheduler and wake a sleeping
+  cluster; `http` inputs and webhooks reach public addresses only; email, Slack, PagerDuty and
+  Jira actions are simulated but never sent); ML jobs/datafeeds/trained models, logstash pipelines, searchable
   snapshots, migration, SSL certificates and streams keep their stored objects, validation,
   state transitions and stats shapes as Elasticsearch reports them, without the native
   processes behind them. ES|QL: ~110 scalar functions with Elasticsearch's arity/type errors and

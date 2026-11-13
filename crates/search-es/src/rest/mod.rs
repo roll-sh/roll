@@ -571,7 +571,16 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
     // Authentication comes first (Elasticsearch's security REST filter), authorization after
     // the request was parsed (its transport action).
     let charged = in_flight.as_ref().map(|_| ()).map_err(Clone::clone);
-    let result = match charged.and_then(|_| crate::xpack::security::authenticate(&ctx)).and_then(|_| params::check_params(&ctx)) {
+    let authenticated = charged.and_then(|_| crate::xpack::security::authenticate(&ctx)).map(|()| {
+        // An internal call without credentials inside `internal::as_principal` (a watch running
+        // as its owner) is that principal's.
+        if ctx.principal.get().is_none()
+            && let Some(p) = crate::xpack::internal::acting_principal(req)
+        {
+            let _ = ctx.principal.set(p);
+        }
+    });
+    let result = match authenticated.and_then(|_| params::check_params(&ctx)) {
         Err(e) => Err(e),
         Ok(()) => {
             // OpenSearch (forked before Elasticsearch added this check) ignores a body an API

@@ -7560,6 +7560,7 @@ dependencies = [
  "regex",
  "regex-syntax",
  "reqwest",
+ "roll-net",
  "ryu",
  "search-aggs",
  "search-analysis",

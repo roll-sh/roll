@@ -31,6 +31,30 @@ pub struct Caller {
 
 tokio::task_local! {
     static CALLER: Caller;
+    static ACTING: crate::xpack::security::Principal;
+}
+
+/// Runs `f` with its internal calls that carry no credentials made as `principal` (when there
+/// is one): a watch runs as the user who stored it, as Elasticsearch runs it with the stored
+/// security headers. Only the user and roles are kept, never credentials.
+pub async fn as_principal<F: Future>(principal: Option<crate::xpack::security::Principal>, f: F) -> F::Output {
+    match principal {
+        Some(p) => ACTING.scope(p, f).await,
+        None => f.await,
+    }
+}
+
+/// Marks a [`call_system`] request, which keeps the cluster's authority inside
+/// [`as_principal`] too. A client sending it gains nothing: outside `as_principal` it changes
+/// nothing.
+pub const SYSTEM_HEADER: &str = "x-roll-internal-system";
+
+/// The principal an internal request without credentials runs as ([`as_principal`]).
+pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Principal> {
+    if req.header("authorization").is_some() || req.header(crate::xpack::security::AUTHENTICATED_HEADER).is_some() || req.header(SYSTEM_HEADER).is_some() {
+        return None;
+    }
+    ACTING.try_with(Clone::clone).ok()
 }
 
 impl Caller {
@@ -78,9 +102,10 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
     send(cluster, req)
 }
 
-/// [`call`] with the cluster's own authority, also inside [`as_caller`].
+/// [`call`] with the cluster's own authority, also inside [`as_caller`] and [`as_principal`].
 pub fn call_system<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Value>) -> Call<'a> {
     let mut req = EsRequest::new(method, uri);
+    req.headers.push((SYSTEM_HEADER.into(), "true".into()));
     if let Some(b) = body {
         req.body = bytes::Bytes::from(b.to_json());
         req.headers.push(("Content-Type".into(), "application/json".into()));

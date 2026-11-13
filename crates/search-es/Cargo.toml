@@ -29,6 +29,8 @@ rand.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 regex-syntax.workspace = true
+# The one private-address guard for URLs tenants choose (watcher's `http` input and webhooks).
+roll-net.workspace = true
 ryu.workspace = true
 search-aggs.workspace = true
 search-analysis.workspace = true

@@ -1,42 +1,65 @@
 //! Watcher: watches (`_watcher/watch`), `_execute`, `_ack`, `_activate`/`_deactivate`,
 //! `_query/watches`, `_watcher/stats`, `_start`/`_stop` and `_watcher/settings`.
 //!
-//! **What is real:** watches are validated and stored with Elasticsearch's status bookkeeping
-//! (versions, sequence numbers, per-action ack states and their transitions), and `_execute`
-//! runs a watch for real: inputs `simple`, `search` (through the core search API), `chain` and
-//! `none`; conditions `always`, `never`, `compare` and `array_compare` (with `{{ctx...}}` and
-//! `<{now...}>` values); transforms `search` and `chain`; actions `index` (into roll's indices)
-//! and `logging` (rendered with mustache), honouring `action_modes`, `ignore_condition`,
-//! `alternative_input` and `record_execution`.
+//! Watches are validated and stored as Elasticsearch stores them in `.watches` ([`parse`]),
+//! with its status bookkeeping (versions, sequence numbers, per-action ack, execution and
+//! throttle states). A watch runs for real ([`exec`]): inputs `simple`, `search`, `http`,
+//! `chain` and `transform`; conditions `always`, `never`, `compare`, `array_compare` and
+//! painless `script`s; transforms `search`, `script` and `chain`; actions `index`, `logging`
+//! and `webhook`, with throttling, acks, action conditions and transforms and `foreach`.
 //!
-//! **What is emulated:** roll has no trigger scheduler, so watches only run through `_execute`.
-//! Actions that need external services (`email`, `webhook`, `slack`, `pagerduty`, `jira`, `http`
-//! inputs) fail with the error Elasticsearch gives when no account is configured, unless
-//! simulated. Watch history is not written to `.watcher-history-*`.
+//! **Triggers** ([`schedule`]) run on the cluster's job scheduler
+//! ([`crate::opensearch::jobs`]): an active watch keeps the time it next fires in its stored
+//! state (`_roll.next_run`), so it survives the cluster sleeping, and a sleeping cluster is
+//! woken when one is due. Every triggered execution, and every `_execute` with
+//! `record_execution`, updates the watch's status and writes its watch record to
+//! `.watcher-history-18-<date>`.
+//!
+//! **Security:** a watch stored by a user who isn't a superuser runs its searches and writes as
+//! that user (Elasticsearch's stored security headers): the user and roles are kept with the
+//! watch (never credentials) and its internal calls are authorized as them.
+//!
+//! **What is emulated:** `email`, `slack`, `pagerduty` and `jira` actions are simulated as
+//! Elasticsearch simulates them, but roll search sends no notifications: executing one fails
+//! as Elasticsearch does without an account. `http` inputs and `webhook` actions only reach
+//! public addresses ([`http`]).
 
+mod compare;
+pub mod exec;
+pub mod http;
+mod parse;
+pub mod schedule;
+
+use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
+use crate::xpack::security::{AuthKind, Principal};
 use crate::xpack::{enc, internal, store};
+use exec::fmt_ms;
 
 pub const WATCHES: &str = "watcher.watch";
 const STATE: &str = "watcher.state";
 
-const ACTION_TYPES: [&str; 8] = ["index", "logging", "email", "webhook", "slack", "pagerduty", "jira", "http"];
+/// The watch history's template version: records go to `.watcher-history-18-<yyyy.MM.dd>`.
+const HISTORY: &str = ".watcher-history-18";
 
-fn iso(ms: i64) -> String {
-    crate::time::java_instant_string(ms)
-}
+/// `xpack.watcher.execution.default_throttle_period`.
+const DEFAULT_THROTTLE_MS: i64 = 5000;
 
 fn state(st: &crate::meta::ClusterState) -> Map {
     st.metadata.xpack.get(STATE, "state").and_then(Value::as_object).cloned().unwrap_or_default()
 }
 
+fn parse_err(msg: impl Into<String>) -> EsError {
+    EsError::new(400, "parse_exception", msg)
+}
+
 /// Checks a Quartz cron expression's shape (6 or 7 fields of the allowed characters).
 fn check_cron(expr: &str) -> Result<(), EsError> {
     cron_problem(expr).map_or(Ok(()), |detail| {
-        Err(EsError::new(400, "parse_exception", "could not parse [cron] schedule").caused_by(
+        Err(parse_err("could not parse [cron] schedule").caused_by(
             EsError::illegal_argument(format!("invalid cron expression [{expr}]"))
                 .caused_by(EsError::illegal_argument(format!("illegal cron expression format [java.lang.IllegalArgumentException: {detail}]"))),
         ))
@@ -91,130 +114,6 @@ pub(crate) fn cron_problem(expr: &str) -> Option<String> {
     None
 }
 
-/// Validates a watch definition (`WatchParser`).
-fn validate_watch(id: &str, w: &Map) -> EsResult<()> {
-    for k in ["trigger", "input"] {
-        if k == "trigger" && !w.contains_key(k) {
-            return Err(EsError::new(400, "parse_exception", format!("could not parse watch [{id}]. missing required field [trigger]")));
-        }
-    }
-    for (k, _) in w {
-        if !matches!(k.as_str(), "trigger" | "input" | "condition" | "transform" | "actions" | "metadata" | "throttle_period" | "throttle_period_in_millis" | "status") {
-            return Err(EsError::new(400, "parse_exception", format!("could not parse watch [{id}]. unexpected field [{k}]")));
-        }
-    }
-    if let Some(Value::Obj(sched)) = w.get("trigger").and_then(|t| t.get("schedule")) {
-        if let Some(c) = sched.get("cron") {
-            let list: Vec<String> = match c {
-                Value::Arr(a) => a.iter().map(Value::to_es_string).collect(),
-                other => vec![other.to_es_string()],
-            };
-            for e in list {
-                check_cron(&e)?;
-            }
-        }
-    } else {
-        return Err(EsError::new(400, "parse_exception", format!("could not parse [{}] trigger for [{id}]", w.get("trigger").and_then(|t| t.as_object()).and_then(|m| m.keys().next().cloned()).unwrap_or_default())));
-    }
-    for (aid, a) in w.get("actions").and_then(Value::as_object).into_iter().flatten() {
-        let has_type = a.as_object().is_some_and(|m| m.keys().any(|k| ACTION_TYPES.contains(&k.as_str())));
-        if !has_type {
-            return Err(EsError::new(400, "parse_exception", format!("could not parse action [{id}/{aid}]. unknown action type")));
-        }
-    }
-    Ok(())
-}
-
-/// `throttle_period` (a time value) as Elasticsearch stores it: `throttle_period_in_millis`.
-fn throttle_ms(m: &Map) -> EsResult<Option<i64>> {
-    match (m.get("throttle_period_in_millis"), m.get("throttle_period")) {
-        (Some(v), _) => Ok(v.as_i64()),
-        (None, Some(v)) => Ok(Some(crate::units::TimeValue::parse(&v.to_es_string(), "throttle_period")?.as_millis())),
-        _ => Ok(None),
-    }
-}
-
-/// An action body as its `toXContent` writes it (defaults filled in, Elasticsearch's order).
-fn normalize_action_body(ty: &str, body: &Value) -> Value {
-    let Value::Obj(b) = body else { return body.clone() };
-    let mut out = Map::new();
-    let mut take = |k: &str, default: Option<Value>| {
-        if let Some(v) = b.get(k).cloned().or(default) {
-            out.insert(k.to_string(), v);
-        }
-    };
-    match ty {
-        "logging" => {
-            take("category", None);
-            take("level", Some(Value::from("info")));
-            take("text", None);
-        }
-        "webhook" => {
-            take("scheme", Some(Value::from("http")));
-            take("host", None);
-            take("port", None);
-            take("method", Some(Value::from("get")));
-            take("path", None);
-            take("params", Some(Value::object()));
-            take("headers", Some(Value::object()));
-            for k in ["auth", "body", "proxy", "connection_timeout_in_millis", "read_timeout_millis", "url"] {
-                take(k, None);
-            }
-        }
-        _ => return body.clone(),
-    }
-    for (k, v) in b {
-        if !out.contains_key(k) {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-    Value::Obj(out)
-}
-
-/// A watch as `Watch.toXContent` stores it: `input` and `condition` default to `none` and
-/// `always`, throttle periods become milliseconds, action bodies get their defaults.
-fn normalize_watch(w: &Map) -> EsResult<Map> {
-    let mut out = Map::new();
-    if let Some(t) = w.get("trigger") {
-        out.insert("trigger".into(), t.clone());
-    }
-    out.insert("input".into(), w.get("input").cloned().unwrap_or_else(|| obj! { "none" => obj! {} }));
-    out.insert("condition".into(), w.get("condition").cloned().unwrap_or_else(|| obj! { "always" => obj! {} }));
-    if let Some(t) = w.get("transform") {
-        out.insert("transform".into(), t.clone());
-    }
-    if let Some(ms) = throttle_ms(w)? {
-        out.insert("throttle_period_in_millis".into(), ms.into());
-    }
-    let mut actions = Map::new();
-    for (id, a) in w.get("actions").and_then(Value::as_object).into_iter().flatten() {
-        let Value::Obj(am) = a else {
-            actions.insert(id.clone(), a.clone());
-            continue;
-        };
-        let mut o = Map::new();
-        if let Some(ms) = throttle_ms(am)? {
-            o.insert("throttle_period_in_millis".into(), ms.into());
-        }
-        for k in ["condition", "transform", "foreach", "max_iterations"] {
-            if let Some(v) = am.get(k) {
-                o.insert(k.into(), v.clone());
-            }
-        }
-        for (k, v) in am {
-            if !matches!(k.as_str(), "throttle_period" | "throttle_period_in_millis" | "condition" | "transform" | "foreach" | "max_iterations") {
-                o.insert(k.clone(), normalize_action_body(k, v));
-            }
-        }
-        actions.insert(id.clone(), Value::Obj(o));
-    }
-    out.insert("actions".into(), Value::Obj(actions));
-    if let Some(m) = w.get("metadata") {
-        out.insert("metadata".into(), m.clone());
-    }
-    Ok(out)
-}
-
 /// The version a watch id's next write gets: one past the live watch, or past the tombstone a
 /// recent delete left (Elasticsearch keeps deleted versions of `.watches` documents).
 fn next_version(st: &crate::meta::ClusterState, id: &str) -> i64 {
@@ -241,12 +140,15 @@ fn set_tombstone(st: &mut crate::meta::ClusterState, id: &str, version: Option<i
     store::put(st, STATE, "state", Value::Obj(s), now).map(|_| ())
 }
 
-fn initial_status(w: &Map, active: bool, now: i64) -> Value {
+fn initial_status(w: &Map, active: bool, now: i64) -> Map {
     let mut actions = Map::new();
     for aid in w.get("actions").and_then(Value::as_object).into_iter().flat_map(|m| m.keys()) {
-        actions.insert(aid.clone(), obj! { "ack" => obj! { "timestamp" => iso(now), "state" => "awaits_successful_execution" } });
+        actions.insert(aid.clone(), obj! { "ack" => obj! { "timestamp" => fmt_ms(now), "state" => "awaits_successful_execution" } });
     }
-    obj! { "state" => obj! { "active" => active, "timestamp" => iso(now) }, "actions" => Value::Obj(actions) }
+    let mut s = Map::new();
+    s.insert("state".into(), obj! { "active" => active, "timestamp" => fmt_ms(now) });
+    s.insert("actions".into(), Value::Obj(crate::json::java_hash_map(actions, 16)));
+    s
 }
 
 fn next_seq(st: &mut crate::meta::ClusterState, now: i64) -> EsResult<i64> {
@@ -257,22 +159,108 @@ fn next_seq(st: &mut crate::meta::ClusterState, now: i64) -> EsResult<i64> {
     Ok(seq)
 }
 
+// --- the watch's user ---------------------------------------------------------------------------
+
+/// The user a watch runs as, kept with it: `None` for a superuser (the watch runs with the
+/// cluster's authority).
+fn stored_user(p: &Principal) -> Option<Value> {
+    if p.is_superuser() {
+        return None;
+    }
+    let mut m = Map::new();
+    m.insert("username".into(), p.username.clone().into());
+    m.insert("roles".into(), Value::Arr(p.roles.iter().map(Value::from).collect()));
+    m.insert("realm_name".into(), p.realm_name.into());
+    m.insert("realm_type".into(), p.realm_type.into());
+    if let AuthKind::ApiKey(a) = &p.kind {
+        m.insert("api_key".into(), obj! { "id" => a.id.clone(), "name" => a.name.clone(), "role_descriptors" => a.role_descriptors.clone(), "limited_by" => a.limited_by.clone(), "cross_cluster" => a.cross_cluster });
+    }
+    Some(Value::Obj(m))
+}
+
+fn principal_of(u: &Value) -> Option<Principal> {
+    const REALMS: [&str; 8] = ["reserved", "default_native", "native", "default_file", "file", "_es_api_key", "_service_account", "__attach"];
+    let known = |s: Option<&str>, d: &'static str| -> &'static str { s.and_then(|s| REALMS.iter().find(|r| **r == s).copied()).unwrap_or(d) };
+    let kind = match u.get("api_key") {
+        Some(a) => AuthKind::ApiKey(Box::new(crate::xpack::security::ApiKeyAuth {
+            id: a.get("id").map(Value::to_es_string).unwrap_or_default(),
+            name: a.get("name").cloned().unwrap_or(Value::Null),
+            role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
+            limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
+            cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
+        })),
+        None => AuthKind::Realm,
+    };
+    // Built from the owner's defaults, so fields this doesn't keep stay neutral.
+    let mut p = Principal::owner();
+    p.username = u.get("username")?.to_es_string();
+    p.roles = u.get("roles").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
+    p.full_name = Value::Null;
+    p.email = Value::Null;
+    p.metadata = Value::object();
+    p.realm_name = known(u.get("realm_name").and_then(Value::as_str), "default_native");
+    p.realm_type = known(u.get("realm_type").and_then(Value::as_str), "native");
+    p.kind = kind;
+    Some(p)
+}
+
+// --- CRUD ------------------------------------------------------------------------------------
+
+/// When an active watch next fires, from its activation.
+fn next_run(watch: &Value, activated: i64, after: i64) -> Option<i64> {
+    schedule::parse("", watch.get("trigger")).ok()?.next_after(activated, after)
+}
+
+fn conflict(id: &str, seq: i64, term: i64, current: Option<i64>) -> EsError {
+    let reason = match current {
+        Some(c) => format!("[{id}]: version conflict, required seqNo [{seq}], primary term [{term}]. current document has seqNo [{c}] and primary term [1]"),
+        None => format!("[{id}]: version conflict, required seqNo [{seq}], primary term [{term}]. but no document was found"),
+    };
+    EsError::new(409, "version_conflict_engine_exception", reason).with_meta("index_uuid", "_na_").with_meta("shard", "0").with_meta("index", ".watches")
+}
+
 pub async fn put_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     let active = ctx.bool_param("active", true)?;
-    let body = ctx.body_map()?.unwrap_or_default();
-    validate_watch(&id, &body)?;
-    let body = normalize_watch(&body)?;
+    if ctx.param("version").is_some() {
+        return Err(EsError::java(500, "unsupported_operation_exception", "update requests do not support versioning"));
+    }
+    let num = |k: &str| -> EsResult<Option<i64>> { ctx.param(k).map(|v| v.parse::<i64>().map_err(|_| EsError::illegal_argument(format!("failed to parse [{k}] with value [{v}]")))).transpose() };
+    let if_seq = num("if_seq_no")?;
+    let if_term = num("if_primary_term")?;
+    let raw = ctx.body_map()?.unwrap_or_default();
+    let previous = if_seq.and_then(|_| ctx.state().metadata.xpack.get(WATCHES, &id).and_then(|w| w.get("watch").cloned()));
+    let body = parse::normalize_watch(ctx.cluster, &id, &raw, previous.as_ref())?;
+    if parse::uses_ignore_throttled(&Value::Obj(raw)) {
+        ctx.warn(parse::IGNORE_THROTTLED);
+    }
+    let user = stored_user(crate::xpack::security::principal(ctx));
     let now = ctx.now_ms;
     let (version, seq, created) = ctx
         .cluster
         .update(move |st| {
             let old = st.metadata.xpack.get(WATCHES, &id).cloned();
+            if let Some(s) = if_seq {
+                let term = if_term.unwrap_or(1);
+                let cur = old.as_ref().and_then(|o| o.get("_seq_no")).and_then(Value::as_i64);
+                if cur != Some(s) || term != 1 {
+                    return Err(conflict(&id, s, term, cur));
+                }
+            }
             let version = next_version(st, &id);
             set_tombstone(st, &id, None, now)?;
             let seq = next_seq(st, now)?;
-            let w = obj! { "watch" => Value::Obj(body.clone()), "status" => initial_status(&body, active, now), "_version" => version, "_seq_no" => seq };
-            store::put(st, WATCHES, &id, w, now)?;
+            let w = Value::Obj(body.clone());
+            let mut roll = Map::new();
+            roll.insert("activated".into(), now.into());
+            if active && let Some(n) = next_run(&w, now, now) {
+                roll.insert("next_run".into(), n.into());
+            }
+            if let Some(u) = user.clone() {
+                roll.insert("user".into(), u);
+            }
+            let doc = obj! { "watch" => w, "status" => Value::Obj(initial_status(&body, active, now)), "_version" => version, "_seq_no" => seq, "_roll" => Value::Obj(roll) };
+            store::put(st, WATCHES, &id, doc, now)?;
             Ok((version, seq, old.is_none()))
         })
         .await?;
@@ -280,10 +268,28 @@ pub async fn put_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Ok(Reply::Body(if created { 201 } else { 200 }, obj! { "_id" => id, "_version" => version, "_seq_no" => seq, "_primary_term" => 1, "created" => created }))
 }
 
-fn status_out(w: &Value) -> Value {
-    let mut s = w.get("status").and_then(Value::as_object).cloned().unwrap_or_default();
-    s.insert("version".into(), w.get("_version").cloned().unwrap_or(Value::from(1)));
-    Value::Obj(s)
+/// A stored status as Elasticsearch prints it: its fields in order, the actions as the
+/// `HashMap` they are, and `version`.
+fn status_out(status: &Map, version: Value) -> Value {
+    let mut s = status.clone();
+    let mut out = Map::new();
+    for k in ["state", "last_checked", "last_met_condition", "actions", "execution_state"] {
+        if let Some(v) = s.shift_remove(k) {
+            let v = match (k, v) {
+                ("actions", Value::Obj(a)) => Value::Obj(crate::json::java_hash_map(a, 16)),
+                (_, v) => v,
+            };
+            out.insert(k.into(), v);
+        }
+    }
+    s.shift_remove("version");
+    out.extend(s);
+    out.insert("version".into(), version);
+    Value::Obj(out)
+}
+
+fn stored_status(w: &Value) -> Map {
+    w.get("status").and_then(Value::as_object).cloned().unwrap_or_default()
 }
 
 pub fn get_watch(ctx: &Ctx) -> EsResult<Reply> {
@@ -292,10 +298,15 @@ pub fn get_watch(ctx: &Ctx) -> EsResult<Reply> {
     let Some(w) = st.metadata.xpack.get(WATCHES, id) else {
         return Ok(Reply::Body(404, obj! { "found" => false, "_id" => id }));
     };
+    let watch = w.get("watch").cloned().unwrap_or(Value::Null);
+    if parse::uses_ignore_throttled(&watch) {
+        ctx.warn(parse::IGNORE_THROTTLED);
+    }
+    let version = w.get("_version").cloned().unwrap_or(Value::from(1));
     Reply::ok(obj! {
-        "found" => true, "_id" => id, "_version" => w.get("_version").cloned().unwrap_or(Value::from(1)),
+        "found" => true, "_id" => id, "_version" => version.clone(),
         "_seq_no" => w.get("_seq_no").cloned().unwrap_or(Value::from(0)), "_primary_term" => 1,
-        "status" => status_out(w), "watch" => w.get("watch").cloned().unwrap_or(Value::Null),
+        "status" => status_out(&stored_status(w), version), "watch" => parse::redacted_watch(&watch),
     })
 }
 
@@ -316,8 +327,8 @@ pub async fn delete_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Ok(Reply::Body(if found { 200 } else { 404 }, obj! { "_id" => out_id, "_version" => version, "found" => found }))
 }
 
-/// Applies `f` to a stored watch's status, bumping its version.
-async fn modify_status(ctx: &Ctx<'_>, id: String, f: impl FnOnce(&mut Map, i64) -> EsResult<bool> + Send) -> EsResult<Reply> {
+/// Applies `f` to a stored watch (its status, and its `_roll` state), bumping its version.
+async fn modify_status(ctx: &Ctx<'_>, id: String, f: impl FnOnce(&mut Map, &mut Map, &Value, i64) -> EsResult<bool> + Send) -> EsResult<Reply> {
     let now = ctx.now_ms;
     let w = ctx
         .cluster
@@ -326,11 +337,14 @@ async fn modify_status(ctx: &Ctx<'_>, id: String, f: impl FnOnce(&mut Map, i64) 
                 return Err(EsError::resource_not_found(format!("Watch with id [{id}] does not exist")));
             };
             let mut status = w.get("status").and_then(Value::as_object).cloned().unwrap_or_default();
+            let mut roll = w.get("_roll").and_then(Value::as_object).cloned().unwrap_or_default();
+            let watch = w.get("watch").cloned().unwrap_or(Value::Null);
             // Nothing changed (an ack with nothing to ack): the document isn't rewritten.
-            if !f(&mut status, now)? {
+            if !f(&mut status, &mut roll, &watch, now)? {
                 return Ok(Value::Obj(w));
             }
             w.insert("status".into(), Value::Obj(status));
+            w.insert("_roll".into(), Value::Obj(roll));
             let version = w.get("_version").and_then(Value::as_i64).unwrap_or(1) + 1;
             w.insert("_version".into(), version.into());
             let seq = next_seq(st, now)?;
@@ -340,24 +354,24 @@ async fn modify_status(ctx: &Ctx<'_>, id: String, f: impl FnOnce(&mut Map, i64) 
             Ok(v)
         })
         .await?;
-    Reply::ok(obj! { "status" => status_out(&w) })
+    Reply::ok(obj! { "status" => status_out(&stored_status(&w), w.get("_version").cloned().unwrap_or(Value::from(1))) })
 }
 
 pub async fn ack_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = ctx.path_param("watch_id").unwrap_or_default().to_string();
     let ids = ctx.list_param("action_id");
-    modify_status(ctx, id, move |status, now| {
+    modify_status(ctx, id, move |status, _, _, now| {
         let mut changed = false;
         if let Some(Value::Obj(actions)) = status.get_mut("actions") {
             for (aid, a) in actions.iter_mut() {
                 if ids.as_ref().is_some_and(|l| !l.iter().any(|x| x == aid || x == "_all")) {
                     continue;
                 }
-                if let Some(Value::Obj(ack)) = a.as_object_mut().and_then(|m| m.get_mut("ack")).map(|v| v as &mut Value)
+                if let Some(Value::Obj(ack)) = a.as_object_mut().and_then(|m| m.get_mut("ack"))
                     && ack.get("state").and_then(Value::as_str) == Some("ackable")
                 {
                     ack.insert("state".into(), "acked".into());
-                    ack.insert("timestamp".into(), iso(now).into());
+                    ack.insert("timestamp".into(), fmt_ms(now).into());
                     changed = true;
                 }
             }
@@ -369,8 +383,13 @@ pub async fn ack_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 pub async fn set_active(ctx: &Ctx<'_>, active: bool) -> EsResult<Reply> {
     let id = ctx.path_param("watch_id").unwrap_or_default().to_string();
-    modify_status(ctx, id, move |status, now| {
-        status.insert("state".into(), obj! { "active" => active, "timestamp" => iso(now) });
+    modify_status(ctx, id, move |status, roll, watch, now| {
+        status.insert("state".into(), obj! { "active" => active, "timestamp" => fmt_ms(now) });
+        roll.insert("activated".into(), now.into());
+        roll.shift_remove("next_run");
+        if active && let Some(n) = next_run(watch, now, now) {
+            roll.insert("next_run".into(), n.into());
+        }
         Ok(true)
     })
     .await
@@ -381,16 +400,20 @@ pub fn query_watches(ctx: &Ctx) -> EsResult<Reply> {
     let from = body.get("from").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
     let size = body.get("size").and_then(Value::as_i64).unwrap_or(10).max(0) as usize;
     let st = ctx.state();
+    let mut warn = false;
     let all: Vec<Value> = st
         .metadata
         .xpack
         .iter(WATCHES)
         .map(|(id, w)| {
-            let mut status = w.get("status").and_then(Value::as_object).cloned().unwrap_or_default();
-            status.insert("version".into(), Value::from(-1));
-            obj! { "_id" => id.clone(), "watch" => w.get("watch").cloned().unwrap_or(Value::Null), "status" => Value::Obj(status), "_seq_no" => w.get("_seq_no").cloned().unwrap_or(Value::from(0)), "_primary_term" => 1 }
+            let watch = w.get("watch").cloned().unwrap_or(Value::Null);
+            warn |= parse::uses_ignore_throttled(&watch);
+            obj! { "_id" => id.clone(), "watch" => parse::redacted_watch(&watch), "status" => status_out(&stored_status(w), Value::from(-1)), "_seq_no" => w.get("_seq_no").cloned().unwrap_or(Value::from(0)), "_primary_term" => 1 }
         })
         .collect();
+    if warn {
+        ctx.warn(parse::IGNORE_THROTTLED);
+    }
     let count = all.len();
     Reply::ok(obj! { "count" => count, "watches" => Value::Arr(all.into_iter().skip(from).take(size).collect()) })
 }
@@ -400,6 +423,9 @@ pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
     let s = state(&st);
     let stopped = s.get("stopped").and_then(Value::as_bool).unwrap_or(false);
     let metrics = ctx.list_param("metric").unwrap_or_default();
+    if metrics.iter().any(|m| m == "pending_watches") {
+        ctx.warn("The pending_watches parameter is deprecated, use queued_watches instead");
+    }
     let mut node = Map::new();
     node.insert("node_id".into(), ctx.cluster.node.id.clone().into());
     node.insert("watcher_state".into(), if stopped { "stopped" } else { "started" }.into());
@@ -410,7 +436,7 @@ pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
         if m == "current_watches" || m == "_all" {
             node.insert("current_watches".into(), Value::Arr(vec![]));
         }
-        if m == "queued_watches" || m == "_all" {
+        if m == "queued_watches" || m == "pending_watches" || m == "_all" {
             node.insert("queued_watches".into(), Value::Arr(vec![]));
         }
     }
@@ -498,368 +524,295 @@ pub async fn update_settings(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 // --- execution ---------------------------------------------------------------------------------
 
-/// Resolves `ctx.payload.a.b` style paths in the execution model.
-fn resolve<'a>(model: &'a Value, path: &str) -> Option<&'a Value> {
-    let mut cur = model;
-    for p in path.split('.') {
-        cur = match cur {
-            Value::Obj(m) => m.get(p)?,
-            Value::Arr(a) => a.get(p.parse::<usize>().ok()?)?,
-            _ => return None,
+fn uuid_like() -> String {
+    let b: [u8; 16] = rand::random();
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-4{}-{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[16..20], &h[20..32])
+}
+
+fn now_instant() -> crate::time::Instant {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    crate::time::Instant { secs: d.as_secs() as i64, nanos: d.subsec_nanos() }
+}
+
+/// What a watch record is made of besides the execution's outcome.
+struct RecordOf<'a> {
+    watch: &'a Value,
+    status_version: Value,
+    trigger_event: Value,
+    user: Option<String>,
+    timestamp: String,
+    started: std::time::Instant,
+    debug: bool,
+}
+
+/// A watch record (`WatchRecord.toXContent`).
+fn record(run: &exec::Run<'_>, out: &exec::Outcome, r: RecordOf<'_>) -> Value {
+    let mut wr = Map::new();
+    wr.insert("watch_id".into(), run.watch_id.clone().into());
+    wr.insert("node".into(), run.cluster.node.id.clone().into());
+    wr.insert("state".into(), out.state.into());
+    wr.insert("@timestamp".into(), r.timestamp.into());
+    if let Some(u) = r.user {
+        wr.insert("user".into(), u.into());
+    }
+    wr.insert("status".into(), status_out(&out.status, r.status_version));
+    wr.insert("trigger_event".into(), r.trigger_event);
+    wr.insert("input".into(), parse::redacted_input(r.watch.get("input").unwrap_or(&Value::Null)));
+    wr.insert("condition".into(), r.watch.get("condition").cloned().unwrap_or_else(|| obj! { "always" => obj! {} }));
+    if let Some(m) = r.watch.get("metadata") {
+        wr.insert("metadata".into(), m.clone());
+    }
+    let mut result = Map::new();
+    result.insert("execution_time".into(), fmt_ms(run.execution.millis()).into());
+    result.insert("execution_duration".into(), (r.started.elapsed().as_millis() as i64).into());
+    result.insert("input".into(), out.input.clone());
+    if let Some(c) = &out.condition {
+        result.insert("condition".into(), c.clone());
+    }
+    if let Some(t) = &out.transform {
+        result.insert("transform".into(), t.clone());
+    }
+    result.insert("actions".into(), Value::Arr(out.actions.iter().map(|(_, v)| v.clone()).collect()));
+    wr.insert("result".into(), Value::Obj(result));
+    if r.debug {
+        wr.insert("vars".into(), obj! {});
+    }
+    match &out.exception {
+        Some(e) => {
+            wr.insert("exception".into(), e.clone());
+        }
+        None => {
+            wr.insert("messages".into(), Value::Arr(out.messages.iter().map(Value::from).collect()));
+        }
+    }
+    Value::Obj(wr)
+}
+
+/// Writes a watch record to the day's history index (hidden; created on first use).
+async fn write_history(cluster: &Cluster, record_id: &str, exec_ms: i64, record: &Value) {
+    let day = chrono::DateTime::from_timestamp_millis(exec_ms).map(|d| d.format("%Y.%m.%d").to_string()).unwrap_or_default();
+    let index = format!("{HISTORY}-{day}");
+    if cluster.state().index(&index).is_none() {
+        let body = obj! {
+            "settings" => obj! { "index.hidden" => true, "index.number_of_shards" => 1, "index.auto_expand_replicas" => "0-1" },
+            "mappings" => obj! { "_meta" => obj! { "watcher-history-version" => "18" }, "dynamic" => false, "properties" => obj! {
+                "watch_id" => obj! { "type" => "keyword" }, "node" => obj! { "type" => "keyword" }, "state" => obj! { "type" => "keyword" },
+                "user" => obj! { "type" => "text" }, "@timestamp" => obj! { "type" => "date" },
+                "trigger_event" => obj! { "type" => "object", "dynamic" => true, "properties" => obj! { "type" => obj! { "type" => "keyword" }, "triggered_time" => obj! { "type" => "date" } } },
+                "result" => obj! { "type" => "object", "dynamic" => false, "properties" => obj! { "execution_time" => obj! { "type" => "date" }, "execution_duration" => obj! { "type" => "long" } } },
+                "messages" => obj! { "type" => "text" },
+            } },
         };
+        let _ = internal::call_system(cluster, "PUT", &format!("/{}", enc(&index)), Some(&body)).await;
     }
-    Some(cur)
+    let _ = internal::call_system(cluster, "PUT", &format!("/{}/_doc/{}?op_type=create", enc(&index), enc(record_id)), Some(record)).await;
 }
 
-/// A compare value: `{{ctx.path}}` references and `<{now-5m}>` date math resolve first.
-fn compare_value(model: &Value, v: &Value, now: i64) -> Value {
-    if let Value::Str(s) = v {
-        if let Some(path) = s.strip_prefix("{{").and_then(|x| x.strip_suffix("}}")) {
-            return resolve(model, path.trim()).cloned().unwrap_or(Value::Null);
+/// The execution modes of `action_modes`.
+fn parse_modes(v: Option<&Value>) -> EsResult<Map> {
+    let mut out = Map::new();
+    for (k, m) in v.and_then(Value::as_object).into_iter().flatten() {
+        let mode = m.to_es_string().to_ascii_lowercase();
+        if !matches!(mode.as_str(), "simulate" | "force_simulate" | "execute" | "force_execute" | "skip") {
+            return Err(parse_err("could not parse watch execution request").caused_by(EsError::illegal_argument(format!("unknown action execution mode [{}]", m.to_es_string()))));
         }
-        if let Some(expr) = s.strip_prefix("<{").and_then(|x| x.strip_suffix("}>"))
-            && let Ok(f) = crate::time::DateFormatter::new("strict_date_optional_time||epoch_millis")
-            && let Ok(i) = crate::time::parse_date_math(expr, now, false, None, &f)
-        {
-            return Value::from(iso(i.millis()));
-        }
+        out.insert(k.clone(), mode.into());
     }
-    v.clone()
-}
-
-fn cmp_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    match (a, b) {
-        (Value::Num(_), Value::Num(_)) => a.as_f64()?.partial_cmp(&b.as_f64()?),
-        (Value::Str(x), Value::Str(y)) => {
-            let fmt = crate::time::DateFormatter::new("strict_date_optional_time").ok()?;
-            match (fmt.parse_millis(x), fmt.parse_millis(y)) {
-                (Ok(p), Ok(q)) => Some(p.cmp(&q)),
-                _ => Some(x.cmp(y)),
-            }
-        }
-        (Value::Num(_), Value::Str(s)) => a.as_f64()?.partial_cmp(&s.parse::<f64>().ok()?),
-        (Value::Str(s), Value::Num(_)) => s.parse::<f64>().ok()?.partial_cmp(&b.as_f64()?),
-        (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
-        (Value::Null, Value::Null) => Some(std::cmp::Ordering::Equal),
-        _ => None,
-    }
-}
-
-fn op_holds(op: &str, actual: &Value, expected: &Value) -> bool {
-    use std::cmp::Ordering::*;
-    let c = cmp_values(actual, expected);
-    match op {
-        "eq" => c == Some(Equal) || actual == expected,
-        "not_eq" => !(c == Some(Equal) || actual == expected),
-        "gt" => c == Some(Greater),
-        "gte" => matches!(c, Some(Greater | Equal)),
-        "lt" => c == Some(Less),
-        "lte" => matches!(c, Some(Less | Equal)),
-        _ => false,
-    }
-}
-
-/// Evaluates a condition: `(met, result details)`.
-fn eval_condition(cond: &Value, model: &Value, now: i64) -> EsResult<(bool, String, Value)> {
-    let Some((ty, body)) = cond.as_object().and_then(|m| m.iter().next()) else { return Ok((true, "always".into(), Value::Null)) };
-    match ty.as_str() {
-        "always" => Ok((true, ty.clone(), Value::Null)),
-        "never" => Ok((false, ty.clone(), Value::Null)),
-        "compare" => {
-            let Some((path, spec)) = body.as_object().and_then(|m| m.iter().next()) else { return Err(EsError::new(400, "parse_exception", "could not parse [compare] condition")) };
-            let Some((op, expected)) = spec.as_object().and_then(|m| m.iter().next()) else { return Err(EsError::new(400, "parse_exception", "could not parse [compare] condition")) };
-            let actual = resolve(model, path).cloned().unwrap_or(Value::Null);
-            let expected = compare_value(model, expected, now);
-            let met = op_holds(op, &actual, &expected);
-            let mut resolved = Map::new();
-            resolved.insert(path.clone(), actual);
-            if let Some(Value::Str(s)) = spec.as_object().and_then(|m| m.values().next())
-                && (s.starts_with("{{") || s.starts_with("<{"))
-            {
-                resolved.insert(s.clone(), expected);
-            }
-            Ok((met, ty.clone(), obj! { "resolved_values" => Value::Obj(resolved) }))
-        }
-        "array_compare" => {
-            let Some((path, spec)) = body.as_object().and_then(|m| m.iter().next()) else { return Err(EsError::new(400, "parse_exception", "could not parse [array_compare] condition")) };
-            let field = spec.get("path").and_then(Value::as_str).unwrap_or("");
-            let Some((op, ospec)) = spec.as_object().and_then(|m| m.iter().find(|(k, _)| k.as_str() != "path")) else {
-                return Err(EsError::new(400, "parse_exception", "could not parse [array_compare] condition"));
-            };
-            let expected = compare_value(model, ospec.get("value").unwrap_or(&Value::Null), now);
-            let quantifier = ospec.get("quantifier").and_then(Value::as_str).unwrap_or("some");
-            let arr = resolve(model, path).and_then(Value::as_array).cloned().unwrap_or_default();
-            let checks: Vec<bool> = arr.iter().map(|e| {
-                let v = if field.is_empty() { Some(e) } else { resolve(e, field) };
-                v.is_some_and(|v| op_holds(op, v, &expected))
-            }).collect();
-            let met = if quantifier == "all" { checks.iter().all(|c| *c) } else { checks.iter().any(|c| *c) };
-            let mut resolved = Map::new();
-            resolved.insert(path.clone(), Value::Arr(arr));
-            Ok((met, ty.clone(), obj! { "resolved_values" => Value::Obj(resolved) }))
-        }
-        other => Err(EsError::new(400, "parse_exception", format!("could not parse condition for watch. unknown condition type [{other}]"))),
-    }
-}
-
-/// Runs an input: `(type, payload)`.
-async fn run_input(ctx: &Ctx<'_>, input: &Value, model: &Value) -> EsResult<(String, Value)> {
-    let Some((ty, body)) = input.as_object().and_then(|m| m.iter().next()) else { return Ok(("none".into(), Value::object())) };
-    match ty.as_str() {
-        "simple" => Ok((ty.clone(), body.clone())),
-        "none" => Ok((ty.clone(), Value::object())),
-        "search" => {
-            let req = body.get("request").cloned().unwrap_or(Value::Null);
-            let indices: Vec<String> = req.get("indices").and_then(Value::as_array).into_iter().flatten().map(Value::to_es_string).collect();
-            let path = if indices.is_empty() { "/_search".to_string() } else { format!("/{}/_search", enc(&indices.join(","))) };
-            let search_body = req.get("body").cloned().unwrap_or_else(Value::object);
-            let mut r = internal::call(ctx.cluster, "POST", &format!("{path}?rest_total_hits_as_int=true"), Some(&search_body)).await?;
-            if let Some(Value::Arr(paths)) = body.get("extract") {
-                let mut m = Map::new();
-                for p in paths {
-                    let p = p.to_es_string();
-                    if let Some(v) = resolve(&r, &p) {
-                        m.insert(p, v.clone());
-                    }
-                }
-                r = Value::Obj(m);
-            }
-            Ok((ty.clone(), r))
-        }
-        "chain" => {
-            let mut payload = Map::new();
-            let mut inner_model = model.clone();
-            for step in body.get("inputs").and_then(Value::as_array).into_iter().flatten() {
-                if let Some((name, inp)) = step.as_object().and_then(|m| m.iter().next()) {
-                    let (_, p) = Box::pin(run_input(ctx, inp, &inner_model)).await?;
-                    payload.insert(name.clone(), p);
-                    if let Some(Value::Obj(c)) = inner_model.as_object_mut().and_then(|m| m.get_mut("ctx")) {
-                        c.insert("payload".into(), Value::Obj(payload.clone()));
-                    }
-                }
-            }
-            Ok((ty.clone(), Value::Obj(payload)))
-        }
-        "http" => Err(EsError::illegal_state("http inputs need external connectivity, which roll search does not provide")),
-        other => Err(EsError::new(400, "parse_exception", format!("could not parse input for watch. unknown input type [{other}]"))),
-    }
-}
-
-fn render_text(ctx: &Ctx, text: &str, model: &Value) -> EsResult<String> {
-    let t = search_painless::mustache::Template::compile(text, &[("content_type".into(), "text/plain".into())]).map_err(crate::scripting::script_error)?;
-    let _ = ctx;
-    t.render_json(&crate::scripting::to_serde(model)).map_err(crate::scripting::script_error)
-}
-
-/// Runs one action: its result object.
-async fn run_action(ctx: &Ctx<'_>, id: &str, action: &Value, model: &Value, mode: &str) -> Value {
-    let Some((ty, body)) = action.as_object().and_then(|m| m.iter().find(|(k, _)| ACTION_TYPES.contains(&k.as_str()))) else {
-        return obj! { "id" => id, "type" => "unknown", "status" => "failure", "reason" => "unknown action type" };
-    };
-    if mode == "skip" {
-        return obj! { "id" => id, "type" => ty.clone(), "status" => "throttled", "reason" => "Watch execution is skipped" };
-    }
-    let simulate = mode == "simulate" || mode == "force_simulate";
-    match ty.as_str() {
-        "logging" => {
-            let text = body.get("text").map(Value::to_es_string).unwrap_or_default();
-            match render_text(ctx, &text, model) {
-                Ok(t) => obj! { "id" => id, "type" => "logging", "status" => if simulate { "simulated" } else { "success" }, "logging" => obj! { "logged_text" => t } },
-                Err(e) => obj! { "id" => id, "type" => "logging", "status" => "failure", "error" => e.to_value(false) },
-            }
-        }
-        "index" => {
-            let index = body.get("index").map(Value::to_es_string).unwrap_or_default();
-            let doc = model.pointer(&["ctx", "payload"]).cloned().unwrap_or_else(Value::object);
-            if simulate {
-                return obj! { "id" => id, "type" => "index", "status" => "simulated", "index" => obj! { "request" => obj! { "index" => index, "source" => doc } } };
-            }
-            let mut uri = match body.get("doc_id") {
-                Some(d) => format!("/{}/_doc/{}", enc(&index), enc(&d.to_es_string())),
-                None => format!("/{}/_doc", enc(&index)),
-            };
-            let mut q = Vec::new();
-            if let Some(op) = body.get("op_type") {
-                q.push(format!("op_type={}", enc(&op.to_es_string())));
-            }
-            if let Some(r) = body.get("refresh") {
-                q.push(format!("refresh={}", enc(&r.to_es_string())));
-            }
-            if !q.is_empty() {
-                uri.push('?');
-                uri.push_str(&q.join("&"));
-            }
-            match internal::call(ctx.cluster, if body.get("doc_id").is_some() { "PUT" } else { "POST" }, &uri, Some(&doc)).await {
-                Ok(r) => obj! {
-                    "id" => id, "type" => "index", "status" => "success",
-                    "index" => obj! { "response" => obj! {
-                        "created" => r.get("result").and_then(Value::as_str) == Some("created"),
-                        "result" => r.get("result").cloned().unwrap_or(Value::Null),
-                        "id" => r.get("_id").cloned().unwrap_or(Value::Null),
-                        "version" => r.get("_version").cloned().unwrap_or(Value::Null),
-                        "index" => r.get("_index").cloned().unwrap_or(Value::Null),
-                    } },
-                },
-                Err(e) => obj! { "id" => id, "type" => "index", "status" => "failure", "error" => e.to_value(false) },
-            }
-        }
-        other => {
-            if simulate {
-                obj! { "id" => id, "type" => other, "status" => "simulated" }
-            } else {
-                let e = EsError::illegal_argument(format!("no account found for name: [{other}]"));
-                obj! { "id" => id, "type" => other, "status" => "failure", "reason" => e.reason().to_string() }
-            }
-        }
-    }
+    Ok(out)
 }
 
 pub async fn execute_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let started = std::time::Instant::now();
     let body = ctx.body_map()?.unwrap_or_default();
+    for k in body.keys() {
+        if matches!(k.as_str(), "trigger" | "input" | "condition" | "actions" | "transform" | "metadata" | "throttle_period" | "throttle_period_in_millis") {
+            return Err(parse_err(format!("could not parse watch execution request. unexpected field [{k}], please wrap watch including field [{k}] inside a \"watch\" field")));
+        }
+        if !matches!(k.as_str(), "trigger_data" | "ignore_condition" | "record_execution" | "alternative_input" | "action_modes" | "watch") {
+            return Err(parse_err(format!("could not parse watch execution request. unexpected field [{k}]")));
+        }
+    }
     let debug = ctx.bool_param("debug", false)?;
-    let now = ctx.now_ms;
-    let (id, watch, mut status, stored) = match ctx.path_param("id") {
+    let modes = parse_modes(body.get("action_modes"))?;
+    let record_execution = body.get("record_execution").and_then(Value::as_bool).unwrap_or(false);
+    let id_param = ctx.path_param("id");
+    let mut errors = Vec::new();
+    match (id_param, body.get("watch")) {
+        (Some(_), Some(_)) => errors.push("a watch execution request must either have a watch id or an inline watch source but not both".to_string()),
+        (None, None) => errors.push("a watch execution request must either have a watch id or an inline watch source, but both are missing".to_string()),
+        _ => {}
+    }
+    if body.get("watch").is_some() && record_execution {
+        errors.push("the execution of an inline watch cannot be recorded".into());
+    }
+    if !errors.is_empty() {
+        return Err(EsError::action_request_validation(&errors));
+    }
+    let execution = now_instant();
+    let now = execution.millis();
+    let (id, watch, status, version, owner) = match id_param {
         Some(id) => {
             let st = ctx.state();
             let Some(w) = st.metadata.xpack.get(WATCHES, id) else { return Err(EsError::resource_not_found(format!("Watch with id [{id}] does not exist"))) };
-            (id.to_string(), w.get("watch").cloned().unwrap_or(Value::Null), status_out(w), true)
+            let watch = w.get("watch").cloned().unwrap_or(Value::Null);
+            if parse::uses_ignore_throttled(&watch) {
+                ctx.warn(parse::IGNORE_THROTTLED);
+            }
+            let owner = w.pointer(&["_roll", "user"]).and_then(principal_of);
+            (id.to_string(), watch, stored_status(w), w.get("_version").cloned().unwrap_or(Value::from(1)), owner)
         }
         None => {
-            let Some(Value::Obj(w)) = body.get("watch") else {
-                return Err(EsError::action_request_validation(&["a watch execution request must either have a watch id or an inline watch source, but both are missing".into()]));
-            };
-            validate_watch("_inlined_", w)?;
-            let mut s = initial_status(w, true, now);
-            if let Value::Obj(m) = &mut s {
-                m.insert("version".into(), Value::from(-1));
-            }
-            ("_inlined_".to_string(), Value::Obj(w.clone()), s, false)
+            let Some(Value::Obj(w)) = body.get("watch") else { return Err(EsError::action_request_validation(&["a watch execution request must either have a watch id or an inline watch source, but both are missing".into()])) };
+            let watch = parse::normalize_watch(ctx.cluster, "_inlined_", w, None)?;
+            let status = initial_status(&watch, true, now);
+            let owner = stored_user(crate::xpack::security::principal(ctx)).as_ref().and_then(principal_of);
+            ("_inlined_".to_string(), Value::Obj(watch), status, Value::from(-1), owner)
         }
     };
-    let trigger_data = body.get("trigger_data").cloned().unwrap_or(Value::Null);
-    let triggered = trigger_data.get("triggered_time").map(Value::to_es_string).unwrap_or_else(|| iso(now));
-    let scheduled = trigger_data.get("scheduled_time").map(Value::to_es_string).unwrap_or_else(|| triggered.clone());
-    let exec_time = iso(now);
-    let mut model = obj! {
-        "ctx" => obj! {
-            "watch_id" => id.clone(), "execution_time" => exec_time.clone(),
-            "trigger" => obj! { "triggered_time" => triggered.clone(), "scheduled_time" => scheduled.clone() },
-            "metadata" => watch.get("metadata").cloned().unwrap_or(Value::Null),
-            "payload" => obj! {},
-        },
+    let trigger = body.get("trigger_data");
+    let triggered = trigger.and_then(|t| t.get("triggered_time")).map(exec::parse_date).transpose()?;
+    let scheduled = trigger.and_then(|t| t.get("scheduled_time")).map(exec::parse_date).transpose()?;
+    let triggered_ms = triggered.unwrap_or(now);
+    let scheduled_ms = scheduled.unwrap_or(triggered_ms);
+    let record_id = format!("{id}_{}-{}", uuid_like(), crate::time::java_instant_string_nanos(execution));
+    let run = exec::Run {
+        cluster: ctx.cluster,
+        watch_id: id.clone(),
+        record_id: record_id.clone(),
+        execution,
+        triggered_ms,
+        scheduled_ms,
+        metadata: watch.get("metadata").cloned(),
+        modes,
+        throttle_ms: watch.get("throttle_period_in_millis").and_then(Value::as_i64).unwrap_or(DEFAULT_THROTTLE_MS),
     };
-    let input = watch.get("input").cloned().unwrap_or_else(|| obj! { "none" => obj! {} });
-    let (input_type, payload) = match body.get("alternative_input") {
-        Some(alt) => ("simple".to_string(), alt.clone()),
-        None => run_input(ctx, &input, &model).await?,
-    };
-    if let Some(Value::Obj(c)) = model.as_object_mut().and_then(|m| m.get_mut("ctx")) {
-        c.insert("payload".into(), payload.clone());
-    }
-    let cond = watch.get("condition").cloned().unwrap_or_else(|| obj! { "always" => obj! {} });
     let ignore = body.get("ignore_condition").and_then(Value::as_bool).unwrap_or(false);
-    let (met, cond_type, cond_detail) = if ignore { (true, "always".to_string(), Value::Null) } else { eval_condition(&cond, &model, now)? };
-    let mut cond_result = obj! { "type" => cond_type.clone(), "status" => "success", "met" => met };
-    if !cond_detail.is_null()
-        && let Value::Obj(m) = &mut cond_result
-    {
-        m.insert(cond_type.clone(), cond_detail);
+    let out = internal::as_principal(owner, run.execute(&watch, status, body.get("alternative_input").cloned(), ignore)).await;
+    let timestamp = if triggered.is_some() { fmt_ms(triggered_ms) } else { crate::time::java_instant_string_nanos(execution) };
+    let rec = record(&run, &out, RecordOf {
+        watch: &watch,
+        status_version: version.clone(),
+        trigger_event: obj! { "type" => "manual", "triggered_time" => fmt_ms(triggered_ms), "manual" => obj! { "schedule" => obj! { "scheduled_time" => fmt_ms(scheduled_ms) } } },
+        user: Some(crate::xpack::security::principal(ctx).username.clone()),
+        timestamp,
+        started,
+        debug,
+    });
+    if id_param.is_some() && record_execution {
+        save_status(ctx.cluster, &id, version.as_i64(), out.status.clone(), None, now).await?;
+        write_history(ctx.cluster, &record_id, now, &rec).await;
     }
-    let modes = body.get("action_modes").and_then(Value::as_object).cloned().unwrap_or_default();
-    let mut action_results = Vec::new();
-    let mut action_ok: Vec<(String, bool, Option<String>)> = Vec::new();
-    if met {
-        for (aid, a) in watch.get("actions").and_then(Value::as_object).into_iter().flatten() {
-            let mode = modes.get(aid).or_else(|| modes.get("_all")).map(Value::to_es_string).unwrap_or_else(|| "execute".into());
-            let r = run_action(ctx, aid, a, &model, &mode).await;
-            let ok = r.get("status").and_then(Value::as_str) == Some("success");
-            let reason = r.get("reason").map(Value::to_es_string).or_else(|| (!ok).then(String::new));
-            action_ok.push((aid.clone(), ok, reason));
-            action_results.push(r);
-        }
-    }
-    // Status bookkeeping.
-    if let Value::Obj(s) = &mut status {
-        s.insert("last_checked".into(), exec_time.clone().into());
-        if met {
-            s.insert("last_met_condition".into(), exec_time.clone().into());
-        }
-        if let Some(Value::Obj(actions)) = s.get_mut("actions") {
-            for (aid, ok, reason) in &action_ok {
-                if let Some(Value::Obj(a)) = actions.get_mut(aid) {
-                    let mut last = obj! { "timestamp" => exec_time.clone(), "successful" => *ok };
-                    if let (Some(r), Value::Obj(m)) = (reason, &mut last)
-                        && !ok
-                    {
-                        m.insert("reason".into(), r.clone().into());
-                    }
-                    a.insert("last_execution".into(), last);
-                    if *ok {
-                        a.insert("last_successful_execution".into(), obj! { "timestamp" => exec_time.clone(), "successful" => true });
-                        if let Some(Value::Obj(ack)) = a.get_mut("ack")
-                            && ack.get("state").and_then(Value::as_str) == Some("awaits_successful_execution")
-                        {
-                            ack.insert("state".into(), "ackable".into());
-                            ack.insert("timestamp".into(), exec_time.clone().into());
-                        }
-                    }
-                }
-            }
-        }
-        s.insert("execution_state".into(), if met { "executed" } else { "execution_not_needed" }.into());
-        // `version` last, as Elasticsearch prints the status.
-        if let Some(v) = s.shift_remove("version") {
-            s.insert("version".into(), v);
-        }
-    }
-    let record = body.get("record_execution").and_then(Value::as_bool).unwrap_or(false);
-    if stored && record {
-        let sid = id.clone();
-        let new_status = status.clone();
-        ctx.cluster
-            .update(move |st| {
-                if let Some(Value::Obj(mut w)) = st.metadata.xpack.get(WATCHES, &sid).cloned() {
-                    let mut s = new_status.as_object().cloned().unwrap_or_default();
-                    s.shift_remove("version");
-                    w.insert("status".into(), Value::Obj(s));
-                    store::put(st, WATCHES, &sid, Value::Obj(w), now)?;
-                }
-                Ok(())
-            })
-            .await?;
-    }
-    let duration = (started.elapsed().as_millis() as i64).max(1);
-    let user = crate::xpack::security::principal(ctx).username.clone();
-    let mut wr = Map::new();
-    wr.insert("watch_id".into(), id.clone().into());
-    wr.insert("node".into(), ctx.cluster.node.id.clone().into());
-    wr.insert("state".into(), if met { "executed" } else { "execution_not_needed" }.into());
-    wr.insert("@timestamp".into(), triggered.clone().into());
-    wr.insert("user".into(), user.into());
-    wr.insert("status".into(), status);
-    wr.insert("trigger_event".into(), obj! { "type" => "manual", "triggered_time" => triggered.clone(), "manual" => obj! { "schedule" => obj! { "scheduled_time" => scheduled } } });
-    wr.insert("input".into(), input);
-    wr.insert("condition".into(), cond);
-    let mut result = Map::new();
-    result.insert("execution_time".into(), exec_time.clone().into());
-    result.insert("execution_duration".into(), duration.into());
-    result.insert("input".into(), obj! { "type" => input_type, "status" => "success", "payload" => payload });
-    result.insert("condition".into(), cond_result);
-    result.insert("actions".into(), Value::Arr(action_results));
-    wr.insert("result".into(), Value::Obj(result));
-    if debug {
-        wr.insert("vars".into(), obj! {});
-    }
-    wr.insert("messages".into(), Value::Arr(vec![]));
-    let record_id = format!("{id}_{}-{}", uuid_like(), crate::xpack::entsearch::now_nanos_string());
-    Reply::ok(obj! { "_id" => record_id, "watch_record" => Value::Obj(wr) })
+    Reply::ok(obj! { "_id" => record_id, "watch_record" => rec })
 }
 
-fn uuid_like() -> String {
-    let b: [u8; 16] = rand::random();
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-4{}-{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[16..20], &h[20..32])
+/// Stores a watch's status after an execution (a new version), unless the watch changed since
+/// it was read (`version`). `next_run`: for a triggered execution, the time it was due and the
+/// time it fires next, stored even when the watch changed meanwhile (unless that change
+/// rescheduled it).
+async fn save_status(cluster: &Cluster, id: &str, version: Option<i64>, status: Map, next_run: Option<(i64, Option<i64>)>, now: i64) -> EsResult<()> {
+    let id = id.to_string();
+    cluster
+        .update(move |st| {
+            let Some(Value::Obj(mut w)) = st.metadata.xpack.get(WATCHES, &id).cloned() else { return Ok(()) };
+            let mut roll = w.get("_roll").and_then(Value::as_object).cloned().unwrap_or_default();
+            let moved = match next_run {
+                Some((due, next)) if roll.get("next_run").and_then(Value::as_i64) == Some(due) => {
+                    roll.shift_remove("next_run");
+                    if let Some(n) = next {
+                        roll.insert("next_run".into(), n.into());
+                    }
+                    w.insert("_roll".into(), Value::Obj(roll));
+                    true
+                }
+                _ => false,
+            };
+            if w.get("_version").and_then(Value::as_i64) != version {
+                if moved {
+                    store::put(st, WATCHES, &id, Value::Obj(w), now)?;
+                }
+                return Ok(());
+            }
+            w.insert("status".into(), Value::Obj(status));
+            w.insert("_version".into(), (version.unwrap_or(1) + 1).into());
+            let seq = next_seq(st, now)?;
+            w.insert("_seq_no".into(), seq.into());
+            store::put(st, WATCHES, &id, Value::Obj(w), now).map(|_| ())
+        })
+        .await
+}
+
+// --- triggers ----------------------------------------------------------------------------------
+
+fn due_at(w: &Value) -> Option<i64> {
+    if w.pointer(&["status", "state", "active"]) == Some(&Value::Bool(false)) {
+        return None;
+    }
+    w.pointer(&["_roll", "next_run"]).and_then(Value::as_i64)
+}
+
+/// When the next active watch fires (none while watcher is stopped): the cluster's job
+/// scheduler sleeps until then.
+pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
+    if state(st).get("stopped").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    st.metadata.xpack.iter(WATCHES).filter_map(|(_, w)| due_at(w)).min()
+}
+
+/// Triggers every watch that is due (the job scheduler's turn). Returns how many ran.
+pub async fn run_due(cluster: &Cluster, now: i64) -> usize {
+    let st = cluster.state();
+    if state(&st).get("stopped").and_then(Value::as_bool) == Some(true) {
+        return 0;
+    }
+    let due: Vec<(String, i64)> = st.metadata.xpack.iter(WATCHES).filter_map(|(id, w)| due_at(w).filter(|t| *t <= now).map(|t| (id.clone(), t))).collect();
+    drop(st);
+    for (id, scheduled) in &due {
+        trigger(cluster, id, *scheduled).await;
+    }
+    due.len()
+}
+
+/// One scheduled execution of a watch: its status and next time stored, its record written.
+async fn trigger(cluster: &Cluster, id: &str, scheduled_ms: i64) {
+    let started = std::time::Instant::now();
+    let Some(w) = cluster.state().metadata.xpack.get(WATCHES, id).cloned() else { return };
+    let watch = w.get("watch").cloned().unwrap_or(Value::Null);
+    let version = w.get("_version").and_then(Value::as_i64);
+    let user = w.pointer(&["_roll", "user"]).cloned();
+    let owner = user.as_ref().and_then(principal_of);
+    let execution = now_instant();
+    let now = execution.millis();
+    let record_id = format!("{id}_{}-{}", uuid_like(), crate::time::java_instant_string_nanos(execution));
+    let run = exec::Run {
+        cluster,
+        watch_id: id.to_string(),
+        record_id: record_id.clone(),
+        execution,
+        triggered_ms: now,
+        scheduled_ms,
+        metadata: watch.get("metadata").cloned(),
+        modes: Map::new(),
+        throttle_ms: watch.get("throttle_period_in_millis").and_then(Value::as_i64).unwrap_or(DEFAULT_THROTTLE_MS),
+    };
+    let out = internal::as_principal(owner, run.execute(&watch, stored_status(&w), None, false)).await;
+    let rec = record(&run, &out, RecordOf {
+        watch: &watch,
+        status_version: version.map_or(Value::from(1), Value::from),
+        trigger_event: obj! { "type" => "schedule", "triggered_time" => fmt_ms(now), "schedule" => obj! { "scheduled_time" => fmt_ms(scheduled_ms) } },
+        user: user.and_then(|u| u.get("username").map(Value::to_es_string)),
+        timestamp: crate::time::java_instant_string_nanos(execution),
+        started,
+        debug: false,
+    });
+    let activated = w.pointer(&["_roll", "activated"]).and_then(Value::as_i64).unwrap_or(scheduled_ms);
+    let next = next_run(&watch, activated, now.max(scheduled_ms));
+    // A store refusing the write (a cluster unloading) leaves the watch due: the scheduler
+    // runs it again.
+    if save_status(cluster, id, version, out.status.clone(), Some((scheduled_ms, next)), now).await.is_ok() {
+        write_history(cluster, &record_id, now, &rec).await;
+    }
 }
 
 #[cfg(test)]
@@ -889,14 +842,15 @@ mod tests {
     }
 
     #[test]
-    fn compare_conditions() {
-        let model = obj! { "ctx" => obj! { "payload" => obj! { "n" => 5, "m" => 3 } } };
-        let c = obj! { "compare" => obj! { "ctx.payload.n" => obj! { "gt" => 3 } } };
-        assert!(eval_condition(&c, &model, 0).unwrap().0);
-        let c = obj! { "compare" => obj! { "ctx.payload.n" => obj! { "lt" => "{{ctx.payload.m}}" } } };
-        assert!(!eval_condition(&c, &model, 0).unwrap().0);
-        let model = obj! { "ctx" => obj! { "payload" => obj! { "a" => crate::arr![obj! { "v" => 1 }, obj! { "v" => 9 }] } } };
-        let c = obj! { "array_compare" => obj! { "ctx.payload.a" => obj! { "path" => "v", "gte" => obj! { "value" => 5 } } } };
-        assert!(eval_condition(&c, &model, 0).unwrap().0);
+    fn stored_users_round_trip() {
+        let mut p = Principal::owner();
+        p.username = "watcher_manager".into();
+        p.roles = vec!["watcher_manager".into()];
+        p.realm_name = "default_file";
+        p.realm_type = "file";
+        let back = principal_of(&stored_user(&p).unwrap()).unwrap();
+        assert_eq!((back.username.as_str(), back.roles.clone(), back.realm_name, back.kind), ("watcher_manager", p.roles.clone(), "default_file", AuthKind::Realm));
+        // A superuser's watch runs with the cluster's authority.
+        assert!(stored_user(&Principal::owner()).is_none());
     }
 }
