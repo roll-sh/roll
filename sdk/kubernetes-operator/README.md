@@ -22,7 +22,15 @@ spec:
   is left alone, and the RollSecret's status says so.
 - Values that don't resolve leave the Secret as it was, and the status names the key.
 
-Install: `kubectl apply -f deploy/crd.yaml -f deploy/operator.yaml` after setting the API URL,
+Install with Helm:
+
+```
+helm install roll-secrets sdk/kubernetes-operator/chart -n roll-system --create-namespace \
+  --set roll.apiUrl=https://api.roll.example --set roll.identity=idn_…
+```
+
+(`roll.tokenSecret.name` instead of `roll.identity` takes a roll token from an existing Secret.)
+Or plainly: `kubectl apply -f deploy/crd.yaml -f deploy/operator.yaml` after setting the API URL,
 the identity and the token's audience in `deploy/operator.yaml`. The identity's issuer is the
 cluster's service account issuer, its subject `system:serviceaccount:roll-system:roll-secrets-operator`.
 roll fetches the issuer's keys over public HTTPS, so the cluster's issuer must be published (EKS,
