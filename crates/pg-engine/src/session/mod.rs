@@ -1,6 +1,7 @@
 //! A session: one client's statements, transactions, prepared statements, portals and
 //! cursors. The wire server drives it message by message; tests drive it directly.
 
+mod badparams;
 pub mod copy;
 mod createdb;
 pub mod current;
@@ -2498,6 +2499,23 @@ impl Session {
                 "current transaction is aborted, commands ignored until end of transaction block",
             ).routine("exec_parse_message"));
         }
+        // Parameters of a type no oid has: the first lookup analysis makes of one fails the
+        // Parse; none looked up keep their oid (bound as text meanwhile).
+        let mut accepted = false;
+        if !missing.is_empty()
+            && let Some(s) = p.stmt.as_ref()
+        {
+            match badparams::verdict(s, &missing) {
+                badparams::Verdict::Fails(e) => return Err(e),
+                badparams::Verdict::Accepted => {
+                    for (i, _) in &missing {
+                        p.param_types[*i] = DataType::Text;
+                    }
+                    accepted = true;
+                }
+                badparams::Verdict::Unmodelled => {}
+            }
+        }
         // A superuser's DML on a system catalog the engine derives: the query it runs types
         // its parameters; it returns no rows.
         if let Some(q) = p.stmt.as_ref().and_then(inner).and_then(ddl::catalog_dml_query) {
@@ -2702,7 +2720,7 @@ impl Session {
             }
         }
         if !missing.is_empty() {
-            missing_param_types(&mut p, sql, &missing)?;
+            missing_param_types(&mut p, sql, &missing, accepted)?;
         }
         Ok(Arc::new(p))
     }
@@ -4239,10 +4257,10 @@ fn max_param(n: &Node, sql: &str) -> usize {
 /// column builds its tuple descriptor (TupleDescInitEntry), one the statement gives a type
 /// to coerces it (getBaseTypeAndTypmod). One it doesn't read keeps the oid (its
 /// ParameterDescription's) and fails at Bind (getTypeInputInfo).
-fn missing_param_types(p: &mut Prepared, sql: &str, missing: &[(usize, u32)]) -> Result<()> {
+fn missing_param_types(p: &mut Prepared, sql: &str, missing: &[(usize, u32)], accepted: bool) -> Result<()> {
     // (A utility statement's text isn't analyzed: PREPARE ... AS's $n aren't the Parse's.)
     let used = match p.stmt.as_ref() {
-        Some(s) if p.is_query() => param_numbers(s, sql),
+        Some(s) if p.is_query() && !accepted => param_numbers(s, sql),
         _ => Default::default(),
     };
     for &(i, oid) in missing {

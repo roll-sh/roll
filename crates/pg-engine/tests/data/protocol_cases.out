@@ -149,6 +149,19 @@ plan_div0_volatile	1 2 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4
 plan_div0_in_block	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK ZI
 plan_generic_after_custom	1 2 D:["1"] C:SELECT 1 ZI / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
 plan_literal	E{S=ERROR|C=22P02|M=invalid input syntax for type integer: "a"|F=numutils.c|L=615|R=pg_strtoint32_safe} ZI
+badtype_func	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=parse_type.c|L=699|R=typeOrDomainTypeRelid} ZI
+badtype_func_nested	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=parse_type.c|L=699|R=typeOrDomainTypeRelid} ZI
+badtype_func_two	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+badtype_func_variadic	1 ZI
+badtype_orderby	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_orderby_col	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_groupby	E{S=ERROR|C=42704|M=type with OID 999999 does not exist|F=typcache.c|L=471|R=lookup_type_cache} ZI
+badtype_isnull	1 t:1 T:0 E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=3183|R=getTypeInputInfo} ZI
+badtype_twice	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=lsyscache.c|L=2852|R=getBaseTypeAndTypmod} ZI
+badtype_coalesce	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=tupdesc.c|L=896|R=TupleDescInitEntry} ZI
+badtype_array	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=format_type.c|L=137|R=format_type_extended} ZI
+badtype_row	1 ZI
+badtype_named	E{S=ERROR|C=XX000|M=cache lookup failed for type 999999|F=format_type.c|L=137|R=format_type_extended} ZI
 role_setup	
 startup_role	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=off S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
 startup_role_missing	R0 E{S=FATAL|C=22023|M=role "pc_nosuch" does not exist|F=guc.c|L=6936|R=call_string_check_hook} closed
