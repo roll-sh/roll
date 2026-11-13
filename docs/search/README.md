@@ -226,7 +226,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    #26 are on main.
    Secrets' link provider once #20 stacks; the fleet test with every product on.
 2. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
-   both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is): a full
+   both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is;
+   `auto_date_histogram` is now counted from the points tree too, 27.8 → 3.0 ms in an A/B): a full
    rerun of every Rally track with variance for all three targets; one allocator policy (rolld's
    against search-dev's purge governor, by a matched benchmark); `terms_enum`'s per-request
    overhead.
@@ -236,8 +237,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    (TOP_SNIPPETS, CATEGORIZE, approximation, `unsigned_long` past `i64::MAX`). `logsdb`'s last 9 are
    decisions (`_ignored_source` binary entries, `@timestamp` doc-values skipper); runtime fields'
    last 5 (`geo_bounds` on geo_point runtime fields, ip terms tie order, highlighting runtime
-   fields); downsample's last one (allocation filtering). In the opensearch dialect, count
-   `auto_date_histogram` from the points tree as OpenSearch does.
+   fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
+   `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
+   from collecting (roll counts with Elasticsearch's choice in both dialects).
 4. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
    (#18) seeing only the clusters and indices their access allows; checked against Elastic
    Cloud's and OpenSearch Dashboards' consoles.
@@ -247,8 +249,8 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`); measure it once
-   main's cache exists. (`search-store`'s mass-recovery WAL test flaked on a loaded host: a replay
-   counted itself in the shared replay cache only after listing, so one could finish and empty it
-   while the others listed; it now counts first. 12 of 40 runs on one CPU failed before, 0 of 40
-   after.)
+7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+   main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
+   WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
+   after listing, so one could finish and empty it while the others listed; it now counts first.
+   12 of 40 runs on one CPU failed before, 0 of 40 after.)

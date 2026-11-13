@@ -108,9 +108,10 @@ numbers are from its latest binary, Elasticsearch's and OpenSearch's from the th
 | geonames `decay_geo_gauss_script_score` | **70.06** | 70.72 | 88.57 |
 
 roll is ahead of both on every task above but two, where OpenSearch is: `autohisto_agg`
-(OpenSearch counts `auto_date_histogram` from the points tree; Elasticsearch's shard-side
-rounding choice depends on document order, so roll counts it only for date histograms, where
-the result can't differ) and `terms_enum` (under a millisecond, almost all of it network and
+(OpenSearch counts `auto_date_histogram` from the points tree; since this table roll does too,
+whenever Elasticsearch's order-dependent rounding choice is certain from the counts: 27.8 → 3.0
+ms in an A/B on 2M nyc_taxis documents, see the tuning log; the Rally rerun is pending) and
+`terms_enum` (under a millisecond, almost all of it network and
 thread handoffs). nyc_taxis' `distance_amount_agg` spread 89-161 ms on a loaded host in the
 latest run; its quiet-run number is the one shown.
 
@@ -1231,6 +1232,7 @@ totals, ids, scores, sort values and aggregations).
 | ... and geo points (`doc['location'].lat` / `.lon`, `decayGeo*`'s point) the same way (`Host::doc_geo_at`) | `search-painless` `fast.rs`; `search-es` `search/scripts.rs` | geonames `painless_dynamic` 69.8 and 68.3 ms, `decay_geo_gauss_script_score` 76.9 and 83.4 (two runs with the binaries swapped between two force-merged copies; the host was loaded) | 56.8 and 61.9, 72.5 and 77.7 ms |
 | `auto_date_histogram` with one owning bucket, no sub-aggregations, no `_doc_count` and one value per doc counts a value of a bucket already seen with a range check (the previous value's bucket first, then the prepared array's search) and an increment, in a loop over the decoded batch; anything else takes the general path | `search-aggs` `bucket/auto_histogram.rs`, `rounding.rs` (`PreparedRounding::holds`) | nyc_taxis `autohisto_agg` 53.6 ms, `auto_date_histogram` 86.2 (wall p50, both binaries with line tables) | 23.8, 28.2 ms |
 | a segment sorted by the request's sort (an index sort: TSDB, logsdb) skips the docs sorting before `search_after` once the total hits passed their threshold: a binary search over their sort values finds the first doc after it (Lucene's competitive iterator past `track_total_hits`), so a deep page reads only its own docs; exact totals still count every match | `search-index` `collector/top_field.rs` (`skip_before`) | 1M nyc_taxis docs sorted by `dropoff_datetime` desc, force-merged, `size: 100` page 90% down with `search_after` (wall p50) | 36.8 -> 3.1 ms (exact totals: unchanged, 40.7 / 45.0) |
+| a top-level `auto_date_histogram` on a `date` field without sub-aggregations, under a `match_all`, an `exists` or a range on its field (UTC), counts its buckets from the points tree when every segment can be and Elasticsearch's rounding is certain: the smallest and largest matching values come from a binary search of range counts, each rounding certainly fails (too many buckets, or the shortest span its mixed-rounding min and max could have is too long) or certainly holds, and only the rounding where it stops is counted (`target × maxInner` ranges or so); anything uncertain is collected. 1,500 random requests (1–3 segments, 1–2 shards, spans from seconds to centuries, `minimum_interval`) answer the same counted and collected | `search-aggs` `bucket/auto_histogram.rs` (`count_from_points`), `filter_rewrite.rs` (`count_ranges`, `extreme`) | nyc_taxis 2M docs, wall p50 of 60 interleaved: `autohisto_agg` 27.8 ms, `auto_date_histogram` 27.4 (23.9 and 34.4 in a second run) | 3.0 and 3.3 ms (2.9 and 3.2) |
 
 Measured and not adopted in round 6: slicing field sorts and queries with score bounds. Their
 serial competitive pruning is so effective that slices only add work: on geonames
