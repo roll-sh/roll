@@ -94,7 +94,7 @@ type Rule = {
 
 type Selector =
   | { project: string }             // a workspace project: every resource in it, as it is now
-  | { id: string };                 // one resource, by its product's id
+  | { id: string; index?: string }; // one resource, by its product's id; search: only some indices
 
 type Product = "workspace" | "postgres" | "redis" | "storage" | "streams" | "nosql" | "queues"
   | "tasks" | "code" | "agents" | "secrets" | "apps" | "previews" | "search" | "observability"
@@ -230,6 +230,25 @@ repeat across accounts:
 - A named account's bucket list is filtered to the `<account>/<bucket>` ids a token has there.
 - Anything else in a named account (keys, roles, IAM) is about storage as a whole: only a rule for
   every storage resource covers it.
+
+### Search indices
+
+A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,metrics"}`
+(the builder writes it `cl_1/logs-*,metrics`).
+
+- It covers the index routes (`/v1/search/clusters/{id}/indices/{index}/…`: search, documents,
+  bulk, mappings, the index itself) when every name or pattern in `{index}` is covered: a name
+  listed, or one starting with what's before a listed pattern's trailing `*` (`logs-*` covers
+  `logs-2025` and `logs-2025-*`, not `logs` or `l*`). Exclusions (`-logs-old`) only narrow, so they
+  needn't be covered; `_all` is `*`; date math only by `*`; another cluster's indices
+  (`remote:logs`) never.
+- The cluster's own routes stay the cluster's: the index list, the console (`request`, any method
+  and path as the cluster's owner), keys, branches and settings need a rule for the whole cluster.
+- Search checks the rest at query time as the caller: a query's reads of other indices (terms
+  lookups, `more_like_this`, lookup runtime fields, …) and a body's `_index` values stay within
+  `{index}` (search's `control.rs`, `per_index_routes`).
+- An approval about some indices names them (`cl_1/logs-a`), and remembering it allows those
+  indices only.
 
 ### Presets
 
