@@ -1532,6 +1532,9 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **The audit log into a roll bucket**: an audit sink that writes signed JSONL objects to a roll
+   storage bucket on the canvas (a compliance archive with the bucket's own retention and Object
+   Lock), not only an HTTPS endpoint.
 
 Waiting on other pull requests:
 
