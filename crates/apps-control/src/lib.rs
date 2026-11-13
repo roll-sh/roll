@@ -17,6 +17,7 @@ pub mod backups;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod site_rules;
 pub mod feedback;
 pub mod scale;
 pub mod registry;

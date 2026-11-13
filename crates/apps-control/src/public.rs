@@ -195,6 +195,7 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
 struct SiteRequest {
     method: axum::http::Method,
     path: String,
+    query: Option<String>,
     if_none_match: Option<String>,
     request_id: Option<String>,
 }
@@ -202,7 +203,7 @@ struct SiteRequest {
 impl SiteRequest {
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), if_none_match: h("if-none-match"), request_id: h("x-request-id") }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), request_id: h("x-request-id") }
     }
 }
 
@@ -230,9 +231,28 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         }
     };
     let path = percent_encoding::percent_decode_str(&req.path).decode_utf8_lossy().into_owned();
-    let Some((name, status)) = crate::sites::resolve(&site, &path, tpl.spa) else {
+    // Its own rules first (`_redirects`): a redirect, or another of its files.
+    let not_found = || page(StatusCode::NOT_FOUND, "Not found", "There's no page at this address.");
+    if crate::site_rules::is_rules_file(&path) {
         done(404, 0);
-        return page(StatusCode::NOT_FOUND, "Not found", "There's no page at this address.");
+        return not_found();
+    }
+    let resolved = match site.rules.redirect(&path, req.query.as_deref(), crate::sites::exists(&site, &path)) {
+        Some(crate::site_rules::Outcome::Redirect(status, to)) => {
+            done(status, 0);
+            let mut r = Response::new(Body::empty());
+            *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::MOVED_PERMANENTLY);
+            if let Ok(v) = HeaderValue::from_str(&to) {
+                r.headers_mut().insert(header::LOCATION, v);
+            }
+            return r;
+        }
+        Some(crate::site_rules::Outcome::Serve(status, to)) => crate::sites::resolve(&site, &to, false).filter(|(_, s)| *s == 200).map(|(n, _)| (n, status)),
+        None => crate::sites::resolve(&site, &path, tpl.spa),
+    };
+    let Some((name, status)) = resolved else {
+        done(404, 0);
+        return not_found();
     };
     let (offset, len) = site.files[name];
     let etag = format!("\"{}-{offset}\"", &key[..key.len().min(16)]);
@@ -282,6 +302,18 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if ctype.starts_with("text/html") { "no-cache" } else { "public, max-age=300" }));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+    // Its own `_headers` over roll's (each checked when the file was read).
+    let mut set = std::collections::HashSet::new();
+    for (n, v) in site.rules.headers(&path) {
+        if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(n.as_bytes()), HeaderValue::from_str(&v)) {
+            // The first a block sets replaces roll's; more of one name add to it.
+            if set.insert(n.clone()) {
+                h.insert(n, v);
+            } else {
+                h.append(n, v);
+            }
+        }
+    }
     r
 }
 

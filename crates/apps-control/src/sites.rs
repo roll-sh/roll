@@ -25,6 +25,30 @@ pub const ROOT: &str = "/site";
 pub struct Site {
     pub tar: PathBuf,
     pub files: HashMap<String, (u64, u64)>,
+    /// Its own `_redirects` and `_headers` ([`crate::site_rules`]).
+    pub rules: crate::site_rules::SiteRules,
+}
+
+/// A site's rules files out of its tar (each at most [`crate::site_rules::MAX_FILE`]; a bigger
+/// one is left out).
+fn rules(tar: &std::path::Path, files: &HashMap<String, (u64, u64)>) -> std::io::Result<crate::site_rules::SiteRules> {
+    use std::io::{Read, Seek};
+    let read = |name: &str| -> std::io::Result<Option<String>> {
+        let Some(&(off, len)) = files.get(name).filter(|(_, len)| *len <= crate::site_rules::MAX_FILE) else { return Ok(None) };
+        let mut f = std::fs::File::open(tar)?;
+        f.seek(std::io::SeekFrom::Start(off))?;
+        let mut s = String::new();
+        f.take(len).read_to_string(&mut s)?;
+        Ok(Some(s))
+    };
+    Ok(crate::site_rules::SiteRules::parse(read("_redirects")?.as_deref(), read("_headers")?.as_deref()))
+}
+
+/// Whether a file answers `path` as it is (the file, or its directory's `index.html`), before
+/// any single-page or 404 fallback.
+pub fn exists(site: &Site, path: &str) -> bool {
+    let p = path.trim_matches('/');
+    (!p.is_empty() && site.files.contains_key(p)) || site.files.contains_key(&if p.is_empty() { "index.html".to_string() } else { format!("{p}/index.html") })
 }
 
 /// A site's key: its image's digest (hex, no `sha256:`), or for an image built here and named
@@ -141,11 +165,15 @@ impl Apps {
             tokio::fs::rename(&part, &path).await.map_err(|e| Error::Internal(e.to_string()))?;
         }
         let p = path.clone();
-        let files = tokio::task::spawn_blocking(move || index(std::fs::File::open(&p)?))
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))?
-            .map_err(|e| Error::Internal(e.to_string()))?;
-        let site = Arc::new(Site { tar: path, files });
+        let (files, rules) = tokio::task::spawn_blocking(move || {
+            let files = index(std::fs::File::open(&p)?)?;
+            let rules = rules(&p, &files)?;
+            Ok::<_, anyhow::Error>((files, rules))
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(|e| Error::Internal(e.to_string()))?;
+        let site = Arc::new(Site { tar: path, files, rules });
         self.sites.lock().insert(key.to_string(), site.clone());
         Ok(site)
     }
@@ -238,7 +266,7 @@ mod tests {
         assert_eq!(names, ["assets/app.js", "index.html"]);
         let (off, len) = files["assets/app.js"];
         assert_eq!(&bytes[off as usize..(off + len) as usize], b"go()");
-        let site = Site { tar: PathBuf::new(), files };
+        let site = Site { tar: PathBuf::new(), files, rules: Default::default() };
         assert_eq!(resolve(&site, "/", false), Some(("index.html", 200)));
         assert_eq!(resolve(&site, "/settings/profile", true), Some(("index.html", 200)), "a page path in a single-page app");
         assert_eq!(resolve(&site, "/settings/profile", false), None);

@@ -1091,8 +1091,20 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(r["image"], d["image"]);
     assert_eq!(Fake::count(&w.fake.counts.builds), builds, "no build");
     let (_, env) = call(&w.api, "GET", &base, None).await;
-    // A static upload: its files answer (no instance reads variables at run time).
-    assert_eq!(visit(&w, &host(&env["url"]), "/").await.0, StatusCode::OK);
+    // A static upload: its files answer (no instance reads variables at run time), with its
+    // own `_redirects` and `_headers`, which aren't served themselves.
+    let h = host(&env["url"]);
+    assert_eq!(visit(&w, &h, "/").await.0, StatusCode::OK);
+    let site = |path: &str| {
+        let req = Request::builder().uri(path).header("host", h.as_str()).body(Body::empty()).unwrap();
+        w.public.clone().oneshot(req)
+    };
+    let r = site("/old?v=2").await.unwrap();
+    assert_eq!((r.status(), r.headers()["location"].to_str().unwrap()), (StatusCode::PERMANENT_REDIRECT, "/assets/app.js?v=2"));
+    let r = site("/assets/app.js").await.unwrap();
+    assert_eq!(r.headers()["cache-control"], "public, max-age=31536000, immutable");
+    assert_eq!(site("/app/settings").await.unwrap().status(), StatusCode::OK, "a rewrite to its index");
+    assert_eq!(site("/_redirects").await.unwrap().status(), StatusCode::NOT_FOUND);
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;

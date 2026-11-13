@@ -326,7 +326,14 @@ impl Runtime for Fake {
     /// A static site: an index, a script, and a symlink that must never be served.
     async fn export_files(&self, _image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
         let mut b = tar::Builder::new(Vec::new());
-        for (name, body) in [("./index.html", &b"<!doctype html><title>fake site</title>"[..]), ("./assets/app.js", b"start()"), ("./404.html", b"<h1>not here</h1>")] {
+        let files: [(&str, &[u8]); 5] = [
+            ("./index.html", b"<!doctype html><title>fake site</title>"),
+            ("./assets/app.js", b"start()"),
+            ("./404.html", b"<h1>not here</h1>"),
+            ("./_redirects", b"/old /assets/app.js 308\n/app/* /index.html 200\n"),
+            ("./_headers", b"/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n"),
+        ];
+        for (name, body) in files {
             let mut h = tar::Header::new_gnu();
             h.set_size(body.len() as u64);
             h.set_mode(0o644);
