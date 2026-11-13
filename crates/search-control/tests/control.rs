@@ -572,6 +572,10 @@ async fn per_index_routes() {
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
     let (_, v) = e.call(reqwest::Method::GET, &format!("{base}/books"), None).await;
     assert_eq!(v["books"]["mappings"]["properties"]["year"]["type"], "integer", "{v}");
+    let (_, v) = e.call(reqwest::Method::GET, &format!("{base}/books/mapping"), None).await;
+    assert_eq!(v["books"]["mappings"]["properties"]["year"]["type"], "integer", "{v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/analyze"), Some(json!({"field": "title", "text": "Rust Book"}))).await;
+    assert_eq!((s, v["tokens"].as_array().map(Vec::len)), (200, Some(2)), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/delete_by_query?refresh=true"), Some(json!({"query": {"term": {"year": 2018}}}))).await;
     assert_eq!((s, v["deleted"].as_i64()), (200, Some(1)), "{v}");
     let (s, _) = e.call(reqwest::Method::DELETE, &format!("{base}/books/docs/3"), None).await;

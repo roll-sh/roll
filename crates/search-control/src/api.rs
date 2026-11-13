@@ -57,7 +57,10 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
-        .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping))
+        .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
+        .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings))
+        .route("/v1/search/clusters/{id}/indices/{index}/refresh", post(index_refresh))
+        .route("/v1/search/clusters/{id}/indices/{index}/analyze", post(index_analyze))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(index_search))
         .route("/v1/search/clusters/{id}/indices/{index}/docs", post(doc_create))
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
@@ -398,6 +401,10 @@ index_route!(index_get, "GET", "", "", true, EsBody::None);
 index_route!(index_create, "PUT", "", "", false, EsBody::Json);
 index_route!(index_delete, "DELETE", "", "", false, EsBody::None);
 index_route!(index_mapping, "PUT", "/mapping", "/_mapping", false, EsBody::Json);
+index_route!(index_mapping_get, "GET", "/mapping", "/_mapping", true, EsBody::None);
+index_route!(index_settings, "GET", "/settings", "/_settings", true, EsBody::None);
+index_route!(index_refresh, "POST", "/refresh", "/_refresh", true, EsBody::None);
+index_route!(index_analyze, "POST", "/analyze", "/_analyze", false, EsBody::Json);
 index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
 index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
