@@ -965,20 +965,30 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **Where it changed** (Percy's and Chromatic's diff view): a percentage says how much, not
+   where. A diff image (`GET …/screenshot?diff=base|previous`: the page dimmed, changed pixels
+   marked), the sheet's Diff mode, so a reviewer accepting a visual change sees what they accept.
+2. **A required review isn't the author's to give**: with `visual_review = "required"` the
+   change's own author (or an agent working on it) can accept it and land, so the gate only
+   asks for a click. Required acceptances from someone else, as reviews' approvals are
+   (`Code::blockers` already knows the change's author).
+3. **A look at the new UI from screenshots of the real thing**: the sheet's page switcher,
+   Accept and diff, the change page's review line, and the settings' new fields, against a live
+   preview at desktop and phone widths.
+4. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+5. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
