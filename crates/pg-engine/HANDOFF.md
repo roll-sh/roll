@@ -11499,3 +11499,105 @@ The cursor change runs only in scroll cursors' FETCH (no index scan path changed
 benchmark pairs. Verification train on `481c345ef`: every step 0 (clippy 19 warnings, all
 outside these files; regress newly differing 0; isolation 1647/1648, intra-grant-inplace as
 before; pg_dump 14609 passed).
+
+## Behaviour gaps closed by agent 222 (2026-11-12)
+
+Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.6-1.pgdg13+2).
+Raw-protocol cases are in the wire test `protocol_cases` (`tests/common/protocol.rs`), whose
+expected replies `tests/data/protocol_cases.out` are recorded from PostgreSQL by the test itself
+(`PROTOCOL_RECORD=host:port`, a server that trusts the connection). A wider exploratory probe
+(221 cases, Python) is in `~/.cache/a222/probe/wire2.py`.
+
+- **Result format codes** (`server.rs` `BadFormat`, `Portal::bad_format`): a code other than 0
+  or 1 no longer fails Bind; the first row with columns an Execute sends fails with
+  printtup_prepare_info's 22023 (a statement returning no rows, a DML without RETURNING, COPY
+  TO and SET run as usual; Describe of the portal shows the code). Rows a portal had
+  materialized fail the same way.
+- **COPY FROM STDIN's lost synchronization**: a message COPY doesn't take (anything but
+  CopyData, CopyDone, CopyFail, Flush, Sync), or a length past the type's limit, fails the COPY
+  (CopyGetData's 08P01, or 08006 "unexpected EOF ..." for the length) and then the connection
+  ends with PostgresMain's FATAL "terminating connection because protocol synchronization was
+  lost" (`Conn::sync_lost`). CopyFail without its terminator: "invalid string in message".
+- **Duplicate portals, trailing bytes, startup layout**: Bind of a named portal that exists (or
+  a DECLAREd cursor of the name) fails with CreatePortal's 42P03 after the parameter counts and
+  the failed-transaction check, before the values (whose errors come first); DECLARE over a
+  Bind's portal too. Every message PostgreSQL ends with pq_getmsgend (Query, Parse, Bind after
+  its parameters, Execute, Describe, Close, Flush, Sync) fails with "invalid message format";
+  a Sync with trailing bytes isn't a Sync (it aborts an implicit transaction, ReadyForQuery
+  follows). Bind's failed-transaction check now follows its count checks, as PostgreSQL's.
+  The startup packet is parsed as ProcessStartupPacket does: a missing terminator, a name
+  without a value or bytes after the terminator are its FATAL 08P01 layout error; a packet
+  over 10,000 bytes closes the connection.
+- **Parameter type oids no type has**: Parse takes them; a parameter the query reads fails
+  with XX000 "cache lookup failed for type N" (TupleDescInitEntry for a bare result column,
+  getBaseTypeAndTypmod where the query gives it a type), one it doesn't read keeps the oid
+  (ParameterDescription) and fails at Bind (getTypeInputInfo / getTypeBinaryInputInfo, NULL
+  too). Still differs: PostgreSQL's routine for a function argument (typeOrDomainTypeRelid),
+  ORDER BY $1 (42704 from lookup_type_cache), `$1 IS NULL` (accepted) and `$1, $1::int`.
+- **Protocol 3.2** (`server.rs` `startup_packet`, `engine::CancelKey`): 3.0 to 3.2 spoken; a
+  3.2 (or later) client's BackendKeyData carries a 32-byte cancel key, a 3.0 / 3.1 client's 4
+  bytes; a CancelRequest's key (1 to 256 bytes) must match in length and bytes; minors past 2
+  and `_pq_.` options get NegotiateProtocolVersion with min(requested, 3.2). "server supports
+  3.0 to 3.2"; a major below 3 gets the old protocol's error form ("EFATAL:  ...\n\0"). psql
+  18 with `min_protocol_version=3.2` connects and its cancel works (the base refused it).
+- **Sweep** (`wire2.py`, 221 cases; `protocol_cases`): fixed besides the above: per-type
+  message length limits (PQ_SMALL_MESSAGE_LIMIT for Sync, Flush, Terminate, Close, Describe,
+  Execute, CopyDone, CopyFail; MaxAllocSize - 1 for the others: the connection closes); a
+  message type is checked before its length is read, so garbage is the FATAL "invalid
+  frontend message type" (also while skipping to Sync); a second SSLRequest / GSSENCRequest
+  is the unsupported-protocol FATAL, data pipelined after either is the "received unencrypted
+  data" FATAL; AuthenticationOk goes out before the errors that follow authentication (a
+  missing database or role, a bad startup setting); the `options` parameter's switches as
+  process_postgres_switches (`-c name` without a value, an unknown switch or a stray argument
+  fail; -B, -S, -e, -f, -t, -d and the rest set their parameters); ParameterStatus at startup
+  in PostgreSQL's order, and after that only just before ReadyForQuery, the last marked first,
+  not when the value is what the client has (`Settings::reported`); an unnamed portal
+  suspended in a transaction block survives Sync; error locations of
+  set_config_with_handle, client_encoding's check hook, the replication parameter,
+  CALL's missing procedure. Still differing: an expression PostgreSQL folds while planning at
+  Bind (`select 1/0`) fails at Bind there, at Execute here; GSSENCRequest is refused ('N', as a
+  build without GSSAPI; the reference image has it and answers 'G'); the startup `role`
+  parameter isn't applied; SET SESSION AUTHORIZATION reports is_superuser before
+  session_authorization (PostgreSQL the other way); a SET leading a multi-statement query
+  that then fails stays set (PostgreSQL's implicit transaction undoes it; opening the
+  transaction at the SET took a following BEGIN's isolation and DEFERRABLE away, wire_waits,
+  so it was taken back: the settings would need a transaction level of their own there).
+- **VACUUM FULL / CLUSTER** (`vacuum.rs` `cluster_rel_inner`, `table.rs` `write_rows_as`):
+  CLUSTER of a table stored by row id copied its rows with its own xmin; they keep theirs now
+  (VACUUM FULL never rewrote them), so `xmin` reads as before, and with relfrozenxid at the
+  copy's cutoff the first VACUUM after it advances relfrozenxid as PostgreSQL's does. Golden
+  `a222_vacuum_rewrite`.
+- **VACUUM VERBOSE's GIN line** (`sizing::gin_cleanup_pages`): the pending list's pages the
+  cleanup deletes are "currently deleted" and, with the pages free before, "reusable", from
+  the GIN model before the cleanup. Not modelled: posting-tree pages a bulk delete empties
+  ("newly deleted", 0). `new relminmxid`: the engine makes no MultiXactIds (row locks of
+  several transactions are its lock manager's), so relminmxid is 1 and never advances;
+  PostgreSQL prints the line once a multixact newer than the table's relminmxid has been made
+  and is no longer needed. Giving it exactly needs a MultiXactId counter advanced where
+  PostgreSQL creates or expands one (a second locker of a row, a locker and an updater), the
+  oldest one any running transaction may still need, and the oldest found in a table's xmax.
+- **Scroll cursor turns after page splits** (not done): PostgreSQL's currPos keeps a leaf
+  page's items and sibling links as loaded. Doing the same needs, for a scroll cursor over a
+  modelled btree, the items of each leaf page as of the moment its scan stepped onto it. A
+  design that costs ordinary index scans nothing: in `Paged`'s forward FETCH only, map the
+  rows returned to their leaf pages (`Btree::places` of those TIDs) and record each page's
+  items (and right/left links) the first time a row of it is returned; at a turn, place rows
+  by those records for pages already read and by the current pages beyond. It costs a scan
+  of the model's leaf pages per FETCH of a scroll cursor (index-sized), which is why it isn't
+  in: a per-page TID index in `btsim` kept by inserts would make it cheap but adds work to
+  every modelled insert.
+
+Verification (agent 222): release golden (in-process, wire, shuffled), wire (73, with
+`protocol_cases`' 115), lib (214), kept_plans (10), twophase (4), no Clippy warning in the
+changed files, on the rebased tree. Point reads at 8 clients on lane A, 5 alternating pairs of
+dist builds (`29e94da4c` against it with these changes): user instructions per read -0.2% at
+the median (pairs -0.4% to +0.4%), ops/s +0.5%, CPU per read -0.3%: the per-type length limit,
+the trailing-byte checks and the format code check add nothing measurable. Clients, the head
+against these changes: psycopg 3.2.9 4924 / 9 failing both, node-postgres 8.16 146 / 3 both,
+pgjdbc 42.7.7 8221 / 0 both, identical lists; psql 18 (`min_protocol_version=3.2`, a cancel
+with the 32-byte key, `\copy`), pgbench simple / extended / prepared without failures.
+Verification train on `66fb5dc38` (these commits in it): every step 0 (clippy 20 warnings,
+none in these files; regress newly differing 0; isolation 1647/1648, intra-grant-inplace as
+before; pg_dump 14609 passed). The first train found the bench example not building (Bind's
+and register_backend's new arguments: `877024ec3`) and wire_waits' safe-snapshot cases
+broken by opening the transaction at a leading SET (taken back: `24792655d`).
