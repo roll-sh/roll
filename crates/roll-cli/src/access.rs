@@ -141,7 +141,12 @@ pub enum Mcp {
         all: bool,
     },
     /// Approve a request: it runs.
-    Approve { id: String },
+    Approve {
+        id: String,
+        /// Also allow the same action on the same resource without asking: 1h, 8h, 1d or always.
+        #[arg(long, value_parser = ["1h", "8h", "1d", "always"])]
+        remember: Option<String>,
+    },
     /// Deny a request.
     Deny {
         id: String,
@@ -508,8 +513,9 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
                 print_approval(a);
             }
         }
-        Mcp::Approve { id } => {
-            let a = api.post(&format!("/v1/access/approvals/{id}/approve"), json!({})).await?;
+        Mcp::Approve { id, remember } => {
+            let body = remember.map_or_else(|| json!({}), |r| json!({ "remember": r }));
+            let a = api.post(&format!("/v1/access/approvals/{id}/approve"), body).await?;
             if json_out { println!("{}", serde_json::to_string_pretty(&a)?) } else { println!("approved: {}", s(&a["summary"])) }
         }
         Mcp::Deny { id, reason } => {

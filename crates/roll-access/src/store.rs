@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS grants (
     client_id TEXT,
     rate_per_minute INTEGER,
     user_id TEXT,
-    revoked_why TEXT
+    revoked_why TEXT,
+    temp_rules TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -141,9 +142,28 @@ pub struct Grant {
     /// Why roll revoked it ("found in acme/site: .env"), when roll did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_why: Option<String>,
+    /// Rules a person allowed for a while when approving one of its requests, each until a time.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub temporary: Vec<TempRule>,
+}
+
+/// A rule allowed for a while (an approval's "for an hour").
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TempRule {
+    pub rule: roll_auth::scope::Rule,
+    /// Unix ms.
+    pub until: i64,
 }
 
 impl Grant {
+    /// What it may do now: its rules, and the temporary ones still live. Decisions use this; making
+    /// tokens (`check_within`) uses `rules` alone, so a while never becomes for good.
+    pub fn effective_rules(&self, now: i64) -> Scope {
+        let mut s = self.rules.clone();
+        s.0.extend(self.temporary.iter().filter(|t| t.until > now).map(|t| t.rule.clone()));
+        s
+    }
+
     pub fn kind(&self) -> GrantKind {
         if self.kind == "oauth" { GrantKind::Oauth } else { GrantKind::Token }
     }
@@ -288,9 +308,9 @@ pub struct Store {
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
-/// A grant's columns, as `grant_row` reads them (20 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (21 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
@@ -323,6 +343,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         rate_per_minute: r.get::<_, Option<i64>>(17)?.and_then(|n| u32::try_from(n).ok()),
         user: r.get(18)?,
         revoked_why: r.get(19)?,
+        temporary: r.get::<_, Option<String>>(20)?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
     })
 }
 
@@ -430,6 +451,10 @@ impl Store {
         if !db.has_column("grants", "revoked_why")? {
             db.add_column("grants", "revoked_why", "TEXT")?;
         }
+        // Rules a person allowed for a while when approving ("for an hour").
+        if !db.has_column("grants", "temp_rules")? {
+            db.add_column("grants", "temp_rules", "TEXT")?;
+        }
         Ok(Store { db, touched: Default::default() })
     }
 
@@ -518,7 +543,7 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(20)?, r.get::<_, Option<i64>>(21)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(21)?, r.get::<_, Option<i64>>(22)?)),
             )
             .optional()
         })?;
@@ -575,6 +600,37 @@ impl Store {
                 return Err(Error::NotFound(format!("no token {id}")));
             }
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [id])?;
+            Ok(())
+        })?;
+        self.get(id)
+    }
+
+    /// Allow `rule` on a grant: for good (`until: None`, added to its rules unless they hold it), or
+    /// until a time (its temporary rules, the lapsed ones dropped).
+    pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>) -> Result<Grant> {
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            let row: Option<(String, Option<String>, Option<i64>)> =
+                c.query_row("SELECT rules, temp_rules, revoked_at FROM grants WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            let Some((rules, temp, revoked)) = row else { return Err(Error::NotFound(format!("no token {id}"))) };
+            if revoked.is_some() {
+                return Err(Error::Conflict("the token is revoked".into()));
+            }
+            match until {
+                None => {
+                    let mut rules: Scope = serde_json::from_str(&rules).unwrap_or_default();
+                    if !rules.0.contains(rule) {
+                        rules.0.push(rule.clone());
+                    }
+                    c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(&rules).unwrap_or_default(), id])?;
+                }
+                Some(until) => {
+                    let mut temp: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+                    temp.retain(|t| t.until > now && t.rule != *rule);
+                    temp.push(TempRule { rule: rule.clone(), until });
+                    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
+                }
+            }
             Ok(())
         })?;
         self.get(id)

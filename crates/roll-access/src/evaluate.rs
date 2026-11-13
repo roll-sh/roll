@@ -292,7 +292,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if found.params.is_some() {
         ctx.route = row.route.to_string();
     }
-    let scope = Arc::new(ctx.grant.rules.clone());
+    let scope = Arc::new(ctx.grant.effective_rules(code_sql::now_ms()));
     let (mut parts, body) = req.into_parts();
     let params: Vec<(String, String)> = match found.params {
         Some(p) => p,
