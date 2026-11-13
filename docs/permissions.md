@@ -140,6 +140,10 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   with its variables: `admin` in every environment, as an agent's shell is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
   `admin`, as in secrets itself.
+- Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
+  copy from each in-project source: `write` on the importing folder plus `reveal` on every folder
+  imported. Importing another project's folder is `admin` on the importing folder (that project's
+  admin must export it too). Secrets also needs `admin` to change a protected environment's imports.
 - Sending a project's data out of roll with a signing secret shown once is `reveal`: an apps
   webhook notification target, and an apps log drain (every service's output, POSTed signed).
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT

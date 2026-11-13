@@ -494,16 +494,28 @@ pub(crate) async fn copy_outcome(
     scope: &Scope,
 ) -> Option<(Outcome, String)> {
     let (Some(from), Target::One(r), Tgt::Param(names, _)) = (row.copies_from, target, row.target) else { return None };
-    let src = match from {
-        catalog::CopyFrom::Body(field) => body?.get(field)?.as_str()?.to_string(),
-        catalog::CopyFrom::Query(name) => url::form_urlencoded::parse(query?.as_bytes()).find(|(k, _)| k == name)?.1.into_owned(),
+    let sources: catalog::Sources = match from {
+        catalog::CopyFrom::Body(field) => vec![(body?.get(field)?.as_str()?.to_string(), None)],
+        catalog::CopyFrom::Query(name) => vec![(url::form_urlencoded::parse(query?.as_bytes()).find(|(k, _)| k == name)?.1.into_owned(), None)],
+        catalog::CopyFrom::Each(list) => list(body?),
     };
     let id = names.iter().filter_map(|n| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())).collect::<Vec<_>>().join("/");
-    let (a, product) = (access.clone(), row.product);
-    let env = tokio::task::spawn_blocking(move || a.resolvers.environment(product, &id, &src)).await.ok()?;
-    let mut from = r.clone();
-    from.environment = Some(env.clone());
-    Some((scope.outcome(&Target::One(from), Action::Reveal), env))
+    // The weakest of the sources decides, and the approval is about that one.
+    let mut weakest: Option<(Outcome, String)> = None;
+    for (src, path) in sources {
+        let (a, product, id) = (access.clone(), row.product, id.clone());
+        let env = tokio::task::spawn_blocking(move || a.resolvers.environment(product, &id, &src)).await.ok()?;
+        let mut from = r.clone();
+        from.environment = Some(env.clone());
+        if let Some(p) = path {
+            from.path = Some(p);
+        }
+        let outcome = scope.outcome(&Target::One(from), Action::Reveal);
+        if weakest.as_ref().is_none_or(|(w, _)| rank(outcome) < rank(*w)) {
+            weakest = Some((outcome, env));
+        }
+    }
+    weakest
 }
 
 /// Outcomes from weakest to strongest.
