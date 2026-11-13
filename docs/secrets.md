@@ -1602,21 +1602,24 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-13 (night): the core and the stacked pull requests are level with
+Reviewed again on 2026-11-13 (later): the Link dialog crashed on a kind that isn't a canvas
+resource (a rotator, an AWS role): `KIND_ICON` only knows the workspace's. It names roll secrets'
+own kinds now and falls back to a plain link icon for any it doesn't know. Earlier, 2026-11-13 (late): #39's own review found two ways a rotation could reset the
+role in use (a refused `ALTER ROLE`, two environments sharing the pair); both fixed and tested.
+The other threads' heads need nothing from roll secrets (MCP lists outside databases; previews
+waits on #31). Earlier, on 2026-11-13 (night): the core and the stacked pull requests are level with
 Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). The gap that's left
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Dynamic AWS credentials**: a project registers a role in its own account (`…/aws-roles`), and a
-   `dynamic` link to it gets a short-lived `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
-   `AWS_SESSION_TOKEN` per lease (STS AssumeRole, as Vault's AWS engine and Infisical's dynamic
-   secrets). The ExternalId is the project, and registering a role proves its trust policy pins it
-   (a decoy project's ExternalId must be refused), so no tenant assumes another customer's role.
-2. **Built-in rotation for databases roll doesn't run** (Postgres and MySQL: a new password set by
-   `ALTER ROLE`/`ALTER USER` through roll's guarded connection, the old one retired after the grace
-   period), as Infisical's secret rotation, without a webhook of your own.
+1. **Redis and MongoDB outside roll** (on #39's registry and guarded connections): rotation and a
+   login per lease for ElastiCache, Upstash and Atlas, as Vault's Redis and MongoDB plugins
+   (`ACL SETUSER` over TLS; MongoDB's `updateUser`/`createUser` with a role).
+2. **Dynamic GCP and Azure credentials** (Vault's GCP and Azure engines, next to #38's AWS): a
+   short-lived service-account token per lease through workload identity federation, and an Entra
+   app's client secret per lease, with the same decoy check against confused deputies.
 3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
 4. **Products say who owns a resource**, so a person's project can link their own databases,
@@ -1643,6 +1646,12 @@ Open pull requests after this one:
   and its Helm chart.
 - **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key,
   set from the project's settings.
+- **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
+- **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
+  after its grace; a user with two keys already is refused, never pruned.
+- **#39, Postgres and MySQL outside roll** (after #20): two login roles take turns (rotation), or a
+  login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
+  itself (Postgres gets a SCRAM verifier, never the password).
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
