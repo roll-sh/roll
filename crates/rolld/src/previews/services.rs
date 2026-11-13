@@ -131,9 +131,11 @@ impl roll_previews::ports::Apps for RollApps {
                 }
             }
         }
-        if !set.is_empty() {
-            self.api.call(Method::PATCH, &format!("{path}/variables"), Some(json!({ "set": set }))).await?;
-        }
+        // What roll set last time and no longer wants (a removed preview variable or project
+        // override) goes; names a person or the base environment set are never touched. The names
+        // roll set are kept in the environment itself, so a restart knows them.
+        let before = self.api.get(&format!("{path}/variables/values")).await.unwrap_or(Value::Null);
+        self.api.call(Method::PATCH, &format!("{path}/variables"), Some(variables_patch(&before, set.clone()))).await?;
         // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let env = self.api.get(&path).await?;
@@ -200,6 +202,20 @@ impl roll_previews::ports::Apps for RollApps {
         None
     }
 }
+
+/// The variable in a preview's roll apps environment that names the variables roll set there.
+const SET_BY_ROLL: &str = "ROLL_PREVIEW_SET";
+
+/// roll apps' variables `PATCH` for a preview environment whose values are `before`: `set`, the
+/// names roll set last time (its `SET_BY_ROLL`) and no longer wants unset, and the new list.
+fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> Value {
+    let prev = before[SET_BY_ROLL].as_str().unwrap_or("");
+    let unset: Vec<&str> = prev.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != SET_BY_ROLL && !set.contains_key(*n)).collect();
+    let names: Vec<String> = set.keys().cloned().collect();
+    set.insert(SET_BY_ROLL.into(), json!(names.join(",")));
+    json!({ "set": set, "unset": unset })
+}
+
 
 /// roll apps for the services in its catalog, the container runtime for `roll.toml`'s.
 pub struct Services {
@@ -275,5 +291,23 @@ impl roll_previews::ports::Apps for Services {
 
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {
         self.runtime.status(preview, service)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What roll set and no longer wants goes; what a person set stays; the list follows.
+    #[test]
+    fn a_removed_variable_is_unset_and_a_persons_own_kept() {
+        let before = json!({ "ROLL_PREVIEW_SET": "FEATURE,DATABASE_URL", "FEATURE": "on", "DATABASE_URL": "x", "MINE": "set by hand" });
+        let set: serde_json::Map<String, Value> = [("DATABASE_URL".to_string(), json!("y"))].into_iter().collect();
+        let patch = variables_patch(&before, set);
+        assert_eq!(patch["unset"], json!(["FEATURE"]));
+        assert_eq!(patch["set"], json!({ "DATABASE_URL": "y", "ROLL_PREVIEW_SET": "DATABASE_URL" }));
+        // A first deploy (nothing recorded): nothing unset.
+        let first = variables_patch(&Value::Null, [("A".to_string(), json!("1"))].into_iter().collect());
+        assert_eq!((first["unset"].clone(), first["set"]["ROLL_PREVIEW_SET"].clone()), (json!([]), json!("A")));
     }
 }
