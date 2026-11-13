@@ -116,8 +116,8 @@ state. A pass of the reconciler:
       the branch the next time.
    4. A due reset runs.
    4b. On fresh data (anything just branched or reset), the project's `seed` runs once:
-       `sh -c <run>` in `<image>`, in the change's tree, with the branches' variables, like a
-       check. Use it to anonymise production rows, run migrations or load fixtures. It runs
+       `sh -c <run>` in `<image>`, in the change's tree, with the preview's secrets (resolved
+       as services get them) and the branches' variables on top, like a check. Use it to anonymise production rows, run migrations or load fixtures. It runs
        before services deploy; a failure fails the preview with the output's tail, and is
        retried.
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).

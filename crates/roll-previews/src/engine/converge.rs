@@ -234,7 +234,13 @@ impl Engine {
         if let Some(seed) = &s.seed
             && self.store.seed_needed(&r.id)?
         {
-            let mut env = vars.clone();
+            // Its secrets environment (as services get it, untrusted unless the project allows
+            // production and the change is trusted), then the branches and overrides on top.
+            let untrusted = !(s.secrets.allow_production && r.trusted);
+            let mut env = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+            for (k, v) in &vars {
+                set(&mut env, k, v.clone());
+            }
             set(&mut env, "ROLL_PREVIEW", r.id.clone());
             set(&mut env, "ROLL_REPO", r.repo.clone());
             set(&mut env, "ROLL_CHANGESET", r.head.clone());
