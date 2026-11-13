@@ -535,6 +535,103 @@ The kernel send at ReadyForQuery is the same work in both servers: round 3's str
 `sendto` and one `recvfrom` per query on the engine (2.0 system calls per query) against
 PostgreSQL's 8.5.
 
+## Bulk writes, round 13 (2026-11-12, agent 224)
+
+HANDOFF.md, "Bulk writes, round 13", has what changed. Method as round 12's (agent 217's harness,
+copied to `~/.cache/a224/bench`, lane C): dist builds with line tables, each server a fresh
+container on CPUs 14,15,32,33 (8 GiB, `--cpu-shares 2`, host network), psql and perf in
+containers on CPUs 16,17,34,35, 1M rows (`bulk1m.tsv`), autovacuum off, settled steps with each
+settle measured as `bg_<step>`; user instructions of the server cgroup; rows checked equal on
+every run (count and sums of every column of both tables). **base** is `af6c1f20f`, **new** the
+three changes kept on it (`keep-a224-new6`; the pushed commits are the same changes rebased).
+pgrust is `malisper/pgrust@sha256:9ec8cbd6…` with PostgreSQL's settings (shared_buffers 2GB,
+maintenance_work_mem 256MB, `io_method=sync` as agents 219/220 run it), three runs.
+
+### The step table against PostgreSQL 18.6 and pgrust (settled, medians of three runs, `g5`)
+
+| step | PostgreSQL wall / CPU s / G ins | pgrust wall / CPU s / G ins | base wall / CPU s / G ins | new wall / CPU s / G ins | base ins /PG, /pgrust | new ins /PG, /pgrust |
+|---|---|---|---|---|---|---|
+| COPY in | 1.02 / 0.89 / 6.47 | 0.79 / 0.68 / 4.92 | 1.33 / 1.17 / 10.17 | 1.30 / 1.19 / 10.19 | 1.57, 2.07 | 1.57, 2.07 |
+| CREATE INDEX | 0.51 / 0.92 / 3.13 | 0.51 / 0.81 / 2.79 | 0.73 / 1.20 / 7.25 | 0.72 / 1.15 / 6.66 | 2.32, 2.60 | **2.13, 2.39** |
+| bg after it | 0 / 0 / 0 | 0.06 / 0.09 | 0 / 0.95 | 0 / 1.06 | | |
+| CREATE UNIQUE INDEX | 0.38 / 0.48 / 2.25 | 0.32 / 0.41 / 1.78 | 0.51 / 0.71 / 5.08 | 0.47 / 0.62 / 4.84 | 2.26, 2.85 | **2.15, 2.71** |
+| bg after it | 0 / 0 / 0 | 0.06 / 0.07 | 0 / 0.48 | 0 / 1.44 | | |
+| COPY out | 0.55 / 0.46 / 3.21 | 0.36 / 0.26 / 1.98 | 0.50 / 0.38 / 3.12 | 0.51 / 0.40 / 3.11 | 0.97, 1.58 | 0.97, 1.57 |
+| INSERT … SELECT | 0.99 / 0.80 / 4.31 | 0.86 / 0.66 / 4.31 | 0.93 / 0.80 / 7.04 | 0.92 / 0.79 / 7.08 | 1.63, 1.63 | 1.64, 1.64 |
+| UPDATE half | 4.59 / 4.59 / 27.50 | 3.79 / 3.77 / 22.77 | 1.96 / 1.83 / 13.44 | 2.07 / 1.93 / 13.45 | 0.49, 0.59 | 0.49, 0.59 |
+| DELETE a quarter | 0.34 / 0.25 / 1.67 | 0.30 / 0.21 / 1.50 | 0.95 / 0.85 / 6.42 | 0.94 / 0.85 / 6.41 | 3.85, 4.28 | 3.84, 4.28 |
+| bg after it (compaction) | 0 / 0 / 0 | 0.03 / 0.04 | 0.23 / 6.79 | 0.23 / 6.68 | | |
+| VACUUM | 0.34 / 0.33 / 2.53 | 0.52 / 0.76 / 3.05 | 0.38 / 0.28 / 2.44 | 0.35 / 0.24 / 2.05 | 0.97, 0.80 | **0.81, 0.67** |
+| ANALYZE | 0.22 / 0.14 / 0.50 | 0.19 / 0.09 / 0.51 | 0.25 / 0.14 / 0.93 | 0.22 / 0.10 / 0.53 | 1.86, 1.84 | **1.06, 1.05** |
+| count(*) after | 0.16 / 0.15 / 0.49 | 0.10 / 0.07 / 0.17 | 0.20 / 0.24 / 1.34 | 0.19 / 0.24 / 1.34 | 2.73, 7.81 | 2.73, 7.82 |
+| TRUNCATE | 0.12 / 0.03 / 0.02 | 0.11 / 0.02 / 0.03 | 0.12 / 0.01 / 0.27 | 0.08 / 0.01 / 0.00 | | |
+| DROP TABLE | 0.15 / 0.05 / 0.04 | 0.15 / 0.04 / 0.04 | 0.12 / 0.02 / 4.69 | 0.11 / 0.00 / 0.00 | | |
+| **all steps** (bg included; wall without the settles) | 9.50 / 9.26 / 52.3 | 8.17 / 8.09 / 44.6 | 7.96 / 8.00 / 70.7 | 7.91 / 7.83 / 64.7 | 1.35, 1.59 | **1.24, 1.45** |
+
+(PostgreSQL's and pgrust's bg rows are their checkpointer/background writer; pgrust's `bg_vacuum`
+writes 86 MB. pgrust's first, unsettled run is in `runs/pgrust-1.txt`. TRUNCATE's and DROP
+TABLE's rows were the rewrite of the 23 MB file holding the table, its indexes, the store's own
+keys and bulk2's last rows; now nothing. Peak memory: roll VmHWM 251-256 MB both arms, cgroup
+peak 293-347 MB both; PostgreSQL 926-954 MB, pgrust 1083-1126 MB.)
+
+### The changes, gated (per round %, user instructions, new against base; nine rounds in three sets)
+
+| step | `g3` | `g4` | `g5` |
+|---|---|---|---|
+| CREATE INDEX | -6.6 / -10.3 / -8.0 | -11.6 / -5.4 / -9.9 | -8.2 / -7.4 / -5.0 |
+| CREATE UNIQUE INDEX | -4.6 / -8.8 / -5.6 | -12.3 / -11.1 / -15.5 | -3.0 / -10.8 / -12.2 |
+| VACUUM | +9.6 / -15.9 / -15.9 | -15.9 x3 | -15.9 x3 |
+| ANALYZE | -15.7 / -46.4 / -42.9 | -46.4 / -45.3 / -42.9 | -45.3 / -43.0 / -42.9 |
+| TRUNCATE + DROP TABLE | -99.5..-100 | -98.7..-100 | -98.5..-100 |
+| DELETE | +1.2 / -0.3 / +0.2 | +0.3 / +2.6 / -3.2 | -1.3 / +6.1 / -0.1 |
+| compaction after DELETE | +42.1 / -1.6 / -0.7 | +2.6 / +0.2 / +7.1 | +0.3 / -10.2 / -4.3 |
+| count(*) | +21.4 / +0.1 / +0.1 | +0.1 x3 | +0.1 x3 |
+| compactions after the index builds | noisy both arms: base 0-1.5 G each, new 0-2.0 G (they fall into the step's window or the settle's) | | |
+| every other step | within 0.5% | | |
+| all steps with bg (G) | 70.5 / 70.9 / 71.5 -> 67.1 / 64.6 / 64.2 | 70.8 / 70.9 / 71.2 -> 64.0 / 63.5 / 64.8 | 70.7 / 71.0 / 70.3 -> 64.7 / 64.7 / 64.3 |
+| MB written over the script | 230-248 -> 190-211 | 230-276 -> 190-202 | 230 -> 190 |
+| data dir at the end (MB) | 27 -> 35 / 5 / 25 | 27 -> 25 | 27 -> 25 |
+
+- `g3`'s first round is one where the compaction after DELETE ran late (8.0 G, VACUUM and
+  count(*) still merging part of it); the other eight rounds have none. DELETE's own count moves
+  ±3% between runs of one binary (round 11); the c1+c4 build without the compaction change
+  (`new7`, `g5`) showed DELETE +5.3% in one round too. The sum of DELETE, its compaction,
+  VACUUM, ANALYZE and count(*) is 16.8-18.2 G base, 17.0-17.1 G new in `g4`.
+- Point reads and short transactions (`smoke.sh`, pgbench scale 10, prepared, 8 clients, 20 s,
+  three interleaved rounds): select-only 54,234-54,278 user instructions a transaction base,
+  52,778-52,834 new (-2.7% every round); tpcb-like 902-953 k base, 903-911 k new.
+
+### Measured and not kept
+
+Patches and notes in `~/.cache/a224/patches/` (HANDOFF lists them):
+- **A parallel index build's entries as one merged run** (alone in its range, it goes to L1 at
+  commit): CREATE INDEX -13..-15%, CREATE UNIQUE INDEX -13..-22%, both their compactions gone
+  (12 MB written less), all steps 70.6 -> 60.0 G with the three kept. But nothing compacts
+  the tiny L0 files a commit's memtable rotation leaves any more: the L0 count reached the
+  trigger at the UPDATE's commit (a compaction while its snapshot was pinned kept the old
+  versions, 1.5M entries in the table's file) and DELETE's deletions stayed under it (ANALYZE
+  +43%, count(*) +64%, UPDATE +4.9%); and pgbench select-only +3.4% instructions a transaction
+  (a 3 kB L0 file spanning every table: every `PointReader::first_raw` seeks in it).
+- **Tiny L0 files not counting toward the trigger** (to put that timing back): built, not
+  measured: it keeps the spanning tiny files longer, which is what cost the point reads.
+- zstd at level 2 instead of 1 (offline, on the compaction's 16 kB blocks of the table and its
+  indexes, `zstd` 1.5.7 as the crate's): row blocks 5.8% smaller for 2.5% more compression
+  instructions, index blocks 0.5% larger; level 1's parameters are already its minimum
+  (minMatch 5, hashLog 14), so compression can't get cheaper at the same size.
+
+### Where the instructions still go
+
+- The compaction after DELETE (6.4-7.1 G both arms): zstd compression a quarter, decompression
+  and `Block::decode` of its inputs a quarter (an uncached read decodes each block to the cache
+  form before the merge walks it), the merge's per-entry `min` / `head` / `advance` and
+  `SstWriter::add` the rest. Its filter building (18% before) is gone.
+- CREATE INDEX (2.1x PostgreSQL): writing the entries' run 29% (zstd 15%), the table's first
+  read 23% (12% zstd decompression: COPY's runs never enter the block cache), the sorts 13%,
+  `stored_tuple_len` and the row decode 15%.
+- count(*) (2.7x PostgreSQL, 7.8x pgrust): `parscan::partial_row` and `LazyBuf::read` per row,
+  and `sum(c)` of a float8 collected per row (`Partial::Floats`) and summed on the executor's
+  thread.
+
 ## Bulk writes, round 12 (2026-11-12, agent 217)
 
 HANDOFF.md, "Bulk writes, round 12", has what changed. Method as round 11's (agent 208's

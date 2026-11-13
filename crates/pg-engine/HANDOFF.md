@@ -10507,6 +10507,97 @@ one); pg_dump_tap 14,609 passed (run again after recreating the dump client cont
 `--user 1000:1000`: as root, its directory dumps are root-owned 0700 and the test's glob checks,
 run as the user, fail 4). No format change: the files written are byte for byte the same.
 
+## Bulk writes, round 13 (agent 224)
+
+BENCH.md "Bulk writes, round 13" has the measurements: on the 1M-row bulk sequence, settled and
+with the background work counted, all steps 70.7 -> 64.7 G user instructions (1.35x -> 1.24x
+PostgreSQL's, 1.59x -> 1.45x pgrust's), 230 -> 190 MB written, the data dir 27 -> 25 MB at the
+end; VACUUM -16%, ANALYZE -43 to -46%, CREATE INDEX -5 to -12%, CREATE UNIQUE INDEX -3 to -16%,
+TRUNCATE and DROP TABLE -5 G; pgbench select-only -2.7%. Three changes, each its own commit:
+
+- **A resolving `TxnScan` fills a batch at a time** (`TxnScan::fill_batch`,
+  `storage::Scan::fill_batch_with`). A scan of a table with a TOAST relation (any table with a
+  text column) that puts out-of-line values back filled one row a call through `next`, a key
+  and value copied per row. Once none of the transaction's writes is left in the range, the
+  store's rows now pass by reference as a raw scan's do; a row with out-of-line values is put
+  back (through the scan's `toast::Reader`, as `next` does) only as the first row of a call:
+  the batch stops before such a row otherwise, so values are still read only for the rows a
+  reader takes. VACUUM's and ANALYZE's table scans and a parallel index build's chunks read
+  batches now (agent 217's `batch-vacuum-analyze-scans.patch`, worse without this).
+- **Compaction ends an output where one table's or index's keys pass to another's**
+  (`storage::part_ends`: past 256 kB, and always between the store's own keys, table 0, and a
+  table's). Compaction merges every L1 file an L0 file's range meets and `collect_ranges`
+  rewrites a file a range deletion covers part of, so one 23 MB file holding the store's own
+  keys, the table, both its indexes and bulk2's last rows was rewritten whole for TRUNCATE
+  bulk2 (4.0-4.7 G instructions and 45 MB written, which the step table showed as DROP TABLE's
+  row). Now TRUNCATE and DROP drop a table's files without reading them, a catalog write
+  rewrites only the store's small file, and a file of index entries alone gets no bloom filter
+  (`SstWriter::finish` builds none for those), where the mixed file built one over every key.
+- **A key's bloom filter bits each from the one before by additions** (`sst::bloom_bits`): bit
+  i is (h1 + i·h2 mod 2^64) mod nbits; it now adds h2's remainder to the last and takes 2^64's
+  remainder away where the 64-bit sum wraps: two `FastMod` remainders a key instead of seven,
+  the same bits (`bloom_bits_are_the_formulas` checks the formula, wraps included). Building
+  the filter was 18% of the compaction after DELETE and 30% of a TRUNCATE's rewrite.
+
+Tests: `compaction_outputs_end_where_tables_and_indexes_do` (storage), and
+`kill_during_compactions_of_many_tables` (`tests/crash_bulk.rs`: kill -9 while batches COPY into
+one table, TRUNCATE and refill another and add to a third, compactions splitting and dropping
+files all along; every committed batch there after reopening, the one cut short all or nothing,
+indexes agreeing). No format change: files are written as before, only where outputs end differs.
+
+Measured and not kept (patches and notes in `~/.cache/a224/patches/`):
+- **A parallel index build's entries as one merged run** (`index-build-one-run.patch`): alone in
+  its range it goes to L1 at commit, so the compaction that merged three overlapping runs after
+  each index build (0.5-1.4 G, 12 MB written) is gone: CREATE INDEX -13..-15%, CREATE UNIQUE
+  INDEX -13..-22%. But that compaction was also what cleared the tiny L0 files every commit's
+  memtable rotation leaves (a few catalog writes, size estimates, a load's last rows). Left
+  there: (1) the L0 count reached its trigger at the bulk UPDATE's commit, and the compaction
+  ran while the UPDATE's snapshot was still pinned (the table's file kept 1.5M entries) while
+  DELETE's two deletion runs stayed below the trigger: ANALYZE +43%, count(*) +64%; (2) pgbench
+  select-only +3.4% instructions a transaction: a 3 kB L0 file spanning every table, in which
+  every `PointReader::first_raw` seeks. `l0-tiny-files-trigger.patch` (tiny files count only at
+  twice the trigger) would put (1)'s timing back but keeps (2)'s files longer; not measured.
+- zstd level 2 (offline, on the compaction's blocks): rows 5.8% smaller, 2.5% more compression
+  instructions; level 1 is at its cheapest parameters.
+
+Not done, for the next round (BENCH.md has the profiles):
+- **Compaction should merge only the L1 files an L0 file has entries in**, not every file its
+  range meets (look up the L1 file's first key in the L0 file's block index and seek one
+  block): then a tiny L0 file spanning many tables compacts for the cost of its few entries,
+  the index-build run above can go in (its timing problem is the tiny files), and a
+  deletion-aware trigger (L0 deletions against the L1 entries they meet) can replace the file
+  count, so the compaction after a big DELETE doesn't depend on how many small files happen to
+  be in L0. Also: a compaction started while its newest input's commit is still pinned keeps
+  every version it replaced; deferring it until the pin goes would make a compaction right
+  after a bulk commit worth running.
+- The compaction after DELETE (6.4-7.1 G, both arms): compression a quarter, decompression plus
+  `Block::decode` of uncached inputs a quarter (a one-pass reader of the file's own block form
+  would skip the decode to the cache form), the per-entry merge and `SstWriter::add` the rest.
+- CREATE INDEX (2.1x): the first read of COPY's runs decompresses every block (they never enter
+  the block cache); writing the run 29% (zstd 15%); the sorts 13%.
+- count(*) (2.7x PostgreSQL, 7.8x pgrust): per-row lazy decode in `parscan::partial_row`, and
+  `sum(float8)` collected per row (`Partial::Floats`) and summed on the executor's thread; agent
+  220's batch path (`exec::partial`, lanes) takes exact numerics only: a float lane summed in the
+  serial order would let count(*) and ANALYZE's sampling sit on it.
+- DELETE (3.8x) unchanged: per round 11/12, design-level (tombstones, the scan merging UPDATE's
+  versions); not tuned here.
+- pgrust per step (instructions): COPY in 4.9 G, CREATE INDEX 2.8, UNIQUE 1.8, COPY out 2.0,
+  INSERT … SELECT 4.3, UPDATE 22.8, DELETE 1.5, VACUUM 3.1, ANALYZE 0.5, count(*) 0.17: roll is
+  ahead of it on UPDATE and VACUUM, at par on ANALYZE.
+
+Verification: before the push, on `b624a8047` (the changes rebased on `a79309351`), release lib
+tests (216), compact_locks, big_tables, txn_spill, crash_bulk (4, the new one included), golden,
+storage_format, storage_linked_gc, storage_read_once, storage_upgrade_batches, drop_storage,
+parallel_scan, crash_random seeds 1-30; release Clippy with no warning in the files changed.
+After the push, the full `tools/verification-train.sh` on `66fb5dc38`: release crate tests
+passed; Clippy 20 warnings, none in the files changed; crash_random seeds 1-30 x 4; the power
+stage (power_cut 4 passed, `CRASH_POWER=1` seeds 1-30 x 4, with and without `CRASH_ASYNC=1`);
+debug crate tests all passed but `wire::big_bytea_values_go_out_in_linear_time` (a 20 s wall
+bound, 21.8 s on the loaded machine; its SELECT $1::bytea touches nothing changed here);
+the full regression suite against a private PostgreSQL 18.6 reference 51,148 / 51,150 units,
+none newly differing; isolation 1647/1648 permutations (the known one); pg_dump_tap 14,609
+passed. No format change.
+
 ## Short write transactions, round 1 (agent 197)
 
 BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients
