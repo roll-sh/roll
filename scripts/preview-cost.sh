@@ -178,11 +178,14 @@ case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should b
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
 # Logs are pushed: a request made while following shows up on the stream.
 FOLLOW="$HOME_DIR/follow.txt"
-curl -sN --max-time 6 "http://$API/v1/previews/$PV/logs?follow=1&lines=1" >"$FOLLOW" &
+curl -sN --max-time 20 "http://$API/v1/previews/$PV/logs?follow=1&lines=1" >"$FOLLOW" &
 FPID=$!
-sleep 2
+# Once the stream is open (its first event), a request; then until its line arrives.
+for _ in $(seq 1 40); do grep -q "event: service" "$FOLLOW" 2>/dev/null && break; sleep 0.25; done
 curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/pushed-log-line"
-wait "$FPID" || true
+for _ in $(seq 1 60); do grep -q "pushed-log-line" "$FOLLOW" && break; sleep 0.25; done
+kill "$FPID" 2>/dev/null || true
+wait "$FPID" 2>/dev/null || true
 grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { echo "the followed log should carry the request:"; cat "$FOLLOW"; exit 1; }
 # CI's way in: the project's bypass secret in a header (no cookie); a wrong one is refused.
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
