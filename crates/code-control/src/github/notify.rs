@@ -7,7 +7,7 @@
 use super::{Hub, Link, link_of, mark, set_mark};
 use crate::model::{Change, ChangeState, Check, CheckStatus, Preview, PreviewState, RepoRow, WorkItem, WorkState};
 use crate::{Code, Result};
-use code_github::model::{CheckConclusion, CheckOutput, CheckRunRequest, CheckStatus as GhStatus};
+use code_github::model::{CheckAction, CheckConclusion, CheckOutput, CheckRunRequest, CheckStatus as GhStatus};
 
 fn connected(code: &Code, repo_id: &str) -> Option<(RepoRow, Link)> {
     let r = code.db.repo_by_id(repo_id).ok()??;
@@ -132,6 +132,7 @@ pub(super) async fn check_run(code: &Code, hub: &Hub, c: &Change, check: &Check)
                 started_at: ts(check.started_at),
                 completed_at: ts(check.finished_at),
                 output,
+                actions: None,
             };
             let run = hub.client.create_check_run(l.installation_id, &l.owner, &l.repo, &req).await.map_err(gh)?;
             set_mark(code, &key, &run.id.to_string())?;
@@ -223,11 +224,35 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
             }
         }
     }
-    // The visual review (Chromatic's UI Review): pending until someone accepts it in roll.
+    // The visual review (Chromatic's UI Review): a check run that needs an action until someone
+    // accepts it, in roll or with its Accept button (GitHub's `requested_action`).
     if rules.status
         && let Some((state, why)) = &visual
     {
-        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/visual", Some(why), log_url.as_deref()).await.map_err(gh)?;
+        let waiting = *state != "success";
+        let req = CheckRunRequest {
+            status: Some(GhStatus::Completed),
+            conclusion: Some(if waiting { CheckConclusion::ActionRequired } else { CheckConclusion::Success }),
+            details_url: log_url.clone(),
+            output: Some(CheckOutput {
+                title: why.clone(),
+                summary: if waiting { format!("{why}. Accept it here (a writer of the repo, not its author) or on its preview in roll.") } else { why.clone() },
+                text: None,
+            }),
+            actions: Some(if waiting { vec![CheckAction { label: "Accept".into(), description: "Accept how its pages look".into(), identifier: ACCEPT.into() }] } else { Vec::new() }),
+            ..Default::default()
+        };
+        let key = format!("pv-visual:{}:{sha}", c.id);
+        match mark(code, &key)?.and_then(|v| v.parse::<u64>().ok()) {
+            Some(id) => {
+                hub.client.update_check_run(l.installation_id, &l.owner, &l.repo, id, &req).await.map_err(gh)?;
+            }
+            None => {
+                let req = CheckRunRequest { name: Some(VISUAL.into()), head_sha: Some(sha.clone()), external_id: Some(c.id.clone()), ..req };
+                let run = hub.client.create_check_run(l.installation_id, &l.owner, &l.repo, &req).await.map_err(gh)?;
+                set_mark(code, &key, &run.id.to_string())?;
+            }
+        }
     }
     // The speed budget (Lighthouse budgets): fails while the first page is over it.
     if rules.status
@@ -416,6 +441,28 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
         _ => None,
     }
 }
+
+/// Someone clicked `roll/visual`'s Accept on GitHub: accepted for them when they can write to the
+/// repo (the event carries no association: GitHub's permission API) and didn't write the change,
+/// as approvals are; anything else is ignored.
+pub(super) async fn visual_action(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, e: &code_github::webhook::CheckRunEvent) -> Result<()> {
+    if e.check_run.name != VISUAL || e.requested_action.as_ref().map(|a| a.identifier.as_str()) != Some(ACCEPT) {
+        return Ok(());
+    }
+    let (Some(change), Some(sender)) = (e.check_run.external_id.as_deref(), e.sender.as_ref().map(|u| u.login.clone())) else { return Ok(()) };
+    let Some(c) = code.db.change(change)?.filter(|c| c.repo_id == r.id) else { return Ok(()) };
+    let own = sender.eq_ignore_ascii_case(&c.author) || sender.eq_ignore_ascii_case(c.author.trim_start_matches('@'));
+    if own || !super::commands::can_write(hub, link, &sender).await {
+        tracing::info!(change = %c.id, user = %sender, "a visual review's Accept from someone who can't give it; ignored");
+        return Ok(());
+    }
+    let Some(backend) = code.previews.read().clone() else { return Ok(()) };
+    backend.accept_visual(&c, &sender).await.map_err(crate::Error::Internal)
+}
+
+/// The visual review's check run, and its button.
+pub(super) const VISUAL: &str = "roll/visual";
+pub(super) const ACCEPT: &str = "accept";
 
 /// The `roll/visual` status for a visual review: its state and description.
 fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String) {

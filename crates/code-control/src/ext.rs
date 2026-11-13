@@ -12,6 +12,11 @@ pub trait PreviewBackend: Send + Sync {
     /// Start (or update) the preview of `change` from the tree materialized at `dir`.
     async fn create(&self, repo: &RepoRow, change: &Change, dir: &Path) -> anyhow::Result<Preview>;
     async fn delete(&self, repo: &RepoRow, change: &Change) -> anyhow::Result<()>;
+    /// `by` accepts how the change's preview's pages look at its latest screenshot (its visual
+    /// review, `roll/visual`): a person, the caller has checked. Backends without one can't.
+    async fn accept_visual(&self, _change: &Change, _by: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this preview backend has no visual review")
+    }
 }
 
 /// Runs the checks a repo's `roll.toml` declares against a materialized tree.

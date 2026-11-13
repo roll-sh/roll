@@ -255,6 +255,9 @@ pub struct PullRequestReviewThreadEvent {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct CheckRunEvent {
     pub check_run: CheckRunPayload,
+    /// Set on a `requested_action` event: the button someone clicked (the sender).
+    #[serde(default)]
+    pub requested_action: Option<RequestedAction>,
     pub repository: Repository,
     #[serde(default)]
     pub installation: Option<Installation>,
@@ -263,10 +266,18 @@ pub struct CheckRunEvent {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct RequestedAction {
+    pub identifier: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct CheckRunPayload {
     pub id: u64,
     pub name: String,
     pub head_sha: String,
+    /// What its app said it's about (roll: the change's id).
+    #[serde(default)]
+    pub external_id: Option<String>,
     #[serde(default)]
     pub status: String,
     /// `success`, `failure`, `timed_out`, `cancelled`, `action_required`, `neutral`, `skipped`, `stale`.
@@ -593,7 +604,7 @@ impl Event {
                     sender: p.sender,
                 }))
             }
-            "check_run" if a == "completed" => Event::CheckRun(Box::new(decode(event, value)?)),
+            "check_run" if a == "completed" || a == "requested_action" => Event::CheckRun(Box::new(decode(event, value)?)),
             "status" => Event::Status(Box::new(decode(event, value)?)),
             _ => ignored(),
         })
