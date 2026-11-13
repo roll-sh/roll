@@ -1591,17 +1591,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Dynamic credentials for Postgres outside roll** (on #39), Vault's database engine: a lease
-   gets its own role (`CREATE ROLE … LOGIN PASSWORD <SCRAM verifier> VALID UNTIL … IN ROLE
-   <group>`), renewing moves `VALID UNTIL`, and ending the lease drops the role, through the same
-   guarded connection. The group role carries the grants, so nothing per lease is granted by hand.
-2. **MySQL outside roll**, next to Postgres: the same two roles taking turns and per-lease users,
-   `ALTER USER … IDENTIFIED BY` over TLS through the same guarded connection.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+1. **MySQL outside roll**, next to #39's Postgres: the same two roles taking turns and per-lease
+   users (`CREATE USER … PASSWORD EXPIRE`/`GRANT <group role>`, `ALTER USER … IDENTIFIED BY`) over
+   TLS through the same guarded connection.
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
@@ -1624,8 +1621,9 @@ Open pull requests after this one:
 - **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key,
   set from the project's settings.
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
-- **#39, rotation for Postgres outside roll** (after #20): two login roles take turns, the new
-  password sent as a SCRAM verifier over TLS to a public address rolld resolved itself.
+- **#39, Postgres outside roll** (after #20): two login roles take turns (rotation), or a login per
+  lease in a group role (dynamic), the password sent as a SCRAM verifier over TLS to a public
+  address rolld resolved itself.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
