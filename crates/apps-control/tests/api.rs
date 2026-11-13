@@ -2176,11 +2176,10 @@ async fn a_tunnel_reaches_a_private_services_port() {
     tokio::spawn(axum::serve(l, w.api.clone()).into_future());
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel")).await.unwrap();
     ws.send(Message::Binary(b"GET /through HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec().into())).await.unwrap();
-    // Done sending (a half-close): the answer still comes.
-    ws.send(Message::Binary(Vec::new().into())).await.unwrap();
     let mut got = Vec::new();
     while let Some(Ok(m)) = ws.next().await {
         match m {
+            // The app's end (`Connection: close`): an empty message.
             Message::Binary(b) if b.is_empty() => break,
             Message::Binary(b) => got.extend_from_slice(&b),
             Message::Close(_) => break,
@@ -2309,4 +2308,38 @@ async fn affinity_keeps_a_visitor_on_one_instance() {
     let (inst, _, set) = get(Some(key)).await;
     assert_ne!(inst, second);
     assert!(set.is_some_and(|s| s.starts_with(&format!("roll_instance={};", apps_control::live::affinity_key(&inst)))), "the cookie follows the instance that answered");
+}
+
+/// A TCP service answers each environment on a port of its own, woken and spliced per
+/// connection (its HTTP names don't serve it); a TCP service has no HTTP settings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tcp_service_answers_on_its_own_port() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let w = world_with(|c| {
+        c.tcp_ports = Some((free, free));
+        c.tcp_host = "127.0.0.1".into();
+    })
+    .await;
+    let (st, e) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "bad", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "tcp": true, "health_path": "/"} }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+    let (svc, _) = image_service(&w, "mqtt", json!({"port": 80, "tcp": true})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    tokio::spawn(w.apps.clone().serve_tcp_ports("127.0.0.1".parse().unwrap()));
+    let env = get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["tcp"].is_string()).await;
+    assert_eq!(env["tcp"], format!("127.0.0.1:{free}"), "{env}");
+    let mut conn = None;
+    for _ in 0..100 {
+        if let Ok(c) = tokio::net::TcpStream::connect(("127.0.0.1", free)).await {
+            conn = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let mut conn = conn.expect("its port listens");
+    conn.write_all(b"GET /raw HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut got = String::new();
+    conn.read_to_string(&mut got).await.unwrap();
+    assert!(got.starts_with("HTTP/1.1 200") && got.contains(r#""path":"/raw""#), "spliced to the app: {got}");
+    assert_eq!(visit(&w, &host(&svc["environments"][0]["url"]), "/").await.0, StatusCode::NOT_FOUND, "not over HTTP");
 }

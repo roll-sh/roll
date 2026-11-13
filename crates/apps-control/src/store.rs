@@ -335,6 +335,8 @@ pub struct EnvRow {
     /// Only these networks get in through its public names (empty: anyone).
     pub allow_ips: Vec<crate::model::IpRule>,
     pub rate_limit: Option<crate::model::RateLimit>,
+    /// A TCP service's port here (`run.tcp`), from the node's TCP range.
+    pub tcp_port: Option<u16>,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
@@ -423,7 +425,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port";
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
@@ -480,6 +482,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         maintenance: r.get(14)?,
         allow_ips: r.get::<_, Option<String>>(15)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         rate_limit: r.get::<_, Option<String>>(16)?.and_then(|j| serde_json::from_str(&j).ok()),
+        tcp_port: r.get::<_, Option<i64>>(17)?.map(|p| p as u16),
     })
 }
 
@@ -557,6 +560,7 @@ impl Store {
         db.add_column("environments", "allow_ips", "TEXT")?;
         db.add_column("environments", "rate_limit", "TEXT")?;
         db.add_column("jobs", "tasks", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("environments", "tcp_port", "INTEGER")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -645,6 +649,21 @@ impl Store {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments WHERE service = ? ORDER BY created_at, name"), [service], env_row)?)
     }
 
+    /// An environment's TCP port: the one it has, else the lowest free in `range` (None: all
+    /// taken).
+    pub fn assign_tcp_port(&self, service: &str, env: &str, range: (u16, u16)) -> Result<Option<u16>> {
+        self.db.write(|c| {
+            let had: Option<i64> = c.query_row("SELECT tcp_port FROM environments WHERE service = ? AND name = ?", [service, env], |r| r.get(0)).optional()?.flatten();
+            if let Some(p) = had {
+                return Ok(Some(p as u16));
+            }
+            let used: std::collections::HashSet<i64> = c.query("SELECT tcp_port FROM environments WHERE tcp_port IS NOT NULL", (), |r| r.get(0))?.into_iter().collect();
+            let Some(p) = (range.0..=range.1).find(|p| !used.contains(&(*p as i64))) else { return Ok(None) };
+            c.execute("UPDATE environments SET tcp_port = ? WHERE service = ? AND name = ?", params![p as i64, service, env])?;
+            Ok(Some(p))
+        })
+    }
+
     pub fn all_environments(&self) -> Result<Vec<EnvRow>> {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments ORDER BY created_at"), (), env_row)?)
     }
@@ -697,7 +716,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }

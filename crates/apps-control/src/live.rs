@@ -519,7 +519,13 @@ impl EnvLive {
         *inst.cpu_seen.lock() = None;
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
-                if self.answers(a, health, run.h2c).await {
+                // A TCP service is up when its port accepts; anything else answers HTTP.
+                let up = if run.tcp {
+                    tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(a)).await.is_ok_and(|c| c.is_ok())
+                } else {
+                    self.answers(a, health, run.h2c).await
+                };
+                if up {
                     break;
                 }
                 if Instant::now() >= deadline {

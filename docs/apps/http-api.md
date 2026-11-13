@@ -209,6 +209,11 @@ type Run = {
    *  session affinity): a `roll_instance` cookie (a digest of the instance, never shown to the
    *  app), moved when another instance answers. 400 on another type. */
   affinity?: boolean;
+  /** Its port speaks TCP, not HTTP (Railway's TCP proxy): each environment answers on a port
+   *  of its own from the node's ROLL_APPS_TCP_PORTS (Environment.tcp), woken and spliced per
+   *  connection, its allow list and maintenance applied; its HTTP names are 404s. A web
+   *  service; no health_path, h2c, affinity or gradual rollout (its health is its port). */
+  tcp?: boolean;
 };
 
 type Service = {
@@ -298,6 +303,7 @@ type Environment = EnvironmentSummary & {
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
+  tcp: string | null; // a TCP service's address, host:port (null until it has its port)
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;

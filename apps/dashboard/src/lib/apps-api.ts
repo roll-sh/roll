@@ -81,6 +81,8 @@ export interface Run {
   restart_tries?: number;
   /** A web service keeps each visitor on one instance (a cookie) while it's up. */
   affinity?: boolean;
+  /** Its port speaks TCP, not HTTP: each environment answers on a port of its own. */
+  tcp?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
 }
@@ -243,6 +245,8 @@ export interface Environment extends EnvironmentSummary {
   instances: Instance[];
   domains: Domain[];
   port: number | null;
+  /** A TCP service's address (`host:port`), once it has its port. */
+  tcp?: string | null;
   needs_deploy: boolean;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;

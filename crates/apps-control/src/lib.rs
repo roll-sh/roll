@@ -19,6 +19,7 @@ pub mod tags;
 pub mod sites;
 pub mod site_rules;
 pub mod tunnel;
+pub mod tcp;
 pub mod feedback;
 pub mod scale;
 pub mod registry;
@@ -102,6 +103,9 @@ pub struct AppsConfig {
     pub url_port: Option<u16>,
     /// A loopback-free port of its own per environment, from this range (one node only).
     pub ports: Option<(u16, u16)>,
+    /// TCP services' ports (`run.tcp`), and the host clients reach them at (one node only).
+    pub tcp_ports: Option<(u16, u16)>,
+    pub tcp_host: String,
     /// Domains users can't add as custom domains (roll's own).
     pub reserved: Vec<String>,
     /// What custom domains point a CNAME at (default: the environment's own hostname).
@@ -129,6 +133,8 @@ impl AppsConfig {
             scheme: "http".into(),
             url_port: Some(7080),
             ports: None,
+            tcp_ports: None,
+            tcp_host: "127.0.0.1".into(),
             reserved: Vec::new(),
             cname_target: None,
             build_timeout: Duration::from_secs(30 * 60),
@@ -760,6 +766,7 @@ impl Apps {
             instances,
             domains,
             port: r.port,
+            tcp: r.tcp_port.filter(|_| svc.run.tcp).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             needs_deploy,
             private,
             next_run_at,
@@ -1581,7 +1588,8 @@ impl Apps {
         // A private service has no public names: the same 404 as an address nobody has, read
         // from its settings now (making it private takes effect at once, not with a deploy).
         let sid = found.0.clone();
-        self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public).then_some(found)
+        // A TCP service's port isn't HTTP: its names don't serve it.
+        self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public && !svc.run.tcp).then_some(found)
     }
 
     async fn host_target(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {

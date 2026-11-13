@@ -51,6 +51,22 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   return (
     <Panel title={<>Environment <span className="font-mono text-[13px] text-muted">{env.name}</span></>}>
       <div className="divide-y divide-line">
+        {service.run.tcp && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">TCP address</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.tcp ? "Clients connect here; each connection wakes the service and keeps it up while it's open." : "Its port comes once the node has a TCP range (ROLL_APPS_TCP_PORTS)."}
+              </p>
+            </div>
+            {env.tcp && (
+              <span className="flex items-center gap-1">
+                <code className="font-mono text-[12px]">{env.tcp}</code>
+                <CopyButton id="tcp" text={env.tcp} copied={copied} onCopy={copy} />
+              </span>
+            )}
+          </div>
+        )}
         {repo && (
           <form
             className="flex flex-wrap items-end gap-3 px-5 py-4"

@@ -411,6 +411,11 @@ pub struct Run {
     /// session affinity: a cookie), for apps that keep sessions in memory.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub affinity: bool,
+    /// Its port speaks TCP, not HTTP (Railway's TCP proxy: a game server, MQTT, a database of
+    /// its own): each environment answers on a port of its own from the node's TCP range,
+    /// woken and spliced per connection; its HTTP names don't serve it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tcp: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +547,7 @@ impl Default for Run {
             restart: Restart::Always,
             restart_tries: None,
             affinity: false,
+            tcp: false,
         }
     }
 }
@@ -600,6 +606,14 @@ impl Run {
         }
         if self.affinity && self.kind != RunType::Web {
             return bad("affinity is for a web service");
+        }
+        if self.tcp {
+            if self.kind != RunType::Web {
+                return bad("tcp is for a service with a port (type web)");
+            }
+            if self.health_path.is_some() || self.h2c || self.affinity || !self.rollout.steps.is_empty() {
+                return bad("a TCP service has no HTTP: no health_path, h2c, affinity or gradual rollout (its health is its port accepting)");
+            }
         }
         if self.restart != Restart::Always && self.kind != RunType::Worker {
             return bad("restart is for a worker (a web service starts on its requests, a cron run once)");
@@ -781,6 +795,8 @@ pub struct Environment {
     pub instances: Vec<Instance>,
     pub domains: Vec<Domain>,
     pub port: Option<u16>,
+    /// A TCP service's address (`host:port`), once it has its port.
+    pub tcp: Option<String>,
     pub needs_deploy: bool,
     /// Visitors need the environment's access token (`PUT … {access: {token}}`).
     pub private: bool,
