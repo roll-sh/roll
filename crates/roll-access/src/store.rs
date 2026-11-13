@@ -320,6 +320,9 @@ pub struct Store {
     audit_tx: std::sync::mpsc::SyncSender<AuditEvent>,
 }
 
+/// Audit rows deleted per transaction when pruning.
+const PRUNE_BATCH: i64 = 5_000;
+
 /// Audit rows queued at most (then callers write their own), and written per transaction at most.
 const AUDIT_QUEUE: usize = 16_384;
 const AUDIT_BATCH: usize = 512;
@@ -1058,8 +1061,21 @@ impl Store {
     /// expired secrets.
     pub fn prune(&self, days: i64) -> Result<()> {
         let now = code_sql::now_ms();
+        // The audit log in bounded batches, oldest first: one huge delete would hold the write
+        // lock (every grant, approval and audit write) for as long as it runs.
+        let before = now - days * 24 * 3600 * 1000;
+        loop {
+            let n = self.db.write(|c| {
+                Ok::<_, Error>(c.execute(
+                    "DELETE FROM audit WHERE id IN (SELECT id FROM audit WHERE at < ? ORDER BY at LIMIT ?)",
+                    params![before, PRUNE_BATCH],
+                )?)
+            })?;
+            if (n as i64) < PRUNE_BATCH {
+                break;
+            }
+        }
         self.db.write(|c| {
-            c.execute("DELETE FROM audit WHERE at < ?", [now - days * 24 * 3600 * 1000])?;
             c.execute("DELETE FROM approvals WHERE expires_at < ?", [now - 24 * 3600 * 1000])?;
             c.execute("DELETE FROM oauth_codes WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;
