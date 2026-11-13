@@ -61,11 +61,18 @@ pub struct Fake {
     volumes: Mutex<HashMap<String, Vec<u8>>>,
     /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
     tags: Mutex<HashMap<String, String>>,
+    /// Who's at an instance's port without rolld ([`Fake::set_callers`]).
+    callers: Mutex<HashMap<String, super::Callers>>,
 }
 
 impl Fake {
     pub fn new() -> Arc<Fake> {
         Arc::new(Fake::default())
+    }
+
+    /// The project's other services at `name`'s port (what Docker reads from its sandbox).
+    pub fn set_callers(&self, name: &str, c: super::Callers) {
+        self.callers.lock().insert(name.to_string(), c);
     }
 
     pub fn state(&self, name: &str) -> Option<FakeState> {
@@ -182,6 +189,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
 impl Runtime for Fake {
     fn name(&self) -> &'static str {
         "fake"
+    }
+
+    async fn callers(&self, name: &str) -> Option<super::Callers> {
+        self.callers.lock().get(name).copied()
     }
 
     fn can_suspend(&self) -> bool {

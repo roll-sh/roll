@@ -484,6 +484,30 @@ every deployment is immutable with instant rollback.
   environment has a Docker network `roll-apps-net-<project>-<env>` and each instance joins it
   with its service name as an alias. On the fleet, tasks of one project and environment share a
   security group that admits only itself, and names resolve through Cloud Map (in `## Next`).
+- **A private caller wakes a sleeping service** (Railway's private network, Fly's Flycast).
+  rolld never sees that traffic, so it reads the instance's own socket tables instead
+  (`runtime/netns.rs`: the sandbox's `/proc/<pid>/net/tcp` and `tcp6`, readable by anyone and
+  still readable while the app is frozen), five times a second for sleeping instances:
+  - Frozen (suspended): a connection in the app's backlog resumes it (about 100 ms more than
+    an awake call).
+  - Stopped: a waker in the sandbox (`<instance>-wake`, busybox `nc` with no capabilities, a
+    read-only root and 16 MiB) listens on the app's port. Accepting the first caller closes its
+    listener, so rolld sees a connection with nothing listening and starts the app, and the
+    waker joins the held caller to the app once it listens. The first call is answered, not
+    refused.
+  - Before any other start (a public request, a cron run) the waker lets go of the port: rolld
+    calls it once through the published port, which frees it in a millisecond (killing its
+    container took Docker 70), and the app's bind never races it.
+  - Running: connections from peers other than the host (rolld's own come through the
+    network's gateway) count as use, so a service in use only privately doesn't sleep.
+  - Measured on real Docker (`a_private_caller_wakes_a_sleeping_service`, a caller on the
+    project network with `docker exec … wget`, which is about 90 ms of the time): awake 86–115
+    ms, stopped 281–457 ms, frozen 185–214 ms. A public cold start with the waker armed was
+    167–210 ms, and five alternating pairs with and without the waker (sandbox medians 165 and
+    200 ms against 175 and 212) showed no cost.
+  - Not on the fleet yet (Cloud Map, in `## Next`). A second caller arriving while the app
+    starts from stopped is refused (the waker holds one); the app's port must listen on
+    loopback too (`0.0.0.0` or `::`, as every generated start command does).
 - **roll databases**: a service links to the project's Postgres, Redis, buckets, streams,
   queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`,
   `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`), named with the resource's prefix
@@ -805,8 +829,8 @@ off the internet, as Render's private services: its `up.roll.site` names, its de
 hostnames and its custom domains are 404s like an address nobody has, and `Environment.url` is
 null. It's read from the service's settings on each request, so it takes effect at once, not
 with the next deploy. The project's services still reach it at `<svc>.<env>.internal` on their
-network (while it's awake: waking over the private network is in `## Next`). Its previews have
-no public URL either.
+network, which wakes it ("A private caller wakes a sleeping service"). Its previews have no
+public URL either.
 
 ## Workers that follow their work
 
@@ -928,16 +952,17 @@ Spend counts the services a project has now (a deleted service's month drops out
 
 - A web instance's network lives in a sandbox made with it (`Docker` with `netns`, the default;
   `ROLL_APPS_NETNS=0` turns it off): busybox asleep, holding the network namespace, its aliases
-  on the project network and its published port, with no capabilities, 16 MiB, 0.05 vCPU, 8
-  pids and a read-only root. The app joins that namespace (`NetworkMode: container:<sandbox>`), so
+  on the project network and its published port, with no capabilities, 16 MiB, half a vCPU, 8
+  pids and a read-only root (at a twentieth of a vCPU, its own start was throttled to 800 ms
+  instead of 170, on the path of every new instance). The app joins that namespace (`NetworkMode: container:<sandbox>`), so
   a wake starts only the app, with no network set up on its path (the same idea as Kubernetes'
   pause container). Snapshot restore (CRIU) would go further, but this host has no CRIU and
   Docker's checkpointing is experimental. Measured on real Docker
   (`a_cold_start_skips_network_setup_with_a_sandbox`: the same image, five alternating pairs):
   median 151 ms against 238 ms, and in a second run 171 against 375, faster in five of five each
   time; the standard cold start went from 258 to 175 ms median and Node's from 313 to 199 ms.
-  The sandbox is removed with its instance, and a node taking a service over keeps a known
-  instance's sandbox.
+  The sandbox (and its waker) is removed with its instance, and a node taking a service over
+  keeps a known instance's sandbox and waker.
 
 On ai-server (36 cores, Docker 29, overlayfs, load around 25–30 from other work), 2026-11-12.
 `crates/apps-control/tests/docker.rs` (`pnpm test:apps --docker`) prints the first three; the Node
@@ -1108,9 +1133,9 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   - Once people manage secrets on their own projects, a canvas stops proving ownership: a
     person-owned project counts only for services that person owns (apps' `SecretSource`, and
     already scaling on a stream).
-- **roll-search** (4a973673d, waiting on #22's hold): its conflicts with apps are additions side
-  by side (`Product`/`Kind` arrays grow). A link to a search cluster gets its own API key
-  through apps' `Resources::link`/`unlink` (#26): whichever of #22 and #26 reaches main second
+- **roll-search** (#22 on main; #29 follows): its conflicts with apps are additions side by side
+  (`Product`/`Kind` arrays grow). A link to a search cluster gets its own API key through
+  apps' `Resources::link`/`unlink` (#26): whichever of #29 and #26 reaches main second
   adds `LinkKind::Search` (`ALL`, `as_str`, `parse`) and, in rolld's `RollResources`, `link` as
   `search_control::Control::mint_link(ref, service)` into `Minted { vars, kept }` and `unlink`
   as `revoke_link(ref, kept)`. The key is data-only (no security privileges), its variables
@@ -1139,47 +1164,38 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Private networking that wakes**: `<svc>.<env>.internal` reaching a service that's asleep, as
-   Railway's private network and Fly's Flycast do. The network sandbox already holds the
-   aliases while the app sleeps, so the shape is a waker in the sandbox: roll-fetch's `wake`
-   mode listening on the app's port while it's down, asking the owner to wake it on the first
-   connection, letting go of the port and handing the held connection to the app. It needs
-   (a) roll-fetch in the sandbox (a static build mounted read-only, or the fleet's guard image),
-   and (b) a handoff that never makes a starting app lose its bind: rolld signals the waker to
-   let go before any start (a public request, a cron run), measured so the cold start keeps its
-   gain.
-2. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
+1. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
    `<NAME>_PUBLIC_URL`, as Render's `fromService`.
-3. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
+2. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
    DNS-01 on a delegated `_acme-challenge` (Railway's and Render's).
-4. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
+3. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
    page (Render's `maxShutdownDelaySeconds` and `maintenanceMode`).
-5. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+4. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-6. **Region**: the region shown on the overview and each environment, defaulting to the project's
+5. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+6. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-8. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+7. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-9. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+8. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
-    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
-    warm window or `min_instances` 1 by default there until a wake is fast), and
-    allocation-based metering for Fargate.
-11. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+9. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+   settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
+   warm window or `min_instances` 1 by default there until a wake is fast), and
+   allocation-based metering for Fargate.
+10. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-13. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-14. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-15. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+14. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).

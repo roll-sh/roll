@@ -1817,3 +1817,45 @@ async fn cron_fires_on_its_schedule_and_skips_while_the_last_run_goes() {
     assert_eq!(call(&w.api, "GET", &runs, None).await.1.as_array().unwrap().len(), 2, "once per due time");
 }
 
+
+/// The project's other services reach a sleeping service: a caller waiting at a stopped
+/// instance starts it, one at a frozen instance resumes it, and while they're connected it
+/// stays awake though rolld sees no request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
+    use apps_control::runtime::Callers;
+    let w = world().await;
+    let (svc, _) = image_service(&w, "internal", json!({"port": 80, "public": false})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let state = || async { call(&w.api, "GET", &base, None).await.1["state"].as_str().unwrap_or("").to_string() };
+    let until = |want: &'static str| async move {
+        for _ in 0..100 {
+            if state().await == want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("never {want}: {}", state().await);
+    };
+    assert_eq!(state().await, "stopped");
+    let name = w.fake.instances(&id)[0].0.clone();
+    w.fake.set_callers(&name, Callers { waiting: true, private: 1 });
+    until("running").await;
+    // Connected: in use, however long since rolld's last request.
+    w.fake.set_callers(&name, Callers { waiting: false, private: 1 });
+    let live = w.apps.live(&id, "production");
+    live.backdate(Duration::from_secs(31));
+    live.answer_private(true).await;
+    live.tick().await;
+    assert_eq!(state().await, "running");
+    // Gone: it sleeps, frozen; the next caller thaws it.
+    w.fake.set_callers(&name, Callers::default());
+    live.backdate(Duration::from_secs(31));
+    live.tick().await;
+    assert_eq!(state().await, "suspended");
+    let resumes = Fake::count(&w.fake.counts.resumes);
+    w.fake.set_callers(&name, Callers { waiting: true, private: 0 });
+    until("running").await;
+    assert_eq!(Fake::count(&w.fake.counts.resumes), resumes + 1, "resumed, not started again");
+}

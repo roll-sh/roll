@@ -957,6 +957,8 @@ impl Apps {
         let this = self.clone();
         tokio::spawn(async move { this.reaper().await });
         let this = self.clone();
+        tokio::spawn(async move { this.private_callers().await });
+        let this = self.clone();
         tokio::spawn(async move { this.keeper().await });
         let this = self.clone();
         tokio::spawn(async move { this.landings().await });
@@ -1000,8 +1002,8 @@ impl Apps {
     pub async fn resume_service(self: &Arc<Self>, service: &str) {
         let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
         for name in self.deps.runtime.list(Some(service)).await {
-            // A known instance's network sandbox (`<instance>-net`) is its own.
-            let owner = name.strip_suffix("-net").unwrap_or(&name).to_string();
+            // A known instance's network sandbox (`<instance>-net`) and waker (`-wake`) are its own.
+            let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name).to_string();
             if !known.contains(&name) && !known.contains(&owner) {
                 self.deps.runtime.remove(&name).await;
             }
@@ -1141,6 +1143,25 @@ impl Apps {
                 None => {
                     self.looping.lock().remove(&key);
                 }
+            }
+        }
+    }
+
+    /// Private callers at owned web services, five times a second for sleeping instances (a
+    /// frozen one's wake is milliseconds) and once a second for running ones' activity: two
+    /// small reads of `/proc` per instance.
+    async fn private_callers(self: Arc<Self>) {
+        let mut every = tokio::time::interval(Duration::from_millis(200));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut n: u64 = 0;
+        loop {
+            tokio::select! {
+                _ = every.tick() => {}
+                _ = self.stop.cancelled() => return,
+            }
+            n += 1;
+            for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+                l.answer_private(n.is_multiple_of(5)).await;
             }
         }
     }

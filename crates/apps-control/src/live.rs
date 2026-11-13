@@ -263,6 +263,8 @@ pub struct EnvLive {
     over_since: Mutex<Option<Instant>>,
     /// A tick is running (the reaper never runs two of one environment at once).
     pub ticking: std::sync::atomic::AtomicBool,
+    /// A private caller's wake is under way (the next look waits for it).
+    answering: std::sync::atomic::AtomicBool,
     last_tick: Mutex<Option<Instant>>,
     last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -303,6 +305,7 @@ impl EnvLive {
             meter: Mutex::new(Meter::default()),
             over_since: Mutex::new(None),
             ticking: std::sync::atomic::AtomicBool::new(false),
+            answering: std::sync::atomic::AtomicBool::new(false),
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
@@ -690,6 +693,69 @@ impl EnvLive {
         l.waited = began.elapsed();
         l.cold = true;
         Ok(l)
+    }
+
+    /// Private callers ([`crate::runtime::Callers`]), which rolld never sees: a sleeping instance
+    /// someone waits at wakes (a frozen one resumes; a stopped one starts, and its waker hands
+    /// it the caller), and with `running` a running one with connections from the project's
+    /// other services counts as in use (Railway's private network keeps a service awake too).
+    pub async fn answer_private(self: &Arc<Self>, running: bool) {
+        let Some(tpl) = self.template() else { return };
+        if tpl.run.kind != RunType::Web || self.answering.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut asked = Vec::new();
+        for i in self.instances().into_iter().filter(|i| i.deployment == tpl.deployment) {
+            let phase = i.phase();
+            let sleeping = matches!(phase, Phase::Suspended(_) | Phase::Created);
+            if !sleeping && !(running && matches!(phase, Phase::Running(_))) {
+                continue;
+            }
+            let Some(c) = self.runtime.callers(&i.name).await else { continue };
+            match phase {
+                Phase::Running(_) if c.private > 0 => *i.last_used.lock() = Instant::now(),
+                _ if sleeping && c.waiting => asked.push(i),
+                _ => {}
+            }
+        }
+        if asked.is_empty() || self.answering.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Its own task: a slow start here holds up no other environment's callers.
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.wake_for_callers(&tpl, asked).await;
+            this.answering.store(false, Ordering::SeqCst);
+        });
+    }
+
+    async fn wake_for_callers(self: &Arc<Self>, tpl: &Template, asked: Vec<Arc<Inst>>) {
+        let _g = self.wake.lock().await;
+        for i in asked {
+            let woke = Instant::now();
+            match i.phase() {
+                Phase::Suspended(addr) => match self.runtime.resume(&i.name).await {
+                    Ok(()) => {
+                        *i.phase.lock() = Phase::Running(addr);
+                        *i.last_used.lock() = Instant::now();
+                    }
+                    Err(_) => self.crashed(&i, "it couldn't be resumed"),
+                },
+                Phase::Created => {
+                    let deadline = Instant::now() + self.cfg.wake_timeout;
+                    match self.start(&i, &tpl.run, None, deadline).await {
+                        Ok(_) => {
+                            *i.last_used.lock() = Instant::now();
+                            let ms = woke.elapsed().as_secs_f64() * 1000.0;
+                            self.meter.lock().cold_start(now_ms(), ms);
+                            self.log.stream(Stream::System).line(format!("cold start: {} answered a private caller in {ms:.0} ms", i.name));
+                        }
+                        Err(e) => self.log.stream(Stream::System).line(format!("a private caller couldn't wake {}: {e}", i.name)),
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The proxy couldn't connect to a running instance: it's gone (killed, out of memory), and

@@ -405,3 +405,78 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
 }
+
+/// Another service of the project reaches a sleeping one by name: stopped, the waker in its
+/// sandbox takes the call and hands it to the app once it's up; frozen, it's thawed. A public
+/// request still wakes it afterwards (the waker lets go of the port first).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_caller_wakes_a_sleeping_service() {
+    use apps_control::runtime::docker::docker;
+    let Some(w) = docker_world_netns(Some(true)).await else { return };
+    let (id, host) = deploy_container(&w, "inner").await;
+    let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    let port = svc["run"]["port"].as_u64().unwrap_or(8080);
+    let net = apps_control::network_name(&w.project, "production");
+    // A caller on the project's network, as another service is.
+    let caller = format!("roll-apps-test-caller-{}", &id[4..]);
+    docker(&["run", "-d", "--name", &caller, "--network", &net, "busybox:1.37", "sleep", "600"]).await.unwrap();
+    let url = format!("http://inner:{port}/");
+    let fetch = || async {
+        let t = Instant::now();
+        let body = docker(&["exec", &caller, "wget", "-q", "-O-", "-T", "30", &url]).await;
+        (body, t.elapsed())
+    };
+    let live = w.apps.live(&id, "production");
+    let state = || async { call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await.1["state"].as_str().unwrap_or("").to_string() };
+    // Awake: the baseline (an exec and a request).
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
+    let (body, awake) = fetch().await;
+    assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "{body:?}");
+    // Stopped.
+    live.sleep().await;
+    assert_eq!(state().await, "stopped");
+    let wakers = docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={id}"), "--filter", "label=sh.roll.apps.role=wake"]).await.unwrap();
+    assert!(!wakers.is_empty(), "asleep, the waker listens");
+    let (body, stopped) = fetch().await;
+    assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the first caller gets the app: {body:?}");
+    assert_eq!(state().await, "running");
+    // Frozen.
+    live.backdate(Duration::from_secs(31));
+    live.tick().await;
+    assert_eq!(state().await, "suspended");
+    let (body, frozen) = fetch().await;
+    assert!(body.is_ok(), "{body:?}");
+    let mut now = String::new();
+    for _ in 0..100 {
+        now = state().await;
+        if now == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(now, "running", "{}", call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await.1);
+    // Asleep again, a public request starts it: the waker gives up the port in time.
+    live.sleep().await;
+    let (st, public) = get(&w.public, &host).await;
+    if st != StatusCode::OK {
+        let (_, l) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=40"), None, "application/json", None).await;
+        for x in l.as_array().into_iter().flatten() {
+            eprintln!("LOG {} {}", x["stream"], x["text"]);
+        }
+        let _ = docker(&["rm", "-f", &caller]).await;
+    }
+    assert_eq!(st, StatusCode::OK);
+    eprintln!(
+        "MEASURED a private caller (docker exec + wget) at a service that's awake {} ms, stopped {} ms, frozen {} ms; a public cold start with the waker armed {} ms",
+        awake.as_millis(),
+        stopped.as_millis(),
+        frozen.as_millis(),
+        public.as_millis()
+    );
+    let _ = docker(&["rm", "-f", &caller]).await;
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let _ = docker(&["network", "rm", &net]).await;
+    let left = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
+    assert!(left.is_empty(), "the instance, its sandbox and its waker are gone: {left}");
+    w.apps.shutdown().await;
+}
