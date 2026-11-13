@@ -73,6 +73,7 @@ async fn a_cluster_runs_on_its_owner_and_moves_on_a_drain() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let http = reqwest::Client::new();
+    let created = std::time::Instant::now();
     let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "shop"}))).await;
     assert_eq!(s, 200, "{c}");
     let pw = c["password"].as_str().unwrap().to_string();
@@ -109,6 +110,11 @@ async fn a_cluster_runs_on_its_owner_and_moves_on_a_drain() {
     // Unloaded, the cluster belongs to nobody.
     let (s, v) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters/shop/unload", other.api), None, Some(json!({}))).await;
     assert_eq!(s, 200, "{v}");
+    // Each owner metered its own stay, and the two never overlapped: the loaded seconds billed
+    // across both nodes fit in the time the cluster existed (each stay rounds up a second).
+    let id = catalog.by_name("shop").await.unwrap().unwrap().id;
+    let billed = catalog.usage_since(&id, 0, i64::MAX / 2).await.unwrap().loaded_seconds;
+    assert!(billed > 0 && billed <= created.elapsed().as_secs() as i64 + 2, "{billed} s billed in {:?}", created.elapsed());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while other.cluster.owns(&key) {
         assert!(tokio::time::Instant::now() < deadline, "the idle lease was never given up");

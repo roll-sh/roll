@@ -918,6 +918,11 @@ async fn a_due_transform_wakes_its_sleeping_cluster() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    // Asleep, a cluster says when its next job wakes it (unless that already happened).
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/jobs", None).await;
+    assert!(v["status"]["state"] == "loaded" || v["status"]["wakes_at"].as_i64().is_some_and(|t| t > 0), "{v}");
+    let (_, v) = e.call(reqwest::Method::GET, "/v1/search/clusters/idle", None).await;
+    assert_eq!((v["status"]["state"].as_str(), v["status"].get("wakes_at")), (Some("asleep"), None), "{v}");
     // No request: the transform's next trigger loads its cluster again.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     while !e.control.node.loaded().iter().any(|n| &**n == "jobs") {

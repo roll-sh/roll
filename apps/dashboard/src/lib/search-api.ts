@@ -56,6 +56,8 @@ export interface SearchStatus {
   in_flight?: number;
   indices?: number;
   cluster_uuid?: string;
+  /** Asleep: when a background job (a watch, a transform, ILM, a rollup) wakes it (unix s). */
+  wakes_at?: number;
 }
 
 export interface SearchSettings {

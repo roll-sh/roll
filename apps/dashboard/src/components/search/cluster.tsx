@@ -224,7 +224,9 @@ function OverviewTab({ cluster, info }: { cluster: SearchCluster; info: SearchIn
               ? cluster.idle_timeout_s === 0
                 ? "always loaded"
                 : `sleeps after ${formatDuration(cluster.idle_timeout_s)} without requests`
-              : "wakes on the next request",
+              : st.wakes_at
+                ? `wakes on the next request, or at ${formatTime(st.wakes_at)} for a background job`
+                : "wakes on the next request",
           },
           { label: "Indices", value: formatCount(st.indices ?? cluster.indices), hint: `${formatCount(cluster.docs)} documents` },
           {
@@ -647,7 +649,10 @@ function UsageTab({ cluster, info }: { cluster: SearchCluster; info: SearchInfo 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13px] text-muted">Metered every minute while loaded; storage accrues while asleep too.</p>
+        <p className="text-[13px] text-muted">
+          Metered every minute while loaded, including the time background jobs (watches, transforms, ILM, rollups) keep it
+          awake; storage accrues while asleep too.
+        </p>
         <div className="w-48">
           <Segmented
             value={days}

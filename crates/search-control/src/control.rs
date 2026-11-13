@@ -637,6 +637,7 @@ impl Control {
             stored_bytes: 0,
             own_bytes: 0,
             loaded_on: None,
+            wake_at: None,
         }
     }
 
@@ -1082,7 +1083,11 @@ impl Control {
                 {
                     return json!({ "state": "loaded", "node": n });
                 }
-                json!({ "state": "asleep" })
+                // A background job (a watch, a transform, ILM, a rollup) wakes it when due.
+                match c.wake_at {
+                    Some(ms) => json!({ "state": "asleep", "wakes_at": ms.div_euclid(1000) }),
+                    None => json!({ "state": "asleep" }),
+                }
             }
         }
     }
@@ -1552,6 +1557,7 @@ mod tests {
             stored_bytes: 0,
             own_bytes: 0,
             loaded_on: None,
+            wake_at: None,
         };
         let s = spec_for(&c);
         assert_eq!(s.name, "app");
