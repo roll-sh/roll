@@ -115,8 +115,9 @@ pub struct Engine {
     deploying_since: Mutex<HashMap<(String, String), i64>>,
     /// The unresolved secrets last told per preview (each set once in its activity).
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
-    /// The paths a head changes (`repo`, `head`), for the path filters: a head's paths never
-    /// change. Cleared past [`PATHS_KEPT`] heads.
+    /// The paths a head changes (`repo`, `head`, or `from..head`), for the path filters. Between
+    /// two changesets they never change; since the merge base they could, if part of the change
+    /// lands first, and then the next push reads them again. Cleared past [`PATHS_KEPT`] heads.
     paths_seen: Mutex<HashMap<(String, String), HeadPaths>>,
     /// One pass at a time.
     passing: tokio::sync::Mutex<()>,
@@ -302,8 +303,8 @@ impl Engine {
         Ok(paths.is_none_or(|p| touches(s, &p)))
     }
 
-    /// The paths `head` changes since its merge base, or (`from`) since changeset `from`: cached,
-    /// since neither ever changes.
+    /// The paths `head` changes since its merge base, or (`from`) since changeset `from`, cached
+    /// (see `paths_seen`).
     async fn paths_of(&self, repo: &str, head: &str, from: Option<&str>) -> anyhow::Result<HeadPaths> {
         let key = (repo.to_string(), match from {
             Some(f) => format!("{f}..{head}"),
