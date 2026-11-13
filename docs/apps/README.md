@@ -1072,6 +1072,9 @@ Spend counts the services a project has now (a deleted service's month drops out
   (`a_cold_start_skips_network_setup_with_a_sandbox`: the same image, five alternating pairs):
   median 151 ms against 238 ms, and in a second run 171 against 375, faster in five of five each
   time; the standard cold start went from 258 to 175 ms median and Node's from 313 to 199 ms.
+  After the private-caller watch moved off the socket tables (2026-11-13, evening), the same
+  suite measured the standard cold start at 155 ms median, the pairs 146 against 257 ms, and
+  Node's at 217 ms: the start path no longer reads them.
   The sandbox (and its waker) is removed with its instance, and a node taking a service over
   keeps a known instance's sandbox and waker.
 
@@ -1287,34 +1290,51 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+1. **A link's credentials made once, even when two requests make the link at once**: two
+   concurrent `PUT …/links/{kind}/{ref}` can both call `Resources::link`; the one whose row
+   loses is never revoked. Store the row only if none is there (`ON CONFLICT DO NOTHING`), and
+   revoke what the loser made.
+2. **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+   of private calls to a stopped service loses all but the first (refused). A waker of roll's own
+   (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
+   and hands them over once the app listens; the cheap accept count already tells rolld.
+3. **TCP services** (Railway's TCP proxy, Fly's raw TCP): `run.tcp` for a service that isn't HTTP
+   (a game server, MQTT, a database of the user's own), a public port per environment from a
+   range, the connection woken and spliced as a tunnel is.
+4. **Metrics for others to scrape** (Fly's Prometheus, Render's metrics streams): an
+   environment's requests, latency, CPU, memory and cold starts in Prometheus text, behind a
+   read token.
+5. **A sandbox's pid checked before it's believed**: after a Docker restart a cached pid may be
+   another process's; read its cgroup once to see it's still the sandbox (a wrong pid only
+   wakes, never leaks).
+6. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-2. **Region**: the region shown on the overview and each environment, defaulting to the project's
+7. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+9. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
-   service variables at `/services/<name>`, values resolved only when a container is made,
-   `dynamic` links refused, and links as per-environment secrets links.
-6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
-   settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
-   warm window or `min_instances` 1 by default there until a wake is fast), and
-   allocation-based metering for Fargate.
-7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-8. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
-   `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
-   another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
-   origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-10. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+10. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+    service variables at `/services/<name>`, values resolved only when a container is made,
+    `dynamic` links refused, and links as per-environment secrets links.
+11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
+    warm window or `min_instances` 1 by default there until a wake is fast), and
+    allocation-based metering for Fargate.
+12. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+13. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
+    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
+14. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+    origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
+15. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+16. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
