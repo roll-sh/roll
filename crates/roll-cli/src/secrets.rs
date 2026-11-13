@@ -180,6 +180,15 @@ pub enum Secrets {
         #[arg(long, requires = "watch", value_name = "COMMAND")]
         exec: Option<String>,
     },
+    /// The keys a template (`.env.example`) names that the environment doesn't have, without
+    /// reading a value; fails when one is missing (`--strict`: also when it has keys the template
+    /// doesn't name).
+    Check {
+        #[arg(default_value = ".env.example")]
+        template: String,
+        #[arg(long)]
+        strict: bool,
+    },
     /// Look for this project's values in files (a directory is walked; `--staged`: what `git
     /// commit` would record, for a pre-commit hook). Says where, never the value; fails if found.
     Scan {
@@ -890,6 +899,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             replace_private(&out, &text)?;
             if watch {
                 render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
+            }
+        }
+        Secrets::Check { template, strict } => {
+            let text = std::fs::read_to_string(&template).with_context(|| format!("reading {template}"))?;
+            let wanted: std::collections::BTreeSet<String> = template_keys(&text);
+            let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
+            let have: std::collections::BTreeSet<String> = list.as_array().into_iter().flatten().filter_map(|x| x["key"].as_str().map(String::from)).collect();
+            let missing: Vec<&String> = wanted.difference(&have).collect();
+            let extra: Vec<&String> = have.difference(&wanted).collect();
+            if json_out {
+                print(&json!({ "missing": missing, "extra": extra }))?;
+            } else {
+                let at = format!("{}:{}", c.at.env, c.at.path);
+                for k in &missing {
+                    println!("missing  {k}  ({template} names it; {at} doesn't set it)");
+                }
+                for k in &extra {
+                    println!("extra    {k}  ({at} sets it; {template} doesn't name it)");
+                }
+                if missing.is_empty() && (extra.is_empty() || !strict) {
+                    eprintln!("{at} has every key {template} names ({})", wanted.len());
+                }
+            }
+            if !missing.is_empty() || (strict && !extra.is_empty()) {
+                bail!("{} doesn't match {template}", c.at.env);
             }
         }
         Secrets::Scan { paths, staged } => {
@@ -1907,6 +1941,18 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
             }
         }
     }
+}
+
+/// The keys a `.env`-style template names: `KEY=…`, `export KEY=…` and a bare `KEY`, not comments.
+fn template_keys(text: &str) -> std::collections::BTreeSet<String> {
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let l = l.strip_prefix("export ").unwrap_or(l).trim_start();
+            let key = l.split(['=', ' ', '\t']).next()?;
+            (!l.starts_with('#') && !key.is_empty() && key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| key.to_string())
+        })
+        .collect()
 }
 
 /// A line's candidates, as roll code's scan takes them: runs of `[A-Za-z0-9_\-+/=.:@~]`, the whole

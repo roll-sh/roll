@@ -505,6 +505,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
+roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
@@ -694,6 +695,14 @@ opened archive; admin, audited `project.restore`), on this server or another. Va
 before any environment is protected, so a restore isn't a change request; what can't be restored
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
+
+### Checking against a template
+
+`roll secrets check .env.example` compares the keys a `.env`-style template names (`KEY=…`,
+`export KEY=…`, a bare `KEY`; not comments) with the keys the environment has, its imports and base
+included, by name only: it reads no value, so `read` is enough. It lists each `missing` key and each
+`extra` one, and fails when one is missing (with `--strict`, also when there's an extra), so a CI
+step catches a variable the code started reading before an environment has it.
 
 ### Templates
 
@@ -1329,6 +1338,7 @@ Done and in PR #20:
   "Find a key"), for rotating an organisation-wide key;
 - exports as a Docker `--env-file` and a Kubernetes Secret manifest, next to dotenv, shell, JSON and
   YAML; `roll secrets render [--watch --exec]` fills `${KEY}` in a config file and keeps it current;
+  `roll secrets check` compares an environment with a `.env.example`;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1340,8 +1350,12 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
-   the ones it has that the template doesn't), without reading a value, for CI and onboarding.
+1. **Generate a value in the dashboard**: the add and edit forms get "Generate" (random letters and
+   digits made in the browser, 48 by default, like the CLI's `--generate`), so a key flagged weak is
+   fixed in one click.
+2. **One health view across environments** (1Password Watchtower): every key insights flag, in
+   every environment the caller can read: weak, also in an unprotected environment, expiring or
+   expired, stale, unread in 90 days, required but missing; each links to its key.
 
 Waiting on other pull requests:
 
