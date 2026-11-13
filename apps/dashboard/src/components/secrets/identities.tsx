@@ -112,6 +112,7 @@ export function Identities() {
                 <span className="text-[11px] text-subtle">
                   {i.environments ? i.environments.join(", ") : "all environments"}
                   {i.paths ? ` · ${i.paths.join(", ")}` : ""} · {i.ttl_minutes} min
+                  {i.allowed_ips ? ` · from ${i.allowed_ips.join(", ")}` : ""}
                 </span>
                 <span className="ml-auto truncate text-right font-mono text-[10.5px] text-subtle" title={i.last_subject ?? undefined}>
                   {i.last_used_at ? `logged in ${ago(i.last_used_at)}` : "never used"} · {i.id}
@@ -159,7 +160,9 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   const [picked, setPicked] = useState<Set<string>>(new Set(envs.includes("production") ? ["production"] : envs.slice(0, 1)));
   const [actions, setActions] = useState<Set<Action>>(new Set(["read", "reveal"]));
   const [ttl, setTtl] = useState("15");
+  const [ips, setIps] = useState("");
   const [busy, setBusy] = useState(false);
+  const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const minutes = Number(ttl);
   const repoOk = provider === "github" ? REPO.test(repo.trim()) : provider === "gitlab" ? GITLAB_PATH.test(repo.trim()) : true;
   const otherOk = provider !== "other" || (issuer.trim().startsWith("https://") && subject.trim() !== "" && subject.trim() !== "*");
@@ -183,7 +186,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
         e.preventDefault();
         if (!ok) return;
         setBusy(true);
-        await onCreate({ name: name.trim(), audience: audience.trim(), ...shape(), environments: [...picked], actions: ACTIONS.filter((a) => actions.has(a)), ttl_minutes: minutes });
+        await onCreate({ name: name.trim(), audience: audience.trim(), ...shape(), environments: [...picked], actions: ACTIONS.filter((a) => actions.has(a)), ttl_minutes: minutes, ...(ipList.length && { allowed_ips: ipList }) });
         setBusy(false);
       }}
       onKeyDown={(e) => e.key === "Escape" && onCancel()}
@@ -260,6 +263,10 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           <input value={ttl} onChange={(e) => setTtl(e.target.value)} inputMode="numeric" className={`${field} font-mono`} />
         </label>
       </div>
+      <label className="block">
+        <span className={label}>Allowed addresses (CIDRs; empty for any)</span>
+        <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder="the runners' egress ranges, e.g. 203.0.113.0/24" className={`${field} font-mono`} />
+      </label>
       <div className="flex justify-end gap-2">
         <button type="button" className={ghost} onClick={onCancel}>
           Cancel

@@ -1,11 +1,11 @@
-import { ArrowDown, ArrowUp, Bell, GripVertical, Lock, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Bell, GripVertical, KeyRound, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { ENV_SLUG, KEY_TYPES, LABEL_PART, SECRET_KEY, type Environment, type KeyType, type Required } from "@/lib/secrets-api";
+import { ENV_SLUG, KEY_TYPES, LABEL_PART, SECRET_KEY, secretsHealth, type Environment, type KeyType, type Required } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
 import { Dialog } from "../agents/ui/dialog";
 import { Switch } from "../agents/ui/switch";
 import { useSecrets } from "./secrets-page";
-import { ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, iconButton, label, primary, Section, until } from "./ui";
+import { ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, iconButton, label, primary, Section, until, useLoad } from "./ui";
 
 /**
  * The project's environments: add, rename (references to the slug are rewritten), reorder (the
@@ -90,6 +90,8 @@ export function EnvironmentsView() {
       <RequiredKeys onError={setError} />
 
       <Retention onError={setError} />
+
+      <DeploymentKey />
 
       <DeleteEnvironment
         env={deleting}
@@ -312,6 +314,34 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
           <Plus className="size-3.5" /> Require
         </button>
       </form>
+    </Section>
+  );
+}
+
+const KEY_SOURCE: Record<string, string> = {
+  kms: "AWS KMS: the key is decrypted at startup and never stored (ROLL_SECRET_KEY_KMS)",
+  env: "ROLL_SECRET_KEY on every node",
+  file: "a key file this node generated (secrets.key): back it up, or set ROLL_SECRET_KEY",
+  missing: "none: secrets are unavailable until ROLL_SECRET_KEY is set",
+};
+
+/** Where the deployment key that seals every project's data key comes from, and a rotation's progress. */
+function DeploymentKey() {
+  const health = useLoad(() => secretsHealth(), []);
+  const h = health.data;
+  if (!h) return null;
+  const warn = h.key === "file" || h.key === "missing";
+  return (
+    <Section title="Deployment key" aside={<span className="text-[11.5px] text-subtle max-sm:hidden">For the whole server: it seals every project&apos;s data key.</span>}>
+      <div className={`${card} flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[12.5px]`}>
+        <KeyRound className={`size-3.5 ${warn ? "text-danger" : "text-muted"}`} />
+        <span className={warn ? "text-danger" : ""}>{KEY_SOURCE[h.key] ?? h.key}</span>
+        {h.resealed !== null && (
+          <span className="ml-auto text-[11.5px] text-subtle">
+            {h.resealed === "all" ? "Rotation done: the previous key can be dropped" : `Rotating: ${h.resealed} data key${h.resealed === 1 ? "" : "s"} resealed so far`}
+          </span>
+        )}
+      </div>
     </Section>
   );
 }
