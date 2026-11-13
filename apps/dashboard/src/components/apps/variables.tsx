@@ -1,6 +1,6 @@
-import { Eye, EyeOff, Link2, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, Link2, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { appsApi, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
+import { appsApi, parseEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
@@ -23,13 +23,43 @@ type Edit = { name: string; value: string };
  * The environment's variables (masked; Reveal asks for the values), edited in place and saved in
  * one PATCH, then the links to the project's databases that add their own.
  */
-export function VariablesTab({ service, project, env, runner, onRedeploy }: { service: string; project: string; env: Environment; runner: Runner; onRedeploy: () => void }) {
+export function VariablesTab({
+  service,
+  project,
+  env,
+  envs = [],
+  runner,
+  onRedeploy,
+}: {
+  service: string;
+  project: string;
+  env: Environment;
+  /** The service's other environments, to copy variables from. */
+  envs?: string[];
+  runner: Runner;
+  onRedeploy: () => void;
+}) {
   const [vars, setVars] = useState<Variables | null>(null);
   const [values, setValues] = useState<Record<string, string> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [added, setAdded] = useState<Edit[]>([]);
+  const [pasting, setPasting] = useState(false);
+  const [pasted, setPasted] = useState("");
+  const parsed = useMemo(() => parseEnv(pasted), [pasted]);
+
+  /** Stage `set` for review: an existing service variable becomes an edit, a new name a row. */
+  const stage = (set: Record<string, string>) => {
+    const have = new Set((vars?.vars ?? []).filter((v) => v.source === "service").map((v) => v.name));
+    setEdits((e) => ({ ...e, ...Object.fromEntries(Object.entries(set).filter(([k]) => have.has(k))) }));
+    setAdded((a) => [...a.filter((x) => !(x.name in set)), ...Object.entries(set).filter(([k]) => !have.has(k)).map(([name, value]) => ({ name, value }))]);
+  };
+  const copyFrom = async (from: string) => {
+    // Reading another environment's values is a reveal there: the gate decides it as one.
+    const v = await runner.run("copy", () => appsApi.reveal(service, from));
+    if (v) stage(v);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -82,7 +112,29 @@ export function VariablesTab({ service, project, env, runner, onRedeploy }: { se
       <section className={panel}>
         <div className="flex min-h-14 flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-3">
           <h2 className="text-[15px] font-medium">Variables</h2>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            {envs.length > 0 && (
+              <label className={`${btn} relative`} title="Stage another environment's variables here (review, then Save)">
+                <Copy className="size-3.5" /> Copy from
+                <select
+                  value=""
+                  onChange={(e) => e.target.value && void copyFrom(e.target.value)}
+                  disabled={runner.busy !== null}
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                  aria-label="Copy variables from another environment"
+                >
+                  <option value="">Copy from…</option>
+                  {envs.map((e) => (
+                    <option key={e} value={e}>
+                      {e}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <button className={btn} onClick={() => setPasting((p) => !p)} aria-pressed={pasting}>
+              <ClipboardPaste className="size-3.5" /> Paste .env
+            </button>
             <button className={btn} onClick={reveal} disabled={runner.busy !== null || !vars?.vars.length}>
               {values ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
               {values ? "Hide" : "Reveal"}
@@ -92,6 +144,35 @@ export function VariablesTab({ service, project, env, runner, onRedeploy }: { se
             </button>
           </div>
         </div>
+        {pasting && (
+          <div className="rise space-y-2 border-b border-line px-5 py-4">
+            <textarea
+              value={pasted}
+              onChange={(e) => setPasted(e.target.value)}
+              placeholder={"DATABASE_URL=postgres://…\nexport API_KEY='…'"}
+              rows={5}
+              spellCheck={false}
+              className={`${input} w-full font-mono text-[12px]`}
+              aria-label=".env text"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <span className={`text-[12px] ${parsed.errors.length ? "text-danger" : "text-subtle"}`}>
+                {parsed.errors.length ? `Lines ${parsed.errors.join(", ")} aren't KEY=value.` : `${Object.keys(parsed.vars).length} variables, staged for review before Save.`}
+              </span>
+              <button
+                className={primary}
+                disabled={!Object.keys(parsed.vars).length || parsed.errors.length > 0}
+                onClick={() => {
+                  stage(parsed.vars);
+                  setPasted("");
+                  setPasting(false);
+                }}
+              >
+                Stage
+              </button>
+            </div>
+          </div>
+        )}
         {error && <p className="px-5 py-4 text-[13px] text-danger">{error}</p>}
         {!vars && !error && <p className="px-5 py-4 text-[13px] text-subtle"><span className="shimmer">Loading…</span></p>}
         {vars && (

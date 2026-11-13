@@ -507,6 +507,40 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
 }
 
+/// Requests that pile up past an instance's concurrency start more instances, up to
+/// `max_instances`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_past_an_instances_concurrency_scale_it_out() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 3}, "variables": {"FAKE_SLOW_MS": "400"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let host = host(&svc["environments"][0]["url"]);
+    let all = futures::future::join_all((0..6).map(|_| visit(&w, &host, "/"))).await;
+    assert!(all.iter().all(|(st, _)| *st == StatusCode::OK), "{all:?}");
+    let up = w.fake.instances(&id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    assert!((2..=3).contains(&up), "scaled out to {up} (max 3)");
+}
+
+/// A push while a build runs queues; a newer one supersedes the queued one, and only the newest
+/// goes live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_newer_push_supersedes_a_queued_deploy() {
+    let w = world().await;
+    w.code.push("f0f0f0f0f0f0", "slow", &[("SLOW_BUILD", "600")]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let first = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production/deploys");
+    get_until(&w.api, &format!("{base}/{first}"), |d| d["status"] == "building").await;
+    let (_, second) = call(&w.api, "POST", &base, Some(json!({"revision": "f0f0f0f0f0f0", "message": "second"}))).await;
+    let (_, third) = call(&w.api, "POST", &base, Some(json!({"revision": "f0f0f0f0f0f0", "message": "third"}))).await;
+    assert_eq!(settled(&w, &id, "production", second["id"].as_str().unwrap()).await["status"], "superseded");
+    assert_eq!(settled(&w, &id, "production", third["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(settled(&w, &id, "production", &first).await["status"], "inactive", "the first finished, then the newest replaced it");
+}
+
 /// `roll.toml` sets run settings in the tree, an environment's block on top, and a redeploy
 /// (no build) keeps what the file set.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

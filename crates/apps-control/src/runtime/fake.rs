@@ -3,8 +3,9 @@
 //! A fake instance answers every request with JSON naming its instance, deployment and the
 //! path, plus the variables listed in `FAKE_ECHO` (comma-separated). Settings through its
 //! variables: `FAKE_UNHEALTHY=1` answers 500 on every path, `FAKE_BOOT_MS` delays its first
-//! answer, `FAKE_EXIT=<code>` makes it a job that exits with that code (cron runs, workers).
-//! The fake builder fails a build whose tree has a file `FAIL_BUILD`.
+//! answer, `FAKE_SLOW_MS` delays every answer (requests pile up), `FAKE_EXIT=<code>` makes it a
+//! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
+//! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
 
 use super::{BuildJob, Builder, InstanceSpec, Runtime, Usage};
 use crate::logs::LogSink;
@@ -103,6 +104,7 @@ fn var<'a>(spec: &'a InstanceSpec, k: &str) -> Option<&'a str> {
 async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSink, sick: Arc<Mutex<std::collections::HashSet<String>>>) {
     let unhealthy = var(&spec, "FAKE_UNHEALTHY") == Some("1");
     let boot = var(&spec, "FAKE_BOOT_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
+    let slow = var(&spec, "FAKE_SLOW_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let echo: Vec<(String, String)> = var(&spec, "FAKE_ECHO")
         .map(|names| names.split(',').filter_map(|n| var(&spec, n).map(|v| (n.to_string(), v.to_string()))).collect())
         .unwrap_or_default();
@@ -114,6 +116,9 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     let app = axum::Router::new().fallback(move |req: Request| {
         let (name, dep, echo, sick) = (name.clone(), dep.clone(), echo.clone(), sick.clone());
         async move {
+            if let Some(s) = slow {
+                tokio::time::sleep(s).await;
+            }
             let status = if unhealthy || sick.lock().contains(&name) { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK };
             let vars: serde_json::Map<String, serde_json::Value> = echo.into_iter().map(|(k, v)| (k, v.into())).collect();
             let host = req.headers().get("x-forwarded-host").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
@@ -294,6 +299,9 @@ impl Builder for Fake {
     async fn build(&self, job: &BuildJob, log: &LogSink, _cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<String> {
         self.counts.builds.fetch_add(1, Ordering::SeqCst);
         log.line(format!("#1 building {}", job.tag));
+        if let Some(ms) = std::fs::read_to_string(job.context.join("SLOW_BUILD")).ok().and_then(|t| t.trim().parse().ok()) {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
         if job.context.join("FAIL_BUILD").exists() {
             log.line("#2 ERROR: the build failed on purpose");
             anyhow::bail!("the build failed");

@@ -367,18 +367,23 @@ function FromGithub({ onPicked }: { onPicked: (fullName: string) => void }) {
   const [pick, setPick] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Why there's no picker, said instead of leaving a gap: GitHub isn't set up here, or its App
+  // sees no repositories yet (with where to install it).
+  const [missing, setMissing] = useState<{ why: "unset" | "empty"; install: string | null } | null>(null);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         const app = await codeApi.github();
-        if (!app.configured || !alive) return;
+        if (!alive) return;
+        if (!app.configured) return setMissing({ why: "unset", install: null });
         const [i, o] = await Promise.all([codeApi.installations(), codeApi.owners()]);
         if (!alive) return;
         setInstalls(i);
         setOwners(o);
         setOwner(o[0]?.name ?? "");
+        if (!i.some((x) => x.repos.length)) setMissing({ why: "empty", install: app.install_url });
       } catch {
         // No GitHub here (or not for this caller): the picker just doesn't show.
       }
@@ -389,7 +394,26 @@ function FromGithub({ onPicked }: { onPicked: (fullName: string) => void }) {
   }, []);
 
   const repos = (installs ?? []).flatMap((i) => i.repos.map((r) => ({ install: i, repo: r })));
-  if (!repos.length) return null;
+  if (!repos.length)
+    return missing ? (
+      <p className="mt-3 text-[11px] leading-relaxed text-subtle">
+        {missing.why === "unset" ? (
+          "GitHub isn't connected to this roll: an operator sets up its GitHub App in roll code, then repositories can be picked here."
+        ) : (
+          <>
+            roll's GitHub App can't see any repositories yet.{" "}
+            {missing.install ? (
+              <a href={missing.install} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                Install it on an account or organization
+              </a>
+            ) : (
+              "Install it on an account or organization"
+            )}
+            , then pick one here.
+          </>
+        )}
+      </p>
+    ) : null;
   const chosen = repos.find((r) => r.repo.full_name === pick);
 
   const go = async () => {
