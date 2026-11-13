@@ -48,6 +48,15 @@ instead of ~16k. An unknown name is `400`, naming the toolsets there are. The da
 panel picks them. A toolset only narrows the list: the token's rules decide every call as before,
 and OAuth's resource is the server whatever the toolsets (checked with the TypeScript SDK).
 
+### Read-only
+
+`/v1/mcp?readonly=1` (or `X-MCP-Readonly: true`) is a read-only connection, as GitHub's server's
+read-only mode is: only tools annotated `readOnlyHint` are listed and run, whatever the token
+allows (a call to another is an error result), and prompts that need one aren't offered. It
+narrows, never widens: each call is still decided by the token's rules. Anything but `1`, `true`,
+`0` or `false` is a 400, so a typo never means "not read-only". The connect panel has a checkbox
+for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
+
 ### With OAuth (Claude Code, Claude.ai, Cursor, VS Code, …)
 
 Add the server by its URL. The client finds roll's authorization server, registers itself, and
@@ -383,7 +392,7 @@ waits on a sibling PR reaching main is last.
 4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and you say so); prompts' arguments complete from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
+Done lately: read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and you say so); prompts' arguments complete from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
 #28 and search #29 pass rolld's route test); a preview's share link is reveal (`previews_share`);
 search's index mapping, settings, refresh and analyze as MCP tools; the ninth review's findings
 (apps settings that change what production runs, its source, build, start and pre-deploy commands,

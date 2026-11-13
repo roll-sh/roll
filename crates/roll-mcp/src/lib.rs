@@ -16,6 +16,8 @@
 //! - Requests from a browser (`Origin`) must come from the dashboard or the API (DNS rebinding).
 //! - Toolsets: `/v1/mcp?toolsets=postgres,code` (or `X-MCP-Toolsets`) lists only those products'
 //!   tools, as GitHub's server does: every product's tools are ~35k tokens of an agent's context.
+//! - Read-only: `?readonly=1` (or `X-MCP-Readonly: true`) lists and runs only read-only tools, as
+//!   GitHub's server's read-only mode does; the token's rules still decide each call.
 
 pub mod prompts;
 pub mod resources;
@@ -147,12 +149,28 @@ fn toolsets(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<Option<Vec<Str
     Ok((!names.is_empty()).then_some(names))
 }
 
+/// Whether a connection asked to be read-only (`?readonly=1|true`, or `X-MCP-Readonly: 1|true`).
+/// Anything else given is an error, so a typo never means "not read-only".
+fn readonly(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<bool, String> {
+    let from_query = uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "readonly").map(|(_, v)| v.into_owned()));
+    let Some(v) = from_query.or_else(|| headers.get("x-mcp-readonly").and_then(|v| v.to_str().ok()).map(str::to_string)) else { return Ok(false) };
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "" => Ok(true),
+        "0" | "false" => Ok(false),
+        other => Err(format!("readonly={other:?}: 1 or true (0 or false to turn it off)")),
+    }
+}
+
 async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     if !origin_ok(&m.config, &headers) {
         return http_error(StatusCode::FORBIDDEN, "Origin not allowed");
     }
     let toolsets = match toolsets(&uri, &headers) {
         Ok(t) => t,
+        Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let readonly = match readonly(&uri, &headers) {
+        Ok(r) => r,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
     let principal = match roll_auth::Grant::on(&ext) {
@@ -204,7 +222,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets, client });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets, readonly, client });
     let mut resp = if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
             futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
@@ -247,6 +265,8 @@ struct Ctx {
     url_elicitation: bool,
     /// The products whose tools are listed (`None`: every product's).
     toolsets: Option<Vec<String>>,
+    /// Only read-only tools are listed and run (`?readonly=1`).
+    readonly: bool,
     /// The client's name and version, as it said in `initialize`.
     client: Option<Arc<str>>,
 }
@@ -288,6 +308,9 @@ impl Ctx {
                 }
             }
         }
+        if self.readonly {
+            out.retain(|t| t["annotations"]["readOnlyHint"].as_bool() == Some(true));
+        }
         out
     }
 }
@@ -310,6 +333,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
+                } else if ctx.readonly && !tool_names(ctx).contains(&name) {
+                    rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
                 } else {
                     match call(ctx, &name, args).await {
                         Some(r) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {

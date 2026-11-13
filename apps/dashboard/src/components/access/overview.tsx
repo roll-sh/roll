@@ -67,13 +67,14 @@ export function ConnectPanel({ token }: { token?: string }) {
   // Toolsets: only some products' tools, so the agent's context isn't spent on the rest.
   const [products, setProducts] = useState<string[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
+  const [readonly, setReadonly] = useState(false);
   useEffect(() => {
     accessApi
       .catalog()
       .then((c) => setProducts(c.products.filter((p) => p !== "access")))
       .catch(() => {});
   }, []);
-  const url = withToolsets(mcpUrl(), picked);
+  const url = withToolsets(mcpUrl(), picked, readonly);
   const cfg = mcpConfig(client, url, token);
   return (
     <Panel
@@ -129,6 +130,10 @@ export function ConnectPanel({ token }: { token?: string }) {
             </div>
           </div>
         )}
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />
+          Read-only: the client sees and runs only tools that read, whatever its token allows
+        </label>
         <p className="text-[13px] text-muted">{CLIENT_WHERE[client]}</p>
         <div className="relative rounded-lg border border-line bg-bg">
           <pre className="overflow-x-auto p-3 pr-10 font-mono text-[12px] leading-relaxed">{cfg.text}</pre>
