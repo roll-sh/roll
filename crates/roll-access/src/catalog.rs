@@ -257,21 +257,42 @@ fn method_rank(r: &Row, method: &str) -> Option<u8> {
 /// The row for a request. An exact route first (a row naming the method beats `*`), else the
 /// longest prefix. A route that is a catch-all (`/v1/tasks/{*rest}`, storage's nest) is the
 /// product's own router in disguise: its rows are matched against the request's path.
-pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
-    if OPERATOR_ONLY.iter().any(|(r, _)| shape(r) == shape(route)) {
-        return None;
+/// The catalogue by shape, built once: every request looks its route up here.
+struct Index {
+    exact: std::collections::HashMap<String, Vec<&'static Row>>,
+    prefixes: Vec<(String, &'static Row)>,
+    operator_only: std::collections::HashSet<String>,
+}
+
+static INDEX: std::sync::LazyLock<Index> = std::sync::LazyLock::new(|| {
+    let mut exact: std::collections::HashMap<String, Vec<&'static Row>> = std::collections::HashMap::new();
+    let mut prefixes = Vec::new();
+    for r in ROWS {
+        if r.route.ends_with('/') {
+            prefixes.push((shape(r.route), r));
+        } else {
+            exact.entry(shape(r.route)).or_default().push(r);
+        }
     }
+    Index { exact, prefixes, operator_only: OPERATOR_ONLY.iter().map(|(r, _)| shape(r)).collect() }
+});
+
+pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
     // Patterns are compared by shape: a product naming a parameter `{key}` where its row says
     // `{name}` still matches its row (a rename must never change an action).
     let shape = shape(route);
-    let exact = ROWS.iter().filter(|r| self::shape(r.route) == shape).filter_map(|r| method_rank(r, method).map(|m| (m, r))).max_by_key(|(m, _)| *m);
+    if INDEX.operator_only.contains(&shape) {
+        return None;
+    }
+    let exact = INDEX.exact.get(&shape).into_iter().flatten().filter_map(|r| method_rank(r, method).map(|m| (m, *r))).max_by_key(|(m, _)| *m);
     if let Some((_, row)) = exact {
         return Some(Found { row, params: None });
     }
-    let prefix = ROWS
+    let prefix = INDEX
+        .prefixes
         .iter()
-        .filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
-        .filter_map(|r| method_rank(r, method).map(|m| ((r.route.len(), m), r)))
+        .filter(|(s, _)| shape.starts_with(s.as_str()))
+        .filter_map(|(_, r)| method_rank(r, method).map(|m| ((r.route.len(), m), *r)))
         .max_by_key(|(k, _)| *k);
     if let Some((_, row)) = prefix {
         return Some(Found { row, params: None });
