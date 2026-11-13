@@ -1034,3 +1034,40 @@ async fn gate_latency() {
     let activity = d.access.store.activity().unwrap();
     assert_eq!(activity.get(&token_id).map(|a| a.0), Some(2 * 2200 + 9600), "every request of the token is in the log");
 }
+
+/// The audit log keeps its days and drops what's older, however much there is (in batches, so a
+/// big prune never holds the database).
+#[tokio::test]
+async fn the_audit_log_keeps_its_days() {
+    let d = Daemon::new(50);
+    let day = 24 * 3600 * 1000;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let row = |n: i64, at: i64| roll_access::store::AuditEvent {
+        id: format!("aud_{n:06}"),
+        at,
+        grant_id: None,
+        grant_name: None,
+        source: "api".into(),
+        tool: None,
+        method: "GET".into(),
+        route: "/v1/projects".into(),
+        product: Some("postgres".into()),
+        action: Some("read".into()),
+        resource: None,
+        decision: "allow".into(),
+        approval: None,
+        status: 200,
+        args: None,
+        ip: None,
+        duration_ms: 1,
+    };
+    for n in 0..12_000 {
+        d.access.store.audit(&row(n, now - 91 * day + n));
+    }
+    for n in 0..3 {
+        d.access.store.audit(&row(100_000 + n, now - day));
+    }
+    d.access.store.prune(90).unwrap();
+    let (_, kept) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=1000", None).await;
+    assert_eq!(kept.as_array().map(Vec::len), Some(3), "only the last 90 days");
+}
