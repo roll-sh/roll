@@ -601,6 +601,12 @@ pub fn merge<T: Serialize + serde::de::DeserializeOwned>(base: &T, patch: Option
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Scaling {
+    pub backlog: Option<u64>,
+    pub wanted: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Canary {
     pub deployment: String,
     pub share: u8,
@@ -692,6 +698,9 @@ pub struct Environment {
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
+    /// A worker that follows its work: the backlog it last read (null before the first read)
+    /// and the instances that wants.
+    pub scaling: Option<Scaling>,
     /// A push deploys only once its commit's checks pass (Railway's "Wait for CI").
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.

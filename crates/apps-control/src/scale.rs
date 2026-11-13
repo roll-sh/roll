@@ -25,11 +25,11 @@ impl Apps {
             });
             if !placed {
                 l.log.stream(crate::logs::Stream::System).line(format!("scale: stream {} isn't in this service's project; scaling on it is off", sc.stream));
-                l.set_wanted(0);
+                l.set_wanted(0, None);
                 continue;
             }
             match self.deps.resources.backlog(&sc.stream, &sc.group).await {
-                Ok(lag) => l.set_wanted(sc.instances(lag, run.min_instances, run.max_instances)),
+                Ok(lag) => l.set_wanted(sc.instances(lag, run.min_instances, run.max_instances), Some(lag)),
                 Err(e) => l.log.stream(crate::logs::Stream::System).line(format!("scale: reading {}'s lag: {e:#}", sc.group)),
             }
         }

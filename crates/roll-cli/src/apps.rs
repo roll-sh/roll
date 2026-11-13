@@ -124,6 +124,8 @@ pub enum Domains {
 }
 
 #[derive(Subcommand)]
+// Parsed once per run: `set`'s many flags make it big, and boxing them would only obscure clap.
+#[allow(clippy::large_enum_variant)]
 pub enum AppsCmd {
     /// Services, with each environment's state and URL.
     #[command(alias = "ls")]
@@ -213,6 +215,12 @@ pub enum AppsCmd {
         /// A step whose 5xx share reaches this (and beats the old deployment's) rolls back.
         #[arg(long, value_name = "PERCENT")]
         rollout_errors: Option<u8>,
+        /// The app speaks HTTP/2 without TLS (a gRPC server): `true` or `false`.
+        #[arg(long)]
+        h2c: Option<bool>,
+        /// A worker follows a stream group's lag: `<stream>:<group>[:<per instance>]`, or `none`.
+        #[arg(long, value_name = "STREAM:GROUP[:PER]")]
+        scale: Option<String>,
     },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
@@ -1443,7 +1451,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -1506,6 +1514,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("timeout_s", timeout.map(Value::from)),
                 ("volume", volume),
                 ("rollout", rollout),
+                ("h2c", h2c.map(Value::from)),
+                ("scale", match scale.as_deref() {
+                    None => None,
+                    Some("none") => Some(Value::Null),
+                    Some(v) => {
+                        let mut parts = v.splitn(3, ':');
+                        let (stream, group) = (parts.next().unwrap_or(""), parts.next().ok_or_else(|| anyhow::anyhow!("--scale is <stream>:<group>[:<per instance>]"))?);
+                        let mut sc = json!({ "stream": stream, "group": group });
+                        if let Some(p) = parts.next() {
+                            sc["per_instance"] = json!(p.parse::<u64>().map_err(|_| anyhow::anyhow!("--scale's per instance is a number"))?);
+                        }
+                        Some(sc)
+                    }
+                }),
             ] {
                 if let Some(v) = v {
                     run.insert(k.into(), v);

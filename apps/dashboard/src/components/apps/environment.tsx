@@ -97,6 +97,16 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        {env.scaling && (
+          <div className="px-5 py-4">
+            <p className="text-[13px] font-medium">Following {service.run.scale?.group ?? "its work"}</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.scaling.backlog == null ? "Its backlog hasn't been read yet." : `${env.scaling.backlog.toLocaleString()} messages behind`}: {env.scaling.wanted} of {service.run.max_instances} instances
+              wanted, read every 10 s.
+            </p>
+          </div>
+        )}
+
         <OwnRun service={service} env={env} runner={runner} />
 
         <div className="space-y-3 px-5 py-4">
