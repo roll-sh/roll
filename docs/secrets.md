@@ -1594,45 +1594,29 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **One permission system** (agreed with roll MCP, 2026-11-13; built on #25's head, which holds
-   #24, on `feature/roll-secrets-access`). `rlst_` goes outright: it never reached main. New tokens
-   are roll-access grants made through `POST /v1/access/tokens` with one rule (`secrets ×
-   {project} × environments × paths × actions`, `ip_allow`, expiry), passing the request's own
-   extensions; `roll secrets tokens` and the dashboard call it. A project's tokens are `GET
-   /v1/access/tokens?product=secrets&resource=<project>`, a list acted on one token at a time
-   (never revoked in bulk: it holds tokens people made in the builder too). Workload identities
-   keep their trust configuration and OIDC verification here and mint short-lived `workload`
-   grants (`Access::mint_workload`, 5–60 minutes, the identity's scope, owned by its creator; 409
-   past 1,000 per owner). `TokenScope`, the `tokens` table's use and the built-in token check go.
-2. **roll apps' variables from roll secrets**, on `feature/roll-secrets-apps` (after #20): rolld's
-   `ForApps` is apps' `SecretSource` (Runtime resolve for services, above). Left, with roll apps:
-   linked keys' addresses rewritten for a container (`Values.linked` → apps' `runtime.reach`, which
-   the trait can't carry yet); preview environments ensured from their base when apps makes one;
-   and apps' `variables?reveal`, which shows secrets' values, needing `reveal` on secrets too.
-3. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
+1. **roll apps, the rest** (with roll apps): linked keys' addresses rewritten for a container
+   (`Values.linked` → apps' `runtime.reach`; the `SecretSource` trait carries pairs only); preview
+   environments ensured from their base when apps makes one; apps' `variables?reveal` needing
+   `reveal` on secrets too. The wiring itself is #31.
+2. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
    protected environment, and an approver grants it for minutes (the approval names the
    environment and folder).
-4. **A runtime SDK** (`@roll/secrets` for Node and the edge, then Go and Python): fetch an
-   environment's values with a token or a workload identity, cache them in memory for a short
-   TTL, refresh on change through the existing event stream; no value on disk.
-5. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Runtime clients beyond TypeScript.** `@roll/secrets` (packages/secrets) already fetches an
+   environment's values with a token, opens sealed exports, watches the digest and renews dynamic
+   leases. Go and Python clients with the same surface (and a workload identity's login built in),
+   as Doppler's and Infisical's SDKs have.
+4. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
-6. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
+5. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
    as Doppler's and Infisical's.
 
-Waiting on other pull requests:
+Open pull requests after this one:
 
-- **Merge with roll search** (#22), whichever merges second. Checked live on a branch with both
-   (2026-11-13): a key linked to a cluster's `api_key` gets the cluster's own API key (200 with it,
-   401 without), rotating issues a new one while the old works through the grace period and fails
-   once its retired lease is revoked, and a `dynamic` link's key dies with its lease. The merge
-   conflicts are additive: CI's matrix (`secrets` and `search` rows), roll-cli's test dependencies,
-   rolld's `main.rs` (search's router, then workspace and secrets) and `DbBudget` (`search`,
-   `secrets` and `accounts`, one reserved connection each for the always-on ones).
-- **roll apps' `SecretSource`** wired to `Secrets::values` as `app:<svc>`, whichever of #20 and
-  #21 merges second.
+- **#30, one permission system** (after #20 and #25): a project's tokens are roll-access grants,
+  identities' logins get `workload` tokens, `rlst_` is gone.
+- **#31, roll apps' deploys get their project's secrets** (after #20): rolld's `ForApps`.
 
-Done since the last review: signed-in people manage the secrets of their own projects (People,
+Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
 caller's roll-access Grant (`GrantGrants`): a grant's request is checked inside the product too,
 health and leaks filter themselves, search and findings take any grant, ephemeral environments are
