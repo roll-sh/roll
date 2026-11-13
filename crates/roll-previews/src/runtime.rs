@@ -52,6 +52,10 @@ struct Live {
     last_request: Mutex<Instant>,
     started: Mutex<Option<Instant>>,
     sleep_after: Mutex<Duration>,
+    /// Held by a start (from making its container to running or failing) and by a stop, so the
+    /// two never overlap on the container's name: a start after a sleep waits for its removal,
+    /// and a sleep during a start (it bumps `stops` first) waits, then the start gives up.
+    lifecycle: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +185,7 @@ impl Runtime {
                     last_request: Mutex::new(Instant::now()),
                     started: Mutex::new(None),
                     sleep_after: Mutex::new(Duration::from_secs(600)),
+                    lifecycle: tokio::sync::Mutex::new(()),
                 })
             })
             .clone()
@@ -188,6 +193,7 @@ impl Runtime {
 
     async fn stop(&self, preview: &str, service: &str, live: &Live, why: Option<String>) {
         live.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _turn = live.lifecycle.lock().await;
         let name = live.container.lock().take();
         if let Some(name) = name {
             self.iso.release(&name).await;
@@ -255,6 +261,12 @@ impl Runtime {
     }
 
     async fn start(&self, preview: &str, service: &str, live: &Live) {
+        let _turn = live.lifecycle.lock().await;
+        // Another start (queued behind the same stop) got there first.
+        if matches!(*live.phase.borrow(), Phase::Running { .. }) {
+            return;
+        }
+        live.phase.send_replace(Phase::Starting);
         match tokio::time::timeout(self.cfg.start_timeout, self.start_inner(preview, service, live)).await {
             Ok(Ok(addr)) => {
                 *live.started.lock() = Some(Instant::now());
@@ -424,8 +436,12 @@ impl Runtime {
                 break addr;
             }
             retried = true;
+            // Only the container it reached: if that one was already replaced (a deploy stopped
+            // it, a new one is starting), stopping now would kill the new one.
             let live = self.live(preview, service);
-            self.stop(preview, service, &live, Some("the container stopped answering".into())).await;
+            if matches!(*live.phase.borrow(), Phase::Running { addr: a } if a == addr) {
+                self.stop(preview, service, &live, Some("the container stopped answering".into())).await;
+            }
         };
         let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
         let Ok(uri) = format!("http://{addr}{pq}").parse::<Uri>() else {
@@ -678,8 +694,12 @@ impl Apps for Runtime {
     /// time, and goes when done.
     async fn probe(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<(u16, String)>> {
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        // A start that a stop or a push overtook isn't the service failing: ask again later.
+        let superseded = |e: &str| e.starts_with("stopped while starting") || e.starts_with("the change moved on");
         let addr = match me.ready(preview, service, self.cfg.start_timeout).await {
             Ok(a) => a,
+            Err(Unavailable::Failed(e)) if superseded(&e) => return Err(crate::ports::StillDeploying(e).into()),
+            Err(Unavailable::NotFound) => return Err(crate::ports::StillDeploying("it was stopped while starting".into()).into()),
             Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
             Err(_) => anyhow::bail!("the service didn't start in time"),
         };

@@ -416,7 +416,17 @@ impl Engine {
             if self.store.healthy(&r.id, &name)?.as_deref() == Some(rev.as_str()) {
                 continue;
             }
-            match self.apps.probe(&r.id, &name, &path).await.map_err(|e| anyhow::anyhow!("{name} didn't answer {path}: {e:#}"))? {
+            let answer = match self.apps.probe(&r.id, &name, &path).await {
+                Ok(a) => a,
+                // Its start was overtaken (slept, redeployed, pushed): converge again soon.
+                Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
+                    let again = self.store.now_ms()? + DEPLOY_POLL_MS;
+                    self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { again } else { 0 })?;
+                    return Ok(());
+                }
+                Err(e) => anyhow::bail!("{name} didn't answer {path}: {e:#}"),
+            };
+            match answer {
                 Some((status, _)) if (200..400).contains(&status) => {
                     self.store.set_healthy(&r.id, &name, &rev)?;
                     self.store.log(&r.id, &format!("{name} is healthy ({path}: {status})"))?;

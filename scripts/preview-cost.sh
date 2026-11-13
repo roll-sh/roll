@@ -223,7 +223,9 @@ SHOT_PATH="/${SHOT_URL#*://*/}"
   api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"
   exit 1
 }
-[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API${SHOT_PATH%?}0")" = 403 ] || { echo "a changed signature should be refused"; exit 1; }
+# Its signature's last character changed (to one it isn't): refused.
+case "$SHOT_PATH" in *0) TAMPERED="${SHOT_PATH%?}1";; *) TAMPERED="${SHOT_PATH%?}0";; esac
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API$TAMPERED")" = 403 ] || { echo "a changed signature should be refused"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 
 say "sleep it"
@@ -268,7 +270,13 @@ for _ in $(seq 1 120); do
   [ "$VAR_SEEN" = on ] && break
   sleep 0.5
 done
-[ "$VAR_SEEN" = on ] || { echo "the service should see FEATURE_FLAG=on after roll preview env"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+[ "$VAR_SEEN" = on ] || {
+  echo "the service should see FEATURE_FLAG=on after roll preview env"
+  api GET "/v1/previews/$PV" | jq_ "{k: d[k] for k in ('state', 'error', 'head', 'updated_at')}"
+  api GET "/v1/previews/$PV/activity" | jq_ "[(a['at'] % 100000, a['message']) for a in d[:16]]"
+  curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | grep -c . || true
+  exit 1
+}
 
 say "with ignore_paths, a docs-only push keeps the services and the preview reports the new head"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"ignore_paths":["docs/"]}' >/dev/null
