@@ -1387,6 +1387,11 @@ async fn a_workload_gets_a_token_for_minutes() {
     let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens?kind=workload", None).await;
     assert_eq!(ids(&list), vec![g.id.as_str()]);
 
+    // Fixed: never given longer, rotated or grown.
+    let edit = d.call(OPERATOR, Method::PATCH, &format!("/v1/access/tokens/{}", g.id), Some(json!({ "expires_at": null }))).await;
+    assert_eq!(edit.0, StatusCode::CONFLICT, "{}", edit.1);
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{}/rotate", g.id), None).await.0, StatusCode::CONFLICT);
+
     d.people.remove("usr_alice");
     assert!(d.access.mint_workload(new(json!({ "read": "allow" })), &within, 15, Some("usr_alice")).await.is_err(), "its owner can't sign in");
     d.access.store.prune(30).unwrap();

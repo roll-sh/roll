@@ -804,7 +804,17 @@ impl Store {
         Ok(row.filter(|(g, kind, exp)| matches!(kind.as_str(), "token" | "access") && exp.is_none_or(|e| e > now) && g.live(now)).map(|(g, ..)| g))
     }
 
+    /// A workload token is fixed (minutes, within its identity's scope): never edited, rotated or
+    /// grown by a remembered approval, only revoked or left to end.
+    fn changeable(&self, id: &str) -> Result<()> {
+        if self.get(id)?.kind == "workload" {
+            return Err(Error::Conflict("a workload token can't be changed: it ends in minutes; revoke it instead".into()));
+        }
+        Ok(())
+    }
+
     pub fn update(&self, id: &str, change: &GrantChange) -> Result<Grant> {
+        self.changeable(id)?;
         if let Some(n) = &change.name {
             check_name(n)?;
         }
@@ -864,6 +874,7 @@ impl Store {
     /// Allow `rule` on a grant: for good (`until: None`, added to its rules unless they hold it), or
     /// until a time (its temporary rules, the lapsed ones dropped).
     pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>, approval: &str) -> Result<Grant> {
+        self.changeable(id)?;
         let now = code_sql::now_ms();
         self.db.write(|c| {
             let row: Option<(String, Option<String>, Option<i64>)> =
@@ -946,6 +957,7 @@ impl Store {
     /// A new secret for a token, the same rules (the old secret stops working at once). OAuth
     /// connections rotate through their refresh tokens instead.
     pub fn rotate(&self, id: &str) -> Result<(Grant, String)> {
+        self.changeable(id)?;
         let grant = self.get(id)?;
         if grant.kind() != GrantKind::Token {
             return Err(Error::Conflict("an OAuth connection rotates its own tokens: revoke it and connect again".into()));
