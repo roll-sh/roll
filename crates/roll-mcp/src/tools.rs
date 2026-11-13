@@ -32,6 +32,8 @@ pub enum Ty {
     Obj,
     Arr,
     Num,
+    /// More than one shape (`true`, `false` or an object): no `type` in the schema.
+    Any,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -138,8 +140,10 @@ impl Tool {
                 Ty::Obj => "object",
                 Ty::Arr => "array",
                 Ty::Num => "number",
+                Ty::Any => "",
             };
-            props.insert(p.name.into(), json!({ "type": ty, "description": p.desc }));
+            let schema = if ty.is_empty() { json!({ "description": p.desc }) } else { json!({ "type": ty, "description": p.desc }) };
+            props.insert(p.name.into(), schema);
             if p.required {
                 required.push(p.name);
             }
@@ -526,7 +530,7 @@ static TOOLS: &[Tool] = &[
     ),
     t("apps_list_environments", "List environments", "A service's environments.", "apps", "GET", "/v1/apps/services/{service}/environments", &[SERVICE]),
     t("apps_get_service", "Get a service", "A service with its environments' summaries (apps_list_deploys lists an environment's deploys).", "apps", "GET", "/v1/apps/services/{service}", &[SERVICE]),
-    t("apps_set_environment", "Set up an environment", "Create an environment or change one: the branch it deploys, its own run settings, following an image tag, waiting for CI. Production changes are \"deploy\" actions; copying another environment's variables needs reveal there.", "apps", "PUT", "/v1/apps/services/{service}/environments/{env}", &[
+    t("apps_set_environment", "Set up an environment", "Create an environment or change one: the branch it deploys, its own run settings, following an image tag, waiting for CI, and who gets in (maintenance, allowed addresses, a rate limit, firewall rules). Production changes are \"deploy\" actions; copying another environment's variables needs reveal there.", "apps", "PUT", "/v1/apps/services/{service}/environments/{env}", &[
         SERVICE,
         ENV,
         b("branch", Ty::Str, "The git branch it deploys"),
@@ -535,6 +539,11 @@ static TOOLS: &[Tool] = &[
         b("follow_tag", Ty::Bool, "An image service: redeploy when its tag points at a new digest"),
         b("wait_for_ci", Ty::Bool, "Deploy a commit only once its checks pass"),
         b("variables_from", Ty::Str, "Creating it: start with this environment's variables"),
+        // Who gets in (apps-next #26): in production each change is deploy.
+        b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
+        b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
+        b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
+        b("firewall", Ty::Arr, "[{action: allow|deny, path?, methods?, user_agent?}], first match wins"),
     ]),
     t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
         SERVICE,
