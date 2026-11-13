@@ -533,7 +533,7 @@ static TOOLS: &[Tool] = &[
         b("name", Ty::Str, "New name"),
         b("source", Ty::Obj, "Where it's built from (repo or image), as apps_get_service shows it"),
         b("build", Ty::Obj, "Build settings to change"),
-        b("run", Ty::Obj, "Run settings to change (instances, memory, start command, h2c, alerts {memory_pct, error_pct, p95_ms}; a worker's scale {stream, group, per_instance} needs read on that stream)"),
+        b("run", Ty::Obj, "Run settings to change (instances, memory, start command, h2c, alerts {memory_pct, error_pct, p95_ms}; public: false takes a web service off the internet and needs deploy; a worker's scale {stream, group, per_instance} needs read on that stream)"),
     ]),
     t(
         "apps_deploy",

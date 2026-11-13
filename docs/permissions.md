@@ -148,6 +148,11 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - An apps shell (its WebSocket, and all of a session: opening, keys, screen, resizing, closing) runs
   any command where the service runs, with its variables: `admin` in every environment, as an
   agent's shell is. Waking a sleeping environment starts compute someone pays for: `write`.
+- A service's settings (`PATCH …/services/{id}`) are `write`, except `run.public`: putting a web
+  service on the internet or taking it off (its public names answer 404) changes production at
+  once, so it's `deploy`. Rolling back to a deployment puts back the variables it went live with
+  (unless `keep_variables`); it's the environment's act as writing its variables is (`deploy` in
+  production, `write` elsewhere), and the answer names them without values.
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
