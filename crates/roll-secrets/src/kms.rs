@@ -3,10 +3,12 @@
 //! Opening it then needs both: roll's deployment key and the customer's key, which they can revoke
 //! (or disable) to make the project's values unreadable to roll.
 //!
-//! Stored as `kms:v1:<key, base64url>:<ciphertext, base64>`; the KMS encryption context names roll
-//! secrets and the project, so a wrapped key opens for nothing else. An unwrapped key (still sealed
-//! by the deployment key) is kept in memory for [`CACHE_TTL`], so a revocation takes effect within
-//! that and a request doesn't wait on KMS.
+//! Stored as `kms:v1:<key, base64url>:<deployment key id>:<ciphertext, base64>`; the KMS
+//! encryption context names roll secrets and the project, so a wrapped key opens for nothing else,
+//! and the deployment key's id tells a rotation's progress without asking KMS. An unwrapped key
+//! (still sealed by the deployment key) is kept in memory for [`CACHE_TTL`], so a revocation takes
+//! effect within that and a request doesn't wait on KMS; a refusal is kept as long, so a revoked
+//! project doesn't ask KMS at every request. Changing the wrapping always asks KMS.
 
 use crate::{Error, Result};
 use base64::Engine as _;
@@ -34,18 +36,46 @@ pub fn check_key(key: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(Error::BadRequest("a customer-managed key is a KMS key's ARN: arn:aws:kms:<region>:<account>:key/<id> (or alias/<name>)".into())) }
 }
 
-/// The key a stored data key is wrapped by, if it is.
-pub fn wrapped_by(stored: &str) -> Option<String> {
-    let rest = stored.strip_prefix(PREFIX)?;
-    let (key, _) = rest.split_once(':')?;
-    String::from_utf8(URL_SAFE_NO_PAD.decode(key).ok()?).ok()
+/// KMS's codes that mean "no", not "not now": the key is revoked, disabled, gone or not this one.
+const DENIALS: &[&str] = &["AccessDeniedException", "DisabledException", "KMSInvalidStateException", "NotFoundException", "InvalidCiphertextException", "IncorrectKeyException", "InvalidKeyUsageException"];
+
+fn kms_error(key: &str, why: String) -> Error {
+    if DENIALS.contains(&why.as_str()) {
+        Error::KeyDenied(format!("the project's customer-managed key ({key}) refused to open its data key: {why}"))
+    } else {
+        Error::Unavailable(format!("the project's customer-managed key ({key}) didn't answer: {why}"))
+    }
 }
 
-/// Unwraps stored data keys, caching what it unwrapped.
+/// A wrapped key's parts: the customer's key, the deployment key's id, the ciphertext.
+fn parts(stored: &str) -> Option<(String, &str, &str)> {
+    let rest = stored.strip_prefix(PREFIX)?;
+    let mut it = rest.splitn(3, ':');
+    let key = String::from_utf8(URL_SAFE_NO_PAD.decode(it.next()?).ok()?).ok()?;
+    Some((key, it.next()?, it.next()?))
+}
+
+/// The key a stored data key is wrapped by, if it is.
+pub fn wrapped_by(stored: &str) -> Option<String> {
+    parts(stored).map(|(k, ..)| k)
+}
+
+/// The id of the deployment key sealing a wrapped data key inside, if it is wrapped.
+pub fn sealed_by(stored: &str) -> Option<String> {
+    parts(stored).map(|(_, id, _)| id.to_string())
+}
+
+#[derive(Clone)]
+enum Cached {
+    Inner(String),
+    Denied(String),
+}
+
+/// Unwraps stored data keys, caching what it unwrapped (and what KMS refused).
 #[derive(Clone, Default)]
 pub(crate) struct Unwrapper {
     pub kms: Option<Arc<dyn ProjectKms>>,
-    cache: Arc<Mutex<HashMap<String, (Instant, String)>>>,
+    cache: Arc<Mutex<HashMap<String, (Instant, Cached)>>>,
 }
 
 impl Unwrapper {
@@ -57,32 +87,68 @@ impl Unwrapper {
         self.kms.as_ref().ok_or_else(|| Error::Unavailable("this project's data key is wrapped by a customer-managed key, and this server has no KMS".into()))
     }
 
-    /// `stored` as the key ring opens it: as is, or unwrapped by the customer's key.
+    /// `stored` as the key ring opens it: as is, or unwrapped by the customer's key (from memory
+    /// for up to a minute).
     pub fn inner(&self, project: &str, stored: &str) -> Result<String> {
-        let Some(rest) = stored.strip_prefix(PREFIX) else { return Ok(stored.to_string()) };
-        if let Some((at, inner)) = self.cache.lock().expect("kms cache").get(stored)
+        if !stored.starts_with(PREFIX) {
+            return Ok(stored.to_string());
+        }
+        if let Some((at, c)) = self.cache.lock().expect("kms cache").get(stored).cloned()
             && at.elapsed() < CACHE_TTL
         {
-            return Ok(inner.clone());
+            return match c {
+                Cached::Inner(inner) => Ok(inner),
+                Cached::Denied(why) => Err(Error::KeyDenied(why)),
+            };
         }
-        let (key, ct) = rest.split_once(':').ok_or_else(|| Error::Internal("a wrapped data key is damaged".into()))?;
-        let key = URL_SAFE_NO_PAD.decode(key).ok().and_then(|k| String::from_utf8(k).ok()).ok_or_else(|| Error::Internal("a wrapped data key is damaged".into()))?;
+        self.inner_fresh(project, stored)
+    }
+
+    /// `stored` unwrapped by asking KMS now: what changes the wrapping never rides on the cache.
+    pub fn inner_fresh(&self, project: &str, stored: &str) -> Result<String> {
+        let Some((key, _, ct)) = parts(stored) else {
+            return if stored.starts_with(PREFIX) { Err(Error::Internal("a wrapped data key is damaged".into())) } else { Ok(stored.to_string()) };
+        };
         let ct = STANDARD.decode(ct).map_err(|_| Error::Internal("a wrapped data key is damaged".into()))?;
-        let plain = self.kms()?.decrypt(&key, project, &ct).map_err(|why| Error::Unavailable(format!("the project's customer-managed key ({key}) didn't open its data key: {why}")))?;
-        let inner = String::from_utf8(plain.to_vec()).map_err(|_| Error::Internal("a wrapped data key is damaged".into()))?;
-        self.cache.lock().expect("kms cache").insert(stored.to_string(), (Instant::now(), inner.clone()));
+        let opened = self.kms()?.decrypt(&key, project, &ct).map_err(|why| kms_error(&key, why));
+        let inner = match opened {
+            Ok(plain) => String::from_utf8(plain.to_vec()).map_err(|_| Error::Internal("a wrapped data key is damaged".into()))?,
+            Err(Error::KeyDenied(why)) => {
+                self.cache.lock().expect("kms cache").insert(stored.to_string(), (Instant::now(), Cached::Denied(why.clone())));
+                return Err(Error::KeyDenied(why));
+            }
+            Err(e) => return Err(e),
+        };
+        self.cache.lock().expect("kms cache").insert(stored.to_string(), (Instant::now(), Cached::Inner(inner.clone())));
         Ok(inner)
     }
 
-    /// `inner` (sealed by the deployment key) wrapped by `key` for `project`, checked to open again.
-    pub fn wrap(&self, key: &str, project: &str, inner: &str) -> Result<String> {
+    fn sealed(&self, key: &str, project: &str, kek_id: &str, inner: &str) -> Result<String> {
+        let ct = self.kms()?.encrypt(key, project, inner.as_bytes()).map_err(|why| kms_error(key, why))?;
+        Ok(format!("{PREFIX}{}:{kek_id}:{}", URL_SAFE_NO_PAD.encode(key), STANDARD.encode(ct)))
+    }
+
+    /// `inner` (sealed by the deployment key `kek_id`) wrapped by a new customer key for
+    /// `project`, after proving roll can use it and that its policy pins the project: a key that
+    /// would wrap any project's data key (another customer's, say) is refused.
+    pub fn wrap_new(&self, key: &str, project: &str, kek_id: &str, inner: &str) -> Result<String> {
         let kms = self.kms()?;
-        let ct = kms.encrypt(key, project, inner.as_bytes()).map_err(|why| Error::BadRequest(format!("roll couldn't encrypt with {key}: {why} (its key policy must let roll's role use it)")))?;
-        let back = kms.decrypt(key, project, &ct).map_err(|why| Error::BadRequest(format!("roll could encrypt with {key} but not decrypt: {why}")))?;
+        let refused = |why: String| Error::BadRequest(format!("roll couldn't use {key}: {why} (its key policy must let roll's role use it with the encryption context roll=secrets, project={project})"));
+        let probe = format!("prj_probe_{}", crate::names::new_id("p", 12));
+        if kms.encrypt(key, &probe, b"probe").is_ok() {
+            return Err(Error::BadRequest(format!("{key}'s key policy doesn't pin the project: add the condition kms:EncryptionContext:project = {project}, so the key wraps this project's data key and nothing else's")));
+        }
+        let ct = kms.encrypt(key, project, inner.as_bytes()).map_err(refused)?;
+        let back = kms.decrypt(key, project, &ct).map_err(refused)?;
         if back.as_slice() != inner.as_bytes() {
             return Err(Error::BadRequest(format!("{key} didn't give back what it encrypted")));
         }
-        Ok(format!("{PREFIX}{}:{}", URL_SAFE_NO_PAD.encode(key), STANDARD.encode(ct)))
+        Ok(format!("{PREFIX}{}:{kek_id}:{}", URL_SAFE_NO_PAD.encode(key), STANDARD.encode(ct)))
+    }
+
+    /// The same customer key around an inner key a rotation resealed.
+    pub fn rewrap(&self, key: &str, project: &str, kek_id: &str, inner: &str) -> Result<String> {
+        self.sealed(key, project, kek_id, inner)
     }
 
     /// Forget a project's unwrapped key (its wrapping changed).
@@ -106,11 +172,13 @@ impl crate::Secrets {
         caller.need(crate::Action::Admin, &crate::Scope::project(project))?;
         self.project(project)?;
         let stored = self.stored_dek(project)?;
-        let inner = self.unwrap.inner(project, &stored)?;
+        // Always KMS's answer now, never the cache: a revoked key can't be swapped or removed.
+        let inner = self.unwrap.inner_fresh(project, &stored)?;
         let next = match &key {
             Some(k) => {
                 check_key(k)?;
-                self.unwrap.wrap(k, project, &inner)?
+                let kek = self.keys.as_ref().map_err(|why| Error::Unavailable(why.clone()))?;
+                self.unwrap.wrap_new(k, project, kek.current_id(), &inner)?
             }
             None => inner,
         };
@@ -146,8 +214,9 @@ mod tests {
         assert!(check_key("arn:aws:kms:eu-west-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab").is_ok());
         assert!(check_key("arn:aws:kms:eu-west-1:123456789012:alias/roll").is_ok());
         assert!(check_key("1234abcd").is_err() && check_key("arn:aws:s3:::bucket").is_err());
-        let stored = format!("{PREFIX}{}:AAAA", URL_SAFE_NO_PAD.encode("arn:aws:kms:eu-west-1:1:key/k"));
+        let stored = format!("{PREFIX}{}:0a1b2c3d4e5f:AAAA", URL_SAFE_NO_PAD.encode("arn:aws:kms:eu-west-1:1:key/k"));
         assert_eq!(wrapped_by(&stored).as_deref(), Some("arn:aws:kms:eu-west-1:1:key/k"));
+        assert_eq!(sealed_by(&stored).as_deref(), Some("0a1b2c3d4e5f"));
         assert_eq!(wrapped_by("v1:abc"), None);
     }
 }

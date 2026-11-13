@@ -417,7 +417,7 @@ function DeploymentKey() {
  * the caller can't see it.
  */
 function CustomerKey({ onError }: { onError: (e: string) => void }) {
-  const { api } = useSecrets();
+  const { api, project } = useSecrets();
   const current = useLoad(() => api.kms(), [api]);
   const [arn, setArn] = useState("");
   const [busy, setBusy] = useState(false);
@@ -462,7 +462,7 @@ function CustomerKey({ onError }: { onError: (e: string) => void }) {
       <p className="mt-1.5 text-[11.5px] text-muted">
         {key
           ? "Opening this project's data key needs roll's deployment key and this key. Revoke roll's use of it (or disable it) and roll can't read the project within a minute; remove it here to go back to roll's key alone."
-          : "Wrap this project's data key with a key only you control: roll checks it can encrypt and decrypt with it first. Its key policy must let roll's role use it with the encryption context roll=secrets."}
+          : "Wrap this project's data key with a key only you control: roll checks it can encrypt and decrypt with it first. Its key policy must let roll's role use it only with the encryption context roll=secrets and project=" + project.id + "."}
       </p>
     </Section>
   );

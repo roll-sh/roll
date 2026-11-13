@@ -253,9 +253,13 @@ pub enum Error {
     /// 409 with a code: `conflict`, `approval_required`, `stale`, `last_environment`.
     #[error("{1}")]
     Conflict(&'static str, String),
-    /// 503: no deployment key.
+    /// 503: no deployment key, or a KMS that didn't answer.
     #[error("{0}")]
     Unavailable(String),
+    /// 423 `kms_denied`: a customer-managed key refused (revoked, disabled, deleted). Never an
+    /// outage: `roll run --fallback` doesn't start from its file on it.
+    #[error("{0}")]
+    KeyDenied(String),
     /// 429: too many attempts (`rate_limited`).
     #[error("{0}")]
     TooMany(String),
@@ -438,14 +442,25 @@ impl Secrets {
         };
         let inner = self.unwrap.inner(project, &sealed)?;
         let (dek, resealed) = keys.open_dek(project, &inner)?;
-        if let Some(new) = resealed {
-            // A wrapped key stays wrapped by the same customer key around its resealed self.
+        // Sealed by the previous deployment key (a rotation): resealed with the current one. A
+        // wrapped key stays wrapped by the same customer key; if KMS won't wrap it now, the key
+        // still opened, so the read goes on and the sweeper tries again.
+        let stale_wrap = kms::sealed_by(&sealed).is_some_and(|id| id != keys.current_id());
+        if let Some(new) = resealed.or_else(|| stale_wrap.then(|| inner.clone())) {
             let new = match kms::wrapped_by(&sealed) {
-                Some(key) => self.unwrap.wrap(&key, project, &new)?,
-                None => new,
+                Some(key) => match self.unwrap.rewrap(&key, project, keys.current_id(), &new) {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!(%project, "resealing a customer-wrapped data key: {e}");
+                        None
+                    }
+                },
+                None => Some(new),
             };
-            self.db.write(|c| c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [new.as_str(), project, sealed.as_str()]))?;
-            self.unwrap.forget(&sealed);
+            if let Some(new) = new {
+                self.db.write(|c| c.execute("UPDATE projects SET dek = ? WHERE project_id = ? AND dek = ?", [new.as_str(), project, sealed.as_str()]))?;
+                self.unwrap.forget(&sealed);
+            }
         }
         Ok(dek)
     }
@@ -456,10 +471,15 @@ impl Secrets {
         let resealed = match &self.keys {
             Ok(keys) => {
                 let rows = self.db.read(|c| c.query("SELECT project_id, dek FROM projects", (), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-                // A customer-wrapped key is resealed when its project is next opened (KMS isn't asked here).
-                let own: Vec<_> = rows.iter().filter(|(_, d)| kms::wrapped_by(d).is_none()).collect();
-                let old = own.iter().filter(|(p, d)| keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true)).count();
-                if old == 0 { serde_json::json!("all") } else { serde_json::json!(own.len() - old) }
+                // A customer-wrapped key says which deployment key sealed it inside (KMS isn't asked).
+                let old = rows
+                    .iter()
+                    .filter(|(p, d)| match kms::sealed_by(d) {
+                        Some(id) => id != keys.current_id(),
+                        None => keys.open_dek(p, d).map(|(_, r)| r.is_some()).unwrap_or(true),
+                    })
+                    .count();
+                if old == 0 { serde_json::json!("all") } else { serde_json::json!(rows.len() - old) }
             }
             Err(_) => serde_json::Value::Null,
         };

@@ -108,6 +108,7 @@ impl IntoResponse for Error {
             Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
+            Error::KeyDenied(_) => (StatusCode::LOCKED, Some("kms_denied")),
             Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
             Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
