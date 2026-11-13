@@ -74,6 +74,16 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     assert!(roll(&api, "", &["mcp", "approve", &approval.expect("an approval")]).status.success());
     assert!(delete.join().unwrap().status.success());
 
+    // Tightened to what it used: read as before (a list names no project), delete only on prj_a,
+    // still asking.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let tight = json_of(&roll(&api, "", &["--json", "token", "tighten", &id, "--apply"]));
+    let rules = &tight["rules"];
+    assert_eq!(rules, &json!([
+        { "product": "postgres", "resources": "*", "actions": { "read": "allow" } },
+        { "product": "postgres", "resources": [{ "id": "prj_a" }], "actions": { "delete": "ask" } },
+    ]), "{tight}");
+
     // Revoked: the next command fails.
     assert!(roll(&api, "", &["token", "revoke", &id]).status.success());
     assert!(!roll(&api, &token, &["db", "list"]).status.success());

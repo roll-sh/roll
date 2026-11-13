@@ -26,6 +26,22 @@ pub enum Token {
     Rotate { id: String },
     /// Change a token: its name, expiry, addresses, or (with --preset/--allow/--ask) its rules.
     Edit(Box<Edit>),
+    /// Its rules narrowed to the actions and resources its requests used (never wider); `--apply`
+    /// makes them its rules.
+    ///
+    /// Examples:
+    ///   roll token tighten tok_…            what it would keep
+    ///   roll token tighten tok_… --apply    keep only that
+    Tighten {
+        id: String,
+        /// Days of activity to go by (1-90).
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Take back what an approval allowed a token for a while (`roll token show` lists them).
+    TakeBack { id: String, approval: String },
     /// Who the token you're using is (`ROLL_TOKEN` or `ROLL_ADMIN_TOKEN`).
     Whoami,
     /// The products, actions and presets the builder offers.
@@ -276,7 +292,15 @@ async fn rules(api: &Api, c: &RuleArgs) -> anyhow::Result<Value> {
 fn describe_rule(r: &Value) -> String {
     let resources = match &r["resources"] {
         Value::String(s) if s == "*" => "every resource".to_string(),
-        Value::Array(a) => a.iter().map(|x| x.get("project").or_else(|| x.get("id")).map(s).unwrap_or_default()).collect::<Vec<_>>().join(", "),
+        Value::Array(a) => a
+            .iter()
+            .map(|x| match (x.get("project"), x.get("id"), x.get("index")) {
+                (Some(p), ..) => format!("project {}", s(p)),
+                (None, Some(id), Some(ix)) => format!("{} indices {}", s(id), s(ix)),
+                (None, id, _) => id.map(s).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
         other => s(other),
     };
     let actions: Vec<String> = r["actions"].as_object().into_iter().flatten().map(|(a, e)| if e == "ask" { format!("{a} (ask)") } else { a.clone() }).collect();
@@ -300,6 +324,11 @@ fn print_grant(g: &Value) {
     }
     for r in g["rules"].as_array().into_iter().flatten() {
         println!("  {}", describe_rule(r));
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    for t in g["temporary"].as_array().into_iter().flatten().filter(|t| t["until"].as_i64().is_some_and(|u| u > now)) {
+        let by = t["approval"].as_str().map(|a| format!(", approved in {a}")).unwrap_or_default();
+        println!("  for a while: {} until {}{by}", describe_rule(&t["rule"]), crate::access::date(t["until"].as_i64().unwrap_or(0)));
     }
     let expires = match g["expires_at"].as_i64() {
         Some(t) => format!("expires {}", crate::access::date(t)),
@@ -367,6 +396,40 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("{}", serde_json::to_string_pretty(&g)?);
             } else {
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
+            }
+        }
+        Token::Tighten { id, days, apply } => {
+            let t = api.get(&format!("/v1/access/tokens/{id}/tighten?days={days}")).await?;
+            if apply && t["narrower"] == true {
+                let g = api.call(reqwest::Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "rules": t["rules"] }))).await?;
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&g)?);
+                } else {
+                    print_grant(&g);
+                }
+                return Ok(());
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&t)?);
+                return Ok(());
+            }
+            let n: i64 = t["used"].as_array().into_iter().flatten().filter_map(|u| u["count"].as_i64()).sum();
+            if t["narrower"] != true {
+                println!("{}", if n == 0 { "it made no requests in that time: revoke it if nothing needs it" } else { "it used everything its rules allow: nothing to narrow" });
+                return Ok(());
+            }
+            println!("from {n} requests over {days} days, it would only be able to:");
+            for r in t["rules"].as_array().into_iter().flatten() {
+                println!("  {}", describe_rule(r));
+            }
+            eprintln!("roll token tighten {id} --apply to keep only that");
+        }
+        Token::TakeBack { id, approval } => {
+            let g = api.call(reqwest::Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{approval}"), None).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&g)?);
+            } else {
+                print_grant(&g);
             }
         }
         Token::Rotate { id } => {

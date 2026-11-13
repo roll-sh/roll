@@ -385,7 +385,8 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
 - A while never becomes for good: a token makes tokens covered by its own rules only, never by
   what it's allowed for now.
 - Each rule for a while names the approval that allowed it. The operator takes it back before it
-  lapses from the token's page (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
+  lapses from the token's page or `roll token take-back <id> <approval>`
+  (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
 
 ### Approvals in chat
@@ -482,7 +483,8 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 
 ### Tighten to what it used
 
-A token's page proposes its rules narrowed to what its allowed requests used in the last 30 days
+A token's page (or `roll token tighten <id> [--apply]`) proposes its rules narrowed to what its
+requests used in the last 30 days, allowed ones and ones that ran on an approval
 (`GET /v1/access/tokens/{id}/tighten?days=`, `roll_access::tighten`), as AWS's access analyzer
 writes a policy from activity:
 
