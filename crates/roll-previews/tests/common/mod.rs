@@ -55,6 +55,9 @@ impl Source for FakeCode {
     async fn head(&self, repo: &str, branch: Option<&str>) -> anyhow::Result<Option<String>> {
         Ok(self.heads.lock().get(&format!("{repo}@{}", branch.unwrap_or("main"))).cloned())
     }
+    async fn default_branch(&self, _repo: &str) -> anyhow::Result<Option<String>> {
+        Ok(Some("main".into()))
+    }
     async fn paths(&self, _repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.paths.lock().get(head).cloned())
     }
@@ -187,6 +190,9 @@ pub struct FakeApps {
     pub fail_deploy: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
+    pub shot: Mutex<Option<Vec<u8>>>,
+    pub shots: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -237,6 +243,11 @@ impl Apps for FakeApps {
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
+    }
+    async fn screenshot(&self, preview: &str, _: &str) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+        let Some(png) = self.shot.lock().clone() else { return Ok(None) };
+        self.shots.lock().push(preview.to_string());
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None }))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {
         None

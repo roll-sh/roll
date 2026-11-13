@@ -208,7 +208,15 @@ impl Row {
     pub fn build(&self) -> &str {
         self.runs.as_deref().unwrap_or(&self.head)
     }
+
+    /// The default branch's preview roll keeps to compare changes with (`github.baseline`).
+    pub fn is_baseline(&self) -> bool {
+        self.change_id.is_none() && self.created_by == BASELINE_BY
+    }
 }
+
+/// Who made a baseline (`created_by`).
+pub const BASELINE_BY: &str = "roll";
 
 /// What a new preview is made from.
 #[derive(Clone, Debug)]

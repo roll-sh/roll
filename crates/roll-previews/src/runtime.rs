@@ -476,6 +476,11 @@ impl Runtime {
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
                 Ok(a) => a,
+                // Stopped while it woke (a sleep or a deploy landing then) and the preview is still
+                // there: the waking page, whose refresh starts what runs now.
+                Err(u) if u.overtaken() && self.store.row(preview).is_ok_and(|r| r.desired == crate::Desired::Active && r.state != crate::State::AwaitingApproval) => {
+                    return Unavailable::Starting.into_response();
+                }
                 Err(u) => return u.into_response(),
             };
             // A container that died underneath us: start it again, once.
@@ -719,6 +724,22 @@ enum Unavailable {
     Failed(String),
 }
 
+/// A start that a stop, a newer deploy or a lost approval overtook: not the service failing.
+fn superseded(e: &str) -> bool {
+    e.starts_with("stopped while starting") || e.starts_with("the change moved on") || e.contains("isn't approved")
+}
+
+impl Unavailable {
+    /// Stopped before it was up, by something other than the service.
+    fn overtaken(&self) -> bool {
+        match self {
+            Unavailable::NotFound => true,
+            Unavailable::Failed(e) => superseded(e),
+            Unavailable::Starting => false,
+        }
+    }
+}
+
 impl IntoResponse for Unavailable {
     fn into_response(self) -> Response {
         match self {
@@ -799,7 +820,6 @@ impl Apps for Runtime {
         // Never long in a converge slot: a service still starting (installing, booting) or whose
         // start a stop or a push overtook isn't failing; the engine asks again later.
         let later = |why: String| -> anyhow::Result<Option<(u16, String)>> { Err(crate::ports::StillDeploying(why).into()) };
-        let superseded = |e: &str| e.starts_with("stopped while starting") || e.starts_with("the change moved on") || e.contains("isn't approved");
         let addr = match me.ready(preview, service, Duration::from_secs(5)).await {
             Ok(a) => a,
             Err(Unavailable::Starting) => return later("starting".into()),

@@ -45,7 +45,7 @@ impl Engine {
         if !s.enabled {
             return Err(Error::Conflict(format!("previews are off for project {}: turn them on in its preview rules", project.name)));
         }
-        let busy = self.store.rows(Some(project_id))?.iter().filter(|r| r.desired == Desired::Active && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
+        let busy = self.store.rows(Some(project_id))?.iter().filter(|r| r.desired == Desired::Active && !r.is_baseline() && !matches!(r.state, State::Queued | State::AwaitingApproval)).count();
         let n = match (change, branch) {
             (Some(id), _) => {
                 let c = self.source.change(id).await.map_err(|e| Error::Internal(e.to_string()))?.ok_or_else(|| Error::NotFound(format!("no change {id}")))?;

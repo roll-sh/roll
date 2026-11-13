@@ -359,6 +359,13 @@ function Form({
         <Toggle label="A commit status (roll/preview)" checked={s.github.status} onChange={(v) => set("github", { ...s.github, status: v })} />
         <Toggle label="A deployment" checked={s.github.deployment} onChange={(v) => set("github", { ...s.github, deployment: v })} />
         <Toggle label="A screenshot of the first service at each push" checked={!!s.github.screenshot} onChange={(v) => set("github", { ...s.github, screenshot: v })} />
+        {s.github.screenshot && (
+          <Toggle
+            label="Compare each change with the default branch (roll keeps a preview of it)"
+            checked={s.github.baseline !== false}
+            onChange={(v) => set("github", { ...s.github, baseline: v })}
+          />
+        )}
         <Toggle label="Warm after each push" note="Its services start as soon as a push is deployed, so the pull request's link opens at once." checked={s.warm} onChange={(v) => set("warm", v)} />
         <Toggle label="A feedback button on its pages" note="For people who open it through roll: a note pinned to the page posts on the change." checked={s.feedback} onChange={(v) => set("feedback", v)} />
       </Section>

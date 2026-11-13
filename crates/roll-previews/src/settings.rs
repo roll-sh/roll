@@ -120,6 +120,15 @@ pub struct GithubRule {
     /// A screenshot of the first service at each new head (it wakes the service once per push).
     #[serde(default)]
     pub screenshot: bool,
+    /// With screenshots on: keep a preview of the default branch (Chromatic's baseline) while
+    /// the project has a change preview, so each change is compared with it. It follows the
+    /// branch, sleeps between screenshots and holds no slot.
+    #[serde(default = "yes")]
+    pub baseline: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -161,7 +170,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true }
     }
 }
 

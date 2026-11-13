@@ -136,6 +136,42 @@ async fn previews_beyond_the_limit_wait_and_start_as_others_go() {
 }
 
 #[tokio::test]
+async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_changes_with() {
+    let e = env(json!({ "enabled": true, "max_previews": 1, "github": { "screenshot": true } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_1", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let rows = e.engine.store.rows(Some(&e.project)).unwrap();
+    let base = rows.iter().find(|r| r.change_id.is_none()).expect("a baseline").clone();
+    assert_eq!((base.repo.as_str(), base.branch.as_deref(), base.head.as_str(), base.state), ("acme/web", Some("main"), "cs_web0", State::Ready));
+    let chg = e.engine.store.row_by_change("chg_1").unwrap().unwrap();
+    assert_eq!(chg.state, State::Ready, "the baseline holds none of the project's one slot");
+    // Whichever screenshot comes first, the change ends up compared with main's.
+    let mut compared = None;
+    for _ in 0..500 {
+        compared = e.code.last_report("chg_1").base_change;
+        if compared.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let compared = compared.expect("compared with the baseline");
+    assert_eq!((compared.branch.as_str(), compared.percent), ("main", 0.0));
+    // It lasts while there are changes, whatever its age, and goes when the rule is off.
+    e.engine.store.update(&base.id, |r| r.last_active_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&base.id).unwrap().desired, Desired::Active);
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "baseline": false } })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row(&base.id).map_or(true, |r| r.desired == Desired::Deleted));
+    assert_eq!(e.engine.store.row(&chg.id).unwrap().desired, Desired::Active);
+}
+
+#[tokio::test]
 async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
     let e = env(json!({ "enabled": true, "seed": { "image": "postgres:18-alpine", "run": "psql \"$DATABASE_URL\" -f seed/anonymise.sql" } }));
     e.apps.seed_exit.store(3, Ordering::SeqCst);

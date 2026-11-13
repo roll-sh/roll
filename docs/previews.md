@@ -721,7 +721,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean };   // all true but screenshot
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean };   // all true but screenshot
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
@@ -762,11 +762,18 @@ type Settings = {
     head before's to compare; "Its first page loads in 1.2 s (+300 ms since the push before)" in
     the comment). The page reports this about itself, so it's bounded (10 minutes, 10 GiB) and
     only ever shown. An operator's own screenshot command only has to write the PNG.
-    When the project has a preview of the repo's default branch (`roll preview create --branch
-    main`), a change's screenshots are also compared with that one's (Chromatic's baseline):
+    A change's screenshots are also compared with the default branch's (Chromatic's baseline):
     `base_change`, the sheet's main view (`GET …/screenshot?base=1`), "Against `main`, the page
-    differs by 8.0%" in the comment. It's read at the change's screenshot, so when main moves the
-    comparison follows at the change's next push.
+    differs by 8.0%" in the comment. With `github.baseline` (on by default) roll keeps that preview
+    itself: once the project has a change preview, it makes one of the first such repo's default
+    branch (created by `roll`; one per project, since every preview runs all the project's
+    services). It follows the branch, sleeps between screenshots, holds none of `max_previews`'
+    slots (it still counts against `max_usd_month`, and waits once that's spent), and lasts while
+    there are change previews, then its TTL. A preview of the repo's default branch someone made
+    (`roll preview create --branch main`) serves instead. Deleted, it comes back at the next pass
+    while the rule is on; turning the rule off deletes it. A change is compared at its screenshot;
+    one taken before the baseline had any is compared once the baseline's first one comes in, and
+    its comment updated. When main moves the comparison follows at the change's next push.
     The same session then takes the page at a phone's width (390 × 844 at twice the density,
     `GET …/screenshot?view=phone`, the sheet's Desktop/Phone), with its own change since the push
     before ("At a phone's width: 3.4%" in the comment), as Percy and Chromatic check widths.
@@ -885,6 +892,7 @@ Ranked by what a person notices first. Done so far:
 - each change's page compared with the default branch's preview (Chromatic's baseline);
 - accessibility per push (what a screen reader can't name, a missing language or title);
 - a phone-width screenshot with its own visual change;
+- every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
 - expiring share links for people outside the team (revocable, shown once);
 - page speed per push (timed with the screenshot, compared with the push before);
@@ -920,23 +928,19 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A baseline that keeps itself**: comparing with the default branch needs someone to make a
-   preview of it. A `baseline` rule (on with screenshots) keeps one per repo with services,
-   following the default branch and asleep until compared (about $0.0006 a month), so every
-   change is compared with main without a step.
-2. **A tidier pull request comment**: the page's checks (speed, errors, accessibility, visual
+1. **A tidier pull request comment**: the page's checks (speed, errors, accessibility, visual
    change, against main) in one summary line with the details folded (Vercel's bot comment), so
    the comment stays short however much it knows.
-3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

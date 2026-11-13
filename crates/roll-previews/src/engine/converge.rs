@@ -511,6 +511,8 @@ impl Engine {
                 let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok() && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok();
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
+                } else if kept {
+                    self.compare_waiting(r).await;
                 }
                 if kept {
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
@@ -534,9 +536,28 @@ impl Engine {
     async fn compare_with_default_branch(&self, r: &Row) {
         let Ok(Some(default)) = self.source.default_branch(&r.repo).await else { return };
         let Ok(rows) = self.store.rows(Some(&r.project_id)) else { return };
-        let Some(base) = rows.into_iter().find(|x| x.change_id.is_none() && x.desired == Desired::Active && x.repo == r.repo && x.branch.as_deref() == Some(default.as_str())) else { return };
-        if let Err(e) = self.store.compare_with_base(&r.id, &base.id, &default) {
+        let rows: Vec<Row> = rows.into_iter().filter(|x| x.change_id.is_none() && x.desired == Desired::Active).collect();
+        // The repo's own default branch, else the project's baseline (of another of its repos).
+        let own = rows.iter().find(|x| x.repo == r.repo && x.branch.as_deref() == Some(default.as_str()));
+        let Some(base) = own.or_else(|| rows.iter().find(|x| x.is_baseline())) else { return };
+        let Some(branch) = base.branch.as_deref() else { return };
+        if let Err(e) = self.store.compare_with_base(&r.id, &base.id, branch) {
             warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's");
+        }
+    }
+
+    /// After branch preview `b`'s screenshot: the project's changes not compared with the default
+    /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
+    async fn compare_waiting(&self, b: &Row) {
+        let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
+        for r in rows.into_iter().filter(|x| x.change_id.is_some() && x.desired == Desired::Active) {
+            if !matches!(self.store.base_change(&r.id), Ok(None)) {
+                continue;
+            }
+            self.compare_with_default_branch(&r).await;
+            if matches!(self.store.base_change(&r.id), Ok(Some(_))) {
+                self.report(r).await;
+            }
         }
     }
 

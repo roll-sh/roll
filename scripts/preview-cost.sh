@@ -217,8 +217,15 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true}}' >/dev/null
-# A preview of the default branch, the baseline a change's screenshots are compared with.
-MAINPV=$(api POST /v1/previews "{\"project\":\"$PRJ\",\"repo\":\"acme/web\",\"branch\":\"main\"}" | jq_ "d['id']")
+# roll keeps a preview of the default branch (github.baseline): the change's screenshots are
+# compared with its.
+MAINPV=""
+for _ in $(seq 1 120); do
+  MAINPV=$(api GET "/v1/previews?project=$PRJ" | jq_ "next((p['id'] for p in d if p.get('branch') == 'main' and p['created_by'] == 'roll'), '')")
+  [ -n "$MAINPV" ] && break
+  sleep 0.5
+done
+[ -n "$MAINPV" ] || { echo "roll should keep a preview of main once screenshots are on (github.baseline)"; exit 1; }
 for _ in $(seq 1 120); do
   [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
   sleep 0.5
@@ -253,7 +260,10 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
-sleep 1
+for _ in $(seq 1 60); do
+  [ "$(docker ps -q --filter "name=^$CONTAINER\$" | wc -l)" = 0 ] && break
+  sleep 0.5
+done
 GONE=$(docker ps -q --filter "name=^$CONTAINER\$" | wc -l)
 du_of() { du -sk "$HOME_DIR/$1" 2>/dev/null | cut -f1; }
 OBJ_KB=$(du_of objects)
@@ -266,10 +276,16 @@ if [ -n "$PG_BRANCH" ]; then
   # The preview's code tries to get the superuser to run it (a function shadowing one the schema
   # diff calls, pg_get_indexdef(oid), the database's search_path pointed at it): the diff runs as the branch's role
   # with only the catalog's names, so the role stays what it is.
-  APP_DB2=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  # Asleep, it wakes on the visit (a 503 waking page until then, as a browser's refresh would).
+  for _ in $(seq 1 60); do
+    ENV_TXT=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt")
+    case "$ENV_TXT" in *DATABASE_URL=*) break;; esac
+    sleep 1
+  done
+  APP_DB2=$(echo "$ENV_TXT" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
   APP_ROLE=$(echo "$APP_DB2" | sed -E 's#^postgres://([^:]+):.*#\1#')
   PLANTED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB2" -Atc "CREATE FUNCTION public.pg_get_indexdef(oid) RETURNS text LANGUAGE plpgsql AS \$f\$ BEGIN EXECUTE 'ALTER ROLE $APP_ROLE SUPERUSER'; RETURN 'x'; END \$f\$; ALTER DATABASE main SET search_path = public, pg_catalog" 2>&1 | tail -1 || true)
-  [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED"; exit 1; }
+  [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED (env.txt: $(echo "$ENV_TXT" | head -c 300))"; exit 1; }
   api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"}}}' >/dev/null
   SCHEMA=""
   for _ in $(seq 1 120); do
@@ -382,11 +398,13 @@ for _ in $(seq 1 120); do
 done
 [ -n "$BASE" ] || { echo "the change's page should be compared with main's preview: $(api GET "/v1/previews/$MAINPV" | jq_ "{k: d.get(k) for k in ('state', 'screenshot_at', 'branch')}")"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?base=1")" = image/png ] || { echo "main's screenshot should be there to compare"; exit 1; }
-api DELETE "/v1/previews/$MAINPV" >/dev/null
+# Turned off, it goes.
+OFF=$(api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"baseline":false}}'); echo "$OFF" | grep -q "\"baseline\":false" || { echo "turning the baseline off: $OFF"; exit 1; }
 for _ in $(seq 1 120); do
   [ "$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)")" = 1 ] && break
   sleep 0.5
 done
+[ "$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)")" = 1 ] || { echo "with github.baseline off, main's preview should go"; exit 1; }
 PHONE=$(curl -sS "http://$API/v1/previews/$PV/screenshot?view=phone" | python3 -c "import sys, struct; b=sys.stdin.buffer.read(); print(f'{struct.unpack(\">I\", b[16:20])[0]} px wide, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')")
 case "$PHONE" in "780 px wide, PNG") ;; *) echo "the phone-width screenshot should be 390 px at twice the density: $PHONE"; exit 1;; esac
 
