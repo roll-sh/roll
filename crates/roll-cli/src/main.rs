@@ -17,6 +17,7 @@ mod search;
 mod storage;
 mod redis;
 mod seal;
+mod fallback;
 mod secrets;
 mod apps;
 
@@ -256,6 +257,12 @@ impl Api {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+        self.answer(method, path, body).await?.map_err(|(_, message)| anyhow::anyhow!(message))
+    }
+
+    /// What `call` answers, telling no answer at all (the outer error: rolld unreachable) from an
+    /// answer that wasn't a success (its status and message).
+    async fn answer(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Result<Value, (reqwest::StatusCode, String)>> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
         if let Some(k) = &self.key {
             req = req.bearer_auth(k);
@@ -274,16 +281,17 @@ impl Api {
             let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             // Batch endpoints report per-record errors.
             let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
-            match value["error"].as_str().or(per_record) {
-                Some(e) => bail!("{e}"),
-                None if text.trim().is_empty() => bail!("{status}"),
-                None => bail!("{status}: {}", text.trim()),
-            }
+            let message = match value["error"].as_str().or(per_record) {
+                Some(e) => e.to_string(),
+                None if text.trim().is_empty() => status.to_string(),
+                None => format!("{status}: {}", text.trim()),
+            };
+            return Ok(Err((status, message)));
         }
         if text.is_empty() {
-            return Ok(Value::Null);
+            return Ok(Ok(Value::Null));
         }
-        serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
+        Ok(Ok(serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))?))
     }
     /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
     /// (`…/t/<tenant>/v1/tasks`).

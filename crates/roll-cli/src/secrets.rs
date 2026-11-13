@@ -644,6 +644,13 @@ pub struct Run {
     pub watch: bool,
     #[arg(long, default_value_t = 5, requires = "watch")]
     pub interval: u64,
+    /// Keep the values in this file too, encrypted (with the token, or ROLL_FALLBACK_KEY), and
+    /// start from it when rolld can't be reached (never when it refuses).
+    #[arg(long, env = "ROLL_FALLBACK")]
+    pub fallback: Option<std::path::PathBuf>,
+    /// How old a fallback may be and still be used: 72h, 30m, 7d.
+    #[arg(long, default_value = "7d", requires = "fallback")]
+    pub fallback_max_age: String,
     /// The command and its arguments.
     #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -2356,27 +2363,68 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
 async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
-    let v = c.call(Method::GET, &format!("{}/values?{}", c.env(&at.env), c.q()), None).await?;
+    let path = format!("{}/values?{}", c.env(&at.env), c.q());
+    let header = |fetched_at| crate::fallback::Header { v: 1, project: c.project.clone(), environment: at.env.clone(), path: at.path.clone(), fetched_at };
+    let v = match (c.api.answer(Method::GET, &path, None).await, &r.fallback) {
+        (Ok(Ok(v)), _) => v,
+        // Refused (a revoked token, no such environment): never the fallback.
+        (Ok(Err((status, message))), _) if !status.is_server_error() => bail!("{message}"),
+        (Ok(Err((_, message))), None) => bail!("{message}"),
+        (Err(e), None) => return Err(e),
+        // No answer, or rolld failing: start from the last values fetched, saying so.
+        (failed, Some(file)) => {
+            let why = match failed {
+                Err(e) => e.to_string(),
+                Ok(Err((_, m))) => m,
+                Ok(Ok(_)) => unreachable!(),
+            };
+            let secret = crate::fallback::secret(c.api.key.as_deref())?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+            let (values, h) = crate::fallback::read(file, &secret, &header(0), now, crate::fallback::duration_ms(&r.fallback_max_age)?).with_context(|| format!("{why}; and the fallback didn't do"))?;
+            eprintln!("roll run: {why}; starting from {} (fetched {} minutes ago)", file.display(), (now - h.fetched_at) / 60_000);
+            return Ok((env_of(values.into_iter(), r), Vec::new()));
+        }
+    };
     let problems: Vec<String> = v["problems"].as_array().into_iter().flatten().map(|p| format!("{}: {}", s(&p["key"]), s(&p["problem"]))).collect();
     if !problems.is_empty() && !r.allow_unresolved {
         bail!("{} of {}:{} didn't resolve (pass --allow-unresolved to run anyway):\n  {}", problems.len(), at.env, at.path, problems.join("\n  "));
     }
-    let env = v["values"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(k, _)| r.override_env || std::env::var_os(k).is_none())
-        .map(|(k, val)| (k.clone(), val.as_str().unwrap_or_default().to_string()))
-        .collect();
+    // Only what resolved cleanly is kept for an outage.
+    if let (Some(file), true) = (&r.fallback, problems.is_empty()) {
+        let kept = crate::fallback::secret(c.api.key.as_deref()).and_then(|secret| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+            crate::fallback::write(file, &secret, header(now), v["values"].as_object().unwrap_or(&serde_json::Map::new()))
+        });
+        if let Err(e) = kept {
+            eprintln!("roll run: couldn't keep the fallback ({e:#})");
+        }
+    }
+    let env = env_of(v["values"].as_object().cloned().unwrap_or_default().into_iter(), r);
     let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
     Ok((env, leases))
+}
+
+/// No answer from rolld at all (a refusal has an answer).
+fn unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some())
+}
+
+/// The variables to set: the shell's own win unless `--override`.
+fn env_of(values: impl Iterator<Item = (String, Value)>, r: &Run) -> Vec<(String, String)> {
+    values.filter(|(k, _)| r.override_env || std::env::var_os(k).is_none()).map(|(k, val)| (k, val.as_str().unwrap_or_default().to_string())).collect()
 }
 
 /// `roll run`: resolve, then exec the command with the values in its environment; with
 /// `--watch`, run it as a child and restart it when the environment's digest changes.
 pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     let at = r.at.resolve();
-    let project = project(api, at.project.as_deref()).await?;
+    // Finding the project may ask rolld (a name, or the token's own): in an outage, the fallback
+    // file's own (checked again when it's opened) for the environment and folder asked.
+    let project = match (project(api, at.project.as_deref()).await, &r.fallback) {
+        (Ok(p), _) => p,
+        (Err(e), Some(file)) if unreachable(&e) => crate::fallback::header(file).map(|h| h.project).map_err(|_| e)?,
+        (Err(e), _) => return Err(e),
+    };
     let c = Client { project, api, at: at.clone() };
     let (env, leases) = run_env(&c, &at, &r).await?;
     if r.watch {
@@ -2402,7 +2450,12 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
 /// the command's own code when it exits by itself.
 async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>, mut leases: Vec<String>) -> anyhow::Result<()> {
     let digest_path = format!("{}/digest?{}", c.env(&at.env), c.q());
-    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+    // Started from a fallback: the first digest rolld answers reloads the command.
+    let mut last = match c.call(Method::GET, &digest_path, None).await {
+        Ok(v) => v["digest"].clone(),
+        Err(e) if r.fallback.is_some() && unreachable(&e) => Value::Null,
+        Err(e) => return Err(e),
+    };
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
