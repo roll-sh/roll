@@ -839,6 +839,10 @@ Ranked by what a person notices first. Done so far:
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
 - per-branch project variables (`env_for`);
+- roll apps live in `scripts/preview-apps.sh` (2026-11-13, load 46: a change's `pv-` environment
+  built at its commit and live in 39 s, its first request 47 ms, the branch's Redis seen, a
+  preview's own variable set and then unset there, nothing left after landing); it found that a
+  request during a converge could be lost (fixed in #27);
 - removed variables unset from roll apps' `pv-` environments (the names roll set kept in
   `ROLL_PREVIEW_SET` there; a person's own never touched);
 - main merged in (roll MCP and accounts), and the previews API scoped to a signed-in person's own
@@ -862,28 +866,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **roll apps live, in `scripts/preview-apps.sh`** (roll apps is in this branch since the merge
-   queue stacked it): a repo with a Dockerfile as a roll apps service, a change's `pv-`
-   environment built at its commit with the branched Redis, a preview's own variable reaching it
-   and, removed, leaving it (`ROLL_PREVIEW_SET`), all gone after landing. Written; it runs once
-   the shared disk has room for a build again.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
-   (`wip/roll-apps-next`) to reach this branch: today's apps refuses an unknown field, which would
+   (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables; and `catalog()` should read `[app.previews.run]` and
    per-environment `run` overrides, not only the service's `memory_mb`.
-4. **A visual change per push**: the screenshot at each head compared with the previous head's,
+3. **A visual change per push**: the screenshot at each head compared with the previous head's,
    and the share of pixels that changed in the pull request comment ("the page changed 12%",
    with both images), as Percy and Chromatic do for visual review, from screenshots roll already
    takes.
-5. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
+4. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
    feedback for that page. That needs a read path the preview's origin can use without a
    credential (a signed, expiring list per page), which is why it waits.
-6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
