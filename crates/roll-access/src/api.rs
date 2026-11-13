@@ -26,6 +26,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
         .route("/v1/access/tokens/{id}/tighten", get(tighten))
+        .route("/v1/access/tokens/{id}/temporary/{approval}", axum::routing::delete(forget))
         .route("/v1/access/approvals", get(approvals))
         .route("/v1/access/approvals/{id}", get(approval))
         .route("/v1/access/approvals/{id}/approve", post(approve))
@@ -332,6 +333,13 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
     Ok(Json(json!(blocking(a, move |a| a.store.revoke(&id)).await?)))
 }
 
+/// Take back what an approval allowed a token for a while. The operator decides approvals, so
+/// the operator takes them back.
+async fn forget(State(a): S, ext: Extensions, Path((id, approval)): Path<(String, String)>) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "take back an approval")?;
+    Ok(Json(json!(blocking(a, move |a| a.store.forget(&id, &approval)).await?)))
+}
+
 /// A new secret, the same rules: shown once. A grant may rotate itself, or tokens it covers.
 async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     let (target_id, a2) = (id.clone(), a.clone());
@@ -403,7 +411,8 @@ async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axu
     let decided = blocking(a.clone(), move |a| a.store.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
     if let Some((grant, rule, until)) = remembered {
-        blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until)).await?;
+        let apr = decided.id.clone();
+        blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until, &apr)).await?;
     }
     Ok(Json(json!(decided)))
 }

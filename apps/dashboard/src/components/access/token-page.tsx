@@ -63,7 +63,7 @@ function Token({ id }: { id: string }) {
                 <p className="text-[12px] text-subtle">{g.ask_otherwise ? "Anything else waits for your approval." : "Anything else is refused."}</p>
               </div>
             </Panel>
-            {statusOf(g) === "active" && <Temporary g={g} projectName={projectName} resourceName={resourceName} />}
+            {statusOf(g) === "active" && <Temporary g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             {statusOf(g) === "active" && <Tighten g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             <Approvals list={approvals ?? []} />
             <Requests id={id} events={events} />
@@ -154,19 +154,59 @@ function Tighten({
 }
 
 /** What remembered approvals allow it for now, until when. */
-function Temporary({ g, projectName, resourceName }: { g: Grant; projectName: (id: string) => string; resourceName: (p: string, id: string) => string }) {
+function Temporary({
+  g,
+  refresh,
+  projectName,
+  resourceName,
+}: {
+  g: Grant;
+  refresh: () => Promise<void>;
+  projectName: (id: string) => string;
+  resourceName: (p: string, id: string) => string;
+}) {
+  const [error, setError] = useState<string | null>(null);
   const live = (g.temporary ?? []).filter((t) => t.until > Date.now());
   if (live.length === 0) return null;
+  const takeBack = async (approval: string) => {
+    setError(null);
+    try {
+      await accessApi.forget(g.id, approval);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
   return (
     <Panel title="Allowed for a while">
       <ul className="divide-y divide-line">
         {live.map((t, i) => (
-          <li key={i} className="flex flex-wrap items-center gap-3 px-5 py-2.5 text-[12px]">
+          <li key={t.approval ?? i} className="flex flex-wrap items-center gap-3 px-5 py-2.5 text-[12px]">
             <span className="min-w-0 flex-1 text-muted">{describeRule(t.rule, projectName, resourceName)}</span>
-            <span className="shrink-0 text-subtle">until {relative(t.until)}</span>
+            <span className="shrink-0 text-subtle">
+              until {relative(t.until)}
+              {t.approval && (
+                <>
+                  {" · "}
+                  <Link href={`/dashboard/access/approvals?id=${encodeURIComponent(t.approval)}`} className="hover:text-fg hover:underline">
+                    approved here
+                  </Link>
+                </>
+              )}
+            </span>
+            {t.approval && (
+              <button onClick={() => takeBack(t.approval!)} className={btn}>
+                Take back
+              </button>
+            )}
           </li>
         ))}
       </ul>
+      {error && (
+        <div className="px-5 pb-3">
+          <ErrorNote error={error} />
+        </div>
+      )}
     </Panel>
   );
 }
