@@ -5566,6 +5566,35 @@ fn merge_as_parallel_hash(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<(Arc<Plan>,
     Some((left, right.clone(), *m))
 }
 
+/// A Parallel Hash's inner side that is an index-only scan of a whole index (no bounds,
+/// conditions or predicate) as a sequential scan of its table: the rows the index has an
+/// entry of, which are the table's, read by the parallel scan's workers (`compute_in_workers`).
+fn whole_index_as_seq(p: &Arc<Plan>) -> Option<Arc<Plan>> {
+    use crate::sql::plan::Access;
+    let Plan::Scan(sp) = &**p else { return None };
+    let (ix, b) = sp.index.as_ref()?;
+    let whole = matches!(&sp.access, Access::Index { only: true, quals, .. } if quals.is_empty())
+        && ix.predicate.is_none()
+        && ix.method == "btree"
+        && b.eq.is_empty()
+        && b.any.is_none()
+        && b.lower.is_none()
+        && b.upper.is_none()
+        && b.skip.is_none();
+    if !whole
+        || sp.with_key
+        || sp.mark.is_some()
+        || sp.limit.is_some()
+        || sp.sample.is_some()
+        || sp.current_of.is_some()
+        || sp.fdw.is_some()
+        || sp.sys
+    {
+        return None;
+    }
+    Some(Arc::new(Plan::Scan(Box::new(crate::sql::plan::ScanPlan { index: None, reverse: false, access: Access::Seq, ..(**sp).clone() }))))
+}
+
 /// What a join's output needs copied: `need` and the columns its condition reads.
 fn join_keep(need: Option<&[bool]>, cond: Option<&Expr>, width: usize) -> Option<Box<[bool]>> {
     let mut k: Vec<bool> = need?.to_vec();
@@ -5936,12 +5965,18 @@ impl HashJoinNode {
         // (The keys of the rows in the table, in its rows' order while it has one batch: the
         // batch's table is made of them, not of the keys evaluated again.)
         let mut prekeys = Some(Vec::new());
+        // (A Parallel Hash over a whole index-only scan: its rows read as the table's, the
+        // same rows in another order, which nothing reads.)
+        let inner_plan = match (&ph, &st) {
+            (Some(_), None) => whole_index_as_seq(&self.right_plan).unwrap_or_else(|| self.right_plan.clone()),
+            _ => self.right_plan.clone(),
+        };
         ctx.statement(|| {
-            let mut node = open_need(&self.right_plan, need, ctx)?;
+            let mut node = open_need(&inner_plan, need, ctx)?;
             // A Parallel Hash's inner rows: PostgreSQL's participants scan and insert them
             // in no set order, so the scan's workers read them as stored, their keys computed
             // there (after each row's columns).
-            let base = match (&ph, &*self.right_plan) {
+            let base = match (&ph, &*inner_plan) {
                 (Some(_), Plan::Scan(_)) if st.is_none() => match self.rkeys.iter().map(super::kernel::compile).collect::<Option<Vec<_>>>() {
                     Some(extra) => node.compute_in_workers(super::Computed { extra, any_order: true, ..Default::default() }, ctx)?,
                     None => None,
