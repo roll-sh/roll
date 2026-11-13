@@ -518,8 +518,9 @@ impl Cluster {
         let mut state = ClusterState { dialect: config.dialect, ..state };
         state.metadata.dialect = config.dialect;
         // x-pack's stack templates (`logs-*-*` and friends); OpenSearch has none.
-        if config.dialect == Dialect::Elasticsearch && config.node_setting("stack.templates.enabled") != Some("false") {
-            crate::meta::stack_templates::install_missing(&mut state.metadata, crate::time::now_millis());
+        if config.dialect == Dialect::Elasticsearch {
+            let on = crate::meta::stack_templates::Registries::of(&config);
+            crate::meta::stack_templates::install_missing(&mut state.metadata, on, crate::time::now_millis());
         }
         let (changes, _) = tokio::sync::watch::channel(state.version);
         let thread_pools = crate::thread_pool::ThreadPools::new(&config);
@@ -666,8 +667,9 @@ impl Cluster {
         // x-pack's template registry re-adds a deleted built-in on the next cluster state change
         // (a `DELETE /_index_template/*` doesn't remove `logs` for good); roll re-adds it in the
         // same update, which no client can tell apart.
-        if next.dialect == Dialect::Elasticsearch && self.config.node_setting("stack.templates.enabled") != Some("false") {
-            crate::meta::stack_templates::install_missing(&mut next.metadata, crate::time::now_millis());
+        if next.dialect == Dialect::Elasticsearch {
+            let on = crate::meta::stack_templates::Registries::of(&self.config);
+            crate::meta::stack_templates::install_missing(&mut next.metadata, on, crate::time::now_millis());
         }
         next.version += 1;
         next.metadata.version += 1;

@@ -62,6 +62,9 @@ pub struct WriteArgs {
     pub require_alias: bool,
     pub require_data_stream: bool,
     pub dynamic_templates: Option<Map>,
+    /// Bulk `dynamic_template_params`: field path → `{param: value}` for the `{{param}}`
+    /// placeholders of the field's dynamic template.
+    pub dynamic_template_params: Option<Map>,
     /// The op comes from an internal action (update, reindex): no versioning validation.
     pub internal: bool,
     /// Bulk `list_executed_pipelines`.
@@ -493,14 +496,18 @@ pub struct Prepared {
 /// Parses `source` for `idx` (merging a dynamic mapping update first when the document needs
 /// one) and builds the engine document.
 ///
-/// `dynamic_templates` is the request's field path → dynamic template name map.
-pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: Option<&str>, source: &Bytes, value: &Value, dynamic_templates: Option<&Map>) -> EsResult<Prepared> {
+/// `args` (a client's write) gives the request's `dynamic_templates` (field path → dynamic
+/// template name) and `dynamic_template_params`.
+pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: Option<&str>, source: &Bytes, value: &Value, args: Option<&WriteArgs>) -> EsResult<Prepared> {
     let mut idx = idx;
-    let requested = dynamic_templates.filter(|m| !m.is_empty()).map(|m| Arc::new(m.clone()));
+    let given = |m: Option<&Map>| m.filter(|m| !m.is_empty()).map(|m| Arc::new(m.clone()));
+    let requested = given(args.and_then(|a| a.dynamic_templates.as_ref()));
+    let params = given(args.and_then(|a| a.dynamic_template_params.as_ref()));
     for _attempt in 0..8 {
         let st = cluster.state();
         let mut ctx = idx.mapping_ctx();
         ctx.requested_templates = requested.clone();
+        ctx.template_params = params.clone();
         ctx.join_routing = Some(routing.is_some());
         let mut parsed = crate::document::parse_document(&idx.mapping, &ctx, value, Some(source), Some(id))?;
         if let Some(update) = parsed.dynamic_update {

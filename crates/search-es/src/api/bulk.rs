@@ -35,6 +35,24 @@ fn token_name(v: &Value) -> &'static str {
     }
 }
 
+/// `dynamic_template_params` maps field paths to `{param: text}`; a param's value is read as
+/// text, so a null, array or object fails the whole request (a field's value that isn't an
+/// object carries no params).
+fn check_template_params(params: &Map, line: &[u8], action: &str) -> EsResult<()> {
+    use crate::json::locate::{Seg, Target, locate};
+    for (field, v) in params {
+        let Value::Obj(p) = v else { continue };
+        for (k, pv) in p {
+            if matches!(pv, Value::Null | Value::Arr(_) | Value::Obj(_)) {
+                let path = [Seg::Key(action), Seg::Key("dynamic_template_params"), Seg::Key(field), Seg::Key(k)];
+                let (l, c) = locate(line, &path, Target::Value).unwrap_or((1, 1));
+                return Err(EsError::illegal_argument(format!("Expected text at {l}:{c} but found {}", token_name(pv))));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn trim_cr(b: &[u8]) -> &[u8] {
     if b.last() == Some(&b'\r') { &b[..b.len() - 1] } else { b }
 }
@@ -97,6 +115,7 @@ pub fn parse(data: &Bytes, defaults: &WriteArgs, default_index: Option<&str>, de
                     if let Value::Obj(_) = x
                         && k != "_source"
                         && k != "dynamic_templates"
+                        && k != "dynamic_template_params"
                     {
                         return Err(EsError::illegal_argument(format!("Malformed action/metadata line [{line}], expected a simple value for field [{k}] but found [START_OBJECT]")));
                     }
@@ -135,10 +154,11 @@ pub fn parse(data: &Bytes, defaults: &WriteArgs, default_index: Option<&str>, de
                         "require_alias" => args.require_alias = crate::units::parse_bool(&text())?,
                         "require_data_stream" => args.require_data_stream = crate::units::parse_bool(&text())?,
                         "list_executed_pipelines" => args.list_executed_pipelines = crate::units::parse_bool(&text())?,
-                        "dynamic_templates" => {
-                            if let Value::Obj(dt) = x {
-                                args.dynamic_templates = Some(dt.clone());
-                            }
+                        // Objects only: a simple value is an unknown parameter.
+                        "dynamic_templates" if x.as_object().is_some() => args.dynamic_templates = x.as_object().cloned(),
+                        "dynamic_template_params" if let Some(p) = x.as_object() => {
+                            check_template_params(p, action_line, action_name)?;
+                            args.dynamic_template_params = Some(p.clone());
                         }
                         "_type" => {}
                         other => return Err(EsError::illegal_argument(format!("Action/metadata line [{line}] contains an unknown parameter [{other}]"))),

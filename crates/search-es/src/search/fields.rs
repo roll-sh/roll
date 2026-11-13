@@ -430,6 +430,14 @@ pub fn fetch_fields(table: &FieldTable, source: Option<&Value>, specs: &[FieldAn
             // Nested fields are returned under their nested object (below).
             continue;
         }
+        // A `constant_keyword` with a value returns it for every document, whatever the source
+        // holds (`ConstantKeywordFieldMapper.valueFetcher`).
+        if f.kind == Kind::ConstantKeyword
+            && let Some(c) = &f.constant_value
+        {
+            fields.insert(name, Value::Arr(vec![Value::Str(c.clone())]));
+            continue;
+        }
         let mut raw = Vec::new();
         let coords = matches!(f.kind, Kind::GeoPoint | Kind::Point);
         let extract = if coords { crate::engine::source::extract_values_keeping_coordinates } else { crate::engine::source::extract_values };

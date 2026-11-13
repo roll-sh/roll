@@ -66,6 +66,7 @@ pub fn write_args(ctx: &Ctx) -> EsResult<WriteArgs> {
         require_alias: ctx.bool_param("require_alias", false)?,
         require_data_stream: ctx.bool_param("require_data_stream", false)?,
         dynamic_templates: None,
+        dynamic_template_params: None,
         internal: false,
         list_executed_pipelines: false,
     })
@@ -351,7 +352,7 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
         let shard = crate::meta::routing::shard_for(&target.index, "", Some(&routing));
         check_active_shards(ctx, &target.index, shard).await?;
         let given = if auto_id { String::new() } else { args.id.clone().unwrap_or_default() };
-        let prepared = write::prepare(cluster, target.index.clone(), &given, Some(&routing), &source, &value, args.dynamic_templates.as_ref()).await?;
+        let prepared = write::prepare(cluster, target.index.clone(), &given, Some(&routing), &source, &value, Some(&args)).await?;
         let id = prepared.id.clone();
         return write::apply_index(prepared, &args, false, &id).map(|o| with_executed(o, &args, executed));
     }
@@ -362,7 +363,7 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
     // A document that fails to index after a pipeline rewrote it goes to the failure store as
     // rewritten (`IndexRequest.source()` is the ingested document by then).
     let ingested = |e: EsError| if executed.is_empty() { e } else { e.with_hidden("ingested_source", value.clone()) };
-    let prepared = write::prepare(cluster, target.index.clone(), &id, routing.as_deref(), &source, &value, args.dynamic_templates.as_ref()).await.map_err(ingested)?;
+    let prepared = write::prepare(cluster, target.index.clone(), &id, routing.as_deref(), &source, &value, Some(&args)).await.map_err(ingested)?;
     write::apply_index(prepared, &args, auto_id, &id).map(|o| with_executed(o, &args, executed))
 }
 

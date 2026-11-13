@@ -1656,8 +1656,8 @@ need arms); `search::computed_sort::{ScriptKey, GeoKey}`; `search_source::parse_
 `engine::shapes::centroid_geometry` and a `<path>\0centroid` binary doc-values sub-field on
 `geo_shape`/`shape` fields (`FieldInfo::subfield("centroid")`, the exact centroid Elasticsearch keeps
 in its doc value header); `counted_keyword` fields get a `<path>\0count` binary sub-field
-(`subfield("count")`); `Cluster::update` re-adds missing stack templates after every change (as
-x-pack's registry does). search-painless: `cls::VERSION_OBJ` (`Version`, visible only in the
+(`subfield("count")`); `Cluster::update` re-adds missing stack and otel-data templates after every change (as
+x-pack's registries do; `meta::stack_templates::Registries`). search-painless: `cls::VERSION_OBJ` (`Version`, visible only in the
 contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_allowlist(ctx)` and
 `Program.version_allowlist` (set by the engine after compiling).
 

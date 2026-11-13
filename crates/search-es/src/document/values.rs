@@ -631,7 +631,8 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
         }
         "keyword" | "wildcard" | "version" => {
             let s = text_of(w.p)?;
-            if f.ty == "keyword"
+            // `version` has no `ignore_above`; a wildcard past it is left out like a keyword.
+            if f.ty != "version"
                 && let Some(limit) = param_i64(f, "ignore_above", ctx)
                 && (limit < 0 || super::exceeds_ignore_above(&s, limit as usize))
             {

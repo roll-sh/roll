@@ -144,3 +144,36 @@ fn java_regex_classes_are_ascii() {
         assert!(rx.is_ok(), "{java}: {rx:?}");
     }
 }
+
+/// Composing templates (`MapperService.RawFieldMappingMerge`), as Elasticsearch 9.5.5 resolves
+/// them: `object` and `nested` definitions merge with only the earlier `properties` (and
+/// `subobjects`) kept, any other later definition replaces the earlier one, and a dotted name's
+/// parent isn't a definition.
+#[test]
+fn composing_templates_replaces_all_but_object_definitions() {
+    let ctx = ctx_for(None);
+    let compose = |a: &str, b: &str| {
+        let parse = |s: &str| Mapping::parse(parse(s.as_bytes()).unwrap().unwrap().as_object().unwrap(), &ctx).unwrap();
+        parse(a).merge(&parse(b), &ctx, MergeReason::IndexTemplate).unwrap().to_value(&ctx, false).to_json()
+    };
+    let pt = r#"{"properties":{"a":{"type":"passthrough","priority":1,"time_series_dimension":true,"properties":{"k":{"type":"keyword"}}}}}"#;
+    assert_eq!(
+        compose(pt, r#"{"properties":{"a":{"type":"passthrough","priority":2,"properties":{"k2":{"type":"keyword"}}}}}"#),
+        r#"{"properties":{"a":{"type":"passthrough","priority":2,"properties":{"k2":{"type":"keyword"}}}}}"#
+    );
+    assert_eq!(
+        compose(pt, r#"{"properties":{"a":{"properties":{"k2":{"type":"keyword"}}}}}"#),
+        r#"{"properties":{"a":{"properties":{"k2":{"type":"keyword"}}}}}"#
+    );
+    assert_eq!(
+        compose(
+            r#"{"properties":{"a":{"dynamic":"strict","properties":{"k":{"type":"keyword"}}}}}"#,
+            r#"{"properties":{"a":{"type":"nested","properties":{"k2":{"type":"keyword"}}}}}"#
+        ),
+        r#"{"properties":{"a":{"type":"nested","properties":{"k":{"type":"keyword"},"k2":{"type":"keyword"}}}}}"#
+    );
+    assert_eq!(
+        compose(r#"{"properties":{"a":{"dynamic":"strict","properties":{"k":{"type":"keyword"}}}}}"#, r#"{"properties":{"a.k2":{"type":"keyword"}}}"#),
+        r#"{"properties":{"a":{"dynamic":"strict","properties":{"k":{"type":"keyword"},"k2":{"type":"keyword"}}}}}"#
+    );
+}

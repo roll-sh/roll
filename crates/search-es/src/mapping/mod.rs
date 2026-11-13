@@ -79,6 +79,9 @@ pub struct MappingCtx {
     /// The write request's `dynamic_templates` (field path → template name): those fields map
     /// through the named template, whatever its match conditions.
     pub requested_templates: Option<Arc<Map>>,
+    /// The write request's `dynamic_template_params` (field path → `{param: value}`), which fill
+    /// the `{{param}}` placeholders of the dynamic template a field maps through.
+    pub template_params: Option<Arc<Map>>,
     /// Whether the document being parsed has a `_routing` (`None`: unknown, unchecked):
     /// child documents of a `join` field need one.
     pub join_routing: Option<bool>,
@@ -135,6 +138,7 @@ impl MappingCtx {
             ),
             vectordb: crate::meta::index_mode::IndexMode::of(s) == crate::meta::index_mode::IndexMode::VectordbDocument,
             requested_templates: None,
+            template_params: None,
             join_routing: None,
             warnings: RefCell::new(Vec::new()),
             routing_path: if crate::meta::index_mode::IndexMode::of(s) == crate::meta::index_mode::IndexMode::TimeSeries {
@@ -826,6 +830,20 @@ pub struct ObjectMapper {
     /// children are refused.
     pub disable_objects: Option<bool>,
     pub children: BTreeMap<String, Mapper>,
+    /// Built for a dotted field name's parent rather than defined in a mapping (see
+    /// `Mapper::merge`).
+    pub implicit: Implicit,
+}
+
+/// Whether an object only exists as a dotted name's parent. It changes how templates compose,
+/// not what the mapping is, so it never makes two mappings differ.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Implicit(pub bool);
+
+impl PartialEq for Implicit {
+    fn eq(&self, _: &Implicit) -> bool {
+        true
+    }
 }
 
 impl ObjectMapper {
@@ -855,6 +873,10 @@ impl ObjectMapper {
         }
     }
 
+    fn is_plain_or_nested(&self) -> bool {
+        matches!(self.kind, ObjectKind::Object | ObjectKind::Nested { .. })
+    }
+
     pub fn new(name: &str) -> ObjectMapper {
         ObjectMapper {
             name: name.to_string(),
@@ -865,6 +887,7 @@ impl ObjectMapper {
             source_keep: None,
             disable_objects: None,
             children: BTreeMap::new(),
+            implicit: Implicit(false),
         }
     }
 
@@ -1087,6 +1110,7 @@ impl ObjectMapper {
             let mut mapper = crate::stack::maybe_grow(|| parse_mapper(&leaf, &ty, node, ctx, depth))?;
             for p in parents.iter().rev() {
                 let mut o = ObjectMapper::new(p);
+                o.implicit = Implicit(true);
                 o.children.insert(mapper.name().to_string(), mapper);
                 mapper = Mapper::Object(o);
             }
@@ -1125,6 +1149,7 @@ impl ObjectMapper {
             _ => {}
         }
         let mut out = self.clone();
+        out.implicit = Implicit(self.implicit.0 && incoming.implicit.0);
         // An object becomes a pass-through object when one is merged in.
         if matches!((&self.kind, &incoming.kind), (ObjectKind::Object, ObjectKind::PassThrough { .. })) {
             out.kind = incoming.kind.clone();
@@ -1321,7 +1346,27 @@ impl Mapper {
         }
     }
 
+    /// Merges the definition of a field (not the root) with a later one. Composing templates,
+    /// Elasticsearch merges their raw mappings first (`MapperService.RawFieldMappingMerge`): two
+    /// definitions of an `object` or `nested` field merge, keeping only the earlier one's
+    /// `properties` and `subobjects`, and any other later definition (a `passthrough` object
+    /// too) replaces the earlier one. Objects that are only a dotted name's parent aren't
+    /// definitions; they merge field by field, as Elasticsearch's builders do.
     fn merge(&self, incoming: &Mapper, full_path: &str, ctx: &MappingCtx, reason: MergeReason) -> Result<Mapper, EsError> {
+        let defined = |m: &Mapper| match m {
+            Mapper::Object(o) => !o.implicit.0,
+            _ => true,
+        };
+        if reason == MergeReason::IndexTemplate && defined(self) && defined(incoming) {
+            match (self, incoming) {
+                (Mapper::Object(a), Mapper::Object(b)) if a.is_plain_or_nested() && b.is_plain_or_nested() => {
+                    let base = ObjectMapper { kind: b.kind.clone(), subobjects: a.subobjects, children: a.children.clone(), ..ObjectMapper::new(&a.name) };
+                    return Ok(Mapper::Object(crate::stack::maybe_grow(|| base.merge(b, full_path, ctx, reason))?));
+                }
+                (Mapper::Object(_), _) | (_, Mapper::Object(_)) => return Ok(incoming.clone()),
+                _ => {}
+            }
+        }
         match (self, incoming) {
             (Mapper::Object(a), Mapper::Object(b)) => Ok(Mapper::Object(crate::stack::maybe_grow(|| a.merge(b, full_path, ctx, reason))?)),
             (Mapper::Field(a), Mapper::Field(b)) => {
@@ -1774,9 +1819,11 @@ impl DynamicTemplate {
         ty
     }
 
-    /// The mapping for a concrete field, with `{name}` and `{dynamic_type}` substituted.
-    pub fn mapping_for(&self, name: &str, dynamic_type: &str) -> Map {
-        fn subst(s: &str, name: &str, dt: &str) -> String {
+    /// The mapping for a concrete field, with `{name}` and `{dynamic_type}` substituted, then
+    /// every other `{{param}}` replaced by the field's value in the write request's
+    /// `dynamic_template_params` (`params`), or by nothing when it has none.
+    pub fn mapping_for(&self, name: &str, dynamic_type: &str, params: Option<&Map>) -> Map {
+        fn subst(s: &str, name: &str, dt: &str, params: Option<&Map>) -> String {
             let mut s = s.to_string();
             if s.contains("{{") {
                 s = s.replace("{{name}}", name).replace("{{dynamic_type}}", dt).replace("{{dynamicType}}", dt);
@@ -1784,17 +1831,19 @@ impl DynamicTemplate {
             if s.contains('{') {
                 s = s.replace("{name}", name).replace("{dynamic_type}", dt).replace("{dynamicType}", dt);
             }
-            s
+            if s.contains("{{") { render_params(&s, params) } else { s }
         }
-        fn walk(v: &Value, name: &str, dt: &str) -> Value {
+        fn walk(v: &Value, name: &str, dt: &str, params: Option<&Map>) -> Value {
             match v {
-                Value::Obj(m) => Value::Obj(m.iter().map(|(k, v)| (subst(k, name, dt), crate::stack::maybe_grow(|| walk(v, name, dt)))).collect()),
-                Value::Arr(a) => Value::Arr(a.iter().map(|v| crate::stack::maybe_grow(|| walk(v, name, dt))).collect()),
-                Value::Str(s) => Value::Str(subst(s, name, dt)),
+                Value::Obj(m) => {
+                    Value::Obj(m.iter().map(|(k, v)| (subst(k, name, dt, params), crate::stack::maybe_grow(|| walk(v, name, dt, params)))).collect())
+                }
+                Value::Arr(a) => Value::Arr(a.iter().map(|v| crate::stack::maybe_grow(|| walk(v, name, dt, params))).collect()),
+                Value::Str(s) => Value::Str(subst(s, name, dt, params)),
                 other => other.clone(),
             }
         }
-        match walk(&Value::Obj(self.mapping.clone()), name, dynamic_type) {
+        match walk(&Value::Obj(self.mapping.clone()), name, dynamic_type, params) {
             Value::Obj(m) => m,
             _ => Map::new(),
         }
@@ -3051,6 +3100,27 @@ fn parse_source(v: &Value) -> Result<SourceConfig, EsError> {
     Ok(s)
 }
 
+/// Replaces each `{{key}}` in `s` with `params[key]` as text, or with nothing: a plain scan
+/// from each `{{` to the next `}}`, without trimming or escaping (`{{ unit }}` is the key
+/// ` unit `).
+fn render_params(s: &str, params: Option<&Map>) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("{{") {
+        let Some(close) = rest[open + 2..].find("}}") else { break };
+        out.push_str(&rest[..open]);
+        let key = &rest[open + 2..open + 2 + close];
+        match params.and_then(|p| p.get(key)) {
+            Some(Value::Str(v)) => out.push_str(v),
+            Some(v) => out.push_str(&v.to_es_string()),
+            None => {}
+        }
+        rest = &rest[open + 2 + close + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn validate_dynamic_template(t: &DynamicTemplate, ctx: &MappingCtx) -> Result<(), EsError> {
     if contains_snippet(&Value::Obj(t.mapping.clone()), "{name}") {
         return Ok(());
@@ -3071,7 +3141,7 @@ fn validate_dynamic_template(t: &DynamicTemplate, ctx: &MappingCtx) -> Result<()
         };
         let ty = t.mapping_type(dynamic_type);
         let name = format!("__dynamic__{}", t.name);
-        let mut conf = t.mapping_for(&name, dynamic_type);
+        let mut conf = t.mapping_for(&name, dynamic_type, None);
         let res = if t.runtime {
             if !RUNTIME_TYPES.contains(&ty.as_str()) {
                 Err(EsError::illegal_argument(format!("No runtime field found for type [{ty}]")))

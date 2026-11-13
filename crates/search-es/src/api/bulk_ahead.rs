@@ -98,7 +98,9 @@ impl Ahead {
                 continue;
             }
             let a = &it.args;
-            if a.require_alias || a.require_data_stream || a.dynamic_templates.as_ref().is_some_and(|d| !d.is_empty()) {
+            if a.require_alias || a.require_data_stream || a.dynamic_templates.as_ref().is_some_and(|d| !d.is_empty())
+                || a.dynamic_template_params.as_ref().is_some_and(|d| !d.is_empty())
+            {
                 continue;
             }
             if a.pipeline.as_deref().is_some_and(|p| p != "_none") {

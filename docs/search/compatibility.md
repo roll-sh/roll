@@ -217,7 +217,7 @@ the discovery/store plugins.
 | `mapper-constant-keyword` | `x-pack/plugin/mapper-constant-keyword` | plain | 5 | 5 | 5 | 5 | 0 |
 | `mapper-unsigned-long` | `x-pack/plugin/mapper-unsigned-long` | plain | 34 | 34 | 22 | 22 | 12 |
 | `mapper-version` | `x-pack/plugin/mapper-version` | plain | 6 | 6 | 6 | 6 | 0 |
-| `otel-data` | `x-pack/plugin/otel-data` | plain | 68 | 68 | 6 | 6 | 62 |
+| `otel-data` | `x-pack/plugin/otel-data` | plain | 68 | 68 | 68 | 68 | 0 |
 | `prometheus` | `x-pack/plugin/prometheus` | security | 6 | 6 | 0 | 0 | 6 |
 | `rank-rrf` | `x-pack/plugin/rank-rrf:linear,rrf` | plain | 136 | 96 | 96 | 96 | 0 |
 | `rank-rrf-license` | `x-pack/plugin/rank-rrf:license` | basic | 3 | 3 | 0 | 0 | 3 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 3629 | 3590 | 1951 |
+| **total** | | | 6044 | 5541 | 3691 | 3652 | 1889 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -273,7 +273,7 @@ the discovery/store plugins.
 <!-- test-search: mapper-constant-keyword >= 5 -->
 <!-- test-search: mapper-unsigned-long >= 22 -->
 <!-- test-search: mapper-version >= 6 -->
-<!-- test-search: otel-data >= 6 -->
+<!-- test-search: otel-data >= 68 -->
 <!-- test-search: rank-rrf >= 96 -->
 <!-- test-search: searchable-snapshots >= 6 -->
 <!-- test-search: search-business-rules >= 16 -->

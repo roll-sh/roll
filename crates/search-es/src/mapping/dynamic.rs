@@ -165,11 +165,9 @@ fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &M
                 return Err(failed(format!("field name starting or ending with a [.] makes object resolution ambiguous: [{key}]")));
             }
             if subobjects || parts.len() == 1 {
-                // Expand `a.b.c: v` to `a: {b: {c: v}}`.
-                let mut v = value.clone();
-                for p in parts[1..].iter().rev() {
-                    v = obj! { p.to_string() => v };
-                }
+                // Expand `a.b.c: v` one level, to `a: {"b.c": v}`: `a` expands the rest only if
+                // it has subobjects (a pass-through object keeps `b.c` as a leaf name).
+                let v = if parts.len() == 1 { value.clone() } else { obj! { parts[1..].join(".") => value.clone() } };
                 let mut single = Map::new();
                 single.insert(parts[0].to_string(), v);
                 crate::stack::maybe_grow(|| walk_object(c, existing, path, &single, dynamic, trail))?;
@@ -314,7 +312,7 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
         }
         let template = find_template(c, full, key, "object")?;
         let mapper = match template {
-            Some(t) => template_mapper(c, &t, key, "object")?,
+            Some(t) => template_mapper(c, &t, full, key, "object")?,
             // OpenSearch: without a template, `false_allow_templates` skips the object;
             // `strict_allow_templates` adds it (its unknown leaves then fail).
             None if dynamic == super::Dynamic::FalseAllowTemplates => return Ok(()),
@@ -338,6 +336,21 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
         let _ = inner;
         return Ok(());
     }
+    // `DocumentParser.parseArray`: an unmapped array is first offered to the dynamic templates
+    // for objects; a field that parses a whole array (`[lon, lat]` for a `geo_point`) takes it
+    // as one value.
+    if let Value::Arr(_) = value
+        && dynamic != super::Dynamic::Runtime
+        && let Some(t) = find_template(c, full, key, "object")?
+        && !t.runtime
+        && PARSES_ARRAYS.contains(&t.mapping_type("object").as_str())
+    {
+        let mapper = template_mapper(c, &t, full, key, "object")?;
+        if admit(c, trail, &mapper) {
+            insert(c, trail, mapper);
+        }
+        return Ok(());
+    }
     let (xtype, builtin): (&str, Builtin) = match v {
         Value::Str(s) => classify_string(c, s),
         Value::Num(n) if n.is_integer() => ("long", Builtin::Long),
@@ -352,12 +365,12 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
                 other => other,
             };
             let ty = t.mapping_type(dt);
-            let mut conf = t.mapping_for(key, dt);
+            let mut conf = t.mapping_for(key, dt, template_params(c, full));
             conf.insert("type".into(), Value::from(ty));
             let rf = RuntimeField::parse(full, &Value::Obj(conf)).map_err(DynamicError::Other)?;
             c.update.runtime.insert(full.to_string(), rf);
         } else {
-            let mapper = template_mapper(c, &t, key, xtype)?;
+            let mapper = template_mapper(c, &t, full, key, xtype)?;
             if admit(c, trail, &mapper) {
                 insert(c, trail, mapper);
             }
@@ -411,6 +424,9 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
     }
     Ok(())
 }
+
+/// The field types whose mappers parse an array as one value (`Mapper.parsesArrayValue`).
+const PARSES_ARRAYS: &[&str] = &["geo_point", "point", "geo_shape", "shape", "dense_vector", "rank_vectors", "completion", "histogram"];
 
 /// `DenseVectorFieldMapper.MIN_DIMS_FOR_DYNAMIC_FLOAT_MAPPING`.
 const MIN_DIMS_FOR_DYNAMIC_FLOAT_MAPPING: usize = 128;
@@ -531,14 +547,19 @@ fn find_template(c: &Ctx, full: &str, key: &str, xtype: &str) -> Result<Option<D
     Ok(templates.iter().find(|t| t.matches(full, key, xtype)).cloned())
 }
 
-fn template_mapper(c: &Ctx, t: &DynamicTemplate, key: &str, xtype: &str) -> Result<Mapper, DynamicError> {
+/// The `dynamic_template_params` the write request gives the field at `full`.
+fn template_params<'a>(c: &'a Ctx, full: &str) -> Option<&'a Map> {
+    c.ctx.template_params.as_deref().and_then(|p| p.get(full)).and_then(Value::as_object)
+}
+
+fn template_mapper(c: &Ctx, t: &DynamicTemplate, full: &str, key: &str, xtype: &str) -> Result<Mapper, DynamicError> {
     let dt = match xtype {
         "string" => "text",
         "double" => "float",
         other => other,
     };
     let ty = t.mapping_type(dt);
-    let conf = t.mapping_for(key, dt);
+    let conf = t.mapping_for(key, dt, template_params(c, full));
     super::parse_mapper(key, &ty, &conf, c.ctx, 1).map_err(|e| {
         if e.reason().starts_with("The mapper type") {
             DynamicError::Other(EsError::mapper_parsing(format!("failed to find type parsed [{ty}] for [{key}]")))
