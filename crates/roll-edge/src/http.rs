@@ -332,3 +332,27 @@ impl Upstream {
         resp.map(Body::new)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a token an order is waiting on is answered, for any host; nothing else under the
+    /// challenge path; everything else goes to HTTPS.
+    #[test]
+    fn the_plain_listener_answers_challenges_and_redirects_the_rest() {
+        let challenges = Http01::new();
+        challenges.put("tok-1_A", "tok-1_A.thumbprint");
+        let req = |method: Method, path: &str| Request::builder().method(method).uri(path).header(header::HOST, "Shop.Example.com:80").body(()).unwrap();
+        let r = plain(&req(Method::GET, "/.well-known/acme-challenge/tok-1_A"), &challenges);
+        assert_eq!(r.status(), StatusCode::OK);
+        for (m, p) in [(Method::GET, "/.well-known/acme-challenge/other"), (Method::GET, "/.well-known/acme-challenge/tok-1_A/x"), (Method::POST, "/.well-known/acme-challenge/tok-1_A"), (Method::GET, "/.well-known/acme-challenge/")] {
+            assert_eq!(plain(&req(m, p), &challenges).status(), StatusCode::NOT_FOUND, "{p}");
+        }
+        let r = plain(&req(Method::GET, "/cart?x=1"), &challenges);
+        assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(r.headers()[header::LOCATION], "https://shop.example.com/cart?x=1");
+        let odd = Request::builder().uri("/").header(header::HOST, "evil.com@x").body(()).unwrap();
+        assert_eq!(plain(&odd, &challenges).status(), StatusCode::BAD_REQUEST);
+    }
+}

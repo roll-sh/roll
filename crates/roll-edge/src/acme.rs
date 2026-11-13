@@ -211,7 +211,7 @@ impl Http01 {
         self.tokens.lock().unwrap().get(token).cloned()
     }
 
-    fn put(&self, token: &str, key_authorization: &str) {
+    pub(crate) fn put(&self, token: &str, key_authorization: &str) {
         self.tokens.lock().unwrap().insert(token.to_string(), key_authorization.to_string());
     }
 
