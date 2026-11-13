@@ -326,7 +326,7 @@ pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
     }
     // A nested service (storage) has no matched route at all: its path decides.
     let nested = route == "unmatched" && NESTS.iter().any(|n| path == *n || path.starts_with(&format!("{n}/")));
-    let forwarded = FORWARDS.iter().any(|(r, _)| *r == route);
+    let forwarded = FORWARDS.iter().any(|(r, _, _)| *r == route);
     if !route.contains("{*") && !is_nest(route) && !nested && !forwarded {
         return None;
     }
@@ -361,7 +361,9 @@ pub fn placement(row: &Row, params: &[(String, String)]) -> Option<(&'static str
 /// metadata owner, the tasks cell's leader), and the header with the client's original path and
 /// query. The route only takes signed requests (`roll_cluster::require_signed`, after the gate);
 /// the gate here decides the original request again, on this node.
-pub const FORWARDS: &[(&str, &str)] = &[("/internal/storage/control", "x-roll-storage-uri"), ("/internal/tasks", "x-roll-tasks-uri")];
+/// Signed hops to an owner or leader: `(route, the header carrying the client's path, the product
+/// whose route it carries)`. A hop is decided by the route it carries, and only its own product's.
+pub const FORWARDS: &[(&str, &str, &str)] = &[("/internal/storage/control", "x-roll-storage-uri", "storage"), ("/internal/tasks", "x-roll-tasks-uri", "tasks")];
 
 /// A route pattern with its parameters' names dropped (`/a/{id}/{*rest}` → `/a/{}/{*}`).
 pub fn shape(route: &str) -> String {
@@ -420,7 +422,7 @@ pub fn classified(route: &str) -> Option<&'static str> {
     if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route))).max_by_key(|r| r.route.len()) {
         return Some(r.product);
     }
-    if FORWARDS.iter().any(|(r, _)| *r == route) {
+    if FORWARDS.iter().any(|(r, _, _)| *r == route) {
         return Some("by path");
     }
     if route.contains("{*") || is_nest(route) {
