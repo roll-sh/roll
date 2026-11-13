@@ -358,6 +358,18 @@ plain values only: links and references are expected to match, and the empty val
 Only environments the caller may read are named. The environment's list marks the key "also in
 staging", and `roll secrets insights` prints `ALSO IN staging`.
 
+**Read alerts** (Doppler's and 1Password's activity alerts). The environment's notify URL also
+hears of reads that look unlike the reader, from the audit log, within a sweep of happening:
+- a token or workload identity reading from an address it hasn't read from before (its first
+  address isn't news: that's where it runs);
+- one principal revealing 30 or more of the environment's values within an hour (someone copying
+  it out by hand).
+
+An alert names the principal, the address or the count, the environment and a link to its
+activity: never a value. The sweep walks the audit log after a cursor; advancing the cursor,
+recording the addresses seen and queueing the notices are one write, so two nodes never both
+alert, and history from before the first sweep isn't alerted on.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -1231,7 +1243,8 @@ Done and in PR #20:
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history;
 - required and typed keys; insights, rotation reminders and expiry dates for values that expire
-  outside roll; a protected environment's values that are also set in an unprotected one;
+  outside roll; a protected environment's values that are also set in an unprotected one; read
+  alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
@@ -1265,11 +1278,8 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Read alerts** (Doppler's and 1Password's activity alerts): tell an environment's notify URL
-   when a token or workload identity reads from an address it hasn't used before, or someone
-   reveals unusually many values in an hour (names and counts, never values).
-3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

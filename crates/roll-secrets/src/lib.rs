@@ -11,6 +11,7 @@
 //! called outside it. [`api::router`] serves it under `/v1/secrets`.
 
 pub mod access;
+mod alerts;
 pub mod api;
 mod audit;
 pub mod backup;
@@ -364,6 +365,7 @@ impl Secrets {
         db.add_column("secrets", "expires_at", "INTEGER")?;
         db.add_column("versions", "expires_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
+        db.ensure_schema(alerts::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }
 

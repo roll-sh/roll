@@ -801,6 +801,41 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
 }
 
 #[tokio::test]
+async fn reads_unlike_the_reader_are_alerted() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    sweep().await;
+    // Reads as the audit log records them: a CI token from its usual address, then another; a
+    // person revealing values one by one.
+    let read = |actor: &str, action: &str, ip: &str| {
+        let (p, actor, action, ip) = (api.project.clone(), actor.to_string(), action.to_string(), ip.to_string());
+        api.db
+            .write(move |c| {
+                c.execute(
+                    "INSERT INTO audit (project_id, at, actor, action, env, path, keys, summary, ip) VALUES (?, (SELECT COALESCE(MAX(at), 0) + 1 FROM audit), ?, ?, 'production', '/', '[\"API_KEY\"]', '', ?)",
+                    code_sql::params![p, actor, action, ip],
+                )
+            })
+            .unwrap();
+    };
+    read("token:tok_ci", "secrets.resolve", "10.0.0.1");
+    read("token:tok_ci", "secrets.resolve", "10.0.0.1");
+    for _ in 0..30 {
+        read("alice", "secrets.reveal", "10.0.0.9");
+    }
+    read("token:tok_ci", "secrets.resolve", "203.0.113.7");
+    sweep().await;
+    sweep().await;
+    let sent = api.sent.0.lock().unwrap().clone();
+    let alerts: Vec<Value> = sent.iter().map(|n| n["alert"].clone()).collect();
+    assert_eq!(alerts, vec![json!({ "kind": "many_reveals", "actor": "alice", "count": 30 }), json!({ "kind": "new_address", "actor": "token:tok_ci", "ip": "203.0.113.7" })], "{sent:?}");
+}
+
+#[tokio::test]
 async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token() {
     let api = Api::new().await;
     api.set("staging", "API_KEY", "staging-key").await;
