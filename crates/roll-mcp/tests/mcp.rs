@@ -116,6 +116,11 @@ async fn tools_follow_the_tokens_rules() {
     let me = d.rpc(&reader, "resources/read", json!({ "uri": "roll://access/me" })).await;
     let text = me["contents"][0]["text"].as_str().unwrap();
     assert!(text.contains("postgres: read, on every resource") && text.contains("Anything else is refused"), "{text}");
+    // Prompts (roll's workflows as slash commands) only with their tools: a postgres reader gets
+    // none of the secrets or apps ones.
+    let prompts = d.rpc(&reader, "prompts/list", json!({})).await;
+    let offered: Vec<&str> = prompts["prompts"].as_array().unwrap().iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(!offered.iter().any(|n| *n == "fix_secrets_health" || *n == "debug_failing_service"), "{offered:?}");
     let ok = d.tool(&reader, "postgres_list_projects", json!({})).await;
     assert_eq!((ok["isError"].as_bool(), &ok["structuredContent"]["items"][0]["id"]), (Some(false), &json!("pa")));
     let refused = d.tool(&reader, "postgres_delete_project", json!({ "project": "pa" })).await;
