@@ -94,6 +94,7 @@ impl IntoResponse for Error {
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, Some("forbidden")),
             Error::NotFound(_) => (StatusCode::NOT_FOUND, None),
             Error::Conflict(code, _) => (StatusCode::CONFLICT, Some(*code)),
+            Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
             Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
             Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),

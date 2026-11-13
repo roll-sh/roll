@@ -245,6 +245,9 @@ pub enum Error {
     /// 503: no deployment key.
     #[error("{0}")]
     Unavailable(String),
+    /// 429: too many attempts (`rate_limited`).
+    #[error("{0}")]
+    TooMany(String),
     /// A product behind a link failed (502).
     #[error("{0}")]
     Link(String),
@@ -302,6 +305,8 @@ pub struct Secrets {
     web_url: Option<String>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
+    /// Logins per identity and per client address in the last minute.
+    logins: oidc::Window,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -344,7 +349,7 @@ impl Secrets {
         db.add_column("required", "type", "TEXT")?;
         db.add_column("required", "pattern", "TEXT")?;
         db.ensure_schema(notices::SCHEMA)?;
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

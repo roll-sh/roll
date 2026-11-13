@@ -62,6 +62,9 @@ const IDENTITIES_MAX: i64 = 50;
 const CLAIMS_MAX: usize = 10;
 pub const TTL_MIN: i64 = 5;
 pub const TTL_MAX: i64 = 60;
+/// Logins a minute per identity and per client address (a CI matrix logs in many times at once).
+const LOGINS_PER_IDENTITY: u32 = 120;
+const LOGINS_PER_IP: u32 = 240;
 
 #[derive(Debug, Serialize)]
 pub struct Identity {
@@ -216,6 +219,11 @@ impl Secrets {
 
     /// `POST /v1/secrets/login` (public): an OIDC token for `identity` in, a scoped token out.
     pub fn login(&self, identity: &str, token: &str, ip: Option<String>) -> Result<Login> {
+        // Before any work: a login is public, and verifying one can mean fetching keys.
+        let busy = !self.logins.allow(&format!("identity:{identity}"), LOGINS_PER_IDENTITY) || ip.as_ref().is_some_and(|ip| !self.logins.allow(&format!("ip:{ip}"), LOGINS_PER_IP));
+        if busy {
+            return Err(Error::TooMany("too many logins: try again in a minute".into()));
+        }
         let denied = || Error::Unauthorized(format!("no identity {identity} takes this token"));
         let deliver = self.deliver.clone().ok_or_else(|| Error::NotFound("workload identities aren't on this server".into()))?;
         let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [identity], identity_row).optional())?;

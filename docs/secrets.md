@@ -765,6 +765,8 @@ minutes.
   account's numeric id exactly): `repo:*` would let anyone's job in. Narrow further with claims
   (`ref=refs/heads/main`, or GitHub's `environment`). A token that lives longer than a day is
   refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
+  Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
+  counted per node before any work.
 - **Who makes them.** Identities are made by people (or the operator), never by a token or a
   login; a login can't create tokens either, so nothing it makes outlives it.
 - **Login.** `POST /v1/secrets/login {identity, token}` (public: the token is the credential)

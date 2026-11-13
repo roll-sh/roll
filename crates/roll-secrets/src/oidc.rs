@@ -272,6 +272,31 @@ impl Keys {
     }
 }
 
+/// Attempts per key in a sliding minute (in memory, per node: a cap on work, not an audit).
+#[derive(Default)]
+pub(crate) struct Window {
+    hits: Mutex<HashMap<String, (Instant, u32)>>,
+}
+
+impl Window {
+    /// Count an attempt for `key`; false past `max` in the current minute.
+    pub fn allow(&self, key: &str, max: u32) -> bool {
+        let mut hits = self.hits.lock().unwrap();
+        if hits.len() >= 10_000 {
+            hits.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+            if hits.len() >= 10_000 {
+                hits.clear();
+            }
+        }
+        let e = hits.entry(key.to_string()).or_insert((Instant::now(), 0));
+        if e.0.elapsed() >= Duration::from_secs(60) {
+            *e = (Instant::now(), 0);
+        }
+        e.1 += 1;
+        e.1 <= max
+    }
+}
+
 /// Whether `text` matches `pattern`, where `*` stands for any run of characters (none too). No
 /// other wildcards; linear in practice (the classic two-pointer match, no recursion).
 pub(crate) fn wildcard(pattern: &str, text: &str) -> bool {
@@ -298,7 +323,14 @@ pub(crate) fn wildcard(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::wildcard;
+    use super::{Window, wildcard};
+
+    #[test]
+    fn a_window_counts_each_key_apart() {
+        let w = Window::default();
+        assert!(w.allow("identity:a", 2) && w.allow("identity:a", 2) && !w.allow("identity:a", 2));
+        assert!(w.allow("identity:b", 2), "another key has its own count");
+    }
 
     #[test]
     fn wildcards_match_any_run_and_nothing_else() {
