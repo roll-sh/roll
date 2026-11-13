@@ -1537,6 +1537,10 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **`roll secrets doctor` compares a local `.env`**: when the directory has one, the diff above
+   as a check (keys it adds, changes or lacks), so a stale copy shows with everything else.
+2. **The audit log into a roll stream**: a sink `stream:<id>/<topic>` producing each audit event
+   to a topic of a roll stream on the canvas, for consumers that react as it's written.
 
 Waiting on other pull requests:
 
