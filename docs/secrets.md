@@ -664,6 +664,18 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
 
+### `kubernetes`
+
+One Secret in a cluster, `{server, namespace, secret, token_key, ca_key?}`: the API server's
+public `https://` URL (fetched like a webhook: `PublicOnly`, no redirects), the namespace and the
+Secret's name, and the keys of this environment and folder holding a service account token (with
+`create`, `get` and `update` on that Secret) and, optionally, the cluster's CA in PEM. Each push
+writes the Secret's `data` as exactly the synced keys (removed ones are gone), labelled
+`app.kubernetes.io/managed-by=roll-secrets` and annotated with the project, environment and
+folder. roll never replaces a Secret without that label, so it can't clobber one of the team's own.
+The synced values must fit a Secret's 1 MiB. Pods read it as usual (`envFrom.secretRef`); a pod
+restart or a reloader picks up a change.
+
 ### `webhook` and `notify`
 
 Both POST JSON to a public HTTPS `url` the creator chose: fetched through the `PublicOnly` resolver,
@@ -1052,7 +1064,8 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
 streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
-sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
+sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store,
+Kubernetes), audit
 sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
 previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
 for stored values, typed keys, sharing across projects, and the fixes from a third security review (of identities, sharing,
@@ -1073,8 +1086,7 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Kubernetes as a sync target**: push an environment into a cluster's Secret (its API server and
-   a service account token kept sealed, like the other platforms' credentials), so workloads that
-   don't run `roll run` read roll secrets without an operator to install.
+4. **More sync targets people ask for**: Fly.io app secrets, Render environment groups, Netlify
+   site variables and GitLab CI variables, each a `SyncTarget` in rolld like Vercel's.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

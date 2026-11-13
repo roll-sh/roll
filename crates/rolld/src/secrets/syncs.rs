@@ -35,6 +35,7 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Vercel(http.clone())));
     s.register(Arc::new(platforms::Cloudflare(http.clone())));
     s.register(Arc::new(platforms::Ssm(http)));
+    s.register(Arc::new(platforms::Kubernetes { allow_private }));
     s
 }
 
