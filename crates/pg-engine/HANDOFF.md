@@ -10895,6 +10895,67 @@ the column where get_actual_variable_range reads the one it needs. The row made 
 stored bytes (`emit` 9.5%: the decode 2.9%, its allocation 1.2%, the header's numbers 0.8%,
 `PlanRef`'s calls 0.6%). Describe at Bind starts the transaction (`ensure_txn`, 0.7%).
 
+## Range reads round 8 (agent 223)
+
+BENCH.md "Range reads, round 8" has the measurements (lane B: servers on CPUs 10,11,28,29, clients
+on 12,13,30,31). Two changes kept, measured together against the round's base; one dropped.
+
+- **A rechosen custom plan restarts the tree of the plan before it** (`Node::adopt`,
+  `Session::kept_tree`, `KeptCustom::last`). Each Bind's rechosen plan (`Analyzed::rechosen`) is a
+  new `Arc<Plan>`, so `kept_tree`, which matches by pointer, never found its tree. Now the rechosen
+  plan names the plan it was made after (`Session::rechosen_after`): that plan's kept tree is taken
+  and adopts the new one: a `ProjectNode` hands it down, a `ScanNode` takes the new `ScanPlan` when
+  it is of the same table (the same `Arc<Table>`), index, access kind, direction, limit, marks and
+  keys, and its filter reads the same columns (`scan_need`'s mask stands); the run of equal keys
+  (`one_run`) and what `restart` decides from the plan (`plan_decided`) are made again. A btree or
+  hash index scan of a key range is now `restartable` too (it was one key's entries only):
+  `rescan_index` makes the new ranges from the new bounds. What still runs per execution:
+  `ranges` (1.1% of samples), `bind_scan` (0.9%), `filter_implied_plan` (0.4%, value-dependent:
+  a bound and a filter qual matched by their constants). Agent 199's regression from restarting a
+  range scan didn't come back: this step alone was -1.3% to -1.8% instructions, -1.1% to -3.8%
+  cycles (binary) and -1.4% to -2.2% / -2.3% to -3.9% (text), +2.0% / +3.9% ops/s, below the gate
+  alone in binary (`~/.cache/a223/patches/A-adopt-alone.*`).
+- **Planning and scanning shortcuts** (measured with the first): `PlanRef` reads its part through a
+  static `Part::of` (it called a function pointer on every access of a scan's plan, 1.1% of
+  samples); `parallel_workers` reads `Hot::parallel_workers` (two settings looked up and parsed per
+  index scan before); a cached plan's fixed result row is compared in place
+  (`is_result_row`, no `Vec<(String, u32, i32)>` per Bind); `toast::may_hold_rows` builds its
+  prefixes on the stack; `add_filter_as` orders quals by a cost found once per qual (the sort's
+  comparator costed both sides on every comparison).
+
+Checks: `tests/kept_plans.rs` `rechosen_plans_follow_the_range_width` (new): a prepared range read
+on a non-unique index bound 92 times as its range widens to the whole table and narrows again, at
+two places of the column, crossing index, bitmap and sequential scans, every result's rows checked
+(debug builds plan each rechosen plan afresh too and assert the same plan and cost,
+`values_custom`, so every step's plan is a fresh plan's); then the benchmark's shape (a key range
+in key order) bound 20 times, at least 15 of them rechosen and run over the tree before. Found on
+the way, not changed: that first shape (`v BETWEEN $1 AND $2` on a non-unique index, no ORDER BY)
+has its index and bitmap scans planned afresh at every bind (7 to 9 of the 92 binds rechosen, all
+sequential scans); why `rechoose` or `keeping_choice` gives up there wasn't followed up.
+`custom_plans_choose_the_scan_again` and `prepared_statements_restart_their_trees` cover the
+adopted trees across transactions, isolation levels, own writes, rollbacks, DDL and settings.
+The verification train on `7de3b99c0` (the two changes over `66fb5dc38`): release and debug crate
+tests pass, clippy shows no warning on the changed lines, crash seeds and the power stage pass, the
+full regression suite has no newly differing unit, isolation 1647/1648 permutations, pg_dump's TAP
+14609 passed (run again alone: its first run found its port taken).
+
+Dropped (`~/.cache/a223/patches/C-readers-dropped.*`): agent 215's reader pool ported onto the kept
+trees (a parked scan's readers kept on the thread, moved over the restarted scan's range at the
+new snapshot, emptied at the idle hook): -0.2% to -1.0% instructions against the two changes. With
+the same scan taking its own readers back, moving them still costs about what new ones do.
+
+Where it stands (same day, lane B): roll leads PostgreSQL 18.6 on the 100-row range read by
++19% ops/s (binary) and +17% (text), -8.4% and -9.3% user cycles, -17% total cycles, half the
+memory; after the rebase onto `29e94da4c`, -8.7% and -10.0% user cycles. The round's target (user
+cycles at least 15% below PostgreSQL's) isn't met. Planning is now the largest user-space cost
+(23% of samples, about 29% of the user cycles): in `rechoose` alone 4.7% of all samples are
+allocation, `Expr` clones and drops (each `IClause` owns three cloned expressions, the bitmap
+candidate clones the index path, `apply` clones the clauses again into the plan). Best lead:
+share the restriction clauses through `IClause` / `IPath` / `apply` (`Arc<Expr>` or positions in
+`rel.quals`) so a rechosen plan's costing allocates little; costing only the chosen path when the
+others provably lose saves about 1.5% more but needs a bound for a bitmap heap's cost, which falls
+as it reads more of the table (BENCH.md).
+
 ## Range reads round 7 (agent 215)
 
 BENCH.md "Range reads, round 7" has the measurements, on the coordinator's new benchmark lane

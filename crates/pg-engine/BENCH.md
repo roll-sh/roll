@@ -285,6 +285,101 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Range reads, round 8 (2026-11-12, agent 223)
+
+HANDOFF.md, "Range reads round 8", has what changed: a rechosen custom plan restarts the executor
+tree of the plan it was made after (`Node::adopt`; a btree range scan is now restartable), and a
+handful of per-execution costs in planning and scanning (`PlanRef` without a call through a
+function pointer, the parallel worker settings from the derived settings, the fixed result row
+compared in place, `toast::may_hold_rows` without allocating, each qual's cost found once when the
+WHERE is placed). Agent 215's harness (`~/.cache/a223/h`, containers `a223-`): dist builds in
+containers with PostgreSQL's limits, 100,000 accounts, 2 s warmup, 10 s measured; user
+instructions and cycles of the connection threads (`perf stat --per-thread`) and the server
+containers' cycles (`perf stat -a -G`). Lane B: servers on CPUs 10,11,28,29, clients on
+12,13,30,31; builds on 0-5,18-23.
+
+**Same day, the three servers** (three rounds each, the arms' order reversed in round 2; cycles
+are the server container's, all its processes and threads; medians):
+
+| format | server | ops/s | us CPU / op | user cycles / op | all cycles / op | MiB after |
+|---|---|---:|---:|---:|---:|---:|
+| binary | PostgreSQL 18.6 | 25,064 | 146.4 | 429k | 582k | 103 |
+| binary | pgrust | 23,616 | 154.8 | 519k | 626k | 200 |
+| binary | roll, base `01da1c495` | 28,399 | 129.0 | 411k | 505k | 53 |
+| binary | roll, this change | 29,889 | 122.2 | 393k | 485k | 52 |
+| text | PostgreSQL 18.6 | 24,284 | 146.0 | 451k | 596k | 103 |
+| text | pgrust | 24,665 | 142.2 | 479k | 576k | 200 |
+| text | roll, base `01da1c495` | 27,044 | 130.0 | 431k | 517k | 53 |
+| text | roll, this change | 28,385 | 123.0 | 409k | 493k | 53 |
+
+(Other tenants' load on the server CPUs 0.09-0.35 cores.) Against PostgreSQL the change is +19%
+ops/s binary and +17% text, -8.4% and -9.3% user cycles, -17% total cycles both, half the memory;
+pgrust is behind PostgreSQL in binary and level in text. The round's target, user cycles at least
+15% below PostgreSQL's, isn't met. Again after rebasing onto `29e94da4c` (the point-read probe and
+portal-map commits; the verification train's build busy on CPUs 0-5,18-23, foreign load up to 0.56
+cores, so ops/s swing 5-10% between rounds):
+
+| format | server | ops/s | us CPU / op | user cycles / op | all cycles / op | MiB after |
+|---|---|---:|---:|---:|---:|---:|
+| binary | PostgreSQL 18.6 | 23,852 | 152.9 | 426k | 579k | 103 |
+| binary | pgrust | 22,492 | 162.5 | 518k | 625k | 184 |
+| binary | roll, base `29e94da4c` | 27,373 | 132.5 | 410k | 502k | 52 |
+| binary | roll, this change | 27,742 | 131.2 | 389k | 480k | 53 |
+| text | PostgreSQL 18.6 | 22,159 | 157.8 | 452k | 598k | 103 |
+| text | pgrust | 23,841 | 147.7 | 479k | 577k | 189 |
+| text | roll, base `29e94da4c` | 26,950 | 132.2 | 429k | 515k | 53 |
+| text | roll, this change | 25,463 | 133.9 | 407k | 491k | 53 |
+
+User cycles per operation -5.1% in both formats against the rebased base (-8.7% and -10.0%
+against PostgreSQL); the ops/s of three single runs under that load don't separate the builds (the
+five alternating pairs below do).
+
+The change against the round's base (`01da1c495`), five alternating pairs each (foreign load on
+the server CPUs 0.09-0.35 cores, the 1-client runs 0.41-0.55; none above a core):
+
+| workload | instr / op (median; range) | cycles / op (range) | ops/s (median; worst pair) | CPU / op (median) | MiB after (base; change) |
+|---|---|---|---|---:|---|
+| range read, binary, 8 clients | -2.10%; -1.92% to -2.34% | -3.15% to -5.44% | +3.7%; +2.4% | -4.1% | 48.7-54.1; 52.8-53.7 |
+| range read, text, 8 clients | -1.57%; -1.25% to -2.77% | -3.91% to -5.90% | +7.0%; +5.0% | -5.5% | 48.4-53.1; 49.8-53.7 |
+| range read, binary, 1 client | -2.07%; -1.81% to -3.24% | -3.39% to -9.70% | +1.2%; -0.7% | -2.7% | 46.6-48.1; 47.3-48.4 |
+| point read, 8 clients | -0.25%; -0.49% to +0.12% | -1.62% to +0.23% | -0.2%; -1.2% | -0.3% | 48.4-50.1; 49.7-51.2 |
+| UPDATE one row, 8 clients | -0.44%; -0.72% to -0.12% | -2.41% to -0.23% | +0.9%; -1.0% | -1.1% | 51.2-56.0; 56.5-58.0 |
+
+Memory: the range reads' is unchanged. The UPDATE's after-run value is where the memtable's
+sawtooth stopped: both builds swing between about 50 and 85 MiB during the run (sampled each
+second). Two rechecks after the rebase (five pairs each) gave the base 46.6-54.7 MiB after and the
+change 48.6-79.7, with the same peaks (78-84 and 79-85 MiB) and run means 64-70 against 63-74; no
+mechanism of the change holds memory on that path (its statement is a point update, whose tree
+restarted before too), but the change's means ran a little higher in the first recheck.
+
+The first change alone (binary): instructions -1.25% to -1.75%, cycles -1.13% to -3.77%, ops/s
++2.0%: what goes is the node allocations, `scan_need` and the tree's drop; the restart still makes
+the ranges (`ranges_from`, 1.0% of samples), binds them (`bind_scan`, 0.9%) and decides whether
+the bounds imply the filter (`filter_implied_plan`, 0.4%).
+
+DataRows are the base's: the change makes no output of its own (the same `row_stored` and
+`put_data_row` paths), and `tests/wire.rs` (72 tests, `stored_rows_go_out_as_decoded_ones`
+included) passes.
+
+Dropped (`~/.cache/a223/patches/C-readers-dropped.*`): agent 215's reader pool on the kept trees
+(a restarted scan takes back its own store readers, moved over the new range at the new snapshot):
+-0.15% to -1.00% instructions against the two changes.
+
+Where the time goes now (LBR profile of the change, binary, connection threads; shares of all
+samples, kernel included): planning 23.4% (`rechoose` 12.5%: paths and their costs 5%, the
+selectivities 2.8%, `apply` 1.2%; placing the WHERE 4.3%; the rest the planning context, `lit_env`
+and the plan's assembly); the scan 38% (`fill_batch` 12.7%, positioning the sources 4.9%, new
+store readers 2.3%); the restart 3.2%; the DataRows from stored bytes 4.5%; the kernel's send at
+ReadyForQuery 12.5% and receive 4.3%; the allocator 7.5% (`mi_malloc_aligned`) and 1.0% (free),
+spread over some twenty call sites. In `rechoose` alone 4.7% of all samples are allocation, `Expr`
+clones and their drops: each index clause owns three cloned expressions (`ClauseAt::made`), the
+bitmap candidate clones the index path, the selectivity memo clones its key, and `apply`,
+`index_quals` and `fill_bounds` clone them again into the plan. Costing only the chosen path when
+the others provably lose would save about 1.5% (the alternatives here are a sequential scan and a
+bitmap scan over the same index path) and needs a bound that holds where a bitmap heap's cost
+falls as it reads more of the table; sharing the clauses (`Arc<Expr>` or indexes into
+`rel.quals` through `IClause`, `IPath` and `apply`) is the larger lead.
+
 ## Executor, round 15 (2026-11-12, agent 219)
 
 HANDOFF "Executor, round 15" has what changed: a parallel scan of a heap only inserted into,
