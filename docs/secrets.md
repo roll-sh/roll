@@ -1602,14 +1602,17 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Dynamic GCP and Azure credentials** (Vault's GCP and Azure engines, next to #38's AWS): a
-   short-lived service-account token per lease through workload identity federation, and an Entra
-   app's client secret per lease, with the same decoy check against confused deputies.
-2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+1. **A measured performance pass on resolving** (`…/resolve`, `roll run`): a project with
+   thousands of keys, references across environments, imports, shares and dynamic links, timed
+   on SQLite and Postgres (`examples/bench.rs`), with what limits it named and fixed.
+2. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
+   own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
+   Azure's do.
+3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-3. **Products say who owns a resource**, so a person's project can link their own databases,
+4. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
@@ -1634,6 +1637,9 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
+  (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
+  its token for one project, checked with a decoy project at registration.
 - **#42, MongoDB outside roll** (after #41): rotation and a user per lease for Atlas and replica
   sets; the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
   signature checked.
