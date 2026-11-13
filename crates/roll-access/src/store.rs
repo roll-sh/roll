@@ -908,6 +908,25 @@ impl Store {
         Ok(self.db.read(|c| c.query(&sql, args.as_slice(), audit_row))?)
     }
 
+    /// What a grant's allowed requests since `since` were about, by product, action and resource
+    /// (most used first; at most 5,000 kinds).
+    pub fn used(&self, grant: &str, since: i64) -> Result<Vec<crate::tighten::Used>> {
+        let rows = self.db.read(|c| {
+            c.query(
+                "SELECT product, action, resource, COUNT(*), MAX(at) FROM audit WHERE grant_id = ? AND at >= ? AND decision = 'allow' AND product IS NOT NULL AND action IS NOT NULL GROUP BY product, action, resource ORDER BY COUNT(*) DESC LIMIT 5000",
+                params![grant, since],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?)),
+            )
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(product, action, resource, count, last_at)| {
+                let action = serde_json::from_value(Value::String(action)).ok()?;
+                Some(crate::tighten::Used { product, action, resource, count, last_at })
+            })
+            .collect())
+    }
+
     /// Each grant's requests in the last day, by decision: `grant id → (allowed, denied, asked)`.
     pub fn activity(&self) -> Result<std::collections::HashMap<String, (i64, i64, i64)>> {
         let since = code_sql::now_ms() - 24 * 3600 * 1000;
