@@ -550,6 +550,36 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+### Databases outside roll
+
+A Postgres server roll doesn't run (Amazon RDS, Supabase, Neon, a server of the customer's own)
+has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
+does. A project registers it (`POST …/outside-databases {name, url, roles, ca?}`, `admin`;
+`roll secrets databases add NAME --role a --role b`, the URL on stdin): `url` is an admin connection
+(`postgres://admin:…@host:5432/db`, a user that may `ALTER ROLE` both roles), sealed with the
+project's data key like a rotator's (only `host:port` is shown); `roles` are two login roles that
+take turns; `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
+Registering connects once and checks both roles exist and can log in.
+
+It's the link kind `outside_postgres` with fields `username` and `password`, one credential
+(`login`), `managed` only. Each issue (linking, every `rotate_days`, `…/rotate`) gives the role not
+handed out last a new 40-character password and hands it out, so the role in use keeps working
+until its grace period ends; then its password is replaced by one nobody knows. Each role's
+generation is kept with the database and carried in the credential's handle, so a retirement that
+ends after the same role was handed out again does nothing. Rotating twice within one grace period
+cuts the older login's grace short (both roles are then in their newest hands).
+
+rolld connects the way it fetches anything a tenant chose: it resolves the host itself, refuses a
+private address (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows them for local development), and connects
+to the address it checked. The URL may set `sslmode` and little else (no socket paths, several
+hosts or `sslrootcert` files); TLS is required (`prefer` is treated as `require`, certificates are
+verified) and `sslmode=disable` works only where private addresses do. The new password goes as a
+SCRAM-SHA-256 verifier (`ALTER ROLE … PASSWORD 'SCRAM-SHA-256$4096:…'`), so neither the connection
+nor the server's statement log ever holds it. One project can't register the same role on one host
+twice (the two would undo each other's passwords), and a database a key links to, or with a
+retired password still to replace, can't be deleted. MySQL is next (`ALTER USER … IDENTIFIED BY`,
+whose statement does carry the password).
+
 ## Consumption
 
 ### `roll secrets` and `roll run`
@@ -578,6 +608,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets databases ls | add NAME --role A --role B [--ca FILE] (admin URL on stdin) | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1414,6 +1445,9 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
+| `POST /outside-databases` | `{name, url, roles: [a, b], ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks both roles first: 400 with the server's reason) |
+| `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
@@ -1588,9 +1622,8 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Built-in rotation for databases roll doesn't run** (Postgres and MySQL: a new password set by
-   `ALTER ROLE`/`ALTER USER` through roll's guarded connection, the old one retired after the grace
-   period), as Infisical's secret rotation, without a webhook of your own.
+1. **MySQL outside roll**, next to Postgres ("Databases outside roll"): the same two roles taking
+   turns, `ALTER USER … IDENTIFIED BY` over TLS through the same guarded connection.
 2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
 3. **Products say who owns a resource**, so a person's project can link their own databases,
@@ -1618,6 +1651,8 @@ Open pull requests after this one:
 - **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key,
   set from the project's settings.
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
+- **Rotation for Postgres outside roll** (after #20): two login roles take turns, the new password
+  sent as a SCRAM verifier over TLS to a public address rolld resolved itself.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the

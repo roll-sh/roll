@@ -126,6 +126,20 @@ impl roll_secrets::Deliver for Sent {
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 
+/// A Postgres server outside roll: each role's current password.
+#[derive(Default)]
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>);
+
+impl roll_secrets::outside::OutsideDb for Outside {
+    fn check(&self, url: &str, _: Option<&str>, roles: &[String]) -> Result<(), String> {
+        if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
+    }
+    fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+        self.0.lock().unwrap().insert(role.into(), password.into());
+        Ok(())
+    }
+}
+
 /// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
 struct Issuer(ring::signature::EcdsaKeyPair);
 
@@ -187,6 +201,7 @@ struct Api {
     db: code_sql::Db,
     fake: Arc<Fake>,
     sync: Arc<FakeSync>,
+    outside: Arc<Outside>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -206,10 +221,11 @@ impl Api {
         let sent = Arc::new(Sent::default());
         let people = Arc::new(People::default());
         ws.set_owners(people.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()) };
+        let outside = Arc::new(Outside::default());
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), outside: Some(outside.clone()) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
+        let mut api = Api { sent, people, router, secrets, db, fake, sync, outside, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -982,6 +998,41 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     // The key it issues keeps it.
     let (s, _) = api.call(Method::DELETE, &format!("/rotators/{}", r["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_database_outside_roll_hands_out_two_logins_in_turn() {
+    let api = Api::new().await;
+    let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require", "roles": ["app_blue", "app_green"] });
+    let d = api.ok(Method::POST, "/outside-databases", Some(new)).await;
+    assert_eq!((d["host"].as_str(), d.get("url")), (Some("db.example:5432"), None), "the admin URL stays sealed: {d}");
+    let link = |field: &str| json!({ "kind": "outside_postgres", "ref": d["id"], "field": field, "mode": "managed" });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "DB_USER", "link": link("username") }, { "op": "set", "key": "DB_PASSWORD", "link": link("password") }] }))).await;
+    let login = || async {
+        let v = api.values("production", "/").await["values"].clone();
+        (v["DB_USER"].as_str().unwrap().to_string(), v["DB_PASSWORD"].as_str().unwrap().to_string())
+    };
+    let password = |role: &str| api.outside.0.lock().unwrap().get(role).cloned();
+    let blue = login().await;
+    assert_eq!((blue.0.as_str(), password("app_blue")), ("app_blue", Some(blue.1.clone())));
+
+    // Each rotation hands out the other role; the one in use keeps working through the grace.
+    api.ok(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
+    let green = login().await;
+    assert_eq!((green.0.as_str(), password("app_green"), password("app_blue")), ("app_green", Some(green.1.clone()), Some(blue.1.clone())));
+    api.ok(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
+    let blue2 = login().await;
+    assert_eq!(blue2.0, "app_blue");
+    // Both graces end: green's password goes, but blue's first retirement doesn't undo its reissue.
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert_eq!(password("app_blue"), Some(blue2.1));
+    assert_ne!(password("app_green"), Some(green.1));
+
+    let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
 }
 
 #[tokio::test]

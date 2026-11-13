@@ -282,6 +282,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// Postgres databases outside roll whose logins roll rotates: list, add, remove.
+    #[command(subcommand)]
+    Databases(DatabasesCmd),
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -494,6 +497,23 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum DatabasesCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a database: its admin URL (postgres://admin:…@host:5432/db) on stdin, and two
+    /// login roles that take turns.
+    Add {
+        name: String,
+        #[arg(long = "role", num_args = 1, required = true)]
+        roles: Vec<String>,
+        /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+    },
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1165,6 +1185,36 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::Databases(d) => match d {
+            DatabasesCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/outside-databases", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for d in v.as_array().into_iter().flatten() {
+                    let roles: Vec<&str> = d["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    println!("{}  {:<16} {:<32} {}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
+                }
+            }
+            DatabasesCmd::Add { name, roles, ca } => {
+                // The admin URL holds a password: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Admin URL (postgres://admin:…@host:5432/db), then Enter and Ctrl-D: ");
+                }
+                let mut url = String::new();
+                std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "ca": ca }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed; each rotation hands out the other role.", s(&v["name"]), s(&v["id"]));
+            }
+            DatabasesCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
                 let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;

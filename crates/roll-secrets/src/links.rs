@@ -220,6 +220,9 @@ impl crate::Secrets {
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
             out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
+        if let Some(provider) = self.links.0.get(crate::outside::KIND) {
+            out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
         Ok(out)
     }
 }

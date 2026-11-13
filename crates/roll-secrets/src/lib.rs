@@ -14,6 +14,7 @@ pub mod access;
 mod alerts;
 pub mod api;
 pub mod health;
+pub mod outside;
 pub mod rotators;
 mod strength;
 mod audit;
@@ -306,6 +307,8 @@ pub struct Options {
     pub trust_forwarded_for: bool,
     /// The dashboard's address (`ROLL_WEB_URL`): a share's link is `<it>/share/<id>#<key>`.
     pub web_url: Option<String>,
+    /// Sets passwords on Postgres servers outside roll (outside.rs); `None`: not on this server.
+    pub outside: Option<std::sync::Arc<dyn outside::OutsideDb>>,
 }
 
 /// The secrets store.
@@ -322,6 +325,7 @@ pub struct Secrets {
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
+    outside: Option<Arc<dyn outside::OutsideDb>>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
@@ -391,7 +395,11 @@ impl Secrets {
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        db.ensure_schema(outside::SCHEMA)?;
+        if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
+            links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), outside: outside.clone() }));
+        }
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -457,7 +465,7 @@ impl Secrets {
         self.revoke_leases_where("project_id = ?", project);
         let managed = self.managed_where("project_id = ?", project);
         let done = self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities"] {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "rotators", "outside_dbs"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;

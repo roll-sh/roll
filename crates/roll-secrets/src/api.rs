@@ -84,6 +84,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/findings", get(all_health))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
+        .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -850,6 +852,20 @@ async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn outside_databases(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.outside_databases(&project, &c)).await?))
+}
+
+async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::outside::NewOutsideDatabase = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_outside_database(&project, n, &c)).await?))
+}
+
+async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_outside_database(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
