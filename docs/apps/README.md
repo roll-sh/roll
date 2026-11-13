@@ -447,7 +447,10 @@ every deployment is immutable with instant rollback.
   first), so `Domain.record` is `both` and only the TXT challenge activates it. A service holds at
   most 50 custom domains and a project 200 (`MAX_DOMAINS_PER_SERVICE`, `_PER_PROJECT`):
   certificates and their orders are shared, and the edge's pass over active hostnames takes turns
-  (one past its `max_domains` waits a pass, never loses its certificate).
+  (one past its `max_domains` waits a pass, never loses its certificate). A custom domain can redirect
+  to another of the environment's hostnames (`PATCH …/domains/{host} {redirect_to}`, the Domains
+  tab): a 308 with the path and query, as Render does for www and apex; it can't point at
+  itself, at one that redirects, or redirect while another points at it.
 - **Custom domains' certificates** (`Domain.tls`: `none`, `pending` → `issued`, or `failed`, with
   `tls_error`): one seam, `integrations::DomainTls`, chosen by `ROLL_APPS_TLS`:
   - `cloudflare` (the fleet): each domain is a **Cloudflare for SaaS** custom hostname on the site
@@ -788,29 +791,28 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **www↔apex redirects** for custom domains (Render adds one itself), and redirect rules.
-2. **First five minutes**: templates (a service and its database), linking a database in New
+1. **First five minutes**: templates (a service and its database), linking a database in New
    service, link lines on the canvas.
-3. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
-4. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
+2. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
+3. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
     (Vercel's rolling releases, Cloud Run's traffic splits).
-5. Then: an audit trail from the event log (variables, settings, domains, reveals), cost
+4. Then: an audit trail from the event log (variables, settings, domains, reveals), cost
     estimates in Settings, per-environment run settings in the dashboard, `roll apps metrics
     --range`, CLI commands for drains and notifications.
-6. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+5. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-11. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+10. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

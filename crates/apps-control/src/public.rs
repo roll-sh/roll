@@ -20,6 +20,16 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
         let apps = apps.clone();
         async move {
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+            // A domain that redirects (www → apex): a 308 to the same path and query there.
+            if let Some(to) = apps.redirect_for_host(&host).await {
+                let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+                let scheme = if apps.cfg.scheme == "https" { "https" } else { "http" };
+                let mut r = StatusCode::PERMANENT_REDIRECT.into_response();
+                if let Ok(l) = HeaderValue::from_str(&format!("{scheme}://{to}{pq}")) {
+                    r.headers_mut().insert(header::LOCATION, l);
+                }
+                return r;
+            }
             match apps.env_for_host(&host).await {
                 Some((service, env)) => serve(apps, service, env, req).await,
                 None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),

@@ -807,6 +807,9 @@ pub struct Domain {
     pub tls: TlsStatus,
     pub tls_error: Option<String>,
     pub created_at: i64,
+    /// Requests to it are sent, `308`, to this hostname of the same environment (www → apex),
+    /// path and query kept.
+    pub redirect_to: Option<String>,
 }
 
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253

@@ -454,7 +454,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
     })
 }
 
-const DOMAIN_COLS: &str = "hostname, service, env, kind, status, token, error, created_at, tls, tls_error";
+const DOMAIN_COLS: &str = "hostname, service, env, kind, status, token, error, created_at, tls, tls_error, redirect_to";
 
 fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain)> {
     let kind: String = r.get(3)?;
@@ -472,6 +472,7 @@ fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain
             created_at: r.get(7)?,
             tls: TlsStatus::parse(&r.get::<_, String>(8)?),
             tls_error: r.get(9)?,
+            redirect_to: r.get(10)?,
         },
     ))
 }
@@ -487,6 +488,7 @@ impl Store {
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("deployments", "actor", "TEXT")?;
         db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
 
@@ -1089,6 +1091,12 @@ impl Store {
     }
 
     /// The service and environment a hostname is a custom domain of.
+    /// A custom domain's redirect (`None`: it serves the environment).
+    pub fn set_redirect(&self, host: &str, to: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE domains SET redirect_to = ? WHERE hostname = ?", params![to, host])?;
+        Ok(())
+    }
+
     pub fn domain_owner(&self, host: &str) -> Result<Option<(String, String, Domain)>> {
         Ok(self.db.query_row(&format!("SELECT {DOMAIN_COLS} FROM domains WHERE hostname = ?"), [host], domain_row).optional()?)
     }
@@ -1134,7 +1142,7 @@ impl Store {
             )?;
             Ok(())
         })?;
-        Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now })
+        Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now, redirect_to: None })
     }
 
     /// A domain's DNS state; the first time it's `active` is kept (the claim no longer expires).

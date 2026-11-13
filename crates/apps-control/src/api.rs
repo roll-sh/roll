@@ -97,7 +97,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/jobs/{{job}}/cancel"), post(cancel_job))
         .route(&format!("{env}/domains"), get(domains).post(add_domain))
         .route(&format!("{env}/domains/{{host}}/verify"), post(verify_domain))
-        .route(&format!("{env}/domains/{{host}}"), axum::routing::delete(delete_domain))
+        .route(&format!("{env}/domains/{{host}}"), axum::routing::delete(delete_domain).patch(patch_domain))
         .route_layer(axum::middleware::from_fn_with_state(apps.clone(), on_owner));
     Router::new()
         .route("/v1/apps", get(overview))
@@ -744,6 +744,10 @@ async fn add_domain(State(apps): S, Path((id, env)): Path<(String, String)>, b: 
 
 async fn verify_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>) -> R {
     ok(apps.verify_domain(&id, &env, &host).await?)
+}
+
+async fn patch_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>, b: Bytes) -> R {
+    ok(apps.set_domain_redirect(&id, &env, &host, body(&b)?).await?)
 }
 
 async fn delete_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>) -> R {

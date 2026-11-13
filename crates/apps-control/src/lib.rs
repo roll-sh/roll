@@ -1003,6 +1003,7 @@ impl Apps {
             tls: if self.cfg.scheme == "https" { TlsStatus::Issued } else { TlsStatus::None },
             tls_error: None,
             created_at: row.created_at,
+            redirect_to: None,
         };
         Ok(std::iter::once(own).chain(custom).collect())
     }
@@ -1119,6 +1120,48 @@ impl Apps {
         }).collect();
         self.release_domains(&hosts).await;
         Ok(hosts)
+    }
+
+    /// `PATCH …/domains/{host} {redirect_to}`: send a custom domain's requests to another of the
+    /// environment's hostnames (its own, or another custom domain that doesn't redirect), or
+    /// (`null`) serve them again.
+    pub async fn set_domain_redirect(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value) -> Result<Domain> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| k.as_str() != "redirect_to") {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let h = host.to_ascii_lowercase();
+        let to = match o.get("redirect_to") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(t)) => Some(t.trim().trim_end_matches('.').to_ascii_lowercase()),
+            Some(_) => return Err(Error::BadRequest("redirect_to is a hostname or null".into())),
+        };
+        let all = self.domains(service, env).await?;
+        if !all.iter().any(|d| d.kind == DomainKind::Custom && d.hostname == h) {
+            return Err(Error::NotFound(format!("{h} isn't a custom domain of {service} in {env}")));
+        }
+        if let Some(t) = &to {
+            let target = all.iter().find(|d| &d.hostname == t).ok_or_else(|| Error::BadRequest(format!("{t} isn't a hostname of this environment")))?;
+            if *t == h || target.redirect_to.is_some() {
+                return Err(Error::BadRequest("redirect_to is another hostname of the environment that serves it (no loops or chains)".into()));
+            }
+            if all.iter().any(|d| d.redirect_to.as_deref() == Some(h.as_str())) {
+                return Err(Error::BadRequest(format!("another domain redirects to {h}: it serves, so it can't redirect")));
+            }
+        }
+        let (hh, t) = (h.clone(), to.clone());
+        self.db(move |s| s.set_redirect(&hh, t.as_deref())).await?;
+        self.domains(service, env).await?.into_iter().find(|d| d.hostname == h).ok_or_else(|| Error::NotFound(h.clone()))
+    }
+
+    /// Where an active custom domain redirects, if it does.
+    pub async fn redirect_for_host(self: &Arc<Self>, host: &str) -> Option<String> {
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if host.ends_with(&format!(".{}", self.cfg.domain)) {
+            return None;
+        }
+        self.db(move |s| s.domain_owner(&host)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active).and_then(|(_, _, d)| d.redirect_to)
     }
 
     /// The environment a request's `Host` names: a generated hostname, or an active custom domain.

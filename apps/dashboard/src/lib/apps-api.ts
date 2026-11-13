@@ -175,6 +175,8 @@ export interface Domain {
   /** Why it failed, or what it's waiting for. */
   tls_error: string | null;
   created_at: number;
+  /** Its requests go, 308, to this hostname of the same environment (www → apex). */
+  redirect_to?: string | null;
 }
 
 export interface Environment extends EnvironmentSummary {
@@ -458,6 +460,7 @@ export const appsApi = {
   addDomain: (id: string, e: string, hostname: string) => call<Domain>("POST", `${env(id, e)}/domains`, { hostname }),
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
   removeDomain: (id: string, e: string, host: string) => call<null>("DELETE", `${env(id, e)}/domains/${enc(host)}`),
+  redirectDomain: (id: string, e: string, host: string, to: string | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { redirect_to: to }),
 };
 
 /**

@@ -811,6 +811,30 @@ async fn a_running_instance_that_fails_its_health_check_is_replaced() {
     assert!(log.to_string().contains("health check /healthz failed"), "{log}");
 }
 
+/// A custom domain can redirect to another hostname of its environment (www → apex): a 308 with
+/// the path and query; loops and chains are refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn www_redirects_to_the_apex() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "www", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production/domains", svc["id"].as_str().unwrap());
+    for h in ["www.example.org", "example.org"] {
+        let (_, d) = call(&w.api, "POST", &base, Some(json!({ "hostname": h }))).await;
+        w.dns.add(h, "CNAME", d["target"].as_str().unwrap());
+        w.dns.add(&format!("_roll-challenge.{h}"), "TXT", d["token"].as_str().unwrap());
+        assert_eq!(call(&w.api, "POST", &format!("{base}/{h}/verify"), None).await.1["status"], "active");
+    }
+    let (st, d) = call(&w.api, "PATCH", &format!("{base}/www.example.org"), Some(json!({"redirect_to": "example.org"}))).await;
+    assert_eq!((st, d["redirect_to"].as_str()), (StatusCode::OK, Some("example.org")), "{d}");
+    let req = Request::builder().uri("/pricing?plan=pro").header("host", "www.example.org").body(Body::empty()).unwrap();
+    let r = w.public.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(r.headers()["location"], "http://example.org/pricing?plan=pro");
+    assert_eq!(visit(&w, "example.org", "/").await.0, StatusCode::OK, "the apex serves");
+    let (st, _) = call(&w.api, "PATCH", &format!("{base}/example.org"), Some(json!({"redirect_to": "www.example.org"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "no loop");
+}
+
 /// Where every tenant's CNAME points at one target (Cloudflare for SaaS), a CNAME proves nothing:
 /// a hostname someone else already points there (or left pointing) needs its TXT challenge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

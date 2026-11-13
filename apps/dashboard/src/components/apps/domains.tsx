@@ -36,6 +36,8 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
   const { copied, copy } = useCopy();
   const roll = env.domains.filter((d) => d.kind === "roll");
   const custom = env.domains.filter((d) => d.kind === "custom");
+  // Where a domain may redirect: the environment's hostnames that serve it.
+  const targets = env.domains.filter((d) => d.status === "active");
   const valid = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host.trim());
 
   const add = async () => {
@@ -96,6 +98,27 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                     </button>
                   </span>
                 </div>
+                {d.status === "active" && (
+                  <label className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+                    {d.redirect_to ? "Redirects (308) to" : "Serves the app, or redirects to"}
+                    <select
+                      value={d.redirect_to ?? ""}
+                      disabled={runner.busy !== null}
+                      onChange={(e) => runner.run(`redirect:${d.hostname}`, () => appsApi.redirectDomain(service, env.name, d.hostname, e.target.value || null))}
+                      className="h-7 rounded-md border border-line bg-panel px-2 font-mono text-[12px] outline-none"
+                      aria-label={`Where ${d.hostname} goes`}
+                    >
+                      <option value="">serve the app</option>
+                      {targets
+                        .filter((t) => t.hostname !== d.hostname && !t.redirect_to)
+                        .map((t) => (
+                          <option key={t.hostname} value={t.hostname}>
+                            {t.hostname}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                )}
                 {d.error && <p className="text-[12px] text-danger">{d.error}</p>}
                 {d.status === "active" && d.tls !== "issued" && d.tls_error && (
                   <p className={`text-[12px] ${d.tls === "failed" ? "text-danger" : "text-subtle"}`}>{d.tls_error}</p>

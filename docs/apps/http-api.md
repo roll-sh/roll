@@ -83,6 +83,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
+| `PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}` | `{ redirect_to: string \| null }` | `Domain` (another hostname of the environment that serves it: no loops or chains; null serves the app again) | write |
 | `DELETE /v1/apps/services/{id}/environments/{env}/domains/{host}` | | 204 | delete |
 
 - Creating a service makes its `production` environment, places its card on the project's canvas
@@ -335,6 +336,7 @@ type Domain = {
   tls: "none" | "pending" | "issued" | "failed";
   /** Why it failed, or what it's waiting for (the provider's words, at most ~300 characters). */
   tls_error: string | null;
+  redirect_to?: string | null; // its requests go 308 there (www → apex), path and query kept
   created_at: number;
 };
 ```
