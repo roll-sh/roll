@@ -322,7 +322,8 @@ previews are listed once those products are on.
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
-| `apps_rollback` | Roll an environment back to an earlier deploy. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_rollback_previous` | Put back the deploy that was live before this one. | `POST /v1/apps/services/{service}/environments/{env}/rollback` |
 | `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
@@ -374,15 +375,17 @@ name no caller; the expiry digest leaves out tokens made for a day or less); wor
 (`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
 and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
 waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
-a secret); every open sibling's routes classified, built with #25 (apps-next #26, previews-next #28
-and search #29 pass rolld's route test); a preview's share link is reveal (`previews_share`);
-search's index mapping, settings, refresh and analyze as MCP tools; `Access::create_grant` (a
-product makes its own tokens for its caller through the token route's own function) and tokens
-listed by what they were made for (`?product=&resource=`), for secrets retiring `rlst_`; taking an
-apps web service off the internet or putting it on (`run.public`) is deploy; a token's rate is the
-fleet's (each node enforces its share, the rate over the live nodes), not N times it; a worker's
-scaling stream needs read on it; a spent OAuth refresh token used again revokes the connection
-(OAuth 2.1; 30 seconds of grace for a retry); only token and access secrets sign a request in.
+a secret); apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and
+`apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25
+(apps-next #26, previews-next #28 and search #29 pass rolld's route test); a preview's share link is
+reveal (`previews_share`); search's index mapping, settings, refresh and analyze as MCP tools;
+`Access::create_grant` (a product makes its own tokens for its caller through the token route's own
+function) and tokens listed by what they were made for (`?product=&resource=`), for secrets retiring
+`rlst_`; taking an apps web service off the internet or putting it on (`run.public`) is deploy; a
+token's rate is the fleet's (each node enforces its share, the rate over the live nodes), not N
+times it; a worker's scaling stream needs read on it; a spent OAuth refresh token used again revokes
+the connection (OAuth 2.1; 30 seconds of grace for a retry); only token and access secrets sign a
+request in.
 
 Done before (oldest last): the consent screen says what a client's identity is worth (a metadata
 document's address vouches for it; a registered name doesn't); the access page's checkup and
