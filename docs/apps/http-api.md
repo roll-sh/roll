@@ -72,7 +72,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
-| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}` | reveal |
+| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`; 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[]}` | `Variables` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&q=&http=&status=&min_ms=` | | `LogLine[]` or SSE; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`) and `min_ms` filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=` | | `Metrics` | read |

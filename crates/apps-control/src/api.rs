@@ -32,6 +32,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -734,11 +735,12 @@ async fn wake(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 }
 
 async fn variables(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.variables(&id, &env, false).await?)
+    ok(apps.variables(&id, &env, None).await?)
 }
 
 async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
-    let v = apps.variables(&id, &env, true).await?;
+    let who = crate::integrations::Asker { operator: roll_auth::Operator::on(&ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(&ext) };
+    let v = apps.variables(&id, &env, Some(who)).await?;
     apps.audit("variables.revealed", &id, &env, actor(&ext), json!({})).await;
     ok(v)
 }

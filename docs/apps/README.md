@@ -1139,11 +1139,14 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   the setting, a change, an access token) once apps' follow-up is in its tree: the held #21
   answers 400 to an unknown field. One copy of `feedback.js` and its tagger after the merge.
 - **roll-secrets** (see "Secrets and environments"). Ours on wiring:
-  - Skip `Secrets::ensure_environment` for ephemeral environments: previews ensures them with
-    their base and trust, and ensuring again with other values is a 409 `mismatch`.
-  - `GET …/variables/values` must not return values whose `source` is `secret` unless the caller
-    may reveal the secret itself (a second catalogue check, as `copies_from` does): today apps'
-    `reveal` alone would read a project's production secrets.
+  - apps never ensures a secrets environment: an apps environment roll secrets doesn't have
+    reads as no secrets (previews ensures its `pv-` ones with their base and trust; ensuring
+    again with other values would be a 409 `mismatch`), and a person adds one in roll secrets
+    when they want secrets there.
+  - Done on apps' side: `GET …/variables/values` asks `SecretSource::may_reveal(who, project,
+    env)` (false by default) when any value comes from roll secrets, and answers 403 naming them
+    if not; secrets' `ForApps` answers it by its own rules (`Caller::allows(Reveal, …)`, protected
+    environments, a token's scope).
   - Seal with secrets' `Keyring` (`ROLL_SECRET_KEY_PREVIOUS`, `ROLL_SECRET_KEY_KMS`), not
     `ROLL_SECRET_KEY` alone, so a key rotation by secrets' guide keeps apps' sealed variables,
     registry logins and target URLs readable, and KMS works on a fleet.

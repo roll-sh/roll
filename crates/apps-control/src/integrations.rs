@@ -90,6 +90,20 @@ pub trait SecretSource: Send + Sync {
     /// audit names, `app:<service>`). An unresolved reference or a missing required key is an
     /// error: the deploy fails rather than start without it.
     async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// Whether `who` may see the project's secrets in `env` in the clear, by roll secrets' own
+    /// rules (protected environments, a token's scope): `…/variables/values` answers them only
+    /// then. No: the safe default.
+    async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str) -> bool {
+        false
+    }
+}
+
+/// Who asks for variables' values: what rolld's gate put on the request.
+#[derive(Clone, Copy, Default)]
+pub struct Asker<'a> {
+    pub operator: bool,
+    pub user: Option<&'a roll_auth::SignedIn>,
+    pub grant: Option<&'a roll_auth::Grant>,
 }
 
 /// No project secrets (until roll secrets is on this node): services use their own variables.

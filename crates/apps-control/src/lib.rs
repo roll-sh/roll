@@ -67,6 +67,9 @@ pub enum Error {
     Conflict(String),
     #[error("{0}")]
     TooLarge(String),
+    /// Allowed into the route, but not to what it would show (another product's rule).
+    #[error("{0}")]
+    Forbidden(String),
     #[error("apps database: {0}")]
     Db(#[from] code_sql::Error),
     #[error("{0}")]
@@ -1084,10 +1087,17 @@ impl Apps {
         Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources })
     }
 
-    pub async fn variables(self: &Arc<Self>, service: &str, env: &str, reveal: bool) -> Result<Value> {
+    /// The environment's variables: masked, or (`reveal`: who asks) in the clear. A value from
+    /// roll secrets is shown only to whom roll secrets would show it; otherwise the reveal is a
+    /// 403 naming them, never a partial answer.
+    pub async fn variables(self: &Arc<Self>, service: &str, env: &str, reveal: Option<integrations::Asker<'_>>) -> Result<Value> {
         let (svc, row) = self.service_env(service, env).await?;
         let r = self.resolve_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
-        if reveal {
+        if let Some(who) = reveal {
+            let secret: Vec<&String> = r.sources.iter().filter(|(_, s)| **s == "secret").map(|(k, _)| k).collect();
+            if !secret.is_empty() && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
+                return Err(Error::Forbidden(format!("{} come from roll secrets, which you may not reveal in {env}", secret.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "))));
+            }
             let m: serde_json::Map<String, Value> = r.vars.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
             return Ok(Value::Object(m));
         }
@@ -1129,7 +1139,7 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.change_variables(&sid, &e, &set, &unset)).await?;
-        self.variables(service, env, false).await
+        self.variables(service, env, None).await
     }
 
     async fn service_env(self: &Arc<Self>, service: &str, env: &str) -> Result<(ServiceRow, EnvRow)> {

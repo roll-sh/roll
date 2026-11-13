@@ -178,11 +178,11 @@ async fn world() -> World {
 }
 
 async fn world_with(setup: impl FnOnce(&mut AppsConfig)) -> World {
-    world_full(setup, false).await
+    world_full(setup, false, |_| {}).await
 }
 
 /// `objects`: a directory as object storage (log chunks, volume backups).
-async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool) -> World {
+async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool, deps_setup: impl FnOnce(&mut Deps)) -> World {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("", "acme", "", None).unwrap().id;
@@ -200,7 +200,7 @@ async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool) -> World
     cfg.live.drain = Duration::from_millis(50);
     cfg.allow_private = true;
     setup(&mut cfg);
-    let deps = Deps {
+    let mut deps = Deps {
         runtime: fake.clone(),
         builder: fake.clone(),
         sources: Some(code.clone()),
@@ -212,6 +212,7 @@ async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool) -> World
         cluster,
         workspace: Some(ws),
     };
+    deps_setup(&mut deps);
     let apps = Apps::new(cfg, store, deps);
     apps.start();
     World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, code, dns, tls, project, _dir: dir }
@@ -762,7 +763,7 @@ async fn deploys_report_on_their_commit_and_can_wait_for_ci() {
 /// meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_volume_is_backed_up_and_restored() {
-    let w = world_full(|_| {}, true).await;
+    let w = world_full(|_| {}, true, |_| {}).await;
     let (svc, _) = image_service(&w, "db", json!({"type": "worker", "volume": {"mount": "/data", "size_gb": 1}})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let volume = apps_control::volume_name(&id, "production");
@@ -1972,3 +1973,35 @@ async fn a_replaced_instance_finishes_its_requests_within_drain_s() {
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     assert_eq!(slow.await.unwrap(), StatusCode::OK, "it finished on the old instance");
 }
+
+/// Project secrets in an environment's values are shown only to whom roll secrets would show
+/// them: otherwise the reveal is a 403 naming them, never a partial answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
+    struct FakeSecrets;
+    #[async_trait]
+    impl apps_control::integrations::SecretSource for FakeSecrets {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+            Ok(vec![("DB_PASSWORD".into(), "s3cret".into())])
+        }
+        async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str) -> bool {
+            who.operator
+        }
+    }
+    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(FakeSecrets)).await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let values = format!("/v1/apps/services/{}/environments/production/variables/values", svc["id"].as_str().unwrap());
+    let (st, e) = call(&w.api, "GET", &values, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("DB_PASSWORD") && !e.to_string().contains("s3cret"), "{e}");
+    let mut req = Request::builder().uri(&values).body(Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::Operator);
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(v["DB_PASSWORD"], "s3cret");
+}
+
