@@ -17,6 +17,7 @@ hex.workspace = true
 ipnet.workspace = true
 percent-encoding.workspace = true
 roll-auth.workspace = true
+roll-cluster.workspace = true
 roll-net.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 roll-workspace.workspace = true

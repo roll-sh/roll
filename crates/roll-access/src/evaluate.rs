@@ -54,13 +54,17 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::Result<T> + Send
     tokio::task::spawn_blocking(f).await.map_err(|e| Error::Internal(e.to_string()))?
 }
 
-/// The client's address: the MCP call's, the forwarded one behind the edge, or the peer.
+/// The client's address: the MCP call's, the one the first node saw (a signed hop), the forwarded
+/// one behind the edge, or the peer.
 pub fn client_ip(req: &Request, trust_forwarded_for: bool) -> Option<IpAddr> {
     if let Some(c) = req.extensions().get::<McpCall>() {
         return c.ip;
     }
     if let Some(roll_auth::ClientIp(ip)) = req.extensions().get::<roll_auth::ClientIp>() {
         return Some(*ip);
+    }
+    if let Some(f) = req.extensions().get::<roll_cluster::Forwarded>() {
+        return f.client.as_deref().and_then(|c| c.parse().ok());
     }
     if trust_forwarded_for
         && let Some(ip) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).and_then(|v| v.trim().parse().ok())
@@ -155,6 +159,8 @@ struct Ctx {
     mcp: Option<McpCall>,
     method: String,
     route: String,
+    /// What a request that isn't an MCP call did, for the log (a push's ref updates).
+    args: Option<Value>,
 }
 
 impl Ctx {
@@ -174,7 +180,7 @@ impl Ctx {
             decision: decision.into(),
             approval: approval.map(Into::into),
             status: status.as_u16(),
-            args: self.mcp.as_ref().map(|m| (*m.args).clone()),
+            args: self.mcp.as_ref().map(|m| (*m.args).clone()).or_else(|| self.args.clone()),
             ip: self.ip.map(|i| i.to_string()),
             duration_ms: self.started.elapsed().as_millis() as i64,
         };
@@ -200,8 +206,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     };
     let ip = client_ip(&req, access.config.trust_forwarded_for);
     let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
-    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route };
-    {
+    // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
+    // person isn't asked twice, and the first node logs it. Everything else is decided again.
+    let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None };
+    if !decided_before {
         let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
         tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
     }
@@ -261,21 +270,29 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
-    let mut action = row.action(&ctx.method, &params, json_body.as_ref());
+    // What the request needs: one action, or every action a push's ref updates take.
+    let mut needs = vec![row.action(&ctx.method, &params, json_body.as_ref())];
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
     if matches!(row.act, catalog::Act::GitPush) {
-        let (prefix, rest) = peek_push(body.take().unwrap_or_default()).await;
-        let gzipped = parts.headers.get(axum::http::header::CONTENT_ENCODING).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
-        let repo = describe(&target).unwrap_or_default();
-        let a2 = access.clone();
-        let default = tokio::task::spawn_blocking(move || a2.resolvers.resolve("default-branch", &repo).map(|r| r.id)).await.ok().flatten();
-        action = if gzipped { Action::Deploy } else { catalog::git_push_action(&prefix, default.as_deref()).unwrap_or(Action::Deploy) };
-        let head = prefix.clone();
-        body = Some(Body::from_stream(futures::stream::once(async move { Ok::<_, axum::Error>(head) }).chain(rest)));
-        git_commands = Some(prefix);
+        needs = catalog::UNREAD_PUSH.to_vec();
+        // A compressed body isn't read: it needs everything a push can do.
+        let encoded = parts.headers.get(axum::http::header::CONTENT_ENCODING).is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"identity"));
+        if !encoded {
+            let (prefix, rest) = peek_push(body.take().unwrap_or_default()).await;
+            let repo = describe(&target).unwrap_or_default();
+            let a2 = access.clone();
+            let default = tokio::task::spawn_blocking(move || a2.resolvers.resolve("default-branch", &repo).map(|r| r.id)).await.ok().flatten();
+            if let catalog::Push::Commands(updates) = catalog::git_push(&prefix, default.as_deref()) {
+                needs = updates.iter().map(|u| u.action).collect();
+                ctx.args = Some(json!({ "updates": updates }));
+            }
+            let head = prefix.clone();
+            body = Some(Body::from_stream(futures::stream::once(async move { Ok::<_, axum::Error>(head) }).chain(rest)));
+            git_commands = Some(prefix);
+        }
     }
-    let mut outcome = if matches!(row.target, Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    let (mut outcome, action) = if matches!(row.target, Tgt::AnyGrant) { (Outcome::Allow, needs[0]) } else { weakest(&needs, |a| scope.outcome(&target, a)) };
     // Putting a resource in a workspace project (or taking it out) changes which tokens reach it:
     // it also needs `admin` on that resource, where it is now, allowed outright.
     if let Some((product, r#ref)) = catalog::placement(row, &params) {
@@ -299,6 +316,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 json!({ "needs": { "product": row.product, "action": action, "resource": resource } }),
             );
         }
+        Outcome::Ask if decided_before => {}
         Outcome::Ask => {
             // A push is bound to its ref updates (the pack isn't read to ask about it).
             if let Some(c) = &git_commands {
@@ -325,7 +343,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 target,
                 bound.join("\n")
             ));
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone() };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
                 Err(resp) => return *resp,
@@ -342,7 +360,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     parts.extensions.insert(roll_auth::Operator);
     if let Some(ip) = ctx.ip {
         parts.extensions.insert(roll_auth::ClientIp(ip));
+        parts.extensions.insert(roll_cluster::ClientAddr(ip.to_string()));
     }
+    // Forwarded to an owner, it carries this decision (signed) so a person isn't asked again.
+    parts.extensions.insert(roll_cluster::Decided(ctx.grant.id.clone()));
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),
@@ -367,8 +388,31 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     } else {
         resp
     };
-    ctx.audit(Some(row), Some(action), resource, if approval_used.is_some() { "ask" } else { "allow" }, approval_used.as_deref(), resp.status());
+    if !decided_before {
+        ctx.audit(Some(row), Some(action), resource, if approval_used.is_some() { "ask" } else { "allow" }, approval_used.as_deref(), resp.status());
+    }
     resp
+}
+
+/// The decision on everything a request needs: the weakest outcome, and the action it's for
+/// (the strongest among equals).
+fn weakest(needs: &[Action], outcome: impl Fn(Action) -> Outcome) -> (Outcome, Action) {
+    let rank = |o: Outcome| match o {
+        Outcome::Deny => 0,
+        Outcome::Ask => 1,
+        Outcome::Allow => 2,
+    };
+    let mut sorted = needs.to_vec();
+    sorted.sort_by(|a, b| b.cmp(a));
+    sorted.dedup();
+    let mut out = (Outcome::Allow, sorted[0]);
+    for a in sorted {
+        let o = outcome(a);
+        if rank(o) < rank(out.0) {
+            out = (o, a);
+        }
+    }
+    out
 }
 
 /// The name a grant reviews and comments as in roll code: `token:<its name>` (roll code's agent
@@ -378,13 +422,13 @@ fn reviewer_name(g: &Grant) -> String {
     format!("token:{name}")
 }
 
-/// The start of a push's body: its commands (pkt-lines to the first flush, at most 1 MiB), and
-/// the rest of the stream.
+/// The start of a push's body: its commands (pkt-lines to the first flush, at most 1 MiB; it
+/// stops at the first line that isn't one), and the rest of the stream.
 async fn peek_push(body: Body) -> (bytes::Bytes, axum::body::BodyDataStream) {
     use futures::StreamExt;
     let mut stream = body.into_data_stream();
     let mut prefix = bytes::BytesMut::new();
-    while catalog::git_push_action(&prefix, None).is_none() && prefix.len() < (1 << 20) {
+    while catalog::git_push(&prefix, None) == catalog::Push::More && prefix.len() < (1 << 20) {
         match stream.next().await {
             Some(Ok(chunk)) => prefix.extend_from_slice(&chunk),
             _ => break,
@@ -409,11 +453,13 @@ struct Asked<'a> {
     path: &'a str,
     body: &'a [u8],
     request_hash: String,
+    /// What it does, when its body isn't JSON (a push's ref updates).
+    args: Option<Value>,
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
-    let Asked { headers, path, body, request_hash } = req;
+    let Asked { headers, path, body, request_hash, args } = req;
     let access = &ctx.access;
     let existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     let approval = match existing {
@@ -427,7 +473,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             found
         }
         None => {
-            let args = redact::body(row, body);
+            let args = args.unwrap_or_else(|| redact::body(row, body));
             let summary = redact::summary(row, action, &ctx.method, resource.as_deref(), ctx.mcp.as_ref().map(|m| &*m.tool));
             let a = access.clone();
             let grant = ctx.grant.clone();

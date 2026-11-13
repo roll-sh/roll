@@ -135,20 +135,20 @@ async fn register(State(a): S, body: axum::body::Bytes) -> Response {
         Ok(Err(e)) => return e.into_response(),
         Err(e) => return Error::Internal(e.to_string()).into_response(),
     };
-    (
-        StatusCode::CREATED,
-        Json(json!({
-            "client_id": client.id,
-            "client_name": client.name,
-            "client_uri": client.uri,
-            "redirect_uris": client.redirect_uris,
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
-            "client_id_issued_at": client.created_at / 1000,
-        })),
-    )
-        .into_response()
+    let mut out = json!({
+        "client_id": client.id,
+        "client_name": client.name,
+        "redirect_uris": client.redirect_uris,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "client_id_issued_at": client.created_at / 1000,
+    });
+    // RFC 7591: a field the client didn't set is left out, never null (clients' schemas refuse it).
+    if let Some(uri) = client.uri {
+        out["client_uri"] = Value::String(uri);
+    }
+    (StatusCode::CREATED, Json(out)).into_response()
 }
 
 #[derive(Deserialize)]

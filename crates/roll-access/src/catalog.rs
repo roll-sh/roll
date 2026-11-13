@@ -84,7 +84,7 @@ impl Row {
                 if params.iter().any(|(k, v)| k == p && v == "production") { Action::Deploy } else { Action::Write }
             }
             Act::Body(f) => f(body.unwrap_or(&Value::Null)),
-            // The strongest it can be, unless its commands were read (`git_push_action`).
+            // The strongest it can be; the evaluator reads its commands (`git_push`).
             Act::GitPush => Action::Deploy,
         }
     }
@@ -185,16 +185,19 @@ fn method_rank(r: &Row, method: &str) -> Option<u8> {
 /// longest prefix. A route that is a catch-all (`/v1/tasks/{*rest}`, storage's nest) is the
 /// product's own router in disguise: its rows are matched against the request's path.
 pub fn find(method: &str, route: &str, path: &str) -> Option<Found> {
-    if OPERATOR_ONLY.iter().any(|(r, _)| *r == route) {
+    if OPERATOR_ONLY.iter().any(|(r, _)| shape(r) == shape(route)) {
         return None;
     }
-    let exact = ROWS.iter().filter(|r| r.route == route).filter_map(|r| method_rank(r, method).map(|m| (m, r))).max_by_key(|(m, _)| *m);
+    // Patterns are compared by shape: a product naming a parameter `{key}` where its row says
+    // `{name}` still matches its row (a rename must never change an action).
+    let shape = shape(route);
+    let exact = ROWS.iter().filter(|r| self::shape(r.route) == shape).filter_map(|r| method_rank(r, method).map(|m| (m, r))).max_by_key(|(m, _)| *m);
     if let Some((_, row)) = exact {
         return Some(Found { row, params: None });
     }
     let prefix = ROWS
         .iter()
-        .filter(|r| r.route.ends_with('/') && route.starts_with(r.route))
+        .filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
         .filter_map(|r| method_rank(r, method).map(|m| ((r.route.len(), m), r)))
         .max_by_key(|(k, _)| *k);
     if let Some((_, row)) = prefix {
@@ -239,6 +242,19 @@ pub fn placement(row: &Row, params: &[(String, String)]) -> Option<(&'static str
 /// the gate here decides the original request again, on this node.
 pub const FORWARDS: &[(&str, &str)] = &[("/internal/storage/control", "x-roll-storage-uri"), ("/internal/tasks", "x-roll-tasks-uri")];
 
+/// A route pattern with its parameters' names dropped (`/a/{id}/{*rest}` → `/a/{}/{*}`).
+pub fn shape(route: &str) -> String {
+    route
+        .split('/')
+        .map(|seg| match seg.strip_prefix('{') {
+            Some(rest) if rest.starts_with('*') => "{*}",
+            Some(_) => "{}",
+            None => seg,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Products mounted with `nest_service`: axum gives their requests no matched route.
 pub const NESTS: &[&str] = &["/v1/storage"];
 
@@ -273,13 +289,14 @@ pub fn by_path(method: &str, path: &str) -> Option<Found> {
 /// catch-all whose real routes have rows), `operator only` (on purpose), or `None`: no row, so no
 /// grant can call it. rolld logs it for every route at startup; `rolld/tests/auth.rs` reads it.
 pub fn classified(route: &str) -> Option<&'static str> {
-    if OPERATOR_ONLY.iter().any(|(r, _)| *r == route) {
+    if OPERATOR_ONLY.iter().any(|(r, _)| shape(r) == shape(route)) {
         return Some("operator only");
     }
-    if let Some(r) = ROWS.iter().find(|r| r.route == route) {
+    let shape = shape(route);
+    if let Some(r) = ROWS.iter().find(|r| self::shape(r.route) == shape) {
         return Some(r.product);
     }
-    if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && route.starts_with(r.route)).max_by_key(|r| r.route.len()) {
+    if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route))).max_by_key(|r| r.route.len()) {
         return Some(r.product);
     }
     if FORWARDS.iter().any(|(r, _)| *r == route) {
@@ -773,6 +790,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/branches", "search", W, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
+    // An API key: its secret is in the answer.
+    row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")),
@@ -792,6 +812,21 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // What hands out more than the request itself: secrets' own tokens, syncs (they push values
+    // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
+    row("*", "/v1/secrets/projects/{project}/tokens", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/tokens", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/tokens/", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/audit/sinks", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
+    // Purging a secret's history can't be undone.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -810,6 +845,15 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/domains/{host}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A shell (a WebSocket's GET) and its screen run commands where the service runs: deploy* too.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // Waking a sleeping environment and checking a domain change nothing a person sees.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps", "apps", R, Tgt::Product),
+    row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
+    row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
     row("GET", "/v1/previews", "previews", R, list("id")),
@@ -882,41 +926,82 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/code/agents/{owner}/automations/{id}/webhook/secret", "agents", REVEAL, one(&["owner"], "owner")),
 ];
 
-/// What a push's commands make it (`old new ref` pkt-lines before the first flush): `deploy` when
-/// one moves `default_branch` (unknown: any branch), `delete` when one deletes a ref, else
-/// `write`. `None` when the commands aren't all there (the evaluator then takes it as `deploy`).
-pub fn git_push_action(prefix: &[u8], default_branch: Option<&str>) -> Option<Action> {
+/// One ref update in a push, and the action it takes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RefUpdate {
+    #[serde(rename = "ref")]
+    pub name: String,
+    pub old: String,
+    pub new: String,
+    pub action: Action,
+}
+
+/// A push's commands (`old new ref` pkt-lines before the first flush), as far as they've arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Push {
+    /// Not all there yet.
+    More,
+    /// Not commands this parser reads: the push needs everything it could do ([`UNREAD_PUSH`]).
+    Bad,
+    Commands(Vec<RefUpdate>),
+}
+
+/// What a push whose commands weren't read might do; it needs every one of them.
+pub const UNREAD_PUSH: [Action; 3] = [Action::Write, Action::Delete, Action::Deploy];
+
+/// A push's ref updates and what each one is: `deploy` when it moves `default_branch`, directly or
+/// through `refs/land/<branch>` (which lands onto the branch; unknown default: any branch),
+/// `delete` when it deletes a ref, else `write`. A push needs every action its updates take:
+/// actions don't imply each other.
+pub fn git_push(prefix: &[u8], default_branch: Option<&str>) -> Push {
     let mut rest = prefix;
-    let mut out = Action::Write;
-    let mut any = false;
+    let mut out = Vec::new();
     loop {
-        let len = std::str::from_utf8(rest.get(..4)?).ok().and_then(|h| usize::from_str_radix(h, 16).ok())?;
+        let Some(head) = rest.get(..4) else { return Push::More };
+        let Some(len) = std::str::from_utf8(head).ok().and_then(|h| usize::from_str_radix(h, 16).ok()) else { return Push::Bad };
         if len == 0 {
-            return any.then_some(out);
+            return if out.is_empty() { Push::Bad } else { Push::Commands(out) };
         }
-        if len < 4 || rest.len() < len {
-            return None;
+        if len < 4 {
+            return Push::Bad;
+        }
+        if rest.len() < len {
+            return Push::More;
         }
         let line = &rest[4..len];
         rest = &rest[len..];
         let line = line.split(|b| *b == 0).next().unwrap_or(line);
-        let text = std::str::from_utf8(line).ok()?.trim_end();
+        let Ok(text) = std::str::from_utf8(line) else { return Push::Bad };
+        let text = text.trim_end_matches('\n');
+        // A shallow client says which commits it has the history of before its commands.
+        if out.is_empty() && text.strip_prefix("shallow ").is_some_and(is_oid) {
+            continue;
+        }
         let mut parts = text.split(' ');
-        let (_old, new, name) = (parts.next()?, parts.next()?, parts.next()?);
-        any = true;
-        let to_default = match default_branch {
-            Some(b) => name == format!("refs/heads/{b}"),
-            None => name.starts_with("refs/heads/"),
+        let (Some(old), Some(new), Some(name), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return Push::Bad };
+        if !is_oid(old) || !is_oid(new) || name.is_empty() {
+            return Push::Bad;
+        }
+        let onto = name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("refs/land/"));
+        let ships = match (onto, default_branch) {
+            (Some(b), Some(d)) => b == d,
+            (Some(_), None) => true,
+            (None, _) => false,
         };
-        let a = if to_default {
+        let action = if ships {
             Action::Deploy
         } else if new.bytes().all(|c| c == b'0') {
             Action::Delete
         } else {
             Action::Write
         };
-        out = out.max(a);
+        out.push(RefUpdate { name: name.to_string(), old: old.to_string(), new: new.to_string(), action });
     }
+}
+
+/// A git object id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
+fn is_oid(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -942,6 +1027,10 @@ mod tests {
         // Static segments beat parameters; production decides deploy.
         let env = find("PUT", "/v1/secrets/projects/{project}/environments/order", "x").unwrap();
         assert_eq!(env.row.action("PUT", &[], None), Action::Admin);
+        // A product naming a parameter differently from its row still gets its row (secrets'
+        // router says `{key}`, the row `{name}`): a value read is never the prefix's read.
+        let f = find("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "x").unwrap();
+        assert_eq!(f.row.action("GET", &[], None), Action::Reveal);
         // Every route that answers secret values is reveal.
         for r in ["values", "secrets/{name}/value", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
             let route = format!("/v1/secrets/projects/{{project}}/environments/{{env}}/{r}");
@@ -974,10 +1063,19 @@ mod tests {
         let pkt = |s: &str| format!("{:04x}{s}", s.len() + 4);
         let (z, a) = ("0".repeat(40), "a".repeat(40));
         let push = |cmds: &[String]| format!("{}0000PACK…", cmds.join("")).into_bytes();
-        assert_eq!(git_push_action(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0report-status\n"))]), Some("main")), Some(Action::Write));
-        assert_eq!(git_push_action(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0caps\n")), pkt(&format!("{z} {a} refs/heads/main\n"))]), Some("main")), Some(Action::Deploy));
-        assert_eq!(git_push_action(&push(&[pkt(&format!("{a} {z} refs/tags/v1\0caps\n"))]), Some("main")), Some(Action::Delete));
-        assert_eq!(git_push_action(b"00", Some("main")), None);
+        let actions = |p: Push| match p {
+            Push::Commands(c) => c.into_iter().map(|u| u.action).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0report-status\n"))]), Some("main"))), [Action::Write]);
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/heads/feature\0caps\n")), pkt(&format!("{z} {a} refs/heads/main\n"))]), Some("main"))), [Action::Write, Action::Deploy]);
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{a} {z} refs/tags/v1\0caps\n")), pkt(&format!("{z} {a} refs/heads/x\n"))]), Some("main"))), [Action::Delete, Action::Write]);
+        // refs/land/<branch> lands onto the branch.
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/land/main\0caps\n"))]), Some("main"))), [Action::Deploy]);
+        assert_eq!(actions(git_push(&push(&[pkt(&format!("{z} {a} refs/land/feature\0caps\n"))]), None)), [Action::Deploy]);
+        assert_eq!(git_push(b"00", Some("main")), Push::More);
+        assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
+        assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         let f = find("POST", "/git/{*path}", "/git/acme/site.git/git-receive-pack").unwrap();
         assert_eq!(f.row.route, "/git/{owner}/{repo}/git-receive-pack");
         let mut routes: Vec<_> = ROWS.iter().map(|r| (r.method, r.route)).collect();

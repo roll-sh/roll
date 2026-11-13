@@ -247,7 +247,13 @@ previews are listed once those products are on.
 | `secrets_delete` | Delete a secret. | `DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `apps_list_services` | App services. | `GET /v1/apps/services` |
 | `apps_get_service` | A service with its environments and deploys. | `GET /v1/apps/services/{service}` |
-| `apps_deploy` | Deploy a service to an environment (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
+| `apps_restart` | Restart an environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/restart` |
+| `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
+| `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
+| `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_rollback` | Roll an environment back to an earlier deploy. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
 | `apps_logs` | Recent logs of a service's environment. | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
@@ -255,7 +261,9 @@ previews are listed once those products are on.
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |
 | `previews_list` | Preview environments. | `GET /v1/previews` |
 | `previews_get` | A preview with its branched resources. | `GET /v1/previews/{id}` |
-| `previews_create` | A preview environment: every resource of a project branched. | `POST /v1/previews` |
+| `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
+| `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
+| `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
 | `previews_delete` | Tear a preview down with its branches. | `DELETE /v1/previews/{id}` |
 | `code_…`, `agents_…` | roll code's tools (docs/code/mcp.md), under product names | as there |
 
@@ -263,16 +271,25 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **Products landing on other branches:** secrets, apps, previews and search have catalogue rows
-   and tools from their contracts; check them against the merged routes, and wire previews'
-   `Store::environment_of` (a Postgres branch's environment comes from its `{branch}`) and search's
-   `resolve_id` (async: through the runtime handle). Whichever of secrets and this lands second
-   makes `Secrets::caller` read `roll_auth::Grant` first.
-2. **Users' own tokens (with accounts, PR #18):** a signed-in user who isn't an admin makes
-   tokens for what they can reach (their roll code owner, agents and workspace projects), the same
-   model and evaluator; `integrate/mcp-accounts` has both branches merged and green.
-3. **Postgres e2e on this server:** five history/replica e2e tests fail here because computes can't
-   reach the daemon on the Docker bridge (`wget … 172.17.0.1 timed out`), with or without this
-   branch; run `pnpm test:pg` where computes reach the host (CI) before merging.
-4. **Finer resources:** storage buckets in another account (today a request naming an account
-   needs a rule for every storage resource), apps' deploys by id.
+1. **Per-token rate limits** (in progress): requests per minute per grant, like Stripe's and GitHub's
+   per-key limits. Over it, `429` with `Retry-After` and the `RateLimit-*` headers, over MCP an
+   error result saying when to retry. Counted in memory per node (a limit protects the daemon, not
+   a bill), set in the builder, `roll token create --rate`, and on OAuth consent.
+2. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
+   `examples/classify` on their routers, and wire their lookups in `rolld/src/access.rs`:
+   - previews' `Store::environment_of` (a Postgres branch's environment comes from `{branch}`);
+   - search's `resolve_id` (async: through the runtime handle);
+   - apps' services to their projects;
+   - secrets' `Grant` swap and `roll_auth::Grants` for its syncs.
+3. **Users' own tokens (with accounts, #18):** a signed-in user who isn't an admin makes tokens for
+   what they can reach (their roll code owner, agents and workspace projects), and their grants
+   act as them, not as the operator. Built on `integrate/mcp-accounts` (both branches merged).
+4. **Audit sinks:** stream the audit log to a webhook (signed, through roll code's delivery queue)
+   for a SIEM, and keep a longer retention for that.
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+   reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
+6. **Finer resources:** storage buckets in another account, apps' deploys by id.
+
+Done lately: the official TypeScript (`@modelcontextprotocol/sdk` 1.32.2, OAuth included) and
+Python (`mcp` 2.3.0) SDKs drive a live rolld end to end; the only thing they tripped on,
+registration answering `"client_uri": null`, is fixed.
