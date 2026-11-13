@@ -2161,6 +2161,27 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
                     keys = Some(names);
                 }
             }
+            // A local .env, if any, still matches (by fingerprint, never printing a value).
+            if let Ok(text) = std::fs::read_to_string(".env") {
+                match api.call(Method::POST, &format!("{env}/diff"), Some(import_body(&text, &at.path, false, false)?)).await {
+                    Ok(d) => {
+                        let names = |k: &str| d[k].as_array().into_iter().flatten().map(s).collect::<Vec<_>>();
+                        let (changed, added, missing) = (names("changed"), names("added"), names("missing"));
+                        checks.push(if changed.is_empty() && added.is_empty() && missing.is_empty() {
+                            (true, format!(".env matches {}:{}", at.env, at.path))
+                        } else {
+                            let mut parts = vec![];
+                            for (what, list) in [("differs", &changed), ("only in .env", &added), ("missing from .env", &missing)] {
+                                if !list.is_empty() {
+                                    parts.push(format!("{what}: {}", list.join(", ")));
+                                }
+                            }
+                            (false, format!(".env is stale against {} ({}); roll secrets export > .env, or roll run", at.env, parts.join("; ")))
+                        });
+                    }
+                    Err(e) => checks.push((false, format!("comparing .env: {e}"))),
+                }
+            }
             // Nothing in this environment needs fixing now.
             if let Ok(found) = api.get(&format!("/v1/secrets/projects/{}/health", enc(&id))).await {
                 let serious: Vec<String> = found

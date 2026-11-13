@@ -588,7 +588,8 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
   the project it's bound to), the directory's project and environment and how many keys it can
   read there, anything there that needs fixing now (expired, missing or exposed keys, from health),
-  the keys a `.env.example` names that it lacks, and whether staged files hold any of
+  the keys a `.env.example` names that it lacks, whether a local `.env` still matches (the diff
+  above, by fingerprint), and whether staged files hold any of
   the project's values (the scan, names only). It fails when a check does: a first step when
   `roll run` doesn't see what it should.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
@@ -1537,9 +1538,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **`roll secrets doctor` compares a local `.env`**: when the directory has one, the diff above
-   as a check (keys it adds, changes or lacks), so a stale copy shows with everything else.
-2. **The audit log into a roll stream**: a sink `stream:<id>/<topic>` producing each audit event
+1. **The audit log into a roll stream**: a sink `stream:<id>/<topic>` producing each audit event
    to a topic of a roll stream on the canvas, for consumers that react as it's written.
 
 Waiting on other pull requests:
