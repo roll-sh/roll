@@ -103,6 +103,10 @@ pub struct SstMeta {
     /// files without it are read as before).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_ts: Option<u64>,
+    /// How many of its entries are deletions, as its writer counted them (not stored: 0 for
+    /// a file of an earlier session). What `Store::maybe_compact` weighs L0 by.
+    #[serde(skip)]
+    pub deletes: u64,
 }
 
 mod hex_bytes {
@@ -223,6 +227,10 @@ pub struct SstWriter {
     /// The bloom filter, when sized up front (`expect_keys`): its bits are set as keys come
     /// instead of keeping every key's hash until `finish`.
     bloom: Option<(Vec<u8>, FastMod)>,
+    /// Values are a spilled run's (`txn::spill`: a tag byte first, bit 0 clear for a deletion).
+    tagged: bool,
+    /// Deletions added (`SstMeta::deletes`).
+    deletes: u64,
 }
 
 impl SstWriter {
@@ -230,6 +238,7 @@ impl SstWriter {
     pub fn create_temp(dir: &Path, id: u64) -> Result<Self> {
         let mut w = Self::create(dir, id, false)?;
         w.sync = false;
+        w.tagged = true;
         Ok(w)
     }
 
@@ -239,6 +248,7 @@ impl SstWriter {
     pub fn create_run(dir: &Path, id: u64, compress: bool) -> Result<Self> {
         let mut w = Self::create(dir, id, compress)?;
         w.sync = false;
+        w.tagged = true;
         Ok(w)
     }
 
@@ -275,6 +285,8 @@ impl SstWriter {
             compress,
             sync: true,
             bloom: None,
+            tagged: false,
+            deletes: 0,
         })
     }
 
@@ -315,6 +327,11 @@ impl SstWriter {
         self.prev_key.extend_from_slice(key);
         self.block_entries += 1;
         self.entries += 1;
+        let deleted = match value {
+            None => true,
+            Some(v) => self.tagged && v.first().is_none_or(|t| t & 1 == 0),
+        };
+        self.deletes += deleted as u64;
         let ts = key_ts(key);
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
@@ -434,6 +451,7 @@ impl SstWriter {
             },
             max_ts: self.max_ts,
             commit_ts: None,
+            deletes: self.deletes,
         })
     }
 

@@ -140,6 +140,105 @@ fn kill_during_big_copy_and_update() {
     }
 }
 
+/// (Half of a batch deleted, its row and two index entries each: past the deletions that
+/// make a compaction due, `storage::deletions_due`.)
+const DEL_ROWS: i64 = 44_000;
+
+/// The child of `kill_during_compactions_after_deletes`: batch k, one transaction, COPYs
+/// `DEL_ROWS` rows with k into table d, deletes the even ids of batch k - 1 and adds k to the
+/// small table c, then (its own transaction) updates c's row k: the store compacts the
+/// deletions' runs at the L0 trigger (waiting for the commit's snapshot to go), and the small
+/// files each commit leaves (c's writes, the catalog's) at once, merged only with the L1 files
+/// they have keys in. After the batch's COMMIT returns, `k` goes into the log (fsynced).
+#[test]
+fn deletes_child() {
+    let Ok(dir) = std::env::var("CRASH_DELETES_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let eng = pg_engine::storage::with_txn_spill_bytes(256 << 10, || open(&dir.join("data")));
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS d (id int PRIMARY KEY, v text, k int)",
+        "CREATE INDEX IF NOT EXISTS d_k ON d (k)",
+        "CREATE TABLE IF NOT EXISTS c (k int PRIMARY KEY, n int)",
+    ] {
+        s.query(sql).unwrap();
+    }
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("committed")).unwrap();
+    let first = match &s.query("SELECT coalesce(max(k), 0) FROM c").unwrap().last().unwrap().rows[0][0] {
+        pg_engine::types::Value::Int4(m) => *m as i64 + 1,
+        v => panic!("{v:?}"),
+    };
+    for k in first..first + 1000 {
+        let mut rows = String::new();
+        for id in k * DEL_ROWS..(k + 1) * DEL_ROWS {
+            rows.push_str(&format!("{id}\tvalue {id} of batch {k}\t{k}\n"));
+        }
+        s.query("BEGIN").unwrap();
+        s.query_copy("COPY d FROM STDIN", rows.as_bytes()).unwrap();
+        s.query(&format!("DELETE FROM d WHERE k = {} AND id % 2 = 0", k - 1)).unwrap();
+        s.query(&format!("INSERT INTO c VALUES ({k}, 0)")).unwrap();
+        s.query("COMMIT").unwrap();
+        s.query(&format!("UPDATE c SET n = {k} WHERE k = {k}")).unwrap();
+        writeln!(log, "{k}").unwrap();
+        log.sync_all().unwrap();
+    }
+}
+
+/// kill -9 while bulk DELETEs' runs and the small files beside them are compacted: every
+/// batch whose COMMIT returned is there with its predecessor's even ids gone, the one cut
+/// short all or nothing, and the indexes agree with the rows.
+#[test]
+fn kill_during_compactions_after_deletes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = std::env::current_exe().unwrap();
+    for (round, ms) in [800u64, 2100, 3500].into_iter().enumerate() {
+        let mut child = std::process::Command::new(&exe)
+            .args(["--exact", "deletes_child", "--nocapture", "--test-threads=1"])
+            .env("CRASH_DELETES_DIR", tmp.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let committed = |p: &Path| std::fs::read_to_string(p.join("committed")).unwrap_or_default();
+        while committed(tmp.path()).lines().count() < 2 * (round + 1) && start.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(ms));
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let done: Vec<i64> = committed(tmp.path()).lines().map(|l| l.parse().unwrap()).collect();
+        assert!(!done.is_empty(), "round {round}: nothing committed");
+        let max = *done.iter().max().unwrap();
+        let eng = open(&tmp.path().join("data"));
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        let last = match one(&mut s, "SELECT max(k) FROM c") {
+            x if x == format!("[[Int4({max})]]") => max,
+            x if x == format!("[[Int4({})]]", max + 1) => max + 1,
+            x => panic!("round {round}: c's last {x}, logged {max}"),
+        };
+        // (Every batch but the last lost its even ids, half of them.)
+        let n = last * DEL_ROWS - (last - 1) * DEL_ROWS / 2;
+        let sum: i64 = (1..=last).map(|k| if k == last { k * DEL_ROWS } else { k * DEL_ROWS / 2 }).sum();
+        let want = format!("[[Int8({n}), Int8({sum})]]");
+        assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM d"), want, "round {round}");
+        assert_eq!(one(&mut s, "SELECT count(*) FROM d WHERE id % 2 = 0 AND k < (SELECT max(k) FROM d)"), "[[Int8(0)]]", "round {round}");
+        // (c's rows of the batches logged are updated; one cut short may not be.)
+        let logged = done.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let cs = one(&mut s, &format!("SELECT count(*), count(*) FILTER (WHERE n = k) FROM c WHERE k IN ({logged})"));
+        assert_eq!(cs, format!("[[Int8({}), Int8({})]]", done.len(), done.len()), "round {round}");
+        s.query("SET enable_seqscan = off").unwrap();
+        s.query("SET enable_bitmapscan = off").unwrap();
+        assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM d WHERE k >= 0"), want, "round {round}");
+        assert_eq!(one(&mut s, "SELECT count(*), sum(k) FROM d WHERE id >= 0"), want, "round {round}");
+        drop(s);
+        eng.shutdown();
+    }
+}
+
 const PART_ROWS: i64 = 5_000;
 
 /// The child of `kill_during_compactions_of_many_tables`: batch k adds `PART_ROWS` rows to

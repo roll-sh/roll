@@ -74,6 +74,33 @@ fn unwatch_written(watched: &mut HashMap<u32, u64>, key: &[u8], value: Option<&[
 /// end (`part_ends`).
 const PART_MIN: u64 = 256 << 10;
 
+/// How long a compaction at the L0 trigger waits for the newest commit it merges to be seen
+/// by every snapshot (`Store::wait_unpinned`).
+const PIN_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Deletions in L0 that make a compaction due before the file count does (`deletions_due`).
+const DELETIONS_MIN: u64 = 1 << 16;
+
+/// Whether L0's files hold `DELETIONS_MIN` deletions or more, an eighth or more of the
+/// entries of the L1 files their ranges meet (a bulk DELETE's, of a table and its indexes):
+/// every scan of those ranges merges each one with the row or entry it deletes until a
+/// compaction drops both, however few files L0 has.
+fn deletions_due(l0: &[Arc<SstReader>], l1: &[Arc<SstReader>]) -> bool {
+    let deletes: u64 = l0.iter().map(|s| s.meta.deletes).sum();
+    if deletes < DELETIONS_MIN {
+        return false;
+    }
+    let meets = |s: &SstReader| {
+        l0.iter().any(|f| {
+            f.meta.deletes > 0
+                && user_key(&s.meta.last_key) >= user_key(&f.meta.first_key)
+                && user_key(&s.meta.first_key) <= user_key(&f.meta.last_key)
+        })
+    };
+    let under: u64 = l1.iter().filter(|s| meets(s)).map(|s| s.meta.entries).sum();
+    deletes * 8 >= under
+}
+
 /// Whether a compaction's output `w`, whose last key began with `part` (a key's first 8
 /// bytes: its table's and index's ids), ends before `uk`: where the keys pass to another
 /// table's or index's once it holds `PART_MIN` bytes, and always between the store's own keys
@@ -336,6 +363,8 @@ pub struct Store {
     horizon_seen: AtomicU64,
     bg: Mutex<()>,
     bg_running: AtomicBool,
+    /// A commit's run went to L1 as it was since `maybe_compact` last looked (`alone_at_bottom`).
+    linked_bottom: AtomicBool,
     closed: AtomicBool,
     /// Small ranges scanned whole again and again, kept as version chains (`hot`).
     hot: hot::Hot,
@@ -554,6 +583,7 @@ impl Store {
             horizon_seen: AtomicU64::new(last_ts),
             bg: Mutex::new(()),
             bg_running: AtomicBool::new(false),
+            linked_bottom: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             hot: hot::Hot::default(),
             dead: Arc::default(),
@@ -1553,6 +1583,7 @@ impl Store {
             }
             for (f, b) in files.iter().zip(&bottom) {
                 if *b {
+                    self.linked_bottom.store(true, Ordering::Release);
                     let at = next.l1.partition_point(|s| s.last_key < f.meta.first_key);
                     next.l1.insert(at, f.meta.clone());
                 } else {
@@ -1893,12 +1924,54 @@ impl Store {
         self.flush_all()
     }
 
-    /// Merge L0 into L1 once L0 has enough files, dropping versions no snapshot can see.
+    /// Merge L0 into L1 once L0 has enough files or deletions (`deletions_due`), dropping
+    /// versions no snapshot can see; or when L0 holds only small files whose keys are in small
+    /// L1 files, for little (`small_bytes`).
     pub fn maybe_compact(&self) -> Result<()> {
-        if self.view.with(|v| v.l0.len()) < self.opts.l0_compaction_trigger {
-            return Ok(());
+        let (n, bytes, newest, before) = self.view.with(|v| {
+            let newest = v.l0.iter().map(|s| s.meta.max_ts).max().unwrap_or(0);
+            let before = v.l0.iter().map(|s| s.meta.max_ts).filter(|&t| t < newest).max().unwrap_or(0);
+            (v.l0.len(), v.l0.iter().map(|s| s.meta.size).sum::<u64>(), newest, before)
+        });
+        if n >= self.opts.l0_compaction_trigger || self.view.with(|v| deletions_due(&v.l0, &v.l1)) {
+            self.wait_unpinned(newest, before);
+            return self.compact();
         }
-        self.compact()
+        // (After a commit's run went to L1 as it was, an index build's or a load's, the small
+        // files beside it go whatever L1 files they meet, as the compaction of the run's L0
+        // files took them before: one left spanning a table and its index costs every point
+        // read of them a seek in it. Once every frozen memtable, the commit's own, is in L0.)
+        let settled = self.view.with(|v| v.imm.is_empty());
+        let linked = settled && self.linked_bottom.swap(false, Ordering::AcqRel);
+        if n > 0 && bytes <= self.small_bytes() {
+            return self.compact_within((!linked).then(|| self.small_bytes()));
+        }
+        Ok(())
+    }
+
+    /// Bytes of L0 files, and of the L1 files their keys are in, that `maybe_compact` merges
+    /// below the trigger: the few writes every bulk commit leaves in L0 (the memtable it freezes,
+    /// a load's last rows) go to L1 at once, as an index build's compaction took them before
+    /// its entries went to L1 as they are: L0 files left lying cost every point read a seek.
+    fn small_bytes(&self) -> u64 {
+        self.opts.target_file_bytes / 64
+    }
+
+    /// Wait a little (`PIN_WAIT`) for every snapshot to see commit `ts`, the newest L0 holds,
+    /// while only snapshots taken since `before` (the commit before it in L0) hold it back: a
+    /// compaction started while the committing statement's own snapshot is still pinned keeps
+    /// every version the commit replaced (a bulk UPDATE's or DELETE's: the whole table again),
+    /// and nothing compacts them later until L0 fills up again. (An older snapshot, a long
+    /// transaction's, isn't waited for.)
+    fn wait_unpinned(&self, ts: u64, before: u64) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < PIN_WAIT && !self.closed.load(Ordering::Acquire) {
+            let h = self.gc_horizon();
+            if h >= ts || h < before {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// Merge L0 into L1: every L0 file with the L1 files whose range holds a user key of one
@@ -1906,6 +1979,11 @@ impl Store {
     /// entries and a catalog change don't rewrite the table loaded between them, nor drop its
     /// cached blocks; the outputs end before each such file, so L1's files still don't overlap).
     pub fn compact(&self) -> Result<()> {
+        self.compact_within(None)
+    }
+
+    /// `compact`, unless the L1 files it would merge hold more than `max_l1` bytes.
+    fn compact_within(&self, max_l1: Option<u64>) -> Result<()> {
         let _g = self.bg.lock();
         // A closed store's files may belong to a store opened after it (`close` waits for a
         // compaction that already runs: it takes `bg` too).
@@ -1949,6 +2027,9 @@ impl Store {
                 }
             }
             if has { inputs_l1.push(s.clone()) } else { kept.push(s.clone()) }
+        }
+        if max_l1.is_some_and(|m| inputs_l1.iter().map(|s| s.meta.size).sum::<u64>() > m) {
+            return Ok(());
         }
         // (The next L1 file left in place that the outputs reach: one ends before it.)
         let mut next_kept = 0;
@@ -3908,6 +3989,47 @@ mod tests {
             drop(s);
             s = Store::open(dir.path(), o()).unwrap();
         }
+    }
+
+    /// A bulk deletion's file compacts at once, below the L0 file count, and a few deletions
+    /// stay in L0; the small files beside them go to L1 for little when nothing big is there.
+    #[test]
+    fn deletions_and_small_files_compact_below_the_file_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = || StoreOptions { memtable_bytes: 1 << 20, sync: false, background: false, ..Default::default() };
+        let s = Store::open(dir.path(), o()).unwrap();
+        // (One table's keys: their first 8 bytes alike, so compaction's outputs don't end
+        // between them, `part_ends`.)
+        let key = |i: u32| format!("table001{i:07}").into_bytes();
+        // (Values zstd can't shrink much: the L1 file is far past `small_bytes`.)
+        let h = |i: u32| (i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
+        let val = |i: u32| Bytes::from(format!("{:016x}{:016x}{:016x}", h(i), h(i ^ 0x55), h(i ^ 0xaa)));
+        s.commit((0..200_000).map(|i| (key(i), Some(val(i)))).collect(), |_| Ok(())).unwrap();
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        let l1 = s.view().l1.iter().map(|f| f.meta.id).collect::<Vec<_>>();
+        // (A few deletions: one small file over the big L1 file, which stays.)
+        s.commit((0..1_000).map(|i| (key(i * 7), None)).collect(), |_| Ok(())).unwrap();
+        s.flush_memtables().unwrap();
+        s.maybe_compact().unwrap();
+        assert_eq!(s.view().l0.len(), 1);
+        assert_eq!(s.view().l1.iter().map(|f| f.meta.id).collect::<Vec<_>>(), l1);
+        // (A third of the keys deleted, one commit: compacted.)
+        s.commit((0..66_667).map(|i| (key(i * 3 + 1), None)).collect(), |_| Ok(())).unwrap();
+        s.flush_all().unwrap();
+        assert!(s.view().l0.len() < s.opts.l0_compaction_trigger);
+        s.maybe_compact().unwrap();
+        assert!(s.view().l0.is_empty());
+        let ts = s.visible_ts();
+        let want = (0..200_000u32).filter(|i| i % 3 != 1 && (i % 7 != 0 || i / 7 >= 1_000)).count();
+        assert_eq!(s.scan(b"", b"", ts).count(), want);
+        assert_eq!(s.view().l1.iter().map(|f| f.meta.entries).sum::<u64>(), want as u64);
+        // (A small write alone, its keys in a small L1 file of their own: to L1 at once.)
+        put(&s, "a0001", Some("x"));
+        s.flush_memtables().unwrap();
+        s.maybe_compact().unwrap();
+        assert!(s.view().l0.is_empty());
+        assert_eq!(s.get(b"a0001", s.visible_ts()).unwrap().as_deref(), Some(&b"x"[..]));
     }
 
     #[test]
