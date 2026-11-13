@@ -1809,8 +1809,9 @@ async fn cron_fires_on_its_schedule_and_skips_while_the_last_run_goes() {
     let cid = cron["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &cid, "production", cron["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
     let runs = format!("/v1/apps/services/{cid}/environments/production/runs");
-    // Minutes from now on: the reaper's own passes, at the real time, find nothing due.
-    let t = code_sql::now_ms() + 3_600_000;
+    // An hour from now, half a minute past a minute (so each pass's due time is fixed): the
+    // reaper's own passes, at the real time, find nothing due.
+    let t = (code_sql::now_ms() / 60_000 + 60) * 60_000 + 30_000;
     w.apps.cron_pass(t).await;
     assert_eq!(call(&w.api, "GET", &runs, None).await.1, json!([]), "the first pass only starts the clock");
     w.apps.cron_pass(t + 61_000).await;
