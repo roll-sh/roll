@@ -392,6 +392,23 @@ async fn path_filters_leave_out_changes_and_pushes_that_touch_only_ignored_paths
     e.engine.pass().await.unwrap();
     assert_eq!(rev().as_deref(), Some("cs_9d"));
     assert_eq!(e.engine.store.row(&p.id).unwrap().runs, None);
+    // `paths` alone never keeps a build: another service may run what it leaves out.
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "paths": ["src/"], "ignore_paths": [] })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.code.between.lock().insert("cs_9d..cs_9f".into(), vec!["api/server.rs".into()]);
+    e.code.edit("chg_d", |c| c.head = "cs_9f".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(rev().as_deref(), Some("cs_9f"));
+    // Manual mode leaves a preview made by hand alone.
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "manual": true, "paths": [] })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_d").unwrap().is_none(), "the rules' own preview goes");
+    e.code.open(change("chg_h", 12));
+    e.engine.create(&e.project, "acme/web", None, Some("chg_h"), "me").await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_h").unwrap().is_some_and(|r| r.desired == Desired::Active), "made by hand, it stays");
 }
 
 #[tokio::test]

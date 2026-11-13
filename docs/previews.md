@@ -72,6 +72,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     path, when it's empty) and `ignore_paths` doesn't: Render's build filters, Vercel's ignored
     build step. A change's paths are everything since its merge base with the default branch,
     as reviews read them, so a change that later only touches ignored paths loses its preview.
+    Negation (`!pattern`) is refused; narrow `paths` instead. A path that can't be read counts
+    as a match, so one change's diff never holds up the project's other previews. A preview made
+    by hand (`roll preview create --change`) stays whatever the rules say.
   - `manual` (Render's manual mode) turns that around: only a change whose title asks with
     `[preview]` gets one.
   - The change's title can say otherwise (Render's `[skip render]`): `[skip preview]` (or
@@ -86,10 +89,11 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   Qovery do), else at their default branch's head, and are redeployed only when that head moves.
   This is Railway's "focused" environment, done the cheap way. Data
   branches stay (they hold the preview's own writes) unless the change resets them.
-  - With path filters set, a push whose diff from the head the services run touches only
-    ignored paths redeploys nothing (Render's skipped deploys): the preview stands for the new
-    head (its status, comment and `roll preview wait`) and says which one it `runs`. The next
-    push that touches a path that counts, measured from what runs, redeploys.
+  - With `ignore_paths` set, a push whose every changed path (since the head the services run)
+    is one it matches, and isn't `roll.toml`, redeploys nothing (Render's skipped deploys): the
+    preview stands for the new head (its status, comment and `roll preview wait`) and says which
+    one it `runs`. `paths` alone never skips a deploy: another service of the repo may run what
+    it leaves out. The next push that touches anything else, measured from what runs, redeploys.
 - **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
   request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
   visitor gets a "starting" page that refreshes. Data products sleep on their own and wake on
@@ -101,9 +105,10 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   (7 days by default). `DELETE /v1/previews/{id}` deletes it at once. Deletion removes, in this
   order: services, the secrets environment, then every data branch. Each step is idempotent, and
   the preview row goes last, so a crash restarts the deletion.
-  A day before an unused preview's TTL passes (a quarter of a shorter TTL ahead), the change, its
-  pull request comment, the sheet and its activity say when, and how to keep it; using it again
-  takes the warning back.
+  A day before a preview goes (its TTL, its keep or a branch preview's fixed expiry running out;
+  a quarter of a shorter TTL ahead), the change, its pull request comment, the sheet and its
+  activity say when, and how to keep it; using it again takes the warning back when using it
+  pushes the time back.
   A change's preview deleted by its TTL or by hand stays deleted until the change's next push
   (`dismissed(change_id, head)`).
 - **Limits**:
@@ -598,7 +603,7 @@ type Preview = {
   change: string | null; number: number | null; github_pr: number | null; branch: string | null;
   title: string; head: string; trusted: boolean;
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
-  goes_at: number | null;             // when it goes unless opened or kept, once a day away (or a quarter of a shorter TTL)
+  goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   desired: "active" | "deleted";
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   error: string | null;

@@ -50,7 +50,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       </p>
       {env.expires_at != null && (
         <p className="text-[12px] text-muted">
-          Unused, it goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })} unless it's opened or kept.
+          It goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}; keep it from Previews.
         </p>
       )}
       {env.dashboard_url && (

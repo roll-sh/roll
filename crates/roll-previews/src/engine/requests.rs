@@ -151,17 +151,18 @@ impl Engine {
                 return Err(Error::BadRequest(format!("{k}: at most {MAX_VAR_BYTES} bytes")));
             }
         }
-        let mut vars = self.store.vars(id)?;
-        for (k, v) in changes {
-            match v {
-                Some(v) => vars.insert(k, v),
-                None => vars.remove(&k),
-            };
-        }
-        if vars.len() > MAX_VARS {
-            return Err(Error::BadRequest(format!("at most {MAX_VARS} variables per preview")));
-        }
-        self.store.set_vars(id, &vars)?;
+        let vars = self.store.update_vars(id, |vars| {
+            for (k, v) in &changes {
+                match v {
+                    Some(v) => vars.insert(k.clone(), v.clone()),
+                    None => vars.remove(k),
+                };
+            }
+            if vars.len() > MAX_VARS {
+                return Err(Error::BadRequest(format!("at most {MAX_VARS} variables per preview")));
+            }
+            Ok(())
+        })?;
         let names: Vec<&str> = vars.keys().map(String::as_str).collect();
         self.store.log(id, &if names.is_empty() { "its own variables removed".to_string() } else { format!("its own variables: {}", names.join(", ")) })?;
         self.store.update(id, |row| row.next_at = 0)?;

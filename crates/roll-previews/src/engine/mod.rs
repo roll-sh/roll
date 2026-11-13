@@ -36,13 +36,18 @@ const WARN_BEFORE_MS: i64 = 86_400_000;
 
 /// When a preview goes, if that's within its warning: unused since `last_active_at` for
 /// `ttl_hours`, or at `expires_at`, whichever is first. `None` when it's kept or not close.
-pub fn goes_soon(last_active_at: i64, expires_at: Option<i64>, kept: bool, ttl_hours: u32, now: i64) -> Option<i64> {
-    if kept {
-        return None;
-    }
+pub fn goes_soon(last_active_at: i64, expires_at: Option<i64>, kept_until: Option<i64>, ttl_hours: u32, now: i64) -> Option<i64> {
     let ttl_ms = ttl_hours as i64 * 3_600_000;
-    let at = expires_at.map_or(last_active_at + ttl_ms, |e| e.min(last_active_at + ttl_ms));
+    // It goes once it's past both its keep and its first deadline (the TTL, or a fixed expiry).
+    let deadline = expires_at.map_or(last_active_at + ttl_ms, |e| e.min(last_active_at + ttl_ms));
+    let at = kept_until.map_or(deadline, |k| k.max(deadline));
     (at - now <= WARN_BEFORE_MS.min(ttl_ms / 4)).then_some(at)
+}
+
+/// Whether using a preview would push back when it goes (`at`): not when that's its keep or a
+/// fixed expiry (a branch preview's).
+pub fn use_extends(last_active_at: i64, expires_at: Option<i64>, ttl_hours: u32, at: i64) -> bool {
+    at == last_active_at + ttl_hours as i64 * 3_600_000 && expires_at.is_none_or(|e| e > at)
 }
 
 /// A duration as the activity says it: `23 hours`, `40 minutes`.
@@ -287,20 +292,23 @@ impl Engine {
 }
 
 impl Engine {
-    /// What another repo of the project runs in a preview of `branch`: its own `branch` when it
-    /// has one (a feature split across repos previews as one), else its default branch's head
-    /// (`default`, when the caller read it already).
     /// Whether `c` gets a preview: [`wants`], then the path filters on what it touches (unless
-    /// its title asked for one).
-    pub(super) async fn wanted(&self, s: &Settings, c: &ChangeInfo) -> anyhow::Result<bool> {
+    /// its title asked for one). Paths that can't be read count as a match: one change's diff
+    /// never stops the project's other previews.
+    pub(super) async fn wanted(&self, s: &Settings, c: &ChangeInfo) -> bool {
         if !wants(s, c) {
-            return Ok(false);
+            return false;
         }
         if (s.paths.is_empty() && s.ignore_paths.is_empty()) || title_says(&c.title) == Some(true) {
-            return Ok(true);
+            return true;
         }
-        let paths = self.paths_of(&c.repo, &c.head, None).await?;
-        Ok(paths.is_none_or(|p| touches(s, &p)))
+        match self.paths_of(&c.repo, &c.head, None).await {
+            Ok(paths) => paths.is_none_or(|p| touches(s, &p)),
+            Err(e) => {
+                warn!(change = %c.id, error = %e, "previews: reading a change's paths");
+                true
+            }
+        }
     }
 
     /// The paths `head` changes since its merge base, or (`from`) since changeset `from`, cached
@@ -326,15 +334,30 @@ impl Engine {
         Ok(p)
     }
 
-    /// Whether every path that differs between `from` and `to` is one the path filters leave
-    /// out (false with no filters, or when that isn't known).
-    pub(super) async fn only_ignored(&self, s: &Settings, repo: &str, from: &str, to: &str) -> anyhow::Result<bool> {
-        if s.paths.is_empty() && s.ignore_paths.is_empty() {
-            return Ok(false);
-        }
-        Ok(self.paths_of(repo, to, Some(from)).await?.is_some_and(|p| !touches(s, &p)))
+    /// Whether the change's own services all run [`Row::build`] (none still waits for its deploy).
+    pub(super) fn runs_build(&self, r: &Row) -> anyhow::Result<bool> {
+        Ok(self.store.services(&r.id)?.iter().filter(|x| x.repo == r.repo).all(|x| x.deployed.as_deref() == Some(r.build())))
     }
 
+    /// Whether every path that differs between `from` and `to` is one `ignore_paths` matches,
+    /// and none is `roll.toml` (what runs). `paths` doesn't decide it: another service of the
+    /// repo may run what it leaves out. False with no `ignore_paths`, or when that isn't known.
+    pub(super) async fn only_ignored(&self, s: &Settings, repo: &str, from: &str, to: &str) -> bool {
+        if s.ignore_paths.is_empty() {
+            return false;
+        }
+        match self.paths_of(repo, to, Some(from)).await {
+            Ok(paths) => paths.is_some_and(|p| all_ignored(s, &p)),
+            Err(e) => {
+                warn!(repo, error = %e, "previews: reading what a push changed");
+                false
+            }
+        }
+    }
+
+    /// What another repo of the project runs in a preview of `branch`: its own `branch` when it
+    /// has one (a feature split across repos previews as one), else its default branch's head
+    /// (`default`, when the caller read it already).
     pub(super) async fn head_for(&self, repo: &str, branch: Option<&str>, default: Option<Option<String>>) -> anyhow::Result<Option<String>> {
         if let Some(b) = branch
             && let Some(h) = self.source.head(repo, Some(b)).await?
@@ -436,6 +459,13 @@ fn touches(s: &Settings, paths: &[String]) -> bool {
     paths.iter().any(|p| (take.is_empty() || any_match(&take, p)) && !any_match(&ignore, p))
 }
 
+/// Whether every one of `paths` is one `ignore_paths` matches, and none is `roll.toml`.
+fn all_ignored(s: &Settings, paths: &[String]) -> bool {
+    use code_control::review::pattern::{any_match, Pattern};
+    let ignore: Vec<Pattern> = s.ignore_paths.iter().filter_map(|p| Pattern::new(p)).collect();
+    paths.iter().all(|p| p != "roll.toml" && any_match(&ignore, p))
+}
+
 /// What a change's title says about its preview, as Render's `[skip render]` does: `[skip preview]`
 /// (or `[preview skip]`, `[no preview]`) skips it, and `[preview]` asks for one the project's
 /// `branches` or `drafts` rules would leave out. `None` leaves it to the rules.
@@ -499,13 +529,19 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
         // Unused for 6 of a week's hours: quiet; within a day: when. A 4-hour TTL warns an hour ahead.
         let h = 3_600_000;
-        assert_eq!(goes_soon(0, None, false, 168, 100 * h), None);
-        assert_eq!(goes_soon(0, None, false, 168, 150 * h), Some(168 * h));
-        assert_eq!(goes_soon(0, None, true, 168, 150 * h), None);
-        assert_eq!(goes_soon(0, Some(30 * h), false, 168, 0), None);
-        assert_eq!(goes_soon(0, Some(30 * h), false, 168, 9 * h), Some(30 * h));
-        assert_eq!(goes_soon(0, None, false, 4, 2 * h), None);
-        assert_eq!(goes_soon(0, None, false, 4, 3 * h), Some(4 * h));
+        assert_eq!(goes_soon(0, None, None, 168, 100 * h), None);
+        assert_eq!(goes_soon(0, None, None, 168, 150 * h), Some(168 * h));
+        assert!(use_extends(0, None, 168, 168 * h));
+        // Kept past its TTL: quiet until a day before the keep runs out, then that.
+        assert_eq!(goes_soon(0, None, Some(200 * h), 168, 150 * h), None);
+        assert_eq!(goes_soon(0, None, Some(200 * h), 168, 180 * h), Some(200 * h));
+        assert!(!use_extends(0, None, 168, 200 * h));
+        // A branch preview's fixed expiry: using it changes nothing.
+        assert_eq!(goes_soon(0, Some(30 * h), None, 168, 0), None);
+        assert_eq!(goes_soon(0, Some(30 * h), None, 168, 9 * h), Some(30 * h));
+        assert!(!use_extends(0, Some(30 * h), 168, 30 * h));
+        assert_eq!(goes_soon(0, None, None, 4, 2 * h), None);
+        assert_eq!(goes_soon(0, None, None, 4, 3 * h), Some(4 * h));
         let manual = Settings { manual: true, ..s.clone() };
         assert!(!wants(&manual, &ch));
         assert!(wants(&manual, &ChangeInfo { title: "Try the nav [Preview]".into(), ..ch.clone() }));

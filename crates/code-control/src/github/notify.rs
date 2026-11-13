@@ -288,16 +288,16 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
     }
 }
 
-/// The pull request comment for a preview.
-/// The comment's warning that an unused preview is about to go.
+/// The comment's warning that the preview is about to go (its TTL, or a keep, running out).
 fn expiry_line(ms: i64) -> Option<String> {
     let at = chrono::DateTime::from_timestamp_millis(ms)?;
     Some(format!(
-        "\n**Unused, it goes at {} UTC** unless it's opened or kept (`roll preview keep`, or Keep in roll). A new push brings it back.\n",
+        "\n**It goes at {} UTC.** Keep it with `roll preview keep` (or Keep in roll); a new push brings it back.\n",
         at.format("%Y-%m-%d %H:%M")
     ))
 }
 
+/// The pull request comment for a preview.
 fn preview_comment(c: &Change) -> String {
     let marker = format!("<!-- roll-preview:{} -->", c.id);
     let Some(p) = &c.preview else { return format!("**roll preview**: deleted.\n\n{marker}") };

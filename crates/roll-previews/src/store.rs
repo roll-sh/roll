@@ -816,13 +816,17 @@ impl Store {
         Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
     }
 
-    pub fn set_vars(&self, id: &str, vars: &std::collections::BTreeMap<String, String>) -> Result<()> {
-        let raw = (!vars.is_empty()).then(|| serde_json::to_string(vars).unwrap_or_default());
-        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![raw, id])?))?;
-        if n == 0 {
-            return Err(Error::NotFound(format!("no preview {id}")));
-        }
-        Ok(())
+    /// Change the preview's own variables in one write (`f` may run again; it only edits the map).
+    pub fn update_vars(&self, id: &str, f: impl Fn(&mut std::collections::BTreeMap<String, String>) -> Result<()>) -> Result<std::collections::BTreeMap<String, String>> {
+        self.db.write(|c| {
+            let raw: Option<Option<String>> = c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional()?;
+            let Some(raw) = raw else { return Err(Error::NotFound(format!("no preview {id}"))) };
+            let mut vars: std::collections::BTreeMap<String, String> = raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            f(&mut vars)?;
+            let raw = (!vars.is_empty()).then(|| serde_json::to_string(&vars).unwrap_or_default());
+            c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![raw, id])?;
+            Ok(vars)
+        })
     }
 
     /// When the preview goes unless it's used or kept, once that's close ([`crate::engine`]'s

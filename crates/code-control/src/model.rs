@@ -284,8 +284,9 @@ pub struct PreviewEnvironment {
     /// What the pull request gets (the project's `github` rules).
     #[serde(default)]
     pub github: PreviewGithub,
-    /// The changeset the preview runs: statuses and deployments are about it, not whatever the
-    /// change's head is when they're sent.
+    /// The changeset the preview is for: statuses and deployments are about it, not whatever the
+    /// change's head is when they're sent. (After pushes that touched only ignored paths, its
+    /// services run an earlier one.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     /// What the change did to the Postgres schema at `head` (`+ …` added, `- …` removed), once
@@ -295,7 +296,7 @@ pub struct PreviewEnvironment {
     /// A signed, expiring link to the first service's screenshot (public previews only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot_url: Option<String>,
-    /// When the preview goes unless it's opened or kept (ms), once that's close (a day ahead).
+    /// When the preview goes (ms: its TTL, or a keep, running out), once that's close (a day ahead).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
 }

@@ -165,7 +165,11 @@ struct VarsBody {
 
 async fn vars(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
     check_id(&id)?;
-    let vars = blocking(e, move |e| e.store.vars(&id)).await?;
+    let vars = blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.vars(&id)
+    })
+    .await?;
     Ok(Json(serde_json::json!({ "vars": vars })))
 }
 

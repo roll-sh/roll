@@ -69,7 +69,7 @@ impl Engine {
         let existing = self.store.rows(Some(project_id))?;
         // Changes that match the rules and have no preview yet.
         for c in open.values() {
-            if !self.wanted(s, c).await? {
+            if !self.wanted(s, c).await {
                 continue;
             }
             if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) || self.store.dismissed(&c.id, &c.head)? {
@@ -107,8 +107,9 @@ impl Engine {
             }
             let ttl_ms = s.ttl_hours as i64 * 3_600_000;
             if let Some(change) = &r.change_id {
+                // One made by hand (`roll preview create --change`) isn't the rules' to delete.
                 let wanted = match open.get(change) {
-                    Some(c) => self.wanted(s, c).await?,
+                    Some(c) => r.created_by != "roll" || self.wanted(s, c).await,
                     None => false,
                 };
                 match open.get(change) {
@@ -117,7 +118,7 @@ impl Engine {
                             let moved = c.head != r.head;
                             // A push that touches only ignored paths (since what the services
                             // run) keeps them running; the preview stands for the new head.
-                            let keep = moved && matches!(r.state, State::Ready | State::Sleeping) && self.only_ignored(s, &r.repo, r.build(), &c.head).await?;
+                            let keep = moved && matches!(r.state, State::Ready | State::Sleeping) && self.runs_build(&r)? && self.only_ignored(s, &r.repo, r.build(), &c.head).await;
                             let build = r.build().to_string();
                             let (head, title, trusted, pr) = (c.head.clone(), c.title.clone(), c.trusted, c.github_pr);
                             self.store.update(&r.id, |row| {
@@ -147,7 +148,7 @@ impl Engine {
                         }
                         // Services kept on an earlier head redeploy once the path filters no
                         // longer leave out what changed since (they were edited or removed).
-                        if c.head == r.head && let Some(runs) = &r.runs && !self.only_ignored(s, &r.repo, runs, &r.head).await? {
+                        if c.head == r.head && let Some(runs) = &r.runs && !self.only_ignored(s, &r.repo, runs, &r.head).await {
                             self.store.update(&r.id, |row| {
                                 row.runs = None;
                                 row.next_at = 0;
@@ -200,7 +201,8 @@ impl Engine {
                     Some(_) => {}
                 }
             }
-            let kept = self.store.kept_until(&r.id)?.is_some_and(|t| t > now);
+            let kept_until = self.store.kept_until(&r.id)?.filter(|t| *t > now);
+            let kept = kept_until.is_some();
             if !kept && (r.expires_at.is_some_and(|t| t <= now) || r.last_active_at + ttl_ms <= now) {
                 // An open change gets a preview again on its next push, not before.
                 if let Some(change) = &r.change_id {
@@ -211,11 +213,12 @@ impl Engine {
             }
             // Close to going: say when, once (the change, its pull request, the sheet); used or
             // kept again, take it back.
-            let goes = goes_soon(r.last_active_at, r.expires_at, kept, s.ttl_hours, now);
+            let goes = goes_soon(r.last_active_at, r.expires_at, kept_until, s.ttl_hours, now);
             if goes != self.store.goes_at(&r.id)? {
                 self.store.set_goes_at(&r.id, goes)?;
                 if let Some(at) = goes {
-                    self.store.log(&r.id, &format!("unused: it goes in {} unless it's opened or kept", in_words(at - now)))?;
+                    let unless = if use_extends(r.last_active_at, r.expires_at, s.ttl_hours, at) { "unless it's opened or kept" } else { "unless it's kept" };
+                    self.store.log(&r.id, &format!("it goes in {} {unless}", in_words(at - now)))?;
                 }
                 self.store.update(&r.id, |row| row.next_at = 0)?;
             }

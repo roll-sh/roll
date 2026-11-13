@@ -183,6 +183,9 @@ impl Settings {
             if list.len() > MAX_BRANCH_GLOBS || list.iter().any(|p| p.len() > 200 || code_control::review::pattern::Pattern::new(p).is_none()) {
                 return bad(format!("{name}: at most {MAX_BRANCH_GLOBS} patterns of 1–200 characters"));
             }
+            if let Some(p) = list.iter().find(|p| p.trim_start().starts_with('!')) {
+                return bad(format!("{name}: {p:?}: negation (!) isn't supported; narrow `paths` instead"));
+            }
         }
         for key in self.resources.keys() {
             let Some((kind, r)) = key.split_once(':') else { return bad(format!("resources: {key:?} isn't \"<kind>:<ref>\"")) };

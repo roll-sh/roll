@@ -75,7 +75,7 @@ export interface Preview {
   schema_changes?: string[] | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
-  /** When it goes unless it's opened or kept, once that's close (a day ahead). */
+  /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
   /** When its screenshot was taken (`screenshot` below), if it has one. */
   screenshot_at?: number | null;
