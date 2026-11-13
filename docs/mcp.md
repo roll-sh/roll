@@ -235,6 +235,17 @@ previews are listed once those products are on.
 | `tasks_invoke` | Start a durable function run. | `POST /v1/tasks/functions/{id}/invoke` |
 | `tasks_stats` | Nodes, queue stats, dead letters, schedules and functions. | `GET /v1/tasks/stats` |
 | `search_list_clusters` | Elasticsearch-compatible search clusters. | `GET /v1/search/clusters` |
+| `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
+| `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
+| `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
+| `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |
+| `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
+| `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |
+| `search_delete_index` | Delete an index and its documents. | `DELETE /v1/search/clusters/{cluster}/indices/{index}` |
+| `search_put_mapping` | Add fields to an index's mapping. | `PUT /v1/search/clusters/{cluster}/indices/{index}/mapping` |
+| `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
+| `search_bulk` | Index, update or delete many documents (NDJSON); deleting is delete. | `POST /v1/search/clusters/{cluster}/indices/{index}/bulk` |
+| `search_delete_by_query` | Delete every document that matches a query. | `POST /v1/search/clusters/{cluster}/indices/{index}/delete_by_query` |
 | `search_list_indices` | A cluster's indices. | `GET /v1/search/clusters/{cluster}/indices` |
 | `search_query` | Run an Elasticsearch _search body on an index. | `POST /v1/search/clusters/{cluster}/indices/{index}/search` |
 | `search_get_document` | A document by id. | `GET /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
@@ -246,10 +257,17 @@ previews are listed once those products are on.
 | `secrets_set` | Create or change a secret's value. | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_delete` | Delete a secret. | `DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `apps_list_services` | App services. | `GET /v1/apps/services` |
+| `apps_create_service` | A new service in a project, from a repo, an image or an upload. | `POST /v1/apps/projects/{project}/services` |
+| `apps_list_environments` | A service's environments. | `GET /v1/apps/services/{service}/environments` |
 | `apps_get_service` | A service with its environments and deploys. | `GET /v1/apps/services/{service}` |
 | `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
+| `apps_promote` | Deploy another environment's running image into this one. | `POST /v1/apps/services/{service}/environments/{env}/promote` |
+| `apps_cancel_deploy` | Stop a deploy that hasn't gone live. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/cancel` |
+| `apps_sleep` | Stop an environment's instances until woken. | `POST /v1/apps/services/{service}/environments/{env}/sleep` |
+| `apps_wake` | Start a sleeping environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/wake` |
+| `apps_usage` | An environment's usage and cost per day. | `GET /v1/apps/services/{service}/environments/{env}/usage` |
 | `apps_restart` | Restart an environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/restart` |
 | `apps_redeploy` | Deploy what's running again with the current settings and variables. | `POST /v1/apps/services/{service}/environments/{env}/redeploy` |
 | `apps_run_job` | Run a one-off command in an environment's image with its variables. | `POST /v1/apps/services/{service}/environments/{env}/jobs` |
@@ -269,6 +287,8 @@ previews are listed once those products are on.
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
 | `previews_reset` | Branch a preview's resources again from their parents. | `POST /v1/previews/{id}/reset` |
+| `previews_keep` | Keep a preview past its time to live, for some hours. | `POST /v1/previews/{id}/keep` |
+| `previews_activity` | What happened to a preview, newest first. | `GET /v1/previews/{id}/activity` |
 | `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
 | `previews_wake` | Start a sleeping preview's services again. | `POST /v1/previews/{id}/wake` |
 | `previews_usage` | What a project's previews used and cost this month. | `GET /v1/previews/projects/{project}/usage` |
@@ -280,25 +300,22 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **MCP tools for every route the sibling branches have now:** compare tools.rs with search's,
-   apps' and previews' routers at their heads (`extract-routes.py`), add what an agent needs
-   (search's indexes and documents, previews' resources), each mapped onto a classified route.
-2. **Approvals UX:** browser notifications while the dashboard is open, approve and deny from the
+1. **Approvals UX:** browser notifications while the dashboard is open, approve and deny from the
    header's waiting badge, and the request's arguments shown as a readable diff where they're a
    body.
-3. **Sibling wiring behind small interfaces, before they merge:** a one-call registration for a
+2. **Sibling wiring behind small interfaces, before they merge:** a one-call registration for a
    product's resolvers (`Resolvers::by_kind` and `environments`) that search's async ids and apps'
    environments can use from their branches today, and a check that their branches compile with
    `roll_auth::Grant`'s new fields (`user`, `ask_otherwise`).
-4. **A fourth security review** of `ask_otherwise`, `variables_from`, the gates and users' own
+3. **A fourth security review** of `ask_otherwise`, `variables_from`, the gates and users' own
    tokens' latest changes.
-5. **Blocked on sibling PRs reaching main:** wire previews', search's, apps' and secrets' lookups
+4. **Blocked on sibling PRs reaching main:** wire previews', search's, apps' and secrets' lookups
    and environment resolvers; secrets' `Grant` swap; one sink module with secrets; apps' deploys
    by id; users' own tokens' PR (#18 and #19 on main).
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: the builder picks resources by name (each product's "Which": all, the project, or ticked resources) and says in words what the token can do and what happens to the rest; the evaluator's suites run in `pnpm test:code` (on Postgres with `--docker`) and CI; "ask for anything else" (`ask_otherwise`: what a token's rules don't allow asks a person, and remembered approvals grow it); hop hardening for users' own tokens (the carried route is judged too, on their branch); copying another environment's variables needs reveal there; the third security review's findings (remembered approvals keep their environment and path, every MCP tool call counts against a rate limit, GitHub key fetching single-flight with fallback, the leak scanner skips unreadable files under a budget and hides private repos, per-person and live-only token caps, admin tokens owned by the admin); tokens about to expire are named in the list and posted to the approvals channel daily; `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
+Done lately: MCP tools for the sibling branches' routes at their heads (search: clusters, indices, documents, bulk; apps: create a service, promote, environments, sleep and wake, usage, cancel; previews: keep, activity), and search's bulk decided by its lines; the builder picks resources by name (each product's "Which": all, the project, or ticked resources) and says in words what the token can do and what happens to the rest; the evaluator's suites run in `pnpm test:code` (on Postgres with `--docker`) and CI; "ask for anything else" (`ask_otherwise`: what a token's rules don't allow asks a person, and remembered approvals grow it); hop hardening for users' own tokens (the carried route is judged too, on their branch); copying another environment's variables needs reveal there; the third security review's findings (remembered approvals keep their environment and path, every MCP tool call counts against a rate limit, GitHub key fetching single-flight with fallback, the leak scanner skips unreadable files under a budget and hides private repos, per-person and live-only token caps, admin tokens owned by the admin); tokens about to expire are named in the list and posted to the approvals channel daily; `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
 one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
 secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
 endpoint); audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in

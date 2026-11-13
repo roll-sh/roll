@@ -305,7 +305,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
     // What the request needs: one action, or every action a push's ref updates take.
-    let mut needs = vec![row.action(&ctx.method, &params, json_body.as_ref())];
+    let mut needs = vec![match row.act {
+        catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
+        _ => row.action(&ctx.method, &params, json_body.as_ref()),
+    }];
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
     if matches!(row.act, catalog::Act::GitPush) {
