@@ -510,7 +510,8 @@ impl Access {
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return Ok(false) };
         let now = code_sql::now_ms();
         let week = now + 7 * 86_400_000;
-        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week)).collect();
+        // A token made to last a day or less (one a workload made for its job) knows its end.
+        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week && e - g.created_at > 86_400_000)).collect();
         if soon.is_empty() {
             return Ok(false);
         }
