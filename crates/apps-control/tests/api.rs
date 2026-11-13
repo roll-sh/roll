@@ -590,7 +590,7 @@ async fn a_postgres_link_puts_its_variables_in_the_instances() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requests_past_an_instances_concurrency_scale_it_out() {
     let w = world().await;
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 3}, "variables": {"FAKE_SLOW_MS": "400"} }))).await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 3}, "variables": {"FAKE_SLOW_MS": "1500"} }))).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
@@ -1480,7 +1480,16 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
     let (_, d3) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d2["id"].as_str().unwrap()), None).await;
     let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
     assert_eq!((d3["status"].as_str(), &d3["image"]), (Some("active"), &d2["image"]), "{d3}");
-    assert_eq!(visit(&w, &h, "/").await.1["deployment"], d3["id"]);
+    // Live a moment after it reads as live (the switch, then the instances).
+    let mut served = Value::Null;
+    for _ in 0..100 {
+        served = visit(&w, &h, "/").await.1["deployment"].clone();
+        if served == d3["id"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(served, d3["id"]);
 }
 
 /// An h2c app (a gRPC server) is spoken HTTP/2 to, with `te: trailers`, and its trailers reach
@@ -1549,8 +1558,15 @@ async fn a_worker_follows_its_streams_backlog() {
     let live = w.apps.live(&id, "production");
     let up = |w: &World| w.fake.instances(&id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
     BACKLOG.store(35, Ordering::SeqCst);
-    w.apps.scale_workers().await;
-    live.tick().await;
+    // The world's own reaper reads the backlog too: wait for the outcome, not one pass.
+    for _ in 0..100 {
+        w.apps.scale_workers().await;
+        live.tick().await;
+        if up(&w) == 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(up(&w), 4, "35 behind at 10 each: 4 (the ceiling)");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["scaling"], json!({"backlog": 35, "wanted": 4}), "{env}");
