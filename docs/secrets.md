@@ -1581,23 +1581,27 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-13 (evening): against Doppler, Infisical, Vault and 1Password Developer,
-and across the five branches. The core is level with them (environments, versions, references,
-approvals, dynamic secrets and rotation, OIDC identities, syncs, scanning, audit sinks). The gaps
-that matter: two permission systems; roll apps deploys without project secrets (`NoSecrets`); no
-time-boxed access requests; no runtime SDK (Doppler's and Infisical's fetch secrets in process);
-no Terraform provider.
+Reviewed again on 2026-11-13 (night): the core and the stacked pull requests are level with
+Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). The gap that's left
+is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
+under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
-   customer-managed keys, and the deploy notice when apps reads secrets (#31), refreshed once those
-   land.
-2. **Products say who owns a resource**, so a person's project can link their own databases,
-   buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
-   Waits on products serving signed-in people (today they're the operator's).
-3. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
-   a project has members besides its owner.
+1. **Dynamic AWS credentials**: a project registers a role in its own account (`…/aws-roles`), and a
+   `dynamic` link to it gets a short-lived `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+   `AWS_SESSION_TOKEN` per lease (STS AssumeRole, as Vault's AWS engine and Infisical's dynamic
+   secrets). The ExternalId is the project, and registering a role proves its trust policy pins it
+   (a decoy project's ExternalId must be refused), so no tenant assumes another customer's role.
+2. **Built-in rotation for databases roll doesn't run** (Postgres and MySQL: a new password set by
+   `ALTER ROLE`/`ALTER USER` through roll's guarded connection, the old one retired after the grace
+   period), as Infisical's secret rotation, without a webhook of your own.
+3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+   customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
+4. **Products say who owns a resource**, so a person's project can link their own databases,
+   buckets and streams. Waits on products serving signed-in people.
+5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+   besides its owner.
 
 Open pull requests after this one:
 
