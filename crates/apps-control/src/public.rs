@@ -225,6 +225,8 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
             return page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds.");
         }
     };
+    // The access line's method and path (no query: it can carry tokens).
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), method: req.method().to_string(), path: req.uri().path().chars().take(512).collect() };
     let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     let Ok(uri) = format!("http://{}{pq}", lease.addr).parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();
@@ -256,6 +258,8 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
     {
         h.insert(HeaderName::from_static("x-request-id"), v);
     }
+    let request_id = h.get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(64).collect::<String>();
+    let (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
     let mut resp = match apps.client.request(req).await {
         Ok(r) => r,
         Err(e) if e.is_connect() => {
@@ -263,10 +267,12 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
             // fresh instance.
             live.connect_failed(&lease.inst);
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 503, 0);
+            access.write(503, began, 0, &instance, &request_id, cold, waited_ms);
             return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Restarting", "The instance stopped; the next request starts it again."));
         }
         Err(e) => {
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 502, 0);
+            access.write(502, began, 0, &instance, &request_id, cold, waited_ms);
             // What went wrong is the owner's to read (the environment's log), not a visitor's.
             live.log.stream(crate::logs::Stream::System).line(format!("a request failed: the instance closed the connection: {e}"));
             return page(StatusCode::BAD_GATEWAY, "The service didn't answer", "It closed the connection before it answered. Try again in a moment.");
@@ -286,6 +292,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
                 && let Ok((_, down)) = tokio::io::copy_bidirectional(&mut TokioIo::new(a), &mut TokioIo::new(b)).await
             {
                 live2.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 101, down);
+                access.write(101, began, down, &instance, &request_id, cold, waited_ms);
             }
         });
         return resp.map(Body::new);
@@ -307,7 +314,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
             }
         }
     });
-    let done = Done { live: live.clone(), began, status, counted, _lease: lease };
+    let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), _lease: lease };
     let stream = stream.chain(futures::stream::once(async move {
         drop(done);
         Ok(bytes::Bytes::new())
@@ -321,12 +328,37 @@ struct Done {
     began: Instant,
     status: u16,
     counted: Arc<AtomicU64>,
+    /// Its access line: where it goes, the instance, the request id, a cold start's wait.
+    access: Option<(Access, String, String, bool, u64)>,
     _lease: crate::live::Lease,
 }
 
 impl Drop for Done {
     fn drop(&mut self) {
-        self.live.meter.lock().request(code_sql::now_ms(), self.began.elapsed().as_secs_f64() * 1000.0, self.status, self.counted.load(Ordering::Relaxed));
+        let bytes = self.counted.load(Ordering::Relaxed);
+        self.live.meter.lock().request(code_sql::now_ms(), self.began.elapsed().as_secs_f64() * 1000.0, self.status, bytes);
+        if let Some((a, instance, id, cold, waited)) = self.access.take() {
+            a.write(self.status, self.began, bytes, &instance, &id, cold, waited);
+        }
+    }
+}
+
+/// A request's access line (`http:<service>/<env>`, Railway's HTTP logs): JSON
+/// `{method, path, status, ms, bytes, instance, request_id, cold, waited_ms}`.
+struct Access {
+    log: crate::logs::LogSink,
+    method: String,
+    path: String,
+}
+
+impl Access {
+    #[allow(clippy::too_many_arguments)]
+    fn write(&self, status: u16, began: Instant, bytes: u64, instance: &str, request_id: &str, cold: bool, waited_ms: u64) {
+        let line = serde_json::json!({
+            "method": self.method, "path": self.path, "status": status, "ms": began.elapsed().as_millis() as u64,
+            "bytes": bytes, "instance": instance, "request_id": request_id, "cold": cold, "waited_ms": waited_ms,
+        });
+        self.log.line(line.to_string());
     }
 }
 

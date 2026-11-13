@@ -1,6 +1,6 @@
 import { ArrowDown, Pause, Play, Search } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { deployStatus, instanceStateLabel, instanceTone, type DeployStatus, type InstanceState, type LogLine, type Tone } from "@/lib/apps-api";
+import { deployStatus, instanceStateLabel, instanceTone, type AccessLine, type DeployStatus, type InstanceState, type LogLine, type Tone } from "@/lib/apps-api";
 import { useMarkState } from "../mark-state";
 
 export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -87,7 +87,26 @@ const STREAM_TEXT: Record<LogLine["stream"], string> = {
   stderr: "text-danger",
   build: "text-soft",
   system: "text-muted",
+  http: "text-fg",
 };
+
+/** An access line as a person reads it: `GET /path 200 12ms`, a 5xx in red, a cold start's wait. */
+function AccessText({ text }: { text: string }) {
+  let a: AccessLine;
+  try {
+    a = JSON.parse(text) as AccessLine;
+  } catch {
+    return <>{text}</>;
+  }
+  return (
+    <>
+      <span className="text-muted">{a.method}</span> {a.path} <span className={a.status >= 500 ? "text-danger" : a.status >= 400 ? "text-soft" : "text-muted"}>{a.status}</span>{" "}
+      <span className="text-subtle">
+        {a.ms}ms{a.cold ? ` · cold +${a.waited_ms}ms` : ""}
+      </span>
+    </>
+  );
+}
 
 /**
  * A log in mono: time, (stream and instance), text. Follows the end while it's scrolled there;
@@ -122,7 +141,7 @@ export function LogView({ lines, columns = false, empty, className = "h-[420px]"
                   {l.stream === "stdout" || l.stream === "stderr" ? (l.instance ?? l.stream) : l.stream}
                 </span>
               )}
-              <span className={`min-w-0 flex-1 break-all whitespace-pre-wrap ${STREAM_TEXT[l.stream]}`}>{l.text}</span>
+              <span className={`min-w-0 flex-1 break-all whitespace-pre-wrap ${STREAM_TEXT[l.stream]}`}>{l.stream === "http" ? <AccessText text={l.text} /> : l.text}</span>
             </div>
           ))
         )}

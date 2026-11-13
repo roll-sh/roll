@@ -64,7 +64,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}` | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[]}` | `Variables` | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&q=` | | `LogLine[]` or SSE | read |
+| `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&q=&http=&status=&min_ms=` | | `LogLine[]` or SSE; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`) and `min_ms` filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=` | | `Metrics` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
@@ -301,6 +301,8 @@ type SpendLimits = { alert_usd: number | null; hard_usd: number | null; month_us
  *  effort: a batch is tried three times, then dropped; a drain that can't keep up loses its
  *  oldest lines. At most 5 a project. */
 type LogDrain = { id: string; project: string; host: string; created_at: number; secret?: string };
+/** A request through the proxy (`stream: "http"` lines' text, JSON). The path has no query string. */
+type AccessLine = { method: string; path: string; status: number; ms: number; bytes: number; instance: string; request_id: string; cold: boolean; waited_ms: number };
 type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord"; host: string; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit")[]; created_at: number; secret?: string };
 type Delivery = { id: string; event: number; kind: string; status: "pending" | "delivered" | "failed"; attempts: number; code: number | null; error: string | null; at: number };
 type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";

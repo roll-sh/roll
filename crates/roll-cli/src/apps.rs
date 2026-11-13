@@ -71,6 +71,15 @@ pub struct Logs {
     /// Only lines from this long ago on: `30m`, `2h`, `7d`.
     #[arg(long)]
     pub since: Option<String>,
+    /// The requests instead (the proxy's access log): method, path, status, time.
+    #[arg(long, conflicts_with = "build")]
+    pub http: bool,
+    /// With `--http`: only these statuses (`500`, `5xx`, `400-499`).
+    #[arg(long, requires = "http")]
+    pub status: Option<String>,
+    /// With `--http`: only requests that took at least this many milliseconds.
+    #[arg(long, requires = "http")]
+    pub min_ms: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -691,6 +700,15 @@ async fn follow_matching(api: &Api, path: &str, grep: Option<&str>) -> anyhow::R
 
 fn print_line(l: &Value) {
     let t = l["t"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%H:%M:%S").to_string()).unwrap_or_default();
+    // An access line: `GET /path 200 12ms`, the cold start's wait when there was one.
+    if l["stream"] == "http"
+        && let Ok(r) = serde_json::from_str::<Value>(&s(&l["text"]))
+    {
+        let cold = if r["cold"] == true { format!("  cold +{}ms", r["waited_ms"]) } else { String::new() };
+        let inst = r["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).unwrap_or_default();
+        println!("{t} {inst:>5} │ {} {} {} {}ms{cold}", s(&r["method"]), s(&r["path"]), r["status"], r["ms"]);
+        return;
+    }
     let who = match l["stream"].as_str() {
         Some("build") => "build".to_string(),
         Some("system") => "roll".to_string(),
@@ -808,11 +826,21 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         Some(d) => format!("&since={}", chrono::Utc::now().timestamp_millis() - ago_ms(d)?),
         None => String::new(),
     };
+    let mut http = String::new();
+    if l.http {
+        http.push_str("&http=1");
+        if let Some(s) = &l.status {
+            http.push_str(&format!("&status={}", enc(s)));
+        }
+        if let Some(ms) = l.min_ms {
+            http.push_str(&format!("&min_ms={ms}"));
+        }
+    }
     if l.follow {
-        return follow_matching(api, &format!("{path}?follow=1&tail={}{since}", l.tail), l.grep.as_deref()).await;
+        return follow_matching(api, &format!("{path}?follow=1&tail={}{since}{http}", l.tail), l.grep.as_deref()).await;
     }
     let grep = l.grep.as_deref().map(|g| format!("&q={}", enc(g))).unwrap_or_default();
-    let lines = api.get(&format!("{path}?tail={}{since}{grep}", l.tail)).await?;
+    let lines = api.get(&format!("{path}?tail={}{since}{grep}{http}", l.tail)).await?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&lines)?);
         return Ok(());

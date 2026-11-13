@@ -250,7 +250,8 @@ export interface Variables {
 
 export interface LogLine {
   t: number;
-  stream: "stdout" | "stderr" | "build" | "system";
+  /** `http`: the proxy's access log, its text JSON (`AccessLine`). */
+  stream: "stdout" | "stderr" | "build" | "system" | "http";
   instance: string | null;
   deployment: string | null;
   text: string;
@@ -482,8 +483,21 @@ export function followShell(
   return stop;
 }
 
+/** An access line's text (`http` lines). */
+export interface AccessLine {
+  method: string;
+  path: string;
+  status: number;
+  ms: number;
+  bytes: number;
+  instance: string;
+  request_id: string;
+  cold: boolean;
+  waited_ms: number;
+}
+
 export function followLog(
-  kind: { runtime: { service: string; env: string } } | { build: { service: string; env: string; deployment: string } } | { job: { service: string; env: string; job: string } },
+  kind: { runtime: { service: string; env: string; http?: boolean } } | { build: { service: string; env: string; deployment: string } } | { job: { service: string; env: string; job: string } },
   opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },
 ): () => void {
   const path =
@@ -492,7 +506,8 @@ export function followLog(
       : "job" in kind
         ? `${env(kind.job.service, kind.job.env)}/jobs/${encodeURIComponent(kind.job.job)}/logs`
         : `${dep(kind.build.service, kind.build.env, kind.build.deployment)}/logs`;
-  return streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500 })}`, {
+  const http = "runtime" in kind && kind.runtime.http ? true : undefined;
+  return streamSse(`${ROLL_API}${path}${qs({ follow: true, tail: opts.tail ?? 500, http })}`, {
     headers: operatorHeaders,
     onOpen: (open) => {
       if (open) opts.onReset();

@@ -671,6 +671,30 @@ async fn an_environment_is_cloned_and_a_live_image_promoted_to_it() {
     assert_eq!(call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "staging"}))).await.0, StatusCode::BAD_REQUEST);
 }
 
+/// Each request through the proxy is an access line (no query string), filterable by status and
+/// duration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_are_access_lines_filtered_by_status() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let host = host(&svc["environments"][0]["url"]);
+    assert_eq!(visit(&w, &host, "/ok?token=s3cr3t").await.0, StatusCode::OK);
+    let up = w.fake.instances(&id).into_iter().find(|(_, _, st)| *st == FakeState::Running).unwrap().0;
+    w.fake.sicken(&up);
+    assert_eq!(visit(&w, &host, "/broken").await.0, StatusCode::INTERNAL_SERVER_ERROR);
+    let base = format!("/v1/apps/services/{id}/environments/production/logs?http=1");
+    let all = get_until(&w.api, &base, |l| l.as_array().is_some_and(|a| a.len() >= 2)).await;
+    let first: Value = serde_json::from_str(all[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((first["method"].as_str(), first["path"].as_str(), first["status"].as_u64()), (Some("GET"), Some("/ok"), Some(200)), "{first}");
+    assert!(!all.to_string().contains("s3cr3t"), "a query string never reaches the log");
+    let (_, errors) = call(&w.api, "GET", &format!("{base}&status=5xx"), None).await;
+    assert_eq!(errors.as_array().unwrap().len(), 1, "{errors}");
+    assert!(errors[0]["text"].as_str().unwrap().contains("/broken"));
+    let (_, slow) = call(&w.api, "GET", &format!("{base}&min_ms=60000"), None).await;
+    assert_eq!(slow, json!([]));
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

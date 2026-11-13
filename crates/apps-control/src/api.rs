@@ -362,6 +362,39 @@ struct LogQuery {
     since: Option<i64>,
     /// Lines that contain this (any case), from memory and the stored chunks.
     q: Option<String>,
+    /// The proxy's access log instead of the runtime's (`http=1`).
+    http: Option<String>,
+    /// Access lines with this status: `500`, `5xx` or `400-499`.
+    status: Option<String>,
+    /// Access lines that took at least this long.
+    min_ms: Option<u64>,
+}
+
+/// Which access lines `status` and `min_ms` keep (`None`: all of them).
+fn http_filter(q: &LogQuery) -> crate::Result<Option<impl Fn(&crate::logs::LogLine) -> bool + Send + Sync + 'static>> {
+    if q.status.is_none() && q.min_ms.is_none() {
+        return Ok(None);
+    }
+    let range = match q.status.as_deref().map(str::trim) {
+        None | Some("") => (0, 999),
+        Some(s) if s.len() == 3 && s.ends_with("xx") => {
+            let d: u16 = s[..1].parse().map_err(|_| Error::BadRequest("status is 500, 5xx or 400-499".into()))?;
+            (d * 100, d * 100 + 99)
+        }
+        Some(s) => match s.split_once('-') {
+            Some((a, b)) => (a.trim().parse().map_err(|_| Error::BadRequest("status is 500, 5xx or 400-499".into()))?, b.trim().parse().map_err(|_| Error::BadRequest("status is 500, 5xx or 400-499".into()))?),
+            None => {
+                let n: u16 = s.parse().map_err(|_| Error::BadRequest("status is 500, 5xx or 400-499".into()))?;
+                (n, n)
+            }
+        },
+    };
+    let min = q.min_ms.unwrap_or(0);
+    Ok(Some(move |l: &crate::logs::LogLine| {
+        let v: Value = serde_json::from_str(&l.text).unwrap_or(Value::Null);
+        let status = v["status"].as_u64().unwrap_or(0) as u16;
+        (range.0..=range.1).contains(&status) && v["ms"].as_u64().unwrap_or(0) >= min
+    }))
 }
 
 fn truthy(v: &Option<String>) -> bool {
@@ -369,7 +402,10 @@ fn truthy(v: &Option<String>) -> bool {
 }
 
 /// Lines as JSON, or (`follow`) as server-sent events: what's there, then what comes.
-async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tokio::sync::watch::Receiver<bool>>) -> R {
+/// The lines `keep` lets through (none: all), as read and as they come.
+type Keep = Option<Box<dyn Fn(&LogLine) -> bool + Send + Sync>>;
+
+async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tokio::sync::watch::Receiver<bool>>, keep: Keep) -> R {
     let tail = q.tail.unwrap_or(500).min(crate::logs::RING);
     if let Some(text) = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         if text.len() > 200 {
@@ -383,7 +419,12 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
         return Ok(r);
     }
     if !truthy(&q.follow) {
-        return ok(apps.logs.tail(&key, tail, q.since).await);
+        let Some(k) = &keep else { return ok(apps.logs.tail(&key, tail, q.since).await) };
+        // Filtered: read back as far as memory holds, then the newest `tail` matches.
+        let mut lines = apps.logs.tail(&key, crate::logs::RING, q.since).await;
+        lines.retain(|l| k(l));
+        let cut = lines.len().saturating_sub(tail);
+        return ok(lines.split_off(cut));
     }
     // A finished build's log is read, not followed: nothing more comes, and following would
     // bring a retired log back into memory.
@@ -396,6 +437,9 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
     }
     if let Some(s) = q.since {
         first.retain(|l| l.t >= s);
+    }
+    if let Some(k) = &keep {
+        first.retain(|l| k(l));
     }
     let stream = async_stream(first, move |tx| async move {
         let mut done = done;
@@ -413,6 +457,9 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
             };
             match next.await {
                 Some(Ok(l)) => {
+                    if keep.as_ref().is_some_and(|k| !k(&l)) {
+                        continue;
+                    }
                     if tx.send(l).await.is_err() {
                         return;
                     }
@@ -473,12 +520,17 @@ async fn deploy_logs(State(apps): S, Path((id, env, dep)): Path<(String, String,
         let (_tx, rx) = tokio::sync::watch::channel(true);
         Some(rx)
     };
-    stream_log(&apps, format!("build:{dep}"), q, done).await
+    stream_log(&apps, format!("build:{dep}"), q, done, None).await
 }
 
 async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<LogQuery>) -> R {
     apps.environment(&id, &env).await?;
-    stream_log(&apps, format!("env:{id}/{env}"), q, None).await
+    if truthy(&q.http) {
+        // The access log, filtered by status and duration when asked (read and followed).
+        let keep: Keep = http_filter(&q)?.map(|f| Box::new(f) as Box<dyn Fn(&LogLine) -> bool + Send + Sync>);
+        return stream_log(&apps, format!("http:{id}/{env}"), q, None, keep).await;
+    }
+    stream_log(&apps, format!("env:{id}/{env}"), q, None, None).await
 }
 
 /// Who made a request, for the deployments it makes: what rolld's gate put in its extensions
@@ -667,7 +719,7 @@ async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, St
             let _ = tx.send(true);
         });
     }
-    stream_log(&apps, format!("job:{job}"), q, Some(rx)).await
+    stream_log(&apps, format!("job:{job}"), q, Some(rx), None).await
 }
 
 async fn runs(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

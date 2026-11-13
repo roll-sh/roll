@@ -12,6 +12,8 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [paused, setPaused] = useState(false);
   const [filter, setFilter] = useState("");
   const [instance, setInstance] = useState("");
+  // The app's output, or the requests it served (the proxy's access log).
+  const [requests, setRequests] = useState(false);
   // A search back through the stored days, shown instead of the live tail until left.
   const [found, setFound] = useState<{ q: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
@@ -41,7 +43,7 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
       if (!pausedRef.current) setLines(buffer.current.slice());
     };
     const stop = followLog(
-      { runtime: { service, env } },
+      { runtime: { service, env, http: requests } },
       {
         tail: 500,
         onOpen: setOpen,
@@ -61,7 +63,7 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
       },
     );
     return stop;
-  }, [service, env]);
+  }, [service, env, requests]);
 
   useEffect(() => {
     if (!paused) setLines(buffer.current.slice());
@@ -83,7 +85,24 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
         live={open}
         extra={
           <>
-          {filter.trim() && (
+          <div className="flex rounded-lg border border-line p-0.5" role="radiogroup" aria-label="Which log">
+            {([false, true] as const).map((r) => (
+              <button
+                key={String(r)}
+                type="button"
+                role="radio"
+                aria-checked={requests === r}
+                onClick={() => {
+                  setRequests(r);
+                  setFound(null);
+                }}
+                className={`h-6 rounded-md px-2 text-[11.5px] ${requests === r ? "bg-fg/[0.08] text-fg" : "text-muted hover:text-fg"}`}
+              >
+                {r ? "Requests" : "Output"}
+              </button>
+            ))}
+          </div>
+          {filter.trim() && !requests && (
             <button type="button" className={btn} disabled={searching} onClick={() => void search()} title="Search the stored logs of the last 7 days, not just what's here">
               {searching ? "Searching…" : "Search 7 days"}
             </button>
@@ -120,7 +139,17 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
         lines={found ? found.lines : shown}
         columns
         className="h-[min(560px,65svh)]"
-        empty={lines.length ? "Nothing matches the filter." : open ? "No output yet. A service that's asleep logs again when a request wakes it." : <span className="shimmer">Connecting…</span>}
+        empty={
+          lines.length ? (
+            "Nothing matches the filter."
+          ) : !open ? (
+            <span className="shimmer">Connecting…</span>
+          ) : requests ? (
+            "No requests yet. Each request through roll shows here: method, path, status and time."
+          ) : (
+            "No output yet. A service that's asleep logs again when a request wakes it."
+          )
+        }
       />
     </div>
   );

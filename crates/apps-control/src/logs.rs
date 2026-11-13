@@ -30,6 +30,8 @@ pub enum Stream {
     Stderr,
     Build,
     System,
+    /// The proxy's access log (`http:<service>/<env>`): a line a request, its text JSON.
+    Http,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
