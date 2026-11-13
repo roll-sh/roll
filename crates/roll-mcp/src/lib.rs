@@ -14,6 +14,7 @@
 //!   resource metadata, so clients start the OAuth flow (`roll_access::oauth`).
 //! - Requests from a browser (`Origin`) must come from the dashboard or the API (DNS rebinding).
 
+pub mod resources;
 pub mod tools;
 
 use axum::body::Body;
@@ -245,7 +246,15 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     }
                 }
             }
-            "resources/list" => rpc_result(id, json!({ "resources": [] })),
+            "resources/list" => rpc_result(id, json!({ "resources": resources::list() })),
+            "resources/read" => match params.get("uri").and_then(Value::as_str) {
+                Some(resources::GUIDE) => rpc_result(id, resources::guide()),
+                Some(resources::ME) => match read_me(ctx).await {
+                    Ok(v) => rpc_result(id, v),
+                    Err(e) => rpc_error(id, -32603, e),
+                },
+                other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+            },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": [] })),
             "prompts/list" => rpc_result(id, json!({ "prompts": [] })),
             other => rpc_error(id, -32601, format!("method not found: {other}")),
@@ -267,14 +276,15 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
     };
     json!({
         "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false } },
         "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION") },
         "instructions": format!(
             "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
 Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
-postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them."
+postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
+Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more."
         ),
     })
 }
@@ -319,6 +329,28 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
         let _ = tokio::task::spawn_blocking(move || access.store.audit(&e)).await;
     }
     Some(result)
+}
+
+/// `roll://access/me`: `GET /v1/access` through the gated router with the caller's headers, as a
+/// tool's request is, put in words.
+async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, String> {
+    let mut req = Request::builder().method("GET").uri(resources::ME_ROUTE);
+    for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
+        req = req.header(k, v);
+    }
+    let mut req = req.body(Body::empty()).map_err(|e| e.to_string())?;
+    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": resources::ME })), ip: ctx.ip });
+    let resp = match ctx.m.api.clone().oneshot(req).await {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("{status}: {}", String::from_utf8_lossy(&bytes).trim()));
+    }
+    let answer: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    Ok(resources::me(&answer, code_sql_now()))
 }
 
 fn code_sql_now() -> i64 {
