@@ -114,9 +114,6 @@ fn kind_of(f: &FieldMapper, ctx: &MappingCtx) -> Option<Kind> {
 impl FastPlan {
     /// The plan for `idx`, or `None` when its documents always need the general path.
     pub(crate) fn new(idx: &IndexMeta) -> Option<FastPlan> {
-        if crate::opensearch::active() {
-            return None;
-        }
         let ctx = idx.mapping_ctx();
         if ctx.columnar.is_some() || idx.mapping.data_stream_timestamp == Some(true) {
             return None;

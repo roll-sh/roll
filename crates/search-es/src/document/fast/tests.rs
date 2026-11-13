@@ -342,3 +342,19 @@ fn numbers_index_as_written_like_elasticsearch() {
     assert_eq!(keywords(&fast, "ia"), ["abcde", "😀😀"]);
     assert_eq!(fast.ignored, vec!["ia".to_string()]);
 }
+
+/// Every check above holds in the opensearch dialect too (its general path is the reference
+/// there: field names, points and dates parse by its rules).
+#[test]
+fn the_opensearch_dialect_agrees() {
+    crate::opensearch::with(true, || {
+        geonames_documents_take_the_fast_path();
+        http_logs_documents_take_the_fast_path();
+        nyc_taxis_documents_take_the_fast_path();
+        everything_else_takes_the_general_path();
+        ignore_above_records_ignored_fields();
+        random_documents_agree();
+        plans_refuse_what_they_cannot_reproduce();
+        numbers_index_as_written_like_elasticsearch();
+    });
+}
