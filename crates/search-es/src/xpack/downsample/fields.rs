@@ -32,6 +32,11 @@ pub(super) enum Metric {
     Counter,
     /// A pre-aggregated gauge (`aggregate_metric_double`): the sub-metrics it keeps.
     Aggregate(Vec<String>),
+    /// `time_series_metric: histogram` on an `exponential_histogram`.
+    ExponentialHistogram,
+    /// `time_series_metric: histogram` on a `histogram` (`values`) or `tdigest` (`centroids`),
+    /// merged as a t-digest: the name of its values array.
+    TDigest(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +189,9 @@ impl Collector<'_> {
         } else if let Some(m) = metric_type(def) {
             Role::Metric(match (m, ty) {
                 (_, "aggregate_metric_double") => Metric::Aggregate(sub_metrics(def)),
+                (_, "exponential_histogram") => Metric::ExponentialHistogram,
+                (_, "histogram") => Metric::TDigest("values"),
+                (_, "tdigest") => Metric::TDigest("centroids"),
                 ("counter", _) => Metric::Counter,
                 _ => Metric::Gauge,
             })
@@ -193,7 +201,7 @@ impl Collector<'_> {
             return;
         };
         let read = match &role {
-            Role::Metric(Metric::Aggregate(_)) => Read::Source(path.to_string()),
+            Role::Metric(Metric::Aggregate(_) | Metric::ExponentialHistogram | Metric::TDigest(_)) => Read::Source(path.to_string()),
             Role::Label if structured(ty) => Read::Source(path.to_string()),
             _ => Read::DocValues(path.to_string()),
         };

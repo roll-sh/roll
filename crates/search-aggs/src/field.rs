@@ -399,6 +399,12 @@ pub trait FieldLookup: Send + Sync {
         None
     }
 
+    /// The interval a downsampled index was downsampled with (`index.downsample.interval`,
+    /// `IndexMetadata.getDownsamplingInterval`).
+    fn downsampling_interval(&self) -> Option<String> {
+        None
+    }
+
     /// The fetch phase for `top_hits`.
     fn fetcher(&self) -> Option<Arc<dyn TopHitsFetcher>> {
         None

@@ -401,6 +401,9 @@ pub struct HistoConfig {
     pub min_doc_count: u64,
     pub keyed: bool,
     pub format: DocValueFormat,
+    /// A date histogram over a downsampled index whose keys moved to the downsampling
+    /// intervals (`downsampled_results_offset`).
+    pub downsampled_offset: bool,
 }
 
 /// How a histogram aggregator maps values to keys.
@@ -441,7 +444,7 @@ pub fn create_histogram(def: &AggDef, spec: &HistogramSpec, ctx: &mut BindCtx<'_
     {
         return Err(AggError::illegal_argument(format!("Expected numeric range type but found non-numeric range [{}]", t.name())));
     }
-    let cfg = Arc::new(HistoConfig { order: spec.order.clone(), min_doc_count: spec.min_doc_count, keyed: spec.keyed, format: vs.format.clone() });
+    let cfg = Arc::new(HistoConfig { order: spec.order.clone(), min_doc_count: spec.min_doc_count, keyed: spec.keyed, format: vs.format.clone(), downsampled_offset: false });
     let empty = if spec.min_doc_count == 0 {
         Some(Arc::new(EmptyInfo {
             interval: spec.interval,
@@ -479,13 +482,35 @@ pub fn create_histogram(def: &AggDef, spec: &HistogramSpec, ctx: &mut BindCtx<'_
     }))
 }
 
+/// A downsampled index holds values aggregated over UTC intervals
+/// (`DateHistogramAggregationBuilder.innerBuild`): calendar intervals are refused, and a time
+/// zone whose offset isn't a multiple of the downsampling interval moves the buckets by the
+/// remainder (reported as `downsampled_results_offset`). Returns the offset to round with and
+/// whether it moved.
+fn downsampled_offset(spec: &DateHistogramSpec, vs: &BoundVs, downsampling: Option<&str>) -> Result<(i64, bool)> {
+    let Some(downsampling) = downsampling else { return Ok((spec.offset, false)) };
+    if let DateInterval::Calendar(_) = spec.interval {
+        return Err(AggError::illegal_argument(format!("{} is not supported for aggregation [date_histogram] with interval type [calendar_interval]", vs.description())));
+    }
+    let Some(tz) = vs.time_zone.as_ref().filter(|tz| tz.id() != "UTC") else { return Ok((spec.offset, false)) };
+    let (DateInterval::Fixed(i) | DateInterval::Legacy(i)) = &spec.interval else { return Ok((spec.offset, false)) };
+    let parse = |s: &str| crate::rounding::parse_time_value_millis(s, "fixed_interval").ok().filter(|ms| *ms > 0);
+    let (Some(resolution), Some(aggregation)) = (parse(downsampling), parse(i)) else { return Ok((spec.offset, false)) };
+    if spec.vs.field.as_deref() != Some("@timestamp") {
+        return Ok((spec.offset, false));
+    }
+    let shift = tz.offset_at(aggregation) as i64 * 1000 % resolution;
+    Ok(if shift == 0 { (spec.offset, false) } else { (spec.offset + shift, true) })
+}
+
 pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
     let vs = bind(&spec.vs, ctx.lookup, VsType::Date, true)?;
     let range = vs.range_type();
     if (!vs.vs_type.is_numeric() && !vs.unmapped && range.is_none()) || vs.is_counter() {
         return Err(vs.unsupported("date_histogram"));
     }
-    let rounding = create_rounding(&spec.interval, vs.time_zone.as_ref(), spec.offset)?;
+    let (offset, downsampled_offset) = downsampled_offset(spec, &vs, ctx.lookup.downsampling_interval().as_deref())?;
+    let rounding = create_rounding(&spec.interval, vs.time_zone.as_ref(), offset)?;
     let now = ctx.lookup.now_millis();
     let ext = match &spec.extended_bounds {
         Some(b) => Some(b.resolve(&def.name, "extended_bounds", &vs.format, now, &rounding)?),
@@ -519,7 +544,7 @@ pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut B
     {
         return Err(AggError::illegal_argument(format!("Expected date range type but found range type [{}]", t.name())));
     }
-    let cfg = Arc::new(HistoConfig { order: spec.order.clone(), min_doc_count: spec.min_doc_count, keyed: spec.keyed, format: vs.format.clone() });
+    let cfg = Arc::new(HistoConfig { order: spec.order.clone(), min_doc_count: spec.min_doc_count, keyed: spec.keyed, format: vs.format.clone(), downsampled_offset });
     let empty = if spec.min_doc_count == 0 { Some(Arc::new(DateEmptyInfo { rounding: rounding.without_offset(), bounds: ext })) } else { None };
     let os = if range.is_none() { OsDateDebug::new(ctx, &vs, &rounding, hard.unwrap_or((None, None)), !subs.is_empty()) } else { None };
     let nanos = vs.field.as_ref().is_some_and(|f| f.type_name == "date_nanos");
@@ -1634,6 +1659,9 @@ impl Internal for DateHistogram {
             out.push("buckets", Json::Obj(self.buckets.iter().map(render_bucket).collect()));
         } else {
             out.push("buckets", Json::Arr(self.buckets.iter().map(|b| render_bucket(b).1).collect()));
+        }
+        if self.cfg.downsampled_offset {
+            out.push("downsampled_results_offset", Json::Bool(true));
         }
     }
     fn property(&self, name: &str, path: &[String]) -> Result<Prop<'_>> {

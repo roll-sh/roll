@@ -280,9 +280,14 @@ fn api_capabilities(api: routes::Api) -> &'static [&'static str] {
         IndicesGetDataLifecycle => &["data_stream_lifecycle_effective_retention", "data_stream_global_retention"],
         IndicesExplainDataLifecycle => &["data_stream_lifecycle_effective_retention"],
         IndicesPutDataLifecycle => &["dlm.downsampling_method", "dlm.frozen_after"],
-        // `RestDownsampleAction`'s, but the histogram ones (histogram metrics aren't
-        // downsampled yet).
-        IndicesDownsample => &["downsample.sampling_mode.last_value", "downsample.multi_field_fix", "downsampling.store_reset_counters"],
+        // `RestDownsampleAction`'s but `downsampling.tdigest` (roll has no `tdigest` field type).
+        IndicesDownsample => &[
+            "downsample.sampling_mode.last_value",
+            "downsample.multi_field_fix",
+            "downsampling.exponential_histograms",
+            "downsampling.tdigest_histograms",
+            "downsampling.store_reset_counters",
+        ],
         IndicesModifyDataStream => &["data_streams.modify.delete_index"],
         EsqlQuery | EsqlAsyncQuery => crate::xpack::esql::CAPABILITIES,
         EsqlGetView => &["view_index_abstraction"],

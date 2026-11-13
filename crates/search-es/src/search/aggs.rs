@@ -945,6 +945,10 @@ impl FieldLookup for Lookup<'_> {
         Some(crate::engine::fields::DOC_COUNT_FIELD)
     }
 
+    fn downsampling_interval(&self) -> Option<String> {
+        self.idx.settings.get("index.downsample.interval").filter(|s| !s.is_empty()).map(str::to_string)
+    }
+
     fn text_terms(&self) -> Option<Arc<dyn search_aggs::TextTerms>> {
         Some(Arc::new(TextSource { table: self.table.clone() }))
     }

@@ -11,7 +11,9 @@
 //! result again counts every source document once.
 
 use super::fields::{Field, Fields, GAUGE_METRICS, Metric, Role};
+use super::histograms::{self, Exponential};
 use crate::json::{Map, Value};
+use search_aggs::metrics::tdigest::MergingDigest;
 use crate::time::{DateFormatter, Instant, Zone};
 use std::collections::BTreeMap;
 
@@ -206,10 +208,10 @@ impl Cumulative {
     fn reset_points(&mut self, field: usize, points: &mut ResetPoints) {
         let Some(first) = self.stack.pop() else { return };
         if first.1 != self.downsampled {
-            points.add(field, first);
+            points.add(field, first.0, Value::from(first.1));
         }
-        while let Some(p) = self.stack.pop() {
-            points.add(field, p);
+        while let Some((ts, v)) = self.stack.pop() {
+            points.add(field, ts, Value::from(v));
         }
     }
 }
@@ -222,13 +224,13 @@ enum Counter {
     Cumulative(Cumulative),
 }
 
-/// The extra documents of a bucket: by timestamp, the counters (field index, value) that
-/// reset there.
+/// The extra documents of a bucket: by timestamp, the counters and histograms (field index,
+/// value) that reset there.
 #[derive(Default)]
-struct ResetPoints(BTreeMap<i64, Vec<(usize, f64)>>);
+struct ResetPoints(BTreeMap<i64, Vec<(usize, Value)>>);
 
 impl ResetPoints {
-    fn add(&mut self, field: usize, (ts, v): (i64, f64)) {
+    fn add(&mut self, field: usize, ts: i64, v: Value) {
         let at = self.0.entry(ts).or_default();
         if !at.iter().any(|(f, _)| *f == field) {
             at.push((field, v));
@@ -241,6 +243,9 @@ enum State {
     Dimension(Option<Value>),
     Gauge(Gauge),
     Counter { counter: Counter, collected: bool },
+    Exponential { agg: Exponential, collected: bool },
+    /// A `histogram` / `tdigest` metric's t-digest, and the name of its values array.
+    Digest(Option<Box<MergingDigest>>, &'static str),
     Aggregate(Vec<Sub>),
     /// Labels and `last_value` metrics: the newest value of the bucket.
     Last(Option<Value>),
@@ -274,6 +279,8 @@ impl<'a> Sampler<'a> {
                 (Role::Metric(Metric::Aggregate(subs)), m) => State::Aggregate(subs.iter().map(|s| Sub::new(s, m)).collect()),
                 (Role::Metric(Metric::Gauge), Method::Aggregate) => State::Gauge(Gauge::EMPTY),
                 (Role::Metric(Metric::Counter), Method::Aggregate) => State::Counter { counter: Counter::Unset, collected: false },
+                (Role::Metric(Metric::ExponentialHistogram), Method::Aggregate) => State::Exponential { agg: Exponential::Unset, collected: false },
+                (Role::Metric(Metric::TDigest(key)), Method::Aggregate) => State::Digest(None, key),
                 _ => State::Last(None),
             })
             .collect();
@@ -325,6 +332,13 @@ impl<'a> Sampler<'a> {
                     }
                     *collected = true;
                 }
+                State::Exponential { agg, collected } => {
+                    if let Some(h) = histograms::parse_exponential(&value) {
+                        agg.collect(h, doc.timestamp, temporality.as_deref());
+                        *collected = true;
+                    }
+                }
+                State::Digest(digest, key) => histograms::add_to_digest(digest, &value, key),
                 State::Aggregate(subs) => {
                     if let Value::Obj(m) = &value {
                         for s in subs.iter_mut() {
@@ -370,6 +384,11 @@ impl<'a> Sampler<'a> {
                         Counter::Unset => {}
                     }
                 }
+                State::Exponential { agg, collected } => {
+                    *collected = false;
+                    agg.reset();
+                }
+                State::Digest(d, _) => *d = None,
                 State::Aggregate(subs) => subs.iter_mut().for_each(Sub::reset),
                 State::Last(l) => *l = None,
             }
@@ -383,6 +402,7 @@ impl<'a> Sampler<'a> {
             match s {
                 State::Dimension(d) => *d = None,
                 State::Counter { counter, .. } => *counter = Counter::Unset,
+                State::Exponential { agg, .. } => *agg = Exponential::Unset,
                 _ => {}
             }
         }
@@ -395,8 +415,10 @@ impl<'a> Sampler<'a> {
         }
         let mut points = ResetPoints::default();
         for (i, s) in self.states.iter_mut().enumerate() {
-            if let State::Counter { counter: Counter::Cumulative(c), .. } = s {
-                c.reset_points(i, &mut points);
+            match s {
+                State::Counter { counter: Counter::Cumulative(c), .. } => c.reset_points(i, &mut points),
+                State::Exponential { agg: Exponential::Cumulative(c), .. } => c.reset_points(|ts, v| points.add(i, ts, v)),
+                _ => {}
             }
         }
         let mut doc = Map::new();
@@ -404,8 +426,8 @@ impl<'a> Sampler<'a> {
         doc.insert("_doc_count".into(), Value::from(self.doc_count - points.0.len() as i64));
         let fields = &self.fields.fields;
         for pass in [Pass::Metrics, Pass::Labels, Pass::Dimensions] {
-            for (f, s) in fields.iter().zip(&self.states).filter(|(f, _)| pass.takes(f)) {
-                if let Some(v) = self.write(f, s) {
+            for (f, s) in fields.iter().zip(self.states.iter_mut()).filter(|(f, _)| pass.takes(f)) {
+                if let Some(v) = write(self.method, f, s) {
                     doc.insert(f.name.clone(), v);
                 }
             }
@@ -420,30 +442,35 @@ impl<'a> Sampler<'a> {
                 }
             }
             for (i, v) in counters {
-                doc.insert(fields[i].name.clone(), Value::from(v));
+                doc.insert(fields[i].name.clone(), v);
             }
             out.push(doc);
         }
     }
 
-    fn write(&self, f: &Field, s: &State) -> Option<Value> {
-        match s {
-            State::Dimension(v) => v.clone(),
-            State::Gauge(g) => (g.count > 0).then(|| crate::obj! { "min" => g.min, "max" => g.max, "sum" => g.sum.value, "value_count" => g.count }),
-            State::Counter { collected: false, .. } | State::Counter { counter: Counter::Unset, .. } => None,
-            State::Counter { counter: Counter::Delta(sum), .. } => Some(Value::from(sum.value)),
-            State::Counter { counter: Counter::Cumulative(c), .. } => Some(Value::from(c.downsampled)),
-            State::Aggregate(subs) => {
-                let mut m = Map::new();
-                subs.iter().for_each(|s| s.write(&mut m));
-                (!m.is_empty()).then_some(Value::Obj(m))
-            }
-            // A metric's last value is its first (smallest) doc value, as a double.
-            State::Last(v) if matches!(f.role, Role::Metric(_)) && self.method == Method::LastValue => {
-                v.as_ref().and_then(|v| numbers(v).next()).map(Value::from)
-            }
-            State::Last(v) => v.as_ref().map(collapse),
+}
+
+/// A field's value in the bucket's document.
+fn write(method: Method, f: &Field, s: &mut State) -> Option<Value> {
+    match s {
+        State::Dimension(v) => v.clone(),
+        State::Gauge(g) => (g.count > 0).then(|| crate::obj! { "min" => g.min, "max" => g.max, "sum" => g.sum.value, "value_count" => g.count }),
+        State::Counter { collected: false, .. } | State::Counter { counter: Counter::Unset, .. } => None,
+        State::Counter { counter: Counter::Delta(sum), .. } => Some(Value::from(sum.value)),
+        State::Counter { counter: Counter::Cumulative(c), .. } => Some(Value::from(c.downsampled)),
+        State::Exponential { collected: false, .. } => None,
+        State::Exponential { agg, .. } => agg.value(),
+        State::Digest(d, key) => d.as_mut().map(|d| histograms::digest_json(d, key)),
+        State::Aggregate(subs) => {
+            let mut m = Map::new();
+            subs.iter().for_each(|s| s.write(&mut m));
+            (!m.is_empty()).then_some(Value::Obj(m))
         }
+        // A numeric metric's last value is its first (smallest) doc value, as a double.
+        State::Last(v) if matches!(f.role, Role::Metric(Metric::Gauge | Metric::Counter)) && method == Method::LastValue => {
+            v.as_ref().and_then(|v| numbers(v).next()).map(Value::from)
+        }
+        State::Last(v) => v.as_ref().map(collapse),
     }
 }
 

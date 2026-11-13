@@ -339,11 +339,20 @@ struct Merging<A, B> {
     index: i64,
     count: i128,
     subtract: bool,
+    /// The difference of counts clamped at zero (`setToDifference`'s combination).
+    clamp: bool,
 }
 
 impl<A: BucketIter, B: BucketIter> Merging<A, B> {
     fn new(a: A, b: B, target_scale: i32, subtract: bool) -> Merging<A, B> {
-        let mut m = Merging { a: ScaleReducing::new(a, target_scale), b: ScaleReducing::new(b, target_scale), end: false, index: 0, count: 0, subtract };
+        let mut m = Merging { a: ScaleReducing::new(a, target_scale), b: ScaleReducing::new(b, target_scale), end: false, index: 0, count: 0, subtract, clamp: false };
+        m.advance();
+        m
+    }
+
+    /// `a`'s counts minus `b`'s, never below zero.
+    fn difference(a: A, b: B, target_scale: i32) -> Merging<A, B> {
+        let mut m = Merging { a: ScaleReducing::new(a, target_scale), b: ScaleReducing::new(b, target_scale), end: false, index: 0, count: 0, subtract: true, clamp: true };
         m.advance();
         m
     }
@@ -385,6 +394,9 @@ impl<A: BucketIter, B: BucketIter> BucketIter for Merging<A, B> {
             self.b.advance();
         }
         self.count = if self.subtract { ca as i128 - cb as i128 } else { ca as i128 + cb as i128 };
+        if self.clamp {
+            self.count = self.count.max(0);
+        }
     }
     fn scale(&self) -> i32 {
         self.a.scale()
@@ -627,6 +639,57 @@ impl Merger {
             debug_assert_eq!(overflow, 0);
         }
     }
+}
+
+/// Whether `a` can have grown from `b` by adding values: the verdict of
+/// `ExponentialHistogramMerger.setToDifference(a, b)` (lenient: bucket differences clamped at
+/// zero, merged into at most `limit` buckets as a merge is), which cumulative histograms are
+/// checked with. `a` must not have fewer values than `b`.
+pub fn is_cumulative_successor(a: &ExpHistogram, b: &ExpHistogram, limit: usize) -> bool {
+    if b.is_empty() {
+        return true;
+    }
+    let (count_a, count_b) = (a.value_count(), b.value_count());
+    if count_a == count_b {
+        return a.sum == b.sum && a.min == b.min && a.max == b.max;
+    }
+    if count_a < count_b {
+        return false;
+    }
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    // Growing, a histogram's scale and min can only fall and its max and zero threshold only
+    // rise (a NaN compares as neither, as in Java).
+    let regressed = a.scale > b.scale || a.min.partial_cmp(&b.min) == Some(Greater) || a.max.partial_cmp(&b.max) == Some(Less);
+    let mut cumulative = !regressed && a.zero.compare_threshold(&b.zero) != Less;
+    let (mut neg_b, mut pos_b) = (b.neg_iter(), b.pos_iter());
+    let collapsed_b = a.zero.with_count(b.zero.count).collapse_all(&mut neg_b, &mut pos_b);
+    if collapsed_b.compare_threshold(&a.zero) != Equal {
+        cumulative = false;
+    }
+    let zero = a.zero.with_count(a.zero.count.saturating_sub(collapsed_b.count));
+    // `mergeBucketsInto` with the clamped difference: a first pass at the common scale, and a
+    // coarser one when the buckets don't fit.
+    let mut out = ExpHistogram::empty();
+    let mut collapsed = [0u32; MAX_INDEX_BITS as usize];
+    let mut target = a.scale.min(b.scale);
+    let fill = |out: &mut ExpHistogram, target: i32, stats: Option<&mut [u32; 62]>| {
+        let mut pos = Merging::difference(a.pos_iter(), pos_b, target);
+        let mut neg = Merging::difference(a.neg_iter(), neg_b, target);
+        out.zero = zero.collapse_all(&mut pos, &mut neg);
+        out.scale = target;
+        out.negative.clear();
+        out.positive.clear();
+        match stats {
+            Some(s) => put_buckets(out, &mut neg, false, limit, Some(&mut *s)) + put_buckets(out, &mut pos, true, limit, Some(s)),
+            None => put_buckets(out, &mut neg, false, limit, None) + put_buckets(out, &mut pos, true, limit, None),
+        }
+    };
+    let overflow = fill(&mut out, target, Some(&mut collapsed));
+    if overflow > 0 {
+        target -= required_reduction(&collapsed, overflow);
+        fill(&mut out, target, None);
+    }
+    cumulative && out.value_count() == count_a - count_b
 }
 
 fn nan_aware(a: f64, b: f64, f: fn(f64, f64) -> f64) -> f64 {

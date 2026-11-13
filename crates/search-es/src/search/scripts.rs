@@ -205,6 +205,7 @@ fn kind_of(k: Kind) -> Option<DocKind> {
         Kind::Ip => DocKind::Ip,
         Kind::Binary => DocKind::Binary,
         Kind::DenseVector => DocKind::DenseVector,
+        Kind::AggregateMetric => DocKind::Double,
         _ => return None,
     })
 }
@@ -750,6 +751,25 @@ impl Host for DocHost {
                     }
                 }
             }
+            // Doubles of the metric the field delegates to: its only metric, or
+            // `sum / value_count` (`AggregateMetricDoubleFieldType`'s script values).
+            Kind::AggregateMetric => match super::aggregate_metric::delegate(f) {
+                super::aggregate_metric::Delegate::Single(m) => {
+                    if let Some(dv) = r.sorted_numeric(m.number) {
+                        match m.kind {
+                            Kind::Double => out.doubles.extend(dv.values(d).map(encode::sortable_f64)),
+                            _ => out.doubles.extend(dv.values(d).map(|v| v as f64)),
+                        }
+                    }
+                }
+                super::aggregate_metric::Delegate::Avg { sum, count } => {
+                    let first = |n: u32| r.sorted_numeric(n).and_then(|dv| dv.values(d).next());
+                    if let (Some(s), Some(c)) = (first(sum), first(count)) {
+                        out.doubles.push(encode::sortable_f64(s) / c as f64);
+                    }
+                }
+                super::aggregate_metric::Delegate::None => {}
+            },
             _ => {
                 if let Some(dv) = r.sorted_numeric(f.number) {
                     out.longs.extend(dv.values(d));
