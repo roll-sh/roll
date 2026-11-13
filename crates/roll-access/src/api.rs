@@ -403,7 +403,7 @@ async fn apply_tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Jso
 
 async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
     let new: NewGrant = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
-    let (grant, token) = a.create_grant(&ext, new).await?;
+    let (grant, token) = a.create_for(&ext, new).await?;
     Ok((StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response())
 }
 
@@ -411,8 +411,18 @@ impl Access {
     /// Make a token for the request `ext` belongs to, as `POST /v1/access/tokens` does (it's this
     /// function): its owner is the caller, a grant makes only what it covers, then the token
     /// policy and the caps. For a product making one of its own tokens for its caller (roll
-    /// secrets' project tokens), never for someone else. The secret is returned once.
+    /// secrets' project tokens), never for someone else, so `ext` must name one (the operator, a
+    /// signed-in person or a grant): extensions without a caller are refused, even on an open
+    /// daemon, where the route itself treats them as the operator. The secret is returned once.
     pub async fn create_grant(self: &Arc<Self>, ext: &Extensions, new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+        let named = roll_auth::Operator::on(ext) || ext.get::<roll_auth::SignedIn>().is_some() || ext.get::<roll_auth::Grant>().is_some();
+        if !named {
+            return Err(Error::Forbidden("create_grant needs the caller's request: these extensions name no one".into()));
+        }
+        self.create_for(ext, new).await
+    }
+
+    async fn create_for(self: &Arc<Self>, ext: &Extensions, new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
         // A user's token is theirs, and so is one their token makes: it acts as them.
         let (by, user) = match who(self, ext)? {
             // An admin's token is theirs too: it acts as the operator while they're an admin, and

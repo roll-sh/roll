@@ -671,10 +671,18 @@ fn apps_create_action(b: &Value) -> Action {
     if b["source"]["kind"] == "upload" { Action::Write } else { Action::Deploy }
 }
 
-/// A service's settings: `write`, except `run.public`, which puts a web service on the internet
-/// or takes it off (its public names answer 404), production too, at once: `deploy`.
+/// A service's settings that decide what production runs or who reaches it: its source and build
+/// (the next landing deploys them), its start and pre-deploy commands (the pre-deploy runs with
+/// production's variables), its schedule, kind, port and volume, and `run.public` (on the
+/// internet or off it, at once).
+const APPS_DEPLOY_RUN: [&str; 7] = ["public", "start", "pre_deploy", "schedule", "kind", "port", "volume"];
+
+/// A service's settings: `deploy` when they change what runs or who reaches it
+/// ([`APPS_DEPLOY_RUN`], `source`, `build`); `write` for its size, scale, health checks, alerts and
+/// rollout.
 fn apps_patch_action(b: &Value) -> Action {
-    if b["run"].get("public").is_some() { Action::Deploy } else { Action::Write }
+    let runs = b.get("source").is_some() || b.get("build").is_some() || APPS_DEPLOY_RUN.iter().any(|k| b["run"].get(*k).is_some());
+    if runs { Action::Deploy } else { Action::Write }
 }
 
 fn agent_command_action(b: &Value) -> Action {
@@ -1337,7 +1345,9 @@ mod tests {
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "public": false } })), Action::Deploy);
-        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "min": 2 } })), Action::Write);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "min_instances": 2, "memory_mb": 512 } })), Action::Write);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "pre_deploy": "./migrate" } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "source": { "kind": "image", "image": "x" } })), Action::Deploy);
         assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
         assert_eq!(bulk_action(b"{\"update\":{\"_id\":\"3\"}}\n{\"script\":{\"source\":\"ctx.op = 'delete'\"}}\n"), Action::Delete);

@@ -148,9 +148,11 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - An apps shell (its WebSocket, and all of a session: opening, keys, screen, resizing, closing) runs
   any command where the service runs, with its variables: `admin` in every environment, as an
   agent's shell is. Waking a sleeping environment starts compute someone pays for: `write`.
-- A service's settings (`PATCH …/services/{id}`) are `write`, except `run.public`: putting a web
-  service on the internet or taking it off (its public names answer 404) changes production at
-  once, so it's `deploy`. Rolling back to a deployment puts back the variables it went live with
+- A service's settings (`PATCH …/services/{id}`) are `deploy` when they change what production
+  runs or who reaches it: `source` and `build` (the next landing deploys them), `run.start`,
+  `run.pre_deploy` (it runs with production's variables), `run.schedule`, `run.kind`, `run.port`,
+  `run.volume`, and `run.public` (a web service on the internet or off it, at once). Its size,
+  scale, health checks, alerts and rollout are `write`. Rolling back to a deployment puts back the variables it went live with
   (unless `keep_variables`); it's the environment's act as writing its variables is (`deploy` in
   production, `write` elsewhere), and the answer names them without values.
 - A route whose product filters its answer per environment and path itself, asking the caller's
